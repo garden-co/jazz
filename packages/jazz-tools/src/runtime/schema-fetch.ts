@@ -409,6 +409,8 @@ export function encodePublishedMigrationValue(value: WasmValue): PublishedMigrat
           values: value.value.values.map(encodePublishedMigrationValue),
         },
       };
+    case "LargeValueEdit":
+      throw new Error("large-value edit operations cannot be stored in schema migrations");
     default:
       return value;
   }

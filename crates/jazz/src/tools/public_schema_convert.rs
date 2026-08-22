@@ -56,11 +56,25 @@ impl fmt::Display for SchemaConversionError {
 impl std::error::Error for SchemaConversionError {}
 
 pub(crate) fn convert_public_schema(schema: &Schema) -> Result<JazzSchema, SchemaConversionError> {
+    if let Some((name, _)) = schema.iter().find(|(name, _)| {
+        name.as_str()
+            .starts_with(crate::large_values::LARGE_VALUE_NODE_TABLE_PREFIX)
+    }) {
+        return Err(err(
+            format!("$.{}", name.as_str()),
+            "table name uses the reserved large-value system namespace",
+        ));
+    }
     let mut converted = schema
         .iter()
         .map(|(name, table)| convert_table(schema, name, table))
         .collect::<Result<Vec<_>, _>>()?;
     coerce_typed_literals(schema, &mut converted);
+    let large_value_tables = converted
+        .iter()
+        .filter_map(crate::large_values::large_value_node_table)
+        .collect::<Vec<_>>();
+    converted.extend(large_value_tables);
     validate_converted_schema(&converted)?;
     Ok(JazzSchema::from_runtime(
         schema.clone(),
@@ -2814,11 +2828,10 @@ mod tests {
                 },
             ))
             .build();
-        let table = convert_public_schema(&schema)
-            .unwrap()
-            .into_runtime()
+        let runtime = convert_public_schema(&schema).unwrap().into_runtime();
+        let table = runtime
             .tables
-            .into_iter()
+            .iter()
             .find(|table| table.name == "events")
             .unwrap();
         let default = table
@@ -3058,11 +3071,10 @@ mod tests {
             )
             .build();
 
-        let table = convert_public_schema(&schema)
-            .unwrap()
-            .into_runtime()
+        let runtime = convert_public_schema(&schema).unwrap().into_runtime();
+        let table = runtime
             .tables
-            .into_iter()
+            .iter()
             .find(|table| table.name == "events")
             .unwrap();
 
@@ -3095,6 +3107,20 @@ mod tests {
                 crate::large_values::ValueKind::Json,
             ))
         );
+        // This is an internal schema-compilation invariant: the generated
+        // table is intentionally absent from the public API, so inspecting the
+        // compiled runtime schema is the narrowest meaningful observation.
+        let nodes = runtime
+            .tables
+            .iter()
+            .find(|table| table.name == crate::large_values::large_value_node_table_name("events"))
+            .expect("large JSON columns inject a versioned node table");
+        assert_eq!(
+            nodes.references.get("owner").map(String::as_str),
+            Some("events")
+        );
+        assert_eq!(nodes.read_policy.as_ref().unwrap().inherits.len(), 1);
+        assert!(nodes.columns.iter().any(|column| column.name == "payload"));
         assert_eq!(
             table
                 .columns

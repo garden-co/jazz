@@ -512,6 +512,7 @@ fn encode_fixed_value(buf: &mut Vec<u8>, col: &ColumnDescriptor, val: &Value) {
         Value::Array(_) => unreachable!("Array is not fixed-size"),
         Value::Row { .. } => unreachable!("Row is not fixed-size"),
         Value::Enum { .. } => unreachable!("Enum payload is not fixed-size"),
+        Value::LargeValueEdit(_) => unreachable!("large-value edits are mutation operations"),
     }
 }
 
@@ -978,6 +979,7 @@ fn encode_value(value: &Value) -> Vec<u8> {
         Value::Enum { .. } => {
             panic!("Enum payload values require a descriptor - use encode_value_with_type")
         }
+        Value::LargeValueEdit(_) => panic!("large-value edits cannot be encoded as stored values"),
         Value::Null => vec![],
     }
 }

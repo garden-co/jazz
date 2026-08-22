@@ -123,27 +123,21 @@ small value. Large text and byte columns additionally accept `splice`, while app
 can use `append`:
 
 ```ts
-db.update(
-  app.documents,
-  documentId,
-  {
-    body: {
-      splice: {
-        slice: { from: 1_000, length: 500 },
-        at: 120,
-        delete: 5,
-        insert: "world",
-      },
+db.update(app.documents, documentId, {
+  body: {
+    splice: {
+      slice: { from: 1_000, length: 500 },
+      at: 120,
+      delete: 5,
+      insert: "world",
     },
-    recording: { append: nextAudioChunk },
   },
-  { ifVersion: document.$version },
-);
+  recording: { append: nextAudioChunk },
+});
 ```
 
 The edit belongs to the normal row update: it uses the same permissions, transaction, history,
-sync, and conflict semantics. `ifVersion` is a general compare-and-swap condition for the complete
-row, preventing an edit calculated against stale contents. See
+sync, branch, and conflict semantics. See
 [Editing without materializing](/docs/schemas/large-values#editing-without-materializing) for text,
 streams, files, and JSON.
 

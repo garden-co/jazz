@@ -19,6 +19,20 @@ export type Value =
   | { type: "Array"; value: Value[] }
   | { type: "Row"; value: { id?: string; values: Value[] } }
   | { type: "Enum"; value: { case: string; values: Value[] } }
+  | {
+      type: "LargeValueEdit";
+      value:
+        | { kind: "Append"; insert: Uint8Array }
+        | {
+            kind: "Splice";
+            sliceFrom: number;
+            sliceLength: number;
+            at: number;
+            delete: number;
+            insert: Uint8Array;
+            text: boolean;
+          };
+    }
   | { type: "Null" };
 
 export type InsertValues = Record<string, Value>;

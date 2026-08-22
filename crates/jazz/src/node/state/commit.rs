@@ -1,7 +1,221 @@
+struct NodeLargeValueReader<'a, S>
+where
+    S: OrderedKvStorage,
+{
+    state: std::cell::RefCell<&'a mut NodeState<S>>,
+}
+
+impl<'a, S> NodeLargeValueReader<'a, S>
+where
+    S: OrderedKvStorage,
+{
+    fn new(state: &'a mut NodeState<S>) -> Self {
+        Self {
+            state: std::cell::RefCell::new(state),
+        }
+    }
+}
+
+impl<S> crate::large_values::LargeValueNodeRows for NodeLargeValueReader<'_, S>
+where
+    S: OrderedKvStorage,
+{
+    fn get(
+        &self,
+        domain: &crate::large_values::LargeValueOwnerDomain,
+        id: crate::large_values::LargeValueNodeId,
+    ) -> Result<Option<Vec<u8>>, crate::large_values::ContentError> {
+        let table_name = crate::large_values::large_value_node_table_name(domain.owner_table());
+        let mut state = self.state.borrow_mut();
+        let table = state
+            .table_in_schema(&table_name, state.catalogue.current_write_schema.schema)
+            .map_err(|error| crate::large_values::ContentError::Storage(error.to_string()))?;
+        let Some(row) = state
+            .local_current_row(&table_name, RowUuid(id.row_id()))
+            .map_err(|error| crate::large_values::ContentError::Storage(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let malformed = || {
+            crate::large_values::ContentError::MalformedNode(
+                "hidden node row does not match its owner or identity".to_owned(),
+            )
+        };
+        if row.cell(&table, "owner") != Some(Value::Uuid(domain.owner_row()))
+            || row.cell(&table, "format")
+                != Some(Value::U8(
+                    crate::large_values::LARGE_VALUE_TREE_FORMAT_VERSION,
+                ))
+        {
+            return Err(malformed());
+        }
+        let Some(Value::Bytes(content_id)) = row.cell(&table, "content_id") else {
+            return Err(malformed());
+        };
+        if crate::large_values::LargeValueNodeId::from_bytes(&content_id)? != id {
+            return Err(malformed());
+        }
+        let Some(Value::Bytes(payload)) = row.cell(&table, "payload") else {
+            return Err(malformed());
+        };
+        let expected = crate::large_values::LargeValueNodeRow {
+            row_id: id.row_id(),
+            owner: domain.clone(),
+            content_id: id,
+            payload: payload.clone(),
+        }
+        .cells(Default::default())?;
+        if expected
+            .iter()
+            .any(|(column, value)| row.cell(&table, column) != Some(value.clone()))
+        {
+            return Err(malformed());
+        }
+        Ok(Some(payload))
+    }
+
+    fn put_if_absent_or_identical(
+        &mut self,
+        _row: &crate::large_values::LargeValueNodeRow,
+    ) -> Result<(), crate::large_values::ContentError> {
+        Err(crate::large_values::ContentError::Storage(
+            "query readers cannot publish node rows".to_owned(),
+        ))
+    }
+}
+
+#[cfg(feature = "runtime")]
+struct NodeLargeValueEditor<'a, S>
+where
+    S: OrderedKvStorage,
+{
+    reader: NodeLargeValueReader<'a, S>,
+    rows: BTreeMap<crate::large_values::LargeValueNodeId, crate::large_values::LargeValueNodeRow>,
+}
+
+#[cfg(feature = "runtime")]
+impl<'a, S> NodeLargeValueEditor<'a, S>
+where
+    S: OrderedKvStorage,
+{
+    fn new(state: &'a mut NodeState<S>) -> Self {
+        Self {
+            reader: NodeLargeValueReader::new(state),
+            rows: BTreeMap::new(),
+        }
+    }
+
+    fn into_rows(self) -> Vec<crate::large_values::LargeValueNodeRow> {
+        self.rows.into_values().collect()
+    }
+}
+
+#[cfg(feature = "runtime")]
+impl<S> crate::large_values::LargeValueNodeRows for NodeLargeValueEditor<'_, S>
+where
+    S: OrderedKvStorage,
+{
+    fn get(
+        &self,
+        domain: &crate::large_values::LargeValueOwnerDomain,
+        id: crate::large_values::LargeValueNodeId,
+    ) -> Result<Option<Vec<u8>>, crate::large_values::ContentError> {
+        if let Some(row) = self.rows.get(&id) {
+            return Ok(Some(row.payload.clone()));
+        }
+        crate::large_values::LargeValueNodeRows::get(&self.reader, domain, id)
+    }
+
+    fn put_if_absent_or_identical(
+        &mut self,
+        row: &crate::large_values::LargeValueNodeRow,
+    ) -> Result<(), crate::large_values::ContentError> {
+        if let Some(existing) = self.get(&row.owner, row.content_id)? {
+            return if existing == row.payload {
+                Ok(())
+            } else {
+                Err(crate::large_values::ContentError::ImmutableCollision(
+                    row.content_id,
+                ))
+            };
+        }
+        self.rows.insert(row.content_id, row.clone());
+        Ok(())
+    }
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
+    #[cfg(feature = "runtime")]
+    pub(crate) fn prepare_large_value_edit(
+        &mut self,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+        edit: crate::large_values::ValueEdit,
+    ) -> Result<(Value, Vec<crate::large_values::LargeValueNodeRow>), Error> {
+        let table_schema = self.table(table)?.clone();
+        let column_schema = table_schema
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column)
+            .ok_or(Error::InvalidStoredValue("unknown large-value column"))?;
+        let schema = column_schema
+            .large_value
+            .as_ref()
+            .ok_or(Error::InvalidStoredValue("column is not a large value"))?;
+        let cells = self
+            .physical_current_cells(table, row)?
+            .ok_or(Error::InvalidStoredValue("large-value owner row is absent"))?;
+        let stored = cells
+            .get(column)
+            .ok_or(Error::InvalidStoredValue("large-value cell is absent"))?;
+        let (stored, nullable) = match stored {
+            Value::Nullable(Some(value)) => (value.as_ref(), true),
+            Value::Nullable(None) => {
+                return Err(Error::InvalidStoredValue("cannot edit a null large value"));
+            }
+            value => (value, false),
+        };
+        let value = crate::large_values::LargeValue::decode_storage_value(schema, stored)
+            .map_err(|_| Error::InvalidStoredValue("edit source is not a large-value envelope"))?;
+        let domain = crate::large_values::LargeValueOwnerDomain::new(table, row.0)
+            .map_err(|_| Error::InvalidStoredValue("invalid large-value owner domain"))?;
+        let tree = crate::large_values::ContentTree::new(Default::default())
+            .map_err(|_| Error::InvalidStoredValue("invalid large-value tree profile"))?;
+        let mut editor = NodeLargeValueEditor::new(self);
+        let patch = value
+            .lower_edit(schema.kind, edit, &domain, tree, &editor)
+            .map_err(|_| Error::InvalidStoredValue("invalid large-value edit"))?;
+        let value = value
+            .apply_edit(
+                schema.kind,
+                &domain,
+                patch,
+                usize::try_from(schema.inline_up_to).expect("u32 fits usize"),
+                schema.tail_bounds(),
+                tree,
+                &mut editor,
+            )
+            .map_err(|_| Error::InvalidStoredValue("invalid large-value edit"))?;
+        let stored = value
+            .encode_storage_value(schema)
+            .map_err(|_| Error::InvalidStoredValue("large-value cell encoding failed"))?;
+        crate::large_values::LargeValue::decode_storage_value(schema, &stored)
+            .map_err(|_| Error::InvalidStoredValue("large-value cell failed its own round trip"))?;
+        let rows = editor.into_rows();
+        Ok((
+            if nullable {
+                Value::Nullable(Some(Box::new(stored)))
+            } else {
+                stored
+            },
+            rows,
+        ))
+    }
+
     /// Commit a local mergeable write and leave its fate pending.
     pub fn commit_mergeable(&mut self, commit: MergeableCommit) -> Result<TxId, Error> {
         commit.validate()?;
@@ -488,6 +702,36 @@ where
             }))
     }
 
+    /// Read the exact physical cells used to author a replacement version.
+    ///
+    /// This is mutation bookkeeping only: callers must separately authorize
+    /// the logical read before using values from this map.
+    pub(crate) fn physical_current_cells(
+        &mut self,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<BTreeMap<String, Value>>, Error> {
+        let schema_version = self.catalogue.current_write_schema.schema;
+        let table_schema = self.table_in_schema(table, schema_version)?;
+        let Some((row, _)) = self.local_current_content_row_candidate(
+            &table_schema,
+            row_uuid,
+            schema_version,
+        )? else {
+            return Ok(None);
+        };
+        Ok(Some(
+            table_schema
+                .columns
+                .iter()
+                .filter_map(|column| {
+                    row.cell(&table_schema, &column.name)
+                        .map(|value| (column.name.clone(), value))
+                })
+                .collect(),
+        ))
+    }
+
     /// Read one exact branch-local row for mutation preparation.
     pub fn visible_current_cells_in_branch(
         &mut self,
@@ -875,10 +1119,72 @@ where
 
     fn materialize_current_row(
         &mut self,
-        _table: &TableSchema,
+        table: &TableSchema,
         row: CurrentRow,
     ) -> Result<CurrentRow, Error> {
-        Ok(row)
+        if !table.columns.iter().any(|column| column.large_value.is_some()) {
+            return Ok(row);
+        }
+        let (descriptor, raw) = row.encoded_record();
+        let borrowed = BorrowedRecord::new(raw, descriptor);
+        let mut values = (0..descriptor.fields().len())
+            .map(|index| borrowed.get_idx(index))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut changed = false;
+        for column in &table.columns {
+            let Some(schema) = &column.large_value else {
+                continue;
+            };
+            let field = descriptor
+                .field_index(&user_column_field(&column.name))
+                .or_else(|| descriptor.field_index(&column.name));
+            let Some(field) = field else {
+                continue;
+            };
+            // `CurrentRow::cell` resolves the incoming descriptor by name and
+            // removes its projection-level nullable wrapper.
+            let Some(value) = row.cell(table, &column.name) else {
+                continue;
+            };
+            let stored = match large_value_leaf(&value) {
+                Some(value @ (Value::Bytes(_) | Value::String(_))) => value.clone(),
+                None => continue,
+                // Query-engine projections may reuse an application column's
+                // output name for a differently typed intermediate slot. It
+                // is not a stored cell and therefore needs no materialization.
+                _ => continue,
+            };
+            if !crate::large_values::LargeValue::storage_value_is_framed(schema, &stored) {
+                continue;
+            }
+            let row_uuid = row.row_uuid();
+            let domain = crate::large_values::LargeValueOwnerDomain::new(&table.name, row_uuid.0)
+            .map_err(|_| Error::InvalidStoredValue("invalid large-value owner domain"))?;
+            let value = crate::large_values::LargeValue::decode_storage_value(schema, &stored)
+                .map_err(|_| Error::InvalidStoredValue("invalid large-value cell"))?;
+            let tree = crate::large_values::ContentTree::new(Default::default())
+                .map_err(|_| Error::InvalidStoredValue("invalid large-value tree profile"))?;
+            let reader = NodeLargeValueReader::new(self);
+            let bytes = value
+                .materialize(schema.kind, &domain, tree, &reader)
+                .map_err(|_| Error::InvalidStoredValue("invalid or missing large-value node row"))?;
+            let logical = schema
+                .kind
+                .logical_value(bytes)
+                .map_err(|_| Error::InvalidStoredValue("invalid materialized large value"))?;
+            values[field] = replace_large_value_leaf(&values[field], logical);
+            changed = true;
+        }
+        if !changed {
+            return Ok(row);
+        }
+        let deleted = row.is_deleted();
+        let raw = descriptor.create(&values)?;
+        let row = CurrentRow::new(
+            row.table().to_owned(),
+            OwnedRecord::new(raw, *descriptor),
+        );
+        Ok(if deleted { row.into_deleted() } else { row })
     }
 
     fn current_row_from_materialized_version(
@@ -886,7 +1192,8 @@ where
         table: &TableSchema,
         version: &VersionRow,
     ) -> Result<CurrentRow, Error> {
-        current_row_from_version_projection(table, version)
+        let row = current_row_from_version_projection(table, version)?;
+        self.materialize_current_row(table, row)
     }
 
     fn materialized_cells_for_version(
@@ -894,7 +1201,16 @@ where
         table: &TableSchema,
         version: &VersionRow,
     ) -> Result<BTreeMap<String, Value>, Error> {
-        version.cells(table)
+        let row = current_row_from_version_projection(table, version)?;
+        let row = self.materialize_current_row(table, row)?;
+        Ok(table
+            .columns
+            .iter()
+            .filter_map(|column| {
+                row.cell(table, &column.name)
+                    .map(|value| (column.name.clone(), value))
+            })
+            .collect())
     }
 
     pub(crate) fn local_current_row(
@@ -1054,4 +1370,22 @@ where
         }))
     }
 
+}
+
+fn large_value_leaf(value: &Value) -> Option<&Value> {
+    match value {
+        Value::Nullable(Some(value)) => large_value_leaf(value),
+        Value::Nullable(None) => None,
+        value => Some(value),
+    }
+}
+
+fn replace_large_value_leaf(template: &Value, replacement: Value) -> Value {
+    match template {
+        Value::Nullable(Some(value)) => Value::Nullable(Some(Box::new(
+            replace_large_value_leaf(value, replacement),
+        ))),
+        Value::Nullable(None) => template.clone(),
+        _ => replacement,
+    }
 }

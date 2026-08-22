@@ -1,8 +1,9 @@
-//! Generic binary storage used by large built-in values.
+//! Chunk/tree algorithms used by large built-in values.
 //!
-//! The module deliberately owns no row identity, history, policy, or sync
-//! state. An [`LargeValue`] is one ordinary atomic cell whose large arm
-//! references immutable, domain-scoped objects.
+//! Immutable nodes are authoritative Jazz rows in versioned, hidden generated
+//! tables. This module deliberately delegates their persistence to
+//! [`LargeValueNodeRows`], so nodes reuse Jazz history, permissions, sync, and
+//! transactions instead of creating a parallel node protocol.
 
 use std::collections::BTreeMap;
 
@@ -10,51 +11,223 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use groove::records::Value as GrooveValue;
-use groove::storage::OrderedKvStorage;
+use groove::schema::ColumnType as GrooveColumnType;
 
+use crate::query::{InheritsOperation, InheritsVia, PolicyBranch, Predicate, Query};
+use crate::schema::{ColumnSchema, TableSchema, WritePolicies};
 // Stable alpha-format domains retain their original bytes across terminology changes.
 const CONTENT_ID_DOMAIN: &[u8] = b"jazz-adaptive-content-v1";
-const OBJECT_FORMAT_VERSION: u8 = 2;
-const CELL_ENVELOPE: &[u8] = b"JAZZ-LARGE-VALUE-V3\0";
+/// Version of canonical leaf/branch payloads stored in node rows.
+pub const LARGE_VALUE_TREE_FORMAT_VERSION: u8 = 2;
+const CELL_ENVELOPE: &[u8] = b"JAZZ-LARGE-VALUE-V4\0";
+const TEXT_STORAGE_ENVELOPE: &str = "JAZZ-LARGE-VALUE-V4:";
 const PATCH_FRAME_HEADER_BYTES: usize = 5 * std::mem::size_of::<u64>() + 1;
-/// Physical column family containing domain-scoped immutable content objects.
-pub const CONTENT_OBJECTS_CF: &str = "jazz_content_objects";
+/// Version of the hidden Jazz table schema containing immutable tree nodes.
+pub const LARGE_VALUE_NODE_SCHEMA_VERSION: u8 = 1;
+/// Reserved prefix for automatically injected large-value node tables.
+pub const LARGE_VALUE_NODE_TABLE_PREFIX: &str = "__jazz_large_value_nodes_v1__";
 
-/// Stable identifier of one immutable content object.
+/// Deterministic hidden table name for one owner-table node domain.
+pub fn large_value_node_table_name(owner_table: &str) -> String {
+    format!(
+        "{LARGE_VALUE_NODE_TABLE_PREFIX}{}",
+        hex::encode(owner_table)
+    )
+}
+
+/// Build the hidden ordinary Jazz table used by large columns on `owner`.
+///
+/// Returning `None` keeps schemas without large-capable columns byte-for-byte
+/// free of this implementation detail.
+pub(crate) fn large_value_node_table(owner: &TableSchema) -> Option<TableSchema> {
+    if !owner
+        .columns
+        .iter()
+        .any(|column| column.large_value.is_some())
+    {
+        return None;
+    }
+    let name = large_value_node_table_name(&owner.name);
+    let mut table = TableSchema::new(
+        name.clone(),
+        [
+            ColumnSchema::new("owner", GrooveColumnType::Uuid),
+            ColumnSchema::new("content_id", GrooveColumnType::Bytes),
+            ColumnSchema::new("format", GrooveColumnType::U8),
+            ColumnSchema::new("kind", GrooveColumnType::U8),
+            ColumnSchema::new("payload", GrooveColumnType::Bytes),
+            ColumnSchema::new("byte_len", GrooveColumnType::U64),
+            ColumnSchema::new("utf16_len", GrooveColumnType::U64.nullable()),
+        ],
+    );
+    table
+        .references
+        .insert("owner".to_owned(), owner.name.clone());
+    table.indexed_columns.insert("owner".to_owned());
+    let mut read = Query::from(name.clone());
+    read.inherits.push(InheritsVia {
+        parent_column: "owner".to_owned(),
+        operation: InheritsOperation::Select,
+        max_depth: None,
+    });
+    table.read_policy = Some(read);
+    let inherited = |operation| InheritsVia {
+        parent_column: "owner".to_owned(),
+        operation,
+        max_depth: None,
+    };
+    let mut insert = Query::from(name.clone());
+    insert.inherits.push(inherited(InheritsOperation::Insert));
+    let mut update_owner = Query::from(name.clone());
+    update_owner
+        .inherits
+        .push(inherited(InheritsOperation::Update));
+    insert = insert.policy_branch(PolicyBranch::single_alternative_from_query(update_owner));
+    let never = || Query::from(name.clone()).filter(Predicate::Any(Vec::new()));
+    table.write_policies = WritePolicies {
+        insert_check: Some(insert),
+        update_using: Some(never()),
+        update_check: Some(never()),
+        delete_using: Some(never()),
+    };
+    Some(table)
+}
+
+/// Stable identifier of one immutable tree node row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct ContentId([u8; 32]);
+pub struct LargeValueNodeId([u8; 32]);
 
-impl ContentId {
+impl LargeValueNodeId {
+    /// Decode the full collision-checking identifier stored in a node row.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ContentError> {
+        let bytes: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| ContentError::MalformedNode("node id must contain 32 bytes".to_owned()))?;
+        Ok(Self(bytes))
+    }
+
     /// Return the identifier bytes.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+
+    /// Deterministic UUIDv8 used as the corresponding hidden Jazz row id.
+    pub fn row_id(&self) -> uuid::Uuid {
+        let mut row_id = [0_u8; 16];
+        row_id.copy_from_slice(&self.0[..16]);
+        row_id[6] = (row_id[6] & 0x0f) | 0x80;
+        row_id[8] = (row_id[8] & 0x3f) | 0x80;
+        uuid::Uuid::from_bytes(row_id)
+    }
 }
 
-/// Authorization and encryption domain included in every object identity.
+/// Owning application location used to route and interpret node rows.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct ContentDomain(Vec<u8>);
+pub struct LargeValueOwnerDomain {
+    owner_table: String,
+    owner_row: uuid::Uuid,
+}
 
-impl ContentDomain {
-    /// Construct a non-empty domain identifier.
-    pub fn new(bytes: impl Into<Vec<u8>>) -> Result<Self, ContentError> {
-        let bytes = bytes.into();
-        if bytes.is_empty() {
-            return Err(ContentError::EmptyDomain);
+/// Canonical contents of one row in a generated large-value node table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LargeValueNodeRow {
+    /// Deterministic Jazz row id used by root and child references.
+    pub row_id: uuid::Uuid,
+    /// Application row from which authorization inherits, plus logical routing.
+    pub owner: LargeValueOwnerDomain,
+    /// Full collision-checking content id retained in the row.
+    pub content_id: LargeValueNodeId,
+    /// Canonical versioned leaf or branch payload.
+    pub payload: Vec<u8>,
+}
+
+impl LargeValueNodeRow {
+    fn new(owner: &LargeValueOwnerDomain, content_id: LargeValueNodeId, payload: &[u8]) -> Self {
+        Self {
+            row_id: content_id.row_id(),
+            owner: owner.clone(),
+            content_id,
+            payload: payload.to_vec(),
         }
-        Ok(Self(bytes))
     }
 
-    fn bytes(&self) -> &[u8] {
-        &self.0
+    /// Hidden generated table containing this row.
+    pub fn table_name(&self) -> String {
+        large_value_node_table_name(self.owner.owner_table())
+    }
+
+    /// Convert the canonical node into ordinary Jazz row cells.
+    pub fn cells(
+        &self,
+        profile: ChunkingProfile,
+    ) -> Result<BTreeMap<String, GrooveValue>, ContentError> {
+        let node = decode_node(&self.payload, profile)?;
+        let (byte_len, utf16_len) = node_metrics(&node)?;
+        Ok(BTreeMap::from([
+            (
+                "owner".to_owned(),
+                GrooveValue::Uuid(self.owner.owner_row()),
+            ),
+            (
+                "content_id".to_owned(),
+                GrooveValue::Bytes(self.content_id.as_bytes().to_vec()),
+            ),
+            (
+                "format".to_owned(),
+                GrooveValue::U8(LARGE_VALUE_TREE_FORMAT_VERSION),
+            ),
+            (
+                "kind".to_owned(),
+                GrooveValue::U8(match node {
+                    TreeNode::Leaf { .. } => 0,
+                    TreeNode::Branch(_) => 1,
+                }),
+            ),
+            (
+                "payload".to_owned(),
+                GrooveValue::Bytes(self.payload.clone()),
+            ),
+            ("byte_len".to_owned(), GrooveValue::U64(byte_len)),
+            (
+                "utf16_len".to_owned(),
+                GrooveValue::Nullable(utf16_len.map(|value| Box::new(GrooveValue::U64(value)))),
+            ),
+        ]))
+    }
+}
+
+impl LargeValueOwnerDomain {
+    /// Bind a tree to one concrete owner row.
+    pub fn new(
+        owner_table: impl Into<String>,
+        owner_row: uuid::Uuid,
+    ) -> Result<Self, ContentError> {
+        let owner_table = owner_table.into();
+        if owner_table.is_empty() {
+            return Err(ContentError::EmptyDomain);
+        }
+        Ok(Self {
+            owner_table,
+            owner_row,
+        })
+    }
+
+    /// Application table referenced by generated node rows.
+    pub fn owner_table(&self) -> &str {
+        &self.owner_table
+    }
+
+    /// Application row referenced by generated node rows.
+    pub fn owner_row(&self) -> uuid::Uuid {
+        self.owner_row
     }
 }
 
 /// One child in an immutable branch node.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChildDescriptor {
-    /// Child object identity.
-    pub id: ContentId,
+    /// Child node identity.
+    pub id: LargeValueNodeId,
     /// Exact materialized byte length below the child.
     pub byte_len: u64,
     /// Exact UTF-16 code-unit length for text trees.
@@ -62,7 +235,7 @@ pub struct ChildDescriptor {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum ContentObject {
+enum TreeNode {
     Leaf {
         bytes: Vec<u8>,
         utf16_len: Option<u64>,
@@ -70,98 +243,70 @@ enum ContentObject {
     Branch(Vec<ChildDescriptor>),
 }
 
-/// Immutable content-addressed object storage.
-pub trait ImmutableContentStore {
-    /// Load canonical object bytes.
-    fn get(&self, id: ContentId) -> Result<Option<Vec<u8>>, ContentError>;
+/// Access to authoritative immutable nodes stored as ordinary hidden Jazz rows.
+///
+/// Implementations bind `domain` to the owning application row. The generated
+/// generated table therefore has a real reference to its owner and can
+/// inherit that row's policies. Implementations must publish node rows in the
+/// same Jazz transaction as the owning row update.
+pub trait LargeValueNodeRows {
+    /// Load canonical node payload from its hidden Jazz row.
+    fn get(
+        &self,
+        domain: &LargeValueOwnerDomain,
+        id: LargeValueNodeId,
+    ) -> Result<Option<Vec<u8>>, ContentError>;
 
-    /// Insert an absent object or verify byte identity with the existing one.
-    fn put_if_absent_or_identical(
-        &mut self,
-        id: ContentId,
-        canonical_bytes: &[u8],
-    ) -> Result<(), ContentError>;
+    /// Insert an absent node row or verify byte identity with the existing row.
+    fn put_if_absent_or_identical(&mut self, row: &LargeValueNodeRow) -> Result<(), ContentError>;
 }
 
-/// Small deterministic store useful for embedded runtimes and tests.
+/// In-memory model of the generated Jazz node rows, for algorithm tests only.
 #[derive(Clone, Debug, Default)]
-pub struct MemoryContentStore {
-    objects: BTreeMap<ContentId, Vec<u8>>,
+pub struct MemoryLargeValueNodeRows {
+    rows: BTreeMap<(LargeValueOwnerDomain, LargeValueNodeId), LargeValueNodeRow>,
 }
 
-impl MemoryContentStore {
-    /// Number of immutable objects currently retained.
+impl MemoryLargeValueNodeRows {
+    /// Number of immutable node rows currently retained.
     pub fn len(&self) -> usize {
-        self.objects.len()
+        self.rows.len()
     }
 
     /// Whether the store is empty.
     pub fn is_empty(&self) -> bool {
-        self.objects.is_empty()
+        self.rows.is_empty()
+    }
+
+    /// Consume the deterministic node rows in owner/id order.
+    pub fn into_rows(self) -> impl Iterator<Item = LargeValueNodeRow> {
+        self.rows.into_values()
     }
 }
 
-impl ImmutableContentStore for MemoryContentStore {
-    fn get(&self, id: ContentId) -> Result<Option<Vec<u8>>, ContentError> {
-        Ok(self.objects.get(&id).cloned())
+impl LargeValueNodeRows for MemoryLargeValueNodeRows {
+    fn get(
+        &self,
+        domain: &LargeValueOwnerDomain,
+        id: LargeValueNodeId,
+    ) -> Result<Option<Vec<u8>>, ContentError> {
+        Ok(self
+            .rows
+            .get(&(domain.clone(), id))
+            .map(|row| row.payload.clone()))
     }
 
-    fn put_if_absent_or_identical(
-        &mut self,
-        id: ContentId,
-        canonical_bytes: &[u8],
-    ) -> Result<(), ContentError> {
-        match self.objects.get(&id) {
-            Some(existing) if existing != canonical_bytes => {
-                Err(ContentError::ImmutableCollision(id))
+    fn put_if_absent_or_identical(&mut self, row: &LargeValueNodeRow) -> Result<(), ContentError> {
+        let key = (row.owner.clone(), row.content_id);
+        match self.rows.get(&key) {
+            Some(existing) if existing != row => {
+                Err(ContentError::ImmutableCollision(row.content_id))
             }
             Some(_) => Ok(()),
             None => {
-                self.objects.insert(id, canonical_bytes.to_vec());
+                self.rows.insert(key, row.clone());
                 Ok(())
             }
-        }
-    }
-}
-
-/// Adapter over Jazz's ordinary ordered key/value storage.
-///
-/// This adapter verifies absent-or-identical behavior within one serialized
-/// writer or storage transaction. It does not manufacture compare-and-set
-/// semantics: integrations with concurrent writers must use a transaction
-/// conflict boundary that covers this column family.
-pub struct KvContentStore<'a, S> {
-    storage: &'a S,
-}
-
-impl<'a, S> KvContentStore<'a, S> {
-    /// Wrap one storage or storage transaction.
-    pub fn new(storage: &'a S) -> Self {
-        Self { storage }
-    }
-}
-
-impl<S: OrderedKvStorage> ImmutableContentStore for KvContentStore<'_, S> {
-    fn get(&self, id: ContentId) -> Result<Option<Vec<u8>>, ContentError> {
-        self.storage
-            .get(CONTENT_OBJECTS_CF, id.as_bytes())
-            .map_err(|error| ContentError::Storage(error.to_string()))
-    }
-
-    fn put_if_absent_or_identical(
-        &mut self,
-        id: ContentId,
-        canonical_bytes: &[u8],
-    ) -> Result<(), ContentError> {
-        match self.get(id)? {
-            Some(existing) if existing != canonical_bytes => {
-                Err(ContentError::ImmutableCollision(id))
-            }
-            Some(_) => Ok(()),
-            None => self
-                .storage
-                .set(CONTENT_OBJECTS_CF, id.as_bytes(), canonical_bytes)
-                .map_err(|error| ContentError::Storage(error.to_string())),
         }
     }
 }
@@ -300,7 +445,7 @@ impl Default for TailBounds {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChunkedValue {
     /// Root of the immutable recursive byte tree.
-    pub root: ContentId,
+    pub root: LargeValueNodeId,
     /// Materialized root length before applying the tail.
     pub root_byte_len: u64,
     /// Materialized UTF-16 length before the tail for text values.
@@ -352,7 +497,7 @@ impl LargeValueSchema {
             inline_up_to: 8 * 1024,
             max_tail_entries: 64,
             max_tail_bytes: 16 * 1024,
-            tree_format: u16::from(OBJECT_FORMAT_VERSION),
+            tree_format: u16::from(LARGE_VALUE_TREE_FORMAT_VERSION),
         }
     }
 
@@ -367,7 +512,7 @@ impl LargeValueSchema {
 
     /// Validate that this runtime understands the declared physical format.
     pub fn validate(&self) -> Result<(), ContentError> {
-        if self.tree_format != u16::from(OBJECT_FORMAT_VERSION) {
+        if self.tree_format != u16::from(LARGE_VALUE_TREE_FORMAT_VERSION) {
             return Err(ContentError::UnsupportedTreeFormat(self.tree_format));
         }
         if self.max_tail_entries == 0 || self.max_tail_bytes == 0 {
@@ -423,6 +568,19 @@ pub enum ValueSelectionResult {
 pub enum ValueEdit {
     /// Replace an absolute byte range.
     Bytes(BytePatch),
+    /// Replace a byte range relative to a selected byte slice.
+    BytesSlice {
+        /// Absolute selected-slice start in bytes.
+        slice_offset: u64,
+        /// Selected-slice length in bytes.
+        slice_len: u64,
+        /// Relative byte offset within the slice.
+        offset: u64,
+        /// Bytes to remove.
+        delete_len: u64,
+        /// Replacement bytes.
+        insert: Vec<u8>,
+    },
     /// Replace a UTF-8 range relative to a selected UTF-8 text slice.
     TextUtf8 {
         /// Absolute selected-slice start in UTF-8 bytes.
@@ -655,16 +813,16 @@ pub enum ContentError {
     Storage(String),
     /// An immutable identity was observed with different bytes.
     #[error("immutable content collision for {0:?}")]
-    ImmutableCollision(ContentId),
-    /// A referenced immutable object is absent.
-    #[error("missing immutable content object {0:?}")]
-    MissingObject(ContentId),
+    ImmutableCollision(LargeValueNodeId),
+    /// A referenced immutable node is absent.
+    #[error("missing immutable large-value node row {0:?}")]
+    MissingNodeRow(LargeValueNodeId),
     /// Canonical bytes do not hash to their referenced id.
-    #[error("immutable object id mismatch for {0:?}")]
-    ObjectIdMismatch(ContentId),
-    /// Canonical object encoding is malformed.
-    #[error("malformed immutable content object: {0}")]
-    MalformedObject(String),
+    #[error("immutable node id mismatch for {0:?}")]
+    NodeIdMismatch(LargeValueNodeId),
+    /// Canonical node encoding is malformed.
+    #[error("malformed immutable large-value node row: {0}")]
+    MalformedNode(String),
     /// A replacement range exceeds the current value.
     #[error("byte patch range {offset}..{end} exceeds value length {value_len}")]
     PatchOutOfBounds {
@@ -744,23 +902,23 @@ impl ContentTree {
     }
 
     /// Persist bytes and return the deterministic root and length.
-    pub fn build<S: ImmutableContentStore>(
+    pub fn build<S: LargeValueNodeRows>(
         &self,
-        domain: &ContentDomain,
+        domain: &LargeValueOwnerDomain,
         bytes: &[u8],
         store: &mut S,
-    ) -> Result<(ContentId, u64), ContentError> {
+    ) -> Result<(LargeValueNodeId, u64), ContentError> {
         self.build_with_metrics(domain, bytes, false, store)
             .map(|descriptor| (descriptor.id, descriptor.byte_len))
     }
 
     /// Persist UTF-8 text with aggregate UTF-16 metrics on every tree edge.
-    pub fn build_text<S: ImmutableContentStore>(
+    pub fn build_text<S: LargeValueNodeRows>(
         &self,
-        domain: &ContentDomain,
+        domain: &LargeValueOwnerDomain,
         text: &str,
         store: &mut S,
-    ) -> Result<(ContentId, u64, u64), ContentError> {
+    ) -> Result<(LargeValueNodeId, u64, u64), ContentError> {
         let descriptor = self.build_with_metrics(domain, text.as_bytes(), true, store)?;
         Ok((
             descriptor.id,
@@ -769,9 +927,9 @@ impl ContentTree {
         ))
     }
 
-    fn build_with_metrics<S: ImmutableContentStore>(
+    fn build_with_metrics<S: LargeValueNodeRows>(
         &self,
-        domain: &ContentDomain,
+        domain: &LargeValueOwnerDomain,
         bytes: &[u8],
         text: bool,
         store: &mut S,
@@ -792,16 +950,16 @@ impl ContentTree {
                     count_utf16(std::str::from_utf8(&payload).expect("text chunks are aligned"))
                 })
                 .transpose()?;
-            let object = ContentObject::Leaf {
+            let node = TreeNode::Leaf {
                 bytes: payload,
                 utf16_len,
             };
-            level.push(self.persist_object(domain, object, store)?);
+            level.push(self.persist_node(domain, node, store)?);
         }
         if level.is_empty() {
-            level.push(self.persist_object(
+            level.push(self.persist_node(
                 domain,
-                ContentObject::Leaf {
+                TreeNode::Leaf {
                     bytes: Vec::new(),
                     utf16_len: text.then_some(0),
                 },
@@ -812,9 +970,9 @@ impl ContentTree {
             let groups = descriptor_groups(&level, self.profile);
             let mut next = Vec::with_capacity(groups.len());
             for group in groups {
-                next.push(self.persist_object(
+                next.push(self.persist_node(
                     domain,
-                    ContentObject::Branch(level[group].to_vec()),
+                    TreeNode::Branch(level[group].to_vec()),
                     store,
                 )?);
             }
@@ -831,12 +989,12 @@ impl ContentTree {
     /// per tree level, bounded by this tree's profile.
     pub fn build_streaming<S, I, B>(
         &self,
-        domain: &ContentDomain,
+        domain: &LargeValueOwnerDomain,
         chunks: I,
         store: &mut S,
-    ) -> Result<(ContentId, u64), ContentError>
+    ) -> Result<(LargeValueNodeId, u64), ContentError>
     where
-        S: ImmutableContentStore,
+        S: LargeValueNodeRows,
         I: IntoIterator<Item = B>,
         B: AsRef<[u8]>,
     {
@@ -848,17 +1006,17 @@ impl ContentTree {
     }
 
     /// Materialize the complete bytes below one root.
-    pub fn materialize<S: ImmutableContentStore>(
+    pub fn materialize<S: LargeValueNodeRows>(
         &self,
-        domain: &ContentDomain,
-        root: ContentId,
+        domain: &LargeValueOwnerDomain,
+        root: LargeValueNodeId,
         expected_len: u64,
         store: &S,
     ) -> Result<Vec<u8>, ContentError> {
         let expected_usize =
             usize::try_from(expected_len).map_err(|_| ContentError::LengthOverflow)?;
         let mut out = Vec::new();
-        self.read_object_range(
+        self.read_node_range(
             domain,
             root,
             0,
@@ -868,7 +1026,7 @@ impl ContentTree {
             &mut out,
         )?;
         if out.len() != expected_usize {
-            return Err(ContentError::MalformedObject(
+            return Err(ContentError::MalformedNode(
                 "root aggregate length does not match descriptor".to_owned(),
             ));
         }
@@ -876,10 +1034,10 @@ impl ContentTree {
     }
 
     /// Read one immutable byte range without loading unrelated leaves.
-    pub fn read_range<S: ImmutableContentStore>(
+    pub fn read_range<S: LargeValueNodeRows>(
         &self,
-        domain: &ContentDomain,
-        root: ContentId,
+        domain: &LargeValueOwnerDomain,
+        root: LargeValueNodeId,
         root_len: u64,
         offset: u64,
         len: u64,
@@ -897,20 +1055,20 @@ impl ContentTree {
         }
         usize::try_from(len).map_err(|_| ContentError::LengthOverflow)?;
         let mut out = Vec::new();
-        self.read_object_range(domain, root, offset, end, Some(root_len), store, &mut out)?;
+        self.read_node_range(domain, root, offset, end, Some(root_len), store, &mut out)?;
         Ok(out)
     }
 
-    fn utf16_prefix<S: ImmutableContentStore>(
+    fn utf16_prefix<S: LargeValueNodeRows>(
         &self,
-        domain: &ContentDomain,
-        root: ContentId,
+        domain: &LargeValueOwnerDomain,
+        root: LargeValueNodeId,
         root_byte_len: u64,
         root_utf16_len: u64,
         byte_offset: u64,
         store: &S,
     ) -> Result<u64, ContentError> {
-        self.utf16_prefix_object(
+        self.utf16_prefix_node(
             domain,
             root,
             root_byte_len,
@@ -920,10 +1078,10 @@ impl ContentTree {
         )
     }
 
-    fn utf16_prefix_object<S: ImmutableContentStore>(
+    fn utf16_prefix_node<S: LargeValueNodeRows>(
         &self,
-        domain: &ContentDomain,
-        id: ContentId,
+        domain: &LargeValueOwnerDomain,
+        id: LargeValueNodeId,
         expected_bytes: u64,
         expected_utf16: u64,
         byte_offset: u64,
@@ -936,15 +1094,15 @@ impl ContentTree {
                 value_len: expected_bytes,
             });
         }
-        let object = self.load_object(domain, id, store)?;
-        let metrics = object_metrics(&object)?;
+        let node = self.load_node(domain, id, store)?;
+        let metrics = node_metrics(&node)?;
         if metrics != (expected_bytes, Some(expected_utf16)) {
-            return Err(ContentError::MalformedObject(
+            return Err(ContentError::MalformedNode(
                 "text child aggregate metrics do not match descriptor".to_owned(),
             ));
         }
-        match object {
-            ContentObject::Leaf {
+        match node {
+            TreeNode::Leaf {
                 bytes,
                 utf16_len: Some(_),
             } => {
@@ -952,7 +1110,7 @@ impl ContentTree {
                 let boundary = utf8_boundary(text, byte_offset)?;
                 count_utf16(&text[..boundary])
             }
-            ContentObject::Branch(children) => {
+            TreeNode::Branch(children) => {
                 let mut bytes_seen = 0_u64;
                 let mut utf16_seen = 0_u64;
                 for child in children {
@@ -960,11 +1118,11 @@ impl ContentTree {
                         .checked_add(child.byte_len)
                         .ok_or(ContentError::LengthOverflow)?;
                     let child_utf16 = child.utf16_len.ok_or_else(|| {
-                        ContentError::MalformedObject("text branch lacks UTF-16 metric".to_owned())
+                        ContentError::MalformedNode("text branch lacks UTF-16 metric".to_owned())
                     })?;
                     if byte_offset <= child_end {
                         return utf16_seen
-                            .checked_add(self.utf16_prefix_object(
+                            .checked_add(self.utf16_prefix_node(
                                 domain,
                                 child.id,
                                 child.byte_len,
@@ -981,18 +1139,18 @@ impl ContentTree {
                 }
                 Ok(utf16_seen)
             }
-            ContentObject::Leaf {
+            TreeNode::Leaf {
                 utf16_len: None, ..
-            } => Err(ContentError::MalformedObject(
+            } => Err(ContentError::MalformedNode(
                 "text root references a byte leaf".to_owned(),
             )),
         }
     }
 
-    fn byte_offset_for_utf16<S: ImmutableContentStore>(
+    fn byte_offset_for_utf16<S: LargeValueNodeRows>(
         &self,
-        domain: &ContentDomain,
-        root: ContentId,
+        domain: &LargeValueOwnerDomain,
+        root: LargeValueNodeId,
         root_byte_len: u64,
         root_utf16_len: u64,
         utf16_offset: u64,
@@ -1005,14 +1163,14 @@ impl ContentTree {
                 text_len: root_utf16_len,
             });
         }
-        let object = self.load_object(domain, root, store)?;
-        if object_metrics(&object)? != (root_byte_len, Some(root_utf16_len)) {
-            return Err(ContentError::MalformedObject(
+        let node = self.load_node(domain, root, store)?;
+        if node_metrics(&node)? != (root_byte_len, Some(root_utf16_len)) {
+            return Err(ContentError::MalformedNode(
                 "text child aggregate metrics do not match descriptor".to_owned(),
             ));
         }
-        match object {
-            ContentObject::Leaf {
+        match node {
+            TreeNode::Leaf {
                 bytes,
                 utf16_len: Some(_),
             } => {
@@ -1020,12 +1178,12 @@ impl ContentTree {
                 u64::try_from(utf16_to_byte_offset(text, utf16_offset)?)
                     .map_err(|_| ContentError::LengthOverflow)
             }
-            ContentObject::Branch(children) => {
+            TreeNode::Branch(children) => {
                 let mut byte_base = 0_u64;
                 let mut utf16_base = 0_u64;
                 for child in children {
                     let child_utf16 = child.utf16_len.ok_or_else(|| {
-                        ContentError::MalformedObject("text branch lacks UTF-16 metric".to_owned())
+                        ContentError::MalformedNode("text branch lacks UTF-16 metric".to_owned())
                     })?;
                     let child_end = utf16_base
                         .checked_add(child_utf16)
@@ -1049,24 +1207,24 @@ impl ContentTree {
                 }
                 Ok(byte_base)
             }
-            ContentObject::Leaf {
+            TreeNode::Leaf {
                 utf16_len: None, ..
-            } => Err(ContentError::MalformedObject(
+            } => Err(ContentError::MalformedNode(
                 "text root references a byte leaf".to_owned(),
             )),
         }
     }
 
-    fn persist_object<S: ImmutableContentStore>(
+    fn persist_node<S: LargeValueNodeRows>(
         &self,
-        domain: &ContentDomain,
-        object: ContentObject,
+        domain: &LargeValueOwnerDomain,
+        node: TreeNode,
         store: &mut S,
     ) -> Result<ChildDescriptor, ContentError> {
-        let (byte_len, utf16_len) = object_metrics(&object)?;
-        let canonical = encode_object(&object)?;
-        let id = object_id(domain, &canonical);
-        store.put_if_absent_or_identical(id, &canonical)?;
+        let (byte_len, utf16_len) = node_metrics(&node)?;
+        let canonical = encode_node(&node)?;
+        let id = node_id(domain, &canonical);
+        store.put_if_absent_or_identical(&LargeValueNodeRow::new(domain, id, &canonical))?;
         Ok(ChildDescriptor {
             id,
             byte_len,
@@ -1074,42 +1232,44 @@ impl ContentTree {
         })
     }
 
-    fn load_object<S: ImmutableContentStore>(
+    fn load_node<S: LargeValueNodeRows>(
         &self,
-        domain: &ContentDomain,
-        id: ContentId,
+        domain: &LargeValueOwnerDomain,
+        id: LargeValueNodeId,
         store: &S,
-    ) -> Result<ContentObject, ContentError> {
-        let canonical = store.get(id)?.ok_or(ContentError::MissingObject(id))?;
-        if object_id(domain, &canonical) != id {
-            return Err(ContentError::ObjectIdMismatch(id));
+    ) -> Result<TreeNode, ContentError> {
+        let canonical = store
+            .get(domain, id)?
+            .ok_or(ContentError::MissingNodeRow(id))?;
+        if node_id(domain, &canonical) != id {
+            return Err(ContentError::NodeIdMismatch(id));
         }
-        decode_object(&canonical, self.profile)
+        decode_node(&canonical, self.profile)
     }
 
-    fn read_object_range<S: ImmutableContentStore>(
+    fn read_node_range<S: LargeValueNodeRows>(
         &self,
-        domain: &ContentDomain,
-        id: ContentId,
+        domain: &LargeValueOwnerDomain,
+        id: LargeValueNodeId,
         start: u64,
         end: u64,
         expected_len: Option<u64>,
         store: &S,
         out: &mut Vec<u8>,
     ) -> Result<(), ContentError> {
-        let object = self.load_object(domain, id, store)?;
-        let (actual_len, _) = object_metrics(&object)?;
+        let node = self.load_node(domain, id, store)?;
+        let (actual_len, _) = node_metrics(&node)?;
         if expected_len.is_some_and(|expected| expected != actual_len) {
-            return Err(ContentError::MalformedObject(
+            return Err(ContentError::MalformedNode(
                 "child aggregate length does not match descriptor".to_owned(),
             ));
         }
-        match object {
-            ContentObject::Leaf { bytes, .. } => {
+        match node {
+            TreeNode::Leaf { bytes, .. } => {
                 let leaf_len =
                     u64::try_from(bytes.len()).map_err(|_| ContentError::LengthOverflow)?;
                 if end > leaf_len || start > end {
-                    return Err(ContentError::MalformedObject(
+                    return Err(ContentError::MalformedNode(
                         "leaf range exceeds canonical bytes".to_owned(),
                     ));
                 }
@@ -1117,13 +1277,13 @@ impl ContentTree {
                 let end = usize::try_from(end).map_err(|_| ContentError::LengthOverflow)?;
                 out.extend_from_slice(&bytes[start..end]);
             }
-            ContentObject::Branch(children) => {
+            TreeNode::Branch(children) => {
                 let total = children.iter().try_fold(0_u64, |sum, child| {
                     sum.checked_add(child.byte_len)
                         .ok_or(ContentError::LengthOverflow)
                 })?;
                 if end > total || start > end {
-                    return Err(ContentError::MalformedObject(
+                    return Err(ContentError::MalformedNode(
                         "branch range exceeds aggregate length".to_owned(),
                     ));
                 }
@@ -1135,7 +1295,7 @@ impl ContentTree {
                     let overlap_start = start.max(child_start);
                     let overlap_end = end.min(child_end);
                     if overlap_start < overlap_end {
-                        self.read_object_range(
+                        self.read_node_range(
                             domain,
                             child.id,
                             overlap_start - child_start,
@@ -1162,7 +1322,7 @@ impl ContentTree {
 /// type keeps the memory invariant explicit and testable near the tree format.
 struct StreamingContentBuilder<'a, S> {
     tree: ContentTree,
-    domain: &'a ContentDomain,
+    domain: &'a LargeValueOwnerDomain,
     store: &'a mut S,
     leaf: Vec<u8>,
     rolling: u64,
@@ -1177,8 +1337,8 @@ struct StreamingContentBuilder<'a, S> {
 
 const LEAF_HASH_WINDOW: usize = 63;
 
-impl<'a, S: ImmutableContentStore> StreamingContentBuilder<'a, S> {
-    fn new(tree: ContentTree, domain: &'a ContentDomain, store: &'a mut S) -> Self {
+impl<'a, S: LargeValueNodeRows> StreamingContentBuilder<'a, S> {
+    fn new(tree: ContentTree, domain: &'a LargeValueOwnerDomain, store: &'a mut S) -> Self {
         Self {
             tree,
             domain,
@@ -1231,9 +1391,9 @@ impl<'a, S: ImmutableContentStore> StreamingContentBuilder<'a, S> {
         self.rolling = 0;
         self.window_len = 0;
         self.window_cursor = 0;
-        let descriptor = self.tree.persist_object(
+        let descriptor = self.tree.persist_node(
             self.domain,
-            ContentObject::Leaf {
+            TreeNode::Leaf {
                 bytes,
                 utf16_len: None,
             },
@@ -1258,17 +1418,15 @@ impl<'a, S: ImmutableContentStore> StreamingContentBuilder<'a, S> {
             || children.len() >= profile.max_children
         {
             let children = std::mem::take(&mut self.levels[level]);
-            let parent = self.tree.persist_object(
-                self.domain,
-                ContentObject::Branch(children),
-                self.store,
-            )?;
+            let parent =
+                self.tree
+                    .persist_node(self.domain, TreeNode::Branch(children), self.store)?;
             self.push_descriptor(level + 1, parent)?;
         }
         Ok(())
     }
 
-    fn finish(mut self) -> Result<(ContentId, u64), ContentError> {
+    fn finish(mut self) -> Result<(LargeValueNodeId, u64), ContentError> {
         if self.saw_bytes {
             if !self.leaf.is_empty() {
                 self.finish_leaf()?;
@@ -1304,11 +1462,9 @@ impl<'a, S: ImmutableContentStore> StreamingContentBuilder<'a, S> {
                 return Ok((root.id, root.byte_len));
             }
             let children = std::mem::take(&mut self.levels[level]);
-            let parent = self.tree.persist_object(
-                self.domain,
-                ContentObject::Branch(children),
-                self.store,
-            )?;
+            let parent =
+                self.tree
+                    .persist_node(self.domain, TreeNode::Branch(children), self.store)?;
             self.push_descriptor(level + 1, parent)?;
             level += 1;
         }
@@ -1316,6 +1472,72 @@ impl<'a, S: ImmutableContentStore> StreamingContentBuilder<'a, S> {
 }
 
 impl LargeValue {
+    /// Whether a storage value carries the tagged chunk-root descriptor.
+    pub(crate) fn storage_value_is_framed(schema: &LargeValueSchema, stored: &GrooveValue) -> bool {
+        match (schema.kind, stored) {
+            (ValueKind::Bytes, GrooveValue::Bytes(bytes)) => bytes.starts_with(CELL_ENVELOPE),
+            (ValueKind::String | ValueKind::Json, GrooveValue::String(text)) => {
+                text.starts_with(TEXT_STORAGE_ENVELOPE)
+            }
+            _ => false,
+        }
+    }
+
+    /// Encode the physical descriptor as a value of the column's existing
+    /// logical storage type. Text and JSON use tagged ASCII because Groove's
+    /// string storage must remain valid UTF-8; bytes retain the binary frame.
+    pub fn encode_storage_value(
+        &self,
+        schema: &LargeValueSchema,
+    ) -> Result<GrooveValue, ContentError> {
+        if let Self::Inline(bytes) = self {
+            return schema.kind.logical_value(bytes.clone());
+        }
+        let encoded = self.encode_cell()?;
+        Ok(match schema.kind {
+            ValueKind::Bytes => GrooveValue::Bytes(encoded),
+            ValueKind::String | ValueKind::Json => {
+                GrooveValue::String(format!("{TEXT_STORAGE_ENVELOPE}{}", hex::encode(encoded)))
+            }
+        })
+    }
+
+    /// Decode a descriptor stored without changing the declared column type.
+    pub fn decode_storage_value(
+        schema: &LargeValueSchema,
+        stored: &GrooveValue,
+    ) -> Result<Self, ContentError> {
+        let encoded = match (schema.kind, stored) {
+            (ValueKind::Bytes, GrooveValue::Bytes(encoded))
+                if encoded.starts_with(CELL_ENVELOPE) =>
+            {
+                encoded.clone()
+            }
+            (ValueKind::String | ValueKind::Json, GrooveValue::String(encoded)) => {
+                let Some(encoded) = encoded.strip_prefix(TEXT_STORAGE_ENVELOPE) else {
+                    let bytes = schema.kind.logical_bytes(stored)?;
+                    if bytes.len() > schema.inline_up_to as usize {
+                        return Err(ContentError::MalformedCell(
+                            "unframed value exceeds inline threshold".to_owned(),
+                        ));
+                    }
+                    return Ok(Self::Inline(bytes));
+                };
+                hex::decode(encoded).map_err(|_| ContentError::UnknownCellFormat)?
+            }
+            _ => {
+                let bytes = schema.kind.logical_bytes(stored)?;
+                if bytes.len() > schema.inline_up_to as usize {
+                    return Err(ContentError::MalformedCell(
+                        "unframed value exceeds inline threshold".to_owned(),
+                    ));
+                }
+                return Ok(Self::Inline(bytes));
+            }
+        };
+        Self::decode_cell(schema, &encoded)
+    }
+
     /// Return the assembled logical byte length without loading tree payloads.
     pub fn byte_len(&self) -> Result<u64, ContentError> {
         match self {
@@ -1367,6 +1589,7 @@ impl LargeValue {
             }
             Self::Chunked(large) => {
                 encoded.push(1);
+                encoded.push(LARGE_VALUE_NODE_SCHEMA_VERSION);
                 encoded.extend_from_slice(large.root.as_bytes());
                 encoded.extend_from_slice(&large.root_byte_len.to_le_bytes());
                 encoded.push(u8::from(large.root_utf16_len.is_some()));
@@ -1423,6 +1646,10 @@ impl LargeValue {
                 Self::Inline(bytes)
             }
             1 => {
+                let node_schema_version = take_cell_bytes(payload, &mut cursor, 1)?[0];
+                if node_schema_version != LARGE_VALUE_NODE_SCHEMA_VERSION {
+                    return Err(ContentError::UnknownCellFormat);
+                }
                 let mut root = [0; 32];
                 root.copy_from_slice(take_cell_bytes(payload, &mut cursor, 32)?);
                 let root_byte_len = read_u64(payload, &mut cursor)?;
@@ -1483,7 +1710,7 @@ impl LargeValue {
                     });
                 }
                 let large = ChunkedValue {
-                    root: ContentId(root),
+                    root: LargeValueNodeId(root),
                     root_byte_len,
                     root_utf16_len,
                     edit_tail,
@@ -1541,9 +1768,9 @@ impl LargeValue {
     }
 
     /// Create the representation selected by one promotion threshold.
-    pub fn create<S: ImmutableContentStore>(
+    pub fn create<S: LargeValueNodeRows>(
         kind: ValueKind,
-        domain: &ContentDomain,
+        domain: &LargeValueOwnerDomain,
         bytes: impl Into<Vec<u8>>,
         inline_up_to: usize,
         tree: ContentTree,
@@ -1577,13 +1804,13 @@ impl LargeValue {
     /// JSON require streaming logical validation and are not accepted by this
     /// bytes-specific entry point.
     pub fn create_streaming_bytes<S, I, B>(
-        domain: &ContentDomain,
+        domain: &LargeValueOwnerDomain,
         chunks: I,
         tree: ContentTree,
         store: &mut S,
     ) -> Result<Self, ContentError>
     where
-        S: ImmutableContentStore,
+        S: LargeValueNodeRows,
         I: IntoIterator<Item = B>,
         B: AsRef<[u8]>,
     {
@@ -1597,10 +1824,10 @@ impl LargeValue {
     }
 
     /// Materialize and validate the complete logical value.
-    pub fn materialize<S: ImmutableContentStore>(
+    pub fn materialize<S: LargeValueNodeRows>(
         &self,
         kind: ValueKind,
-        domain: &ContentDomain,
+        domain: &LargeValueOwnerDomain,
         tree: ContentTree,
         store: &S,
     ) -> Result<Vec<u8>, ContentError> {
@@ -1615,11 +1842,11 @@ impl LargeValue {
     }
 
     /// Evaluate one immutable query projection.
-    pub fn select<S: ImmutableContentStore>(
+    pub fn select<S: LargeValueNodeRows>(
         &self,
         kind: ValueKind,
         selection: &ValueSelection,
-        domain: &ContentDomain,
+        domain: &LargeValueOwnerDomain,
         tree: ContentTree,
         store: &S,
     ) -> Result<ValueSelectionResult, ContentError> {
@@ -1709,14 +1936,53 @@ impl LargeValue {
     }
 
     /// Lower one declarative operation against this exact value snapshot.
-    pub fn lower_edit<S: ImmutableContentStore>(
+    pub fn lower_edit<S: LargeValueNodeRows>(
         &self,
         kind: ValueKind,
         edit: ValueEdit,
-        domain: &ContentDomain,
+        domain: &LargeValueOwnerDomain,
         tree: ContentTree,
         store: &S,
     ) -> Result<BytePatch, ContentError> {
+        if kind == ValueKind::Bytes {
+            let value_len = match self {
+                Self::Inline(bytes) => {
+                    u64::try_from(bytes.len()).map_err(|_| ContentError::LengthOverflow)?
+                }
+                Self::Chunked(large) => patched_length(large)?,
+            };
+            return match edit {
+                ValueEdit::Bytes(patch) => {
+                    validate_absolute_patch(value_len, &patch)?;
+                    Ok(patch)
+                }
+                ValueEdit::BytesSlice {
+                    slice_offset,
+                    slice_len,
+                    offset,
+                    delete_len,
+                    insert,
+                } => {
+                    validate_relative_range(slice_len, offset, delete_len)?;
+                    let slice_end = slice_offset
+                        .checked_add(slice_len)
+                        .ok_or(ContentError::LengthOverflow)?;
+                    if slice_end > value_len {
+                        return Err(ContentError::PatchOutOfBounds {
+                            offset: slice_offset,
+                            end: slice_end,
+                            value_len,
+                        });
+                    }
+                    let absolute = slice_offset
+                        .checked_add(offset)
+                        .ok_or(ContentError::LengthOverflow)?;
+                    Ok(BytePatch::replace(absolute, delete_len, insert))
+                }
+                ValueEdit::Append(insert) => Ok(BytePatch::insert(value_len, insert)),
+                _ => Err(ContentError::InvalidEdit),
+            };
+        }
         if let (
             ValueKind::String,
             ValueEdit::TextUtf8 {
@@ -1814,14 +2080,6 @@ impl LargeValue {
         }
         let bytes = self.materialize(kind, domain, tree, store)?;
         match (kind, edit) {
-            (ValueKind::Bytes, ValueEdit::Bytes(patch)) => {
-                apply_patches(&bytes, std::slice::from_ref(&patch))?;
-                Ok(patch)
-            }
-            (ValueKind::Bytes, ValueEdit::Append(insert)) => Ok(BytePatch::insert(
-                u64::try_from(bytes.len()).map_err(|_| ContentError::LengthOverflow)?,
-                insert,
-            )),
             (ValueKind::String, ValueEdit::TextUtf8 { .. })
             | (ValueKind::String, ValueEdit::TextUtf16 { .. }) => unreachable!(),
             (ValueKind::Json, ValueEdit::Json(value)) => {
@@ -1834,16 +2092,64 @@ impl LargeValue {
     }
 
     /// Apply one declarative patch, consolidating only when tail bounds require it.
-    pub fn apply_edit<S: ImmutableContentStore>(
+    pub fn apply_edit<S: LargeValueNodeRows>(
         &self,
         kind: ValueKind,
-        domain: &ContentDomain,
+        domain: &LargeValueOwnerDomain,
         mut patch: BytePatch,
         inline_up_to: usize,
         tail_bounds: TailBounds,
         tree: ContentTree,
         store: &mut S,
     ) -> Result<Self, ContentError> {
+        if let Self::Chunked(large) = self {
+            let value_len = patched_length(large)?;
+            let end = patch
+                .offset
+                .checked_add(patch.delete_len)
+                .ok_or(ContentError::LengthOverflow)?;
+            if end > value_len {
+                return Err(ContentError::PatchOutOfBounds {
+                    offset: patch.offset,
+                    end,
+                    value_len,
+                });
+            }
+            if kind == ValueKind::String {
+                let deleted = materialize_large_range(
+                    large,
+                    domain,
+                    tree,
+                    store,
+                    patch.offset,
+                    patch.delete_len,
+                )?;
+                let local = BytePatch::replace(0, patch.delete_len, patch.insert.clone());
+                let actual_metrics = text_patch_metrics(&deleted, &local)?;
+                if patch
+                    .text_metrics
+                    .is_some_and(|claimed| claimed != actual_metrics)
+                {
+                    return Err(ContentError::MalformedCell(
+                        "text patch UTF-16 metrics are incorrect".to_owned(),
+                    ));
+                }
+                patch.text_metrics = Some(actual_metrics);
+            } else if patch.text_metrics.is_some() {
+                return Err(ContentError::InvalidEdit);
+            }
+            let mut tail = large.edit_tail.clone();
+            tail.push(patch.clone());
+            if kind != ValueKind::Json && tail_within_bounds(&tail, tail_bounds)? {
+                return Ok(Self::Chunked(ChunkedValue {
+                    root: large.root,
+                    root_byte_len: large.root_byte_len,
+                    root_utf16_len: large.root_utf16_len,
+                    edit_tail: tail,
+                }));
+            }
+        }
+
         let current = self.materialize(kind, domain, tree, store)?;
         if kind == ValueKind::String {
             let actual_metrics = text_patch_metrics(&current, &patch)?;
@@ -2016,9 +2322,9 @@ fn split_pieces_at(pieces: &mut Vec<MaterialPiece>, at: u64) -> Result<usize, Co
     }
 }
 
-fn materialize_large_range<S: ImmutableContentStore>(
+fn materialize_large_range<S: LargeValueNodeRows>(
     large: &ChunkedValue,
-    domain: &ContentDomain,
+    domain: &LargeValueOwnerDomain,
     tree: ContentTree,
     store: &S,
     offset: u64,
@@ -2077,9 +2383,9 @@ fn materialize_large_range<S: ImmutableContentStore>(
     Ok(out)
 }
 
-fn large_utf16_len<S: ImmutableContentStore>(
+fn large_utf16_len<S: LargeValueNodeRows>(
     large: &ChunkedValue,
-    domain: &ContentDomain,
+    domain: &LargeValueOwnerDomain,
     tree: ContentTree,
     store: &S,
 ) -> Result<u64, ContentError> {
@@ -2107,9 +2413,9 @@ fn large_utf16_len<S: ImmutableContentStore>(
     Ok(total)
 }
 
-fn large_byte_offset_for_utf16<S: ImmutableContentStore>(
+fn large_byte_offset_for_utf16<S: LargeValueNodeRows>(
     large: &ChunkedValue,
-    domain: &ContentDomain,
+    domain: &LargeValueOwnerDomain,
     tree: ContentTree,
     store: &S,
     target: u64,
@@ -2208,9 +2514,9 @@ fn large_byte_offset_for_utf16<S: ImmutableContentStore>(
     Ok(logical_bytes)
 }
 
-fn validate_large_utf8_boundary<S: ImmutableContentStore>(
+fn validate_large_utf8_boundary<S: LargeValueNodeRows>(
     large: &ChunkedValue,
-    domain: &ContentDomain,
+    domain: &LargeValueOwnerDomain,
     tree: ContentTree,
     store: &S,
     target: u64,
@@ -2389,6 +2695,22 @@ fn validate_relative_range(
     }
 }
 
+fn validate_absolute_patch(value_len: u64, patch: &BytePatch) -> Result<(), ContentError> {
+    let end = patch
+        .offset
+        .checked_add(patch.delete_len)
+        .ok_or(ContentError::LengthOverflow)?;
+    if end <= value_len {
+        Ok(())
+    } else {
+        Err(ContentError::PatchOutOfBounds {
+            offset: patch.offset,
+            end,
+            value_len,
+        })
+    }
+}
+
 fn text_patch_metrics(current: &[u8], patch: &BytePatch) -> Result<TextPatchMetrics, ContentError> {
     let text = std::str::from_utf8(current).map_err(|_| ContentError::InvalidUtf8)?;
     let start = utf8_boundary(text, patch.offset)?;
@@ -2422,23 +2744,30 @@ fn tail_within_bounds(tail: &[BytePatch], bounds: TailBounds) -> Result<bool, Co
     Ok(encoded_len <= bounds.max_encoded_bytes)
 }
 
-fn object_id(domain: &ContentDomain, canonical: &[u8]) -> ContentId {
+fn node_id(domain: &LargeValueOwnerDomain, canonical: &[u8]) -> LargeValueNodeId {
     let mut hasher = blake3::Hasher::new();
     hasher.update(CONTENT_ID_DOMAIN);
-    hasher.update(&(domain.bytes().len() as u64).to_le_bytes());
-    hasher.update(domain.bytes());
+    hasher.update(&[
+        LARGE_VALUE_NODE_SCHEMA_VERSION,
+        LARGE_VALUE_TREE_FORMAT_VERSION,
+    ]);
+    // Logical table and column names are deliberately not identity inputs.
+    // Migration lenses may rename either while preserving the ordinary hidden
+    // Jazz rows and their physical mappings. The owner UUID scopes reuse within
+    // that hidden table; the table itself supplies the remaining namespace.
+    hasher.update(domain.owner_row.as_bytes());
     hasher.update(&(canonical.len() as u64).to_le_bytes());
     hasher.update(canonical);
-    ContentId(*hasher.finalize().as_bytes())
+    LargeValueNodeId(*hasher.finalize().as_bytes())
 }
 
-fn object_metrics(object: &ContentObject) -> Result<(u64, Option<u64>), ContentError> {
-    match object {
-        ContentObject::Leaf { bytes, utf16_len } => Ok((
+fn node_metrics(node: &TreeNode) -> Result<(u64, Option<u64>), ContentError> {
+    match node {
+        TreeNode::Leaf { bytes, utf16_len } => Ok((
             u64::try_from(bytes.len()).map_err(|_| ContentError::LengthOverflow)?,
             *utf16_len,
         )),
-        ContentObject::Branch(children) => {
+        TreeNode::Branch(children) => {
             let byte_len = children.iter().try_fold(0_u64, |sum, child| {
                 sum.checked_add(child.byte_len)
                     .ok_or(ContentError::LengthOverflow)
@@ -2448,7 +2777,7 @@ fn object_metrics(object: &ContentObject) -> Result<(u64, Option<u64>), ContentE
                 .iter()
                 .any(|child| child.utf16_len.is_some() != text)
             {
-                return Err(ContentError::MalformedObject(
+                return Err(ContentError::MalformedNode(
                     "branch mixes byte and text metrics".to_owned(),
                 ));
             }
@@ -2465,10 +2794,10 @@ fn object_metrics(object: &ContentObject) -> Result<(u64, Option<u64>), ContentE
     }
 }
 
-fn encode_object(object: &ContentObject) -> Result<Vec<u8>, ContentError> {
-    let mut bytes = vec![OBJECT_FORMAT_VERSION];
-    match object {
-        ContentObject::Leaf {
+fn encode_node(node: &TreeNode) -> Result<Vec<u8>, ContentError> {
+    let mut bytes = vec![LARGE_VALUE_TREE_FORMAT_VERSION];
+    match node {
+        TreeNode::Leaf {
             bytes: payload,
             utf16_len,
         } => {
@@ -2479,7 +2808,7 @@ fn encode_object(object: &ContentObject) -> Result<Vec<u8>, ContentError> {
             }
             bytes.extend_from_slice(payload);
         }
-        ContentObject::Branch(children) => {
+        TreeNode::Branch(children) => {
             bytes.push(1);
             write_u64(&mut bytes, children.len())?;
             for child in children {
@@ -2493,10 +2822,10 @@ fn encode_object(object: &ContentObject) -> Result<Vec<u8>, ContentError> {
     Ok(bytes)
 }
 
-fn decode_object(bytes: &[u8], profile: ChunkingProfile) -> Result<ContentObject, ContentError> {
-    if bytes.len() < 2 || bytes[0] != OBJECT_FORMAT_VERSION {
-        return Err(ContentError::MalformedObject(
-            "unknown object format version".to_owned(),
+fn decode_node(bytes: &[u8], profile: ChunkingProfile) -> Result<TreeNode, ContentError> {
+    if bytes.len() < 2 || bytes[0] != LARGE_VALUE_TREE_FORMAT_VERSION {
+        return Err(ContentError::MalformedNode(
+            "unknown node format version".to_owned(),
         ));
     }
     let mut cursor = 2;
@@ -2515,29 +2844,29 @@ fn decode_object(bytes: &[u8], profile: ChunkingProfile) -> Result<ContentObject
                 profile.max_leaf_bytes
             };
             if count > max_leaf || bytes.len().saturating_sub(cursor) != count {
-                return Err(ContentError::MalformedObject(
+                return Err(ContentError::MalformedNode(
                     "leaf length exceeds bounds or payload".to_owned(),
                 ));
             }
             let payload = bytes[cursor..].to_vec();
             if let Some(expected) = utf16_len {
                 let text = std::str::from_utf8(&payload).map_err(|_| {
-                    ContentError::MalformedObject("text leaf is not UTF-8".to_owned())
+                    ContentError::MalformedNode("text leaf is not UTF-8".to_owned())
                 })?;
                 if count_utf16(text)? != expected {
-                    return Err(ContentError::MalformedObject(
+                    return Err(ContentError::MalformedNode(
                         "text leaf UTF-16 metric is incorrect".to_owned(),
                     ));
                 }
             }
-            Ok(ContentObject::Leaf {
+            Ok(TreeNode::Leaf {
                 bytes: payload,
                 utf16_len,
             })
         }
         1 => {
             if count == 0 || count > profile.max_children {
-                return Err(ContentError::MalformedObject(
+                return Err(ContentError::MalformedNode(
                     "branch child count exceeds bounds".to_owned(),
                 ));
             }
@@ -2545,7 +2874,7 @@ fn decode_object(bytes: &[u8], profile: ChunkingProfile) -> Result<ContentObject
                 .checked_add(count.checked_mul(49).ok_or(ContentError::LengthOverflow)?)
                 .ok_or(ContentError::LengthOverflow)?;
             if expected != bytes.len() {
-                return Err(ContentError::MalformedObject(
+                return Err(ContentError::MalformedNode(
                     "branch descriptor bytes do not match child count".to_owned(),
                 ));
             }
@@ -2561,7 +2890,7 @@ fn decode_object(bytes: &[u8], profile: ChunkingProfile) -> Result<ContentObject
                 let has_utf16 = bytes[cursor];
                 cursor += 1;
                 if has_utf16 > 1 {
-                    return Err(ContentError::MalformedObject(
+                    return Err(ContentError::MalformedNode(
                         "invalid UTF-16 metric tag".to_owned(),
                     ));
                 }
@@ -2570,21 +2899,19 @@ fn decode_object(bytes: &[u8], profile: ChunkingProfile) -> Result<ContentObject
                 cursor += 8;
                 let utf16_len = (has_utf16 == 1).then(|| u64::from_le_bytes(utf16));
                 if byte_len == 0 {
-                    return Err(ContentError::MalformedObject(
+                    return Err(ContentError::MalformedNode(
                         "branch child cannot have zero aggregate length".to_owned(),
                     ));
                 }
                 children.push(ChildDescriptor {
-                    id: ContentId(id),
+                    id: LargeValueNodeId(id),
                     byte_len,
                     utf16_len,
                 });
             }
-            Ok(ContentObject::Branch(children))
+            Ok(TreeNode::Branch(children))
         }
-        _ => Err(ContentError::MalformedObject(
-            "unknown object kind".to_owned(),
-        )),
+        _ => Err(ContentError::MalformedNode("unknown node kind".to_owned())),
     }
 }
 
@@ -2596,9 +2923,9 @@ fn write_u64(out: &mut Vec<u8>, value: usize) -> Result<(), ContentError> {
 
 fn read_u64(bytes: &[u8], cursor: &mut usize) -> Result<u64, ContentError> {
     let end = cursor.checked_add(8).ok_or(ContentError::LengthOverflow)?;
-    let slice = bytes.get(*cursor..end).ok_or_else(|| {
-        ContentError::MalformedObject("truncated canonical object length".to_owned())
-    })?;
+    let slice = bytes
+        .get(*cursor..end)
+        .ok_or_else(|| ContentError::MalformedNode("truncated canonical node length".to_owned()))?;
     let mut encoded = [0_u8; 8];
     encoded.copy_from_slice(slice);
     *cursor = end;
@@ -2754,21 +3081,21 @@ mod tests {
         }
     }
 
-    fn domain() -> ContentDomain {
-        ContentDomain::new(b"test-domain".to_vec()).unwrap()
+    fn domain() -> LargeValueOwnerDomain {
+        LargeValueOwnerDomain::new("documents", uuid::Uuid::from_bytes([7; 16])).unwrap()
     }
 
-    fn collect_leaf_ids(
+    fn collect_leaf_node_ids(
         tree: ContentTree,
-        store: &MemoryContentStore,
-        id: ContentId,
-        out: &mut Vec<ContentId>,
+        store: &MemoryLargeValueNodeRows,
+        id: LargeValueNodeId,
+        out: &mut Vec<LargeValueNodeId>,
     ) {
-        match tree.load_object(&domain(), id, store).unwrap() {
-            ContentObject::Leaf { .. } => out.push(id),
-            ContentObject::Branch(children) => {
+        match tree.load_node(&domain(), id, store).unwrap() {
+            TreeNode::Leaf { .. } => out.push(id),
+            TreeNode::Branch(children) => {
                 for child in children {
-                    collect_leaf_ids(tree, store, child.id, out);
+                    collect_leaf_node_ids(tree, store, child.id, out);
                 }
             }
         }
@@ -2778,8 +3105,8 @@ mod tests {
     fn tree_is_history_independent_and_ranges_are_lazy_values() {
         let tree = ContentTree::new(tiny_profile()).unwrap();
         let bytes = (0..=255).cycle().take(4096).collect::<Vec<_>>();
-        let mut first = MemoryContentStore::default();
-        let mut second = MemoryContentStore::default();
+        let mut first = MemoryLargeValueNodeRows::default();
+        let mut second = MemoryLargeValueNodeRows::default();
         let (root_a, len_a) = tree.build(&domain(), &bytes, &mut first).unwrap();
         let (root_b, len_b) = tree.build(&domain(), &bytes, &mut second).unwrap();
         assert_eq!((root_a, len_a), (root_b, len_b));
@@ -2790,17 +3117,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn node_identity_survives_logical_table_and_column_renames() {
+        let tree = ContentTree::new(tiny_profile()).unwrap();
+        let owner = uuid::Uuid::from_bytes([9; 16]);
+        let before = LargeValueOwnerDomain::new("documents", owner).unwrap();
+        let after = LargeValueOwnerDomain::new("articles", owner).unwrap();
+        let bytes = (0..=255).cycle().take(4096).collect::<Vec<_>>();
+        let mut before_rows = MemoryLargeValueNodeRows::default();
+        let mut after_rows = MemoryLargeValueNodeRows::default();
+
+        let before_root = tree.build(&before, &bytes, &mut before_rows).unwrap();
+        let after_root = tree.build(&after, &bytes, &mut after_rows).unwrap();
+
+        assert_eq!(before_root, after_root);
+    }
+
     // Internal because the public behavior being protected is the exact
     // content-addressed format identity, not a user-visible database flow.
     #[test]
     fn streaming_build_matches_slice_build_across_transport_chunk_sizes() {
         let tree = ContentTree::new(tiny_profile()).unwrap();
         let bytes = (0..=255).cycle().take(16_777).collect::<Vec<_>>();
-        let mut expected_store = MemoryContentStore::default();
+        let mut expected_store = MemoryLargeValueNodeRows::default();
         let expected = tree.build(&domain(), &bytes, &mut expected_store).unwrap();
 
         for chunk_size in [1, 3, 17, 64, 513, 4096] {
-            let mut actual_store = MemoryContentStore::default();
+            let mut actual_store = MemoryLargeValueNodeRows::default();
             let value = LargeValue::create_streaming_bytes(
                 &domain(),
                 bytes.chunks(chunk_size),
@@ -2829,10 +3172,10 @@ mod tests {
         let tree = ContentTree::new(tiny_profile()).unwrap();
         for len in 0..400 {
             let bytes = (0..=255).cycle().take(len).collect::<Vec<_>>();
-            let mut expected_store = MemoryContentStore::default();
+            let mut expected_store = MemoryLargeValueNodeRows::default();
             let expected = tree.build(&domain(), &bytes, &mut expected_store).unwrap();
             for chunk_size in [1, 2, 3, 5, 7, 8, 11, 16, 31, 64, 127, 512] {
-                let mut actual_store = MemoryContentStore::default();
+                let mut actual_store = MemoryLargeValueNodeRows::default();
                 let actual = tree
                     .build_streaming(&domain(), bytes.chunks(chunk_size), &mut actual_store)
                     .unwrap();
@@ -2842,28 +3185,33 @@ mod tests {
     }
 
     #[test]
-    fn declared_child_lengths_must_match_canonical_objects() {
+    fn declared_child_lengths_must_match_canonical_nodes() {
         let tree = ContentTree::new(tiny_profile()).unwrap();
-        let mut store = MemoryContentStore::default();
-        let leaf = encode_object(&ContentObject::Leaf {
+        let mut store = MemoryLargeValueNodeRows::default();
+        let leaf = encode_node(&TreeNode::Leaf {
             bytes: b"abc".to_vec(),
             utf16_len: None,
         })
         .unwrap();
-        let leaf_id = object_id(&domain(), &leaf);
-        store.put_if_absent_or_identical(leaf_id, &leaf).unwrap();
-        let branch = encode_object(&ContentObject::Branch(vec![ChildDescriptor {
+        let content_domain = domain();
+        let leaf_id = node_id(&content_domain, &leaf);
+        store
+            .put_if_absent_or_identical(&LargeValueNodeRow::new(&content_domain, leaf_id, &leaf))
+            .unwrap();
+        let branch = encode_node(&TreeNode::Branch(vec![ChildDescriptor {
             id: leaf_id,
             byte_len: 2,
             utf16_len: None,
         }]))
         .unwrap();
-        let root = object_id(&domain(), &branch);
-        store.put_if_absent_or_identical(root, &branch).unwrap();
+        let root = node_id(&content_domain, &branch);
+        store
+            .put_if_absent_or_identical(&LargeValueNodeRow::new(&content_domain, root, &branch))
+            .unwrap();
 
         assert!(matches!(
             tree.materialize(&domain(), root, 2, &store),
-            Err(ContentError::MalformedObject(message))
+            Err(ContentError::MalformedNode(message))
                 if message.contains("child aggregate length")
         ));
     }
@@ -2871,7 +3219,7 @@ mod tests {
     #[test]
     fn patched_range_does_not_load_unrelated_leaf_payloads() {
         let tree = ContentTree::new(tiny_profile()).unwrap();
-        let mut store = MemoryContentStore::default();
+        let mut store = MemoryLargeValueNodeRows::default();
         let bytes = (0..=255).cycle().take(4096).collect::<Vec<_>>();
         let value = LargeValue::create(ValueKind::Bytes, &domain(), bytes, 4, tree, &mut store)
             .unwrap()
@@ -2889,9 +3237,9 @@ mod tests {
             panic!("value must be large")
         };
         let mut leaves = Vec::new();
-        collect_leaf_ids(tree, &store, large.root, &mut leaves);
+        collect_leaf_node_ids(tree, &store, large.root, &mut leaves);
         assert!(leaves.len() > 2);
-        store.objects.remove(leaves.last().unwrap());
+        store.rows.remove(&(domain(), *leaves.last().unwrap()));
 
         assert_eq!(
             value
@@ -2907,14 +3255,14 @@ mod tests {
         );
         assert!(matches!(
             value.materialize(ValueKind::Bytes, &domain(), tree, &store),
-            Err(ContentError::MissingObject(_))
+            Err(ContentError::MissingNodeRow(_))
         ));
     }
 
     #[test]
     fn large_value_tail_is_ordered_and_consolidates_at_the_bound() {
         let tree = ContentTree::new(tiny_profile()).unwrap();
-        let mut store = MemoryContentStore::default();
+        let mut store = MemoryLargeValueNodeRows::default();
         let value = LargeValue::create(
             ValueKind::String,
             &domain(),
@@ -2976,7 +3324,7 @@ mod tests {
     #[test]
     fn text_ranges_expose_explicit_utf8_and_utf16_coordinates() {
         let tree = ContentTree::new(tiny_profile()).unwrap();
-        let mut store = MemoryContentStore::default();
+        let mut store = MemoryLargeValueNodeRows::default();
         let source = "a🦀e\u{301}Z—終";
         let value =
             LargeValue::create(ValueKind::String, &domain(), source, 1, tree, &mut store).unwrap();
@@ -3058,7 +3406,7 @@ mod tests {
     #[test]
     fn utf16_slice_relative_edits_survive_tail_materialization_and_consolidation() {
         let tree = ContentTree::new(tiny_profile()).unwrap();
-        let mut store = MemoryContentStore::default();
+        let mut store = MemoryLargeValueNodeRows::default();
         let original = "zero 🦀 one 🐙 two — end".repeat(40);
         let mut expected = original.clone();
         let mut value = LargeValue::create(
@@ -3140,7 +3488,7 @@ mod tests {
     #[test]
     fn utf16_tail_range_does_not_load_an_unrelated_leaf() {
         let tree = ContentTree::new(tiny_profile()).unwrap();
-        let mut store = MemoryContentStore::default();
+        let mut store = MemoryLargeValueNodeRows::default();
         let source = "abcdefghijklmnop".repeat(256);
         let value = LargeValue::create(ValueKind::String, &domain(), source, 4, tree, &mut store)
             .unwrap()
@@ -3158,8 +3506,8 @@ mod tests {
             panic!("value must be chunked")
         };
         let mut leaves = Vec::new();
-        collect_leaf_ids(tree, &store, large.root, &mut leaves);
-        store.objects.remove(leaves.last().unwrap());
+        collect_leaf_node_ids(tree, &store, large.root, &mut leaves);
+        store.rows.remove(&(domain(), *leaves.last().unwrap()));
 
         assert_eq!(
             value
@@ -3175,14 +3523,14 @@ mod tests {
         );
         assert!(matches!(
             value.materialize(ValueKind::String, &domain(), tree, &store),
-            Err(ContentError::MissingObject(_))
+            Err(ContentError::MissingNodeRow(_))
         ));
     }
 
     #[test]
     fn mixed_unicode_edit_tail_matches_plain_string_model_exhaustively() {
         let tree = ContentTree::new(tiny_profile()).unwrap();
-        let mut store = MemoryContentStore::default();
+        let mut store = MemoryLargeValueNodeRows::default();
         let mut expected = "A🦀e\u{301}—終z".repeat(80);
         let mut value = LargeValue::create(
             ValueKind::String,
@@ -3261,7 +3609,7 @@ mod tests {
     #[test]
     fn json_validation_observes_the_complete_atomic_tail() {
         let tree = ContentTree::new(tiny_profile()).unwrap();
-        let mut store = MemoryContentStore::default();
+        let mut store = MemoryLargeValueNodeRows::default();
         let value = LargeValue::create(
             ValueKind::Json,
             &domain(),
@@ -3291,30 +3639,30 @@ mod tests {
     }
 
     #[test]
-    fn local_insert_reuses_most_content_defined_objects() {
-        // Internal evidence is appropriate here: object identity reuse is the
+    fn local_insert_reuses_most_content_defined_nodes() {
+        // Internal evidence is appropriate here: node identity reuse is the
         // physical invariant under test and has no public row API observation.
         let tree = ContentTree::new(tiny_profile()).unwrap();
         let original = (0..=255).cycle().take(16 * 1024).collect::<Vec<_>>();
         let mut edited = original.clone();
         edited.splice(257..257, [99, 98, 97]);
-        let mut store = MemoryContentStore::default();
+        let mut store = MemoryLargeValueNodeRows::default();
         tree.build(&domain(), &original, &mut store).unwrap();
         let before = store
-            .objects
+            .rows
             .keys()
-            .copied()
+            .map(|(_, id)| *id)
             .collect::<std::collections::BTreeSet<_>>();
         tree.build(&domain(), &edited, &mut store).unwrap();
         let after = store
-            .objects
+            .rows
             .keys()
-            .copied()
+            .map(|(_, id)| *id)
             .collect::<std::collections::BTreeSet<_>>();
         let reused = before.intersection(&after).count();
         assert!(
             reused * 4 > before.len() * 3,
-            "expected at least 75% object reuse, reused {reused} of {}",
+            "expected at least 75% node reuse, reused {reused} of {}",
             before.len()
         );
     }
@@ -3322,7 +3670,7 @@ mod tests {
     #[test]
     fn projections_and_declarative_edits_use_native_values() {
         let tree = ContentTree::new(tiny_profile()).unwrap();
-        let mut store = MemoryContentStore::default();
+        let mut store = MemoryLargeValueNodeRows::default();
         let text = LargeValue::create(
             ValueKind::String,
             &domain(),
@@ -3423,7 +3771,7 @@ mod tests {
     fn atomic_cell_round_trips_without_a_legacy_fallback() {
         let schema = LargeValueSchema::built_in(ValueKind::Bytes);
         let cell = LargeValue::Chunked(ChunkedValue {
-            root: ContentId([7; 32]),
+            root: LargeValueNodeId([7; 32]),
             root_byte_len: 42,
             root_utf16_len: None,
             edit_tail: vec![BytePatch::insert(4, b"next")],
@@ -3440,7 +3788,7 @@ mod tests {
     fn decoded_cells_obey_the_schema_format_and_tail_bounds() {
         let mut schema = LargeValueSchema::built_in(ValueKind::Bytes);
         let cell = LargeValue::Chunked(ChunkedValue {
-            root: ContentId([7; 32]),
+            root: LargeValueNodeId([7; 32]),
             root_byte_len: 42,
             root_utf16_len: None,
             edit_tail: (0..=schema.max_tail_entries)
@@ -3462,6 +3810,7 @@ mod tests {
         let schema = LargeValueSchema::built_in(ValueKind::Bytes);
         let mut hostile = CELL_ENVELOPE.to_vec();
         hostile.push(1);
+        hostile.push(LARGE_VALUE_NODE_SCHEMA_VERSION);
         hostile.extend_from_slice(&[0; 32]);
         hostile.extend_from_slice(&0_u64.to_le_bytes());
         hostile.push(0);
@@ -3473,7 +3822,7 @@ mod tests {
         );
 
         let oversized_bytes = LargeValue::Chunked(ChunkedValue {
-            root: ContentId([7; 32]),
+            root: LargeValueNodeId([7; 32]),
             root_byte_len: 42,
             root_utf16_len: None,
             edit_tail: (0..schema.max_tail_entries)
@@ -3492,7 +3841,7 @@ mod tests {
     fn text_metrics_are_validated_at_cell_and_edit_boundaries() {
         let schema = LargeValueSchema::built_in(ValueKind::String);
         let bad_cell = LargeValue::Chunked(ChunkedValue {
-            root: ContentId([7; 32]),
+            root: LargeValueNodeId([7; 32]),
             root_byte_len: 10,
             root_utf16_len: Some(10),
             edit_tail: vec![BytePatch::insert(0, "🦀".as_bytes()).with_text_metrics(0, 1)],
@@ -3506,7 +3855,7 @@ mod tests {
         ));
 
         let tree = ContentTree::new(tiny_profile()).unwrap();
-        let mut store = MemoryContentStore::default();
+        let mut store = MemoryLargeValueNodeRows::default();
         let value = LargeValue::create(
             ValueKind::String,
             &domain(),
@@ -3534,7 +3883,7 @@ mod tests {
     #[test]
     fn untrusted_descriptor_length_does_not_drive_prevalidation_allocation() {
         let value = LargeValue::Chunked(ChunkedValue {
-            root: ContentId([9; 32]),
+            root: LargeValueNodeId([9; 32]),
             root_byte_len: u64::MAX,
             root_utf16_len: None,
             edit_tail: Vec::new(),
@@ -3544,24 +3893,27 @@ mod tests {
                 ValueKind::Bytes,
                 &domain(),
                 ContentTree::new(tiny_profile()).unwrap(),
-                &MemoryContentStore::default(),
+                &MemoryLargeValueNodeRows::default(),
             ),
-            Err(ContentError::MissingObject(_))
+            Err(ContentError::MissingNodeRow(_))
         ));
     }
 
     #[test]
-    fn ordered_kv_adapter_enforces_absent_or_identical_objects() {
-        use groove::storage::MemoryStorage;
-
-        let storage = MemoryStorage::new(&[CONTENT_OBJECTS_CF]);
-        let mut store = KvContentStore::new(&storage);
-        let id = ContentId([3; 32]);
-        store.put_if_absent_or_identical(id, b"same").unwrap();
-        store.put_if_absent_or_identical(id, b"same").unwrap();
-        assert_eq!(store.get(id).unwrap(), Some(b"same".to_vec()));
+    fn system_node_rows_enforce_absent_or_identical_payloads() {
+        let mut store = MemoryLargeValueNodeRows::default();
+        let content_domain = domain();
+        let id = LargeValueNodeId([3; 32]);
+        let same = LargeValueNodeRow::new(&content_domain, id, b"same");
+        store.put_if_absent_or_identical(&same).unwrap();
+        store.put_if_absent_or_identical(&same).unwrap();
         assert_eq!(
-            store.put_if_absent_or_identical(id, b"different"),
+            store.get(&content_domain, id).unwrap(),
+            Some(b"same".to_vec())
+        );
+        let different = LargeValueNodeRow::new(&content_domain, id, b"different");
+        assert_eq!(
+            store.put_if_absent_or_identical(&different),
             Err(ContentError::ImmutableCollision(id))
         );
     }

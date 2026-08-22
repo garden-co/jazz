@@ -48,6 +48,7 @@ export interface NormalizedBuiltQuery {
   includes: NormalizedIncludeSpec;
   requireIncludes: boolean;
   select: string[];
+  partialValueSelections?: Record<string, unknown>;
   orderBy: Array<[string, "asc" | "desc"]>;
   limit?: number;
   offset?: number;
@@ -62,6 +63,7 @@ type BuiltQueryShape = {
   includes?: unknown;
   __jazz_requireIncludes?: unknown;
   select?: unknown;
+  partialValueSelections?: unknown;
   orderBy?: unknown;
   limit?: unknown;
   offset?: unknown;
@@ -107,6 +109,10 @@ function normalizeSelect(value: unknown): string[] {
   }
 
   return value.filter((column): column is string => typeof column === "string");
+}
+
+function normalizePartialValueSelections(value: unknown): Record<string, unknown> | undefined {
+  return isPlainObject(value) ? value : undefined;
 }
 
 function normalizeGather(value: unknown): BuiltGather | undefined {
@@ -261,6 +267,7 @@ export function normalizeBuiltQuery(raw: unknown): NormalizedBuiltQuery {
     includes: normalizeIncludeEntries(value.includes),
     requireIncludes: value[INTERNAL_REQUIRE_INCLUDES_KEY] === true,
     select: normalizeSelect(value.select),
+    partialValueSelections: normalizePartialValueSelections(value.partialValueSelections),
     orderBy: normalizeOrderBy(value.orderBy),
     limit: typeof value.limit === "number" ? value.limit : undefined,
     offset: typeof value.offset === "number" ? value.offset : undefined,

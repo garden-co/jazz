@@ -613,6 +613,23 @@ export interface TableProxy<T, Init> {
   readonly _initType: Init;
 }
 
+export type ValueSlice = { from: number; length: number };
+export type LargeValueSplice<TInsert> = {
+  splice: {
+    slice: ValueSlice;
+    at: number;
+    delete: number;
+    insert: TInsert;
+  };
+};
+export type LargeValueAppend<TInsert> = { append: TInsert };
+type LargeValueEdit<T> = T extends string | Uint8Array
+  ? LargeValueSplice<T> | (T extends Uint8Array ? LargeValueAppend<T> : never)
+  : never;
+export type UpdateData<Init> = {
+  [K in keyof Init]?: Init[K] | LargeValueEdit<NonNullable<Init[K]>>;
+};
+
 export interface ColumnTransform {
   from(value: unknown): unknown;
   to(value: unknown): unknown;
@@ -905,7 +922,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   upsert<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
-    data: Partial<Init>,
+    data: UpdateData<Init>,
     options?: UpdateOptions,
   ): void {
     this.bindTable(table);
@@ -938,7 +955,7 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
   update<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
-    data: Partial<Init>,
+    data: UpdateData<Init>,
     options?: UpdateOptions,
   ): void {
     this.bindTable(table);
@@ -1485,7 +1502,7 @@ export class Db {
   upsert<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
-    data: Partial<Init>,
+    data: UpdateData<Init>,
     options?: UpdateOptions,
   ): MutationResult<void> {
     const client = this.getClient(table._schema);
@@ -1517,7 +1534,7 @@ export class Db {
   update<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
-    data: Partial<Init>,
+    data: UpdateData<Init>,
     options?: UpdateOptions,
   ): MutationResult<void> {
     const client = this.getClient(table._schema);
@@ -1593,7 +1610,7 @@ export class Db {
   async canUpdate<T, Init>(
     table: TableProxy<T, Init>,
     id: string,
-    data: Partial<Init>,
+    data: UpdateData<Init>,
   ): Promise<PermissionAdvice> {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);

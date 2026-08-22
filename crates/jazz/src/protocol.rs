@@ -3096,7 +3096,10 @@ mod tests {
             .expect("serialization trusts the source established at construction");
         let decoded: SchemaVersion = postcard::from_bytes(&encoded).expect("source recompiles");
         assert_eq!(decoded.schema.public_schema(), &source);
-        assert_eq!(decoded.schema.tables().len(), 1);
+        assert_eq!(decoded.schema.tables().len(), 2);
+        assert!(decoded.schema.tables().iter().any(|table| {
+            table.name == crate::large_values::large_value_node_table_name("todos")
+        }));
     }
 
     #[test]

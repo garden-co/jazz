@@ -8,6 +8,44 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    #[cfg(feature = "runtime")]
+    pub(crate) fn prepare_large_value_edit(
+        &self,
+        identity: Option<AuthorId>,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+        edit: crate::large_values::ValueEdit,
+    ) -> Result<(Value, Vec<DependentRowWrite>), Error> {
+        let author = identity.unwrap_or(self.identity.author);
+        self.local_row_for_client_identity(table, row, author)?
+            .ok_or_else(|| read_for_write_denied("large-value UPDATE", table))?;
+        let (value, rows) = self
+            .node
+            .node
+            .borrow_mut()
+            .prepare_large_value_edit(table, row, column, edit)?;
+        let dependencies = rows
+            .into_iter()
+            .map(|node| {
+                Ok(DependentRowWrite {
+                    table: node.table_name(),
+                    row: RowUuid(node.row_id),
+                    cells: node.cells(Default::default()).map_err(|_| {
+                        Error::new(ErrorCode::Schema, "invalid large-value node row")
+                    })?,
+                })
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok((value, dependencies))
+    }
+
+    /// Reserve the next configured row id for a facade that must prepare
+    /// dependent rows before publishing the owner mutation.
+    #[cfg(feature = "runtime")]
+    pub(crate) fn allocate_row_id(&self) -> RowUuid {
+        self.row_id_source.borrow_mut().next_row_id()
+    }
     /// Calculate and commit novel contributions from one exact branch key into
     /// another. This requires a history-complete database and emits an ordinary
     /// mergeable transaction when the target does not already represent every
@@ -101,6 +139,32 @@ where
             cells,
             Vec::new(),
             None,
+        )
+    }
+
+    #[cfg(feature = "runtime")]
+    pub(crate) fn insert_with_id_and_dependencies(
+        &self,
+        identity: Option<AuthorId>,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        dependencies: Vec<DependentRowWrite>,
+    ) -> Result<WriteHandle<S>, Error> {
+        let author = identity.unwrap_or(self.identity.author);
+        self.ensure_row_absent(table, row, author)?;
+        self.write_mergeable_at_ms_with_authorship_in_branch_and_dependencies(
+            author,
+            identity,
+            table,
+            row,
+            cells,
+            Vec::new(),
+            None,
+            None,
+            self.next_now_ms(),
+            BranchSelector::default(),
+            dependencies,
         )
     }
 
@@ -327,6 +391,33 @@ where
             parent.into_iter().collect(),
             None,
             authored_columns,
+        )
+    }
+
+    #[cfg(feature = "runtime")]
+    pub(crate) fn update_with_dependencies(
+        &self,
+        identity: Option<AuthorId>,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        dependencies: Vec<DependentRowWrite>,
+    ) -> Result<WriteHandle<S>, Error> {
+        let author = identity.unwrap_or(self.identity.author);
+        let (cells, parent, authored_columns) =
+            self.merge_existing_cells_for_client_identity(table, row, patch, author)?;
+        self.write_mergeable_at_ms_with_authorship_in_branch_and_dependencies(
+            author,
+            identity,
+            table,
+            row,
+            cells,
+            parent.into_iter().collect(),
+            None,
+            Some(authored_columns),
+            self.next_now_ms(),
+            BranchSelector::default(),
+            dependencies,
         )
     }
 
@@ -653,6 +744,42 @@ where
             None,
             authored_columns,
             self.next_now_ms(),
+        )
+    }
+
+    #[cfg(feature = "runtime")]
+    pub(crate) fn upsert_with_dependencies(
+        &self,
+        identity: Option<AuthorId>,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        dependencies: Vec<DependentRowWrite>,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.ensure_row_not_deleted(table, row)?;
+        let author = identity.unwrap_or(self.identity.author);
+        let (cells, parents, authored_columns) = if self
+            .upsert_target_for_client_identity(table, row, author)?
+            .is_some()
+        {
+            let (cells, parent, authored_columns) =
+                self.merge_existing_cells_for_client_identity(table, row, cells, author)?;
+            (cells, parent.into_iter().collect(), Some(authored_columns))
+        } else {
+            (cells, Vec::new(), None)
+        };
+        self.write_mergeable_at_ms_with_authorship_in_branch_and_dependencies(
+            author,
+            identity,
+            table,
+            row,
+            cells,
+            parents,
+            None,
+            authored_columns,
+            self.next_now_ms(),
+            BranchSelector::default(),
+            dependencies,
         )
     }
 
@@ -1614,6 +1741,36 @@ where
         now_ms: u64,
         branch: BranchSelector,
     ) -> Result<WriteHandle<S>, Error> {
+        self.write_mergeable_at_ms_with_authorship_in_branch_and_dependencies(
+            made_by,
+            permission_subject,
+            table,
+            row,
+            cells,
+            parents,
+            deletion,
+            authored_columns,
+            now_ms,
+            branch,
+            Vec::new(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_mergeable_at_ms_with_authorship_in_branch_and_dependencies(
+        &self,
+        made_by: AuthorId,
+        permission_subject: Option<AuthorId>,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        parents: Vec<TxId>,
+        deletion: Option<DeletionEvent>,
+        authored_columns: Option<BTreeSet<String>>,
+        now_ms: u64,
+        branch: BranchSelector,
+        dependencies: Vec<DependentRowWrite>,
+    ) -> Result<WriteHandle<S>, Error> {
         let operation = if deletion == Some(DeletionEvent::Deleted) {
             "DELETE"
         } else if parents.is_empty() {
@@ -1642,11 +1799,22 @@ where
         }
         // Db is an untrusted client: structurally valid writes are staged and
         // sent optimistically. A serving authority assigns the policy fate.
+        let mut commits = Vec::with_capacity(1 + dependencies.len());
+        commits.push(commit);
+        for dependency in dependencies {
+            let mut commit = MergeableCommit::new(dependency.table, dependency.row, now_ms)
+                .made_by(made_by)
+                .cells(dependency.cells);
+            if let Some(subject) = permission_subject {
+                commit = commit.permission_subject(subject);
+            }
+            commits.push(commit);
+        }
         let tx_id = self
             .node
             .node
             .borrow_mut()
-            .commit_mergeable_in_schema(self.schema_version_id, commit)?;
+            .commit_mergeable_many_in_schema(self.schema_version_id, commits)?;
         let local_tier = self.finalize_local_commit(tx_id)?;
         self.refresh_subscriptions()?;
         Ok(WriteHandle {
@@ -2043,18 +2211,15 @@ where
             let authored_columns = patch.keys().cloned().collect();
             return Ok((patch, parent, authored_columns));
         }
-        let mut cells = BTreeMap::new();
         let existing = self
             .local_row_for_client_identity(table, row, identity)?
             .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
-        for column in &table_schema.columns {
-            if let Some(value) = existing.cell(table_schema, &column.name) {
-                cells.insert(
-                    column.name.clone(),
-                    default_cell_for_column_type(&column.column_type, &value),
-                );
-            }
-        }
+        let mut cells = self
+            .node
+            .node
+            .borrow_mut()
+            .physical_current_cells(table, row)?
+            .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
         let parent = self.node.node.borrow_mut().current_row_tx_id(&existing);
         let authored_columns = patch.keys().cloned().collect();
         cells.extend(patch);
@@ -2085,18 +2250,15 @@ where
         if self.authorize_read_for_identity(table, row, identity)? != PermissionAdvice::Allowed {
             return Err(read_for_write_denied("partial UPDATE", table));
         }
-        let mut cells = BTreeMap::new();
         let existing = self
             .local_row_for_trusted_identity(table, row, identity)?
             .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
-        for column in &table_schema.columns {
-            if let Some(value) = existing.cell(table_schema, &column.name) {
-                cells.insert(
-                    column.name.clone(),
-                    default_cell_for_column_type(&column.column_type, &value),
-                );
-            }
-        }
+        let mut cells = self
+            .node
+            .node
+            .borrow_mut()
+            .physical_current_cells(table, row)?
+            .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
         let parent = self.node.node.borrow_mut().current_row_tx_id(&existing);
         let authored_columns = patch.keys().cloned().collect();
         cells.extend(patch);

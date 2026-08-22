@@ -553,6 +553,24 @@ fn canonical_query_bytes_for_schema(
             put_str(&mut bytes, column);
         }
     }
+    if !query.partial_value_selections.is_empty() {
+        bytes.push(b'v');
+        put_len(&mut bytes, query.partial_value_selections.len());
+        for (column, selection) in &query.partial_value_selections {
+            put_str(&mut bytes, column);
+            match selection {
+                LargeValueSelection::Slice(slice) => {
+                    bytes.push(b's');
+                    bytes.extend_from_slice(&slice.from.to_le_bytes());
+                    bytes.extend_from_slice(&slice.length.to_le_bytes());
+                }
+                LargeValueSelection::Pointer(pointer) => {
+                    bytes.push(b'p');
+                    put_str(&mut bytes, pointer);
+                }
+            }
+        }
+    }
     if !query.order_by.is_empty() {
         bytes.push(b'o');
         put_len(&mut bytes, query.order_by.len());

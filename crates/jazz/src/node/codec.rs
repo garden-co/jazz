@@ -738,7 +738,13 @@ impl VersionRow {
             return Ok(cells);
         }
         let borrowed = self.record.borrowed();
-        for (idx, column) in table.columns.iter().enumerate() {
+        let user_cell_count = self
+            .record
+            .descriptor()
+            .field_index("authored_columns")
+            .unwrap_or_else(|| self.record.descriptor().fields().len())
+            .saturating_sub(HistoryRowRecord::USER_CELLS);
+        for (idx, column) in table.columns.iter().enumerate().take(user_cell_count) {
             if let Some(value) =
                 nullable_value(borrowed.get_idx(HistoryRowRecord::USER_CELLS + idx)?)?
             {
@@ -752,28 +758,39 @@ impl VersionRow {
         if self.is_register_record() {
             return Ok(None);
         }
-        let field = HistoryRowRecord::USER_CELLS
-            + table
-                .columns
-                .iter()
-                .position(|candidate| candidate.name == column)
-                .ok_or(Error::InvalidStoredValue("missing user column field"))?;
-        nullable_value(self.record.borrowed().get_idx(field)?)
+        let position = table
+            .columns
+            .iter()
+            .position(|candidate| candidate.name == column)
+            .ok_or(Error::InvalidStoredValue("missing user column field"))?;
+        let user_cell_count = self
+            .record
+            .descriptor()
+            .field_index("authored_columns")
+            .unwrap_or_else(|| self.record.descriptor().fields().len())
+            .saturating_sub(HistoryRowRecord::USER_CELLS);
+        if position >= user_cell_count {
+            return Ok(None);
+        }
+        nullable_value(
+            self.record
+                .borrowed()
+                .get_idx(HistoryRowRecord::USER_CELLS + position)?,
+        )
     }
 
     /// `None` is the deliberate legacy/lens fallback: every present cell is
     /// treated as authored by merge code.
     pub(super) fn authored_columns(
         &self,
-        table: &TableSchema,
+        _table: &TableSchema,
     ) -> Result<Option<BTreeSet<String>>, Error> {
         if self.is_register_record() {
             return Ok(None);
         }
-        let field = HistoryRowRecord::USER_CELLS + table.columns.len();
-        if field >= self.record.descriptor().fields().len() {
+        let Some(field) = self.record.descriptor().field_index("authored_columns") else {
             return Ok(None);
-        }
+        };
         let value = nullable_value(self.record.borrowed().get_idx(field)?)?;
         value
             .map(|value| match value {
@@ -1808,10 +1825,9 @@ fn current_row_prefix_and_cells_from_version(
         values.extend(table.columns.iter().map(|_| Value::Nullable(None)));
         return Ok(values);
     }
-    let borrowed = version.record.borrowed();
-    for (idx, _) in table.columns.iter().enumerate() {
+    for column in &table.columns {
         values.push(Value::Nullable(
-            nullable_value(borrowed.get_idx(HistoryRowRecord::USER_CELLS + idx)?)?.map(Box::new),
+            version.cell(table, &column.name)?.map(Box::new),
         ));
     }
     Ok(values)
@@ -1980,6 +1996,24 @@ pub(super) fn nullable_value(value: Value) -> Result<Option<Value>, Error> {
 pub(super) fn validate_cell_value(column: &ColumnSchema, value: &Value) -> Result<(), Error> {
     records::RecordDescriptor::new([("cell", column.column_type.clone())])
         .create(std::slice::from_ref(value))?;
+    if let Some(schema) = &column.large_value {
+        let mut logical = value;
+        while let Value::Nullable(Some(value)) = logical {
+            logical = value;
+        }
+        if matches!(logical, Value::Nullable(None)) {
+            return Ok(());
+        }
+        if crate::large_values::LargeValue::storage_value_is_framed(schema, logical) {
+            crate::large_values::LargeValue::decode_storage_value(schema, logical)
+                .map_err(|_| Error::InvalidStoredValue("invalid large-value cell"))?;
+        } else {
+            schema
+                .kind
+                .logical_bytes(logical)
+                .map_err(|_| Error::InvalidStoredValue("invalid logical large-value cell"))?;
+        }
+    }
     Ok(())
 }
 

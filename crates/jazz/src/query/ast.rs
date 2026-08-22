@@ -46,6 +46,27 @@ pub struct Query {
     /// Number of rows to skip after filtering.
     #[serde(default)]
     pub offset: usize,
+    /// Partial materialization requested for selected large-value columns.
+    #[serde(default)]
+    pub partial_value_selections: std::collections::BTreeMap<String, LargeValueSelection>,
+}
+
+/// One immutable subset requested from an ordinary large-value column.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum LargeValueSelection {
+    /// Text (UTF-16 in JS) or byte range, resolved from the column type.
+    Slice(LargeValueSlice),
+    /// RFC 6901 pointer into a JSON value.
+    Pointer(String),
+}
+
+/// Non-negative range used by partial large-value projections.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct LargeValueSlice {
+    /// Absolute start in the binding's public coordinate system.
+    pub from: u64,
+    /// Requested number of bytes or UTF-16 code units.
+    pub length: u64,
 }
 
 /// Output-changing relational join syntax.

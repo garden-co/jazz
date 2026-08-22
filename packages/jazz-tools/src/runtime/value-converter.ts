@@ -66,6 +66,47 @@ function normalizeByteaValue(value: unknown): Uint8Array {
   throw new Error("Expected Uint8Array or byte array for Bytea column type");
 }
 
+function largeValueEdit(value: unknown, columnType: ColumnType): WasmValue | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  if (columnType.type !== "Text" && columnType.type !== "Bytea") return undefined;
+  const edit = value as Record<string, unknown>;
+  if ("append" in edit) {
+    if (columnType.type !== "Bytea") throw new Error("append is only supported for byte columns");
+    return {
+      type: "LargeValueEdit",
+      value: { kind: "Append", insert: normalizeByteaValue(edit.append) },
+    };
+  }
+  if (!("splice" in edit) || typeof edit.splice !== "object" || edit.splice === null) {
+    return undefined;
+  }
+  const splice = edit.splice as Record<string, unknown>;
+  const slice = splice.slice as Record<string, unknown> | undefined;
+  const integer = (name: string, input: unknown): number => {
+    if (!Number.isSafeInteger(input) || Number(input) < 0) {
+      throw new Error(`${name} must be a non-negative safe integer`);
+    }
+    return Number(input);
+  };
+  if (!slice || typeof slice !== "object") throw new Error("splice.slice is required");
+  const insert =
+    columnType.type === "Text"
+      ? new TextEncoder().encode(String(splice.insert ?? ""))
+      : normalizeByteaValue(splice.insert);
+  return {
+    type: "LargeValueEdit",
+    value: {
+      kind: "Splice",
+      sliceFrom: integer("splice.slice.from", slice.from),
+      sliceLength: integer("splice.slice.length", slice.length),
+      at: integer("splice.at", splice.at),
+      delete: integer("splice.delete", splice.delete),
+      insert,
+      text: columnType.type === "Text",
+    },
+  };
+}
+
 /**
  * Convert a JS value to WasmValue based on column type.
  */
@@ -73,6 +114,9 @@ export function toValue(value: unknown, columnType: ColumnType): WasmValue {
   if (value === null || value === undefined) {
     return { type: "Null" };
   }
+
+  const edit = largeValueEdit(value, columnType);
+  if (edit) return edit;
 
   switch (columnType.type) {
     case "Text":

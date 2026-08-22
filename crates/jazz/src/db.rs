@@ -261,6 +261,16 @@ where
     next_now_ms: Rc<Cell<u64>>,
 }
 
+impl<S> Db<S>
+where
+    S: OrderedKvStorage,
+{
+    #[cfg(feature = "runtime")]
+    pub(crate) fn compiled_schema(&self) -> &JazzSchema {
+        &self.schema
+    }
+}
+
 /// Process-local, content-addressed identity for an exact typed schema view.
 ///
 /// Unlike [`SchemaVersionId`], which identifies structural migration lineage,
@@ -517,7 +527,11 @@ fn direct_schema_view_lens(
     let source_id = source.version_id();
     let target_id = target.version_id();
     let mut table_lenses = Vec::new();
-    for source_table in &source.tables {
+    for source_table in source.tables.iter().filter(|table| {
+        !table
+            .name
+            .starts_with(crate::large_values::LARGE_VALUE_NODE_TABLE_PREFIX)
+    }) {
         let Some(target_table) = target
             .tables
             .iter()
@@ -596,12 +610,22 @@ fn direct_schema_view_lens(
     let new_tables = target
         .tables
         .iter()
+        .filter(|table| {
+            !table
+                .name
+                .starts_with(crate::large_values::LARGE_VALUE_NODE_TABLE_PREFIX)
+        })
         .filter(|table| source.tables.iter().all(|source| source.name != table.name))
         .map(|table| table.name.clone())
         .collect::<Vec<_>>();
     let dropped_tables = source
         .tables
         .iter()
+        .filter(|table| {
+            !table
+                .name
+                .starts_with(crate::large_values::LARGE_VALUE_NODE_TABLE_PREFIX)
+        })
         .filter(|table| target.tables.iter().all(|target| target.name != table.name))
         .map(|table| table.name.clone())
         .collect::<Vec<_>>();
@@ -1344,6 +1368,14 @@ fn subscriber_permission_subject(ingest: CommitUnitIngestContext) -> AuthorId {
 
 /// Row cells supplied to write methods.
 pub type RowCells = BTreeMap<String, Value>;
+
+/// One core-generated ordinary Jazz row published atomically with an
+/// application-row mutation.
+pub(crate) struct DependentRowWrite {
+    pub(crate) table: String,
+    pub(crate) row: RowUuid,
+    pub(crate) cells: RowCells,
+}
 
 /// Build [`RowCells`] with bare identifier column names.
 ///

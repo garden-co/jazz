@@ -672,6 +672,10 @@ type TableOrderableFromMeta<TMeta extends AnyTableMeta> =
   | ProvenanceMagicColumn;
 type DefaultTableSelection<TMeta extends AnyTableMeta> = BaseColumnNameFromMeta<TMeta>;
 
+export type LargeValueSlice = { from: number; length: number };
+
+type PartialValueSelectionMap = Record<string, { slice: LargeValueSlice } | { pointer: string }>;
+
 export type SchemaRelations<TTable extends string, TSchema extends SchemaLike> =
   TTable extends TableName<TSchema>
     ? {
@@ -845,6 +849,7 @@ export class TypedTableQueryBuilder<
   private _includes: Partial<BuilderInclude<TMeta>> = {};
   private _requireIncludes = false;
   private _selectColumns?: string[];
+  private _partialValueSelections?: Record<string, unknown>;
   private _orderBys: Array<[string, "asc" | "desc"]> = [];
   private _limitVal?: number;
   private _offsetVal?: number;
@@ -877,9 +882,21 @@ export class TypedTableQueryBuilder<
 
   select<NewSelection extends TableSelectableFromMeta<TMeta>>(
     ...columns: [NewSelection, ...NewSelection[]]
-  ): MetaQueryHandle<TMeta, TInclude, NewSelection, TRequired> {
-    const clone = this._clone<TInclude, NewSelection, TRequired>();
-    clone._selectColumns = [...columns] as string[];
+  ): MetaQueryHandle<TMeta, TInclude, NewSelection, TRequired>;
+  select(
+    selections: PartialValueSelectionMap,
+  ): MetaQueryHandle<TMeta, TInclude, TableSelectableFromMeta<TMeta>, TRequired>;
+  select(
+    ...selection: [TableSelectableFromMeta<TMeta>, ...TableSelectableFromMeta<TMeta>[]] | [object]
+  ): MetaQueryHandle<TMeta, TInclude, any, TRequired> {
+    const clone = this._clone<TInclude, any, TRequired>();
+    if (selection.length === 1 && typeof selection[0] === "object") {
+      clone._partialValueSelections = { ...(selection[0] as Record<string, unknown>) };
+      clone._selectColumns = Object.keys(clone._partialValueSelections);
+    } else {
+      clone._selectColumns = selection as string[];
+      clone._partialValueSelections = undefined;
+    }
     return clone;
   }
 
@@ -1043,6 +1060,7 @@ export class TypedTableQueryBuilder<
         includes: this._includes,
         __jazz_requireIncludes: this._requireIncludes || undefined,
         select: this._selectColumns,
+        partialValueSelections: this._partialValueSelections,
         orderBy: this._orderBys,
         limit: this._limitVal,
         offset: this._offsetVal,
@@ -1073,6 +1091,9 @@ export class TypedTableQueryBuilder<
     clone._includes = { ...this._includes } as Partial<BuilderInclude<TMeta>>;
     clone._requireIncludes = this._requireIncludes;
     clone._selectColumns = this._selectColumns ? [...this._selectColumns] : undefined;
+    clone._partialValueSelections = this._partialValueSelections
+      ? { ...this._partialValueSelections }
+      : undefined;
     clone._orderBys = [...this._orderBys];
     clone._limitVal = this._limitVal;
     clone._offsetVal = this._offsetVal;
@@ -1133,6 +1154,15 @@ export interface Query<
   select<NewSelection extends TableSelectableFromMeta<SchemaMeta<TTable, TSchema>>>(
     ...columns: [NewSelection, ...NewSelection[]]
   ): Query<TTable, TInclude, NewSelection, TSchema, TRequired>;
+  select(
+    selections: PartialValueSelectionMap,
+  ): Query<
+    TTable,
+    TInclude,
+    TableSelectableFromMeta<SchemaMeta<TTable, TSchema>>,
+    TSchema,
+    TRequired
+  >;
   include<NewInclude extends BuilderInclude<SchemaMeta<TTable, TSchema>>>(
     relations: NewInclude,
   ): Query<TTable, TInclude & NewInclude, TSelection, TSchema, TRequired>;

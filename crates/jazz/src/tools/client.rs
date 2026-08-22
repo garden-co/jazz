@@ -24,7 +24,7 @@ use crate::query::{Aggregate as CoreAggregate, AggregateFunction as CoreAggregat
 use crate::tools::OpenTransactionId;
 use crate::tools::native_transport_connector::{NativeTransportConnector, NativeTransportRequest};
 use crate::tools::public_api::types::{
-    OrderedAdded, OrderedRemoved, OrderedUpdated, QueryResultField,
+    LargeValueEdit, OrderedAdded, OrderedRemoved, OrderedUpdated, QueryResultField,
 };
 use crate::tools::public_schema::TableName;
 use crate::tools::public_schema::{ColumnType, Session, TableSchema, Value, WriteContext};
@@ -226,6 +226,18 @@ enum ClosedTransactionState {
 struct Backend(Rc<CoreClientDb>);
 
 impl Backend {
+    fn prepare_large_value_edit(
+        &self,
+        identity: Option<CoreAuthorId>,
+        table: &str,
+        row_id: CoreRowUuid,
+        column: &str,
+        edit: crate::large_values::ValueEdit,
+    ) -> std::result::Result<(CoreValue, Vec<crate::db::DependentRowWrite>), CoreDbError> {
+        self.0
+            .prepare_large_value_edit(identity, table, row_id, column, edit)
+    }
+
     async fn open(
         schema: crate::schema::JazzSchema,
         storage: StorageBundle,
@@ -240,6 +252,19 @@ impl Backend {
 
     fn set_tick_scheduler(&self, scheduler: Rc<TickSchedulerImpl>) {
         self.0.set_tick_scheduler(Some(scheduler));
+    }
+
+    fn allocate_row_id(&self) -> CoreRowUuid {
+        self.0.allocate_row_id()
+    }
+
+    fn runtime_table(&self, table: &str) -> Option<crate::schema::TableSchema> {
+        self.0
+            .compiled_schema()
+            .tables()
+            .iter()
+            .find(|candidate| candidate.name == table)
+            .cloned()
     }
 
     fn connect_upstream(&self, transport: Box<dyn CoreTransport>) -> BackendConnection {
@@ -259,79 +284,46 @@ impl Backend {
         self.0.tick()
     }
 
-    fn insert(
+    fn insert_with_id_and_dependencies(
         &self,
-        table: &str,
-        cells: crate::db::RowCells,
-    ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
-        let write = self.0.insert(table, cells)?;
-        Ok((write.row_uuid(), write.mergeable_tx_id()))
-    }
-
-    fn insert_for_identity(
-        &self,
-        identity: CoreAuthorId,
-        table: &str,
-        cells: crate::db::RowCells,
-    ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
-        let write = self.0.insert_for_identity(identity, table, cells)?;
-        Ok((write.row_uuid(), write.mergeable_tx_id()))
-    }
-
-    fn insert_with_id(
-        &self,
+        identity: Option<CoreAuthorId>,
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
+        dependencies: Vec<crate::db::DependentRowWrite>,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
         Ok(self
             .0
-            .insert_with_id(table, row_id, cells)?
+            .insert_with_id_and_dependencies(identity, table, row_id, cells, dependencies)?
             .mergeable_tx_id())
     }
 
-    fn insert_with_id_for_identity(
+    fn upsert_with_dependencies(
         &self,
-        identity: CoreAuthorId,
+        identity: Option<CoreAuthorId>,
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
+        dependencies: Vec<crate::db::DependentRowWrite>,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
         Ok(self
             .0
-            .insert_with_id_for_identity(identity, table, row_id, cells)?
+            .upsert_with_dependencies(identity, table, row_id, cells, dependencies)?
             .mergeable_tx_id())
     }
 
-    fn upsert(
+    fn update_with_dependencies(
         &self,
+        identity: Option<CoreAuthorId>,
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
-    ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(self.0.upsert(table, row_id, cells)?.mergeable_tx_id())
-    }
-
-    fn upsert_for_identity(
-        &self,
-        identity: CoreAuthorId,
-        table: &str,
-        row_id: CoreRowUuid,
-        cells: crate::db::RowCells,
+        dependencies: Vec<crate::db::DependentRowWrite>,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
         Ok(self
             .0
-            .upsert_for_identity(identity, table, row_id, cells)?
+            .update_with_dependencies(identity, table, row_id, cells, dependencies)?
             .mergeable_tx_id())
-    }
-
-    fn update(
-        &self,
-        table: &str,
-        row_id: CoreRowUuid,
-        cells: crate::db::RowCells,
-    ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(self.0.update(table, row_id, cells)?.mergeable_tx_id())
     }
 
     fn delete_for_identity(
@@ -518,6 +510,21 @@ impl TickScheduler for TickSchedulerImpl {
 }
 
 impl ClientDb {
+    fn prepare_large_value_edit(
+        &self,
+        identity: Option<CoreAuthorId>,
+        table: &str,
+        row_id: CoreRowUuid,
+        column: &str,
+        edit: crate::large_values::ValueEdit,
+    ) -> Result<(CoreValue, Vec<crate::db::DependentRowWrite>)> {
+        self.inner
+            .borrow()
+            .db
+            .prepare_large_value_edit(identity, table, row_id, column, edit)
+            .map_err(|error| JazzError::Write(error.to_string()))
+    }
+
     async fn open(
         schema: crate::schema::JazzSchema,
         public_schema: Schema,
@@ -612,42 +619,26 @@ impl ClientDb {
         .await
     }
 
-    fn insert(
+    fn allocate_row_id(&self) -> Uuid {
+        self.inner.borrow().db.allocate_row_id().0
+    }
+
+    fn insert_with_dependencies(
         &self,
-        table: String,
-        row_id: Option<Uuid>,
-        cells: crate::db::RowCells,
         identity: Option<CoreAuthorId>,
+        table: String,
+        row_id: Uuid,
+        cells: crate::db::RowCells,
+        dependencies: Vec<crate::db::DependentRowWrite>,
     ) -> Result<(ObjectId, CoreTxId)> {
         let mut inner = self.inner.borrow_mut();
-        let (row_uuid, tx_id) = match row_id {
-            Some(uuid) => {
-                let row_uuid = CoreRowUuid(uuid);
-                let tx_id = match identity {
-                    Some(identity) => inner
-                        .db
-                        .insert_with_id_for_identity(identity, &table, row_uuid, cells),
-                    None => inner.db.insert_with_id(&table, row_uuid, cells),
-                }
-                .map_err(|error| JazzError::Write(error.to_string()))?;
-                (row_uuid, tx_id)
-            }
-            None => {
-                if let Some(identity) = identity {
-                    inner
-                        .db
-                        .insert_for_identity(identity, &table, cells)
-                        .map_err(|error| JazzError::Write(error.to_string()))?
-                } else {
-                    inner
-                        .db
-                        .insert(&table, cells)
-                        .map_err(|error| JazzError::Write(error.to_string()))?
-                }
-            }
-        };
+        let row_uuid = CoreRowUuid(row_id);
+        let tx_id = inner
+            .db
+            .insert_with_id_and_dependencies(identity, &table, row_uuid, cells, dependencies)
+            .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(&inner.db, tx_id)?;
-        let object_id = ObjectId::from_uuid(row_uuid.0);
+        let object_id = ObjectId::from_uuid(row_id);
         inner.remember_write(object_id, &table, tx_id);
         Ok((object_id, tx_id))
     }
@@ -679,27 +670,21 @@ impl ClientDb {
         Ok(row_id)
     }
 
-    fn upsert(
+    fn upsert_with_dependencies(
         &self,
+        identity: Option<CoreAuthorId>,
         table: String,
         row_id: Uuid,
         cells: crate::db::RowCells,
-        identity: Option<CoreAuthorId>,
+        dependencies: Vec<crate::db::DependentRowWrite>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
-        let write = match identity {
-            Some(identity) => {
-                inner
-                    .db
-                    .upsert_for_identity(identity, &table, CoreRowUuid(row_id), cells)
-            }
-            None => inner.db.upsert(&table, CoreRowUuid(row_id), cells),
-        }
-        .map_err(|error| JazzError::Write(error.to_string()))?;
-        JazzClient::check_core_write_not_rejected(&inner.db, write)?;
-        let object_id = ObjectId::from_uuid(row_id);
-        inner.remember_write(object_id, &table, write);
-        let tx_id = write;
+        let tx_id = inner
+            .db
+            .upsert_with_dependencies(identity, &table, CoreRowUuid(row_id), cells, dependencies)
+            .map_err(|error| JazzError::Write(error.to_string()))?;
+        JazzClient::check_core_write_not_rejected(&inner.db, tx_id)?;
+        inner.remember_write(ObjectId::from_uuid(row_id), &table, tx_id);
         Ok(tx_id)
     }
 
@@ -730,28 +715,29 @@ impl ClientDb {
         Ok(())
     }
 
-    fn update(
+    fn update_with_dependencies(
         &self,
+        identity: Option<CoreAuthorId>,
         row_id: ObjectId,
         cells: crate::db::RowCells,
-        identity: Option<CoreAuthorId>,
+        dependencies: Vec<crate::db::DependentRowWrite>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
-            JazzError::Write("update requires a row created or observed by this client".to_string())
+            JazzError::Write("update requires a row created or observed by this client".to_owned())
         })?;
-        let write = match identity {
-            Some(identity) => {
-                inner
-                    .db
-                    .upsert_for_identity(identity, &table, CoreRowUuid(*row_id.uuid()), cells)
-            }
-            None => inner.db.update(&table, CoreRowUuid(*row_id.uuid()), cells),
-        }
-        .map_err(|error| JazzError::Write(error.to_string()))?;
-        JazzClient::check_core_write_not_rejected(&inner.db, write)?;
-        inner.remember_write(row_id, &table, write);
-        let tx_id = write;
+        let tx_id = inner
+            .db
+            .update_with_dependencies(
+                identity,
+                &table,
+                CoreRowUuid(*row_id.uuid()),
+                cells,
+                dependencies,
+            )
+            .map_err(|error| JazzError::Write(error.to_string()))?;
+        JazzClient::check_core_write_not_rejected(&inner.db, tx_id)?;
+        inner.remember_write(row_id, &table, tx_id);
         Ok(tx_id)
     }
 
@@ -1771,6 +1757,56 @@ fn core_to_public_value_for_column_type(
     }
 }
 
+fn select_public_large_value(
+    value: Value,
+    selection: &crate::query::LargeValueSelection,
+) -> Result<Value> {
+    use crate::query::LargeValueSelection;
+    match (value, selection) {
+        (Value::Null, _) => Ok(Value::Null),
+        (Value::Bytea(bytes), LargeValueSelection::Slice(slice)) => {
+            let start = usize::try_from(slice.from)
+                .map_err(|_| JazzError::Query("large-value slice start overflows".to_owned()))?;
+            let length = usize::try_from(slice.length)
+                .map_err(|_| JazzError::Query("large-value slice length overflows".to_owned()))?;
+            let end = start
+                .checked_add(length)
+                .filter(|end| *end <= bytes.len())
+                .ok_or_else(|| {
+                    JazzError::Query("large-value byte slice is out of bounds".to_owned())
+                })?;
+            Ok(Value::Bytea(bytes[start..end].to_vec()))
+        }
+        (Value::Text(text), LargeValueSelection::Slice(slice)) => {
+            let units = text.encode_utf16().collect::<Vec<_>>();
+            let start = usize::try_from(slice.from)
+                .map_err(|_| JazzError::Query("text slice start overflows".to_owned()))?;
+            let length = usize::try_from(slice.length)
+                .map_err(|_| JazzError::Query("text slice length overflows".to_owned()))?;
+            let end = start
+                .checked_add(length)
+                .filter(|end| *end <= units.len())
+                .ok_or_else(|| JazzError::Query("text UTF-16 slice is out of bounds".to_owned()))?;
+            String::from_utf16(&units[start..end])
+                .map(Value::Text)
+                .map_err(|_| JazzError::Query("text slice splits a surrogate pair".to_owned()))
+        }
+        (Value::Text(text), LargeValueSelection::Pointer(pointer)) => {
+            let document: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|error| JazzError::Query(format!("invalid stored JSON: {error}")))?;
+            let selected = document.pointer(pointer).ok_or_else(|| {
+                JazzError::Query(format!("JSON pointer does not exist: {pointer}"))
+            })?;
+            serde_json::to_string(selected)
+                .map(Value::Text)
+                .map_err(|error| JazzError::Query(format!("encode selected JSON: {error}")))
+        }
+        _ => Err(JazzError::Query(
+            "large-value selection does not match the selected column".to_owned(),
+        )),
+    }
+}
+
 fn auth_mode_claim_value(auth_mode: crate::tools::public_api::session::AuthMode) -> &'static str {
     match auth_mode {
         crate::tools::public_api::session::AuthMode::External => "external",
@@ -2182,7 +2218,14 @@ impl PublicQueryDecoder {
                                 "row missing projected value for column {column}"
                             )));
                         }
-                        core_to_public_value_for_column_type(value, &column_schema.column_type)
+                        let value = core_to_public_value_for_column_type(
+                            value,
+                            &column_schema.column_type,
+                        )?;
+                        match query.partial_value_selections.get(column) {
+                            Some(selection) => select_public_large_value(value, selection),
+                            None => Ok(value),
+                        }
                     })
                     .chain(query.array_subqueries.iter().map(|subquery| {
                         row.raw_field(&subquery.column_name)
@@ -2654,22 +2697,170 @@ impl JazzClient {
     fn core_cells(
         &self,
         table: &str,
+        row_id: CoreRowUuid,
         values: HashMap<String, Value>,
-    ) -> Result<crate::db::RowCells> {
+    ) -> Result<(crate::db::RowCells, Vec<crate::db::DependentRowWrite>)> {
         let schema = self.schema()?;
         let table_schema = schema
             .get(&TableName::new(table))
             .ok_or_else(|| JazzError::Write(format!("unknown table {table}")))?;
-        values
-            .into_iter()
-            .map(|(name, value)| {
-                let column = table_schema.columns.column(&name).ok_or_else(|| {
-                    JazzError::Write(format!("unknown column {name} on table {table}"))
+        let runtime_table = self
+            .db
+            .inner
+            .borrow()
+            .db
+            .runtime_table(table)
+            .ok_or_else(|| JazzError::Write(format!("unknown runtime table {table}")))?;
+        let mut cells = crate::db::RowCells::new();
+        let mut dependencies = Vec::new();
+        for (name, value) in values {
+            let column = table_schema.columns.column(&name).ok_or_else(|| {
+                JazzError::Write(format!("unknown column {name} on table {table}"))
+            })?;
+            if let Value::LargeValueEdit(edit) = value {
+                let edit = match edit {
+                    LargeValueEdit::Append { insert } => {
+                        crate::large_values::ValueEdit::Append(insert)
+                    }
+                    LargeValueEdit::Splice {
+                        slice_from,
+                        slice_length,
+                        at,
+                        delete,
+                        insert,
+                        text,
+                    } => {
+                        let relative_end = at.checked_add(delete).ok_or_else(|| {
+                            JazzError::Write("large-value splice range overflows".to_owned())
+                        })?;
+                        if relative_end > slice_length {
+                            return Err(JazzError::Write(
+                                "large-value splice exceeds the selected slice".to_owned(),
+                            ));
+                        }
+                        if text {
+                            let insert = String::from_utf8(insert).map_err(|_| {
+                                JazzError::Write("text splice insert is not UTF-8".to_owned())
+                            })?;
+                            crate::large_values::ValueEdit::TextUtf16 {
+                                slice_offset: slice_from,
+                                slice_len: slice_length,
+                                offset: at,
+                                delete_len: delete,
+                                insert,
+                            }
+                        } else {
+                            crate::large_values::ValueEdit::BytesSlice {
+                                slice_offset: slice_from,
+                                slice_len: slice_length,
+                                offset: at,
+                                delete_len: delete,
+                                insert,
+                            }
+                        }
+                    }
+                };
+                let (physical, edit_dependencies) = self.db.prepare_large_value_edit(
+                    self.write_identity(),
+                    table,
+                    row_id,
+                    &name,
+                    edit,
+                )?;
+                cells.insert(name, physical);
+                dependencies.extend(edit_dependencies);
+                continue;
+            }
+            let logical = public_to_core_value_for_column(value, column)?;
+            let runtime_column = runtime_table
+                .columns
+                .iter()
+                .find(|candidate| candidate.name == name)
+                .ok_or_else(|| {
+                    JazzError::Write(format!("unknown runtime column {table}.{name}"))
                 })?;
-                Ok((name, public_to_core_value_for_column(value, column)?))
-            })
-            .collect()
+            let Some(large_schema) = &runtime_column.large_value else {
+                cells.insert(name, logical);
+                continue;
+            };
+            let (physical, node_rows) =
+                Self::encode_large_value_cell(table, row_id, &name, large_schema, logical)?;
+            cells.insert(name, physical);
+            dependencies.extend(node_rows);
+        }
+        for column in &runtime_table.columns {
+            let (Some(large_schema), Some(default)) = (&column.large_value, &column.default) else {
+                continue;
+            };
+            if cells.contains_key(&column.name) {
+                continue;
+            }
+            let (physical, node_rows) = Self::encode_large_value_cell(
+                table,
+                row_id,
+                &column.name,
+                large_schema,
+                default.clone(),
+            )?;
+            cells.insert(column.name.clone(), physical);
+            dependencies.extend(node_rows);
+        }
+        Ok((cells, dependencies))
     }
+
+    fn encode_large_value_cell(
+        table: &str,
+        row_id: CoreRowUuid,
+        column: &str,
+        schema: &crate::large_values::LargeValueSchema,
+        logical: CoreValue,
+    ) -> Result<(CoreValue, Vec<crate::db::DependentRowWrite>)> {
+        if matches!(logical, CoreValue::Nullable(None)) {
+            return Ok((logical, Vec::new()));
+        }
+        let (logical_source, wrap_nullable) = match &logical {
+            CoreValue::Nullable(Some(value)) => (value.as_ref(), true),
+            value => (value, false),
+        };
+        let bytes = schema
+            .kind
+            .logical_bytes(logical_source)
+            .map_err(|error| JazzError::Write(error.to_string()))?;
+        let domain = crate::large_values::LargeValueOwnerDomain::new(table, row_id.0)
+            .map_err(|error| JazzError::Write(error.to_string()))?;
+        let tree = crate::large_values::ContentTree::new(Default::default())
+            .map_err(|error| JazzError::Write(error.to_string()))?;
+        let mut rows = crate::large_values::MemoryLargeValueNodeRows::default();
+        let physical = crate::large_values::LargeValue::create(
+            schema.kind,
+            &domain,
+            bytes,
+            schema.inline_up_to as usize,
+            tree,
+            &mut rows,
+        )
+        .and_then(|value| value.encode_storage_value(schema))
+        .map_err(|error| JazzError::Write(error.to_string()))?;
+        let physical = if wrap_nullable {
+            CoreValue::Nullable(Some(Box::new(physical)))
+        } else {
+            physical
+        };
+        let dependencies = rows
+            .into_rows()
+            .map(|node| {
+                Ok(crate::db::DependentRowWrite {
+                    table: node.table_name(),
+                    row: CoreRowUuid(node.row_id),
+                    cells: node
+                        .cells(Default::default())
+                        .map_err(|error| JazzError::Write(error.to_string()))?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok((physical, dependencies))
+    }
+
     fn core_ordered_values(
         &self,
         table: &str,
@@ -2884,8 +3075,11 @@ impl JazzClient {
         values: HashMap<String, Value>,
     ) -> Result<(ObjectId, Vec<Value>, Option<TransactionId>)> {
         {
+            let object_id = object_id
+                .into()
+                .unwrap_or_else(|| self.db.allocate_row_id());
             let row_values = self.core_ordered_values(table, &values)?;
-            let cells = self.core_cells(table, values)?;
+            let (cells, dependencies) = self.core_cells(table, CoreRowUuid(object_id), values)?;
             if let Some(transaction_id) = self
                 .write_context
                 .as_ref()
@@ -2894,16 +3088,25 @@ impl JazzClient {
                 let row_id = self.db.stage_insert(
                     transaction_id,
                     table.to_string(),
-                    object_id.into(),
+                    Some(object_id),
                     cells,
                 )?;
+                for dependency in dependencies {
+                    self.db.stage_insert(
+                        transaction_id,
+                        dependency.table,
+                        Some(dependency.row.0),
+                        dependency.cells,
+                    )?;
+                }
                 Ok((row_id, row_values, None))
             } else {
-                let (row_id, tx_id) = self.db.insert(
-                    table.to_string(),
-                    object_id.into(),
-                    cells,
+                let (row_id, tx_id) = self.db.insert_with_dependencies(
                     self.write_identity(),
+                    table.to_string(),
+                    object_id,
+                    cells,
+                    dependencies,
                 )?;
                 let transaction_id = core_batch_id(tx_id);
                 Ok((row_id, row_values, Some(transaction_id)))
@@ -2919,7 +3122,7 @@ impl JazzClient {
         values: HashMap<String, Value>,
     ) -> Result<Option<TransactionId>> {
         {
-            let cells = self.core_cells(table, values)?;
+            let (cells, dependencies) = self.core_cells(table, CoreRowUuid(object_id), values)?;
             if let Some(transaction_id) = self
                 .write_context
                 .as_ref()
@@ -2927,11 +3130,23 @@ impl JazzClient {
             {
                 self.db
                     .stage_upsert(transaction_id, table.to_string(), object_id, cells)?;
+                for dependency in dependencies {
+                    self.db.stage_insert(
+                        transaction_id,
+                        dependency.table,
+                        Some(dependency.row.0),
+                        dependency.cells,
+                    )?;
+                }
                 Ok(None)
             } else {
-                let tx_id =
-                    self.db
-                        .upsert(table.to_string(), object_id, cells, self.write_identity())?;
+                let tx_id = self.db.upsert_with_dependencies(
+                    self.write_identity(),
+                    table.to_string(),
+                    object_id,
+                    cells,
+                    dependencies,
+                )?;
                 Ok(Some(core_batch_id(tx_id)))
             }
         }
@@ -2956,16 +3171,33 @@ impl JazzClient {
                         "update requires a row created or observed by this client".to_string(),
                     )
                 })?;
-            let cells = self.core_cells(&table, updates.into_iter().collect())?;
+            let (cells, dependencies) = self.core_cells(
+                &table,
+                CoreRowUuid(*object_id.uuid()),
+                updates.into_iter().collect(),
+            )?;
             if let Some(transaction_id) = self
                 .write_context
                 .as_ref()
                 .and_then(|ctx| ctx.transaction_id)
             {
                 self.db.stage_update(transaction_id, object_id, cells)?;
+                for dependency in dependencies {
+                    self.db.stage_insert(
+                        transaction_id,
+                        dependency.table,
+                        Some(dependency.row.0),
+                        dependency.cells,
+                    )?;
+                }
                 Ok(None)
             } else {
-                let tx_id = self.db.update(object_id, cells, self.write_identity())?;
+                let tx_id = self.db.update_with_dependencies(
+                    self.write_identity(),
+                    object_id,
+                    cells,
+                    dependencies,
+                )?;
                 Ok(Some(core_batch_id(tx_id)))
             }
         }
@@ -3409,6 +3641,92 @@ mod tests {
                 row_id,
                 vec![Value::Text("rehydrated".to_string()), Value::Boolean(false)]
             )]
+        );
+    }
+
+    #[tokio::test]
+    async fn large_text_round_trips_through_hidden_jazz_node_rows() {
+        let data_dir = TempDir::new().expect("temp large-value client dir");
+        let context = make_offline_context_with_storage(
+            AppId::from_name("large-value-system-rows"),
+            data_dir.path().to_path_buf(),
+            declared_todo_schema(),
+            ClientStorage::Persistent,
+        );
+        let client = JazzClient::connect(context.clone())
+            .await
+            .expect("connect persistent large-value client");
+        let title = "Jazz 🎷\n".repeat(20_000);
+        let (row_id, _, transaction_id) = client
+            .insert(
+                "todos",
+                crate::row_input!("title" => title.clone(), "completed" => false),
+            )
+            .expect("insert chunked text and its hidden node rows");
+        client
+            .wait_for_transaction(
+                transaction_id.expect("large-value mutation commits immediately"),
+                DurabilityTier::Local,
+            )
+            .await
+            .expect("wait for owner and node transaction");
+        drop(client);
+
+        let client = JazzClient::connect(context)
+            .await
+            .expect("reopen owner and hidden node rows from RocksDB");
+
+        let rows = client
+            .query(Query::from("todos"), Some(DurabilityTier::Local))
+            .await
+            .expect("materialize large text from hidden node rows");
+        assert_eq!(
+            rows,
+            vec![(
+                row_id,
+                vec![Value::Text(title.clone()), Value::Boolean(false)]
+            )]
+        );
+
+        let mut partial = Query::from("todos").select(["title"]);
+        partial.partial_value_selections.insert(
+            "title".to_owned(),
+            crate::query::LargeValueSelection::Slice(crate::query::LargeValueSlice {
+                from: 5,
+                length: 2,
+            }),
+        );
+        let rows = client
+            .query(partial, Some(DurabilityTier::Local))
+            .await
+            .expect("select a UTF-16 slice");
+        assert_eq!(rows, vec![(row_id, vec![Value::Text("🎷".to_owned())])]);
+
+        client
+            .update(
+                row_id,
+                vec![(
+                    "title".to_owned(),
+                    Value::LargeValueEdit(LargeValueEdit::Splice {
+                        slice_from: 0,
+                        slice_length: 7,
+                        at: 5,
+                        delete: 2,
+                        insert: "🎺".as_bytes().to_vec(),
+                        text: true,
+                    }),
+                )],
+            )
+            .expect("append a UTF-16 edit-tail entry");
+        let rows = client
+            .query(Query::from("todos"), Some(DurabilityTier::Local))
+            .await
+            .expect("materialize the edited tail");
+        let mut edited = title;
+        edited.replace_range(5..9, "🎺");
+        assert_eq!(
+            rows,
+            vec![(row_id, vec![Value::Text(edited), Value::Boolean(false)])]
         );
     }
 

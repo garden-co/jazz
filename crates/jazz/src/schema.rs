@@ -491,8 +491,7 @@ impl RuntimeSchema {
                 .chain(std::iter::once("jazz_physical_history"))
                 .chain(std::iter::once("jazz_physical_register"))
                 .chain(std::iter::once("jazz_physical_global_current"))
-                .chain(std::iter::once("jazz_physical_ahead_current"))
-                .chain(std::iter::once(crate::large_values::CONTENT_OBJECTS_CF)),
+                .chain(std::iter::once("jazz_physical_ahead_current")),
         )
     }
 

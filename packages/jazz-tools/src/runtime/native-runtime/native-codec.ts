@@ -233,6 +233,10 @@ export type QueryOptions = {
   orderBy?: QueryOrder[];
   select?: string[];
   arraySubqueries?: QueryArraySubquery[];
+  partialValueSelections?: Record<
+    string,
+    { slice: { from: number; length: number } } | { pointer: string }
+  >;
 };
 
 export function queryWithEqFilters(
@@ -253,7 +257,14 @@ export function queryWithPredicates(
   options: number | QueryOptions = {},
 ): Uint8Array {
   const queryOptions = typeof options === "number" ? { limit: options } : options;
-  const { limit, offset = 0, orderBy = [], select, arraySubqueries = [] } = queryOptions;
+  const {
+    limit,
+    offset = 0,
+    orderBy = [],
+    select,
+    arraySubqueries = [],
+    partialValueSelections = {},
+  } = queryOptions;
   if (limit != null) validateQueryBound("query limit", limit);
   validateQueryBound("query offset", offset);
   const writer = new PostcardWriter();
@@ -294,6 +305,23 @@ export function queryWithPredicates(
     writer.some((valueWriter) => valueWriter.u64(limit));
   }
   writer.u64(offset);
+  const partialEntries = Object.entries(partialValueSelections).sort(([left], [right]) =>
+    left.localeCompare(right),
+  );
+  writer.map(partialEntries.length);
+  for (const [column, selection] of partialEntries) {
+    writer.string(column);
+    if ("slice" in selection) {
+      validateQueryBound(`large-value slice ${column} from`, selection.slice.from);
+      validateQueryBound(`large-value slice ${column} length`, selection.slice.length);
+      writer.u64(0); // LargeValueSelection::Slice
+      writer.u64(selection.slice.from);
+      writer.u64(selection.slice.length);
+    } else {
+      writer.u64(1); // LargeValueSelection::Pointer
+      writer.string(selection.pointer);
+    }
+  }
   return writer.finish();
 }
 

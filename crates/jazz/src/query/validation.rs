@@ -98,6 +98,14 @@ pub(crate) fn binding_id_for_values(values: &BTreeMap<String, Value>) -> Binding
 /// Query validation error.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum QueryError {
+    /// Partial materialization is invalid for the selected column or range.
+    #[error("invalid large-value selection for {column}: {reason}")]
+    InvalidLargeValueSelection {
+        /// Selected application column.
+        column: String,
+        /// Stable validation explanation.
+        reason: &'static str,
+    },
     /// Aggregate aliases cannot occupy compiler-owned output names.
     #[error("aggregate alias {0} uses a reserved compiler namespace")]
     ReservedAggregateAlias(String),
@@ -241,6 +249,10 @@ fn validate_query_canonical_parts(
             (!query.includes.is_empty(), "includes"),
             (!query.array_subqueries.is_empty(), "array subqueries"),
             (query.select.is_some(), "select projections"),
+            (
+                !query.partial_value_selections.is_empty(),
+                "large-value projections",
+            ),
             (!query.order_by.is_empty(), "ordering"),
             (query.aggregate.is_some(), "aggregates"),
             (query.limit.is_some(), "limits"),
@@ -300,6 +312,49 @@ fn validate_query_canonical_parts(
     if let Some(select) = &query.select {
         for column in select {
             validate_select_column(&root, column)?;
+        }
+    }
+    for (column, selection) in &query.partial_value_selections {
+        let column_schema = column_schema(&root, column)?;
+        let Some(large_value) = &column_schema.large_value else {
+            return Err(QueryError::InvalidLargeValueSelection {
+                column: column.clone(),
+                reason: "column does not support large-value projections",
+            });
+        };
+        if query
+            .select
+            .as_ref()
+            .is_none_or(|selected| !selected.contains(column))
+        {
+            return Err(QueryError::InvalidLargeValueSelection {
+                column: column.clone(),
+                reason: "column must also be selected",
+            });
+        }
+        match selection {
+            LargeValueSelection::Slice(slice) => {
+                slice.from.checked_add(slice.length).ok_or(
+                    QueryError::InvalidLargeValueSelection {
+                        column: column.clone(),
+                        reason: "slice range overflows",
+                    },
+                )?;
+                if large_value.kind == crate::large_values::ValueKind::Json {
+                    return Err(QueryError::InvalidLargeValueSelection {
+                        column: column.clone(),
+                        reason: "JSON uses pointer projections",
+                    });
+                }
+            }
+            LargeValueSelection::Pointer(_) => {
+                if large_value.kind != crate::large_values::ValueKind::Json {
+                    return Err(QueryError::InvalidLargeValueSelection {
+                        column: column.clone(),
+                        reason: "JSON pointers require a JSON column",
+                    });
+                }
+            }
         }
     }
     if let Some(aggregate) = &query.aggregate {

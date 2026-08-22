@@ -40,7 +40,30 @@ pub enum Value {
         case: String,
         values: Vec<Value>,
     },
+    /// Declarative edit to an existing large text or byte value.
+    LargeValueEdit(LargeValueEdit),
     Null,
+}
+
+/// Public mutation-only large-value edit shape.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum LargeValueEdit {
+    Append {
+        #[serde(with = "serde_bytes")]
+        insert: Vec<u8>,
+    },
+    Splice {
+        #[serde(rename = "sliceFrom")]
+        slice_from: u64,
+        #[serde(rename = "sliceLength")]
+        slice_length: u64,
+        at: u64,
+        delete: u64,
+        #[serde(with = "serde_bytes")]
+        insert: Vec<u8>,
+        text: bool,
+    },
 }
 
 impl fmt::Debug for Value {
@@ -68,6 +91,7 @@ impl fmt::Debug for Value {
                 .field("case", case)
                 .field("values_len", &values.len())
                 .finish(),
+            Self::LargeValueEdit(edit) => f.debug_tuple("LargeValueEdit").field(edit).finish(),
             Self::Null => f.write_str("Null"),
         }
     }
@@ -95,6 +119,7 @@ enum ValueHuman {
     Array(Vec<ValueHuman>),
     Row(RowHuman),
     Enum(EnumHuman),
+    LargeValueEdit(LargeValueEdit),
     Null,
 }
 
@@ -239,6 +264,7 @@ impl From<&Value> for ValueHuman {
                 case: case.clone(),
                 values: values.iter().map(ValueHuman::from).collect(),
             }),
+            Value::LargeValueEdit(edit) => ValueHuman::LargeValueEdit(edit.clone()),
             Value::Null => ValueHuman::Null,
         }
     }
@@ -265,6 +291,7 @@ impl From<ValueHuman> for Value {
                 case: e.case,
                 values: e.values.into_iter().map(Value::from).collect(),
             },
+            ValueHuman::LargeValueEdit(edit) => Value::LargeValueEdit(edit),
             ValueHuman::Null => Value::Null,
         }
     }
@@ -329,6 +356,7 @@ impl PartialEq for Value {
                     values: b,
                 },
             ) => id_a == id_b && a == b,
+            (Value::LargeValueEdit(a), Value::LargeValueEdit(b)) => a == b,
             (Value::Null, Value::Null) => true,
             _ => false,
         }
@@ -363,6 +391,7 @@ impl Value {
             // Row type requires external schema, can't be inferred
             Value::Row { .. } => None,
             Value::Enum { .. } => None,
+            Value::LargeValueEdit(_) => None,
             Value::Null => None,
         }
     }

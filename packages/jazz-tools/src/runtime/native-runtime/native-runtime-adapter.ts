@@ -2981,6 +2981,7 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
     orderBy?: unknown;
     select?: unknown;
     select_columns?: unknown;
+    partial_value_selections?: unknown;
   };
   if (typeof parsed.table !== "string") {
     throw new Error("Native runtime only supports table queries in this slice");
@@ -2992,7 +2993,44 @@ function encodeQueryJson(queryJson: string, schema: WasmSchema): Uint8Array {
     orderBy: encoded.orderBy.concat(readRootOrderBy(parsed.order_by ?? parsed.orderBy)),
     select: readSelectColumns(parsed.select_columns ?? parsed.select ?? encoded.select),
     arraySubqueries: readQueryArraySubqueries(parsed.array_subqueries, parsed.table, schema),
+    partialValueSelections: readPartialValueSelections(parsed.partial_value_selections),
   });
+}
+
+function readPartialValueSelections(
+  value: unknown,
+): Record<string, { slice: { from: number; length: number } } | { pointer: string }> | undefined {
+  if (value == null) return undefined;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw unsupportedQueryEncodingError("partial_value_selections");
+  }
+  const result: Record<string, { slice: { from: number; length: number } } | { pointer: string }> =
+    {};
+  for (const [column, raw] of Object.entries(value)) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      throw unsupportedQueryEncodingError(`partial_value_selections.${column}`);
+    }
+    const selection = raw as Record<string, unknown>;
+    if (typeof selection.pointer === "string") {
+      result[column] = { pointer: selection.pointer };
+      continue;
+    }
+    const slice = selection.slice;
+    if (!slice || typeof slice !== "object" || Array.isArray(slice)) {
+      throw unsupportedQueryEncodingError(`partial_value_selections.${column}`);
+    }
+    const range = slice as Record<string, unknown>;
+    if (
+      !Number.isSafeInteger(range.from) ||
+      Number(range.from) < 0 ||
+      !Number.isSafeInteger(range.length) ||
+      Number(range.length) < 0
+    ) {
+      throw unsupportedQueryEncodingError(`partial_value_selections.${column}.slice`);
+    }
+    result[column] = { slice: { from: Number(range.from), length: Number(range.length) } };
+  }
+  return result;
 }
 
 function unsupportedQueryEncodingError(context?: string): Error {
@@ -5005,6 +5043,16 @@ function valueEqual(left: Value, right: Value | undefined): boolean {
         right.type === "Enum" &&
         left.value.case === right.value.case &&
         rowValuesEqual(left.value.values, right.value.values)
+      );
+    case "LargeValueEdit":
+      return (
+        right.type === "LargeValueEdit" &&
+        JSON.stringify(left.value, (_key, value) =>
+          value instanceof Uint8Array ? [...value] : value,
+        ) ===
+          JSON.stringify(right.value, (_key, value) =>
+            value instanceof Uint8Array ? [...value] : value,
+          )
       );
     case "Null":
       return right.type === "Null";

@@ -918,6 +918,9 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
       relation_ir: relation,
       ...(builder.includeDeleted ? { include_deleted: true } : {}),
       ...(projectedColumns ? { select_columns: projectedColumns } : {}),
+      ...(builder.partialValueSelections
+        ? { partial_value_selections: builder.partialValueSelections }
+        : {}),
     });
   }
 
@@ -930,6 +933,9 @@ export function translateQuery(builderJson: string, schema: WasmSchema): string 
     array_subqueries: arraySubqueries,
     ...(builder.includeDeleted ? { include_deleted: true } : {}),
     ...(projectedColumns ? { select_columns: projectedColumns } : {}),
+    ...(builder.partialValueSelections
+      ? { partial_value_selections: builder.partialValueSelections }
+      : {}),
     ...(orderBy.length > 0 ? { order_by: orderBy } : {}),
     ...(clientLimit !== undefined ? { limit: clientLimit } : {}),
     ...(clientOffset !== undefined ? { offset: clientOffset } : {}),

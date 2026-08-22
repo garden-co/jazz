@@ -324,7 +324,18 @@ where
             .schema
             .clone();
         let target_schema = &target_schema_version.schema;
-        for table_lens in &lens.table_lenses {
+        let source_version = catalogue
+            .catalogue_schemas
+            .get(&lens.source)
+            .ok_or(Error::InvalidStoredValue(
+                "source physical mapping schema missing",
+            ))?;
+        let effective_lens = Self::migration_lens_with_system_tables(
+            lens,
+            source_version,
+            target_schema_version,
+        );
+        for table_lens in &effective_lens.table_lenses {
             let source_table = source_mapping.tables.get(&table_lens.source_table).ok_or(
                 Error::InvalidStoredValue("source physical table mapping missing"),
             )?;
@@ -522,7 +533,12 @@ where
         target_mapping: &SchemaPhysicalMapping,
     ) -> Result<SchemaPhysicalMapping, Error> {
         let mut source_mapping = provisional_source_mapping.clone();
-        for table_lens in &lens.table_lenses {
+        let effective_lens = Self::migration_lens_with_system_tables(
+            lens,
+            source_schema_version,
+            target_schema_version,
+        );
+        for table_lens in &effective_lens.table_lenses {
             let provisional_source_table = source_mapping
                 .tables
                 .get(&table_lens.source_table)

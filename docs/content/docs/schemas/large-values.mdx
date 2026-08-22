@@ -44,7 +44,6 @@ and common editor APIs:
 const slice = { from: 1_000, length: 2_000 };
 const excerpt = await db.one(
   app.documents.where({ id: documentId }).select({
-    $version: true,
     body: { slice },
   }),
 );
@@ -70,7 +69,6 @@ Byte slices use byte offsets in every binding and return a detached `Uint8Array`
 ```ts
 const result = await db.one(
   app.documents.where({ id: documentId }).select({
-    $version: true,
     recording: { slice: { from: resumeAt, length: 64 * 1024 } },
     attachment: { slice: { from: 0, length: headerLength } },
   }),
@@ -98,9 +96,8 @@ Edits repeat the slice used for the read and express the edit position relative 
 those coordinates together is the caller's responsibility; no provenance is hidden inside the
 returned primitive.
 
-Select the row's `$version` with the slice and pass it as `ifVersion` when updating. This is a
-general row-level compare-and-swap condition. The mutation fails if any part of the row changed
-after the read.
+Like every Jazz update, a slice-relative edit uses the row's ordinary branch and conflict behavior.
+Whole-row compare-and-swap is intentionally outside this API.
 
 ### Edit text
 
@@ -110,26 +107,20 @@ In TypeScript, every text position is a UTF-16 code-unit count:
 const slice = { from: 1_000, length: 500 };
 const document = await db.one(
   app.documents.where({ id: documentId }).select({
-    $version: true,
     body: { slice },
   }),
 );
 
-db.update(
-  app.documents,
-  documentId,
-  {
-    body: {
-      splice: {
-        slice,
-        at: 120,
-        delete: 11,
-        insert: "large values",
-      },
+db.update(app.documents, documentId, {
+  body: {
+    splice: {
+      slice,
+      at: 120,
+      delete: 11,
+      insert: "large values",
     },
   },
-  { ifVersion: document!.$version },
-);
+});
 ```
 
 Use `delete: 0` to insert or `insert: ""` to delete. Passing a plain string replaces the whole
@@ -138,12 +129,9 @@ value. Rust offers corresponding `splice_utf8(...)` and `splice_utf16(...)` oper
 ### Append to a byte stream
 
 ```ts
-db.update(
-  app.documents,
-  documentId,
-  { recording: { append: nextAudioChunk } },
-  { ifVersion: document.$version },
-);
+db.update(app.documents, documentId, {
+  recording: { append: nextAudioChunk },
+});
 ```
 
 ### Edit a file
@@ -151,21 +139,16 @@ db.update(
 For bytes, every position is a byte offset:
 
 ```ts
-db.update(
-  app.documents,
-  documentId,
-  {
-    attachment: {
-      splice: {
-        slice: { from: 0, length: headerAndPreviewLength },
-        at: headerLength,
-        delete: oldPreviewLength,
-        insert: newPreviewBytes,
-      },
+db.update(app.documents, documentId, {
+  attachment: {
+    splice: {
+      slice: { from: 0, length: headerAndPreviewLength },
+      at: headerLength,
+      delete: oldPreviewLength,
+      insert: newPreviewBytes,
     },
   },
-  { ifVersion: document.$version },
-);
+});
 ```
 
 The same operation covers insertion, deletion, and replacement. Passing a plain `Uint8Array`
@@ -180,13 +163,28 @@ parse the base and both candidates to obtain a semantic, side-attributed diff.
 ## What happens underneath
 
 Small values live inline. Large values use an immutable, content-defined chunk tree plus a short
-tail of recent byte edits. Every tree records aggregate UTF-8 byte lengths. Text trees additionally
-record aggregate UTF-16 lengths. Resolving either coordinate system traverses those metrics in
-logarithmic time and scans only the target chunk.
+tail of recent byte edits. Every tree node is an ordinary Jazz row in a hidden, versioned table that
+Jazz derives from the application schema. The node row references its owning application row and
+inherits that row's read and write policy. The owner update and any new node rows are one Jazz
+transaction, and the rows travel through normal history, subscriptions, persistence, and sync.
+There is no second store, protocol, permission model, or synchronization mechanism.
+
+Applications never declare or migrate these generated tables themselves. Jazz derives their schema
+and migration lineage from the owning table; an incompatible future node layout uses a new reserved
+table version while old roots remain readable.
+
+The small root-and-tail descriptor still uses the column's existing storage type: bytes use a
+binary frame, while text and JSON use a tagged ASCII frame. That keeps schema history and lenses on
+the ordinary declared type; the bulk payload lives only in the hidden Jazz rows.
+
+Every tree records aggregate UTF-8 byte lengths. Text trees additionally record aggregate UTF-16
+lengths. The tree algorithm can resolve either coordinate system in logarithmic time and visit only
+the target chunks. The generated node tables are not exposed through `app.*`.
 
 An edit tail records its changes in both metrics. When the tail reaches a built-in bound, Jazz
-consolidates it into a new immutable tree and updates metrics only along rewritten paths. Range
-reads visit only relevant nodes and chunks, keeping memory proportional to the data being accessed.
+consolidates it into a new immutable tree and updates metrics only along rewritten paths. The first
+API preserves these partial-read semantics; planner-level streaming that avoids every intermediate
+full materialization is follow-up optimization work and is not promised by this draft.
 
 The tree and edit tail form one atomic cell in the owning row. Readers never combine the tree from
 one row version with edits from another, and all writes continue through normal Jazz row

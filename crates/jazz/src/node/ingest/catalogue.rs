@@ -708,7 +708,8 @@ where
         source: &SchemaVersion,
         target: &SchemaVersion,
     ) -> Result<(), Error> {
-        for table_lens in &lens.table_lenses {
+        let effective_lens = Self::migration_lens_with_system_tables(lens, source, target);
+        for table_lens in &effective_lens.table_lenses {
             let source_table = source
                 .schema
                 .tables
@@ -876,6 +877,43 @@ where
         Ok(())
     }
 
+    /// Add the generated ordinary-Jazz tables implied by application-table
+    /// lenses. They are runtime schema details, so authors neither declare nor
+    /// version them independently, while the catalogue still gives them the
+    /// same physical lineage as every other Jazz table.
+    pub(super) fn migration_lens_with_system_tables(
+        lens: &MigrationLens,
+        source: &SchemaVersion,
+        target: &SchemaVersion,
+    ) -> MigrationLens {
+        let mut effective = lens.clone();
+        for table_lens in &lens.table_lenses {
+            let source_name = crate::large_values::large_value_node_table_name(
+                &table_lens.source_table,
+            );
+            let target_name = crate::large_values::large_value_node_table_name(
+                &table_lens.target_table,
+            );
+            let source_has = source.schema.tables.iter().any(|table| table.name == source_name);
+            let target_has = target.schema.tables.iter().any(|table| table.name == target_name);
+            if source_has && target_has {
+                let ops = (source_name != target_name)
+                    .then(|| LensOp::RenameTable {
+                        from: source_name.clone(),
+                        to: target_name.clone(),
+                    })
+                    .into_iter()
+                    .collect();
+                effective.table_lenses.push(crate::protocol::TableLens {
+                    source_table: source_name,
+                    target_table: target_name,
+                    ops,
+                });
+            }
+        }
+        effective
+    }
+
     pub(super) fn validate_lineage_table_partition(
         source: &JazzSchema,
         target: &JazzSchema,
@@ -883,14 +921,19 @@ where
         new_tables: &[String],
         dropped_tables: &[String],
     ) -> Result<(), Error> {
+        let is_application_table = |name: &str| {
+            !name.starts_with(crate::large_values::LARGE_VALUE_NODE_TABLE_PREFIX)
+        };
         let source_tables = source
             .tables
             .iter()
+            .filter(|table| is_application_table(&table.name))
             .map(|table| table.name.clone())
             .collect::<BTreeSet<_>>();
         let target_tables = target
             .tables
             .iter()
+            .filter(|table| is_application_table(&table.name))
             .map(|table| table.name.clone())
             .collect::<BTreeSet<_>>();
         let related_source = lens
@@ -903,12 +946,28 @@ where
             .iter()
             .map(|table| table.target_table.clone())
             .collect::<BTreeSet<_>>();
-        let new = new_tables.iter().cloned().collect::<BTreeSet<_>>();
-        let dropped = dropped_tables.iter().cloned().collect::<BTreeSet<_>>();
+        let new = new_tables
+            .iter()
+            .filter(|name| is_application_table(name))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let dropped = dropped_tables
+            .iter()
+            .filter(|name| is_application_table(name))
+            .cloned()
+            .collect::<BTreeSet<_>>();
         if related_source.len() != lens.table_lenses.len()
             || related_target.len() != lens.table_lenses.len()
-            || new.len() != new_tables.len()
-            || dropped.len() != dropped_tables.len()
+            || new.len()
+                != new_tables
+                    .iter()
+                    .filter(|name| is_application_table(name))
+                    .count()
+            || dropped.len()
+                != dropped_tables
+                    .iter()
+                    .filter(|name| is_application_table(name))
+                    .count()
             || !related_source.is_disjoint(&dropped)
             || !related_target.is_disjoint(&new)
             || related_source

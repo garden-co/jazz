@@ -255,6 +255,9 @@ fn hash_value(hasher: &mut blake3::Hasher, value: &Value) {
                 hash_value(hasher, inner);
             }
         }
+        Value::LargeValueEdit(_) => {
+            panic!("large-value edit operations cannot be branch-key values")
+        }
         Value::Null => {
             hasher.update(&[9]);
         }
