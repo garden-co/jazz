@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "crates/benchmark-guard",
+  "crates/idb-tree",
   "crates/groove",
   "crates/jazz",
   "crates/jazz-compression",
