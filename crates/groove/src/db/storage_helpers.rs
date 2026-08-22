@@ -472,6 +472,28 @@ impl<S> OrderedKvStorage for MeteredStorage<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn scan(
+        &self,
+        request: crate::storage::ScanRequest,
+    ) -> crate::storage::StorageFuture<
+        '_,
+        Result<crate::storage::StorageScan<'_>, crate::storage::Error>,
+    > {
+        let cf = request.cf.clone();
+        let metric_key = match &request.bounds {
+            crate::storage::ScanBounds::Prefix(prefix) => prefix.clone(),
+            crate::storage::ScanBounds::Range { start, .. } => start.clone(),
+        };
+        self.metrics.borrow_mut().record_range(&cf, &metric_key);
+        Box::pin(async move {
+            Ok(Box::new(MeteredStorageCursor {
+                inner: self.storage.scan(request).await?,
+                column_family: cf,
+                metrics: &self.metrics,
+            }) as crate::storage::StorageScan<'_>)
+        })
+    }
+
     fn close(&self) -> crate::storage::StorageFuture<'_, Result<(), crate::storage::Error>> {
         self.storage.close()
     }
