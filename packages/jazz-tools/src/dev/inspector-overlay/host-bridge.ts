@@ -1,4 +1,4 @@
-import { resolveBrokerWorkerUrl } from "../../runtime/browser-broker-client.js";
+import { resolveBrowserWorkerUrl } from "../../runtime/browser-worker-config.js";
 import type { Db, DbConfig } from "../../runtime/db.js";
 import { resolveDefaultPersistentDbName } from "../../runtime/db.js";
 import { getRegisteredWasmSchema } from "../../typed-app.js";
@@ -35,7 +35,7 @@ function buildOverlayDbConfig(config: DbConfig): DbConfig {
     driver: { type: "persistent", dbName: resolveDefaultPersistentDbName(config) },
     // A SharedWorker is identified by URL + name. Forward the exact resolved
     // URL so the separately-built overlay joins the existing worker.
-    runtimeSources: { brokerWorkerUrl: resolveBrokerWorkerUrl(config.runtimeSources) },
+    runtimeSources: { brokerWorkerUrl: resolveBrowserWorkerUrl(config.runtimeSources) },
   };
 }
 

@@ -1,4 +1,4 @@
-import { resolveBrokerWorkerUrl } from "../browser-broker-client.js";
+import { resolveBrowserWorkerUrl } from "../browser-worker-config.js";
 import type { BrowserWorkerConnection, BrowserWorkerConnectionContext } from "../runtime-source.js";
 import { MessagePortBrowserFollowerConnection } from "./browser-follower-connection.js";
 import type {
@@ -26,7 +26,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
   ) {
     this.worker =
       options.runtimeSources?.brokerWorkerUrl || options.runtimeSources?.baseUrl
-        ? new SharedWorker(resolveBrokerWorkerUrl(options.runtimeSources), {
+        ? new SharedWorker(resolveBrowserWorkerUrl(options.runtimeSources), {
             type: "module",
             name: `jazz-runtime:${options.appId}:${options.dbName}`,
           })
