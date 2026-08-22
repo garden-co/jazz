@@ -909,7 +909,7 @@ mod tests {
         // when it selects the shared/default branch-local row.
         assert_eq!(
             validated.shape_id().0.to_string(),
-            "b0dc6f46-cbc2-5003-928c-f607d7943c77"
+            "0bc64b6e-4f17-59eb-9636-33b72a9f67be"
         );
     }
 }
