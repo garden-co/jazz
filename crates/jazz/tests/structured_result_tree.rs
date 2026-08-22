@@ -5,7 +5,7 @@ mod common;
 use jazz::block_on;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
 use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
+use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorId, NodeUuid};
 use jazz::query::{ArraySubquery, OrderDirection, Query, col, eq, param};
 use jazz::result_tree::ResultRelation;
@@ -41,7 +41,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_db() -> Db<MemoryStorage> {
+fn open_db() -> Db<TestStorage> {
     let schema = schema();
     let column_families = schema.column_families();
     let references = column_families
@@ -51,7 +51,7 @@ fn open_db() -> Db<MemoryStorage> {
     block_on(Db::open(
         DbConfig::new(
             schema,
-            MemoryStorage::new(&references),
+            TestStorage::new(&references),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x71; 16]),
                 author: AuthorId::from_bytes([0x72; 16]),
@@ -81,40 +81,39 @@ fn children<'a>(
 #[test]
 fn nested_tree_preserves_projection_order_offset_and_reset() {
     let db = open_db();
-    let parent = db
-        .insert(
-            "parents",
-            BTreeMap::from([
-                ("title".to_owned(), Value::String("parent".to_owned())),
-                ("rank".to_owned(), Value::I32(0)),
-            ]),
-        )
-        .expect("insert parent")
-        .row_uuid();
+    let parent = block_on(db.insert(
+        "parents",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("parent".to_owned())),
+            ("rank".to_owned(), Value::I32(0)),
+        ]),
+    ))
+    .expect("insert parent")
+    .row_uuid();
     let mut child_ids = Vec::new();
     for (rank, label) in [(0, "first"), (1, "second"), (2, "third")] {
         child_ids.push(
-            db.insert(
+            block_on(db.insert(
                 "children",
                 BTreeMap::from([
                     ("parent_id".to_owned(), Value::Uuid(parent.0)),
                     ("label".to_owned(), Value::String(label.to_owned())),
                     ("rank".to_owned(), Value::I32(rank)),
                 ]),
-            )
+            ))
             .expect("insert child")
             .row_uuid(),
         );
     }
     for (rank, label) in [(0, "hidden"), (1, "visible")] {
-        db.insert(
+        block_on(db.insert(
             "grandchildren",
             BTreeMap::from([
                 ("child_id".to_owned(), Value::Uuid(child_ids[1].0)),
                 ("label".to_owned(), Value::String(label.to_owned())),
                 ("rank".to_owned(), Value::I32(rank)),
             ]),
-        )
+        ))
         .expect("insert grandchild");
     }
 
@@ -208,35 +207,33 @@ fn nested_tree_preserves_projection_order_offset_and_reset() {
 #[test]
 fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
     let db = open_db();
-    let matching_parent = db
-        .insert(
-            "parents",
-            BTreeMap::from([
-                ("title".to_owned(), Value::String("matching".to_owned())),
-                ("rank".to_owned(), Value::I32(7)),
-            ]),
-        )
-        .expect("insert matching parent")
-        .row_uuid();
-    db.insert(
+    let matching_parent = block_on(db.insert(
+        "parents",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("matching".to_owned())),
+            ("rank".to_owned(), Value::I32(7)),
+        ]),
+    ))
+    .expect("insert matching parent")
+    .row_uuid();
+    block_on(db.insert(
         "parents",
         BTreeMap::from([
             ("title".to_owned(), Value::String("other".to_owned())),
             ("rank".to_owned(), Value::I32(8)),
         ]),
-    )
+    ))
     .expect("insert non-matching parent");
-    let initial_child = db
-        .insert(
-            "children",
-            BTreeMap::from([
-                ("parent_id".to_owned(), Value::Uuid(matching_parent.0)),
-                ("label".to_owned(), Value::String("initial".to_owned())),
-                ("rank".to_owned(), Value::I32(0)),
-            ]),
-        )
-        .expect("insert initial child")
-        .row_uuid();
+    let initial_child = block_on(db.insert(
+        "children",
+        BTreeMap::from([
+            ("parent_id".to_owned(), Value::Uuid(matching_parent.0)),
+            ("label".to_owned(), Value::String("initial".to_owned())),
+            ("rank".to_owned(), Value::I32(0)),
+        ]),
+    ))
+    .expect("insert initial child")
+    .row_uuid();
 
     let query = Query::from("parents")
         .filter(eq(col("rank"), param("rank")))
@@ -271,17 +268,16 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
     };
     assert_eq!(child.get_idx(0), Ok(Value::Uuid(initial_child.0)));
 
-    let _added_child = db
-        .insert(
-            "children",
-            BTreeMap::from([
-                ("parent_id".to_owned(), Value::Uuid(matching_parent.0)),
-                ("label".to_owned(), Value::String("later".to_owned())),
-                ("rank".to_owned(), Value::I32(1)),
-            ]),
-        )
-        .expect("insert later child")
-        .row_uuid();
+    let _added_child = block_on(db.insert(
+        "children",
+        BTreeMap::from([
+            ("parent_id".to_owned(), Value::Uuid(matching_parent.0)),
+            ("label".to_owned(), Value::String("later".to_owned())),
+            ("rank".to_owned(), Value::I32(1)),
+        ]),
+    ))
+    .expect("insert later child")
+    .row_uuid();
     let SubscriptionEvent::Delta {
         reset,
         added,
@@ -312,24 +308,23 @@ fn maintained_array_subscription_with_root_parameter_lowers_and_delivers() {
 #[test]
 fn omitted_array_limit_is_unbounded_for_prepare_read_and_subscribe() {
     let db = open_db();
-    let parent = db
-        .insert(
-            "parents",
-            BTreeMap::from([
-                ("title".to_owned(), Value::String("parent".to_owned())),
-                ("rank".to_owned(), Value::I32(0)),
-            ]),
-        )
-        .expect("insert parent")
-        .row_uuid();
-    db.insert(
+    let parent = block_on(db.insert(
+        "parents",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("parent".to_owned())),
+            ("rank".to_owned(), Value::I32(0)),
+        ]),
+    ))
+    .expect("insert parent")
+    .row_uuid();
+    block_on(db.insert(
         "children",
         BTreeMap::from([
             ("parent_id".to_owned(), Value::Uuid(parent.0)),
             ("label".to_owned(), Value::String("child".to_owned())),
             ("rank".to_owned(), Value::I32(0)),
         ]),
-    )
+    ))
     .expect("insert child");
 
     let unbounded_query = child_query(ArraySubquery::new(
@@ -380,26 +375,25 @@ fn omitted_array_limit_is_unbounded_for_prepare_read_and_subscribe() {
 #[test]
 fn large_parent_is_materialized_atomically_without_a_frame_bound() {
     let db = open_db();
-    let parent = db
-        .insert(
-            "parents",
-            BTreeMap::from([
-                ("title".to_owned(), Value::String("parent".to_owned())),
-                ("rank".to_owned(), Value::I32(0)),
-            ]),
-        )
-        .expect("insert parent")
-        .row_uuid();
+    let parent = block_on(db.insert(
+        "parents",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("parent".to_owned())),
+            ("rank".to_owned(), Value::I32(0)),
+        ]),
+    ))
+    .expect("insert parent")
+    .row_uuid();
     let payload = "x".repeat(jazz::protocol_limits::MAX_WIRE_FRAME_BYTES + 1024);
     for rank in 0..2 {
-        db.insert(
+        block_on(db.insert(
             "children",
             BTreeMap::from([
                 ("parent_id".to_owned(), Value::Uuid(parent.0)),
                 ("label".to_owned(), Value::String(payload.clone())),
                 ("rank".to_owned(), Value::I32(rank)),
             ]),
-        )
+        ))
         .expect("insert individually valid child");
     }
     let prepared = db

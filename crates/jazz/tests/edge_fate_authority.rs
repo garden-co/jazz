@@ -12,7 +12,7 @@ use jazz::db::{
     Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts, WireTransportAdapter, block_on,
 };
 use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
+use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::schema::JazzSchema;
@@ -52,23 +52,23 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_db(node_byte: u8, author: AuthorId, schema: &JazzSchema) -> Db<MemoryStorage> {
+fn open_db(node_byte: u8, author: AuthorId, schema: &JazzSchema) -> Db<TestStorage> {
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(DbConfig::new(
         schema.clone(),
-        MemoryStorage::new(&refs),
+        TestStorage::new(&refs),
         identity(node_byte, author),
     )))
     .unwrap()
 }
 
-fn open_core(node_byte: u8, schema: &JazzSchema) -> Db<MemoryStorage> {
+fn open_core(node_byte: u8, schema: &JazzSchema) -> Db<TestStorage> {
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open_history_complete(DbConfig::new(
         schema.clone(),
-        MemoryStorage::new(&refs),
+        TestStorage::new(&refs),
         identity(node_byte, AuthorId::SYSTEM),
     )))
     .unwrap()
@@ -108,7 +108,7 @@ impl WireTransport for QueuedWireTransport {
 
 fn connect_client_to_edge(
     edge: &mut InMemoryServerShell,
-    client: &Db<MemoryStorage>,
+    client: &Db<TestStorage>,
     client_wire: &QueuedWireTransport,
     identity: AuthorId,
 ) -> ServerSession {
@@ -117,21 +117,21 @@ fn connect_client_to_edge(
 }
 
 fn pump_client_edge(
-    client: &Db<MemoryStorage>,
+    client: &Db<TestStorage>,
     wire: &QueuedWireTransport,
     edge: &mut InMemoryServerShell,
     session: ServerSession,
 ) {
-    client.tick().unwrap();
+    block_on(client.tick()).unwrap();
     edge.receive_frames(session, wire.drain_outbound()).unwrap();
     edge.tick().unwrap();
     for frame in edge.take_frames(session).unwrap() {
         wire.push_inbound(frame);
     }
-    client.tick().unwrap();
+    block_on(client.tick()).unwrap();
 }
 
-fn visible_titles(db: &Db<MemoryStorage>, tier: DurabilityTier) -> Vec<String> {
+fn visible_titles(db: &Db<TestStorage>, tier: DurabilityTier) -> Vec<String> {
     let query = Query::from("todos");
     let prepared = db.prepare_query(&query).unwrap();
     block_on(db.all(
@@ -188,12 +188,11 @@ fn edge_shell_does_not_report_global_or_serve_global_before_core_ack() {
     pump_client_edge(&bob, &bob_wire, &mut edge, bob_session);
     while bob_global_subscription.try_next_event().is_some() {}
 
-    let write = alice
-        .insert(
-            "todos",
-            BTreeMap::from([("title".to_owned(), Value::String("edge only".to_owned()))]),
-        )
-        .unwrap();
+    let write = block_on(alice.insert(
+        "todos",
+        BTreeMap::from([("title".to_owned(), Value::String("edge only".to_owned()))]),
+    ))
+    .unwrap();
     pump_client_edge(&alice, &alice_wire, &mut edge, alice_session);
     pump_client_edge(&bob, &bob_wire, &mut edge, bob_session);
 
@@ -254,12 +253,11 @@ fn core_shell_client_upload_still_reports_global_immediately() {
     assert!(updated.is_empty());
     assert!(removed.is_empty());
 
-    let write = alice
-        .insert(
-            "todos",
-            BTreeMap::from([("title".to_owned(), Value::String("core global".to_owned()))]),
-        )
-        .unwrap();
+    let write = block_on(alice.insert(
+        "todos",
+        BTreeMap::from([("title".to_owned(), Value::String("core global".to_owned()))]),
+    ))
+    .unwrap();
     pump_client_edge(&alice, &alice_wire, &mut core, alice_session);
     pump_client_edge(&bob, &bob_wire, &mut core, bob_session);
 
@@ -318,17 +316,16 @@ fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
     // Keep every transaction identity distinct and the LWW order explicit:
     // TxId includes each client's already-distinct node id plus this HLC time.
     let row = RowUuid::from_bytes([0xd2; 16]);
-    alice
-        .insert_with_id_at_ms(
-            "todos",
-            row,
-            BTreeMap::from([
-                ("title".to_owned(), Value::String("base".to_owned())),
-                ("completed".to_owned(), Value::Bool(false)),
-            ]),
-            100,
-        )
-        .unwrap();
+    block_on(alice.insert_with_id_at_ms(
+        "todos",
+        row,
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("base".to_owned())),
+            ("completed".to_owned(), Value::Bool(false)),
+        ]),
+        100,
+    ))
+    .unwrap();
     pump_client_edge(&alice, &alice_wire, &mut core, alice_session);
 
     let prepared = bob.prepare_query(&Query::from("todos")).unwrap();
@@ -341,30 +338,27 @@ fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
 
     // Neither client is pumped after these writes until both heads exist, so
     // they remain concurrent children of the shared t=100 base.
-    alice
-        .update_at_ms(
-            "todos",
-            row,
-            BTreeMap::from([
-                ("title".to_owned(), Value::String("alice-change".to_owned())),
-                ("completed".to_owned(), Value::Bool(true)),
-            ]),
-            200,
-        )
-        .unwrap();
-    let explicit_write = bob
-        .update_at_ms(
-            "todos",
-            row,
-            BTreeMap::from([("title".to_owned(), Value::String("base".to_owned()))]),
-            300,
-        )
-        .unwrap();
+    block_on(alice.update_at_ms(
+        "todos",
+        row,
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("alice-change".to_owned())),
+            ("completed".to_owned(), Value::Bool(true)),
+        ]),
+        200,
+    ))
+    .unwrap();
+    let explicit_write = block_on(bob.update_at_ms(
+        "todos",
+        row,
+        BTreeMap::from([("title".to_owned(), Value::String("base".to_owned()))]),
+        300,
+    ))
+    .unwrap();
     // An empty partial update is not a content mutation. It reuses the current
     // write identity instead of emitting a newer legacy "all materialized cells
     // authored" version that could clobber Alice's cells during reconciliation.
-    let no_op = bob
-        .update_at_ms("todos", row, BTreeMap::new(), 400)
+    let no_op = block_on(bob.update_at_ms("todos", row, BTreeMap::new(), 400))
         .expect("empty patch remains a safe no-op");
     assert_eq!(no_op.mergeable_tx_id(), explicit_write.mergeable_tx_id());
 

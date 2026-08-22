@@ -4,11 +4,33 @@ use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
 use groove::records::{EnumValue, RecordDescriptor, ValueType};
-use groove::storage::{OrderedKvStorage, ReopenableStorage};
-use jazz_storage_rocksdb::RocksDbStorage;
+use groove::storage::{OrderedKvStorage, ReopenableStorage, YieldingStorage};
+use jazz_storage_rocksdb::RocksDbStorage as ImmediateRocksDbStorage;
+use std::path::Path;
+
+type RocksDbStorage = YieldingStorage<ImmediateRocksDbStorage>;
+
+trait TestRocksOpen: Sized {
+    fn open(
+        path: impl AsRef<Path>,
+        column_families: &[&str],
+    ) -> Result<Self, groove::storage::Error>;
+}
+
+impl TestRocksOpen for RocksDbStorage {
+    fn open(
+        path: impl AsRef<Path>,
+        column_families: &[&str],
+    ) -> Result<Self, groove::storage::Error> {
+        ImmediateRocksDbStorage::open(path, column_families).map(YieldingStorage::wrap)
+    }
+}
 
 use super::*;
 use crate::ids::{AuthorId, NodeUuid};
+use crate::legacy_test_future::{
+    FutureResolveExt as _, OptionFutureExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
+};
 use crate::protocol::{
     AuthorizationScopePurpose, AuthorizationScopeReceipt, AuthorizationSupportScopeKey,
     BindingViewKey, CatalogueAck, KnownStateCompleteness, KnownStateDeclaration, LensOp,
@@ -53,8 +75,8 @@ use crate::wire::{
 };
 
 use super::peer_connection::{
-    PendingRowVersionRepair, aggregate_authorization_scope_bounds,
-    authorization_scope_receipt_matches_transport_context,
+    PendingRowVersionRepair, SubscriberConnectionState, UpstreamConnectionState,
+    aggregate_authorization_scope_bounds, authorization_scope_receipt_matches_transport_context,
     authorization_scope_support_options_match, remove_scope_aggregate_member, view_update_is_empty,
 };
 use catalogue::assert_authority_rejects_staged_write;

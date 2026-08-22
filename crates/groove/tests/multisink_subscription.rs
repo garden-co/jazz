@@ -25,11 +25,13 @@ fn albums_schema() -> DatabaseSchema {
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))])
 }
 
-fn database() -> Database<MemoryStorage> {
-    Database::new(albums_schema(), MemoryStorage::new(&["albums"])).unwrap()
+async fn database() -> Database {
+    Database::new(albums_schema(), MemoryStorage::new(&["albums"]))
+        .await
+        .unwrap()
 }
 
-fn insert_album(db: &mut Database<MemoryStorage>, id: u64, title: &str, year: u64) {
+async fn insert_album(db: &mut Database, id: u64, title: &str, year: u64) {
     let mut batch = db.open_batch();
     batch.insert(
         "albums",
@@ -39,7 +41,9 @@ fn insert_album(db: &mut Database<MemoryStorage>, id: u64, title: &str, year: u6
             Value::U64(year),
         ],
     );
-    db.commit_batch(batch).unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 }
 
 fn project_schema() -> DatabaseSchema {
@@ -75,8 +79,10 @@ fn route_descriptor() -> RecordDescriptor {
     ])
 }
 
-fn project_database() -> Database<MemoryStorage> {
-    Database::new(project_schema(), MemoryStorage::new(&["docs", "comments"])).unwrap()
+async fn project_database() -> Database {
+    Database::new(project_schema(), MemoryStorage::new(&["docs", "comments"]))
+        .await
+        .unwrap()
 }
 
 fn project_bindings() -> GraphBuilder {
@@ -196,13 +202,15 @@ fn insert_comment(
     );
 }
 
-#[test]
-fn routed_terminal_can_select_a_nonprefix_binding_value() {
-    let mut db = project_database();
+#[futures_test::test]
+async fn routed_terminal_can_select_a_nonprefix_binding_value() {
+    let mut db = project_database().await;
     let mut batch = db.open_batch();
     insert_doc(&mut batch, 1, 10, 20, "Spec");
     insert_doc(&mut batch, 2, 11, 21, "Roadmap");
-    db.commit_batch(batch).unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     let shape = db
         .prepare(
@@ -210,9 +218,11 @@ fn routed_terminal_can_select_a_nonprefix_binding_value() {
             "project_route",
             route_descriptor(),
         )
+        .await
         .unwrap();
     let project_21 = db
         .bind_shape(shape.id(), &[Value::U64(11), Value::U64(21)])
+        .await
         .unwrap();
 
     assert_eq!(
@@ -227,14 +237,16 @@ fn routed_terminal_can_select_a_nonprefix_binding_value() {
     );
 }
 
-#[test]
-fn prepared_routed_multisink_combines_binding_sets_with_user_output_routings() {
-    let mut db = project_database();
+#[futures_test::test]
+async fn prepared_routed_multisink_combines_binding_sets_with_user_output_routings() {
+    let mut db = project_database().await;
     let mut batch = db.open_batch();
     insert_doc(&mut batch, 1, 10, 20, "Spec");
     insert_doc(&mut batch, 2, 10, 21, "Roadmap");
     insert_doc(&mut batch, 3, 11, 20, "Other org");
-    db.commit_batch(batch).unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     let shape = db
         .prepare(
@@ -242,10 +254,12 @@ fn prepared_routed_multisink_combines_binding_sets_with_user_output_routings() {
             "project_route",
             route_descriptor(),
         )
+        .await
         .unwrap();
 
     let project_20 = db
         .bind_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
+        .await
         .unwrap();
     let initial_20 = project_20.recv().unwrap();
     assert_eq!(initial_20.sinks.len(), 2);
@@ -260,6 +274,7 @@ fn prepared_routed_multisink_combines_binding_sets_with_user_output_routings() {
 
     let project_21 = db
         .bind_shape(shape.id(), &[Value::U64(10), Value::U64(21)])
+        .await
         .unwrap();
     assert!(
         matches!(project_20.try_recv(), Err(TryRecvError::Empty)),
@@ -277,6 +292,7 @@ fn prepared_routed_multisink_combines_binding_sets_with_user_output_routings() {
 
     let project_20_again = db
         .bind_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
+        .await
         .unwrap();
     assert!(
         matches!(project_20.try_recv(), Err(TryRecvError::Empty)),
@@ -304,7 +320,9 @@ fn prepared_routed_multisink_combines_binding_sets_with_user_output_routings() {
     insert_doc(&mut batch, 4, 10, 20, "Design");
     insert_doc(&mut batch, 5, 10, 21, "Launch");
     insert_doc(&mut batch, 6, 10, 22, "Wrong project");
-    db.commit_batch(batch).unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     let tick_20 = project_20.recv().unwrap();
     assert_eq!(
@@ -337,10 +355,10 @@ fn prepared_routed_multisink_combines_binding_sets_with_user_output_routings() {
     );
 }
 
-#[test]
-fn multisink_subscription_delivers_initial_and_tick_deltas_for_all_sinks() {
-    let mut db = database();
-    insert_album(&mut db, 1, "Kind of Blue", 1959);
+#[futures_test::test]
+async fn multisink_subscription_delivers_initial_and_tick_deltas_for_all_sinks() {
+    let mut db = database().await;
+    insert_album(&mut db, 1, "Kind of Blue", 1959).await;
 
     let subscription = db
         .subscribe([
@@ -350,6 +368,7 @@ fn multisink_subscription_delivers_initial_and_tick_deltas_for_all_sinks() {
                 GraphBuilder::table("albums").project(["id", "year"]),
             ),
         ])
+        .await
         .unwrap();
 
     let initial = subscription.recv().unwrap();
@@ -369,7 +388,7 @@ fn multisink_subscription_delivers_initial_and_tick_deltas_for_all_sinks() {
         [(vec![Value::U64(1), Value::U64(1959)], 1)]
     );
 
-    insert_album(&mut db, 2, "Blue Train", 1957);
+    insert_album(&mut db, 2, "Blue Train", 1957).await;
 
     let tick = subscription.recv().unwrap();
     assert_eq!(tick.sinks.len(), 2);
@@ -390,9 +409,9 @@ fn multisink_subscription_delivers_initial_and_tick_deltas_for_all_sinks() {
     );
 }
 
-#[test]
-fn unsubscribing_multisink_subscription_closes_the_whole_stream() {
-    let mut db = database();
+#[futures_test::test]
+async fn unsubscribing_multisink_subscription_closes_the_whole_stream() {
+    let mut db = database().await;
     let subscription = db
         .subscribe([
             ("rows", GraphBuilder::table("albums")),
@@ -401,13 +420,14 @@ fn unsubscribing_multisink_subscription_closes_the_whole_stream() {
                 GraphBuilder::table("albums").project(["id", "year"]),
             ),
         ])
+        .await
         .unwrap();
     let initial = subscription.recv().unwrap();
     assert!(initial.get("rows").unwrap().is_empty());
     assert!(initial.get("years").unwrap().is_empty());
 
-    assert!(db.unsubscribe(subscription.id()));
-    insert_album(&mut db, 1, "Kind of Blue", 1959);
+    assert!(db.unsubscribe(subscription.id()).await);
+    insert_album(&mut db, 1, "Kind of Blue", 1959).await;
 
     assert!(matches!(
         subscription.try_recv(),
@@ -415,9 +435,9 @@ fn unsubscribing_multisink_subscription_closes_the_whole_stream() {
     ));
 }
 
-#[test]
-fn routed_multisink_binding_sets_filter_in_graph_and_project_public_sinks() {
-    let mut db = project_database();
+#[futures_test::test]
+async fn routed_multisink_binding_sets_filter_in_graph_and_project_public_sinks() {
+    let mut db = project_database().await;
     let mut batch = db.open_batch();
     insert_doc(&mut batch, 1, 10, 20, "Spec");
     insert_doc(&mut batch, 2, 10, 21, "Roadmap");
@@ -425,14 +445,18 @@ fn routed_multisink_binding_sets_filter_in_graph_and_project_public_sinks() {
     insert_comment(&mut batch, 11, 10, 20, 1, "looks good");
     insert_comment(&mut batch, 12, 10, 21, 2, "ship it");
     insert_comment(&mut batch, 13, 10, 22, 1, "wrong project");
-    db.commit_batch(batch).unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     let shape = db
         .prepare(routed_terminals(), "project_route", route_descriptor())
+        .await
         .unwrap();
 
     let project_20 = db
         .bind_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
+        .await
         .unwrap();
     let initial_20 = project_20.recv().unwrap();
     assert_eq!(initial_20.sinks.len(), 2);
@@ -454,6 +478,7 @@ fn routed_multisink_binding_sets_filter_in_graph_and_project_public_sinks() {
 
     let project_21 = db
         .bind_shape(shape.id(), &[Value::U64(10), Value::U64(21)])
+        .await
         .unwrap();
     assert!(project_20.try_recv().is_err());
     let initial_21 = project_21.recv().unwrap();
@@ -479,7 +504,9 @@ fn routed_multisink_binding_sets_filter_in_graph_and_project_public_sinks() {
     insert_doc(&mut batch, 5, 10, 21, "Launch");
     insert_comment(&mut batch, 15, 10, 21, 5, "approved");
     insert_doc(&mut batch, 6, 11, 20, "Ignored");
-    db.commit_batch(batch).unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     let tick_20 = project_20.recv().unwrap();
     assert_eq!(
@@ -516,15 +543,17 @@ fn routed_multisink_binding_sets_filter_in_graph_and_project_public_sinks() {
     );
 }
 
-#[test]
-fn dropped_routed_multisink_receiver_retracts_binding_before_rebind() {
-    let mut db = project_database();
+#[futures_test::test]
+async fn dropped_routed_multisink_receiver_retracts_binding_before_rebind() {
+    let mut db = project_database().await;
     let shape = db
         .prepare(routed_terminals(), "project_route", route_descriptor())
+        .await
         .unwrap();
 
     let dropped = db
         .bind_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
+        .await
         .unwrap();
     let initial = dropped.recv().unwrap();
     assert!(initial.get("docs").unwrap().is_empty());
@@ -532,10 +561,13 @@ fn dropped_routed_multisink_receiver_retracts_binding_before_rebind() {
 
     let mut batch = db.open_batch();
     insert_doc(&mut batch, 1, 10, 20, "Spec");
-    db.commit_batch(batch).unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     let rebound = db
         .bind_shape(shape.id(), &[Value::U64(10), Value::U64(20)])
+        .await
         .unwrap();
     assert_eq!(
         rebound
@@ -550,7 +582,9 @@ fn dropped_routed_multisink_receiver_retracts_binding_before_rebind() {
 
     let mut batch = db.open_batch();
     insert_doc(&mut batch, 2, 10, 20, "Design");
-    db.commit_batch(batch).unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
     assert_eq!(
         rebound
             .recv()

@@ -2,12 +2,12 @@
 
 use super::*;
 
-#[test]
-fn query_subscriptions_receive_filtered_projected_messages() {
+#[futures_test::test]
+async fn query_subscriptions_receive_filtered_projected_messages() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_query(select_query(
             Select::new([SelectItem::expr(col("title"))])
@@ -18,6 +18,7 @@ fn query_subscriptions_receive_filtered_projected_messages() {
                     Expr::Literal(Value::U64(10)),
                 )),
         ))
+        .await
         .unwrap();
 
     let mut batch = database.open_batch();
@@ -29,7 +30,7 @@ fn query_subscriptions_receive_filtered_projected_messages() {
         "albums",
         vec![Value::U64(11), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription_id),
@@ -37,17 +38,18 @@ fn query_subscriptions_receive_filtered_projected_messages() {
     );
 }
 
-#[test]
-fn query_projection_aliases_drive_output_schema() {
+#[futures_test::test]
+async fn query_projection_aliases_drive_output_schema() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_query(select_query(
             Select::new([SelectItem::aliased(col("title"), "album_title")])
                 .from([TableRef::named("albums")]),
         ))
+        .await
         .unwrap();
     let output = database
         .ivm_runtime
@@ -60,7 +62,7 @@ fn query_projection_aliases_drive_output_schema() {
         "albums",
         vec![Value::U64(11), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription_id),
@@ -68,12 +70,12 @@ fn query_projection_aliases_drive_output_schema() {
     );
 }
 
-#[test]
-fn query_subscriptions_can_read_from_simple_ctes() {
+#[futures_test::test]
+async fn query_subscriptions_can_read_from_simple_ctes() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let cte = Cte::new(
         "recent",
         select_query(
@@ -94,6 +96,7 @@ fn query_subscriptions_can_read_from_simple_ctes() {
                     .from([TableRef::named("recent")]),
             ),
         ))))
+        .await
         .unwrap();
 
     let mut batch = database.open_batch();
@@ -105,7 +108,7 @@ fn query_subscriptions_can_read_from_simple_ctes() {
         "albums",
         vec![Value::U64(10), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription_id),
@@ -113,12 +116,12 @@ fn query_subscriptions_can_read_from_simple_ctes() {
     );
 }
 
-#[test]
-fn query_subscriptions_support_literal_on_left_predicates() {
+#[futures_test::test]
+async fn query_subscriptions_support_literal_on_left_predicates() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_query(select_query(
             Select::new([SelectItem::expr(col("title"))])
@@ -129,6 +132,7 @@ fn query_subscriptions_support_literal_on_left_predicates() {
                     col("id"),
                 )),
         ))
+        .await
         .unwrap();
 
     let mut batch = database.open_batch();
@@ -140,7 +144,7 @@ fn query_subscriptions_support_literal_on_left_predicates() {
         "albums",
         vec![Value::U64(11), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription_id),
@@ -148,15 +152,17 @@ fn query_subscriptions_support_literal_on_left_predicates() {
     );
 }
 
-#[test]
-fn query_subscriptions_support_multi_key_inner_joins() {
+#[futures_test::test]
+async fn query_subscriptions_support_multi_key_inner_joins() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(tenant_albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(tenant_albums_artists_schema(), storage)
+        .await
+        .unwrap();
     let join = TableRef::Join {
         left: Box::new(TableRef::named("albums").aliased("a")),
         right: Box::new(TableRef::named("artists").aliased("r")),
@@ -175,6 +181,7 @@ fn query_subscriptions_support_multi_key_inner_joins() {
             ])
             .from([join]),
         ))
+        .await
         .unwrap();
 
     let mut batch = database.open_batch();
@@ -194,7 +201,7 @@ fn query_subscriptions_support_multi_key_inner_joins() {
             Value::String("Wrong Tenant".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert!(subscription_id.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
@@ -207,7 +214,7 @@ fn query_subscriptions_support_multi_key_inner_joins() {
             Value::String("Blue Train".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription_id),
@@ -215,15 +222,17 @@ fn query_subscriptions_support_multi_key_inner_joins() {
     );
 }
 
-#[test]
-fn query_subscriptions_support_qualified_wildcards_after_join() {
+#[futures_test::test]
+async fn query_subscriptions_support_qualified_wildcards_after_join() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
     let join = TableRef::Join {
         left: Box::new(TableRef::named("albums").aliased("a")),
         right: Box::new(TableRef::named("artists").aliased("r")),
@@ -238,6 +247,7 @@ fn query_subscriptions_support_qualified_wildcards_after_join() {
         .subscribe_query(select_query(
             Select::new([SelectItem::QualifiedWildcard(vec!["a".to_owned()])]).from([join]),
         ))
+        .await
         .unwrap();
 
     let mut batch = database.open_batch();
@@ -253,7 +263,7 @@ fn query_subscriptions_support_qualified_wildcards_after_join() {
             Value::String("Blue Train".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         expect_recv_vals(&subscription_id),

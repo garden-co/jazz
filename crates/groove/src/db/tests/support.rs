@@ -904,8 +904,8 @@ pub(super) fn prepared_reachability_graph(
     GraphBuilder::recursive(seed, step, "frontier", max_iters)
 }
 
-pub(super) fn prepared_reachability_shape(
-    database: &mut Database<TestStorage>,
+pub(super) async fn prepared_reachability_shape(
+    database: &mut Database,
 ) -> crate::ivm::PreparedShape {
     database
         .prepare_one_sink(
@@ -914,11 +914,12 @@ pub(super) fn prepared_reachability_shape(
             RecordDescriptor::new([("seed", ColumnType::U64.clone())]),
             ["seed".to_owned()],
         )
+        .await
         .unwrap()
 }
 
-pub(super) fn prepared_reachability_with_antijoin_shape(
-    database: &mut Database<TestStorage>,
+pub(super) async fn prepared_reachability_with_antijoin_shape(
+    database: &mut Database,
 ) -> crate::ivm::PreparedShape {
     let unblocked = GraphBuilder::anti_join(
         GraphBuilder::table("edges"),
@@ -933,6 +934,7 @@ pub(super) fn prepared_reachability_with_antijoin_shape(
             RecordDescriptor::new([("seed", ColumnType::U64.clone())]),
             ["seed".to_owned()],
         )
+        .await
         .unwrap()
 }
 
@@ -1055,9 +1057,7 @@ pub(super) fn grant_shape_graph() -> GraphBuilder {
     ])
 }
 
-pub(super) fn prepare_grant_shape(
-    database: &mut Database<MemoryStorage>,
-) -> crate::ivm::PreparedShape {
+pub(super) async fn prepare_grant_shape(database: &mut Database) -> crate::ivm::PreparedShape {
     database
         .prepare_one_sink(
             grant_shape_graph(),
@@ -1065,6 +1065,7 @@ pub(super) fn prepare_grant_shape(
             RecordDescriptor::new([("seed", ColumnType::U64.clone())]),
             ["seed"],
         )
+        .await
         .unwrap()
 }
 

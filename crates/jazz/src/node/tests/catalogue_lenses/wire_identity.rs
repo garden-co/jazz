@@ -6,13 +6,13 @@ fn wire_commit_units_preserve_node_and_schema_uuids_not_local_aliases() {
     let (_writer_dir, mut writer) = open_node_with_schema(node(0x4a), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(0x4b), schema.clone());
     let (parent, parent_unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(0x4a), 10).cells(title_cells("parent")),
         )
         .unwrap();
-    core.apply_sync_message(parent_unit).unwrap();
+    core.apply_sync_message_settled(parent_unit).unwrap();
     let (_child_tx, unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(0x4a), 11)
                 .parents(vec![parent])
                 .cells(title_cells("child")),
@@ -26,7 +26,7 @@ fn wire_commit_units_preserve_node_and_schema_uuids_not_local_aliases() {
     assert_eq!(versions[0].parents(), vec![parent]);
     assert_eq!(versions[0].parents()[0].node, node(0x4a));
 
-    core.apply_sync_message(unit).unwrap();
+    core.apply_sync_message_settled(unit).unwrap();
     let stored = core.query_table_versions("todos").unwrap();
     let child_row = stored
         .iter()

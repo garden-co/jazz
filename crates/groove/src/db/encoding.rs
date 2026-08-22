@@ -161,7 +161,7 @@ pub(super) fn decode_stored_key_value<'a>(
     ))
 }
 
-pub(super) fn persisted_index_primary_key(
+pub(crate) fn persisted_index_primary_key(
     table: &TableSchema,
     index_name: &str,
     index: &IndexSchema,
@@ -716,7 +716,7 @@ pub(super) fn decode_ordered_bytes(bytes: &mut &[u8]) -> Result<Vec<u8>, Error> 
     }
 }
 
-pub(super) fn index_record_descriptor() -> RecordDescriptor {
+pub(crate) fn index_record_descriptor() -> RecordDescriptor {
     static DESCRIPTOR: std::sync::OnceLock<RecordDescriptor> = std::sync::OnceLock::new();
     *DESCRIPTOR.get_or_init(|| {
         RecordDescriptor::new([

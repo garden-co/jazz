@@ -219,8 +219,8 @@ fn branch_view_subscription_projects_base_resumes_and_unsubscribes_exact_view() 
     client.tick().unwrap();
     server.tick().unwrap();
     let served = match &resumed.borrow().link {
-        ConnectionLink::Subscriber { served, .. } => served.len(),
-        ConnectionLink::Upstream { .. } => unreachable!("server link is a subscriber"),
+        ConnectionLink::Subscriber(state) => state.served.len(),
+        ConnectionLink::Upstream(_) => unreachable!("server link is a subscriber"),
     };
     assert_eq!(served, 0, "unsubscribe must release the exact branch view");
 }
@@ -324,8 +324,8 @@ fn branch_view_subscriptions_disambiguate_same_row_and_tx_by_branch() {
     }
 
     let served = match &subscriber.borrow().link {
-        ConnectionLink::Subscriber { served, .. } => served.len(),
-        ConnectionLink::Upstream { .. } => unreachable!("server link is a subscriber"),
+        ConnectionLink::Subscriber(state) => state.served.len(),
+        ConnectionLink::Upstream(_) => unreachable!("server link is a subscriber"),
     };
     assert_eq!(
         served, 2,

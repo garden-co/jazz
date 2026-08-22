@@ -44,7 +44,7 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -52,7 +52,7 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
         },
     })
     .unwrap();
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("todos", row(0x49), 10).cells(BTreeMap::from([
             ("name".to_owned(), v("projected")),
             ("body".to_owned(), v("partition")),
@@ -135,7 +135,7 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
     )
     .unwrap();
     join_core
-        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
@@ -144,7 +144,7 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
         })
         .unwrap();
     join_core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x4d), 20).cells(BTreeMap::from([
                 ("title".to_owned(), v("joined")),
                 ("body".to_owned(), v("projected-body")),
@@ -152,7 +152,7 @@ fn heterogeneous_schema_projected_reads_keep_prepared_plans_valid() {
         )
         .unwrap();
     join_core
-        .commit_mergeable(MergeableCommit::new("todo_members", row(0x4e), 21).cells(
+        .commit_mergeable_settled(MergeableCommit::new("todo_members", row(0x4e), 21).cells(
             BTreeMap::from([
                 ("todo".to_owned(), Value::Uuid(row(0x4d).0)),
                 ("member".to_owned(), Value::Uuid(row(0x4d).0)),
@@ -215,7 +215,7 @@ fn schema_projected_reads_ignore_settled_result_set_materialization_cache() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -225,7 +225,7 @@ fn schema_projected_reads_ignore_settled_result_set_materialization_cache() {
     .unwrap();
 
     let tx_id = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x4c), 10).cells(BTreeMap::from([
                 ("name".to_owned(), v("projected")),
                 ("body".to_owned(), v("cache-guard")),
@@ -327,7 +327,7 @@ fn schema_projected_current_reachable_filters_translate_old_names() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -340,17 +340,17 @@ fn schema_projected_current_reachable_filters_translate_old_names() {
     let team2 = row(0x52);
     let team3 = row(0x53);
     for idx in [0x51, 0x52, 0x53] {
-        core.commit_mergeable(MergeableCommit::new("teams", row(idx), idx as u64).cells(
+        core.commit_mergeable_settled(MergeableCommit::new("teams", row(idx), idx as u64).cells(
             BTreeMap::from([("name".to_owned(), v(format!("team-{idx}")))]),
         ))
         .unwrap();
     }
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("docs", row(0xd1), 20)
             .cells(BTreeMap::from([("title".to_owned(), v("reachable"))])),
     )
     .unwrap();
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("teamAccess", row(0xa1), 21).cells(BTreeMap::from([
             ("doc".to_owned(), Value::Uuid(row(0xd1).0)),
             ("team".to_owned(), Value::Uuid(team3.0)),
@@ -359,7 +359,7 @@ fn schema_projected_current_reachable_filters_translate_old_names() {
     )
     .unwrap();
     for (idx, member, parent) in [(0xe1, team1, team2), (0xe2, team2, team3)] {
-        core.commit_mergeable(
+        core.commit_mergeable_settled(
             MergeableCommit::new("teamEdges", row(idx), idx as u64).cells(BTreeMap::from([
                 ("member".to_owned(), Value::Uuid(member.0)),
                 ("parent".to_owned(), Value::Uuid(parent.0)),
@@ -432,7 +432,7 @@ fn include_deleted_schema_projected_root_filters_translate_old_names() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -441,14 +441,14 @@ fn include_deleted_schema_projected_root_filters_translate_old_names() {
     })
     .unwrap();
 
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("todos", row(0x59), 10).cells(BTreeMap::from([
             ("name".to_owned(), v("deleted-root")),
             ("body".to_owned(), v("projected-body")),
         ])),
     )
     .unwrap();
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("todos", row(0x59), 11).deletion(DeletionEvent::Deleted),
     )
     .unwrap();
@@ -536,7 +536,7 @@ fn include_deleted_schema_projected_join_filters_translate_old_names() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -546,16 +546,16 @@ fn include_deleted_schema_projected_join_filters_translate_old_names() {
     .unwrap();
 
     let issue = row(0x5a);
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("issues", issue, 10)
             .cells(BTreeMap::from([("name".to_owned(), v("joined"))])),
     )
     .unwrap();
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("issues", issue, 11).deletion(DeletionEvent::Deleted),
     )
     .unwrap();
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("issue_tags", row(0x5b), 12).cells(BTreeMap::from([
             ("issue".to_owned(), Value::Uuid(issue.0)),
             ("tag_label".to_owned(), v("bug")),
@@ -645,7 +645,7 @@ fn include_deleted_schema_projected_reachable_filters_translate_old_names() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -658,7 +658,7 @@ fn include_deleted_schema_projected_reachable_filters_translate_old_names() {
     let team2 = row(0x5d);
     let doc = row(0x5e);
     for (idx, team) in [(10, team1), (11, team2)] {
-        core.commit_mergeable(
+        core.commit_mergeable_settled(
             MergeableCommit::new("teams", team, idx).cells(BTreeMap::from([(
                 "name".to_owned(),
                 v(format!("team-{idx}")),
@@ -666,14 +666,14 @@ fn include_deleted_schema_projected_reachable_filters_translate_old_names() {
         )
         .unwrap();
     }
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("docs", doc, 12)
             .cells(BTreeMap::from([("name".to_owned(), v("reachable"))])),
     )
     .unwrap();
-    core.commit_mergeable(MergeableCommit::new("docs", doc, 13).deletion(DeletionEvent::Deleted))
+    core.commit_mergeable_settled(MergeableCommit::new("docs", doc, 13).deletion(DeletionEvent::Deleted))
         .unwrap();
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("team_edges", row(0x5f), 14).cells(BTreeMap::from([
             ("member".to_owned(), Value::Uuid(team1.0)),
             ("parent".to_owned(), Value::Uuid(team2.0)),
@@ -681,7 +681,7 @@ fn include_deleted_schema_projected_reachable_filters_translate_old_names() {
         ])),
     )
     .unwrap();
-    core.commit_mergeable(MergeableCommit::new("team_access", row(0x60), 15).cells(
+    core.commit_mergeable_settled(MergeableCommit::new("team_access", row(0x60), 15).cells(
         BTreeMap::from([
             ("doc".to_owned(), Value::Uuid(doc.0)),
             ("team".to_owned(), Value::Uuid(team2.0)),
@@ -760,7 +760,7 @@ fn historical_schema_projected_reads_use_projected_snapshot_source() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -770,7 +770,7 @@ fn historical_schema_projected_reads_use_projected_snapshot_source() {
     .unwrap();
 
     let tx_id = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x54), 10).cells(BTreeMap::from([
                 ("name".to_owned(), v("historical")),
                 ("body".to_owned(), v("projected-body")),
@@ -830,7 +830,7 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
     let (dir, mut core) = open_node_with_schema(node(0x57), base.clone());
 
     let base_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x57), 10).cells(title_cells("before rename")),
         )
         .unwrap();
@@ -879,7 +879,7 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -889,7 +889,7 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
     .unwrap();
 
     let renamed_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("tasks", row(0x59), 11)
                 .cells(BTreeMap::from([("name".to_owned(), v("after rename"))])),
         )
@@ -920,7 +920,7 @@ fn global_changes_span_table_renames_for_history_and_conflict_detection() {
     }));
 
     assert!(matches!(
-        core.commit_exclusive(exclusive, AuthorId::SYSTEM, 12),
+        core.commit_exclusive_settled(exclusive, AuthorId::SYSTEM, 12),
         Err(Error::TransactionConflict)
     ));
 
@@ -1034,7 +1034,7 @@ fn historical_schema_projected_reachable_filters_translate_old_names() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -1048,7 +1048,7 @@ fn historical_schema_projected_reachable_filters_translate_old_names() {
     let team3 = row(0x58);
     for idx in [0x56, 0x57, 0x58] {
         let tx_id = core
-            .commit_mergeable(MergeableCommit::new("teams", row(idx), idx as u64).cells(
+            .commit_mergeable_settled(MergeableCommit::new("teams", row(idx), idx as u64).cells(
                 BTreeMap::from([("name".to_owned(), v(format!("team-{idx}")))]),
             ))
             .unwrap();
@@ -1061,7 +1061,7 @@ fn historical_schema_projected_reachable_filters_translate_old_names() {
         .unwrap();
     }
     let doc_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("docs", row(0xd5), 90)
                 .cells(BTreeMap::from([("name".to_owned(), v("reachable"))])),
         )
@@ -1074,7 +1074,7 @@ fn historical_schema_projected_reachable_filters_translate_old_names() {
     )
     .unwrap();
     let access_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("teamAccess", row(0xa5), 91).cells(BTreeMap::from([
                 ("doc".to_owned(), Value::Uuid(row(0xd5).0)),
                 ("team".to_owned(), Value::Uuid(team3.0)),
@@ -1091,7 +1091,7 @@ fn historical_schema_projected_reachable_filters_translate_old_names() {
     .unwrap();
     for (idx, member, parent) in [(0xe5, team1, team2), (0xe6, team2, team3)] {
         let tx_id = core
-            .commit_mergeable(
+            .commit_mergeable_settled(
                 MergeableCommit::new("teamEdges", row(idx), idx as u64).cells(BTreeMap::from([
                     ("member".to_owned(), Value::Uuid(member.0)),
                     ("parent".to_owned(), Value::Uuid(parent.0)),

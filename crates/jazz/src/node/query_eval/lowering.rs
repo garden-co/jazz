@@ -405,14 +405,15 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    pub(super) fn compile_query_program_request(
+    pub(super) async fn compile_query_program_request(
         &mut self,
         request: QueryProgramRequest,
     ) -> Result<QueryProgram, Error> {
         self.compile_query_program_request_with_access_paths(request, BTreeMap::new())
+            .await
     }
 
-    pub(super) fn compile_query_program_request_with_access_paths(
+    pub(super) async fn compile_query_program_request_with_access_paths(
         &mut self,
         request: QueryProgramRequest,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
@@ -422,17 +423,19 @@ where
             BTreeMap::new(),
             access_paths,
         )
+        .await
     }
 
-    pub(super) fn compile_query_program_request_with_inline_sources_and_access_paths(
+    pub(super) async fn compile_query_program_request_with_inline_sources_and_access_paths(
         &mut self,
         request: QueryProgramRequest,
         inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
         access_paths: BTreeMap<SourceId, CurrentAccessPath>,
     ) -> Result<QueryProgram, Error> {
+        Box::pin(self.prepare_query_program_policy_dependencies(&request)).await?;
         let trace_request = capability_trace_enabled().then(|| request.clone());
         let read_view = request.reads.primary.clone();
-        let mut resolver = CurrentQuerySourceResolver {
+        let mut resolver = JazzSourceGraphPreparer {
             node: self,
             read_view: &read_view,
             inline_sources,
@@ -441,7 +444,7 @@ where
         };
         let node_uuid = resolver.node.node_uuid;
         let node_alias = resolver.node.self_node_alias;
-        let result = lower_query_program(request, &mut resolver);
+        let result = Box::pin(prepare_and_lower_query_program(request, &mut resolver)).await;
         if let Some(request) = trace_request {
             trace_capability_compile(
                 node_uuid,
@@ -453,7 +456,60 @@ where
         result.map_err(|report| Error::QueryCapability(format!("{report:?}")))
     }
 
-    pub(super) fn prepared_query_plan_from_program(
+    async fn prepare_query_program_policy_dependencies(
+        &mut self,
+        request: &QueryProgramRequest,
+    ) -> Result<(), Error> {
+        let source_requests = query_program_source_requests(request)
+            .map_err(|report| Error::QueryCapability(format!("{report:?}")))?;
+        let read_view = request.reads.primary.clone();
+        let dependencies = {
+            let mut preparer = JazzSourceGraphPreparer {
+                node: self,
+                read_view: &read_view,
+                inline_sources: BTreeMap::new(),
+                access_paths: BTreeMap::new(),
+                current_projection_targets: BTreeMap::new(),
+            };
+            source_requests
+                .iter()
+                .map(|source| preparer.policy_dependency_request(source))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+        };
+        let dependencies = dependencies
+            .into_iter()
+            .map(|dependency| {
+                (
+                    policy_authorization_graph_cache_key(&dependency),
+                    dependency,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        for (cache_key, dependency) in dependencies {
+            match Box::pin(self.policy_authorization_row_id_graph(dependency)).await {
+                Ok(_) => {}
+                Err(Error::QueryCapability(error)) if error.contains("PolicyProofCycle") => {
+                    return Err(Error::QueryCapability(error));
+                }
+                Err(Error::QueryCapability(_)) => {
+                    self.query.policy_authorization_graph_cache.insert(
+                        cache_key,
+                        PolicyAuthorizationGraph {
+                            graph: empty_authorized_row_id_graph(),
+                            route_fields: BTreeSet::new(),
+                        },
+                    );
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn prepared_query_plan_from_program(
         &mut self,
         program: &QueryProgram,
         _shape: &ValidatedQuery,
@@ -496,17 +552,20 @@ where
                 .unwrap_or_else(|| query_binding_source_shape_for_prepared_params(&params));
             let route_fields = route_params;
             let route_value_indices = prepared_route_value_indices(&params, &route_fields);
-            let prepared = self.database.prepare(
-                [groove::ivm::RoutedMultisinkTerminal::new(
-                    JAZZ_APP_ROWS_SINK,
-                    graph,
-                    route_fields,
-                    app_row_fields,
+            let prepared = self
+                .database
+                .prepare(
+                    [groove::ivm::RoutedMultisinkTerminal::new(
+                        JAZZ_APP_ROWS_SINK,
+                        graph,
+                        route_fields,
+                        app_row_fields,
+                    )
+                    .with_route_value_indices(route_value_indices)],
+                    binding_source_shape,
+                    binding_descriptor,
                 )
-                .with_route_value_indices(route_value_indices)],
-                binding_source_shape,
-                binding_descriptor,
-            )?;
+                .await?;
             Ok(PreparedQueryPlan::Prepared {
                 shape: prepared.id(),
                 params,
@@ -514,7 +573,7 @@ where
         }
     }
 
-    pub(super) fn subscribe_lowered_program(
+    pub(super) async fn subscribe_lowered_program(
         &mut self,
         program: QueryProgram,
         binding: &Binding,
@@ -530,7 +589,7 @@ where
                 .into_iter()
                 .map(|terminal| (terminal.sink, terminal.graph))
                 .collect();
-            return self.database.subscribe(sinks).map_err(Error::Groove);
+            return self.database.subscribe(sinks).await.map_err(Error::Groove);
         }
         let param_names = params
             .iter()
@@ -568,11 +627,13 @@ where
                 .with_route_value_indices(route_value_indices))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        let prepared =
-            self.database
-                .prepare(terminals, binding_source_shape, binding_descriptor)?;
+        let prepared = self
+            .database
+            .prepare(terminals, binding_source_shape, binding_descriptor)
+            .await?;
         self.database
             .bind_shape(prepared.id(), &values)
+            .await
             .map_err(Error::Groove)
     }
 }

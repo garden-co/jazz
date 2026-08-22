@@ -72,8 +72,11 @@ fn open_core() -> Result<CoreDb, Box<dyn std::error::Error>> {
         .map(String::as_str)
         .collect::<Vec<_>>();
     let storage = MemoryStorage::new(&column_family_refs);
-    let node =
-        NodeState::new_history_complete(NodeUuid::from_bytes([0x22; 16]), schema.clone(), storage)?;
+    let node = block_on(NodeState::new_history_complete(
+        NodeUuid::from_bytes([0x22; 16]),
+        schema.clone(),
+        storage,
+    ))?;
 
     Ok(CoreDb {
         server: Node::new(node),
@@ -97,28 +100,42 @@ impl CoreDb {
     fn one(&self, query: &Query) -> Result<Option<jazz::node::CurrentRow>, Error> {
         let shape = query.validate(&self.schema)?;
         let binding = shape.bind(BTreeMap::new())?;
-        self.server
-            .node()
-            .borrow_mut()
-            .query_rows(&shape, &binding, DurabilityTier::Local)
-            .map(|rows| rows.into_iter().next())
-            .map_err(Into::into)
+        let node = self.server.node();
+        block_on(async {
+            node.lock()
+                .await
+                .query_rows(&shape, &binding, DurabilityTier::Local)
+                .await
+        })
+        .map(|rows| rows.into_iter().next())
+        .map_err(Into::into)
     }
 
     fn insert_with_id(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<TxId, Error> {
         let node = self.server.node();
-        let tx_id = node.borrow_mut().commit_mergeable(
-            MergeableCommit::new(table, row, self.next_now_ms())
-                .made_by(self.author)
-                .cells(cells),
-        )?;
-        node.borrow_mut().finalize_local_mergeable_commit(tx_id)?;
+        let tx_id = block_on(async {
+            let mut node = node.lock().await;
+            let published = node
+                .commit_mergeable(
+                    MergeableCommit::new(table, row, self.next_now_ms())
+                        .made_by(self.author)
+                        .cells(cells),
+                )
+                .await?;
+            node.persist_and_settle_transaction(published).await
+        })?;
+        block_on(async {
+            let mut node = node.lock().await;
+            let outcome = node.finalize_local_mergeable_commit(tx_id).await?;
+            node.persist_and_settle_outcome(outcome).await
+        })?;
         Ok(tx_id)
     }
 
     fn exclusive_tx(&self) -> Result<CoreExclusiveTx<'_>, Error> {
         let tx_id = OpenTransactionId::new();
-        self.server.node().borrow_mut().open_exclusive(tx_id)?;
+        let node = self.server.node();
+        block_on(async { node.lock().await.open_exclusive(tx_id).await })?;
         Ok(CoreExclusiveTx {
             core: self,
             tx_id,
@@ -136,21 +153,20 @@ struct CoreExclusiveTx<'a> {
 impl CoreExclusiveTx<'_> {
     fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
         self.has_reads.set(true);
-        self.core
-            .server
-            .node()
-            .borrow_mut()
-            .tx_read(self.tx_id, table, row)
+        let node = self.core.server.node();
+        block_on(async { node.lock().await.tx_read(self.tx_id, table, row).await })
             .map_err(Into::into)
     }
 
     fn insert_with_id(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
-        self.core
-            .server
-            .node()
-            .borrow_mut()
-            .tx_write(self.tx_id, table, row, cells, None)
-            .map_err(Into::into)
+        let node = self.core.server.node();
+        block_on(async {
+            node.lock()
+                .await
+                .tx_write(self.tx_id, table, row, cells, None)
+                .await
+        })
+        .map_err(Into::into)
     }
 
     fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
@@ -161,33 +177,42 @@ impl CoreExclusiveTx<'_> {
 
     fn commit(self) -> Result<TxId, RejectionReason> {
         let node = self.core.server.node();
-        if self.has_reads.get()
-            && node
-                .borrow()
-                .open_exclusive_snapshot_moved(self.tx_id)
-                .expect("exclusive snapshot check succeeds")
-        {
-            node.borrow_mut()
-                .abandon_tx(self.tx_id)
-                .expect("abandoning conflicting transaction succeeds");
-            return Err(write_rejected(RejectionReason::ExclusiveConflict));
-        }
+        block_on(async {
+            let mut node = node.lock().await;
+            if self.has_reads.get()
+                && node
+                    .open_exclusive_snapshot_moved(self.tx_id)
+                    .expect("exclusive snapshot check succeeds")
+            {
+                node.abandon_tx(self.tx_id)
+                    .expect("abandoning conflicting transaction succeeds");
+                return Err(write_rejected(RejectionReason::ExclusiveConflict));
+            }
 
-        let (tx_id, unit) = node
-            .borrow_mut()
-            .commit_exclusive(self.tx_id, self.core.author, self.core.next_now_ms())
-            .expect("core exclusive commit succeeds");
-        let SyncMessage::CommitUnit { tx, versions } = unit else {
-            panic!("commit_exclusive must yield a CommitUnit");
-        };
-        let fate = node
-            .borrow_mut()
-            .finalize_local_exclusive_commit(tx, versions)
-            .expect("core exclusive finalize succeeds");
-        if let Fate::Rejected(reason) = fate {
-            return Err(write_rejected(reason));
-        }
-        Ok(tx_id)
+            let (published, unit) = node
+                .commit_exclusive(self.tx_id, self.core.author, self.core.next_now_ms())
+                .await
+                .expect("core exclusive commit succeeds");
+            let tx_id = node
+                .persist_and_settle_transaction(published)
+                .await
+                .expect("core exclusive persistence succeeds");
+            let SyncMessage::CommitUnit { tx, versions } = unit else {
+                panic!("commit_exclusive must yield a CommitUnit");
+            };
+            let outcome = node
+                .finalize_local_exclusive_commit(tx, versions)
+                .await
+                .expect("core exclusive finalize succeeds");
+            let fate = node
+                .persist_and_settle_outcome(outcome)
+                .await
+                .expect("core exclusive finalization persistence succeeds");
+            if let Fate::Rejected(reason) = fate {
+                return Err(write_rejected(reason));
+            }
+            Ok(tx_id)
+        })
     }
 }
 
@@ -197,10 +222,10 @@ fn write_rejected(reason: RejectionReason) -> RejectionReason {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = open_db()?;
-    let mergeable = db.mergeable_tx()?;
-    let first = mergeable.insert("todos", todo_cells("write examples", false))?;
-    let second = mergeable.insert("todos", todo_cells("run examples", true))?;
-    let mergeable_tx = mergeable.commit()?;
+    let mergeable = block_on(db.mergeable_tx())?;
+    let first = block_on(mergeable.insert("todos", todo_cells("write examples", false)))?;
+    let second = block_on(mergeable.insert("todos", todo_cells("run examples", true)))?;
+    let mergeable_tx = block_on(mergeable.commit())?;
 
     let todos = db.prepare_query(&db.table("todos"))?;
     let rows = block_on(db.all(&todos, ReadOpts::default()))?;

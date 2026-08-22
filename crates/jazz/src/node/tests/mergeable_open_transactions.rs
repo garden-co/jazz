@@ -32,22 +32,22 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
     let inserted_then_deleted = row(5);
 
     for core in [&mut actual, &mut expected] {
-        core.commit_mergeable(
+        core.commit_mergeable_settled(
             MergeableCommit::new("todos", updated, 10)
                 .cells(mergeable_open_cells("base", "base-note")),
         )
         .unwrap();
-        core.commit_mergeable(
+        core.commit_mergeable_settled(
             MergeableCommit::new("todos", deleted, 11)
                 .cells(mergeable_open_cells("delete-me", "delete-note")),
         )
         .unwrap();
-        core.commit_mergeable(
+        core.commit_mergeable_settled(
             MergeableCommit::new("todos", restored, 12)
                 .cells(mergeable_open_cells("archived", "archive-note")),
         )
         .unwrap();
-        core.commit_mergeable(
+        core.commit_mergeable_settled(
             MergeableCommit::new("todos", restored, 13).deletion(DeletionEvent::Deleted),
         )
         .unwrap();
@@ -181,19 +181,19 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
     let mut intervening_content = None;
     let mut intervening_deletion = None;
     for core in [&mut actual, &mut expected] {
-        core.commit_mergeable(
+        core.commit_mergeable_settled(
             MergeableCommit::new("todos", updated, 110)
                 .cells(mergeable_open_cells("external", "external-note")),
         )
         .unwrap();
         let content = core
-            .commit_mergeable(
+            .commit_mergeable_settled(
                 MergeableCommit::new("todos", restored, 111)
                     .cells(mergeable_open_cells("external-archive", "external-archive-note")),
             )
             .unwrap();
         let deletion_tx = core
-            .commit_mergeable(
+            .commit_mergeable_settled(
                 MergeableCommit::new("todos", restored, 112)
                     .deletion(DeletionEvent::Deleted),
             )
@@ -233,10 +233,10 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
             .permission_subject(author)
             .deletion(DeletionEvent::Deleted),
     ];
-    let expected_tx = expected.commit_mergeable_many(expected_commits).unwrap();
+    let expected_tx = expected.commit_mergeable_many_settled(expected_commits).unwrap();
     let mut fallback_now_ms = 200;
     let actual_tx = actual
-        .commit_mergeable_open(open_tx, || {
+        .commit_mergeable_open_settled(open_tx, || {
             let now_ms = fallback_now_ms;
             fallback_now_ms += 1;
             now_ms
@@ -255,7 +255,7 @@ fn mergeable_open_commit_matches_replayed_mergeable_batch_with_intervening_write
 fn mergeable_open_patch_commit_uses_point_reads_not_table_scans() {
     let (_dir, mut core) = open_node_with_schema(node(0x62), mergeable_open_test_schema());
     for ordinal in 0_u16..256 {
-        core.commit_mergeable(
+        core.commit_mergeable_settled(
             MergeableCommit::new("todos", row(ordinal as u8), ordinal as u64 + 1)
                 .cells(mergeable_open_cells(format!("title-{ordinal}"), "note")),
         )
@@ -279,7 +279,7 @@ fn mergeable_open_patch_commit_uses_point_reads_not_table_scans() {
     }
 
     core.reset_storage_read_metrics();
-    core.commit_mergeable_open(batch, || 2_000).unwrap();
+    core.commit_mergeable_open_settled(batch, || 2_000).unwrap();
     let reads = core.take_storage_read_metrics();
     assert!(
         reads.total.reads < 256,
@@ -317,7 +317,7 @@ fn abandoning_mergeable_open_transaction_discards_its_only_staged_representation
             .is_empty()
     );
     assert!(matches!(
-        core.commit_mergeable_open(open_tx, || 51).unwrap_err(),
+        core.commit_mergeable_open_settled(open_tx, || 51).unwrap_err(),
         Error::MissingOpenBatch(missing) if missing == open_tx
     ));
 }

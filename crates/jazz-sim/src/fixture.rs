@@ -5,9 +5,11 @@ use std::collections::BTreeMap;
 use jazz::groove::records::Value;
 use jazz::groove::storage::{OrderedKvStorage, ReopenableStorage};
 use jazz::ids::{AuthorId, RowUuid};
-use jazz::node::{MergeableCommit, NodeState};
+use jazz::node::{Error as NodeError, MergeableCommit, NodeState, PublicationOutcome};
 use jazz::peer::PeerState;
-use jazz::protocol::SyncMessage;
+use jazz::protocol::{SyncMessage, VersionRecord};
+use jazz::tools::OpenTransactionId;
+use jazz::tx::{Transaction, TxId};
 
 use crate::DriverContext;
 use crate::distributions::{Lcg, Zipf};
@@ -399,27 +401,97 @@ pub fn apply_fixture_commit<S>(
 where
     S: OrderedKvStorage + ReopenableStorage,
 {
-    let (_tx_id, unit) = writer
-        .commit_mergeable_unit(
+    let (published, unit) = jazz::db::block_on(
+        writer.commit_mergeable_unit(
             MergeableCommit::new(&commit.table, commit.row_uuid, options.now_ms)
                 .made_by(options.made_by)
                 .cells(commit.cells.clone()),
-        )
-        .map_err(|err| format!("writer commit failed: {err}"))?;
+        ),
+    )
+    .map_err(|err| format!("writer commit failed: {err}"))?;
+    jazz::db::block_on(writer.persist_and_settle_transaction(published))
+        .map_err(|err| format!("writer commit persistence failed: {err}"))?;
     ctx.send(options.writer_name, options.core_name, unit);
     let delivered = ctx.recv(options.core_name);
-    let fates = core
-        .apply_sync_message(delivered.message)
+    let fates = jazz::db::block_on(core.apply_sync_message(delivered.message))
         .map_err(|err| format!("core ingest failed: {err}"))?;
+    let fates = jazz::db::block_on(core.persist_and_settle_outcome(fates))
+        .map_err(|err| format!("core ingest persistence failed: {err}"))?;
     for fate in fates {
         ctx.send(options.core_name, options.writer_name, fate);
         let delivered = ctx.recv(options.writer_name);
-        writer
-            .apply_sync_message(delivered.message)
+        let outcome = jazz::db::block_on(writer.apply_sync_message(delivered.message))
             .map_err(|err| format!("writer fate apply failed: {err}"))?;
+        jazz::db::block_on(writer.persist_and_settle_outcome(outcome))
+            .map_err(|err| format!("writer fate persistence failed: {err}"))?;
     }
     ctx.record_counter("fixture_commits_applied", 1);
     Ok(())
+}
+
+/// Commit, persist, and settle one mergeable unit at a synchronous simulator boundary.
+pub fn commit_mergeable_unit_settled<S>(
+    node: &mut NodeState<S>,
+    commit: MergeableCommit,
+) -> Result<(TxId, SyncMessage), NodeError>
+where
+    S: OrderedKvStorage + ReopenableStorage,
+{
+    let (published, unit) = jazz::db::block_on(node.commit_mergeable_unit(commit))?;
+    let tx_id = jazz::db::block_on(node.persist_and_settle_transaction(published))?;
+    Ok((tx_id, unit))
+}
+
+/// Commit, persist, and settle one exclusive transaction.
+pub fn commit_exclusive_settled<S>(
+    node: &mut NodeState<S>,
+    open_tx: OpenTransactionId,
+    made_by: AuthorId,
+    now_ms: u64,
+) -> Result<(TxId, SyncMessage), NodeError>
+where
+    S: OrderedKvStorage + ReopenableStorage,
+{
+    let (published, unit) = jazz::db::block_on(node.commit_exclusive(open_tx, made_by, now_ms))?;
+    let tx_id = jazz::db::block_on(node.persist_and_settle_transaction(published))?;
+    Ok((tx_id, unit))
+}
+
+/// Persist and settle an already-produced publication outcome.
+pub fn settle_outcome<S, T>(
+    node: &mut NodeState<S>,
+    outcome: PublicationOutcome<T>,
+) -> Result<T, NodeError>
+where
+    S: OrderedKvStorage + ReopenableStorage,
+{
+    jazz::db::block_on(node.persist_and_settle_outcome(outcome))
+}
+
+/// Apply, persist, and settle one sync message at a synchronous simulator boundary.
+pub fn apply_sync_message_settled<S>(
+    node: &mut NodeState<S>,
+    message: SyncMessage,
+) -> Result<Vec<SyncMessage>, NodeError>
+where
+    S: OrderedKvStorage + ReopenableStorage,
+{
+    let outcome = jazz::db::block_on(node.apply_sync_message(message))?;
+    settle_outcome(node, outcome)
+}
+
+/// Ingest, persist, and settle one authority commit unit.
+pub fn ingest_commit_unit_settled<S>(
+    node: &mut NodeState<S>,
+    tx: Transaction,
+    versions: Vec<VersionRecord>,
+    now_ms: u64,
+) -> Result<Vec<SyncMessage>, NodeError>
+where
+    S: OrderedKvStorage + ReopenableStorage,
+{
+    let outcome = jazz::db::block_on(node.ingest_commit_unit(tx, versions, now_ms))?;
+    settle_outcome(node, outcome)
 }
 
 /// Sync one table's current-row view from an upstream node to a downstream node.
@@ -444,16 +516,17 @@ pub fn sync_current_rows<S>(
 where
     S: OrderedKvStorage + ReopenableStorage,
 {
-    let update = peer
-        .current_rows_update(from, options.table)
+    let update = jazz::db::block_on(peer.current_rows_update(from, options.table))
         .map_err(|err| format!("view update failed: {err}"))?;
     if !matches!(update, SyncMessage::ViewUpdate { .. }) {
         return Err("expected view update".to_owned());
     }
     ctx.send(options.from_name, options.to_name, update);
     let delivered = ctx.recv(options.to_name);
-    to.apply_sync_message(delivered.message)
+    let outcome = jazz::db::block_on(to.apply_sync_message(delivered.message))
         .map_err(|err| format!("view apply failed: {err}"))?;
+    jazz::db::block_on(to.persist_and_settle_outcome(outcome))
+        .map_err(|err| format!("view persistence failed: {err}"))?;
     ctx.record_counter("fixture_view_updates_applied", 1);
     Ok(())
 }

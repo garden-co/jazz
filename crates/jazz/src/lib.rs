@@ -9,7 +9,8 @@
     clippy::manual_unwrap_or_default,
     clippy::needless_borrow,
     clippy::too_many_arguments,
-    clippy::type_complexity
+    clippy::type_complexity,
+    async_fn_in_trait
 )]
 
 //! Jazz is the local-first database layer above groove storage and IVM. The
@@ -31,6 +32,7 @@
 //! use jazz::tx::{DeletionEvent, DurabilityTier};
 //! use jazz::groove::records::Value;
 //! use jazz::groove::storage::MemoryStorage;
+//! use jazz::db::doctest_support::block_on;
 //! use jazz::tools::{
 //!     CmpOp, ColumnType, PolicyExpr, PolicyValue, SchemaBuilder, TablePolicies,
 //!     TableSchemaBuilder,
@@ -39,7 +41,7 @@
 //! fn open_node(node: NodeUuid, schema: JazzSchema) -> NodeState<MemoryStorage> {
 //!     let cfs = schema.column_families();
 //!     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-//!     NodeState::new(node, schema, MemoryStorage::new(&refs)).unwrap()
+//!     block_on(NodeState::new(node, schema, MemoryStorage::new(&refs))).unwrap()
 //! }
 //!
 //! let owner = AuthorId::from_bytes([0xa1; 16]);
@@ -72,25 +74,26 @@
 //!     ("owner".to_owned(), Value::Uuid(owner.0)),
 //! ]);
 //!
-//! let (tx_id, unit) = writer
+//! let (tx_id, unit) = block_on(writer
 //!     .commit_mergeable_unit(
 //!         MergeableCommit::new("todos", row, 1_000)
 //!             .made_by(owner)
 //!             .cells(cells),
-//!     )
+//!     ))
 //!     .unwrap();
-//! let local_rows = writer.current_rows("todos", DurabilityTier::Local).unwrap();
+//! let local_rows = block_on(writer.current_rows("todos", DurabilityTier::Local)).unwrap();
 //! assert_eq!(local_rows[0].row_uuid(), row);
 //! assert_eq!(local_rows[0].cell(&schema.tables()[0], "title"), Some(Value::String("draft".to_owned())));
 //!
 //! let SyncMessage::CommitUnit { tx, versions } = unit else { unreachable!() };
-//! let [fate] = core.ingest_commit_unit(tx, versions, 1_000).unwrap().try_into().unwrap();
-//! writer.apply_sync_message(fate).unwrap();
+//! let outcome = block_on(core.ingest_commit_unit(tx, versions, 1_000)).unwrap();
+//! let [fate] = block_on(core.persist_and_settle_outcome(outcome)).unwrap().try_into().unwrap();
+//! block_on(writer.apply_sync_message(fate)).unwrap();
 //!
 //! let tx_id = jazz::tools::OpenTransactionId::new();
-//! core.open_exclusive(tx_id).unwrap();
-//! core.tx_read(tx_id, "todos", row).unwrap();
-//! core.tx_write(
+//! block_on(core.open_exclusive(tx_id)).unwrap();
+//! block_on(core.tx_read(tx_id, "todos", row)).unwrap();
+//! block_on(core.tx_write(
 //!     tx_id,
 //!     "todos",
 //!     row,
@@ -99,11 +102,337 @@
 //!         ("owner".to_owned(), Value::Uuid(owner.0)),
 //!     ]),
 //!     None::<DeletionEvent>,
-//! )
+//! ))
 //! .unwrap();
-//! let (_exclusive, _unit) = core.commit_exclusive(tx_id, owner, 1_001).unwrap();
-//! assert!(!core.row_history("todos", row).unwrap().is_empty());
+//! let (_exclusive, _unit) = block_on(core.commit_exclusive(tx_id, owner, 1_001)).unwrap();
+//! assert!(!block_on(core.row_history("todos", row)).unwrap().is_empty());
 //! ```
+
+// Legacy synchronous tests import these traits explicitly while the async API
+// migration is in progress. New async lifecycle tests intentionally do not:
+// they poll futures directly so suspension and ordering remain observable.
+#[cfg(test)]
+pub(crate) mod legacy_test_future {
+    use std::future::Future;
+
+    use crate::ids::{AuthorId, SchemaVersionId};
+    use crate::node::{ContributionMergeRequest, Error, MergeableCommit, NodeState};
+    use crate::protocol::{CatalogueSnapshot, SyncMessage, VersionRecord};
+    use crate::time::{GlobalTime, TxTime};
+    use crate::tools::OpenTransactionId;
+    use crate::tx::{DurabilityTier, Fate, Transaction, TxId};
+    use groove::storage::{OrderedKvStorage, ReopenableStorage};
+
+    #[allow(clippy::wrong_self_convention)]
+    pub(crate) trait ResultFutureExt<T, E>: Future<Output = Result<T, E>> {
+        fn unwrap(self) -> T
+        where
+            Self: Sized,
+            E: std::fmt::Debug,
+        {
+            crate::db::block_on(self).unwrap()
+        }
+
+        fn expect(self, message: &str) -> T
+        where
+            Self: Sized,
+            E: std::fmt::Debug,
+        {
+            crate::db::block_on(self).expect(message)
+        }
+
+        fn unwrap_or_else<F>(self, op: F) -> T
+        where
+            Self: Sized,
+            F: FnOnce(E) -> T,
+        {
+            crate::db::block_on(self).unwrap_or_else(op)
+        }
+
+        fn unwrap_err(self) -> E
+        where
+            Self: Sized,
+            T: std::fmt::Debug,
+        {
+            crate::db::block_on(self).unwrap_err()
+        }
+
+        fn expect_err(self, message: &str) -> E
+        where
+            Self: Sized,
+            T: std::fmt::Debug,
+        {
+            crate::db::block_on(self).expect_err(message)
+        }
+
+        fn is_err(self) -> bool
+        where
+            Self: Sized,
+        {
+            crate::db::block_on(self).is_err()
+        }
+
+        fn is_ok(self) -> bool
+        where
+            Self: Sized,
+        {
+            crate::db::block_on(self).is_ok()
+        }
+    }
+
+    impl<F, T, E> ResultFutureExt<T, E> for F where F: Future<Output = Result<T, E>> {}
+
+    #[allow(clippy::wrong_self_convention)]
+    pub(crate) trait OptionFutureExt<T>: Future<Output = Option<T>> {
+        fn unwrap(self) -> T
+        where
+            Self: Sized,
+        {
+            crate::db::block_on(self).unwrap()
+        }
+
+        fn expect(self, message: &str) -> T
+        where
+            Self: Sized,
+        {
+            crate::db::block_on(self).expect(message)
+        }
+
+        fn is_none(self) -> bool
+        where
+            Self: Sized,
+        {
+            crate::db::block_on(self).is_none()
+        }
+    }
+
+    impl<F, T> OptionFutureExt<T> for F where F: Future<Output = Option<T>> {}
+
+    pub(crate) trait FutureResolveExt: Future {
+        fn resolve(self) -> Self::Output
+        where
+            Self: Sized,
+        {
+            crate::db::block_on(self)
+        }
+    }
+
+    impl<F> FutureResolveExt for F where F: Future {}
+
+    pub(crate) trait SettledNodeTestExt {
+        fn commit_mergeable_settled(&mut self, commit: MergeableCommit) -> Result<TxId, Error>;
+        fn commit_mergeable_unit_settled(
+            &mut self,
+            commit: MergeableCommit,
+        ) -> Result<(TxId, SyncMessage), Error>;
+        fn commit_mergeable_many_settled(
+            &mut self,
+            commits: Vec<MergeableCommit>,
+        ) -> Result<TxId, Error>;
+        fn merge_branch_contributions_settled(
+            &mut self,
+            request: ContributionMergeRequest,
+        ) -> Result<Option<TxId>, Error>;
+        fn commit_mergeable_in_schema_settled(
+            &mut self,
+            schema: SchemaVersionId,
+            commit: MergeableCommit,
+        ) -> Result<TxId, Error>;
+        fn commit_mergeable_at_settled(
+            &mut self,
+            commit: MergeableCommit,
+            made_at: TxTime,
+        ) -> Result<TxId, Error>;
+        fn commit_mergeable_open_settled<F>(
+            &mut self,
+            open: OpenTransactionId,
+            next_now_ms: F,
+        ) -> Result<TxId, Error>
+        where
+            F: FnMut() -> u64;
+        fn apply_trusted_catalogue_snapshot_settled(
+            &mut self,
+            snapshot: CatalogueSnapshot,
+        ) -> Result<(), Error>;
+        fn commit_exclusive_settled(
+            &mut self,
+            tx_id: OpenTransactionId,
+            author: AuthorId,
+            now_ms: u64,
+        ) -> Result<(TxId, SyncMessage), Error>;
+        fn apply_sync_message_settled(
+            &mut self,
+            message: SyncMessage,
+        ) -> Result<Vec<SyncMessage>, Error>;
+        fn apply_trusted_catalogue_message_settled(
+            &mut self,
+            message: SyncMessage,
+        ) -> Result<Vec<SyncMessage>, Error>;
+        fn ingest_commit_unit_settled(
+            &mut self,
+            tx: Transaction,
+            versions: Vec<VersionRecord>,
+            now_ms: u64,
+        ) -> Result<Vec<SyncMessage>, Error>;
+        fn finalize_local_mergeable_commit_settled(&mut self, tx_id: TxId) -> Result<(), Error>;
+        fn transaction_state_settled(
+            &mut self,
+            tx_id: TxId,
+        ) -> Option<(Fate, Option<GlobalTime>, DurabilityTier)>;
+    }
+
+    impl<S> SettledNodeTestExt for NodeState<S>
+    where
+        S: OrderedKvStorage + ReopenableStorage,
+    {
+        fn commit_mergeable_settled(&mut self, commit: MergeableCommit) -> Result<TxId, Error> {
+            crate::db::block_on(async {
+                let published = self.commit_mergeable(commit).await?;
+                self.persist_and_settle_transaction(published).await
+            })
+        }
+
+        fn commit_mergeable_unit_settled(
+            &mut self,
+            commit: MergeableCommit,
+        ) -> Result<(TxId, SyncMessage), Error> {
+            crate::db::block_on(async {
+                let (published, unit) = self.commit_mergeable_unit(commit).await?;
+                let tx_id = self.persist_and_settle_transaction(published).await?;
+                Ok((tx_id, unit))
+            })
+        }
+
+        fn commit_mergeable_many_settled(
+            &mut self,
+            commits: Vec<MergeableCommit>,
+        ) -> Result<TxId, Error> {
+            crate::db::block_on(async {
+                let published = self.commit_mergeable_many(commits).await?;
+                self.persist_and_settle_transaction(published).await
+            })
+        }
+
+        fn merge_branch_contributions_settled(
+            &mut self,
+            request: ContributionMergeRequest,
+        ) -> Result<Option<TxId>, Error> {
+            crate::db::block_on(async {
+                let Some(published) = self.merge_branch_contributions(request).await? else {
+                    return Ok(None);
+                };
+                self.persist_and_settle_transaction(published)
+                    .await
+                    .map(Some)
+            })
+        }
+
+        fn commit_mergeable_in_schema_settled(
+            &mut self,
+            schema: SchemaVersionId,
+            commit: MergeableCommit,
+        ) -> Result<TxId, Error> {
+            crate::db::block_on(async {
+                let published = self.commit_mergeable_in_schema(schema, commit).await?;
+                self.persist_and_settle_transaction(published).await
+            })
+        }
+
+        fn commit_mergeable_at_settled(
+            &mut self,
+            commit: MergeableCommit,
+            made_at: TxTime,
+        ) -> Result<TxId, Error> {
+            crate::db::block_on(async {
+                let published = self.commit_mergeable_at(commit, made_at).await?;
+                self.persist_and_settle_transaction(published).await
+            })
+        }
+
+        fn commit_mergeable_open_settled<F>(
+            &mut self,
+            open: OpenTransactionId,
+            next_now_ms: F,
+        ) -> Result<TxId, Error>
+        where
+            F: FnMut() -> u64,
+        {
+            crate::db::block_on(async {
+                let published = self.commit_mergeable_open(open, next_now_ms).await?;
+                self.persist_and_settle_transaction(published).await
+            })
+        }
+
+        fn apply_trusted_catalogue_snapshot_settled(
+            &mut self,
+            snapshot: CatalogueSnapshot,
+        ) -> Result<(), Error> {
+            crate::db::block_on(async {
+                let outcome = self.apply_trusted_catalogue_snapshot(snapshot).await?;
+                self.persist_and_settle_outcome(outcome).await
+            })
+        }
+
+        fn commit_exclusive_settled(
+            &mut self,
+            tx_id: OpenTransactionId,
+            author: AuthorId,
+            now_ms: u64,
+        ) -> Result<(TxId, SyncMessage), Error> {
+            crate::db::block_on(async {
+                let (published, unit) = self.commit_exclusive(tx_id, author, now_ms).await?;
+                let tx_id = self.persist_and_settle_transaction(published).await?;
+                Ok((tx_id, unit))
+            })
+        }
+
+        fn apply_sync_message_settled(
+            &mut self,
+            message: SyncMessage,
+        ) -> Result<Vec<SyncMessage>, Error> {
+            crate::db::block_on(async {
+                let outcome = self.apply_sync_message(message).await?;
+                self.persist_and_settle_outcome(outcome).await
+            })
+        }
+
+        fn apply_trusted_catalogue_message_settled(
+            &mut self,
+            message: SyncMessage,
+        ) -> Result<Vec<SyncMessage>, Error> {
+            crate::db::block_on(async {
+                let outcome = self.apply_trusted_catalogue_message(message).await?;
+                self.persist_and_settle_outcome(outcome).await
+            })
+        }
+
+        fn ingest_commit_unit_settled(
+            &mut self,
+            tx: Transaction,
+            versions: Vec<VersionRecord>,
+            now_ms: u64,
+        ) -> Result<Vec<SyncMessage>, Error> {
+            crate::db::block_on(async {
+                let outcome = self.ingest_commit_unit(tx, versions, now_ms).await?;
+                self.persist_and_settle_outcome(outcome).await
+            })
+        }
+
+        fn finalize_local_mergeable_commit_settled(&mut self, tx_id: TxId) -> Result<(), Error> {
+            crate::db::block_on(async {
+                let outcome = self.finalize_local_mergeable_commit(tx_id).await?;
+                self.persist_and_settle_outcome(outcome).await
+            })
+        }
+
+        fn transaction_state_settled(
+            &mut self,
+            tx_id: TxId,
+        ) -> Option<(Fate, Option<GlobalTime>, DurabilityTier)> {
+            crate::db::block_on(self.transaction_state(tx_id))
+        }
+    }
+}
 
 /// Re-export of the underlying groove crate used for storage setup.
 pub use groove;

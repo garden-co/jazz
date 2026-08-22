@@ -3,11 +3,14 @@ where
     S: OrderedKvStorage,
 {
     /// Commit a local mergeable write and leave its fate pending.
-    pub fn commit_mergeable(&mut self, commit: MergeableCommit) -> Result<TxId, Error> {
+    pub async fn commit_mergeable(
+        &mut self,
+        commit: MergeableCommit,
+    ) -> Result<PublishedTransaction, Error> {
         commit.validate()?;
         self.merge_commit_parent_times(std::slice::from_ref(&commit))?;
         let made_at = self.mint_tx_time(commit.now_ms);
-        self.commit_mergeable_at(commit, made_at)
+        self.commit_mergeable_at(commit, made_at).await
     }
 
     /// Commit one local mergeable write under an admitted authored schema.
@@ -16,16 +19,20 @@ where
     /// when an authority later advances its separate current-write pointer.
     /// Their canonical versions must retain that authored schema so receivers
     /// can reconstruct through the ordered catalogue lineage.
-    pub(crate) fn commit_mergeable_in_schema(
+    pub(crate) async fn commit_mergeable_in_schema(
         &mut self,
         schema_version: SchemaVersionId,
         commit: MergeableCommit,
-    ) -> Result<TxId, Error> {
+    ) -> Result<PublishedTransaction, Error> {
         self.commit_mergeable_many_in_schema(schema_version, vec![commit])
+            .await
     }
 
     /// Commit multiple local mergeable writes as one transaction.
-    pub fn commit_mergeable_many(&mut self, commits: Vec<MergeableCommit>) -> Result<TxId, Error> {
+    pub async fn commit_mergeable_many(
+        &mut self,
+        commits: Vec<MergeableCommit>,
+    ) -> Result<PublishedTransaction, Error> {
         if commits.is_empty() {
             return Err(Error::InvalidMergeableCommit(
                 "mergeable transaction requires at least one write",
@@ -41,16 +48,16 @@ where
         }
         self.merge_commit_parent_times(&commits)?;
         let made_at = self.mint_tx_time(commits[0].now_ms);
-        self.commit_mergeable_many_at(commits, made_at)
+        self.commit_mergeable_many_at(commits, made_at).await
     }
 
     /// Commit the already-calculated output of the high-level contribution
     /// merge helper as one ordinary mergeable transaction.
-    pub(crate) fn commit_calculated_merge_many(
+    pub(crate) async fn commit_calculated_merge_many(
         &mut self,
         commits: Vec<MergeableCommit>,
         provenance: ContributionMergeProvenance,
-    ) -> Result<TxId, Error> {
+    ) -> Result<PublishedTransaction, Error> {
         self.require_catalogue_ready()?;
         provenance.validate().map_err(Error::InvalidMergeableCommit)?;
         if commits.is_empty() {
@@ -153,14 +160,15 @@ where
             made_at,
             Some(provenance),
         )
+        .await
     }
 
     /// Commit local mergeable writes under one admitted authored schema.
-    pub(crate) fn commit_mergeable_many_in_schema(
+    pub(crate) async fn commit_mergeable_many_in_schema(
         &mut self,
         schema_version: SchemaVersionId,
         commits: Vec<MergeableCommit>,
-    ) -> Result<TxId, Error> {
+    ) -> Result<PublishedTransaction, Error> {
         self.require_catalogue_ready()?;
         if !self
             .catalogue
@@ -193,6 +201,7 @@ where
             .collect(),
             made_at,
         )
+        .await
     }
 
     fn merge_commit_parent_times(&mut self, commits: &[MergeableCommit]) -> Result<(), Error> {
@@ -206,19 +215,19 @@ where
         Ok(())
     }
 
-    fn commit_mergeable_at(
+    pub(crate) async fn commit_mergeable_at(
         &mut self,
         commit: MergeableCommit,
         made_at: TxTime,
-    ) -> Result<TxId, Error> {
-        self.commit_mergeable_many_at(vec![commit], made_at)
+    ) -> Result<PublishedTransaction, Error> {
+        self.commit_mergeable_many_at(vec![commit], made_at).await
     }
 
-    fn commit_mergeable_many_at(
+    async fn commit_mergeable_many_at(
         &mut self,
         commits: Vec<MergeableCommit>,
         made_at: TxTime,
-    ) -> Result<TxId, Error> {
+    ) -> Result<PublishedTransaction, Error> {
         self.require_catalogue_ready()?;
         let write_schema_version = self.catalogue.current_write_schema.schema;
         let commits = commits
@@ -226,24 +235,26 @@ where
             .map(|commit| (write_schema_version, commit))
             .collect();
         self.commit_mergeable_many_at_with_schema_versions(commits, made_at)
+            .await
     }
 
-    pub(super) fn commit_mergeable_many_at_with_schema_versions(
+    pub(super) async fn commit_mergeable_many_at_with_schema_versions(
         &mut self,
         commits: Vec<(SchemaVersionId, MergeableCommit)>,
         made_at: TxTime,
-    ) -> Result<TxId, Error> {
+    ) -> Result<PublishedTransaction, Error> {
         self.commit_mergeable_many_at_with_schema_versions_and_provenance(
             commits, made_at, None,
         )
+        .await
     }
 
-    pub(super) fn commit_mergeable_many_at_with_schema_versions_and_provenance(
+    pub(super) async fn commit_mergeable_many_at_with_schema_versions_and_provenance(
         &mut self,
         commits: Vec<(SchemaVersionId, MergeableCommit)>,
         made_at: TxTime,
         contribution_merge: Option<ContributionMergeProvenance>,
-    ) -> Result<TxId, Error> {
+    ) -> Result<PublishedTransaction, Error> {
         let tx_id = TxId::new(made_at, self.node_uuid);
         let made_by = commits[0].1.made_by;
         let permission_subject = commits[0].1.effective_permission_subject();
@@ -263,7 +274,7 @@ where
             user_metadata_json,
             contribution_merge,
         };
-        let tx_node_alias = self.ensure_node_alias(tx_id.node)?;
+        let tx_node_alias = self.ensure_node_alias(tx_id.node).await?;
         let mut batch = self.database.open_batch();
         batch.insert(
             "jazz_transactions",
@@ -278,7 +289,9 @@ where
         let mut stored_versions = Vec::new();
         let mut pending_parents = BTreeSet::new();
         for (write_schema_version, commit) in commits {
-            let schema_version_alias = self.ensure_schema_version_alias(write_schema_version)?;
+            let schema_version_alias = self
+                .ensure_schema_version_alias(write_schema_version)
+                .await?;
             let table_schema = self.table_in_schema(&commit.table, write_schema_version)?;
             let schema = &self
                 .catalogue
@@ -294,7 +307,7 @@ where
                 &table_schema.name,
             )?;
             for parent in &commit.parents {
-                let parent_versions = self.query_versions_for_tx(*parent)?;
+                let parent_versions = self.query_versions_for_tx(*parent).await?;
                 let same_row = parent_versions.iter().filter(|version| {
                     version.row_uuid() == commit.row_uuid
                         && self.physical_table_id_for_version(version).ok() == Some(table_id)
@@ -314,14 +327,14 @@ where
                     &branch_key,
                     commit.row_uuid,
                     layer,
-                )? {
+                ).await? {
                     Some(previous) => Some(previous),
                     None => self.query_global_layer_winner_in_branch(
                         &table_schema.name,
                         &branch_key,
                         commit.row_uuid,
                         layer,
-                    )?,
+                    ).await?,
                 };
             let creator_source = if let Some(previous) = previous_current.as_ref() {
                 Some(previous.clone())
@@ -331,14 +344,14 @@ where
                     &branch_key,
                     commit.row_uuid,
                     VersionLayer::Content,
-                )? {
+                ).await? {
                     Some(previous) => Some(previous),
                     None => self.query_global_layer_winner_in_branch(
                         &table_schema.name,
                         &branch_key,
                         commit.row_uuid,
                         VersionLayer::Content,
-                    )?,
+                    ).await?,
                 }
             } else {
                 None
@@ -395,7 +408,7 @@ where
                 Some((
                     previous,
                     self.version_tx_id(previous)?,
-                    self.version_made_at(previous)?,
+                    self.version_made_at(previous).await?,
                 ))
             } else {
                 None
@@ -409,7 +422,8 @@ where
                 self.version_storage_primary_key(&stored)?,
                 groove_record,
             );
-            self.update_merge_heads_for_content_version(&mut batch, &stored)?;
+            self.update_merge_heads_for_content_version(&mut batch, &stored)
+                .await?;
             self.write_ahead_current_insert(&mut batch, &stored)?;
             pending_parents.extend(stored.parents());
             stored_versions.push(stored);
@@ -422,26 +436,123 @@ where
                 );
             }
         }
-        self.database.commit_batch(batch)?;
+        let pending_child_edges = {
+            let mut edges = Vec::new();
+            for stored in &stored_versions {
+                for parent in stored.parents() {
+                    if self
+                        .query_transaction(parent)
+                        .await?
+                        .is_none_or(|tx| matches!(tx.fate, Fate::Pending))
+                    {
+                        edges.push(parent);
+                    }
+                }
+            }
+            edges
+        };
+        let persistence = self.database.apply_batch(batch).await?;
         self.cache_tx_versions(tx_id, stored_versions.clone());
         if permission_subject != made_by {
             self.open_tx
                 .local_permission_subjects
                 .insert(tx_id, permission_subject);
         }
-        for stored in &stored_versions {
-            self.record_child_edges(tx_id, stored.parents());
+        for parent in pending_child_edges {
+            self.rejections
+                .child_txs_by_parent
+                .entry(parent)
+                .or_default()
+                .insert(tx_id);
         }
-        Ok(tx_id)
+        self.pending_persistence.insert(tx_id);
+        Ok(PublishedTransaction { tx_id, persistence })
     }
 
     /// Commit a local mergeable write and return its sync commit unit.
-    pub fn commit_mergeable_unit(
+    pub async fn commit_mergeable_unit(
         &mut self,
         commit: MergeableCommit,
-    ) -> Result<(TxId, SyncMessage), Error> {
-        let tx_id = self.commit_mergeable(commit)?;
-        Ok((tx_id, self.commit_unit_for(tx_id)?))
+    ) -> Result<(PublishedTransaction, SyncMessage), Error> {
+        let made_by = commit.made_by;
+        let permission_subject = commit.permission_subject;
+        let user_metadata_json = commit.user_metadata_json.clone();
+        let published = self.commit_mergeable(commit).await?;
+        let tx_id = published.tx_id;
+        let tx = Transaction {
+            tx_id,
+            kind: TxKind::Mergeable,
+            n_total_writes: 1,
+            made_by,
+            permission_subject,
+            base_snapshot: None,
+            row_read_set: None,
+            absent_read_set: None,
+            predicate_read_set: None,
+            user_metadata_json,
+            contribution_merge: None,
+        };
+        let unit = self.resident_commit_unit(tx)?;
+        Ok((published, unit))
+    }
+
+    pub(super) fn resident_commit_unit(&mut self, tx: Transaction) -> Result<SyncMessage, Error> {
+        let versions = self
+            .cached_tx_versions(tx.tx_id)
+            .expect("newly published transaction retains its resident versions")
+            .into_iter()
+            .map(|row| self.version_record_from_row(&row))
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(SyncMessage::CommitUnit { tx, versions })
+    }
+
+    /// Settle a completed persistence receipt and release its storage boundary.
+    pub fn settle_published_transaction(
+        &mut self,
+        tx_id: TxId,
+        persistence: PersistedBatch,
+    ) -> Result<(), Error> {
+        self.database.finish_persistence(persistence)?;
+        self.pending_persistence.remove(&tx_id);
+        Ok(())
+    }
+
+    /// Persist and settle one resident transaction publication.
+    pub async fn persist_and_settle_transaction(
+        &mut self,
+        published: PublishedTransaction,
+    ) -> Result<TxId, Error> {
+        let tx_id = published.tx_id;
+        let persistence = published.persist().await;
+        self.settle_published_transaction(tx_id, persistence)?;
+        Ok(tx_id)
+    }
+
+    /// Persist and settle every resident publication attached to an outcome.
+    pub async fn persist_and_settle_outcome<T>(
+        &mut self,
+        outcome: PublicationOutcome<T>,
+    ) -> Result<T, Error>
+    where
+        S: ReopenableStorage,
+    {
+        let (value, mut publications, mut work) = outcome.into_parts();
+        loop {
+            for publication in publications {
+                let persistence = publication.persist().await;
+                self.settle_published_transaction(publication.tx_id(), persistence)?;
+            }
+            let Some(message) = work.pop_front() else {
+                break;
+            };
+            let mut outcome = self.apply_sync_message(message).await?;
+            // This is internal continuation work, not a reply to a remote
+            // sender. Its resident publications and further continuations are
+            // lifecycle-significant; its protocol response is not.
+            publications = outcome.publications;
+            work.append(&mut outcome.post_settlement_work);
+        }
+        Ok(value)
     }
 
     /// Rebuild the sync commit unit for an already-committed local transaction
@@ -451,14 +562,16 @@ where
     /// on a connection. Unlike [`NodeState::commit_mergeable_unit`] this reads the
     /// stored versions, so the shipped
     /// unit matches what the author actually stored.
-    pub fn commit_unit_for(&mut self, tx_id: TxId) -> Result<SyncMessage, Error> {
+    pub async fn commit_unit_for(&mut self, tx_id: TxId) -> Result<SyncMessage, Error> {
         let tx = self
-            .query_transaction(tx_id)?
+            .query_transaction(tx_id)
+            .await?
             .ok_or(Error::MissingTransaction(tx_id))?
             .tx
             .clone();
         let versions = self
-            .query_versions_for_tx(tx_id)?
+            .query_versions_for_tx(tx_id)
+            .await?
             .into_iter()
             .map(|row| self.version_record_from_row(&row))
             .collect::<Result<Vec<_>, Error>>()?;
@@ -471,8 +584,9 @@ where
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
-        Ok(self
-            .current_rows(table, DurabilityTier::Local)?
+        Ok(crate::db::block_on(
+            self.current_rows(table, DurabilityTier::Local),
+        )?
             .into_iter()
             .find(|row| row.row_uuid() == row_uuid)
             .map(|row| {
@@ -489,7 +603,7 @@ where
     }
 
     /// Read one exact branch-local row for mutation preparation.
-    pub fn visible_current_cells_in_branch(
+    pub async fn visible_current_cells_in_branch(
         &mut self,
         table: &str,
         branch: &BranchSelector,
@@ -511,14 +625,17 @@ where
             &branch_key,
             row_uuid,
             VersionLayer::Deletion,
-        )? {
+        )
+        .await?
+        {
             Some(version) => Some(version),
             None => self.query_global_layer_winner_in_branch(
                 table,
                 &branch_key,
                 row_uuid,
                 VersionLayer::Deletion,
-            )?,
+            )
+            .await?,
         };
         if deletion.is_some_and(|version| version.deletion() == Some(DeletionEvent::Deleted)) {
             return Ok(None);
@@ -528,14 +645,17 @@ where
             &branch_key,
             row_uuid,
             VersionLayer::Content,
-        )? {
+        )
+        .await?
+        {
             Some(version) => Some(version),
             None => self.query_global_layer_winner_in_branch(
                 table,
                 &branch_key,
                 row_uuid,
                 VersionLayer::Content,
-            )?,
+            )
+            .await?,
         };
         let Some(content) = content
         else {
@@ -546,7 +666,7 @@ where
     }
 
     /// Return the exact local content parent for a branch-local row.
-    pub fn local_content_winner_tx_id_in_branch(
+    pub async fn local_content_winner_tx_id_in_branch(
         &mut self,
         table: &str,
         branch: &BranchSelector,
@@ -558,10 +678,11 @@ where
             row_uuid,
             VersionLayer::Content,
         )
+        .await
     }
 
     /// Return the exact local deletion parent for a branch-local row.
-    pub fn local_deletion_winner_tx_id_in_branch(
+    pub async fn local_deletion_winner_tx_id_in_branch(
         &mut self,
         table: &str,
         branch: &BranchSelector,
@@ -573,9 +694,10 @@ where
             row_uuid,
             VersionLayer::Deletion,
         )
+        .await
     }
 
-    fn local_layer_winner_tx_id_in_branch_selector(
+    async fn local_layer_winner_tx_id_in_branch_selector(
         &mut self,
         table: &str,
         branch: &BranchSelector,
@@ -593,14 +715,15 @@ where
         let (branch_key, _) = schema
             .project_branch_selector(&table_schema, branch)
             .map_err(Error::InvalidBranchKey)?;
-        self.query_local_layer_winner_in_branch(table, &branch_key, row_uuid, layer)?
+        self.query_local_layer_winner_in_branch(table, &branch_key, row_uuid, layer)
+            .await?
             .as_ref()
             .map(|version| self.version_tx_id(version))
             .transpose()
     }
 
     /// Return current rows at the requested durability tier.
-    pub fn current_rows(
+    pub async fn current_rows(
         &mut self,
         table: &str,
         settled: DurabilityTier,
@@ -608,55 +731,79 @@ where
         self.require_catalogue_ready()?;
         let shape = crate::query::Query::from(table).validate(&self.catalogue.schema)?;
         let binding = shape.bind(BTreeMap::new())?;
-        self.query_rows(&shape, &binding, settled)
+        self.query_rows(&shape, &binding, settled).await
     }
 
-    fn local_layer_winner_tx_id(
-        &mut self,
-        table: &str,
-        row_uuid: RowUuid,
-        layer: VersionLayer,
-    ) -> Result<Option<TxId>, Error> {
-        self.query_local_layer_winner(table, row_uuid, layer)?
-            .as_ref()
-            .map(|version| self.version_tx_id(version))
-            .transpose()
-    }
-
-    pub(crate) fn local_content_winner_tx_id(
+    pub(crate) async fn local_content_winner_tx_id(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<Option<TxId>, Error> {
-        self.local_layer_winner_tx_id(table, row_uuid, VersionLayer::Content)
+        self.local_content_winner_tx_id_in_schema(
+            self.catalogue.current_write_schema.schema,
+            table,
+            row_uuid,
+        )
+        .await
     }
 
-    pub(crate) fn local_deletion_winner_tx_id(
+    pub(crate) async fn local_content_winner_tx_id_in_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<TxId>, Error> {
+        let table_schema = self.table_in_schema(table, schema_version)?;
+        Ok(self
+            .local_current_content_row_candidate(&table_schema, row_uuid, schema_version)
+            .await?
+            .map(|(_, (time, node))| TxId::new(time, node)))
+    }
+
+    pub(crate) async fn local_deletion_winner_tx_id(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
     ) -> Result<Option<TxId>, Error> {
-        self.local_layer_winner_tx_id(table, row_uuid, VersionLayer::Deletion)
+        self.local_deletion_winner_tx_id_in_schema(
+            self.catalogue.current_write_schema.schema,
+            table,
+            row_uuid,
+        )
+        .await
     }
 
-    fn rebuild_ahead_current_keys(&mut self) -> Result<(), Error> {
+    pub(crate) async fn local_deletion_winner_tx_id_in_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<TxId>, Error> {
+        let table_schema = self.table_in_schema(table, schema_version)?;
+        Ok(self
+            .local_current_deletion_candidate(&table_schema, row_uuid, schema_version)
+            .await?
+            .map(|(_, (time, node))| TxId::new(time, node)))
+    }
+
+    async fn rebuild_ahead_current_keys(&mut self) -> Result<(), Error> {
         #[cfg(feature = "testing")]
         {
-            self.rebuild_ahead_current_keys_inner(None)
+            self.rebuild_ahead_current_keys_inner(None).await
         }
         #[cfg(not(feature = "testing"))]
-        self.rebuild_ahead_current_keys_inner()
+        self.rebuild_ahead_current_keys_inner().await
     }
 
     #[cfg(feature = "testing")]
-    fn rebuild_ahead_current_keys_with_receipt(
+    async fn rebuild_ahead_current_keys_with_receipt(
         &mut self,
         receipt: &mut NodeOpenReceipt,
     ) -> Result<(), Error> {
-        self.rebuild_ahead_current_keys_inner(Some(receipt))
+        self.rebuild_ahead_current_keys_inner(Some(receipt)).await
     }
 
-    fn rebuild_ahead_current_keys_inner(
+    async fn rebuild_ahead_current_keys_inner(
         &mut self,
         #[cfg(feature = "testing")] mut receipt: Option<&mut NodeOpenReceipt>,
     ) -> Result<(), Error> {
@@ -672,7 +819,8 @@ where
         for table_id in physical_table_ids {
             let content_rows = self
                 .database
-                .primary_key_scan_raw(&physical_ahead_current_table_name(table_id), &[])?
+                .primary_key_scan_raw(&physical_ahead_current_table_name(table_id), &[])
+                .await?
                 .into_iter()
                 .map(|raw| {
                     let record = raw.record();
@@ -706,7 +854,8 @@ where
             }
             let deletion_rows = self
                 .database
-                .primary_key_scan_raw(&physical_register_ahead_current_table_name(table_id), &[])?
+                .primary_key_scan_raw(&physical_register_ahead_current_table_name(table_id), &[])
+                .await?
                 .into_iter()
                 .map(|raw| {
                     let record = raw.record();
@@ -897,7 +1046,7 @@ where
         version.cells(table)
     }
 
-    pub(crate) fn local_current_row(
+    pub(crate) async fn local_current_row(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
@@ -907,9 +1056,10 @@ where
             row_uuid,
             self.catalogue.current_write_schema.schema,
         )
+        .await
     }
 
-    pub(crate) fn local_current_row_in_schema(
+    pub(crate) async fn local_current_row_in_schema(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
@@ -917,9 +1067,11 @@ where
     ) -> Result<Option<CurrentRow>, Error> {
         let table_schema = self.table_in_schema(table, schema_version)?;
         let content =
-            self.local_current_content_row_candidate(&table_schema, row_uuid, schema_version)?;
+            self.local_current_content_row_candidate(&table_schema, row_uuid, schema_version)
+                .await?;
         let deletion =
-            self.local_current_deletion_candidate(&table_schema, row_uuid, schema_version)?;
+            self.local_current_deletion_candidate(&table_schema, row_uuid, schema_version)
+                .await?;
         if let (Some((_, content_tx)), Some((deletion, deletion_tx))) = (&content, &deletion)
             && deletion_tx > content_tx
             && *deletion == DeletionEvent::Deleted
@@ -931,7 +1083,7 @@ where
             .transpose()
     }
 
-    fn local_current_content_row_candidate(
+    async fn local_current_content_row_candidate(
         &mut self,
         table: &TableSchema,
         row_uuid: RowUuid,
@@ -957,6 +1109,7 @@ where
                 ["row_uuid"],
                 ["tx_time", "tx_node_id"],
             ))
+            .await
             .map_err(|error| Self::malformed_current_query_error(&table.name, row_uuid, error))?;
         let Some(delta) = result.deltas.into_iter().find(|delta| delta.weight > 0) else {
             return Ok(None);
@@ -966,21 +1119,26 @@ where
         Ok(Some((decode_current_row(table, record)?, tx)))
     }
 
-    fn local_current_deletion_candidate(
+    async fn local_current_deletion_candidate(
         &mut self,
         table: &TableSchema,
         row_uuid: RowUuid,
         schema_version: SchemaVersionId,
     ) -> Result<Option<(DeletionEvent, (TxTime, NodeUuid))>, Error> {
         let table_id = self.physical_table_id_for_schema(schema_version, &table.name)?;
-        let prefix = vec![groove::ivm::LiteralValue::from(Value::Uuid(row_uuid.0))];
+        // Physical current keys lead with the branch key. Prepend the shared
+        // (default) branch exactly as the canonical content-current lookup
+        // does before applying the logical row-UUID point lookup.
+        let point = groove::ivm::StaticScanSpec::Point(vec![
+            groove::ivm::LiteralValue::from(Value::Uuid(row_uuid.0)),
+        ]);
         let global = GraphBuilder::table_scan(
             physical_register_global_current_table_name(table_id),
-            groove::ivm::StaticScanSpec::Point(prefix.clone()),
+            shared_branch_scan(Some(point.clone())),
         );
         let ahead = GraphBuilder::table_scan(
             physical_register_ahead_current_table_name(table_id),
-            groove::ivm::StaticScanSpec::Prefix(prefix),
+            shared_branch_scan(Some(point)),
         );
         let result = self
             .database
@@ -989,6 +1147,7 @@ where
                 ["row_uuid"],
                 ["tx_time", "tx_node_id"],
             ))
+            .await
             .map_err(|error| Self::malformed_current_query_error(&table.name, row_uuid, error))?;
         let Some(delta) = result.deltas.into_iter().find(|delta| delta.weight > 0) else {
             return Ok(None);

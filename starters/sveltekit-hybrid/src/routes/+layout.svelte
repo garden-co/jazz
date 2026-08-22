@@ -19,11 +19,9 @@
 </script>
 
 {#if authenticated !== null}
-  {#key authenticated}
-    <JazzClientProvider {authenticated}>
-      {#snippet children()}
-        {@render pageChildren?.()}
-      {/snippet}
-    </JazzClientProvider>
-  {/key}
+  <JazzClientProvider {authenticated}>
+    {#snippet children()}
+      {@render pageChildren?.()}
+    {/snippet}
+  </JazzClientProvider>
 {/if}

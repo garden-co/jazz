@@ -58,14 +58,50 @@ pub(crate) struct ClaimParameter {
 /// Result of lowering one query program.
 pub(crate) type QueryCompileResult = CapabilityResult<QueryProgram>;
 
-/// Lower one Jazz query program into the unified Groove-backed program.
-pub(crate) fn lower_query_program(
+/// Owned declarative Groove inputs prepared before pure Jazz lowering.
+pub(crate) type ResolvedQuerySources = BTreeMap<SourceId, ResolvedSource>;
+
+/// Analyze the logical source requests for one program without preparing or
+/// lowering any source. Compilation orchestration uses this to discover
+/// dependent policy programs before source preparation begins.
+pub(crate) fn query_program_source_requests(
+    request: &QueryProgramRequest,
+) -> CapabilityResult<Vec<SourceRequest>> {
+    let plan = analyze_query_plan(request).map_err(|gaps| {
+        Box::new(CapabilityReport {
+            gaps,
+            explain: explain_with_request(request, ExplainPlan::default()),
+        })
+    })?;
+    let source_visibilities = source_visibilities(&plan);
+    source_requirements(request, &plan)?
+        .into_iter()
+        .map(|(source, requirements)| {
+            Ok(SourceRequest {
+                visibility: source_visibilities
+                    .get(&source)
+                    .copied()
+                    .unwrap_or(RowVisibility::Visible),
+                authorization: source_authorization_for_source(request, &source)?,
+                source,
+                requirements,
+            })
+        })
+        .collect()
+}
+
+/// Prepare concrete source descriptions, then synchronously lower the program.
+///
+/// This is an explicit compatibility boundary while snapshot capture and
+/// physical-layout preparation remain async. Runtime production code calls
+/// this function; the lowering phase itself is [`lower_resolved_query_program`].
+pub(crate) async fn prepare_and_lower_query_program(
     request: QueryProgramRequest,
-    source_resolver: &mut impl SourceResolver,
+    source_preparer: &mut impl SourceGraphPreparer,
 ) -> QueryCompileResult {
     let mut explain = ExplainPlan::default();
 
-    let plan = match analyze_query_plan(&request) {
+    let _plan = match analyze_query_plan(&request) {
         Ok(plan) => plan,
         Err(gaps) => {
             explain
@@ -78,33 +114,27 @@ pub(crate) fn lower_query_program(
         }
     };
 
-    let source_requirements = source_requirements(&request, &plan)?;
     let mut resolved_sources = BTreeMap::new();
-    let source_visibilities = source_visibilities(&plan);
-    for (source, requirements) in source_requirements {
-        let visibility = source_visibilities
-            .get(&source)
-            .copied()
-            .unwrap_or(RowVisibility::Visible);
-        let source_request = SourceRequest {
-            source: source.clone(),
-            visibility,
-            authorization: source_authorization_for_source(&request, &source)?,
-            requirements,
-        };
-        let resolved_source = match source_resolver.resolve_source(&source_request) {
-            Ok(resolved_source) => resolved_source,
-            Err(err) => {
-                let mut failure_explain = explain.clone();
-                failure_explain
-                    .read
-                    .push(format!("failed source request: {:#?}", err.request));
-                return Err(Box::new(CapabilityReport {
-                    gaps: vec![UnsupportedReason::Source(err.gap)],
-                    explain: explain_with_request(&request, failure_explain),
-                }));
-            }
-        };
+    for source_request in query_program_source_requests(&request)? {
+        let source = source_request.source.clone();
+        // Source preparation is the remaining async compatibility boundary.
+        // Policy programs have already been prepared by compilation
+        // orchestration; this future is only for source-local snapshot and
+        // physical-layout work that has not migrated to Groove yet.
+        let resolved_source =
+            match Box::pin(source_preparer.prepare_source_graph(&source_request)).await {
+                Ok(resolved_source) => resolved_source,
+                Err(err) => {
+                    let mut failure_explain = explain.clone();
+                    failure_explain
+                        .read
+                        .push(format!("failed source request: {:#?}", err.request));
+                    return Err(Box::new(CapabilityReport {
+                        gaps: vec![UnsupportedReason::Source(err.gap)],
+                        explain: explain_with_request(&request, failure_explain),
+                    }));
+                }
+            };
         explain.physical.push(format!(
             "source {:?} ({:?}) -> resolved table {}",
             source,
@@ -113,6 +143,30 @@ pub(crate) fn lower_query_program(
         ));
         resolved_sources.insert(source, resolved_source);
     }
+    lower_resolved_query_program(request, resolved_sources, explain)
+}
+
+/// Purely lower a Jazz request whose Groove sources have already been prepared.
+///
+/// This function performs no storage access, hydration, registration, or
+/// evaluation and therefore must remain synchronous.
+pub(crate) fn lower_resolved_query_program(
+    request: QueryProgramRequest,
+    resolved_sources: ResolvedQuerySources,
+    mut explain: ExplainPlan,
+) -> QueryCompileResult {
+    let plan = match analyze_query_plan(&request) {
+        Ok(plan) => plan,
+        Err(gaps) => {
+            explain
+                .capabilities
+                .push("only current-source row-set lowering is implemented".to_owned());
+            return Err(Box::new(CapabilityReport {
+                gaps,
+                explain: explain_with_request(&request, explain),
+            }));
+        }
+    };
     let resolved_root = resolved_sources
         .get(plan.root_source())
         .cloned()
@@ -205,6 +259,14 @@ pub(crate) fn lower_query_program(
         request,
         explain,
     })
+}
+
+#[cfg(test)]
+pub(crate) async fn lower_query_program(
+    request: QueryProgramRequest,
+    source_preparer: &mut impl SourceGraphPreparer,
+) -> QueryCompileResult {
+    prepare_and_lower_query_program(request, source_preparer).await
 }
 
 fn verify_routed_terminal_outputs(

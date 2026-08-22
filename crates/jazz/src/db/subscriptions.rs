@@ -31,7 +31,7 @@ where
     /// assert!(reset);
     /// assert!(added.is_empty());
     ///
-    /// db.insert("todos", todo_cells("notify subscribers", false))?;
+    /// block_on(db.insert("todos", todo_cells("notify subscribers", false)))?;
     /// let changed = block_on(subscription.next_event()).unwrap();
     /// let SubscriptionEvent::Delta { added, updated, removed, .. } = changed else {
     ///     panic!("expected subscription delta");
@@ -134,12 +134,13 @@ where
             opts.read_view.clone(),
             opts.propagation == Propagation::Full,
         );
-        let (shape, binding, _) = self.node.node.borrow_mut().prepare_query_binding_for_link(
-            &prepared.shape,
-            &prepared.binding,
-            upstream_opts.tier,
-            author,
-        )?;
+        let (shape, binding, _) =
+            super::block_on(self.node.node.borrow_mut().prepare_query_binding_for_link(
+                &prepared.shape,
+                &prepared.binding,
+                upstream_opts.tier,
+                author,
+            ))?;
         self.attach_or_refresh_query_coverage(&shape, &binding, upstream_opts, author)
     }
 
@@ -418,7 +419,8 @@ where
                 author,
                 &opts.read_view,
                 authorization_mode,
-            )?;
+            )
+            .await?;
         let (local_shape, local_binding, _local_plan) = self
             .node
             .node
@@ -429,7 +431,8 @@ where
                 read_tier,
                 author,
                 authorization_mode,
-            )?;
+            )
+            .await?;
         let (subscription, snapshot) = self
             .node
             .node
@@ -442,7 +445,8 @@ where
                 &opts.read_view,
                 Some(_local_plan),
                 authorization_mode,
-            )?;
+            )
+            .await?;
         let root_occurrence_ids = subscription.root_occurrence_ids().to_vec();
         let local_subscription_id = subscription.subscription_id();
         let local_node = Rc::clone(&self.node.node);
@@ -457,7 +461,7 @@ where
             if let Some((runtime_token, subscription_id)) = local_cleanup_handle.get()
                 && node.groove_runtime_token() == runtime_token
             {
-                node.unsubscribe_groove_subscription(subscription_id);
+                super::block_on(node.unsubscribe_groove_subscription(subscription_id));
             }
         }));
         let mut maintained_subscription = Some(subscription);
@@ -497,7 +501,8 @@ where
                         upstream_opts.tier,
                         author,
                         authorization_mode,
-                    )?;
+                    )
+                    .await?;
                 (shape, binding)
             };
             state_shape = shape.clone();
@@ -677,17 +682,19 @@ where
         identity: AuthorId,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<OpenedUpstreamCoverage, Error> {
-        self.node
-            .node
-            .borrow_mut()
-            .ensure_peer_maintained_subscription_view_supported(
-                shape,
-                binding,
-                opts.tier,
-                identity,
-                &opts.read_view,
-                authorization_mode,
-            )?;
+        super::block_on(
+            self.node
+                .node
+                .borrow_mut()
+                .ensure_peer_maintained_subscription_view_supported(
+                    shape,
+                    binding,
+                    opts.tier,
+                    identity,
+                    &opts.read_view,
+                    authorization_mode,
+                ),
+        )?;
         let coverage = coverage_key(shape, binding, opts.clone());
         if self
             .node
@@ -730,10 +737,12 @@ where
             .borrow_mut()
             .entry(coverage.clone())
             .or_insert(0) += 1;
-        let has_live_upstream =
-            self.node.connections.borrow().iter().any(|connection| {
-                matches!(&connection.borrow().link, ConnectionLink::Upstream { .. })
-            });
+        let has_live_upstream = self
+            .node
+            .connections
+            .borrow()
+            .iter()
+            .any(|connection| matches!(&connection.borrow().link, ConnectionLink::Upstream(_)));
         if has_live_upstream {
             self.node
                 .awaiting_initial_authority_coverage

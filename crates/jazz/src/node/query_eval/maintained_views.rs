@@ -174,7 +174,7 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    pub(crate) fn open_maintained_view_subscription_in_authorization_mode(
+    pub(crate) async fn open_maintained_view_subscription_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -207,7 +207,8 @@ where
                 authorization_mode,
                 settled_binding_view,
                 PreparedClaimBindingMode::Strict,
-            )?;
+            )
+            .await?;
         let mut local = LocalMaintainedViewSubscription {
             subscription,
             _retained_prepared_plan: retained_prepared_plan,
@@ -238,15 +239,17 @@ where
             program_facts: BTreeSet::new(),
             root_occurrence_ids: Vec::new(),
         };
-        let _initial_delta =
-            self.apply_local_maintained_view_transitions(&mut local, transitions)?;
-        let initial =
-            self.materialize_local_maintained_relation_snapshot_with_occurrences(&local)?;
+        let _initial_delta = self
+            .apply_local_maintained_view_transitions(&mut local, transitions)
+            .await?;
+        let initial = self
+            .materialize_local_maintained_relation_snapshot_with_occurrences(&local)
+            .await?;
         local.root_occurrence_ids = initial.root_occurrence_ids;
         Ok((local, initial.snapshot))
     }
 
-    pub(crate) fn drain_local_maintained_view_subscription(
+    pub(crate) async fn drain_local_maintained_view_subscription(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
         authoritative_binding_view: Option<BindingViewKey>,
@@ -256,10 +259,11 @@ where
             authoritative_binding_view,
             &BTreeSet::new(),
         )
+        .await
         .map(|(update, _)| update)
     }
 
-    pub(crate) fn drain_local_maintained_view_subscription_preserving_rows(
+    pub(crate) async fn drain_local_maintained_view_subscription_preserving_rows(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
         authoritative_binding_view: Option<BindingViewKey>,
@@ -270,32 +274,39 @@ where
                 local,
                 authoritative_binding_view,
                 preserved_row_keys,
-            )?;
+            )
+            .await?;
         let Some(transitions) = transitions else {
             return Ok((None, suppressed_authoritative_change));
         };
-        let update = self.apply_local_maintained_view_transitions(local, transitions)?;
+        let update = self
+            .apply_local_maintained_view_transitions(local, transitions)
+            .await?;
         Ok((Some(update), suppressed_authoritative_change))
     }
 
-    pub(crate) fn drain_local_maintained_view_subscription_state(
+    pub(crate) async fn drain_local_maintained_view_subscription_state(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
         authoritative_binding_view: Option<BindingViewKey>,
     ) -> Result<bool, Error> {
-        let (Some(transitions), _) = self.drain_local_maintained_view_subscription_transitions(
-            local,
-            authoritative_binding_view,
-            &BTreeSet::new(),
-        )?
+        let (Some(transitions), _) = self
+            .drain_local_maintained_view_subscription_transitions(
+                local,
+                authoritative_binding_view,
+                &BTreeSet::new(),
+            )
+            .await?
         else {
             return Ok(false);
         };
-        let _ = self.apply_local_maintained_view_transitions_inner(local, transitions, false)?;
+        let _ = self
+            .apply_local_maintained_view_transitions_inner(local, transitions, false)
+            .await?;
         Ok(true)
     }
 
-    pub(crate) fn reset_local_maintained_view_subscription_from_binding_view(
+    pub(crate) async fn reset_local_maintained_view_subscription_from_binding_view(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
         binding_view_key: BindingViewKey,
@@ -358,7 +369,8 @@ where
         // the reset snapshot; retaining the opening vector makes a later
         // reset fail its root-count invariant (or, worse, pair wrong roots).
         local.root_occurrence_ids = self
-            .materialize_local_maintained_relation_snapshot_with_occurrences(local)?
+            .materialize_local_maintained_relation_snapshot_with_occurrences(local)
+            .await?
             .root_occurrence_ids;
         Ok(())
     }
@@ -407,7 +419,7 @@ where
                 != local.authoritative_result_generation
     }
 
-    fn drain_local_maintained_view_subscription_transitions(
+    async fn drain_local_maintained_view_subscription_transitions(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
         authoritative_binding_view: Option<BindingViewKey>,
@@ -419,6 +431,7 @@ where
         ),
         Error,
     > {
+        self.drive_query_runtime().await?;
         if local.result_query.aggregate.is_some()
             && let Some(remote_members) =
                 self.query.settled_result_sets.get(&local.binding_view_key)
@@ -558,8 +571,9 @@ where
                     if !local.result_set.contains(entry) {
                         let materializable = if remote_payloads.contains_key(entry) {
                             true
-                        } else if let Some(row) =
-                            self.materialize_local_maintained_view_result_member(local, entry)?
+                        } else if let Some(row) = self
+                            .materialize_local_maintained_view_result_member(local, entry)
+                            .await?
                         {
                             let table = self.table(row.table())?;
                             current_row_has_required_subscription_cells(
@@ -751,15 +765,16 @@ where
         Ok((Some(transitions), suppressed_authoritative_change))
     }
 
-    fn apply_local_maintained_view_transitions(
+    async fn apply_local_maintained_view_transitions(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
         transitions: super::maintained_subscription_view::ResultTransitions,
     ) -> Result<LocalMaintainedViewSubscriptionUpdate, Error> {
         self.apply_local_maintained_view_transitions_inner(local, transitions, true)
+            .await
     }
 
-    fn apply_local_maintained_view_transitions_inner(
+    async fn apply_local_maintained_view_transitions_inner(
         &mut self,
         local: &mut LocalMaintainedViewSubscription,
         transitions: super::maintained_subscription_view::ResultTransitions,
@@ -824,8 +839,9 @@ where
                 local.result_query.aggregate.is_some(),
             )?;
             if local.result_set.insert(member.clone()) && materialize_update && !structured_output {
-                if let Some(row) =
-                    self.materialize_local_maintained_view_result_member(local, &member)?
+                if let Some(row) = self
+                    .materialize_local_maintained_view_result_member(local, &member)
+                    .await?
                     && let Some(occurrence_id) = public_result_member_occurrence_id(
                         &member,
                         local.result_table.as_str(),
@@ -877,10 +893,13 @@ where
                     && !structured_output
                     && let ProgramFactEntry::RelationEdge(edge) = fact
                 {
-                    removed_edges.push(self.project_relation_edge_through_read_schema(
-                        &edge,
-                        local.result_schema_version,
-                    )?);
+                    removed_edges.push(
+                        self.project_relation_edge_through_read_schema(
+                            &edge,
+                            local.result_schema_version,
+                        )
+                        .await?,
+                    );
                 }
             }
         }
@@ -894,17 +913,17 @@ where
             if local.program_facts.insert(fact)
                 && let Some(edge) = edge
             {
-                let relation_edge = self.project_relation_edge_through_read_schema(
-                    &edge,
-                    local.result_schema_version,
-                )?;
+                let relation_edge = self
+                    .project_relation_edge_through_read_schema(&edge, local.result_schema_version)
+                    .await?;
                 let row = if let Some(version) = &edge.target_version {
                     self.materialize_local_maintained_view_relation_edge_row(
                         local,
                         edge.target_table.as_str(),
                         edge.target_row,
                         version.tx,
-                    )?
+                    )
+                    .await?
                 } else {
                     None
                 };

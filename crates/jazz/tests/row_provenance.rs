@@ -4,7 +4,7 @@ mod common;
 
 use jazz::db::{Db, DbConfig, DbIdentity, MergeableTxOps, ReadOpts};
 use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
+use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, OpenTransactionId, SchemaBuilder, TableSchemaBuilder};
@@ -27,11 +27,11 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_db(identity: AuthorId) -> Db<MemoryStorage> {
+fn open_db(identity: AuthorId) -> Db<TestStorage> {
     let schema = schema();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = MemoryStorage::new(&refs);
+    let storage = TestStorage::new(&refs);
     jazz::db::block_on(Db::open(DbConfig {
         schema,
         storage,
@@ -50,20 +50,20 @@ fn row_provenance_preserves_created_fields_and_advances_updated_at() {
     let row = RowUuid::from_bytes([0x33; 16]);
     let db = open_db(alice);
 
-    db.insert_with_id_at_ms(
+    jazz::block_on(db.insert_with_id_at_ms(
         "todos",
         row,
         BTreeMap::from([("title".to_owned(), Value::String("first".to_owned()))]),
         1_000,
-    )
+    ))
     .expect("insert row");
 
-    db.update_at_ms(
+    jazz::block_on(db.update_at_ms(
         "todos",
         row,
         BTreeMap::from([("title".to_owned(), Value::String("second".to_owned()))]),
         2_000,
-    )
+    ))
     .expect("update row");
 
     let prepared = db.prepare_query(&db.table("todos")).expect("prepare query");
@@ -109,14 +109,14 @@ fn deletion_advances_updated_provenance_without_replacing_creation_provenance() 
     let row = RowUuid::from_bytes([0x44; 16]);
     let db = open_db(alice);
 
-    db.insert_with_id_at_ms(
+    jazz::block_on(db.insert_with_id_at_ms(
         "todos",
         row,
         BTreeMap::from([("title".to_owned(), Value::String("first".to_owned()))]),
         1_000,
-    )
+    ))
     .expect("insert row");
-    db.delete_at_ms("todos", row, 3_000).expect("delete row");
+    jazz::block_on(db.delete_at_ms("todos", row, 3_000)).expect("delete row");
 
     let prepared = db.prepare_query(&db.table("todos")).expect("prepare query");
     let rows = jazz::block_on(db.all(
@@ -152,21 +152,25 @@ fn empty_batched_update_still_validates_handle_and_target() {
     let row = RowUuid::from_bytes([0x55; 16]);
 
     let abandoned = OpenTransactionId::new();
-    db.begin_mergeable(abandoned).expect("open batch");
+    jazz::block_on(db.begin_mergeable(abandoned)).expect("open batch");
     db.abandon_transaction_handle(abandoned)
         .expect("abandon batch");
-    let stale_error = db
-        .mergeable_tx_ref(abandoned)
-        .update("todos", row, BTreeMap::new())
-        .expect_err("stale batch handle must be rejected");
+    let stale_error = jazz::block_on(db.mergeable_tx_ref(abandoned).update(
+        "todos",
+        row,
+        BTreeMap::new(),
+    ))
+    .expect_err("stale batch handle must be rejected");
     assert!(stale_error.message.contains("open transaction"));
 
     let open = OpenTransactionId::new();
-    db.begin_mergeable(open).expect("open batch");
-    let absent_error = db
-        .mergeable_tx_ref(open)
-        .update("todos", row, BTreeMap::new())
-        .expect_err("absent target must be rejected");
+    jazz::block_on(db.begin_mergeable(open)).expect("open batch");
+    let absent_error = jazz::block_on(db.mergeable_tx_ref(open).update(
+        "todos",
+        row,
+        BTreeMap::new(),
+    ))
+    .expect_err("absent target must be rejected");
     assert!(
         absent_error.message.contains("must carry content cells"),
         "unexpected absent-target error: {}",

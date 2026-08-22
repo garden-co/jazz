@@ -1,6 +1,6 @@
 impl PeerState {
     /// Build a reset current-row view for `table`.
-    pub fn reset_current_rows<S>(
+    pub async fn reset_current_rows<S>(
         &mut self,
         node: &mut NodeState<S>,
         table: &str,
@@ -8,7 +8,7 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        self.rehydrate_current_rows(node, table)
+        self.rehydrate_current_rows(node, table).await
     }
 
     /// Drops only the per-subscription result_set cache. Version payload dedup
@@ -62,13 +62,18 @@ impl PeerState {
         let Some(mut state) = self.subscriptions.remove(&subscription) else {
             return false;
         };
-        let unsubscribed = state.groove_runtime_token == Some(node.groove_runtime_token())
-            && state
+        let unsubscribed = if state.groove_runtime_token == Some(node.groove_runtime_token()) {
+            state
                 .maintained_subscription_view
                 .take()
                 .is_some_and(|maintained| {
-                    node.unsubscribe_groove_subscription(maintained.subscription.id())
-                });
+                    crate::db::block_on(
+                        node.unsubscribe_groove_subscription(maintained.subscription.id()),
+                    )
+                })
+        } else {
+            false
+        };
         drop(state);
         unsubscribed
     }
@@ -147,7 +152,7 @@ impl PeerState {
     }
 
     /// Serve exact row-version repair fetches for this peer.
-    pub fn handle_row_versions_fetch<S>(
+    pub async fn handle_row_versions_fetch<S>(
         &mut self,
         node: &mut NodeState<S>,
         message: SyncMessage,
@@ -163,11 +168,11 @@ impl PeerState {
         validate_fetch_row_versions(&requests).map_err(|_| {
             Error::UnsupportedSyncMessage("row-version repair request exceeds limit")
         })?;
-        self.serve_row_versions(node, &requests)
+        self.serve_row_versions(node, &requests).await
     }
 
     /// Build repair-lane responses for visible requested row-version payloads.
-    pub fn serve_row_versions<S>(
+    pub async fn serve_row_versions<S>(
         &mut self,
         node: &mut NodeState<S>,
         requests: &[RowVersionRef],
@@ -175,7 +180,9 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        let versions = node.row_version_payloads_for_refs(requests, self.identity())?;
+        let versions = node
+            .row_version_payloads_for_refs(requests, self.identity())
+            .await?;
         Ok(vec![SyncMessage::RowVersionPayloads {
             version_bundles: versions,
         }])

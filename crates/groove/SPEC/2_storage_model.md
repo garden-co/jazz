@@ -261,6 +261,20 @@ Reopening means a fresh open over the same storage, which rebuilds in-memory
 state from the durable data. This is a deliberate fail-stop behavior; no partial
 rollback or retry is attempted for an ambiguous outcome (`INV-OK-14`).
 
+**Open question — ownership of read-your-writes batches.** Atomic
+`write_many` is a required ordered-storage property. It is less clear that a
+general read-your-writes transaction belongs in `OrderedKvStorage` itself.
+Groove currently needs an overlay for public `DatabaseBatch` reads, including a
+small number of genuine Jazz ingestion dependencies, while the IVM's same-tick
+overlay is being reconsidered as part of interruptible evaluation. Revisit
+whether the stable model should be:
+
+- an ordered-storage transaction that also supports reads; or
+- a Groove-owned prepared write set/read view that ultimately submits one
+  atomic `write_many`.
+
+Do not grow backend transaction lifecycle semantics until this is resolved.
+
 ### 2.7 Encoding (normative reference)
 
 This section defines the exact byte encodings referenced by §2.2–2.3.

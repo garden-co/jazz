@@ -7,9 +7,9 @@ where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     /// Build a mergeable transaction that commits multiple writes under one id.
-    pub fn mergeable_tx(&self) -> Result<MergeableTx<'_, S>, Error> {
+    pub async fn mergeable_tx(&self) -> Result<MergeableTx<'_, S>, Error> {
         let tx_id = OpenTransactionId::new();
-        self.begin_mergeable(tx_id)?;
+        self.begin_mergeable(tx_id).await?;
         Ok(MergeableTx {
             db: self,
             tx_id,
@@ -21,20 +21,23 @@ where
     ///
     /// If `callback` returns an error, the transaction is dropped without committing. Reads and
     /// writes through the [`MergeableTx`] observe earlier writes staged in the same callback.
-    pub fn transaction<T>(
+    pub async fn transaction<T>(
         &self,
-        callback: impl FnOnce(&mut MergeableTx<'_, S>) -> Result<T, Error>,
+        callback: impl AsyncFnOnce(&mut MergeableTx<'_, S>) -> Result<T, Error>,
     ) -> Result<(T, TxId), Error> {
-        let mut tx = self.mergeable_tx()?;
-        let value = callback(&mut tx)?;
-        let tx_id = tx.commit()?;
+        let mut tx = self.mergeable_tx().await?;
+        let value = callback(&mut tx).await?;
+        let tx_id = tx.commit().await?;
         Ok((value, tx_id))
     }
 
     /// Build a mergeable transaction authored and permission-checked as `author`.
-    pub fn mergeable_tx_for_identity(&self, author: AuthorId) -> Result<MergeableTx<'_, S>, Error> {
+    pub async fn mergeable_tx_for_identity(
+        &self,
+        author: AuthorId,
+    ) -> Result<MergeableTx<'_, S>, Error> {
         let tx_id = OpenTransactionId::new();
-        self.begin_mergeable_for_identity(tx_id, author)?;
+        self.begin_mergeable_for_identity(tx_id, author).await?;
         Ok(MergeableTx {
             db: self,
             tx_id,
@@ -45,14 +48,14 @@ where
     /// Run `callback` in a mergeable transaction authored and permission-checked as `author`.
     ///
     /// If `callback` returns an error, the transaction is dropped without committing.
-    pub fn transaction_for_identity<T>(
+    pub async fn transaction_for_identity<T>(
         &self,
         author: AuthorId,
-        callback: impl FnOnce(&mut MergeableTx<'_, S>) -> Result<T, Error>,
+        callback: impl AsyncFnOnce(&mut MergeableTx<'_, S>) -> Result<T, Error>,
     ) -> Result<(T, TxId), Error> {
-        let mut tx = self.mergeable_tx_for_identity(author)?;
-        let value = callback(&mut tx)?;
-        let tx_id = tx.commit()?;
+        let mut tx = self.mergeable_tx_for_identity(author).await?;
+        let value = callback(&mut tx).await?;
+        let tx_id = tx.commit().await?;
         Ok((value, tx_id))
     }
 
@@ -64,26 +67,30 @@ where
     /// [`MergeableTxRef`], which can be reconstructed from this id for each
     /// foreign-function call. Rust callers that want RAII should use
     /// [`Db::mergeable_tx`] instead.
-    pub fn begin_mergeable(&self, id: OpenTransactionId) -> Result<(), Error> {
+    pub async fn begin_mergeable(&self, id: OpenTransactionId) -> Result<(), Error> {
         self.node
             .node
-            .borrow_mut()
+            .lock()
+            .await
             .open_mergeable(id, self.identity.author, None)
+            .await
             .map_err(Into::into)
     }
 
     /// Open a mergeable transaction authored and permission-checked as `author`.
     ///
     /// See [`Db::begin_mergeable`] for ownership and operation-handle guidance.
-    pub fn begin_mergeable_for_identity(
+    pub async fn begin_mergeable_for_identity(
         &self,
         id: OpenTransactionId,
         author: AuthorId,
     ) -> Result<(), Error> {
         self.node
             .node
-            .borrow_mut()
+            .lock()
+            .await
             .open_mergeable(id, author, Some(author))
+            .await
             .map_err(Into::into)
     }
 
@@ -97,7 +104,7 @@ where
         MergeableTxRef { db: self, tx_id }
     }
 
-    pub(super) fn stage_mergeable_insert(
+    pub(super) async fn stage_mergeable_insert(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -109,7 +116,8 @@ where
         let cells = self.apply_insert_defaults(table, cells)?;
         self.node
             .node
-            .borrow_mut()
+            .lock()
+            .await
             .tx_write_mergeable_in_schema(
                 tx_id,
                 self.schema_version_id,
@@ -121,10 +129,11 @@ where
                 now_ms,
                 false,
             )
+            .await
             .map_err(Into::into)
     }
 
-    pub(super) fn stage_mergeable_insert_in_branch(
+    pub(super) async fn stage_mergeable_insert_in_branch(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -137,7 +146,8 @@ where
         let cells = self.apply_insert_defaults(table, cells)?;
         self.node
             .node
-            .borrow_mut()
+            .lock()
+            .await
             .tx_write_mergeable_in_schema_and_branch(
                 tx_id,
                 self.schema_version_id,
@@ -153,7 +163,7 @@ where
         Ok(())
     }
 
-    pub(super) fn stage_mergeable_update(
+    pub(super) async fn stage_mergeable_update(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -164,12 +174,14 @@ where
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         self.node
             .node
-            .borrow_mut()
+            .lock()
+            .await
             .tx_patch_mergeable_in_schema(tx_id, self.schema_version_id, table, row, patch, now_ms)
+            .await
             .map_err(Into::into)
     }
 
-    pub(super) fn stage_mergeable_update_in_branch_view(
+    pub(super) async fn stage_mergeable_update_in_branch_view(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -189,12 +201,15 @@ where
         let head_cells = self
             .node
             .node
-            .borrow_mut()
-            .visible_current_cells_in_branch(table, &head, row)?;
+            .lock()
+            .await
+            .visible_current_cells_in_branch(table, &head, row)
+            .await?;
         if head_cells.is_some() {
             self.node
                 .node
-                .borrow_mut()
+                .lock()
+                .await
                 .tx_patch_mergeable_in_schema_and_branch(
                     tx_id,
                     self.schema_version_id,
@@ -203,14 +218,17 @@ where
                     patch,
                     now_ms,
                     head,
-                )?;
+                )
+                .await?;
             return Ok(());
         }
         let Some(mut inherited) = self
             .node
             .node
-            .borrow_mut()
-            .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)?
+            .lock()
+            .await
+            .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
+            .await?
         else {
             return Err(Error::new(
                 ErrorCode::NotObserved,
@@ -219,9 +237,10 @@ where
         };
         inherited.extend(patch);
         self.stage_mergeable_insert_in_branch(tx_id, table, head, row, inherited, now_ms)
+            .await
     }
 
-    pub(super) fn stage_mergeable_delete(
+    pub(super) async fn stage_mergeable_delete(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -231,7 +250,8 @@ where
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         self.node
             .node
-            .borrow_mut()
+            .lock()
+            .await
             .tx_write_mergeable_in_schema(
                 tx_id,
                 self.schema_version_id,
@@ -243,10 +263,11 @@ where
                 now_ms,
                 false,
             )
+            .await
             .map_err(Into::into)
     }
 
-    pub(super) fn stage_mergeable_delete_in_branch_view(
+    pub(super) async fn stage_mergeable_delete_in_branch_view(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -258,8 +279,10 @@ where
         if self
             .node
             .node
-            .borrow_mut()
-            .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)?
+            .lock()
+            .await
+            .visible_current_cells_in_branch_view(table, &head, base.as_ref(), row)
+            .await?
             .is_none()
         {
             return Err(Error::new(
@@ -270,7 +293,8 @@ where
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         self.node
             .node
-            .borrow_mut()
+            .lock()
+            .await
             .tx_write_mergeable_in_schema_and_branch(
                 tx_id,
                 self.schema_version_id,
@@ -286,7 +310,7 @@ where
         Ok(())
     }
 
-    pub(super) fn stage_mergeable_restore(
+    pub(super) async fn stage_mergeable_restore(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -296,13 +320,15 @@ where
     ) -> Result<(), Error> {
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
-        let mut node = self.node.node.borrow_mut();
+        let mut node = self.node.node.lock().await;
         let content_parents = node
-            .local_content_winner_tx_id(table, row)?
+            .local_content_winner_tx_id(table, row)
+            .await?
             .into_iter()
             .collect();
         let deletion_parents = node
-            .local_deletion_winner_tx_id(table, row)?
+            .local_deletion_winner_tx_id(table, row)
+            .await?
             .into_iter()
             .collect();
         node.tx_write_mergeable_in_schema(
@@ -315,7 +341,8 @@ where
             content_parents,
             now_ms,
             true,
-        )?;
+        )
+        .await?;
         node.tx_write_mergeable_in_schema(
             tx_id,
             self.schema_version_id,
@@ -326,11 +353,12 @@ where
             deletion_parents,
             now_ms,
             true,
-        )?;
+        )
+        .await?;
         Ok(())
     }
 
-    pub(super) fn stage_mergeable_restore_in_branch(
+    pub(super) async fn stage_mergeable_restore_in_branch(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -341,13 +369,15 @@ where
     ) -> Result<(), Error> {
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
-        let mut node = self.node.node.borrow_mut();
+        let mut node = self.node.node.lock().await;
         let content_parents = node
-            .local_content_winner_tx_id_in_branch(table, &branch, row)?
+            .local_content_winner_tx_id_in_branch(table, &branch, row)
+            .await?
             .into_iter()
             .collect();
         let deletion_parents = node
-            .local_deletion_winner_tx_id_in_branch(table, &branch, row)?
+            .local_deletion_winner_tx_id_in_branch(table, &branch, row)
+            .await?
             .into_iter()
             .collect();
         node.tx_write_mergeable_in_schema_and_branch(
@@ -378,14 +408,26 @@ where
     }
 
     /// Commit an owned mergeable transaction handle.
-    pub fn commit_mergeable_handle(&self, open_tx_id: OpenTransactionId) -> Result<TxId, Error> {
-        let tx_id = self
+    pub async fn commit_mergeable_handle(
+        &self,
+        open_tx_id: OpenTransactionId,
+    ) -> Result<TxId, Error> {
+        let published = self
             .node
             .node
-            .borrow_mut()
-            .commit_mergeable_open(open_tx_id, || self.next_now_ms())?;
-        self.finalize_local_commit(tx_id)?;
-        self.refresh_subscriptions()?;
+            .lock()
+            .await
+            .commit_mergeable_open(open_tx_id, || self.next_now_ms())
+            .await?;
+        let tx_id = published.tx_id;
+        if self.node.defer_local_persistence.get() {
+            self.refresh_subscriptions().await?;
+            self.node.queue_local_publication(published, None);
+        } else {
+            self.finish_publication_outcome(PublicationOutcome::published((), published))
+                .await?;
+            self.finalize_local_commit(tx_id)?;
+        }
         Ok(tx_id)
     }
 
@@ -403,9 +445,9 @@ where
     /// This is the owning, RAII flavour. It abandons an uncommitted transaction
     /// on drop. Use [`Db::exclusive_tx_ref`] only when another layer retains the
     /// `OpenTransactionId` and owns that lifetime explicitly.
-    pub fn exclusive_tx(&self) -> Result<ExclusiveTx<'_, S>, Error> {
+    pub async fn exclusive_tx(&self) -> Result<ExclusiveTx<'_, S>, Error> {
         let tx_id = OpenTransactionId::new();
-        self.open_exclusive_handle(tx_id)?;
+        self.open_exclusive_handle(tx_id).await?;
         Ok(ExclusiveTx {
             db: self,
             tx_id,
@@ -420,8 +462,8 @@ where
     /// [`Db::abandon_exclusive_handle`]. Perform its operations through an
     /// [`ExclusiveTxRef`]. Rust callers that want RAII should use
     /// [`Db::exclusive_tx`] instead.
-    pub fn begin_exclusive(&self, id: OpenTransactionId) -> Result<(), Error> {
-        self.open_exclusive_handle(id)
+    pub async fn begin_exclusive(&self, id: OpenTransactionId) -> Result<(), Error> {
+        self.open_exclusive_handle(id).await
     }
 
     /// Return a non-owning operations handle for an already-open exclusive transaction.
@@ -434,7 +476,7 @@ where
         ExclusiveTxRef { db: self, tx_id }
     }
 
-    pub(super) fn exclusive_read(
+    pub(super) async fn exclusive_read(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -442,12 +484,14 @@ where
     ) -> Result<Option<RowCells>, Error> {
         self.node
             .node
-            .borrow_mut()
+            .lock()
+            .await
             .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
+            .await
             .map_err(Into::into)
     }
 
-    pub(super) fn transaction_all(
+    pub(super) async fn transaction_all(
         &self,
         tx_id: OpenTransactionId,
         prepared: &PreparedQuery,
@@ -460,9 +504,10 @@ where
             opts,
             QueryAuthorizationMode::ClientLocal,
         )
+        .await
     }
 
-    pub(crate) fn transaction_all_for_identity(
+    pub(crate) async fn transaction_all_for_identity(
         &self,
         tx_id: OpenTransactionId,
         prepared: &PreparedQuery,
@@ -476,9 +521,10 @@ where
             opts,
             QueryAuthorizationMode::TrustedServing,
         )
+        .await
     }
 
-    fn transaction_all_in_authorization_mode(
+    async fn transaction_all_in_authorization_mode(
         &self,
         tx_id: OpenTransactionId,
         prepared: &PreparedQuery,
@@ -487,7 +533,7 @@ where
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         ensure_default_read_view(&opts)?;
-        let mut node = self.node.node.borrow_mut();
+        let mut node = self.node.node.lock().await;
         match authorization_mode {
             QueryAuthorizationMode::ClientLocal => node
                 .tx_query_with_options(
@@ -496,6 +542,7 @@ where
                     &prepared.binding,
                     opts.include_deleted,
                 )
+                .await
                 .map_err(Into::into),
             QueryAuthorizationMode::TrustedServing => node
                 .tx_query_for_identity_with_options(
@@ -505,11 +552,12 @@ where
                     author,
                     opts.include_deleted,
                 )
+                .await
                 .map_err(Into::into),
         }
     }
 
-    pub(super) fn stage_exclusive_insert(
+    pub(super) async fn stage_exclusive_insert(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -520,7 +568,8 @@ where
         let cells = self.apply_insert_defaults(table, cells)?;
         self.node
             .node
-            .borrow_mut()
+            .lock()
+            .await
             .tx_write_in_schema_at_ms(
                 tx_id,
                 self.schema_version_id,
@@ -530,10 +579,11 @@ where
                 None,
                 Some(now_ms),
             )
+            .await
             .map_err(Into::into)
     }
 
-    pub(super) fn stage_exclusive_delete(
+    pub(super) async fn stage_exclusive_delete(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -542,7 +592,8 @@ where
         let now_ms = self.next_now_ms();
         self.node
             .node
-            .borrow_mut()
+            .lock()
+            .await
             .tx_write_in_schema_at_ms(
                 tx_id,
                 self.schema_version_id,
@@ -552,10 +603,11 @@ where
                 Some(DeletionEvent::Deleted),
                 Some(now_ms),
             )
+            .await
             .map_err(Into::into)
     }
 
-    pub(super) fn stage_exclusive_restore(
+    pub(super) async fn stage_exclusive_restore(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
@@ -564,7 +616,7 @@ where
     ) -> Result<(), Error> {
         let now_ms = self.next_now_ms();
         let cells = self.apply_insert_defaults(table, cells)?;
-        let mut node = self.node.node.borrow_mut();
+        let mut node = self.node.node.lock().await;
         // Restore needs one content version and one deletion-register version:
         // `tx_write` rejects a version carrying both. The layers have separate
         // winners and parent chains; see `restore`'s `local_*_winner_tx_id` pair.
@@ -577,7 +629,8 @@ where
             cells,
             None,
             Some(now_ms),
-        )?;
+        )
+        .await?;
         node.tx_write_in_schema_at_ms(
             tx_id,
             self.schema_version_id,
@@ -586,19 +639,32 @@ where
             BTreeMap::<String, Value>::new(),
             Some(DeletionEvent::Restored),
             Some(now_ms),
-        )?;
+        )
+        .await?;
         Ok(())
     }
 
     /// Commit an owned exclusive transaction handle.
-    pub fn commit_exclusive_handle(&self, open_tx_id: OpenTransactionId) -> Result<TxId, Error> {
-        let (tx_id, unit) = self.node.node.borrow_mut().commit_exclusive(
-            open_tx_id,
-            self.identity.author,
-            self.next_now_ms(),
-        )?;
-        self.finalize_local_exclusive_unit(tx_id, unit)?;
-        self.refresh_subscriptions()?;
+    pub async fn commit_exclusive_handle(
+        &self,
+        open_tx_id: OpenTransactionId,
+    ) -> Result<TxId, Error> {
+        let (published, unit) = self
+            .node
+            .node
+            .lock()
+            .await
+            .commit_exclusive(open_tx_id, self.identity.author, self.next_now_ms())
+            .await?;
+        let tx_id = published.tx_id;
+        if self.node.defer_local_persistence.get() {
+            self.refresh_subscriptions().await?;
+            self.node.queue_local_publication(published, Some(unit));
+        } else {
+            self.finish_publication_outcome(PublicationOutcome::published((), published))
+                .await?;
+            self.node.queue_pending_upload(tx_id, Some(unit));
+        }
         Ok(tx_id)
     }
 
@@ -607,11 +673,13 @@ where
         self.abandon_transaction_handle(open_tx_id)
     }
 
-    pub(crate) fn open_exclusive_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
+    pub(crate) async fn open_exclusive_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
         self.node
             .node
-            .borrow_mut()
+            .lock()
+            .await
             .open_exclusive_for_identity(id, self.identity.author)
+            .await
             .map_err(Into::into)
     }
 }

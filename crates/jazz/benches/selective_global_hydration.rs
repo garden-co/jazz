@@ -314,16 +314,14 @@ fn open_db(path: &Path, schema: JazzSchema) -> (Db<RocksDbStorage>, u128, u128) 
 fn seed_rows(db: &Db<RocksDbStorage>, config: ConfigRef, table_rows: usize) {
     for batch_start in (0..table_rows).step_by(config.batch_rows) {
         let batch_end = table_rows.min(batch_start + config.batch_rows);
-        let tx = db
-            .mergeable_tx()
-            .expect("open selective-hydration seed transaction");
+        let tx = block_on(db.mergeable_tx()).expect("open selective-hydration seed transaction");
         for index in batch_start..batch_end {
             let (row, team, updated_at) = if index < config.target_rows {
                 (target_row(index), target_team(), index)
             } else {
                 (filler_row(index), filler_team(), index)
             };
-            tx.insert_with_id(
+            block_on(tx.insert_with_id(
                 TABLE,
                 row,
                 BTreeMap::from([
@@ -335,10 +333,10 @@ fn seed_rows(db: &Db<RocksDbStorage>, config: ConfigRef, table_rows: usize) {
                         Value::String(format!("document-{index}")),
                     ),
                 ]),
-            )
+            ))
             .expect("stage selective-hydration seed row");
         }
-        let tx_id = tx.commit().expect("commit selective-hydration seed batch");
+        let tx_id = block_on(tx.commit()).expect("commit selective-hydration seed batch");
         db.finalize_local_mergeable_commit_for_test(tx_id)
             .expect("settle selective-hydration seed batch");
     }

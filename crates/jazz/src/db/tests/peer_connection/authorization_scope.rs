@@ -585,7 +585,6 @@ fn authorization_scope_requires_canonical_current_global_support_options() {
                         dots: Vec::new(),
                     },
                 },
-                ..ReadViewSpec::default()
             },
             ..RegisterShapeOptions::default()
         },
@@ -624,7 +623,6 @@ fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
                     dots: Vec::new(),
                 },
             },
-            ..ReadViewSpec::default()
         },
         ..RegisterShapeOptions::default()
     };
@@ -840,7 +838,7 @@ fn oversized_register_shape_is_rejected_at_admission() {
     let error = server
         .node()
         .borrow_mut()
-        .apply_sync_message(SyncMessage::RegisterShape {
+        .apply_sync_message_settled(SyncMessage::RegisterShape {
             shape_id: ShapeId(uuid::Uuid::from_bytes([0x99; 16])),
             ast,
             opts: RegisterShapeOptions::default(),

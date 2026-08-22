@@ -38,13 +38,13 @@ use super::query_engine::{
     RowRefSchema as QueryEngineRowRefSchema, RowSetExpr, RowSetNodeId, RowSetOutputRequest,
     RowSetProgramInput, RowVisibility, SchemaFamilySelection, SchemaProjection, SettledBindingRows,
     SortDirection as NormalizedSortDirection, SourceAuthorizationRequest, SourceExpr, SourceGap,
-    SourceId, SourceMetadataFields, SourceMetadataRequirement, SourcePath, SourceRequest,
-    SourceRequirements, SourceResolutionError, SourceResolver, SourceRole, SourceRowShape,
+    SourceGraphPreparer, SourceId, SourceMetadataFields, SourceMetadataRequirement, SourcePath,
+    SourceRequest, SourceRequirements, SourceResolutionError, SourceRole, SourceRowShape,
     StorageSchemaSelection, TypedOutputField, UnionInput, ValueSourceColumn, ValueSourceMode,
     VersionIdentityFields, VersionedRowRefSchema, aggregate_output_app_field,
     aggregate_output_column, aggregate_output_field, claim_param_field,
-    claim_path_from_param_field, left_field, lower_query_program, right_field, route_param_field,
-    user_column_field,
+    claim_path_from_param_field, left_field, prepare_and_lower_query_program,
+    query_program_source_requests, right_field, route_param_field, user_column_field,
 };
 use crate::protocol::{
     AuthorizationOperationKey, AuthorizationScopeOperation, AuthorizationSupportScopeKey,
@@ -220,19 +220,22 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    pub(super) fn resolve_time_travel_position(
+    pub(super) async fn resolve_time_travel_position(
         &mut self,
         time: TxTime,
     ) -> Result<GlobalTime, Error> {
         let raws = if time.0 == u64::MAX {
             self.database
-                .primary_key_scan_raw("jazz_transactions", &[])?
+                .primary_key_scan_raw("jazz_transactions", &[])
+                .await?
         } else {
-            self.database.primary_key_scan_range_raw(
-                "jazz_transactions",
-                &[Value::U64(0), Value::U64(0)],
-                &[Value::U64(time.0 + 1), Value::U64(0)],
-            )?
+            self.database
+                .primary_key_scan_range_raw(
+                    "jazz_transactions",
+                    &[Value::U64(0), Value::U64(0)],
+                    &[Value::U64(time.0 + 1), Value::U64(0)],
+                )
+                .await?
         };
         let mut position = GlobalTime(0);
         for raw in raws {
@@ -256,7 +259,7 @@ where
         self.query.registered_shapes.get(&shape_id).cloned()
     }
 
-    fn compile_current_query_program(
+    async fn compile_current_query_program(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -272,9 +275,10 @@ where
             output,
             QueryAuthorizationMode::TrustedServing,
         )
+        .await
     }
 
-    fn compile_current_query_program_in_authorization_mode(
+    async fn compile_current_query_program_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -293,10 +297,11 @@ where
             None,
             authorization_mode,
         )
+        .await
     }
 
     #[cfg(test)]
-    fn compile_current_query_program_for_read_view(
+    async fn compile_current_query_program_for_read_view(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -314,9 +319,10 @@ where
             read_view,
             QueryAuthorizationMode::TrustedServing,
         )
+        .await
     }
 
-    fn compile_current_query_program_for_read_view_in_authorization_mode(
+    async fn compile_current_query_program_for_read_view_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -336,9 +342,10 @@ where
             None,
             authorization_mode,
         )
+        .await
     }
 
-    fn compile_current_query_program_with_settled_view(
+    async fn compile_current_query_program_with_settled_view(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -360,9 +367,10 @@ where
             authorization_mode,
             PreparedClaimBindingMode::Strict,
         )
+        .await
     }
 
-    fn compile_current_query_program_with_settled_view_and_prepared_claim_mode(
+    async fn compile_current_query_program_with_settled_view_and_prepared_claim_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -386,10 +394,10 @@ where
             prepared_claim_binding_mode,
             false,
         )?;
-        self.compile_query_program_request(request)
+        self.compile_query_program_request(request).await
     }
 
-    fn compile_current_query_program_for_one_shot_read(
+    async fn compile_current_query_program_for_one_shot_read(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -410,9 +418,10 @@ where
             authorization_mode,
         )?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
+            .await
     }
 
-    fn compile_current_query_program_with_access_paths(
+    async fn compile_current_query_program_with_access_paths(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -431,9 +440,10 @@ where
             QueryAuthorizationMode::TrustedServing,
         )?;
         self.compile_query_program_request_with_access_paths(request, access_paths)
+            .await
     }
 
-    fn compile_historical_query_program(
+    async fn compile_historical_query_program(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -462,10 +472,10 @@ where
             input,
             output: current_query_output_request(output, shape.query()),
         };
-        self.compile_query_program_request(request)
+        self.compile_query_program_request(request).await
     }
 
-    fn compile_snapshot_query_program(
+    async fn compile_snapshot_query_program(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -494,10 +504,10 @@ where
             input,
             output: current_query_output_request(output, shape.query()),
         };
-        self.compile_query_program_request(request)
+        self.compile_query_program_request(request).await
     }
 
-    fn compile_include_deleted_query_program_in_authorization_mode(
+    async fn compile_include_deleted_query_program_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -540,10 +550,10 @@ where
             input,
             output: current_query_output_request(CurrentQueryProgramOutput::AppRows, shape.query()),
         };
-        self.compile_query_program_request(request)
+        self.compile_query_program_request(request).await
     }
 
-    fn compile_open_tx_query_program(
+    async fn compile_open_tx_query_program(
         &mut self,
         tx_id: OpenTransactionId,
         shape: &ValidatedQuery,
@@ -592,7 +602,7 @@ where
             input,
             output: current_query_output_request(output, lowered_shape.query()),
         };
-        self.compile_query_program_request(request)
+        self.compile_query_program_request(request).await
     }
 
     fn current_query_program_request(
@@ -754,7 +764,7 @@ where
         })
     }
 
-    pub(crate) fn query_rows_with_prepared_plan(
+    pub(crate) async fn query_rows_with_prepared_plan(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -768,6 +778,7 @@ where
             prepared_plan,
             AuthorId::SYSTEM,
         )
+        .await
     }
 
     #[cfg(test)]
@@ -780,7 +791,7 @@ where
         self.query.query_shape_cache.is_empty()
     }
 
-    pub(crate) fn query_rows_with_prepared_plan_for_identity(
+    pub(crate) async fn query_rows_with_prepared_plan_for_identity(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -797,11 +808,12 @@ where
             false,
             QueryAuthorizationMode::TrustedServing,
         )
+        .await
     }
 
     /// Execute an ordinary local client read. The upstream serving edge is the
     /// confidentiality boundary; this path must not re-evaluate row policy.
-    pub(crate) fn query_rows_for_client(
+    pub(crate) async fn query_rows_for_client(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -817,10 +829,11 @@ where
             false,
             QueryAuthorizationMode::ClientLocal,
         )
+        .await
     }
 
     #[allow(dead_code)]
-    pub(crate) fn query_rows_for_client_read_view(
+    pub(crate) async fn query_rows_for_client_read_view(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -832,8 +845,9 @@ where
         else {
             return Ok(Vec::new());
         };
-        let Some(snapshot) =
-            self.authoritative_reset_snapshot_for_binding_view(shape, binding_view)?
+        let Some(snapshot) = self
+            .authoritative_reset_snapshot_for_binding_view(shape, binding_view)
+            .await?
         else {
             return Ok(Vec::new());
         };
@@ -844,16 +858,17 @@ where
             .collect())
     }
 
-    pub(crate) fn query_rows_local_preview(
+    pub(crate) async fn query_rows_local_preview(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
         prepared_plan: Option<&PreparedQueryPlanHandle>,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.query_rows_with_prepared_plan(shape, binding, DurabilityTier::Local, prepared_plan)
+            .await
     }
 
-    pub(crate) fn query_rows_local_preview_profiled(
+    pub(crate) async fn query_rows_local_preview_profiled(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -866,9 +881,10 @@ where
             prepared_plan,
             AuthorId::SYSTEM,
         )
+        .await
     }
 
-    pub(crate) fn query_rows_including_deleted_in_authorization_mode(
+    pub(crate) async fn query_rows_including_deleted_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -886,9 +902,10 @@ where
             true,
             authorization_mode,
         )
+        .await
     }
 
-    fn query_rows_with_options_for_identity(
+    async fn query_rows_with_options_for_identity(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -899,14 +916,16 @@ where
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         if include_deleted {
-            let mut rows = self.query_rows_including_deleted_with_query_engine(
-                shape,
-                binding,
-                tier,
-                identity,
-                authorization_mode,
-                &ReadViewSpec::default(),
-            )?;
+            let mut rows = self
+                .query_rows_including_deleted_with_query_engine(
+                    shape,
+                    binding,
+                    tier,
+                    identity,
+                    authorization_mode,
+                    &ReadViewSpec::default(),
+                )
+                .await?;
             let query = shape.query();
             self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
             self.apply_projection_in_schema(query, shape.schema_version(), &mut rows)?;
@@ -961,14 +980,17 @@ where
         let program = if prepared_plan.is_some() {
             None
         } else {
-            Some(self.compile_current_query_program_for_one_shot_read(
-                shape,
-                binding,
-                tier,
-                identity,
-                settled_binding_view,
-                authorization_mode,
-            )?)
+            Some(
+                self.compile_current_query_program_for_one_shot_read(
+                    shape,
+                    binding,
+                    tier,
+                    identity,
+                    settled_binding_view,
+                    authorization_mode,
+                )
+                .await?,
+            )
         };
         let needs_binding = || {
             let parameters = &program
@@ -986,7 +1008,10 @@ where
                 && self.can_use_prepared_current_query_plan(shape)
                 && needs_binding() =>
             {
-                Some(self.prepared_query_plan(shape, binding, tier, identity)?)
+                Some(
+                    self.prepared_query_plan(shape, binding, tier, identity)
+                        .await?,
+                )
             }
             None if authorization_mode == QueryAuthorizationMode::TrustedServing
                 && settled_binding_view.is_none()
@@ -999,7 +1024,8 @@ where
                             .expect("program is compiled when no prepared plan is supplied"),
                         shape,
                         binding,
-                    )?,
+                    )
+                    .await?,
                 ))
             }
             None => None,
@@ -1012,6 +1038,7 @@ where
                 .query_graph(lowered_materialization_app_rows_graph(
                     &program.expect("program is compiled when no prepared plan is supplied"),
                 )?)
+                .await
                 .map_err(Error::Groove),
             Some(plan) => match plan.as_ref() {
                 PreparedQueryPlan::Prepared { shape, params } => {
@@ -1021,12 +1048,15 @@ where
                         &policy,
                         PreparedClaimBindingMode::Strict,
                     )?;
-                    self.bind_shape_snapshot(*shape, &values)
-                        .and_then(|deltas| take_required_sink_deltas(deltas, JAZZ_APP_ROWS_SINK))
+                    take_required_sink_deltas(
+                        self.bind_shape_snapshot(*shape, &values).await?,
+                        JAZZ_APP_ROWS_SINK,
+                    )
                 }
                 PreparedQueryPlan::Graph(graph) => self
                     .database
                     .query_graph(graph.clone())
+                    .await
                     .map_err(Error::Groove),
                 PreparedQueryPlan::PeerMaintainedMarker => {
                     unreachable!("peer maintained markers are filtered before query execution")
@@ -1080,7 +1110,7 @@ where
         Ok(rows)
     }
 
-    fn query_rows_with_options_for_identity_profiled(
+    async fn query_rows_with_options_for_identity_profiled(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -1128,14 +1158,17 @@ where
         let program = if prepared_plan.is_some() {
             None
         } else {
-            Some(self.compile_current_query_program_for_one_shot_read(
-                shape,
-                binding,
-                tier,
-                identity,
-                settled_binding_view,
-                QueryAuthorizationMode::TrustedServing,
-            )?)
+            Some(
+                self.compile_current_query_program_for_one_shot_read(
+                    shape,
+                    binding,
+                    tier,
+                    identity,
+                    settled_binding_view,
+                    QueryAuthorizationMode::TrustedServing,
+                )
+                .await?,
+            )
         };
         profile.compile_program = phase_started.elapsed();
 
@@ -1155,7 +1188,10 @@ where
                 && self.can_use_prepared_current_query_plan(shape)
                 && needs_binding() =>
             {
-                Some(self.prepared_query_plan(shape, binding, tier, identity)?)
+                Some(
+                    self.prepared_query_plan(shape, binding, tier, identity)
+                        .await?,
+                )
             }
             None if settled_binding_view.is_none() && needs_binding() => Some(std::sync::Arc::new(
                 self.prepared_query_plan_from_program(
@@ -1164,7 +1200,8 @@ where
                         .expect("program is compiled when no prepared plan is supplied"),
                     shape,
                     binding,
-                )?,
+                )
+                .await?,
             )),
             None => None,
         };
@@ -1179,6 +1216,7 @@ where
                 .query_graph(lowered_materialization_app_rows_graph(
                     &program.expect("program is compiled when no prepared plan is supplied"),
                 )?)
+                .await
                 .map_err(Error::Groove),
             Some(plan) => match plan.as_ref() {
                 PreparedQueryPlan::Prepared { shape, params } => {
@@ -1188,12 +1226,15 @@ where
                         &policy,
                         PreparedClaimBindingMode::Strict,
                     )?;
-                    self.bind_shape_snapshot(*shape, &values)
-                        .and_then(|deltas| take_required_sink_deltas(deltas, JAZZ_APP_ROWS_SINK))
+                    take_required_sink_deltas(
+                        self.bind_shape_snapshot(*shape, &values).await?,
+                        JAZZ_APP_ROWS_SINK,
+                    )
                 }
                 PreparedQueryPlan::Graph(graph) => self
                     .database
                     .query_graph(graph.clone())
+                    .await
                     .map_err(Error::Groove),
                 PreparedQueryPlan::PeerMaintainedMarker => {
                     unreachable!("peer maintained markers are filtered before query execution")
@@ -1401,7 +1442,7 @@ where
         Some(())
     }
 
-    fn settled_binding_view_source_rows(
+    async fn settled_binding_view_source_rows(
         &mut self,
         table: &str,
         read_schema: SchemaVersionId,
@@ -1522,24 +1563,27 @@ where
                 continue;
             }
             let version = if let Some(version_ref) = relation_version {
-                self.resolve_relation_edge_version(&canonical_table, row_uuid, &version_ref)?
+                self.resolve_relation_edge_version(&canonical_table, row_uuid, &version_ref)
+                    .await?
             } else {
                 let tx_node_alias = self
                     .node_aliases
                     .get(&tx_id.node)
                     .copied()
                     .ok_or(Error::MissingTransaction(tx_id))?;
-                let shared = self.query_version_by_alias(
-                    &canonical_table,
-                    row_uuid,
-                    VersionLayer::Content,
-                    tx_id.time,
-                    tx_node_alias,
-                )?;
+                let shared = self
+                    .query_version_by_alias(
+                        &canonical_table,
+                        row_uuid,
+                        VersionLayer::Content,
+                        tx_id.time,
+                        tx_node_alias,
+                    )
+                    .await?;
                 if let Some(version) = shared {
                     version
                 } else {
-                    let versions = self.query_versions_for_tx(tx_id)?;
+                    let versions = self.query_versions_for_tx(tx_id).await?;
                     self.maintained_witness_for_result_member(
                         &versions,
                         read_schema,
@@ -1567,7 +1611,7 @@ where
     /// This is a settled-history read: it considers only transactions with
     /// `global_time <= position`, chooses the ordinary per-row winners from
     /// that subset, and evaluates the query against that historical state.
-    pub fn query_rows_at(
+    pub async fn query_rows_at(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -1575,22 +1619,25 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         self.require_catalogue_ready()?;
         self.query_rows_at_for_identity(shape, binding, position, AuthorId::SYSTEM)
+            .await
     }
 
-    fn query_rows_at_for_identity(
+    async fn query_rows_at_for_identity(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
         position: GlobalTime,
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
-        let mut rows = self.query_rows_at_with_query_engine(shape, binding, position, identity)?;
+        let mut rows = self
+            .query_rows_at_with_query_engine(shape, binding, position, identity)
+            .await?;
         let query = shape.query();
         self.finish_engine_query_rows_in_schema(query, shape.schema_version(), &mut rows)?;
         Ok(rows)
     }
 
-    fn query_rows_at_with_query_engine(
+    async fn query_rows_at_with_query_engine(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -1605,16 +1652,19 @@ where
         let lowered_shape =
             inline_snapshot_bind_filter_literals(shape, binding, &read_schema.schema)?;
         let binding = lowered_shape.bind(BTreeMap::new())?;
-        let program = self.compile_historical_query_program(
-            &lowered_shape,
-            &binding,
-            position,
-            identity,
-            CurrentQueryProgramOutput::AppRows,
-        )?;
+        let program = self
+            .compile_historical_query_program(
+                &lowered_shape,
+                &binding,
+                position,
+                identity,
+                CurrentQueryProgramOutput::AppRows,
+            )
+            .await?;
         let deltas = self
             .database
             .query_graph(lowered_app_rows_graph(&program)?)
+            .await
             .map_err(Error::Groove)?;
         let table = self
             .table_in_schema(&lowered_shape.query().table, lowered_shape.schema_version())?
@@ -1622,7 +1672,7 @@ where
         self.materialize_historical_query_rows(table, deltas)
     }
 
-    pub(super) fn query_rows_at_snapshot(
+    pub(super) async fn query_rows_at_snapshot(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -1636,16 +1686,19 @@ where
         let lowered_shape =
             inline_snapshot_bind_filter_literals(shape, binding, &read_schema.schema)?;
         let binding = lowered_shape.bind(BTreeMap::new())?;
-        let program = self.compile_snapshot_query_program(
-            &lowered_shape,
-            &binding,
-            snapshot,
-            AuthorId::SYSTEM,
-            CurrentQueryProgramOutput::AppRows,
-        )?;
+        let program = self
+            .compile_snapshot_query_program(
+                &lowered_shape,
+                &binding,
+                snapshot,
+                AuthorId::SYSTEM,
+                CurrentQueryProgramOutput::AppRows,
+            )
+            .await?;
         let deltas = self
             .database
             .query_graph(lowered_app_rows_graph(&program)?)
+            .await
             .map_err(Error::Groove)?;
         let table = self
             .table_in_schema(&lowered_shape.query().table, lowered_shape.schema_version())?
@@ -1659,7 +1712,7 @@ where
         Ok(rows)
     }
 
-    pub(super) fn query_rows_including_deleted_with_query_engine(
+    pub(super) async fn query_rows_including_deleted_with_query_engine(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -1683,17 +1736,20 @@ where
                 .clone()
         };
         let binding = lowered_shape.bind(BTreeMap::new())?;
-        let program = self.compile_include_deleted_query_program_in_authorization_mode(
-            &lowered_shape,
-            &binding,
-            tier,
-            identity,
-            authorization_mode,
-            read_view,
-        )?;
+        let program = self
+            .compile_include_deleted_query_program_in_authorization_mode(
+                &lowered_shape,
+                &binding,
+                tier,
+                identity,
+                authorization_mode,
+                read_view,
+            )
+            .await?;
         let deltas = self
             .database
             .query_graph(lowered_materialization_app_rows_graph(&program)?)
+            .await
             .map_err(Error::Groove)?;
         if query.aggregate.is_some() {
             self.materialize_aggregate_query_rows(query, &table, deltas)
@@ -1703,17 +1759,17 @@ where
     }
 
     #[allow(dead_code)]
-    pub(super) fn current_rows_at(
+    pub(super) async fn current_rows_at(
         &mut self,
         table: &str,
         position: GlobalTime,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.query_engine_read_metrics
             .source_global_time_range_scans += 1;
-        self.bounded_historical_current_rows(table, position)
+        self.bounded_historical_current_rows(table, position).await
     }
 
-    fn bounded_global_change_records_at(
+    async fn bounded_global_change_records_at(
         &mut self,
         table: &str,
         position: GlobalTime,
@@ -1721,33 +1777,39 @@ where
         let table_id =
             self.physical_table_id_for_schema(self.catalogue.current_schema_version_id, table)?;
         if position.0 == u64::MAX {
-            Ok(self.database.index_scan_raw(
-                "jazz_global_changes",
-                "by_table_global_time",
-                &[
-                    Value::U64(table_id.0),
-                    Value::Bytes(BranchKey::default().canonical_bytes()),
-                ],
-            )?)
+            Ok(self
+                .database
+                .index_scan_raw(
+                    "jazz_global_changes",
+                    "by_table_global_time",
+                    &[
+                        Value::U64(table_id.0),
+                        Value::Bytes(BranchKey::default().canonical_bytes()),
+                    ],
+                )
+                .await?)
         } else {
-            Ok(self.database.index_scan_range_raw(
-                "jazz_global_changes",
-                "by_table_global_time",
-                &[
-                    Value::U64(table_id.0),
-                    Value::Bytes(BranchKey::default().canonical_bytes()),
-                    Value::U64(0),
-                ],
-                &[
-                    Value::U64(table_id.0),
-                    Value::Bytes(BranchKey::default().canonical_bytes()),
-                    Value::U64(position.0 + 1),
-                ],
-            )?)
+            Ok(self
+                .database
+                .index_scan_range_raw(
+                    "jazz_global_changes",
+                    "by_table_global_time",
+                    &[
+                        Value::U64(table_id.0),
+                        Value::Bytes(BranchKey::default().canonical_bytes()),
+                        Value::U64(0),
+                    ],
+                    &[
+                        Value::U64(table_id.0),
+                        Value::Bytes(BranchKey::default().canonical_bytes()),
+                        Value::U64(position.0 + 1),
+                    ],
+                )
+                .await?)
         }
     }
 
-    fn bounded_historical_current_rows(
+    async fn bounded_historical_current_rows(
         &mut self,
         table: &str,
         position: GlobalTime,
@@ -1760,7 +1822,10 @@ where
                 Option<(TxTime, NodeAlias, Option<DeletionEvent>)>,
             ),
         >::new();
-        for raw in self.bounded_global_change_records_at(table, position)? {
+        for raw in self
+            .bounded_global_change_records_at(table, position)
+            .await?
+        {
             let record = raw.record();
             let row_uuid = RowUuid(record.get_uuid(GlobalChangeRowRecord::FIELD_ROW_UUID_IDX)?);
             let layer = record.get_bytes(GlobalChangeRowRecord::FIELD_LAYER_IDX)?;
@@ -1800,7 +1865,8 @@ where
                     VersionLayer::Content,
                     tx_time,
                     tx_node_alias,
-                )?
+                )
+                .await?
                 .ok_or(Error::InvalidStoredValue(
                     "historical content winner is missing",
                 ))?;
@@ -1810,7 +1876,7 @@ where
         Ok(rows)
     }
     #[allow(dead_code)]
-    fn historical_content_witness_at(
+    async fn historical_content_witness_at(
         &mut self,
         table: &str,
         read_schema: SchemaVersionId,
@@ -1821,29 +1887,33 @@ where
         let mut latest_event = None::<(TxTime, NodeAlias, Option<DeletionEvent>)>;
         let table_id = self.physical_table_id_for_schema(read_schema, table)?;
         let raw_records = if position.0 == u64::MAX {
-            self.database.index_scan_raw(
-                "jazz_global_changes",
-                "by_table_global_time",
-                &[
-                    Value::U64(table_id.0),
-                    Value::Bytes(BranchKey::default().canonical_bytes()),
-                ],
-            )?
+            self.database
+                .index_scan_raw(
+                    "jazz_global_changes",
+                    "by_table_global_time",
+                    &[
+                        Value::U64(table_id.0),
+                        Value::Bytes(BranchKey::default().canonical_bytes()),
+                    ],
+                )
+                .await?
         } else {
-            self.database.index_scan_range_raw(
-                "jazz_global_changes",
-                "by_table_global_time",
-                &[
-                    Value::U64(table_id.0),
-                    Value::Bytes(BranchKey::default().canonical_bytes()),
-                    Value::U64(0),
-                ],
-                &[
-                    Value::U64(table_id.0),
-                    Value::Bytes(BranchKey::default().canonical_bytes()),
-                    Value::U64(position.0 + 1),
-                ],
-            )?
+            self.database
+                .index_scan_range_raw(
+                    "jazz_global_changes",
+                    "by_table_global_time",
+                    &[
+                        Value::U64(table_id.0),
+                        Value::Bytes(BranchKey::default().canonical_bytes()),
+                        Value::U64(0),
+                    ],
+                    &[
+                        Value::U64(table_id.0),
+                        Value::Bytes(BranchKey::default().canonical_bytes()),
+                        Value::U64(position.0 + 1),
+                    ],
+                )
+                .await?
         };
         for raw in raw_records {
             let record = raw.record();
@@ -1883,7 +1953,7 @@ where
             ))?;
         Ok(Some(TxId::new(time, node)))
     }
-    fn query_relation_snapshot_in_authorization_mode(
+    async fn query_relation_snapshot_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -1892,20 +1962,24 @@ where
         read_view: &ReadViewSpec,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<RelationSnapshot, Error> {
-        let program = self.compile_current_query_program_for_read_view_in_authorization_mode(
-            shape,
-            binding,
-            tier,
-            identity,
-            CurrentQueryProgramOutput::RelationSnapshot,
-            read_view,
-            authorization_mode,
-        )?;
+        let program = self
+            .compile_current_query_program_for_read_view_in_authorization_mode(
+                shape,
+                binding,
+                tier,
+                identity,
+                CurrentQueryProgramOutput::RelationSnapshot,
+                read_view,
+                authorization_mode,
+            )
+            .await?;
         let snapshots = self
             .database
             .query_graphs(lowered_program_sinks(&program))
+            .await
             .map_err(Error::Groove)?;
         self.materialize_relation_snapshot_from_query_engine(shape, read_view, &snapshots)
+            .await
     }
 
     pub(crate) fn maintained_witness_for_result_member<'a>(
@@ -1928,7 +2002,7 @@ where
         Ok(None)
     }
 
-    pub(crate) fn prepare_query_binding_for_link(
+    pub(crate) async fn prepare_query_binding_for_link(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -1936,11 +2010,13 @@ where
         identity: AuthorId,
     ) -> Result<(ValidatedQuery, Binding, PreparedQueryPlanHandle), Error> {
         let (shape, binding) = self.query_binding_for_link(shape, binding)?;
-        let plan = self.prepared_query_plan(&shape, &binding, tier, identity)?;
+        let plan = self
+            .prepared_query_plan(&shape, &binding, tier, identity)
+            .await?;
         Ok((shape, binding, plan))
     }
 
-    pub(crate) fn prepare_query_binding_for_link_in_authorization_mode(
+    pub(crate) async fn prepare_query_binding_for_link_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -1951,14 +2027,16 @@ where
         match authorization_mode {
             QueryAuthorizationMode::ClientLocal => {
                 self.prepare_client_subscription_binding(shape, binding, tier, identity)
+                    .await
             }
             QueryAuthorizationMode::TrustedServing => {
                 self.prepare_trusted_subscription_binding(shape, binding, tier, identity)
+                    .await
             }
         }
     }
 
-    fn prepare_client_subscription_binding(
+    async fn prepare_client_subscription_binding(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -1968,7 +2046,8 @@ where
         let (shape, binding, plan) = self
             .prepare_query_binding_for_link_with_shared_claim_fragments(
                 shape, binding, tier, identity,
-            )?;
+            )
+            .await?;
         Ok((
             shape,
             binding,
@@ -1979,15 +2058,16 @@ where
         ))
     }
 
-    fn prepare_trusted_subscription_binding(
+    async fn prepare_trusted_subscription_binding(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
         tier: DurabilityTier,
         identity: AuthorId,
     ) -> Result<(ValidatedQuery, Binding, SubscriptionPreparedPlan), Error> {
-        let (shape, binding, plan) =
-            self.prepare_query_binding_for_link(shape, binding, tier, identity)?;
+        let (shape, binding, plan) = self
+            .prepare_query_binding_for_link(shape, binding, tier, identity)
+            .await?;
         Ok((
             shape,
             binding,
@@ -1998,7 +2078,7 @@ where
         ))
     }
 
-    pub(crate) fn prepare_query_binding_for_link_with_shared_claim_fragments(
+    pub(crate) async fn prepare_query_binding_for_link_with_shared_claim_fragments(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -2010,14 +2090,16 @@ where
         // The upstream shape is registered separately below, where serving
         // compilation stays TrustedServing. Do not lower local policy here:
         // locally stored rows are already scoped by that upstream boundary.
-        let program = self.compile_current_query_program_in_authorization_mode(
-            &shape,
-            &binding,
-            tier,
-            identity,
-            CurrentQueryProgramOutput::AppRows,
-            QueryAuthorizationMode::ClientLocal,
-        )?;
+        let program = self
+            .compile_current_query_program_in_authorization_mode(
+                &shape,
+                &binding,
+                tier,
+                identity,
+                CurrentQueryProgramOutput::AppRows,
+                QueryAuthorizationMode::ClientLocal,
+            )
+            .await?;
         let has_claim_binding = !program.lowered.parameters.claim_params.is_empty();
         let plan = if has_claim_binding {
             let key = (
@@ -2036,13 +2118,17 @@ where
                 plan.clone()
             } else {
                 let plan = std::sync::Arc::new(
-                    self.prepared_query_plan_from_program(&program, &shape, &binding)?,
+                    self.prepared_query_plan_from_program(&program, &shape, &binding)
+                        .await?,
                 );
                 self.query.query_shape_cache.insert(key, plan.clone());
                 plan
             }
         } else {
-            std::sync::Arc::new(self.prepared_query_plan_from_program(&program, &shape, &binding)?)
+            std::sync::Arc::new(
+                self.prepared_query_plan_from_program(&program, &shape, &binding)
+                    .await?,
+            )
         };
         Ok((shape, binding, plan))
     }
@@ -2067,7 +2153,7 @@ where
         Ok((shape, binding))
     }
 
-    pub(crate) fn query_rows_for_link(
+    pub(crate) async fn query_rows_for_link(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -2075,12 +2161,13 @@ where
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.query_rows_with_prepared_plan_for_identity(shape, binding, tier, None, identity)
+            .await
     }
 
     /// Execute a serving query with its root constrained to a physical row
     /// UUID. This is for internal authorization probes: public `id` may be a
     /// declared user column and must not be used as the storage-row selector.
-    pub(in crate::node) fn query_rows_for_link_physical_row(
+    pub(in crate::node) async fn query_rows_for_link_physical_row(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -2095,20 +2182,24 @@ where
             root_source_id(&shape.query().table),
             CurrentAccessPath::PrimaryKey(vec![Value::Uuid(row_uuid.0)]),
         )]);
-        let program = self.compile_current_query_program_with_access_paths(
-            shape,
-            binding,
-            tier,
-            identity,
-            CurrentQueryProgramOutput::AppRows,
-            access_paths,
-        )?;
+        let program = self
+            .compile_current_query_program_with_access_paths(
+                shape,
+                binding,
+                tier,
+                identity,
+                CurrentQueryProgramOutput::AppRows,
+                access_paths,
+            )
+            .await?;
         // A policy can introduce claim parameters even though this physical
         // row lookup has no public query parameters. Those programs must go
         // through Groove's prepare/bind boundary just like ordinary serving
         // reads; executing the lowered graph directly leaves its binding
         // source unprepared and fails instead of representing a denied read.
-        let plan = self.prepared_query_plan_from_program(&program, shape, binding)?;
+        let plan = self
+            .prepared_query_plan_from_program(&program, shape, binding)
+            .await?;
         let policy = self.query_program_policy_context(identity);
         let deltas = match plan {
             PreparedQueryPlan::Prepared { shape, params } => {
@@ -2118,11 +2209,13 @@ where
                     &policy,
                     PreparedClaimBindingMode::Strict,
                 )?;
-                self.bind_disposable_shape_snapshot(shape, &values)?
+                self.bind_disposable_shape_snapshot(shape, &values).await?
             }
-            PreparedQueryPlan::Graph(graph) => {
-                self.database.query_graph(graph).map_err(Error::Groove)?
-            }
+            PreparedQueryPlan::Graph(graph) => self
+                .database
+                .query_graph(graph)
+                .await
+                .map_err(Error::Groove)?,
             PreparedQueryPlan::PeerMaintainedMarker => {
                 unreachable!("point reads never use peer-maintained plans")
             }
@@ -2133,7 +2226,7 @@ where
     }
 
     #[cfg(test)]
-    pub(crate) fn query_rows_for_link_forced_full_scan_for_test(
+    pub(crate) async fn query_rows_for_link_forced_full_scan_for_test(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -2153,11 +2246,13 @@ where
             None,
             QueryAuthorizationMode::TrustedServing,
         )?;
-        let program =
-            self.compile_query_program_request_with_access_paths(request, BTreeMap::new())?;
+        let program = self
+            .compile_query_program_request_with_access_paths(request, BTreeMap::new())
+            .await?;
         let deltas = self
             .database
             .query_graph(lowered_app_rows_graph(&program)?)
+            .await
             .map_err(Error::Groove)?;
         let mut rows = if shape.query().aggregate.is_some() {
             self.materialize_aggregate_query_rows(shape.query(), &table, deltas)?
@@ -2172,7 +2267,7 @@ where
     /// Evaluate a query plus its array-subquery relation payload against local
     /// visible-current knowledge for one identity.
     #[cfg(test)]
-    pub(crate) fn query_relation_snapshot_for_serving(
+    pub(crate) async fn query_relation_snapshot_for_serving(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -2186,9 +2281,10 @@ where
             identity,
             &ReadViewSpec::default(),
         )
+        .await
     }
 
-    pub(crate) fn query_relation_snapshot_for_serving_in_read_view(
+    pub(crate) async fn query_relation_snapshot_for_serving_in_read_view(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -2204,9 +2300,10 @@ where
             read_view,
             QueryAuthorizationMode::TrustedServing,
         )
+        .await
     }
 
-    pub(crate) fn query_relation_snapshot_for_client(
+    pub(crate) async fn query_relation_snapshot_for_client(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -2222,9 +2319,10 @@ where
             read_view,
             QueryAuthorizationMode::ClientLocal,
         )
+        .await
     }
 
-    pub(crate) fn subscription_snapshot_in_authorization_mode(
+    pub(crate) async fn subscription_snapshot_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -2235,15 +2333,18 @@ where
     ) -> Result<RelationSnapshot, Error> {
         #[cfg(test)]
         record_subscription_snapshot_for_link_call();
-        if shape.query().array_subqueries.is_empty() {
+        if shape.query().array_subqueries.is_empty() && read_view == &ReadViewSpec::default() {
             let rows = match authorization_mode {
                 QueryAuthorizationMode::ClientLocal => {
-                    self.query_rows_for_client(shape, binding, tier, identity)?
+                    self.query_rows_for_client(shape, binding, tier, identity)
+                        .await?
                 }
-                QueryAuthorizationMode::TrustedServing => self
-                    .query_rows_with_prepared_plan_for_identity(
+                QueryAuthorizationMode::TrustedServing => {
+                    self.query_rows_with_prepared_plan_for_identity(
                         shape, binding, tier, None, identity,
-                    )?,
+                    )
+                    .await?
+                }
             };
             return Ok(RelationSnapshot {
                 root_count: rows.len(),
@@ -2254,16 +2355,19 @@ where
         match authorization_mode {
             QueryAuthorizationMode::ClientLocal => {
                 self.query_relation_snapshot_for_client(shape, binding, tier, identity, read_view)
+                    .await
             }
-            QueryAuthorizationMode::TrustedServing => self
-                .query_relation_snapshot_for_serving_in_read_view(
+            QueryAuthorizationMode::TrustedServing => {
+                self.query_relation_snapshot_for_serving_in_read_view(
                     shape, binding, tier, identity, read_view,
-                ),
+                )
+                .await
+            }
         }
     }
 
     #[allow(dead_code)] // Slice 2 wires this into API-level routing.
-    pub(crate) fn query_rows_at_for_link(
+    pub(crate) async fn query_rows_at_for_link(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -2271,6 +2375,7 @@ where
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.query_rows_at_for_identity(shape, binding, position, identity)
+            .await
     }
 
     pub(crate) fn uses_schema_projected_read(&self, shape: &ValidatedQuery) -> bool {
@@ -2308,18 +2413,19 @@ where
     }
 
     /// Evaluate a validated query inside an open exclusive transaction.
-    pub fn tx_query(
+    pub async fn tx_query(
         &mut self,
         tx_id: OpenTransactionId,
         shape: &ValidatedQuery,
         binding: &Binding,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.tx_query_with_options(tx_id, shape, binding, false)
+            .await
     }
 
     /// Evaluate a validated query inside an open transaction using the local
     /// client read boundary with explicit root-row deletion visibility.
-    pub fn tx_query_with_options(
+    pub async fn tx_query_with_options(
         &mut self,
         tx_id: OpenTransactionId,
         shape: &ValidatedQuery,
@@ -2334,10 +2440,11 @@ where
             include_deleted,
             QueryAuthorizationMode::ClientLocal,
         )
+        .await
     }
 
     /// Evaluate a validated query inside an open exclusive transaction as `identity`.
-    pub fn tx_query_for_identity(
+    pub async fn tx_query_for_identity(
         &mut self,
         tx_id: OpenTransactionId,
         shape: &ValidatedQuery,
@@ -2345,11 +2452,12 @@ where
         identity: AuthorId,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.tx_query_for_identity_with_options(tx_id, shape, binding, identity, false)
+            .await
     }
 
     /// Evaluate a validated query inside an open transaction with explicit
     /// root-row deletion visibility.
-    pub fn tx_query_for_identity_with_options(
+    pub async fn tx_query_for_identity_with_options(
         &mut self,
         tx_id: OpenTransactionId,
         shape: &ValidatedQuery,
@@ -2365,9 +2473,10 @@ where
             include_deleted,
             QueryAuthorizationMode::TrustedServing,
         )
+        .await
     }
 
-    fn tx_query_in_authorization_mode(
+    async fn tx_query_in_authorization_mode(
         &mut self,
         tx_id: OpenTransactionId,
         shape: &ValidatedQuery,
@@ -2379,18 +2488,21 @@ where
         let query = shape.query();
         let predicate_len = self.open_tx(tx_id)?.predicate_reads.len();
         let table = self.table_in_schema(&query.table, shape.schema_version())?;
-        let program = self.compile_open_tx_query_program(
-            tx_id,
-            shape,
-            binding,
-            identity,
-            CurrentQueryProgramOutput::AppRows,
-            include_deleted,
-            authorization_mode,
-        )?;
+        let program = self
+            .compile_open_tx_query_program(
+                tx_id,
+                shape,
+                binding,
+                identity,
+                CurrentQueryProgramOutput::AppRows,
+                include_deleted,
+                authorization_mode,
+            )
+            .await?;
         let deltas = self
             .database
             .query_graph(lowered_materialization_app_rows_graph(&program)?)
+            .await
             .map_err(Error::Groove)?;
         let mut rows = self.materialize_inline_current_query_rows(&table, deltas)?;
         let predicate_read = PredicateRead {
@@ -2410,7 +2522,7 @@ where
         Ok(rows)
     }
 
-    pub(crate) fn prepared_query_plan(
+    pub(crate) async fn prepared_query_plan(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -2427,20 +2539,24 @@ where
         {
             return Ok(plan.clone());
         }
-        let program = self.compile_current_query_program(
-            shape,
-            binding,
-            tier,
-            identity,
-            CurrentQueryProgramOutput::AppRows,
-        )?;
-        let plan =
-            std::sync::Arc::new(self.prepared_query_plan_from_program(&program, shape, binding)?);
+        let program = self
+            .compile_current_query_program(
+                shape,
+                binding,
+                tier,
+                identity,
+                CurrentQueryProgramOutput::AppRows,
+            )
+            .await?;
+        let plan = std::sync::Arc::new(
+            self.prepared_query_plan_from_program(&program, shape, binding)
+                .await?,
+        );
         self.query.query_shape_cache.insert(key, plan.clone());
         Ok(plan)
     }
 
-    pub(crate) fn ensure_peer_maintained_subscription_view_supported(
+    pub(crate) async fn ensure_peer_maintained_subscription_view_supported(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -2463,6 +2579,7 @@ where
             read_view,
             authorization_mode,
         )
+        .await
         .map(|_| ())
     }
 
@@ -2484,7 +2601,7 @@ where
             .clone()
     }
 
-    pub(crate) fn open_seeded_maintained_subscription_view(
+    pub(crate) async fn open_seeded_maintained_subscription_view(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -2511,12 +2628,13 @@ where
             None,
             PreparedClaimBindingMode::Strict,
         )
+        .await
     }
 
     /// Hydrate a terminal CommitUnit authorization-support clause. Unlike an
     /// ordinary prepared query, a missing policy claim is a denied proof and
     /// is surfaced to the peer as an empty, settled authorization view.
-    pub(crate) fn open_seeded_authorization_support_subscription_view(
+    pub(crate) async fn open_seeded_authorization_support_subscription_view(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -2543,9 +2661,10 @@ where
             None,
             PreparedClaimBindingMode::FailClosedAuthorizationSupport,
         )
+        .await
     }
 
-    fn open_seeded_maintained_subscription_view_in_authorization_mode(
+    async fn open_seeded_maintained_subscription_view_in_authorization_mode(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -2588,7 +2707,8 @@ where
                 settled_binding_view,
                 authorization_mode,
                 prepared_claim_binding_mode,
-            )?;
+            )
+            .await?;
         let tables = program.lowered.maintained_terminal_tables.clone();
         let terminal_schemas = MaintainedSubscriptionView::terminal_schemas_for_program(&program);
         let binding_source_shape = program
@@ -2602,12 +2722,14 @@ where
                     &program.lowered.parameters,
                 ))
             });
-        let subscription = self.subscribe_lowered_program(
-            program,
-            &binding,
-            binding_source_shape,
-            prepared_claim_binding_mode,
-        )?;
+        let subscription = self
+            .subscribe_lowered_program(
+                program,
+                &binding,
+                binding_source_shape,
+                prepared_claim_binding_mode,
+            )
+            .await?;
         let mut maintained = MaintainedSubscriptionView::default();
         let mut transitions = super::maintained_subscription_view::ResultTransitions::default();
         let snapshot = subscription.recv().map_err(|_| {
@@ -2680,7 +2802,7 @@ where
         ))
     }
 
-    fn bind_shape_snapshot(
+    async fn bind_shape_snapshot(
         &mut self,
         shape: PreparedShapeId,
         values: &[groove::records::Value],
@@ -2688,10 +2810,11 @@ where
         let subscription = self
             .database
             .bind_shape(shape, values)
+            .await
             .map_err(Error::Groove)?;
         let subscription_id = subscription.id();
         let snapshot = subscription.recv().map_err(|_| Error::SubscriptionClosed);
-        self.database.unsubscribe(subscription_id);
+        self.database.unsubscribe(subscription_id).await;
         snapshot
     }
 
@@ -2699,7 +2822,7 @@ where
     /// compile a physical-row access path, so their graph cannot be safely
     /// shared with later rows; retaining it would leak one shape per advice or
     /// repair request.
-    fn bind_disposable_shape_snapshot(
+    async fn bind_disposable_shape_snapshot(
         &mut self,
         shape: PreparedShapeId,
         values: &[groove::records::Value],
@@ -2707,6 +2830,7 @@ where
         let subscription = match self
             .database
             .bind_shape(shape, values)
+            .await
             .map_err(Error::Groove)
         {
             Ok(subscription) => subscription,
@@ -2719,7 +2843,7 @@ where
         };
         let subscription_id = subscription.id();
         let snapshot = subscription.recv().map_err(|_| Error::SubscriptionClosed);
-        self.database.unsubscribe(subscription_id);
+        self.database.unsubscribe(subscription_id).await;
         self.database
             .retire_prepared_shape(shape)
             .map_err(Error::Groove)?;
@@ -2767,7 +2891,7 @@ where
     /// Partial nodes return [`Error::HistoricalReadRequiresServer`] rather than
     /// answering from incomplete local history. A later protocol slice wires
     /// that error to a server-evaluated one-shot.
-    pub fn read(
+    pub async fn read(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -2775,7 +2899,7 @@ where
         if !self.node.is_history_complete_for(shape, self.position) {
             return Err(Error::HistoricalReadRequiresServer);
         }
-        self.node.query_rows_at(shape, binding, self.position)
+        self.node.query_rows_at(shape, binding, self.position).await
     }
 }
 

@@ -55,7 +55,7 @@ fn row_version_fetch_returns_authorized_versions_and_omits_unauthorized_rows() {
         alice_peer.handle_row_versions_fetch(
             &mut core,
             SyncMessage::FetchRowVersions { requests: too_many },
-        ),
+        ).resolve(),
         Err(Error::UnsupportedSyncMessage(
             "row-version repair request exceeds limit"
         ))
@@ -72,14 +72,14 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
     register_shape_binding(&mut reader, &shape, &binding);
 
     let (tx_id, commit_unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("repair me")),
         )
         .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = commit_unit else {
         panic!("expected commit unit");
     };
-    core.ingest_commit_unit(tx.clone(), versions, u64::MAX - SKEW_TOLERANCE_MS)
+    core.ingest_commit_unit_settled(tx.clone(), versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap();
     reader
         .ingest_known_transaction(
@@ -148,7 +148,9 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
             groove::db::PrimaryKeyValue::U64(tx_node_alias.0),
         ]),
     );
-    reader.database.commit_batch(batch).unwrap();
+    let applied = crate::db::block_on(reader.database.apply_batch(batch)).unwrap();
+let persisted = crate::db::block_on(applied.persist());
+reader.database.finish_persistence(persisted).unwrap();
     assert_eq!(
         reader
             .missing_known_state_row_version_refs(&update)
@@ -166,7 +168,7 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
             .is_empty()
     );
 
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         reader
             .current_rows("todos", DurabilityTier::Local)
@@ -229,7 +231,7 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -243,7 +245,7 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     // canonical `todos` payload resolve to the one durable physical table.
     let (_reader_dir, mut reader) = open_node_with_schema(node(0x93), base.clone());
     reader
-        .apply_trusted_catalogue_snapshot(core.catalogue_snapshot().unwrap())
+        .apply_trusted_catalogue_snapshot_settled(core.catalogue_snapshot().unwrap())
         .unwrap();
     let (shape, binding) = core.whole_table_shape_binding("tasks").unwrap();
     register_shape_binding(&mut reader, &shape, &binding);
@@ -330,7 +332,7 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
         "the pending update resumes only after the canonical witness arrives"
     );
     let pending_update = update.clone();
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         reader
             .query_rows(&shape, &binding, DurabilityTier::Global)
@@ -368,7 +370,7 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     .unwrap()];
     let (_negative_dir, mut negative) = open_node_with_schema(node(0x94), schema());
     negative
-        .apply_trusted_catalogue_snapshot(core.catalogue_snapshot().unwrap())
+        .apply_trusted_catalogue_snapshot_settled(core.catalogue_snapshot().unwrap())
         .unwrap();
     register_shape_binding(&mut negative, &shape, &binding);
     negative
@@ -388,7 +390,7 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     wrong_tx.tx.tx_id = TxId::new(TxTime(tx_id.time.0 + 1), tx_id.node);
     let (_wrong_tx_dir, mut wrong_tx_reader) = open_node_with_schema(node(0x95), schema());
     wrong_tx_reader
-        .apply_trusted_catalogue_snapshot(core.catalogue_snapshot().unwrap())
+        .apply_trusted_catalogue_snapshot_settled(core.catalogue_snapshot().unwrap())
         .unwrap();
     register_shape_binding(&mut wrong_tx_reader, &shape, &binding);
     wrong_tx_reader
@@ -472,7 +474,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
     )
     .unwrap();
     receiver
-        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 2,

@@ -73,6 +73,10 @@ mod relay_topology {
         std::iter::from_fn(|| subscription.try_next_event()).collect()
     }
 
+    fn tick(db: &Db<MemoryStorage>, context: &str) {
+        block_on(db.tick()).expect(context);
+    }
+
     fn has_settled_event(events: &[SubscriptionEvent]) -> bool {
         events
             .iter()
@@ -105,12 +109,12 @@ mod relay_topology {
         let (seeder_transport, authority_seed_transport) = duplex();
         let _seeder_connection = seeder.connect_upstream(seeder_transport);
         let _authority_seed_subscriber = authority.accept_subscriber(authority_seed_transport, bob);
-        let seeded = seeder
-            .insert("documents", document_cells("settled at the authority"))
-            .expect("seed authority document");
-        seeder.tick().expect("upload seeded document");
-        authority.tick().expect("accept seeded document");
-        seeder.tick().expect("apply seeded document fate");
+        let seeded =
+            block_on(seeder.insert("documents", document_cells("settled at the authority")))
+                .expect("seed authority document");
+        tick(&seeder, "upload seeded document");
+        tick(&authority, "accept seeded document");
+        tick(&seeder, "apply seeded document fate");
 
         let (client_transport, relay_subscriber_transport) = duplex();
         let _client_connection = client.connect_upstream(client_transport);
@@ -138,9 +142,9 @@ mod relay_topology {
         // The authority never processes during this phase, so any settled
         // event could only come from the relay's cold store.
         for _ in 0..3 {
-            client.tick().expect("send subscription toward the relay");
-            relay.tick().expect("forward coverage without settling");
-            client.tick().expect("apply any relay response");
+            tick(&client, "send subscription toward the relay");
+            tick(&relay, "forward coverage without settling");
+            tick(&client, "apply any relay response");
         }
         let premature = drain(&mut subscription);
         assert!(
@@ -151,9 +155,9 @@ mod relay_topology {
 
         let mut events = premature;
         for _ in 0..4 {
-            authority.tick().expect("serve the authority result");
-            relay.tick().expect("apply and relay the authority result");
-            client.tick().expect("apply the relayed authority result");
+            tick(&authority, "serve the authority result");
+            tick(&relay, "apply and relay the authority result");
+            tick(&client, "apply the relayed authority result");
             events.extend(drain(&mut subscription));
         }
         let first_settled = events
@@ -218,11 +222,9 @@ mod relay_topology {
         .expect("subscribe at Global through the relay");
 
         for _ in 0..3 {
-            client.tick().expect("send subscription toward the relay");
-            relay
-                .tick()
-                .expect("queue coverage for the silent upstream");
-            client.tick().expect("apply any relay response");
+            tick(&client, "send subscription toward the relay");
+            tick(&relay, "queue coverage for the silent upstream");
+            tick(&client, "apply any relay response");
         }
         let premature = drain(&mut subscription);
         assert!(
@@ -234,9 +236,9 @@ mod relay_topology {
         let _authority_subscriber = authority.accept_subscriber(held_authority_transport, alice);
         let mut events = premature;
         for _ in 0..4 {
-            authority.tick().expect("process the queued handshake");
-            relay.tick().expect("apply and relay the authority result");
-            client.tick().expect("apply the relayed authority result");
+            tick(&authority, "process the queued handshake");
+            tick(&relay, "apply and relay the authority result");
+            tick(&client, "apply the relayed authority result");
             events.extend(drain(&mut subscription));
         }
         assert!(
@@ -268,8 +270,7 @@ mod relay_topology {
     fn relay_without_any_upstream_settles_downstream_local_reads() {
         let alice = AuthorId::from_bytes([0xa3; 16]);
         let relay = open_db(0x23, AuthorId::SYSTEM);
-        relay
-            .insert("documents", document_cells("stored before alice opens"))
+        block_on(relay.insert("documents", document_cells("stored before alice opens")))
             .expect("seed relay document");
 
         let client = open_db(0x13, alice);
@@ -299,9 +300,9 @@ mod relay_topology {
         );
 
         for _ in 0..3 {
-            client.tick().expect("request the relay's stored view");
-            relay.tick().expect("serve the stored view");
-            client.tick().expect("apply the stored view");
+            tick(&client, "request the relay's stored view");
+            tick(&relay, "serve the stored view");
+            tick(&client, "apply the stored view");
         }
         let events = drain(&mut subscription);
         assert!(
@@ -326,8 +327,7 @@ mod relay_topology {
         let (upstream_transport, _held_far_end) = duplex();
         let _upstream = node.connect_upstream(upstream_transport);
 
-        let written = node
-            .insert("documents", document_cells("locally visible"))
+        let written = block_on(node.insert("documents", document_cells("locally visible")))
             .expect("insert local document");
 
         let documents = node
@@ -341,7 +341,7 @@ mod relay_topology {
             },
         ))
         .expect("subscribe at Global with a silent upstream");
-        node.tick().expect("queue coverage for the silent upstream");
+        tick(&node, "queue coverage for the silent upstream");
         assert!(
             !has_settled_event(&drain(&mut subscription)),
             "the authority-tier subscription must stay held while the \
@@ -386,7 +386,7 @@ mod relay_topology {
         .expect("subscribe at Global with a silent upstream");
 
         for _ in 0..3 {
-            node.tick().expect("queue coverage for the silent upstream");
+            tick(&node, "queue coverage for the silent upstream");
         }
         let premature = drain(&mut subscription);
         assert!(
@@ -398,8 +398,8 @@ mod relay_topology {
         let _authority_subscriber = authority.accept_subscriber(held_authority_transport, alice);
         let mut events = Vec::new();
         for _ in 0..4 {
-            authority.tick().expect("process the queued handshake");
-            node.tick().expect("apply the authority result");
+            tick(&authority, "process the queued handshake");
+            tick(&node, "apply the authority result");
             events.extend(drain(&mut subscription));
         }
         assert!(
@@ -419,8 +419,7 @@ mod relay_topology {
     fn node_subscription_without_any_upstream_settles_locally() {
         let alice = AuthorId::from_bytes([0xa6; 16]);
         let node = open_db(0x16, alice);
-        let written = node
-            .insert("documents", document_cells("settles locally"))
+        let written = block_on(node.insert("documents", document_cells("settles locally")))
             .expect("insert local document");
 
         let documents = node
@@ -475,7 +474,7 @@ mod relay_topology {
         ))
         .expect("subscribe at Global against a connected authority");
 
-        client.tick().expect("send the subscription upstream");
+        tick(&client, "send the subscription upstream");
         assert!(
             subscription.try_next_event().is_none(),
             "nothing may be delivered before the upstream serves the result"
@@ -483,8 +482,8 @@ mod relay_topology {
 
         let mut events = Vec::new();
         for _ in 0..4 {
-            authority.tick().expect("serve the empty authority result");
-            client.tick().expect("apply the authority result");
+            tick(&authority, "serve the empty authority result");
+            tick(&client, "apply the authority result");
             events.extend(drain(&mut subscription));
         }
         let settled = events
@@ -528,9 +527,9 @@ mod relay_topology {
         let (upstream_transport, _held_far_end) = duplex();
         let upstream = node.connect_upstream(upstream_transport);
 
-        let written = node
-            .insert("documents", document_cells("local answer after detach"))
-            .expect("insert local document");
+        let written =
+            block_on(node.insert("documents", document_cells("local answer after detach")))
+                .expect("insert local document");
 
         let documents = node
             .prepare_query(&node.table("documents"))
@@ -544,7 +543,7 @@ mod relay_topology {
         ))
         .expect("subscribe at Global with a silent upstream");
         for _ in 0..3 {
-            node.tick().expect("queue coverage for the silent upstream");
+            tick(&node, "queue coverage for the silent upstream");
         }
         assert!(
             drain(&mut subscription).is_empty(),
@@ -554,7 +553,7 @@ mod relay_topology {
         assert!(node.detach_connection(&upstream));
         let mut events = Vec::new();
         for _ in 0..3 {
-            node.tick().expect("settle the held subscription locally");
+            tick(&node, "settle the held subscription locally");
             events.extend(drain(&mut subscription));
         }
         let deltas = events
@@ -577,8 +576,7 @@ mod relay_topology {
             "the local answer must carry the locally stored row: {events:?}"
         );
 
-        node.tick()
-            .expect("no further settlement after the local answer");
+        tick(&node, "no further settlement after the local answer");
         assert!(
             drain(&mut subscription).is_empty(),
             "the local settlement must not be delivered twice"

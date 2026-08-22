@@ -27,11 +27,7 @@ impl FailTransactionReadMemoryStorage {
 }
 
 impl OrderedKvStorage for FailTransactionReadMemoryStorage {
-    fn get(
-        &self,
-        cf: &ColumnFamilyName,
-        key: &Key,
-    ) -> Result<Option<StorageValue>, groove::storage::Error> {
+    fn get(&self, cf: String, key: Vec<u8>) -> groove::storage::StorageFuture<'_, Result<Option<StorageValue>, groove::storage::Error>> {
         if key
             .windows("jazz_transactions".len())
             .any(|window| window == b"jazz_transactions")
@@ -39,9 +35,7 @@ impl OrderedKvStorage for FailTransactionReadMemoryStorage {
         {
             if remaining == 0 {
                 self.fail_after_transaction_reads.set(None);
-                return Err(groove::storage::Error::InvalidStorageLayout(
-                    "injected transaction read failure".to_owned(),
-                ));
+                return Box::pin(async { Err(groove::storage::Error::InvalidStorageLayout("injected transaction read failure".to_owned())) });
             }
             self.fail_after_transaction_reads.set(Some(remaining - 1));
         }
@@ -50,41 +44,35 @@ impl OrderedKvStorage for FailTransactionReadMemoryStorage {
 
     fn set(
         &self,
-        cf: &ColumnFamilyName,
-        key: &Key,
-        value: &[u8],
-    ) -> Result<(), groove::storage::Error> {
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {
         self.inner.set(cf, key, value)
     }
 
-    fn delete(
-        &self,
-        cf: &ColumnFamilyName,
-        key: &Key,
-    ) -> Result<(), groove::storage::Error> {
+    fn delete(&self, cf: String, key: Vec<u8>) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {
         self.inner.delete(cf, key)
     }
 
     fn scan_range(
         &self,
-        cf: &ColumnFamilyName,
-        start: &Key,
-        end: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), groove::storage::Error> {
-        self.inner.scan_range(cf, start, end, visit)
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<groove::storage::StorageScan<'_>, groove::storage::Error>> {
+        self.inner.scan_range(cf, start, end)
     }
 
     fn scan_prefix(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), groove::storage::Error> {
-        self.inner.scan_prefix(cf, prefix, visit)
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<groove::storage::StorageScan<'_>, groove::storage::Error>> {
+        self.inner.scan_prefix(cf, prefix)
     }
 
-    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), groove::storage::Error> {
+    fn write_many(&self, operations: Vec<groove::storage::OwnedWriteOperation>) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {
         self.inner.write_many(operations)
     }
 
@@ -94,12 +82,11 @@ impl OrderedKvStorage for FailTransactionReadMemoryStorage {
 }
 
 impl ReopenableStorage for FailTransactionReadMemoryStorage {
-    fn reopen(
-        mut self,
-        column_families: &[&str],
-    ) -> Result<Self, groove::storage::Error> {
-        self.inner = self.inner.reopen(column_families)?;
-        Ok(self)
+    fn reopen(self, column_families: Vec<String>) -> groove::storage::StorageFuture<'static, Result<Self, groove::storage::Error>> {
+        Box::pin(async move {
+            let Self { inner, fail_after_transaction_reads } = self;
+            Ok(Self { inner: inner.reopen(column_families).await?, fail_after_transaction_reads })
+        })
     }
 }
 
@@ -117,7 +104,7 @@ fn attributed_write_retry_preserves_permission_subject_after_rejection_error() {
     let mut core = NodeState::new(node(0x90), schema, storage.clone()).unwrap();
 
     let tx_id = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x90), 10)
                 .made_by(attributed_user)
                 .permission_subject(backend)
@@ -126,27 +113,27 @@ fn attributed_write_retry_preserves_permission_subject_after_rejection_error() {
         .unwrap();
 
     assert!(matches!(
-        core.transaction_state(tx_id),
+        core.transaction_state_settled(tx_id),
         Some((Fate::Pending, None, DurabilityTier::Local))
     ));
     // The finalizer reads its pending transaction and the policy evaluator reads
     // its transaction provenance before `ingest_rejected_transaction` retries
     // that lookup to persist the rejection.
     storage.fail_after_transaction_reads(2);
-    let error = core.finalize_local_mergeable_commit(tx_id).unwrap_err();
+    let error = core.finalize_local_mergeable_commit_settled(tx_id).unwrap_err();
     assert!(error.to_string().contains("injected transaction read failure"));
-    let pending_state = core.transaction_state(tx_id);
+    let pending_state = core.transaction_state_settled(tx_id);
     assert!(matches!(
         pending_state,
         Some((Fate::Pending, None, DurabilityTier::Local))
     ), "failed finalization must leave the transaction pending, got {pending_state:?}");
 
-    core.finalize_local_mergeable_commit(tx_id).unwrap();
+    core.finalize_local_mergeable_commit_settled(tx_id).unwrap();
 
     // The retry must still use the trusted backend as its authenticated subject.
     // `made_by` owns the row and would incorrectly accept this transaction.
     assert!(matches!(
-        core.transaction_state(tx_id),
+        core.transaction_state_settled(tx_id),
         Some((
             Fate::Rejected(RejectionReason::AuthorizationDenied),
             None,
@@ -173,7 +160,7 @@ fn attributed_write_checkpoint_error_cleans_up_terminal_permission_subject() {
     let mut core = NodeState::new(node(0x90), schema, storage.clone()).unwrap();
 
     let tx_id = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x90), 10)
                 .made_by(attributed_user)
                 .permission_subject(backend)
@@ -184,9 +171,9 @@ fn attributed_write_checkpoint_error_cleans_up_terminal_permission_subject() {
     // The first six transaction reads are part of validation and acceptance;
     // The seventh after Accepted persists.
     storage.fail_after_transaction_reads(6);
-    let error = core.finalize_local_mergeable_commit(tx_id).unwrap_err();
+    let error = core.finalize_local_mergeable_commit_settled(tx_id).unwrap_err();
     assert!(error.to_string().contains("injected transaction read failure"));
-    let terminal_state = core.transaction_state(tx_id);
+    let terminal_state = core.transaction_state_settled(tx_id);
     assert!(matches!(
         terminal_state,
         Some((Fate::Accepted, Some(_), DurabilityTier::Global))
@@ -207,14 +194,14 @@ fn write_policy_rejection_cleans_up_client() {
     let other = user(0xb2);
     let row_uuid = row(1);
     let (tx_id, unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 10)
                 .made_by(author)
                 .cells(owner_cells(other, "wrong owner")),
         )
         .unwrap();
 
-    let [fate] = core.apply_sync_message(unit).unwrap().try_into().unwrap();
+    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
     assert_eq!(
         fate,
         SyncMessage::FateUpdate {
@@ -224,7 +211,7 @@ fn write_policy_rejection_cleans_up_client() {
             durability: None,
         }
     );
-    writer.apply_sync_message(fate).unwrap();
+    writer.apply_sync_message_settled(fate).unwrap();
     assert!(
         writer
             .current_rows("todos", DurabilityTier::Local)
@@ -249,7 +236,7 @@ fn session_owner_string_uuid_write_policy_accepts_matching_author() {
     let author = user(0xa1);
     let row_uuid = row(0x51);
     let (tx_id, unit) = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 10)
                 .made_by(author)
                 .cells(BTreeMap::from([
@@ -259,7 +246,7 @@ fn session_owner_string_uuid_write_policy_accepts_matching_author() {
         )
         .unwrap();
 
-    let [fate] = core.apply_sync_message(unit).unwrap().try_into().unwrap();
+    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
     assert_eq!(
         fate,
         SyncMessage::FateUpdate {
@@ -305,7 +292,7 @@ fn owner_only_delete_requires_current_owner() {
     );
 
     let (bad_delete, bad_unit) = other_writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 11)
                 .made_by(other)
                 .parents(vec![create])
@@ -313,7 +300,7 @@ fn owner_only_delete_requires_current_owner() {
         )
         .unwrap();
     let [bad_fate] = core
-        .apply_sync_message(bad_unit)
+        .apply_sync_message_settled(bad_unit)
         .unwrap()
         .try_into()
         .unwrap();
@@ -328,7 +315,7 @@ fn owner_only_delete_requires_current_owner() {
     );
 
     let (good_delete, good_unit) = owner_writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 12)
                 .made_by(owner)
                 .parents(vec![create])
@@ -336,7 +323,7 @@ fn owner_only_delete_requires_current_owner() {
         )
         .unwrap();
     let [good_fate] = core
-        .apply_sync_message(good_unit)
+        .apply_sync_message_settled(good_unit)
         .unwrap()
         .try_into()
         .unwrap();
@@ -370,10 +357,10 @@ fn owner_only_read_narrows_view_updates_per_peer_identity() {
 
     let update_a = link_a.current_rows_update(&mut core, "todos").unwrap();
     assert_view_update_only_references_rows(&update_a, BTreeSet::from([row(1)]));
-    reader_a.apply_sync_message(update_a).unwrap();
+    reader_a.apply_sync_message_settled(update_a).unwrap();
     let update_b = link_b.current_rows_update(&mut core, "todos").unwrap();
     assert_view_update_only_references_rows(&update_b, BTreeSet::from([row(2)]));
-    reader_b.apply_sync_message(update_b).unwrap();
+    reader_b.apply_sync_message_settled(update_b).unwrap();
     let subscription = core.whole_table_subscription_key("todos").unwrap();
 
     assert_eq!(
@@ -414,7 +401,7 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
     let announcement_row = row(0x11);
     let private_message_row = row(0x12);
     let tx_id = core
-        .commit_mergeable_many(vec![
+        .commit_mergeable_many_settled(vec![
             MergeableCommit::new("announcements", announcement_row, 10)
                 .made_by(alice)
                 .cells(BTreeMap::from([("title".to_owned(), v("public"))])),
@@ -465,7 +452,7 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
         .collect::<BTreeSet<_>>();
     assert_eq!(shipped_rows, BTreeSet::from([announcement_row]));
 
-    bob_node.apply_sync_message(update).unwrap();
+    bob_node.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         bob_node
             .current_rows("announcements", DurabilityTier::Local)
@@ -500,7 +487,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
 
     let update = link_a.current_rows_update(&mut core, "todos").unwrap();
     assert_view_update_only_references_rows(&update, BTreeSet::from([row_uuid]));
-    reader_a.apply_sync_message(update).unwrap();
+    reader_a.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         reader_a
             .subscription_current_rows("todos", DurabilityTier::Global)
@@ -530,7 +517,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
         result_member_removes,
         &vec![("todos".to_owned().into(), row_uuid, tx_a)]
     );
-    reader_a.apply_sync_message(update).unwrap();
+    reader_a.apply_sync_message_settled(update).unwrap();
     assert!(
         reader_a
             .subscription_current_rows("todos", DurabilityTier::Global)
@@ -547,7 +534,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
     let mut link_b = PeerState::client_link(author_b);
     let update = link_b.current_rows_update(&mut core, "todos").unwrap();
     assert_view_update_only_references_rows(&update, BTreeSet::from([row_uuid]));
-    reader_b.apply_sync_message(update).unwrap();
+    reader_b.apply_sync_message_settled(update).unwrap();
     let subscription = core.whole_table_subscription_key("todos").unwrap();
     assert_eq!(
         link_b.subscription_result_sets(subscription),
@@ -595,7 +582,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     let (_uninvited_dir, mut uninvited_reader) = open_node_with_schema(node(4), schema);
 
     let denied_tx = uninvited_writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("canvases", canvas_row, 10)
                 .made_by(uninvited)
                 .cells(BTreeMap::from([(
@@ -605,7 +592,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
         )
         .unwrap();
     let [denied] = core
-        .apply_sync_message(denied_tx.1)
+        .apply_sync_message_settled(denied_tx.1)
         .unwrap()
         .try_into()
         .unwrap();
@@ -618,7 +605,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     ));
 
     let invite_tx = core
-        .commit_mergeable(MergeableCommit::new("canvasInvites", invite_row, 11).cells(
+        .commit_mergeable_settled(MergeableCommit::new("canvasInvites", invite_row, 11).cells(
             BTreeMap::from([
                 ("canvas".to_owned(), Value::Uuid(canvas_row.0)),
                 ("userID".to_owned(), Value::Uuid(invited.0)),
@@ -634,7 +621,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     .unwrap();
 
     let accepted_tx = invited_writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("canvases", canvas_row, 12)
                 .made_by(invited)
                 .cells(BTreeMap::from([(
@@ -645,7 +632,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
         .unwrap();
     let accepted_id = accepted_tx.0;
     let [accepted] = core
-        .apply_sync_message(accepted_tx.1)
+        .apply_sync_message_settled(accepted_tx.1)
         .unwrap()
         .try_into()
         .unwrap();
@@ -657,7 +644,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
         }
     ));
     assert!(matches!(
-        core.transaction_state(accepted_id),
+        core.transaction_state_settled(accepted_id),
         Some((Fate::Accepted, _, DurabilityTier::Global))
     ));
 
@@ -665,7 +652,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     let invited_update = invited_link
         .current_rows_update(&mut core, "canvases")
         .unwrap();
-    invited_reader.apply_sync_message(invited_update).unwrap();
+    invited_reader.apply_sync_message_settled(invited_update).unwrap();
     assert_eq!(
         invited_reader
             .subscription_current_rows("canvases", DurabilityTier::Global)
@@ -699,7 +686,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
         .current_rows_update(&mut core, "canvases")
         .unwrap();
     uninvited_reader
-        .apply_sync_message(uninvited_update)
+        .apply_sync_message_settled(uninvited_update)
         .unwrap();
     assert!(
         uninvited_reader
@@ -709,7 +696,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     );
 
     let revoke_tx = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("canvasInvites", invite_row, 13).deletion(DeletionEvent::Deleted),
         )
         .unwrap();
@@ -733,7 +720,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
         result_member_removes,
         &vec![("canvases".to_owned().into(), canvas_row, accepted_id)]
     );
-    invited_reader.apply_sync_message(revoked_update).unwrap();
+    invited_reader.apply_sync_message_settled(revoked_update).unwrap();
     assert!(
         invited_reader
             .subscription_current_rows("canvases", DurabilityTier::Global)
@@ -780,7 +767,7 @@ fn write_policy_branch_or_join_allows_either_literal_branch_or_membership_join()
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
 
     let invite_tx = core
-        .commit_mergeable(MergeableCommit::new("canvasInvites", invite_row, 3).cells(
+        .commit_mergeable_settled(MergeableCommit::new("canvasInvites", invite_row, 3).cells(
             BTreeMap::from([
                 ("canvas".to_owned(), Value::Uuid(private_canvas.0)),
                 ("userID".to_owned(), Value::Uuid(invited.0)),
@@ -796,7 +783,7 @@ fn write_policy_branch_or_join_allows_either_literal_branch_or_membership_join()
     .unwrap();
 
     let public_tx = uninvited_writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("canvases", public_canvas, 14)
                 .made_by(uninvited)
                 .cells(BTreeMap::from([
@@ -805,7 +792,7 @@ fn write_policy_branch_or_join_allows_either_literal_branch_or_membership_join()
                 ])),
         )
         .unwrap();
-    let [public_fate] = core.apply_sync_message(public_tx.1).unwrap().try_into().unwrap();
+    let [public_fate] = core.apply_sync_message_settled(public_tx.1).unwrap().try_into().unwrap();
     assert!(matches!(
         public_fate,
         SyncMessage::FateUpdate {
@@ -815,7 +802,7 @@ fn write_policy_branch_or_join_allows_either_literal_branch_or_membership_join()
     ));
 
     let private_tx = invited_writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("canvases", private_canvas, 15)
                 .made_by(invited)
                 .cells(BTreeMap::from([
@@ -825,7 +812,7 @@ fn write_policy_branch_or_join_allows_either_literal_branch_or_membership_join()
         )
         .unwrap();
     let [private_fate] = core
-        .apply_sync_message(private_tx.1)
+        .apply_sync_message_settled(private_tx.1)
         .unwrap()
         .try_into()
         .unwrap();
@@ -838,7 +825,7 @@ fn write_policy_branch_or_join_allows_either_literal_branch_or_membership_join()
     ));
 
     let blocked_tx = uninvited_writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("canvases", blocked_canvas, 16)
                 .made_by(uninvited)
                 .cells(BTreeMap::from([
@@ -848,7 +835,7 @@ fn write_policy_branch_or_join_allows_either_literal_branch_or_membership_join()
         )
         .unwrap();
     let [blocked_fate] = core
-        .apply_sync_message(blocked_tx.1)
+        .apply_sync_message_settled(blocked_tx.1)
         .unwrap()
         .try_into()
         .unwrap();

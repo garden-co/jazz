@@ -1859,8 +1859,7 @@ fn r11_byte_wire_resume(c: &mut Criterion) {
 
                     client.tick().expect("announce client tasks subscription");
                     server.tick().expect("serve full task snapshot");
-                    let full_bytes = subscriber
-                        .borrow()
+                    let full_bytes = block_on(subscriber.lock())
                         .last_resume_bytes()
                         .expect("full current-row bytes");
                     client.tick().expect("apply full task snapshot");
@@ -1874,8 +1873,7 @@ fn r11_byte_wire_resume(c: &mut Criterion) {
                     server.tick().expect("refresh served current rows");
                     client.tick().expect("apply served cursor state");
 
-                    let cursor = subscriber
-                        .borrow_mut()
+                    let cursor = block_on(subscriber.lock())
                         .take_resume_cursor()
                         .expect("take subscriber resume cursor");
                     assert!(client.detach_connection(&upstream));
@@ -1918,8 +1916,7 @@ fn r11_byte_wire_resume(c: &mut Criterion) {
                     client.tick().expect("apply task resume catch-up");
                     client.tick().expect("materialize task resume event");
 
-                    let resume_bytes = resumed
-                        .borrow()
+                    let resume_bytes = block_on(resumed.lock())
                         .last_resume_bytes()
                         .expect("resume catch-up bytes");
                     assert!(resume_bytes > 0);
@@ -2025,8 +2022,7 @@ fn run_permission_filtered_resume(
         .tick()
         .expect("announce permission docs subscription");
     server.tick().expect("serve full permission docs snapshot");
-    let full_bytes = subscriber
-        .borrow()
+    let full_bytes = block_on(subscriber.lock())
         .last_resume_bytes()
         .expect("full permission current-row bytes");
     client.tick().expect("apply full permission docs snapshot");
@@ -2045,8 +2041,7 @@ fn run_permission_filtered_resume(
 
     server.tick().expect("refresh permission docs cursor");
     client.tick().expect("apply permission docs cursor state");
-    let cursor = subscriber
-        .borrow_mut()
+    let cursor = block_on(subscriber.lock())
         .take_resume_cursor()
         .expect("take permission subscriber resume cursor");
     assert!(client.detach_connection(&upstream));
@@ -2134,8 +2129,7 @@ fn run_permission_filtered_resume(
         .expect("materialize settled permission resume state");
     let resume_elapsed = resume_started.elapsed();
 
-    let resume_bytes = resumed
-        .borrow()
+    let resume_bytes = block_on(resumed.lock())
         .last_resume_bytes()
         .expect("permission resume catch-up bytes");
     assert!(resume_bytes > 0);
@@ -2222,8 +2216,7 @@ fn run_claim_filtered_resume(
     );
     client.tick().expect("announce claim-filtered subscription");
     server.tick().expect("serve full claim-filtered snapshot");
-    let full_bytes = subscriber
-        .borrow()
+    let full_bytes = block_on(subscriber.lock())
         .last_resume_bytes()
         .expect("full claim-filtered snapshot bytes");
     client.tick().expect("apply claim-filtered snapshot");
@@ -2237,8 +2230,7 @@ fn run_claim_filtered_resume(
 
     server.tick().expect("refresh claim-filtered cursor");
     client.tick().expect("apply claim-filtered cursor state");
-    let cursor = subscriber
-        .borrow_mut()
+    let cursor = block_on(subscriber.lock())
         .take_resume_cursor()
         .expect("take claim-filtered resume cursor");
     assert!(client.detach_connection(&upstream));
@@ -2266,8 +2258,7 @@ fn run_claim_filtered_resume(
         .tick()
         .expect("materialize settled claim resume state");
     let resume_elapsed = resume_started.elapsed();
-    let resume_bytes = resumed
-        .borrow()
+    let resume_bytes = block_on(resumed.lock())
         .last_resume_bytes()
         .expect("claim resume catch-up bytes");
     assert!(resume_bytes > 0);
@@ -2376,3 +2367,6 @@ criterion_group! {
     targets = guarded_benches
 }
 criterion_main!(benches);
+mod support;
+
+use support::BenchFutureExt as _;

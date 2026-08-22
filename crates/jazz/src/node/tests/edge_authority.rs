@@ -13,13 +13,14 @@ fn edge_accept_mergeable_unit(
     unit: SyncMessage,
 ) -> (Transaction, Vec<VersionRecord>, Vec<SyncMessage>) {
     let (tx, versions) = split_commit_unit(unit);
-    let updates = edge
+    let outcome = edge
         .ingest_edge_authority_mergeable_commit_unit(
             tx.clone(),
             versions.clone(),
             u64::MAX - SKEW_TOLERANCE_MS,
         )
         .unwrap();
+    let updates = settle_outcome(edge, outcome).unwrap();
     assert_eq!(
         updates,
         vec![SyncMessage::FateUpdate {
@@ -67,12 +68,14 @@ fn global_promote_edge_unit(
     tx: Transaction,
     versions: Vec<VersionRecord>,
 ) -> SyncMessage {
-    let [fate] = core
+    let outcome = core
         .finalize_edge_accepted_mergeable_commit_unit_once(
             tx.clone(),
             versions,
             u64::MAX - SKEW_TOLERANCE_MS,
         )
+        .unwrap();
+    let [fate] = settle_outcome(core, outcome)
         .unwrap()
         .try_into()
         .unwrap();
@@ -90,7 +93,7 @@ fn edge_accepted_mergeable_promotes_to_global_without_revalidating_write_policy(
     let (_reader_dir, mut reader) = open_node_with_schema(node(0xe4), schema);
 
     let unit = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 10)
                 .made_by(owner)
                 .cells(owner_cells(owner, "edge-visible")),
@@ -107,11 +110,11 @@ fn edge_accepted_mergeable_promotes_to_global_without_revalidating_write_policy(
 
     let fate = global_promote_edge_unit(&mut core, tx.clone(), versions);
     assert_current_title(&mut core, DurabilityTier::Global, row_uuid, "edge-visible");
-    edge.apply_sync_message(fate).unwrap();
+    edge.apply_sync_message_settled(fate).unwrap();
 
     let mut peer = PeerState::new();
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
     assert_current_title(
         &mut reader,
         DurabilityTier::Global,
@@ -119,7 +122,7 @@ fn edge_accepted_mergeable_promotes_to_global_without_revalidating_write_policy(
         "edge-visible",
     );
     assert_eq!(
-        edge.transaction_state(tx.tx_id).unwrap().2,
+        edge.transaction_state_settled(tx.tx_id).unwrap().2,
         DurabilityTier::Global
     );
 }
@@ -132,7 +135,7 @@ fn edge_serves_and_accepts_mergeable_writes_while_disconnected() {
     let row_uuid = row(0xe5);
 
     let first = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("one")),
         )
         .unwrap()
@@ -141,7 +144,7 @@ fn edge_serves_and_accepts_mergeable_writes_while_disconnected() {
     assert_current_title(&mut edge, DurabilityTier::Edge, row_uuid, "one");
 
     let second = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 20)
                 .parents(vec![first_tx.tx_id])
                 .cells(title_cells("two")),
@@ -167,7 +170,7 @@ fn edge_authority_accepts_mergeable_insert_update_delete_and_restore() {
     let row_uuid = row(0xe8);
 
     let insert = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 10).cells(title_cells("one")),
         )
         .unwrap()
@@ -176,7 +179,7 @@ fn edge_authority_accepts_mergeable_insert_update_delete_and_restore() {
     assert_current_title(&mut edge, DurabilityTier::Edge, row_uuid, "one");
 
     let update = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 20)
                 .parents(vec![insert_tx.tx_id])
                 .cells(title_cells("two")),
@@ -187,7 +190,7 @@ fn edge_authority_accepts_mergeable_insert_update_delete_and_restore() {
     assert_current_title(&mut edge, DurabilityTier::Edge, row_uuid, "two");
 
     let delete = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 30)
                 .parents(vec![update_tx.tx_id])
                 .deletion(DeletionEvent::Deleted),
@@ -201,7 +204,7 @@ fn edge_authority_accepts_mergeable_insert_update_delete_and_restore() {
         .is_empty());
 
     let restored_content = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 40)
                 .parents(vec![delete_tx.tx_id])
                 .cells(title_cells("restored")),
@@ -215,7 +218,7 @@ fn edge_authority_accepts_mergeable_insert_update_delete_and_restore() {
         .is_empty());
 
     let restore = writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row_uuid, 50)
                 .parents(vec![restored_content_tx.tx_id])
                 .deletion(DeletionEvent::Restored),
@@ -253,7 +256,7 @@ fn edge_authority_rejects_exclusive_and_catalogue_writes_loudly() {
                 None
             )],
             u64::MAX - SKEW_TOLERANCE_MS,
-        ),
+        ).resolve(),
         Err(Error::UnsupportedCommitUnit(
             "edge authority only supports mergeable commit units"
         ))
@@ -278,14 +281,14 @@ fn edge_authority_rejects_exclusive_and_catalogue_writes_loudly() {
         Vec::<String>::new(),
     );
     assert!(matches!(
-        edge.apply_sync_message(SyncMessage::PublishSchemaWithLens {
+        edge.apply_sync_message_settled(SyncMessage::PublishSchemaWithLens {
             author: user(0xee),
             catalogue_seq: 1,
             publication: Box::new(publication.clone()),
         }),
         Err(Error::UnauthorizedCatalogueUpdate)
     ));
-    edge.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+    edge.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
         author: AuthorId::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(publication),

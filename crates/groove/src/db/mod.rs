@@ -10,16 +10,17 @@
 //! and how subscriptions are exposed above the engine.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
 use std::str;
-use std::sync::{Arc, Mutex};
+use std::task::{Poll, Waker};
 
 use web_time::{Duration, Instant};
 
 use crate::ivm::runtime::{durable_index_key_prefix, encode_key_part};
 use crate::ivm::{
-    IvmRuntime, PlannerError, QueryParameter, RecordDelta, RecordDeltas, RuntimeStats, TableDelta,
-    TickMetrics, plan_prepared_shape, plan_query,
+    IvmRuntime, PlannerError, PublicationId, QueryParameter, RecordDelta, RecordDeltas,
+    RuntimeStats, TableDelta, TickMetrics, plan_prepared_shape, plan_query,
 };
 use crate::queries::Query;
 use crate::records::{
@@ -31,91 +32,196 @@ use crate::schema::{
     PrimaryKeyColumn, PrimaryKeyType, TableSchema, TableVariant,
 };
 use crate::storage::{
-    LayoutStorage, OrderedKvStorage, OwnedWriteOperation, RecordStore, StagedWriteOverlay,
-    StagedWriteState, StorageLayout, WriteOperation,
+    BoxedStorage, LayoutStorage, OrderedKvStorage, OwnedStorage, OwnedWriteOperation, RecordStore,
+    ReopenableStorage, StagedWriteOverlay, StagedWriteState, StorageLayout,
 };
 use thiserror::Error;
 
 pub use crate::ivm::{
     CollectByField, GraphBuilder, IvmRuntimeError, MultisinkDeltas, MultisinkSubscription,
-    PredicateExpr, PreparedShapeId, ProjectField, RoutedMultisinkTerminal, Subscription,
-    SubscriptionId,
+    PredicateExpr, PreparedShapeId, ProjectField, PublicationUpdate, RoutedMultisinkTerminal,
+    Subscription, SubscriptionError, SubscriptionEvent, SubscriptionId,
 };
 
 /// Schema-aware database facade over storage and IVM subscriptions.
-pub struct Database<S> {
-    storage: LayoutStorage<S>,
+pub struct Database {
+    storage: Rc<LayoutStorage>,
     /// Owns query/index maintenance over the storage-backed base tables.
     ivm_runtime: IvmRuntime,
     last_commit_metrics: Option<CommitMetrics>,
     last_tick_metrics: Option<TickMetrics>,
-    storage_read_metrics: RefCell<StorageReadMetrics>,
-    /// Host-owned transactions may span several Groove storage commits while
-    /// remaining one externally atomic publication. Notifications stay queued
-    /// until the outermost host scope completes.
-    durable_publication_state: Arc<Mutex<DurablePublicationState>>,
+    storage_read_metrics: Rc<RefCell<StorageReadMetrics>>,
+    next_publication_id: u64,
+    durable_publication_frontier: Option<PublicationId>,
+    resident_publications: BTreeMap<PublicationId, Vec<OwnedWriteOperation>>,
+    persisted_publications: BTreeSet<PublicationId>,
+    resident_writes: Rc<RefCell<StagedWriteState>>,
+    publication_persistence: Rc<RefCell<PersistenceOrder>>,
+    abandoned_application: Rc<Cell<bool>>,
     poisoned: bool,
 }
 
-/// Capability token for one host-owned durable publication scope.
-///
-/// This is an internal cross-crate seam used by Jazz. The token is consumed by
-/// exactly one finish or abort operation, preventing double-finalization; the
-/// database tracks nesting so an inner abort makes every enclosing completion
-/// discard rather than publish.
-#[doc(hidden)]
-#[must_use = "a durable publication scope must be finished or aborted"]
-pub struct DurablePublicationScope {
-    state: Arc<Mutex<DurablePublicationState>>,
-    resolved: bool,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AppliedBatchLifecycle {
+    Applied,
+    Persisting,
+    PersistenceComplete,
+    Finished,
+    Abandoned,
 }
 
-#[derive(Default)]
-struct DurablePublicationState {
-    depth: usize,
-    aborted: bool,
-    successful_commits: usize,
+/// One resident publication whose ordered storage write can progress without
+/// borrowing the database runtime.
+#[must_use = "an immediate publication must be persisted and settled"]
+pub struct AppliedBatch {
+    publication: PublicationId,
+    storage: Rc<LayoutStorage>,
+    operations: Vec<OwnedWriteOperation>,
+    order: Rc<RefCell<PersistenceOrder>>,
+    ivm_tick_time: Duration,
+    storage_writes: StorageWriteMetrics,
+    tick: TickMetrics,
+    notifications_deferred: bool,
+    lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
+    abandoned_application: Rc<Cell<bool>>,
 }
 
-impl DurablePublicationScope {
-    /// Successfully complete this scope. Publication occurs only when this is
-    /// the outermost scope and no nested scope aborted.
-    #[doc(hidden)]
-    pub fn finish<S: OrderedKvStorage>(mut self, database: &mut Database<S>) {
-        assert!(
-            Arc::ptr_eq(&self.state, &database.durable_publication_state),
-            "durable publication scope belongs to a different database"
+impl AppliedBatch {
+    pub fn publication(&self) -> PublicationId {
+        self.publication
+    }
+
+    pub async fn persist(&self) -> PersistedBatch {
+        assert_eq!(
+            self.lifecycle.replace(AppliedBatchLifecycle::Persisting),
+            AppliedBatchLifecycle::Applied,
+            "an applied batch may have only one persistence attempt at a time",
         );
-        self.resolve(false);
-        database.settle_durable_publication_scopes();
-    }
-
-    /// Abort this scope and poison its whole nested publication unit.
-    #[doc(hidden)]
-    pub fn abort<S: OrderedKvStorage>(mut self, database: &mut Database<S>) {
-        assert!(
-            Arc::ptr_eq(&self.state, &database.durable_publication_state),
-            "durable publication scope belongs to a different database"
-        );
-        self.resolve(true);
-        database.settle_durable_publication_scopes();
-    }
-
-    fn resolve(&mut self, aborted: bool) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("durable publication state mutex poisoned");
-        state.depth = state.depth.saturating_sub(1);
-        state.aborted |= aborted;
-        self.resolved = true;
+        let mut attempt = PersistenceAttempt {
+            lifecycle: Rc::clone(&self.lifecycle),
+            completed: false,
+        };
+        let turn = std::future::poll_fn(|cx| {
+            let mut order = self.order.borrow_mut();
+            if let Some(message) = &order.failure {
+                return Poll::Ready(Err(crate::storage::Error::Backend {
+                    backend: "publication order",
+                    message: message.clone(),
+                }));
+            }
+            if order.next == self.publication.0 {
+                return Poll::Ready(Ok(()));
+            }
+            order.waiters.insert(self.publication.0, cx.waker().clone());
+            Poll::Pending
+        })
+        .await;
+        let storage_start = Instant::now();
+        let result = match turn {
+            Ok(()) => self.storage.write_many(self.operations.clone()).await,
+            Err(error) => Err(error),
+        };
+        let storage_write_time = storage_start.elapsed();
+        self.lifecycle
+            .set(AppliedBatchLifecycle::PersistenceComplete);
+        attempt.completed = true;
+        let waiter = {
+            let mut order = self.order.borrow_mut();
+            if result.is_ok() {
+                order.next = order.next.saturating_add(1);
+                let next = order.next;
+                order.waiters.remove(&next)
+            } else {
+                order.failure = Some(
+                    result
+                        .as_ref()
+                        .expect_err("failed persistence has an error")
+                        .to_string(),
+                );
+                let waiters = std::mem::take(&mut order.waiters);
+                for (_, waiter) in waiters {
+                    waiter.wake();
+                }
+                None
+            }
+        };
+        if let Some(waiter) = waiter {
+            waiter.wake();
+        }
+        PersistedBatch {
+            publication: self.publication,
+            result,
+            notifications_deferred: self.notifications_deferred,
+            metrics: CommitMetrics {
+                storage_write_time,
+                ivm_tick_time: self.ivm_tick_time,
+                storage_write_count: self.storage_writes.total.count,
+                storage_write_bytes: self.storage_writes.total.bytes,
+                storage_writes: self.storage_writes,
+                tick: self.tick.clone(),
+            },
+            receipt: PersistenceReceipt {
+                lifecycle: Rc::clone(&self.lifecycle),
+                abandoned_application: Rc::clone(&self.abandoned_application),
+            },
+        }
     }
 }
 
-impl Drop for DurablePublicationScope {
+struct PersistenceAttempt {
+    lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
+    completed: bool,
+}
+
+impl Drop for PersistenceAttempt {
     fn drop(&mut self) {
-        if !self.resolved {
-            self.resolve(true);
+        if !self.completed && self.lifecycle.get() == AppliedBatchLifecycle::Persisting {
+            self.lifecycle.set(AppliedBatchLifecycle::Applied);
+        }
+    }
+}
+
+impl Drop for AppliedBatch {
+    fn drop(&mut self) {
+        if self.lifecycle.get() == AppliedBatchLifecycle::Applied {
+            self.lifecycle.set(AppliedBatchLifecycle::Abandoned);
+            self.abandoned_application.set(true);
+        }
+    }
+}
+
+struct PersistenceOrder {
+    next: u64,
+    waiters: BTreeMap<u64, Waker>,
+    failure: Option<String>,
+}
+
+/// Completion of one owned publication persistence operation.
+#[must_use = "persistence completion must be settled on its database"]
+pub struct PersistedBatch {
+    publication: PublicationId,
+    result: Result<(), crate::storage::Error>,
+    notifications_deferred: bool,
+    metrics: CommitMetrics,
+    receipt: PersistenceReceipt,
+}
+
+struct PersistenceReceipt {
+    lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
+    abandoned_application: Rc<Cell<bool>>,
+}
+
+impl PersistenceReceipt {
+    fn finish(&self) {
+        self.lifecycle.set(AppliedBatchLifecycle::Finished);
+    }
+}
+
+impl Drop for PersistenceReceipt {
+    fn drop(&mut self) {
+        if self.lifecycle.get() == AppliedBatchLifecycle::PersistenceComplete {
+            self.lifecycle.set(AppliedBatchLifecycle::Abandoned);
+            self.abandoned_application.set(true);
         }
     }
 }
@@ -131,6 +237,7 @@ mod storage_helpers;
 
 pub use batch::*;
 use encoding::*;
+pub(crate) use encoding::{index_record_descriptor, persisted_index_primary_key};
 use schema_admission::*;
 pub(crate) use storage_helpers::MeteredStorage;
 use storage_helpers::*;
@@ -144,6 +251,12 @@ pub use storage_helpers::{
 pub enum Error {
     #[error("database instance is poisoned after a failed atomic commit")]
     DatabasePoisoned,
+    #[error("publication does not belong to this database: {0:?}")]
+    PublicationNotFound(PublicationId),
+    #[error("subscription ended")]
+    SubscriptionEnded,
+    #[error(transparent)]
+    SubscriptionFailed(#[from] SubscriptionError),
     #[error("duplicate primary key for table {table}: {key:?}")]
     DuplicatePrimaryKey { table: String, key: Vec<u8> },
     #[error("duplicate schema version {version} for table {table}")]

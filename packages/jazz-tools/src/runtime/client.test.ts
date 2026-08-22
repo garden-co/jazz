@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   JazzClient,
-  MutationResult,
+  ExclusiveWriteHandle,
   resolveDefaultDurabilityTier,
   type Runtime,
   type TransactionalRuntime,
@@ -97,7 +97,7 @@ function makeFakeRuntime() {
     connect: vi.fn<Runtime["connect"]>(),
     disconnect: vi.fn<Runtime["disconnect"]>(),
     commitTransaction: vi.fn<TransactionalRuntime["commitTransaction"]>(
-      async () => `committed-${nextTransactionNumber}` as BatchId,
+      () => `committed-${nextTransactionNumber}` as BatchId,
     ),
     waitForTransaction: vi.fn<Runtime["waitForTransaction"]>(async () => undefined),
     rollbackTransaction: vi.fn<TransactionalRuntime["rollbackTransaction"]>(async () => false),
@@ -439,12 +439,7 @@ describe("JazzClient runtime transaction waits", () => {
   it("waits for connected exclusive transactions at the global tier", async () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const handle = new MutationResult(
-      undefined,
-      "transaction-exclusive" as BatchId,
-      client,
-      "exclusive",
-    );
+    const handle = new ExclusiveWriteHandle("transaction-exclusive" as BatchId, client);
 
     await expect(handle.wait()).resolves.toBeUndefined();
 
@@ -457,12 +452,7 @@ describe("JazzClient runtime transaction waits", () => {
       ...makeContext(),
       serverUrl: undefined,
     });
-    const handle = new MutationResult(
-      undefined,
-      "transaction-exclusive" as BatchId,
-      client,
-      "exclusive",
-    );
+    const handle = new ExclusiveWriteHandle("transaction-exclusive" as BatchId, client);
 
     await expect(handle.wait()).resolves.toBeUndefined();
 

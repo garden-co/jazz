@@ -88,7 +88,7 @@ where
     ///
     /// Cold globally accepted row versions are evictable unless some edge pin
     /// source names their transaction. Everything uncertain stays pinned.
-    pub fn classify_row_version_for_eviction(
+    pub async fn classify_row_version_for_eviction(
         &mut self,
         tx_id: TxId,
         peer_pins: &PeerEvictionPins,
@@ -96,7 +96,7 @@ where
         if peer_pins.deferred_edge_fate_txs.contains(&tx_id) {
             return Ok(EdgeCacheClass::Pinned);
         }
-        let Some(tx) = self.query_transaction(tx_id)? else {
+        let Some(tx) = self.query_transaction(tx_id).await? else {
             return Ok(EdgeCacheClass::Pinned);
         };
         if matches!(tx.fate, Fate::Pending) {
@@ -114,8 +114,12 @@ where
     /// This is intentionally not called by any automatic trigger. It preserves
     /// fate-pending rows, peer-deferred edge fates,
     /// referenced permission scopes, and all parked families.
-    pub fn evict_cold(&mut self, peer_pins: &PeerEvictionPins) -> Result<EvictColdReport, Error> {
+    pub async fn evict_cold(
+        &mut self,
+        peer_pins: &PeerEvictionPins,
+    ) -> Result<EvictColdReport, Error> {
         self.evict_cold_inner(peer_pins, None)
+            .await
             .map(|report| report.evicted)
     }
 
@@ -123,30 +127,33 @@ where
     ///
     /// Returns `Ok(None)` when the backend cannot meter all relevant storage
     /// classes or when the cache is already at or below the high-water budget.
-    pub fn enforce_edge_cache_budget(
+    pub async fn enforce_edge_cache_budget(
         &mut self,
         peer_pins: &PeerEvictionPins,
         budget: EdgeCacheBudget,
     ) -> Result<Option<EdgeCacheBudgetReport>, Error> {
-        let Some(before_bytes) = self.edge_cache_metered_bytes()? else {
+        let Some(before_bytes) = self.edge_cache_metered_bytes().await? else {
             return Ok(None);
         };
         if before_bytes <= budget.max_bytes {
             return Ok(None);
         }
-        let mut report = self.evict_cold_inner(peer_pins, Some(budget.low_water_bytes()))?;
+        let mut report = self
+            .evict_cold_inner(peer_pins, Some(budget.low_water_bytes()))
+            .await?;
         report.before_bytes = before_bytes;
         report.after_bytes = self
-            .edge_cache_metered_bytes()?
+            .edge_cache_metered_bytes()
+            .await?
             .unwrap_or(report.after_bytes);
         Ok(Some(report))
     }
 
     /// Return metered edge-cache bytes, if every relevant class can be metered.
-    pub fn edge_cache_metered_bytes(&mut self) -> Result<Option<u64>, Error> {
+    pub async fn edge_cache_metered_bytes(&mut self) -> Result<Option<u64>, Error> {
         let mut bytes = 0_u64;
-        for cf in self.edge_cache_metered_column_families()? {
-            let Some(next) = self.database.approximate_class_bytes(&cf)? else {
+        for cf in self.edge_cache_metered_column_families().await? {
+            let Some(next) = self.database.approximate_class_bytes(&cf).await? else {
                 return Ok(None);
             };
             bytes = bytes.saturating_add(next);
@@ -154,7 +161,7 @@ where
         Ok(Some(bytes))
     }
 
-    fn evict_cold_inner(
+    async fn evict_cold_inner(
         &mut self,
         peer_pins: &PeerEvictionPins,
         low_water_bytes: Option<u64>,
@@ -168,15 +175,18 @@ where
             ..EvictColdReport::default()
         };
 
-        let before_bytes = self.edge_cache_metered_bytes()?.unwrap_or(0);
+        let before_bytes = self.edge_cache_metered_bytes().await?.unwrap_or(0);
         let mut remaining_bytes = before_bytes;
 
         let mut seen_pinned_txs = BTreeSet::new();
         let mut evictable = Vec::new();
         for table in self.catalogue.schema.tables.clone() {
-            for version in self.query_table_versions(&table.name)? {
+            for version in self.query_table_versions(&table.name).await? {
                 let tx_id = self.version_tx_id(&version)?;
-                match self.classify_row_version_for_eviction(tx_id, peer_pins)? {
+                match self
+                    .classify_row_version_for_eviction(tx_id, peer_pins)
+                    .await?
+                {
                     EdgeCacheClass::Evictable => {
                         evictable.push(EvictableRowVersion { tx_id, version })
                     }
@@ -184,7 +194,8 @@ where
                         if seen_pinned_txs.insert(tx_id) {
                             report.row_versions_pinned += 1;
                             if self
-                                .query_transaction(tx_id)?
+                                .query_transaction(tx_id)
+                                .await?
                                 .is_some_and(|tx| matches!(tx.fate, Fate::Pending))
                             {
                                 report.fate_pending_txs_pinned += 1;
@@ -212,13 +223,20 @@ where
             );
             batch_deletes += 1;
             if low_water_bytes.is_some() {
-                self.database.commit_batch(batch)?;
-                remaining_bytes = self.edge_cache_metered_bytes()?.unwrap_or(remaining_bytes);
+                let applied = self.database.apply_batch(batch).await?;
+                let persisted = applied.persist().await;
+                self.database.finish_persistence(persisted)?;
+                remaining_bytes = self
+                    .edge_cache_metered_bytes()
+                    .await?
+                    .unwrap_or(remaining_bytes);
                 batch = self.database.open_batch();
             }
         }
         if batch_deletes > 0 && low_water_bytes.is_none() {
-            self.database.commit_batch(batch)?;
+            let applied = self.database.apply_batch(batch).await?;
+            let persisted = applied.persist().await;
+            self.database.finish_persistence(persisted)?;
         }
         for tx_id in evicted_tx_ids {
             self.invalidate_tx_version_tables_cache(tx_id);
@@ -228,10 +246,13 @@ where
             // persisted fast known-state cursor may survive. This coarse
             // invalidation is conservative until eviction tracks affected
             // binding views directly.
-            self.clear_all_known_state_facts()?;
+            self.clear_all_known_state_facts().await?;
         }
 
-        let after_bytes = self.edge_cache_metered_bytes()?.unwrap_or(remaining_bytes);
+        let after_bytes = self
+            .edge_cache_metered_bytes()
+            .await?
+            .unwrap_or(remaining_bytes);
         Ok(EdgeCacheBudgetReport {
             before_bytes,
             after_bytes,
@@ -240,10 +261,10 @@ where
         })
     }
 
-    fn edge_cache_metered_column_families(&mut self) -> Result<Vec<String>, Error> {
+    async fn edge_cache_metered_column_families(&mut self) -> Result<Vec<String>, Error> {
         let mut families = BTreeSet::new();
         for table in self.catalogue.schema.tables.clone() {
-            for version in self.query_table_versions(&table.name)? {
+            for version in self.query_table_versions(&table.name).await? {
                 families.insert(self.version_storage_table_for_row(&version)?.to_string());
             }
         }

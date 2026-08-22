@@ -6,10 +6,10 @@ where
     /// contributions between explicit branch views and commit the result as
     /// one ordinary atomic transaction. Unsupported or incomplete calculation
     /// fails before any output transaction is minted.
-    pub fn merge_branch_contributions(
+    pub async fn merge_branch_contributions(
         &mut self,
         request: ContributionMergeRequest,
-    ) -> Result<Option<TxId>, Error> {
+    ) -> Result<Option<PublishedTransaction>, Error> {
         self.require_catalogue_ready()?;
         if !self.is_history_complete() {
             return Err(Error::InvalidMergeableCommit(
@@ -60,7 +60,8 @@ where
                     DurabilityTier::Local,
                     source_identity,
                     &source_view,
-                )?
+                )
+                .await?
                 .rows
                 .into_iter()
                 .any(|row| row.row_uuid() == selected.row_uuid);
@@ -73,7 +74,8 @@ where
                         source_identity,
                         QueryAuthorizationMode::TrustedServing,
                         &source_view,
-                    )?
+                    )
+                    .await?
                     .into_iter()
                     .any(|row| row.row_uuid() == selected.row_uuid);
             }
@@ -88,7 +90,7 @@ where
             let (target_key, _) = schema
                 .project_branch_view_selector(&table, &request.target)
                 .map_err(Error::InvalidBranchKey)?;
-            let versions = self.query_table_versions(&selected.table)?;
+            let versions = self.query_table_versions(&selected.table).await?;
             let all_row_versions = versions
                 .iter()
                 .filter(|version| version.row_uuid() == selected.row_uuid)
@@ -112,7 +114,7 @@ where
                 {
                     let tx_id = self.version_tx_id(&version)?;
                     if observed_transactions.insert(tx_id)
-                        && let Some(tx) = self.query_transaction(tx_id)?
+                        && let Some(tx) = self.query_transaction(tx_id).await?
                         && let Some(provenance) = &tx.tx.contribution_merge
                     {
                         let mut provenance = provenance.clone();
@@ -200,18 +202,13 @@ where
             };
 
             let source_content = self
-                .query_local_layer_winner_in_branch(
+                .query_current_layer_winner_in_branch(
                     &selected.table,
                     &source_key,
                     selected.row_uuid,
                     VersionLayer::Content,
-                )?
-                .or(self.query_global_layer_winner_in_branch(
-                    &selected.table,
-                    &source_key,
-                    selected.row_uuid,
-                    VersionLayer::Content,
-                )?);
+                )
+                .await?;
             let mut cells = BTreeMap::new();
             let mut authored = BTreeSet::new();
             for column in table.columns.iter().filter(|column| {
@@ -376,18 +373,13 @@ where
                     }
                     MergeStrategy::Counter => {
                         let target_value = self
-                            .query_local_layer_winner_in_branch(
+                            .query_current_layer_winner_in_branch(
                                 &selected.table,
                                 &target_key,
                                 selected.row_uuid,
                                 VersionLayer::Content,
-                            )?
-                            .or(self.query_global_layer_winner_in_branch(
-                                &selected.table,
-                                &target_key,
-                                selected.row_uuid,
-                                VersionLayer::Content,
-                            )?)
+                            )
+                            .await?
                             .as_ref()
                             .map(|version| version.cell(&table, &column.name))
                             .transpose()?
@@ -452,18 +444,13 @@ where
                         let descriptor = records::RecordDescriptor::new([("element", element_type)]);
                         let mut elements = BTreeMap::<Vec<u8>, Value>::new();
                         if let Some(Value::Array(current)) = self
-                            .query_local_layer_winner_in_branch(
+                            .query_current_layer_winner_in_branch(
                                 &selected.table,
                                 &target_key,
                                 selected.row_uuid,
                                 VersionLayer::Content,
-                            )?
-                            .or(self.query_global_layer_winner_in_branch(
-                                &selected.table,
-                                &target_key,
-                                selected.row_uuid,
-                                VersionLayer::Content,
-                            )?)
+                            )
+                            .await?
                             .as_ref()
                             .map(|version| version.cell(&table, &column.name))
                             .transpose()?
@@ -542,18 +529,13 @@ where
             }
             if !cells.is_empty() {
                 let parents = self
-                    .query_local_layer_winner_in_branch(
+                    .query_current_layer_winner_in_branch(
                         &selected.table,
                         &target_key,
                         selected.row_uuid,
                         VersionLayer::Content,
-                    )?
-                    .or(self.query_global_layer_winner_in_branch(
-                        &selected.table,
-                        &target_key,
-                        selected.row_uuid,
-                        VersionLayer::Content,
-                    )?)
+                    )
+                    .await?
                     .as_ref()
                     .map(|version| self.version_tx_id(version))
                     .transpose()?
@@ -587,34 +569,24 @@ where
                     .map_err(Error::InvalidMergeableCommit)?;
                 if !novel.is_empty() {
                     let source_register = self
-                        .query_local_layer_winner_in_branch(
+                        .query_current_layer_winner_in_branch(
                             &selected.table,
                             &source_key,
                             selected.row_uuid,
                             VersionLayer::Deletion,
-                        )?
-                        .or(self.query_global_layer_winner_in_branch(
-                            &selected.table,
-                            &source_key,
-                            selected.row_uuid,
-                            VersionLayer::Deletion,
-                        )?)
+                        )
+                        .await?
                         .ok_or(Error::InvalidStoredValue(
                             "source deletion contribution has no current register",
                         ))?;
                     let parents = self
-                        .query_local_layer_winner_in_branch(
+                        .query_current_layer_winner_in_branch(
                             &selected.table,
                             &target_key,
                             selected.row_uuid,
                             VersionLayer::Deletion,
-                        )?
-                        .or(self.query_global_layer_winner_in_branch(
-                            &selected.table,
-                            &target_key,
-                            selected.row_uuid,
-                            VersionLayer::Deletion,
-                        )?)
+                        )
+                        .await?
                         .as_ref()
                         .map(|version| self.version_tx_id(version))
                         .transpose()?
@@ -657,7 +629,9 @@ where
             if !self.dry_run_mergeable_write_allows_in_schema(
                 schema_version,
                 commit.clone(),
-            )? {
+            )
+            .await?
+            {
                 return Err(Error::InvalidMergeableCommit(
                     "calculated merge target write is unauthorized",
                 ));
@@ -670,6 +644,7 @@ where
         )
         .map_err(Error::InvalidMergeableCommit)?;
         self.commit_calculated_merge_many(commits, provenance)
+            .await
             .map(Some)
     }
 }

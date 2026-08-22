@@ -66,12 +66,14 @@ fn some(value: Value) -> Value {
     Value::Nullable(Some(Box::new(value)))
 }
 
-#[test]
-fn non_count_aggregate_outputs_are_always_nullable() {
+#[futures_test::test]
+async fn non_count_aggregate_outputs_are_always_nullable() {
     let storage = MemoryStorage::new(&["metrics"]);
-    let mut database = Database::new(metric_schema(ColumnType::U64), storage).unwrap();
+    let mut database = Database::new(metric_schema(ColumnType::U64), storage)
+        .await
+        .unwrap();
 
-    let result = database.query_graph(metric_aggregates([])).unwrap();
+    let result = database.query_graph(metric_aggregates([])).await.unwrap();
     let output_types = result
         .descriptor
         .fields()
@@ -92,27 +94,33 @@ fn non_count_aggregate_outputs_are_always_nullable() {
     );
 }
 
-#[test]
-fn grouped_aggregate_over_zero_rows_returns_no_rows() {
+#[futures_test::test]
+async fn grouped_aggregate_over_zero_rows_returns_no_rows() {
     let storage = MemoryStorage::new(&["metrics"]);
-    let mut database = Database::new(metric_schema(ColumnType::U64), storage).unwrap();
+    let mut database = Database::new(metric_schema(ColumnType::U64), storage)
+        .await
+        .unwrap();
 
     assert!(
         database
             .query_graph(metric_aggregates(["bucket"]))
+            .await
             .unwrap()
             .is_empty()
     );
 }
 
-#[test]
-fn ungrouped_aggregate_over_zero_rows_returns_one_row() {
+#[futures_test::test]
+async fn ungrouped_aggregate_over_zero_rows_returns_one_row() {
     let storage = MemoryStorage::new(&["metrics"]);
-    let mut database = Database::new(metric_schema(ColumnType::U64), storage).unwrap();
+    let mut database = Database::new(metric_schema(ColumnType::U64), storage)
+        .await
+        .unwrap();
 
     assert_eq!(
         database
             .query_graph(metric_aggregates([]))
+            .await
             .unwrap()
             .to_values()
             .unwrap(),
@@ -123,17 +131,22 @@ fn ungrouped_aggregate_over_zero_rows_returns_one_row() {
     );
 }
 
-#[test]
-fn all_null_inputs_return_null_except_for_counts() {
+#[futures_test::test]
+async fn all_null_inputs_return_null_except_for_counts() {
     let storage = MemoryStorage::new(&["metrics"]);
-    let mut database = Database::new(metric_schema(ColumnType::U64.nullable()), storage).unwrap();
+    let mut database = Database::new(metric_schema(ColumnType::U64.nullable()), storage)
+        .await
+        .unwrap();
     let mut batch = database.open_batch();
     batch.insert("metrics", vec![Value::U64(1), Value::U64(10), null()]);
-    database.commit_batch(batch).unwrap();
+    let applied = database.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted).unwrap();
 
     assert_eq!(
         database
             .query_graph(metric_aggregates(["bucket"]))
+            .await
             .unwrap()
             .to_values()
             .unwrap(),
@@ -152,20 +165,25 @@ fn all_null_inputs_return_null_except_for_counts() {
     );
 }
 
-#[test]
-fn nullable_aggregate_outputs_wrap_non_null_results() {
+#[futures_test::test]
+async fn nullable_aggregate_outputs_wrap_non_null_results() {
     let storage = MemoryStorage::new(&["metrics"]);
-    let mut database = Database::new(metric_schema(ColumnType::U64.nullable()), storage).unwrap();
+    let mut database = Database::new(metric_schema(ColumnType::U64.nullable()), storage)
+        .await
+        .unwrap();
     let mut batch = database.open_batch();
     batch.insert(
         "metrics",
         vec![Value::U64(1), Value::U64(10), some(Value::U64(5))],
     );
-    database.commit_batch(batch).unwrap();
+    let applied = database.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted).unwrap();
 
     assert_eq!(
         database
             .query_graph(metric_aggregates(["bucket"]))
+            .await
             .unwrap()
             .to_values()
             .unwrap(),
@@ -184,10 +202,12 @@ fn nullable_aggregate_outputs_wrap_non_null_results() {
     );
 }
 
-#[test]
-fn signed_i64_inputs_are_supported() {
+#[futures_test::test]
+async fn signed_i64_inputs_are_supported() {
     let storage = MemoryStorage::new(&["metrics"]);
-    let mut database = Database::new(metric_schema(ColumnType::I64), storage).unwrap();
+    let mut database = Database::new(metric_schema(ColumnType::I64), storage)
+        .await
+        .unwrap();
     let mut batch = database.open_batch();
     batch.insert(
         "metrics",
@@ -197,11 +217,14 @@ fn signed_i64_inputs_are_supported() {
         "metrics",
         vec![Value::U64(2), Value::U64(10), Value::I64(2)],
     );
-    database.commit_batch(batch).unwrap();
+    let applied = database.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted).unwrap();
 
     assert_eq!(
         database
             .query_graph(metric_aggregates(["bucket"]))
+            .await
             .unwrap()
             .to_values()
             .unwrap(),
@@ -220,10 +243,12 @@ fn signed_i64_inputs_are_supported() {
     );
 }
 
-#[test]
-fn sum_overflow_fails_with_a_named_error_at_the_declared_width() {
+#[futures_test::test]
+async fn sum_overflow_fails_with_a_named_error_at_the_declared_width() {
     let storage = MemoryStorage::new(&["metrics"]);
-    let mut database = Database::new(metric_schema(ColumnType::U8), storage).unwrap();
+    let mut database = Database::new(metric_schema(ColumnType::U8), storage)
+        .await
+        .unwrap();
     let mut batch = database.open_batch();
     batch.insert(
         "metrics",
@@ -233,10 +258,12 @@ fn sum_overflow_fails_with_a_named_error_at_the_declared_width() {
         "metrics",
         vec![Value::U64(2), Value::U64(10), Value::U8(10)],
     );
-    database.commit_batch(batch).unwrap();
+    let applied = database.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted).unwrap();
 
     assert!(matches!(
-        database.query_graph(metric_aggregates(["bucket"])),
+        database.query_graph(metric_aggregates(["bucket"])).await,
         Err(DatabaseError::IvmRuntime(
             IvmRuntimeError::AggregateOverflow
         ))

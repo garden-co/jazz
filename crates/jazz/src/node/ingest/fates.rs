@@ -3,7 +3,7 @@ where
     S: OrderedKvStorage,
 {
     /// Apply an upstream fate update.
-    pub fn apply_fate_update(
+    pub async fn apply_fate_update(
         &mut self,
         tx_id: TxId,
         fate: Fate,
@@ -22,14 +22,14 @@ where
             global_time,
             durability,
             &mut terminal_fate_persisted,
-        );
+        ).await;
         if terminal_fate_persisted {
             self.open_tx.local_permission_subjects.remove(&tx_id);
         }
         result
     }
 
-    fn apply_fate_update_once(
+    async fn apply_fate_update_once(
         &mut self,
         tx_id: TxId,
         fate: Fate,
@@ -38,7 +38,7 @@ where
         terminal_fate_persisted: &mut bool,
     ) -> Result<(), Error> {
         let mut stored = self
-            .query_transaction(tx_id)?
+            .query_transaction(tx_id).await?
             .ok_or(Error::MissingTransaction(tx_id))?;
         if let (Some(current), Some(next)) = (stored.global_time, global_time)
             && next < current
@@ -61,7 +61,7 @@ where
         let mut batch = self.database.open_batch();
         let mut global_current_updates = Vec::new();
         let cleanup_rejected_versions = matches!(stored.fate, Fate::Rejected(_));
-        let tx_versions = self.query_versions_for_tx(tx_id)?;
+        let tx_versions = self.query_versions_for_tx(tx_id).await?;
         let content_versions = tx_versions
             .iter()
             .filter(|version| version.layer() == VersionLayer::Content)
@@ -69,13 +69,13 @@ where
             .collect::<Vec<_>>();
         if matches!(stored.fate, Fate::Accepted) && stored.global_time.is_some() {
             global_current_updates =
-                self.global_current_updates_for_versions(tx_id, &tx_versions)?;
+                self.global_current_updates_for_versions(tx_id, &tx_versions).await?;
         }
         if let Some(child_alias) = self.node_aliases.get(&tx_id.node).copied() {
             for raw in self.database.primary_key_scan_raw(
                 "jazz_pending_edges",
                 &[Value::U64(tx_id.time.0), Value::U64(child_alias.0)],
-            )? {
+            ).await? {
                 let record = raw.record();
                 let parent_alias =
                     NodeAlias(record.get_u64(PendingEdgeRowRecord::FIELD_PARENT_NODE_ID_IDX)?);
@@ -105,7 +105,8 @@ where
         );
         if !matches!(stored.fate, Fate::Rejected(_)) {
             for version in &content_versions {
-                self.update_merge_heads_for_content_version(&mut batch, version)?;
+                self.update_merge_heads_for_content_version(&mut batch, version)
+                    .await?;
             }
         }
         if let Some(global_time) = stored.global_time {
@@ -132,28 +133,21 @@ where
             .copied()
             .filter(|global_time| Some(*global_time) != stored.global_time)
         {
-            self.prune_ahead_current_for_global_time(&mut batch, global_time)?;
+            self.prune_ahead_current_for_global_time(&mut batch, global_time)
+                .await?;
         }
         let rejected_payload = if cleanup_rejected_versions {
-            self.remove_rejected_local_versions(tx_id, &stored, &mut batch)?
+            self.remove_rejected_local_versions(tx_id, &stored, &mut batch).await?
         } else {
             None
         };
-        let publication_scope = self.database.begin_durable_publication_scope()?;
-        let durable_result = (|| {
-            self.database.commit_batch(batch)?;
-            *terminal_fate_persisted = !matches!(stored.fate, Fate::Pending);
-            if matches!(stored.fate, Fate::Rejected(_)) || stored.global_time.is_some() {
-                self.persist_storage_consistency_marker_through(tx_id.time)?;
-            }
-            Ok(())
-        })();
-        match durable_result {
-            Ok(()) => publication_scope.finish(&mut self.database),
-            Err(error) => {
-                publication_scope.abort(&mut self.database);
-                return Err(error);
-            }
+        let applied = self.database.apply_batch(batch).await?;
+        let persisted = applied.persist().await;
+        self.database.finish_persistence(persisted)?;
+        *terminal_fate_persisted = !matches!(stored.fate, Fate::Pending);
+        if matches!(stored.fate, Fate::Rejected(_)) || stored.global_time.is_some() {
+            self.persist_storage_consistency_marker_through(tx_id.time)
+                .await?;
         }
         #[cfg(test)]
         {
@@ -167,10 +161,12 @@ where
                     )
                 })
                 .collect::<BTreeSet<_>>();
-            self.assert_merge_head_rows_match_history_for_test(&rows)?;
+            self.assert_merge_head_rows_match_history_for_test(&rows)
+                .await?;
             self.assert_global_current_updates_match_history_for_test(
                 &global_current_update_versions,
-            )?;
+            )
+            .await?;
         }
         if let Some(rejected_payload) = rejected_payload {
             let tx_id = rejected_payload.tx_id();
@@ -185,11 +181,11 @@ where
             self.prune_child_edges(tx_id);
         } else if let Some(root) = rejected_root {
             self.prune_child_edges(tx_id);
-            let cascades = self.local_cascade_descendants(tx_id, root)?;
+            let cascades = self.local_cascade_descendants(tx_id, root).await?;
             for descendant in cascades {
                 // Authority-side parking resolves parents before children, so
                 // a locally cascaded descendant should still be speculative.
-                let descendant_fate = self.query_transaction(descendant)?.map(|tx| tx.fate);
+                let descendant_fate = self.query_transaction(descendant).await?.map(|tx| tx.fate);
                 debug_assert!(
                     matches!(descendant_fate.as_ref(), Some(Fate::Pending))
                         || matches!(
@@ -198,19 +194,20 @@ where
                                 if *existing == root
                         )
                 );
-                self.apply_fate_update(
+                Box::pin(self.apply_fate_update(
                     descendant,
                     Fate::Rejected(RejectionReason::Cascade { root }),
                     None,
                     None,
-                )?;
+                ))
+                .await?;
             }
         }
         Ok(())
     }
 
     /// Return locally visible current cells for one row.
-    pub(super) fn validate_exclusive_commit_unit(
+    pub(super) async fn validate_exclusive_commit_unit(
         &mut self,
         tx: &Transaction,
         versions: &[VersionRecord],
@@ -224,7 +221,7 @@ where
                 &read.table,
                 read.row_uuid,
                 &mut visible_content_memo,
-            );
+            ).await;
             if current != Some(read.version) {
                 return Ok(false);
             }
@@ -234,17 +231,23 @@ where
                 &absent.table,
                 absent.row_uuid,
                 &mut visible_content_memo,
-            );
+            ).await;
             if current.is_some() {
                 return Ok(false);
             }
         }
         for predicate in tx.predicate_read_set.as_deref().unwrap_or(&[]) {
             if self.predicate_read_is_degenerate_whole_table(predicate)? {
-                if self.global_currency_changed_outside_snapshot(&predicate.table, base_snapshot)? {
+                if self
+                    .global_currency_changed_outside_snapshot(&predicate.table, base_snapshot)
+                    .await?
+                {
                     return Ok(false);
                 }
-            } else if self.shape_predicate_changed_after(predicate, base_snapshot)? {
+            } else if self
+                .shape_predicate_changed_after(predicate, base_snapshot)
+                .await?
+            {
                 return Ok(false);
             }
         }
@@ -254,7 +257,7 @@ where
                 version.table(),
                 version.row_uuid(),
                 &mut visible_content_memo,
-            );
+            ).await;
             let parents = version.parents();
             let parent = match parents.as_slice() {
                 [] => None,
@@ -268,7 +271,7 @@ where
         Ok(true)
     }
 
-    fn visible_global_content_tx_id_now_memoized(
+    async fn visible_global_content_tx_id_now_memoized(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
@@ -277,7 +280,7 @@ where
         if let Some(current) = memo.get(&(table.to_owned(), row_uuid)) {
             return *current;
         }
-        let current = self.visible_global_content_tx_id_now(table, row_uuid);
+        let current = self.visible_global_content_tx_id_now(table, row_uuid).await;
         memo.insert((table.to_owned(), row_uuid), current);
         current
     }
@@ -291,7 +294,7 @@ where
         Ok(predicate.shape_id == shape.shape_id() && predicate.binding_id == binding.binding_id())
     }
 
-    pub(super) fn shape_predicate_changed_after(
+    pub(super) async fn shape_predicate_changed_after(
         &mut self,
         predicate: &PredicateRead,
         snapshot: &Snapshot,
@@ -304,50 +307,58 @@ where
         if binding.binding_id() != predicate.binding_id {
             return Ok(true);
         }
-        let at_base = self.shape_output_tx_set_at_snapshot(&shape, &binding, snapshot)?;
-        let at_now = self.shape_output_tx_set_now(&shape, &binding)?;
+        let at_base = self
+            .shape_output_tx_set_at_snapshot(&shape, &binding, snapshot)
+            .await?;
+        let at_now = self.shape_output_tx_set_now(&shape, &binding).await?;
         Ok(at_base != at_now)
     }
 
-    fn shape_output_tx_set_now(
+    async fn shape_output_tx_set_now(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
     ) -> Result<BTreeSet<(RowUuid, TxId)>, Error> {
         let table = shape.query().table.clone();
         let mut set = BTreeSet::new();
-        for row in self.query_rows(shape, binding, DurabilityTier::Global)? {
-            if let Some(tx_id) = self.visible_global_content_tx_id_now(&table, row.row_uuid()) {
+        for row in self
+            .query_rows(shape, binding, DurabilityTier::Global)
+            .await?
+        {
+            if let Some(tx_id) = self.visible_global_content_tx_id_now(&table, row.row_uuid()).await {
                 set.insert((row.row_uuid(), tx_id));
             }
         }
         Ok(set)
     }
 
-    fn shape_output_tx_set_at_snapshot(
+    async fn shape_output_tx_set_at_snapshot(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
         snapshot: &Snapshot,
     ) -> Result<BTreeSet<(RowUuid, TxId)>, Error> {
         let table = shape.query().table.clone();
-        let rows = self.query_rows_at_snapshot(shape, binding, snapshot)?;
-        rows.into_iter()
-            .map(|row| {
-                let row_uuid = row.row_uuid();
-                let Some(tx_id) =
-                    self.snapshot_content_witness(&table, row_uuid, snapshot)
-                else {
+        let rows = self
+            .query_rows_at_snapshot(shape, binding, snapshot)
+            .await?;
+        let mut set = BTreeSet::new();
+        for row in rows {
+            let row_uuid = row.row_uuid();
+            let Some(tx_id) = self
+                .snapshot_content_witness(&table, row_uuid, snapshot)
+                .await
+            else {
                     return Err(Error::InvalidStoredValue(
                         "historical query output row must have visible content",
                     ));
-                };
-                Ok((row_uuid, tx_id))
-            })
-            .collect()
+            };
+            set.insert((row_uuid, tx_id));
+        }
+        Ok(set)
     }
 
-    pub(super) fn commit_unit_satisfies_write_policies(
+    pub(super) async fn commit_unit_satisfies_write_policies(
         &mut self,
         tx: &Transaction,
         versions: &[VersionRecord],
@@ -366,31 +377,37 @@ where
             None => tx.permission_subject.unwrap_or(tx.made_by),
         };
         for version in versions {
-            if !self.version_satisfies_write_policy(version, permission_subject)? {
+            if !self
+                .version_satisfies_write_policy(version, permission_subject)
+                .await?
+            {
                 return Ok(false);
             }
         }
         Ok(true)
     }
 
-    pub(super) fn version_satisfies_write_policy(
+    pub(super) async fn version_satisfies_write_policy(
         &mut self,
         version: &VersionRecord,
         author: AuthorId,
     ) -> Result<bool, Error> {
-        self.write_policy_allows_version_record(version, author)
+        self.write_policy_allows_version_record(version, author).await
     }
 
-    pub(super) fn cascade_root_for_versions(&mut self, versions: &[VersionRecord]) -> Option<TxId> {
+    pub(super) async fn cascade_root_for_versions(
+        &mut self,
+        versions: &[VersionRecord],
+    ) -> Option<TxId> {
         for parent in versions.iter().flat_map(|version| version.parents()) {
-            if let Some(root) = self.cascade_root_for_tx(parent) {
+            if let Some(root) = self.cascade_root_for_tx(parent).await {
                 return Some(root);
             }
         }
         None
     }
 
-    pub(super) fn park_commit_unit_if_missing_parents_with_mode(
+    pub(super) async fn park_commit_unit_if_missing_parents_with_mode(
         &mut self,
         tx: &Transaction,
         versions: &[VersionRecord],
@@ -398,7 +415,7 @@ where
         memo: &mut IngestMemo,
         mode: CommitUnitParkMode,
     ) -> Result<bool, Error> {
-        if self.missing_parent_refs_memo(versions, memo)?.is_empty() {
+        if self.missing_parent_refs_memo(versions, memo).await?.is_empty() {
             return Ok(false);
         }
         if let Some(existing) = self.parking.parked_commit_units.get_mut(&tx.tx_id) {
@@ -465,29 +482,29 @@ where
         Ok(true)
     }
 
-    pub(super) fn missing_parent_refs(
+    pub(super) async fn missing_parent_refs(
         &mut self,
         versions: &[VersionRecord],
     ) -> Result<BTreeSet<TxId>, Error> {
         let mut memo = IngestMemo::default();
-        self.missing_parent_refs_memo(versions, &mut memo)
+        self.missing_parent_refs_memo(versions, &mut memo).await
     }
 
-    pub(super) fn missing_parent_refs_memo(
+    pub(super) async fn missing_parent_refs_memo(
         &mut self,
         versions: &[VersionRecord],
         memo: &mut IngestMemo,
     ) -> Result<BTreeSet<TxId>, Error> {
         let mut missing = BTreeSet::new();
         for parent in versions.iter().flat_map(|version| version.parents()) {
-            if !self.transaction_exists_memo(parent, memo)? {
+            if !self.transaction_exists_memo(parent, memo).await? {
                 missing.insert(parent);
             }
         }
         Ok(missing)
     }
 
-    pub(super) fn commit_unit_satisfies_clock_condition(
+    pub(super) async fn commit_unit_satisfies_clock_condition(
         &mut self,
         tx: &Transaction,
         versions: &[VersionRecord],
@@ -495,7 +512,7 @@ where
     ) -> Result<bool, Error> {
         for version in versions {
             for parent in version.parents() {
-                let Some(parent_made_at) = self.transaction_made_at_memo(parent, memo)? else {
+                let Some(parent_made_at) = self.transaction_made_at_memo(parent, memo).await? else {
                     return Ok(false);
                 };
                 if tx.tx_id.time <= parent_made_at {
@@ -506,11 +523,13 @@ where
         Ok(true)
     }
 
-    pub(super) fn drain_parked_commit_units(&mut self) -> Result<Vec<SyncMessage>, Error>
+    pub(super) async fn drain_parked_commit_units(
+        &mut self,
+    ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
     where
         S: ReopenableStorage,
     {
-        let mut updates = Vec::new();
+        let mut updates = PublicationOutcome::settled(Vec::new());
         loop {
             let parked = self
                 .parking
@@ -525,7 +544,7 @@ where
                     self.catalogue
                         .catalogue_schemas
                         .contains_key(&version.schema_version())
-                }) && self.missing_parent_refs(&versions)?.is_empty()
+                }) && self.missing_parent_refs(&versions).await?.is_empty()
                 {
                     ready.push(tx_id);
                 }
@@ -546,28 +565,28 @@ where
                         unit.tx,
                         unit.versions,
                         unit.now_ms,
-                    )?);
+                    ).await?);
                 } else if unit.ingress_role == ParkedIngressRole::EdgeAuthority {
                     updates.extend(self.ingest_edge_authority_mergeable_commit_unit_once(
                         unit.tx,
                         unit.versions,
                         unit.now_ms,
                         unit.ingest_context,
-                    )?);
+                    ).await?);
                 } else {
                     updates.extend(self.ingest_commit_unit_once(
                         unit.tx,
                         unit.versions,
                         unit.now_ms,
                         unit.ingest_context,
-                    )?);
+                    ).await?);
                 }
             }
         }
         Ok(updates)
     }
 
-    pub(super) fn drain_parked_relay_commit_units(&mut self) -> Result<(), Error>
+    pub(super) async fn drain_parked_relay_commit_units(&mut self) -> Result<(), Error>
     where
         S: ReopenableStorage,
     {
@@ -585,7 +604,7 @@ where
                     self.catalogue
                         .catalogue_schemas
                         .contains_key(&version.schema_version())
-                }) && self.missing_parent_refs(&versions)?.is_empty()
+                }) && self.missing_parent_refs(&versions).await?.is_empty()
                 {
                     ready.push(tx_id);
                 }
@@ -614,30 +633,30 @@ where
                 if self.parking.parked_catalogue_commit_units.remove(&tx_id) {
                     self.sync_metrics.parked_catalogue_orphans_resolved += 1;
                 }
-                self.ingest_relay_commit_unit_once(unit.tx, unit.versions)?;
+                self.ingest_relay_commit_unit_once(unit.tx, unit.versions).await?;
             }
         }
         Ok(())
     }
 
-    pub(super) fn cascade_root_for_tx(&mut self, tx_id: TxId) -> Option<TxId> {
+    pub(super) async fn cascade_root_for_tx(&mut self, tx_id: TxId) -> Option<TxId> {
         let mut stack = vec![tx_id];
         let mut seen = BTreeSet::new();
         while let Some(current) = stack.pop() {
             if !seen.insert(current) {
                 continue;
             }
-            if let Ok(Some(tx)) = self.query_transaction(current)
+            if let Ok(Some(tx)) = self.query_transaction(current).await
                 && let Some(root) = rejected_root_for(&tx.fate, current)
             {
                 return Some(root);
             }
-            if let Ok(Some(tx)) = self.query_transaction(current)
+            if let Ok(Some(tx)) = self.query_transaction(current).await
                 && matches!(tx.fate, Fate::Accepted)
             {
                 continue;
             }
-            let Ok(versions) = self.query_versions_for_tx(current) else {
+            let Ok(versions) = self.query_versions_for_tx(current).await else {
                 return None;
             };
             stack.extend(versions.iter().flat_map(|version| version.parents()));
@@ -645,18 +664,18 @@ where
         None
     }
 
-    pub(super) fn cascade_rejections_from(
+    pub(super) async fn cascade_rejections_from(
         &mut self,
         rejected: TxId,
     ) -> Result<Vec<SyncMessage>, Error> {
-        let Some(root) = self.cascade_root_for_tx(rejected).or(Some(rejected)) else {
+        let Some(root) = self.cascade_root_for_tx(rejected).await.or(Some(rejected)) else {
             return Ok(Vec::new());
         };
-        let descendants = self.local_cascade_descendants(rejected, root)?;
+        let descendants = self.local_cascade_descendants(rejected, root).await?;
         let mut updates = Vec::new();
         for descendant in descendants {
             let fate = Fate::Rejected(RejectionReason::Cascade { root });
-            self.apply_fate_update(descendant, fate.clone(), None, None)?;
+            self.apply_fate_update(descendant, fate.clone(), None, None).await?;
             updates.push(SyncMessage::FateUpdate {
                 tx_id: descendant,
                 fate,
@@ -668,11 +687,12 @@ where
     }
 
     #[cfg(test)]
-    pub(crate) fn transaction_ids(&self) -> Result<Vec<TxId>, Error> {
+    pub(crate) async fn transaction_ids(&self) -> Result<Vec<TxId>, Error> {
         let mut tx_ids = Vec::new();
         for raw in self
             .database
-            .primary_key_scan_raw("jazz_transactions", &[])?
+            .primary_key_scan_raw("jazz_transactions", &[])
+            .await?
         {
             let record = raw.record();
             let time = TxTime(record.get_u64(TransactionRowRecord::FIELD_TIME_IDX)?);
@@ -687,7 +707,7 @@ where
         Ok(tx_ids)
     }
 
-    pub(super) fn local_cascade_descendants(
+    pub(super) async fn local_cascade_descendants(
         &mut self,
         rejected: TxId,
         root: TxId,
@@ -705,7 +725,7 @@ where
             if !seen.insert(tx_id) {
                 continue;
             }
-            let Some(tx) = self.query_transaction(tx_id)? else {
+            let Some(tx) = self.query_transaction(tx_id).await? else {
                 continue;
             };
             let eligible = !matches!(tx.fate, Fate::Rejected(_))
@@ -723,13 +743,13 @@ where
         Ok(descendants.into_iter().collect())
     }
 
-    pub(super) fn remove_rejected_local_versions(
+    pub(super) async fn remove_rejected_local_versions(
         &mut self,
         tx_id: TxId,
         tx: &StoredTransaction,
         batch: &mut DatabaseBatch,
     ) -> Result<Option<RejectedTransaction>, Error> {
-        let rejected = self.query_versions_for_tx(tx_id)?;
+        let rejected = self.query_versions_for_tx(tx_id).await?;
         if rejected.is_empty() {
             return Ok(None);
         }
@@ -816,7 +836,8 @@ where
                 &branch_key,
                 row_uuid,
                 tx_id,
-            )?;
+            )
+            .await?;
         }
         self.invalidate_tx_version_tables_cache(tx_id);
         let _ = affected;

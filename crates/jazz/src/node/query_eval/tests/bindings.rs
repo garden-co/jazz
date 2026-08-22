@@ -322,7 +322,7 @@ fn one_claim_path_has_distinct_prepared_slots_per_numeric_width() {
 }
 
 #[test]
-fn lowered_groove_graph_differs_for_distinct_identity_claims() {
+fn lowered_groove_graph_is_shared_for_distinct_identity_claims() {
     let schema = owner_policy_schema();
     let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0xa1; 16]), schema.clone());
     let shape = Query::from("issues").validate(&schema).unwrap();
@@ -343,9 +343,9 @@ fn lowered_groove_graph_differs_for_distinct_identity_claims() {
         &ReadViewSpec::default(),
     );
 
-    assert_ne!(
+    assert_eq!(
         alice_graph, bob_graph,
-        "claim('sub') must be encoded in the lowered Groove descriptor graph"
+        "identity values belong in prepared bindings so hash-equal policy graphs share work"
     );
 }
 

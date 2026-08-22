@@ -41,6 +41,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use futures::lock::Mutex as LocalMutex;
 use jazz::db::{
     ConnectionSessionContext as CoreConnectionSessionContext, Db as CoreDb,
     DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
@@ -376,11 +377,11 @@ pub type SubscriptionTerminalEdit = Either4<
 enum NapiTransportInner {
     Memory {
         db: Rc<CoreDb<CoreMemoryStorage>>,
-        connection: Option<Rc<RefCell<CorePeerConnection<CoreMemoryStorage>>>>,
+        connection: Option<Rc<LocalMutex<CorePeerConnection<CoreMemoryStorage>>>>,
     },
     Persistent {
         db: Rc<CoreDb<CoreRocksDbStorage>>,
-        connection: Option<Rc<RefCell<CorePeerConnection<CoreRocksDbStorage>>>>,
+        connection: Option<Rc<LocalMutex<CorePeerConnection<CoreRocksDbStorage>>>>,
     },
     Closed,
 }
@@ -410,11 +411,11 @@ macro_rules! with_napi_mergeable_tx {
         match &$transaction.db {
             NapiDbInnerStorage::Memory(db) => {
                 let $tx = db.mergeable_tx_ref(open_tx);
-                $operation
+                core_block_on($operation)
             }
             NapiDbInnerStorage::Persistent(db) => {
                 let $tx = db.mergeable_tx_ref(open_tx);
-                $operation
+                core_block_on($operation)
             }
         }
         .map_err(|error: jazz::db::Error| napi::Error::from_reason(error.to_string()))
@@ -427,15 +428,24 @@ macro_rules! with_napi_exclusive_tx {
         match &$transaction.db {
             NapiDbInnerStorage::Memory(db) => {
                 let $tx = db.exclusive_tx_ref(open_tx);
-                $operation
+                core_block_on($operation)
             }
             NapiDbInnerStorage::Persistent(db) => {
                 let $tx = db.exclusive_tx_ref(open_tx);
-                $operation
+                core_block_on($operation)
             }
         }
         .map_err(|error: jazz::db::Error| napi::Error::from_reason(error.to_string()))
     }};
+}
+
+macro_rules! core_block_on_optional {
+    ($option:expr, |$value:ident| $some:expr, $none:expr) => {
+        match $option {
+            Some($value) => core_block_on($some),
+            None => core_block_on($none),
+        }
+    };
 }
 
 impl Write {
@@ -611,10 +621,13 @@ impl Tx {
         let cells = decode_core_cells(&cells)?;
         let now_ms = updated_at_ms.map(|value| value as u64);
         match self.kind {
-            NapiTxKind::Mergeable => with_napi_mergeable_tx!(self, |tx| match now_ms {
-                Some(now_ms) => tx.insert_with_id_at_ms(&table, row_id, cells, now_ms),
-                None => tx.insert_with_id(&table, row_id, cells),
-            }),
+            NapiTxKind::Mergeable => match now_ms {
+                Some(now_ms) => with_napi_mergeable_tx!(self, |tx| tx
+                    .insert_with_id_at_ms(&table, row_id, cells, now_ms)),
+                None => {
+                    with_napi_mergeable_tx!(self, |tx| tx.insert_with_id(&table, row_id, cells))
+                }
+            },
             NapiTxKind::Exclusive => {
                 with_napi_exclusive_tx!(self, |tx| tx.insert_with_id(&table, row_id, cells))
             }
@@ -653,10 +666,11 @@ impl Tx {
         let patch = decode_core_cells(&patch)?;
         let now_ms = updated_at_ms.map(|value| value as u64);
         match self.kind {
-            NapiTxKind::Mergeable => with_napi_mergeable_tx!(self, |tx| match now_ms {
-                Some(now_ms) => tx.update_at_ms(&table, row_id, patch, now_ms),
-                None => tx.update(&table, row_id, patch),
-            }),
+            NapiTxKind::Mergeable => match now_ms {
+                Some(now_ms) => with_napi_mergeable_tx!(self, |tx| tx
+                    .update_at_ms(&table, row_id, patch, now_ms)),
+                None => with_napi_mergeable_tx!(self, |tx| tx.update(&table, row_id, patch)),
+            },
             NapiTxKind::Exclusive => {
                 with_napi_exclusive_tx!(self, |tx| tx.update(&table, row_id, patch))
             }
@@ -697,10 +711,11 @@ impl Tx {
         let cells = decode_core_cells(&cells)?;
         let now_ms = updated_at_ms.map(|value| value as u64);
         match self.kind {
-            NapiTxKind::Mergeable => with_napi_mergeable_tx!(self, |tx| match now_ms {
-                Some(now_ms) => tx.update_at_ms(&table, row_id, cells, now_ms),
-                None => tx.update(&table, row_id, cells),
-            }),
+            NapiTxKind::Mergeable => match now_ms {
+                Some(now_ms) => with_napi_mergeable_tx!(self, |tx| tx
+                    .update_at_ms(&table, row_id, cells, now_ms)),
+                None => with_napi_mergeable_tx!(self, |tx| tx.update(&table, row_id, cells)),
+            },
             NapiTxKind::Exclusive => {
                 with_napi_exclusive_tx!(self, |tx| tx.update(&table, row_id, cells))
             }
@@ -760,10 +775,11 @@ impl Tx {
         let cells = decode_core_cells(&cells)?;
         let now_ms = updated_at_ms.map(|value| value as u64);
         match self.kind {
-            NapiTxKind::Mergeable => with_napi_mergeable_tx!(self, |tx| match now_ms {
-                Some(now_ms) => tx.restore_at_ms(&table, row_id, cells, now_ms),
-                None => tx.restore(&table, row_id, cells),
-            }),
+            NapiTxKind::Mergeable => match now_ms {
+                Some(now_ms) => with_napi_mergeable_tx!(self, |tx| tx
+                    .restore_at_ms(&table, row_id, cells, now_ms)),
+                None => with_napi_mergeable_tx!(self, |tx| tx.restore(&table, row_id, cells)),
+            },
             NapiTxKind::Exclusive => {
                 with_napi_exclusive_tx!(self, |tx| tx.restore(&table, row_id, cells))
             }
@@ -899,11 +915,11 @@ impl NapiDb {
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let view = match db {
             NapiDbInnerStorage::Memory(db) => NapiDbInnerStorage::Memory(Rc::new(
-                db.register_schema_view(schema)
+                core_block_on(db.register_schema_view(schema))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             )),
             NapiDbInnerStorage::Persistent(db) => NapiDbInnerStorage::Persistent(Rc::new(
-                db.register_schema_view(schema)
+                core_block_on(db.register_schema_view(schema))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             )),
         };
@@ -987,14 +1003,19 @@ impl NapiDb {
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         macro_rules! begin {
             ($db:expr) => {
-                if kind == "mergeable" {
-                    match author {
-                        Some(author) => $db.begin_mergeable_for_identity(open_batch_id, author),
-                        None => $db.begin_mergeable(open_batch_id),
+                core_block_on(async {
+                    if kind == "mergeable" {
+                        match author {
+                            Some(author) => {
+                                $db.begin_mergeable_for_identity(open_batch_id, author)
+                                    .await
+                            }
+                            None => $db.begin_mergeable(open_batch_id).await,
+                        }
+                    } else {
+                        $db.begin_exclusive(open_batch_id).await
                     }
-                } else {
-                    $db.begin_exclusive(open_batch_id)
-                }
+                })
             };
         }
         match db {
@@ -1308,8 +1329,10 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let row = match db {
-            NapiDbInnerStorage::Memory(db) => db.local_current_row(&table, row_id),
-            NapiDbInnerStorage::Persistent(db) => db.local_current_row(&table, row_id),
+            NapiDbInnerStorage::Memory(db) => core_block_on(db.local_current_row(&table, row_id)),
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.local_current_row(&table, row_id))
+            }
         }
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         let rows = row.into_iter().collect::<Vec<_>>();
@@ -1531,18 +1554,20 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => db.insert_with_id_at_ms(&table, row_id, cells, now_ms),
-                    None => db.insert_with_id(&table, row_id, cells),
-                }
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db.insert_with_id_at_ms(&table, row_id, cells, now_ms),
+                    db.insert_with_id(&table, row_id, cells)
+                )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => db.insert_with_id_at_ms(&table, row_id, cells, now_ms),
-                    None => db.insert_with_id(&table, row_id, cells),
-                }
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db.insert_with_id_at_ms(&table, row_id, cells, now_ms),
+                    db.insert_with_id(&table, row_id, cells)
+                )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
@@ -1566,12 +1591,12 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                db.insert_with_id_in_branch(&table, branch, row_id, cells)
+                core_block_on(db.insert_with_id_in_branch(&table, branch, row_id, cells))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                db.insert_with_id_in_branch(&table, branch, row_id, cells)
+                core_block_on(db.insert_with_id_in_branch(&table, branch, row_id, cells))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
@@ -1597,13 +1622,17 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                db.insert_with_id_in_branch_for_identity(author, &table, branch, row_id, cells)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                core_block_on(
+                    db.insert_with_id_in_branch_for_identity(author, &table, branch, row_id, cells),
+                )
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                db.insert_with_id_in_branch_for_identity(author, &table, branch, row_id, cells)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                core_block_on(
+                    db.insert_with_id_in_branch_for_identity(author, &table, branch, row_id, cells),
+                )
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
     }
@@ -1628,22 +1657,22 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => {
-                        db.insert_with_id_for_identity_at_ms(author, &table, row_id, cells, now_ms)
-                    }
-                    None => db.insert_with_id_for_identity(author, &table, row_id, cells),
-                }
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db
+                        .insert_with_id_for_identity_at_ms(author, &table, row_id, cells, now_ms),
+                    db.insert_with_id_for_identity(author, &table, row_id, cells)
+                )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => {
-                        db.insert_with_id_for_identity_at_ms(author, &table, row_id, cells, now_ms)
-                    }
-                    None => db.insert_with_id_for_identity(author, &table, row_id, cells),
-                }
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db
+                        .insert_with_id_for_identity_at_ms(author, &table, row_id, cells, now_ms),
+                    db.insert_with_id_for_identity(author, &table, row_id, cells)
+                )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
@@ -1667,18 +1696,20 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => db.update_at_ms(&table, row_id, patch, now_ms),
-                    None => db.update(&table, row_id, patch),
-                }
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db.update_at_ms(&table, row_id, patch, now_ms),
+                    db.update(&table, row_id, patch)
+                )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => db.update_at_ms(&table, row_id, patch, now_ms),
-                    None => db.update(&table, row_id, patch),
-                }
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db.update_at_ms(&table, row_id, patch, now_ms),
+                    db.update(&table, row_id, patch)
+                )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
@@ -1702,12 +1733,12 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                db.update_in_branch(&table, branch, row_id, patch)
+                core_block_on(db.update_in_branch(&table, branch, row_id, patch))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                db.update_in_branch(&table, branch, row_id, patch)
+                core_block_on(db.update_in_branch(&table, branch, row_id, patch))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
@@ -1733,12 +1764,12 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                db.update_in_branch_view(&table, head, base, row_id, patch)
+                core_block_on(db.update_in_branch_view(&table, head, base, row_id, patch))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                db.update_in_branch_view(&table, head, base, row_id, patch)
+                core_block_on(db.update_in_branch_view(&table, head, base, row_id, patch))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
@@ -1764,16 +1795,24 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                db.update_in_branch_view_for_identity(author, &table, head, base, row_id, patch)
+            NapiDbInnerStorage::Memory(db) => {
+                core_write_memory(
+                    Rc::clone(db),
+                    core_block_on(db.update_in_branch_view_for_identity(
+                        author, &table, head, base, row_id, patch,
+                    ))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                db.update_in_branch_view_for_identity(author, &table, head, base, row_id, patch)
+                )
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                core_write_persistent(
+                    Rc::clone(db),
+                    core_block_on(db.update_in_branch_view_for_identity(
+                        author, &table, head, base, row_id, patch,
+                    ))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
+                )
+            }
         }
     }
 
@@ -1797,22 +1836,20 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => {
-                        db.update_for_identity_at_ms(author, &table, row_id, patch, now_ms)
-                    }
-                    None => db.update_for_identity(author, &table, row_id, patch),
-                }
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db.update_for_identity_at_ms(author, &table, row_id, patch, now_ms),
+                    db.update_for_identity(author, &table, row_id, patch)
+                )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => {
-                        db.update_for_identity_at_ms(author, &table, row_id, patch, now_ms)
-                    }
-                    None => db.update_for_identity(author, &table, row_id, patch),
-                }
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db.update_for_identity_at_ms(author, &table, row_id, patch, now_ms),
+                    db.update_for_identity(author, &table, row_id, patch)
+                )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
@@ -1836,18 +1873,20 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => db.upsert_at_ms(&table, row_id, cells, now_ms),
-                    None => db.upsert(&table, row_id, cells),
-                }
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db.upsert_at_ms(&table, row_id, cells, now_ms),
+                    db.upsert(&table, row_id, cells)
+                )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => db.upsert_at_ms(&table, row_id, cells, now_ms),
-                    None => db.upsert(&table, row_id, cells),
-                }
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db.upsert_at_ms(&table, row_id, cells, now_ms),
+                    db.upsert(&table, row_id, cells)
+                )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
@@ -1873,22 +1912,20 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => {
-                        db.upsert_for_identity_at_ms(author, &table, row_id, cells, now_ms)
-                    }
-                    None => db.upsert_for_identity(author, &table, row_id, cells),
-                }
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db.upsert_for_identity_at_ms(author, &table, row_id, cells, now_ms),
+                    db.upsert_for_identity(author, &table, row_id, cells)
+                )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => {
-                        db.upsert_for_identity_at_ms(author, &table, row_id, cells, now_ms)
-                    }
-                    None => db.upsert_for_identity(author, &table, row_id, cells),
-                }
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db.upsert_for_identity_at_ms(author, &table, row_id, cells, now_ms),
+                    db.upsert_for_identity(author, &table, row_id, cells)
+                )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
@@ -1910,18 +1947,20 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => db.delete_at_ms(&table, row_id, now_ms),
-                    None => db.delete(&table, row_id),
-                }
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db.delete_at_ms(&table, row_id, now_ms),
+                    db.delete(&table, row_id)
+                )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => db.delete_at_ms(&table, row_id, now_ms),
-                    None => db.delete(&table, row_id),
-                }
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db.delete_at_ms(&table, row_id, now_ms),
+                    db.delete(&table, row_id)
+                )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
@@ -1943,12 +1982,12 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                db.delete_in_branch(&table, branch, row_id)
+                core_block_on(db.delete_in_branch(&table, branch, row_id))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                db.delete_in_branch(&table, branch, row_id)
+                core_block_on(db.delete_in_branch(&table, branch, row_id))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
@@ -1972,12 +2011,12 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                db.delete_in_branch_view(&table, head, base, row_id)
+                core_block_on(db.delete_in_branch_view(&table, head, base, row_id))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                db.delete_in_branch_view(&table, head, base, row_id)
+                core_block_on(db.delete_in_branch_view(&table, head, base, row_id))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
@@ -2003,13 +2042,17 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                db.delete_in_branch_view_for_identity(author, &table, head, base, row_id)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                core_block_on(
+                    db.delete_in_branch_view_for_identity(author, &table, head, base, row_id),
+                )
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                db.delete_in_branch_view_for_identity(author, &table, head, base, row_id)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                core_block_on(
+                    db.delete_in_branch_view_for_identity(author, &table, head, base, row_id),
+                )
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
     }
@@ -2032,18 +2075,20 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => db.delete_for_identity_at_ms(author, &table, row_id, now_ms),
-                    None => db.delete_for_identity(author, &table, row_id),
-                }
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db.delete_for_identity_at_ms(author, &table, row_id, now_ms),
+                    db.delete_for_identity(author, &table, row_id)
+                )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => db.delete_for_identity_at_ms(author, &table, row_id, now_ms),
-                    None => db.delete_for_identity(author, &table, row_id),
-                }
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db.delete_for_identity_at_ms(author, &table, row_id, now_ms),
+                    db.delete_for_identity(author, &table, row_id)
+                )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
@@ -2067,18 +2112,20 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => db.restore_at_ms(&table, row_id, cells, now_ms),
-                    None => db.restore(&table, row_id, cells),
-                }
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db.restore_at_ms(&table, row_id, cells, now_ms),
+                    db.restore(&table, row_id, cells)
+                )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => db.restore_at_ms(&table, row_id, cells, now_ms),
-                    None => db.restore(&table, row_id, cells),
-                }
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db.restore_at_ms(&table, row_id, cells, now_ms),
+                    db.restore(&table, row_id, cells)
+                )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
@@ -2100,12 +2147,12 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                db.restore_in_branch(&table, branch, row_id)
+                core_block_on(db.restore_in_branch(&table, branch, row_id))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                db.restore_in_branch(&table, branch, row_id)
+                core_block_on(db.restore_in_branch(&table, branch, row_id))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
@@ -2129,12 +2176,12 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                db.restore_with_cells_in_branch(&table, branch, row_id, cells)
+                core_block_on(db.restore_with_cells_in_branch(&table, branch, row_id, cells))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                db.restore_with_cells_in_branch(&table, branch, row_id, cells)
+                core_block_on(db.restore_with_cells_in_branch(&table, branch, row_id, cells))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
@@ -2160,13 +2207,17 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                db.restore_with_cells_in_branch_as_identity(author, &table, branch, row_id, cells)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                core_block_on(db.restore_with_cells_in_branch_as_identity(
+                    author, &table, branch, row_id, cells,
+                ))
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                db.restore_with_cells_in_branch_as_identity(author, &table, branch, row_id, cells)
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                core_block_on(db.restore_with_cells_in_branch_as_identity(
+                    author, &table, branch, row_id, cells,
+                ))
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
     }
@@ -2191,22 +2242,20 @@ impl NapiDb {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => {
-                        db.restore_for_identity_at_ms(author, &table, row_id, cells, now_ms)
-                    }
-                    None => db.restore_for_identity(author, &table, row_id, cells),
-                }
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db.restore_for_identity_at_ms(author, &table, row_id, cells, now_ms),
+                    db.restore_for_identity(author, &table, row_id, cells)
+                )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => {
-                        db.restore_for_identity_at_ms(author, &table, row_id, cells, now_ms)
-                    }
-                    None => db.restore_for_identity(author, &table, row_id, cells),
-                }
+                core_block_on_optional!(
+                    updated_at_ms,
+                    |now_ms| db.restore_for_identity_at_ms(author, &table, row_id, cells, now_ms),
+                    db.restore_for_identity(author, &table, row_id, cells)
+                )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
@@ -2219,8 +2268,8 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
-            NapiDbInnerStorage::Memory(db) => db.tick(),
-            NapiDbInnerStorage::Persistent(db) => db.tick(),
+            NapiDbInnerStorage::Memory(db) => core_block_on(db.tick()),
+            NapiDbInnerStorage::Persistent(db) => core_block_on(db.tick()),
         }
         .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
@@ -2344,7 +2393,7 @@ impl NapiDb {
                 db: NapiDbInnerStorage::Memory(Rc::clone(db)),
                 kind: NapiTxKind::Mergeable,
                 open_tx: Some({
-                    db.begin_mergeable(open_batch_id)
+                    core_block_on(db.begin_mergeable(open_batch_id))
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
                     open_batch_id
                 }),
@@ -2354,7 +2403,7 @@ impl NapiDb {
                 db: NapiDbInnerStorage::Persistent(Rc::clone(db)),
                 kind: NapiTxKind::Mergeable,
                 open_tx: Some({
-                    db.begin_mergeable(open_batch_id)
+                    core_block_on(db.begin_mergeable(open_batch_id))
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
                     open_batch_id
                 }),
@@ -2382,7 +2431,7 @@ impl NapiDb {
                 db: NapiDbInnerStorage::Memory(Rc::clone(db)),
                 kind: NapiTxKind::Mergeable,
                 open_tx: Some({
-                    db.begin_mergeable_for_identity(open_batch_id, author)
+                    core_block_on(db.begin_mergeable_for_identity(open_batch_id, author))
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
                     open_batch_id
                 }),
@@ -2392,7 +2441,7 @@ impl NapiDb {
                 db: NapiDbInnerStorage::Persistent(Rc::clone(db)),
                 kind: NapiTxKind::Mergeable,
                 open_tx: Some({
-                    db.begin_mergeable_for_identity(open_batch_id, author)
+                    core_block_on(db.begin_mergeable_for_identity(open_batch_id, author))
                         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
                     open_batch_id
                 }),
@@ -2624,7 +2673,7 @@ fn core_tx_write(tx_id: TxId, inner: Option<NapiWrite>) -> napi::Result<Write> {
 }
 
 fn core_tick_connection<S>(
-    connection: &Option<Rc<RefCell<CorePeerConnection<S>>>>,
+    connection: &Option<Rc<LocalMutex<CorePeerConnection<S>>>>,
 ) -> napi::Result<u32>
 where
     S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
@@ -2632,9 +2681,7 @@ where
     let Some(connection) = connection else {
         return Ok(0);
     };
-    let stats = connection
-        .borrow_mut()
-        .tick()
+    let stats = core_block_on(async { connection.lock().await.tick().await })
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
     Ok(stats.subscription_events as u32)
 }
@@ -2688,7 +2735,7 @@ fn core_commit_tx<S>(db: &CoreDb<S>, open_tx: CoreOpenBatchId) -> napi::Result<T
 where
     S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
-    db.commit_mergeable_handle(open_tx)
+    core_block_on(db.commit_mergeable_handle(open_tx))
         .map_err(|error| napi::Error::from_reason(error.to_string()))
 }
 
@@ -2724,8 +2771,7 @@ fn core_commit_exclusive_tx_memory(
     db: &Rc<CoreDb<CoreMemoryStorage>>,
     open_tx: CoreOpenBatchId,
 ) -> napi::Result<Write> {
-    let tx_id = db
-        .commit_exclusive_handle(open_tx)
+    let tx_id = core_block_on(db.commit_exclusive_handle(open_tx))
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
     core_tx_write(
         tx_id,
@@ -2740,8 +2786,7 @@ fn core_commit_exclusive_tx_persistent(
     db: &Rc<CoreDb<CoreRocksDbStorage>>,
     open_tx: CoreOpenBatchId,
 ) -> napi::Result<Write> {
-    let tx_id = db
-        .commit_exclusive_handle(open_tx)
+    let tx_id = core_block_on(db.commit_exclusive_handle(open_tx))
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
     core_tx_write(
         tx_id,
@@ -3965,42 +4010,40 @@ mod tests {
             )))
             .unwrap(),
         );
-        let view = Rc::new(owner.register_schema_view(schema).unwrap());
+        let view = Rc::new(core_block_on(owner.register_schema_view(schema)).unwrap());
         let batch = CoreOpenBatchId::new();
-        owner.begin_mergeable(batch).unwrap();
+        core_block_on(owner.begin_mergeable(batch)).unwrap();
         drop(Tx {
             db: NapiDbInnerStorage::Memory(Rc::clone(&view)),
             kind: NapiTxKind::Mergeable,
             open_tx: Some(batch),
             owns_lifetime: false,
         });
-        view.mergeable_tx_ref(batch)
-            .insert_with_id(
-                "items",
-                CoreRowUuid::from_bytes([1; 16]),
-                BTreeMap::from([("label".to_owned(), CoreValue::String("kept".to_owned()))]),
-            )
-            .unwrap();
-        owner.commit_mergeable_handle(batch).unwrap();
+        core_block_on(view.mergeable_tx_ref(batch).insert_with_id(
+            "items",
+            CoreRowUuid::from_bytes([1; 16]),
+            BTreeMap::from([("label".to_owned(), CoreValue::String("kept".to_owned()))]),
+        ))
+        .unwrap();
+        core_block_on(owner.commit_mergeable_handle(batch)).unwrap();
 
         let exclusive = CoreOpenBatchId::new();
-        owner.begin_exclusive(exclusive).unwrap();
+        core_block_on(owner.begin_exclusive(exclusive)).unwrap();
         drop(Tx {
             db: NapiDbInnerStorage::Memory(Rc::clone(&view)),
             kind: NapiTxKind::Exclusive,
             open_tx: Some(exclusive),
             owns_lifetime: false,
         });
-        view.exclusive_tx_ref(exclusive)
-            .insert_with_id(
-                "items",
-                CoreRowUuid::from_bytes([2; 16]),
-                BTreeMap::from([(
-                    "label".to_owned(),
-                    CoreValue::String("exclusive-kept".to_owned()),
-                )]),
-            )
-            .unwrap();
-        owner.commit_exclusive_handle(exclusive).unwrap();
+        core_block_on(view.exclusive_tx_ref(exclusive).insert_with_id(
+            "items",
+            CoreRowUuid::from_bytes([2; 16]),
+            BTreeMap::from([(
+                "label".to_owned(),
+                CoreValue::String("exclusive-kept".to_owned()),
+            )]),
+        ))
+        .unwrap();
+        core_block_on(owner.commit_exclusive_handle(exclusive)).unwrap();
     }
 }

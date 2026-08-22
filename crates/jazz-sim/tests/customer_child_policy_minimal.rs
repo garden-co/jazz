@@ -221,9 +221,9 @@ fn apply_event(rows: &mut BTreeSet<RowUuid>, event: SubscriptionEvent) {
 }
 
 fn tick_all(core: &Db<MemoryStorage>, relay: &Db<MemoryStorage>, client: &Db<MemoryStorage>) {
-    core.tick().expect("core tick");
-    relay.tick().expect("relay tick");
-    client.tick().expect("client tick");
+    jazz::db::block_on(core.tick()).expect("core tick");
+    jazz::db::block_on(relay.tick()).expect("relay tick");
+    jazz::db::block_on(client.tick()).expect("client tick");
 }
 
 #[test]

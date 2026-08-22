@@ -1,10 +1,62 @@
 //! Prepared shapes, routed bindings, and subscription delivery state.
 
 use super::*;
+use crate::storage::OwnedStorage;
+use std::rc::Rc;
+use std::sync::Mutex;
 
 /// Stable handle returned to callers for subscription management.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SubscriptionId(pub(super) u64);
+
+/// Monotone identity of one resident database publication.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PublicationId(pub u64);
+
+/// Incremental terminal output together with the publication that produced it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublicationUpdate<T> {
+    pub publication: Option<PublicationId>,
+    pub deltas: T,
+}
+
+/// One low-level subscription outcome. An error is terminal for this session.
+#[derive(Clone, Debug)]
+pub enum SubscriptionEvent<T> {
+    Update(PublicationUpdate<T>),
+    Error(SubscriptionError),
+}
+
+/// Shared evaluation failure which permanently ended a low-level subscription.
+#[derive(Clone, Debug)]
+pub enum SubscriptionError {
+    Evaluation(Arc<IvmRuntimeError>),
+    Ended,
+}
+
+impl SubscriptionError {
+    pub(super) fn new(error: Arc<IvmRuntimeError>) -> Self {
+        Self::Evaluation(error)
+    }
+
+    pub fn source_error(&self) -> Option<&IvmRuntimeError> {
+        match self {
+            Self::Evaluation(error) => Some(error.as_ref()),
+            Self::Ended => None,
+        }
+    }
+}
+
+impl std::fmt::Display for SubscriptionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Evaluation(error) => write!(formatter, "subscription evaluation failed: {error}"),
+            Self::Ended => formatter.write_str("subscription ended"),
+        }
+    }
+}
+
+impl std::error::Error for SubscriptionError {}
 
 impl SubscriptionId {
     pub(super) fn retainer_key(self) -> String {
@@ -92,14 +144,84 @@ impl Subscription {
     }
 
     pub fn recv(&self) -> Result<RecordDeltas, RecvError> {
+        if let Some(initial) = self.take_initial() {
+            return Ok(initial);
+        }
         self.inner
             .recv()
             .map(|deltas| self.extract_sink_deltas(deltas))
     }
 
+    pub fn recv_with_publication(&self) -> Result<PublicationUpdate<RecordDeltas>, RecvError> {
+        self.inner
+            .recv_with_publication()
+            .map(|update| PublicationUpdate {
+                publication: update.publication,
+                deltas: self.extract_sink_deltas(update.deltas),
+            })
+    }
+
     pub fn try_recv(&self) -> Result<RecordDeltas, TryRecvError> {
+        if let Some(initial) = self.take_initial() {
+            return Ok(initial);
+        }
         self.inner
             .try_recv()
+            .map(|deltas| self.extract_sink_deltas(deltas))
+    }
+
+    pub fn poll_next(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<RecordDeltas, RecvError>> {
+        self.poll_next_with_publication(cx)
+            .map(|result| result.map(|update| update.deltas))
+    }
+
+    pub fn poll_next_with_publication(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<PublicationUpdate<RecordDeltas>, RecvError>> {
+        self.inner.poll_next_with_publication(cx).map(|result| {
+            result.map(|update| PublicationUpdate {
+                publication: update.publication,
+                deltas: self.extract_sink_deltas(update.deltas),
+            })
+        })
+    }
+
+    pub fn poll_next_event(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<SubscriptionEvent<RecordDeltas>> {
+        self.inner.poll_next_event(cx).map(|event| match event {
+            SubscriptionEvent::Update(update) => SubscriptionEvent::Update(PublicationUpdate {
+                publication: update.publication,
+                deltas: self.extract_sink_deltas(update.deltas),
+            }),
+            SubscriptionEvent::Error(error) => SubscriptionEvent::Error(error),
+        })
+    }
+
+    pub fn try_recv_with_publication(
+        &self,
+    ) -> Result<PublicationUpdate<RecordDeltas>, TryRecvError> {
+        self.inner
+            .try_recv_with_publication()
+            .map(|update| PublicationUpdate {
+                publication: update.publication,
+                deltas: self.extract_sink_deltas(update.deltas),
+            })
+    }
+
+    /// Take the complete value captured when this terminal session opened.
+    ///
+    /// Once this returns `Some`, every later value received from this session
+    /// is an incremental delta relative to that initial value and its preceding
+    /// deltas.
+    pub fn take_initial(&self) -> Option<RecordDeltas> {
+        self.inner
+            .take_initial()
             .map(|deltas| self.extract_sink_deltas(deltas))
     }
 
@@ -122,15 +244,20 @@ pub struct MultisinkDeltas {
 
 #[derive(Clone, Debug)]
 pub(super) struct QueuedMultisinkDeltas {
-    // Explicit fragment-output drain channel: once a tick or hydration computes
+    // Explicit fragment-output drain channel: once a tick computes incremental
     // subscription output, this queue owns delivery until the receiver drains
-    // it. Eval memo is only a recompute cache and may be evicted independently.
+    // it. The initial snapshot is owned separately by MultisinkSubscription.
+    // Eval memo is only a recompute cache and may be evicted independently.
     pub(super) deltas: MultisinkDeltas,
+    pub(super) publication: Option<PublicationId>,
 }
 
 impl QueuedMultisinkDeltas {
     pub(super) fn new(deltas: MultisinkDeltas) -> Self {
-        Self { deltas }
+        Self {
+            deltas,
+            publication: None,
+        }
     }
 }
 
@@ -149,7 +276,9 @@ impl MultisinkDeltas {
 #[derive(Debug)]
 pub struct MultisinkSubscription {
     pub(super) id: SubscriptionId,
-    pub(super) receiver: Receiver<QueuedMultisinkDeltas>,
+    pub(super) initial: Mutex<Option<MultisinkDeltas>>,
+    pub(super) receiver: Receiver<Result<QueuedMultisinkDeltas, SubscriptionError>>,
+    pub(super) waiter: Arc<Mutex<Option<std::task::Waker>>>,
     pub(super) _receiver_liveness: Arc<()>,
 }
 
@@ -159,11 +288,126 @@ impl MultisinkSubscription {
     }
 
     pub fn recv(&self) -> Result<MultisinkDeltas, RecvError> {
-        self.receiver.recv().map(|queued| queued.deltas)
+        if let Some(initial) = self.take_initial() {
+            return Ok(initial);
+        }
+        match self.receiver.recv()? {
+            Ok(queued) => Ok(queued.deltas),
+            Err(_) => Err(RecvError),
+        }
+    }
+
+    pub fn recv_with_publication(&self) -> Result<PublicationUpdate<MultisinkDeltas>, RecvError> {
+        if let Some(initial) = self.take_initial() {
+            return Ok(PublicationUpdate {
+                publication: None,
+                deltas: initial,
+            });
+        }
+        match self.receiver.recv()? {
+            Ok(queued) => Ok(PublicationUpdate {
+                publication: queued.publication,
+                deltas: queued.deltas,
+            }),
+            Err(_) => Err(RecvError),
+        }
     }
 
     pub fn try_recv(&self) -> Result<MultisinkDeltas, TryRecvError> {
-        self.receiver.try_recv().map(|queued| queued.deltas)
+        if let Some(initial) = self.take_initial() {
+            return Ok(initial);
+        }
+        match self.receiver.try_recv()? {
+            Ok(queued) => Ok(queued.deltas),
+            Err(_) => Err(TryRecvError::Disconnected),
+        }
+    }
+
+    pub fn poll_next(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<MultisinkDeltas, RecvError>> {
+        self.poll_next_with_publication(cx)
+            .map(|result| result.map(|update| update.deltas))
+    }
+
+    pub fn poll_next_with_publication(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<PublicationUpdate<MultisinkDeltas>, RecvError>> {
+        self.poll_next_event(cx).map(|event| match event {
+            SubscriptionEvent::Update(update) => Ok(update),
+            SubscriptionEvent::Error(_) => Err(RecvError),
+        })
+    }
+
+    pub fn poll_next_event(
+        &self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<SubscriptionEvent<MultisinkDeltas>> {
+        if let Some(initial) = self.take_initial() {
+            return std::task::Poll::Ready(SubscriptionEvent::Update(PublicationUpdate {
+                publication: None,
+                deltas: initial,
+            }));
+        }
+        match self.receiver.try_recv() {
+            Ok(Ok(queued)) => {
+                return std::task::Poll::Ready(SubscriptionEvent::Update(PublicationUpdate {
+                    publication: queued.publication,
+                    deltas: queued.deltas,
+                }));
+            }
+            Ok(Err(error)) => return std::task::Poll::Ready(SubscriptionEvent::Error(error)),
+            Err(TryRecvError::Disconnected) => {
+                return std::task::Poll::Ready(SubscriptionEvent::Error(SubscriptionError::Ended));
+            }
+            Err(TryRecvError::Empty) => {}
+        }
+        *self
+            .waiter
+            .lock()
+            .expect("subscription waiter mutex poisoned") = Some(cx.waker().clone());
+        match self.receiver.try_recv() {
+            Ok(Ok(queued)) => {
+                std::task::Poll::Ready(SubscriptionEvent::Update(PublicationUpdate {
+                    publication: queued.publication,
+                    deltas: queued.deltas,
+                }))
+            }
+            Ok(Err(error)) => std::task::Poll::Ready(SubscriptionEvent::Error(error)),
+            Err(TryRecvError::Disconnected) => {
+                std::task::Poll::Ready(SubscriptionEvent::Error(SubscriptionError::Ended))
+            }
+            Err(TryRecvError::Empty) => std::task::Poll::Pending,
+        }
+    }
+
+    pub fn try_recv_with_publication(
+        &self,
+    ) -> Result<PublicationUpdate<MultisinkDeltas>, TryRecvError> {
+        if let Some(initial) = self.take_initial() {
+            return Ok(PublicationUpdate {
+                publication: None,
+                deltas: initial,
+            });
+        }
+        match self.receiver.try_recv()? {
+            Ok(queued) => Ok(PublicationUpdate {
+                publication: queued.publication,
+                deltas: queued.deltas,
+            }),
+            Err(_) => Err(TryRecvError::Disconnected),
+        }
+    }
+
+    /// Take the complete multisink value captured when this terminal session
+    /// opened. The receiver contains only later incremental deltas.
+    pub fn take_initial(&self) -> Option<MultisinkDeltas> {
+        self.initial
+            .lock()
+            .expect("subscription initial snapshot mutex poisoned")
+            .take()
     }
 }
 
@@ -270,11 +514,66 @@ impl RecordDelta {
 }
 
 #[derive(Clone, Debug)]
+pub(super) struct SubscriptionSender {
+    sender: Arc<Mutex<Option<SubscriptionChannelSender>>>,
+    waiter: Arc<Mutex<Option<std::task::Waker>>>,
+}
+
+type SubscriptionChannelSender = Sender<Result<QueuedMultisinkDeltas, SubscriptionError>>;
+
+impl SubscriptionSender {
+    pub(super) fn send(
+        &self,
+        queued: QueuedMultisinkDeltas,
+    ) -> Result<(), std::sync::mpsc::SendError<QueuedMultisinkDeltas>> {
+        let sender = self
+            .sender
+            .lock()
+            .expect("subscription sender mutex poisoned");
+        let Some(sender) = sender.as_ref() else {
+            return Err(std::sync::mpsc::SendError(queued));
+        };
+        sender.send(Ok(queued)).map_err(|error| {
+            std::sync::mpsc::SendError(error.0.expect("update send retains update"))
+        })?;
+        if let Some(waiter) = self
+            .waiter
+            .lock()
+            .expect("subscription waiter mutex poisoned")
+            .take()
+        {
+            waiter.wake();
+        }
+        Ok(())
+    }
+
+    pub(super) fn fail(&self, error: SubscriptionError) {
+        if let Some(sender) = self
+            .sender
+            .lock()
+            .expect("subscription sender mutex poisoned")
+            .take()
+        {
+            let _ = sender.send(Err(error));
+        }
+        if let Some(waiter) = self
+            .waiter
+            .lock()
+            .expect("subscription waiter mutex poisoned")
+            .take()
+        {
+            waiter.wake();
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(super) struct MultisinkSubscriptionState {
-    pub(super) sender: Sender<QueuedMultisinkDeltas>,
+    pub(super) sender: SubscriptionSender,
     pub(super) receiver_liveness: Weak<()>,
     pub(super) outputs: BTreeMap<String, CompiledNode>,
     pub(super) target: MultisinkSubscriptionTarget,
+    pub(super) failed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -414,7 +713,7 @@ pub(super) fn record_store_for_table<'a, S>(
     descriptor: &'a RecordDescriptor,
 ) -> RecordStore<'a, S>
 where
-    S: OrderedKvStorage,
+    S: OrderedKvStorage + ?Sized,
 {
     RecordStore::new(storage, &table.name, descriptor)
 }
@@ -1550,7 +1849,7 @@ fn replace_binding_shape(graph: GraphBuilder, shape: &str) -> GraphBuilder {
 }
 
 impl IvmRuntime {
-    pub fn subscribe_one_sink(
+    pub async fn subscribe_one_sink(
         &mut self,
         graph: GraphBuilder,
         storage: &impl OrderedKvStorage,
@@ -1565,13 +1864,15 @@ impl IvmRuntime {
             {
                 shape_id
             } else {
-                let shape = self.prepare_one_sink(
-                    plan.graph.clone(),
-                    plan.shape.clone(),
-                    plan.binding_descriptor,
-                    [plan.binding_field.clone()],
-                    storage,
-                )?;
+                let shape = self
+                    .prepare_one_sink(
+                        plan.graph.clone(),
+                        plan.shape.clone(),
+                        plan.binding_descriptor,
+                        [plan.binding_field.clone()],
+                        storage,
+                    )
+                    .await?;
                 if let Some(state) = self.prepared_shapes.get_mut(&shape.id()) {
                     state.auto_family_key = Some(plan.key.clone());
                     if let Some(terminal) = state.terminals.get_mut(DEFAULT_SINK) {
@@ -1582,13 +1883,15 @@ impl IvmRuntime {
                     .insert(plan.key.clone(), shape.id());
                 shape.id()
             };
-            return self.bind_shape_one_sink(shape_id, &[plan.binding_value], storage);
+            return self
+                .bind_shape_one_sink(shape_id, &[plan.binding_value], storage)
+                .await;
         }
-        let multisink = self.subscribe([(DEFAULT_SINK, graph)], storage)?;
+        let multisink = self.subscribe([(DEFAULT_SINK, graph)], storage).await?;
         self.single_sink_subscription(multisink, DEFAULT_SINK)
     }
 
-    pub fn subscribe<I, K, S>(
+    pub async fn subscribe<I, K, S>(
         &mut self,
         sinks: I,
         storage: &S,
@@ -1598,11 +1901,22 @@ impl IvmRuntime {
         K: Into<String>,
         S: OrderedKvStorage,
     {
-        self.flush_pending_binding_retractions(storage)?;
         let sinks = sinks
             .into_iter()
             .map(|(sink, graph)| (sink.into(), graph))
             .collect::<Vec<_>>();
+        self.subscribe_staged(sinks, storage).await
+    }
+
+    async fn subscribe_staged<S>(
+        &mut self,
+        sinks: Vec<(String, GraphBuilder)>,
+        storage: &S,
+    ) -> Result<MultisinkSubscription, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        self.flush_pending_binding_retractions(storage).await?;
         if sinks.is_empty() {
             return Err(IvmRuntimeError::EmptyMultisinkSubscription);
         }
@@ -1618,21 +1932,41 @@ impl IvmRuntime {
         {
             return Err(IvmRuntimeError::MultisinkSinkRequiresPrepare(sink.clone()));
         }
-        self.logical_nodes_requested += sinks
-            .iter()
-            .map(|(_, graph)| count_builder_nodes(graph))
-            .sum::<usize>() as u64;
-        let mut outputs = BTreeMap::new();
-        for (sink, graph) in sinks {
-            let compiled = self.add_dedup_graph(&graph)?;
-            outputs.insert(sink, compiled);
-        }
         let subscription_id = self.next_subscription_id();
         let (sender, receiver) = mpsc::channel();
+        let waiter = Arc::new(Mutex::new(None));
+        let sender = SubscriptionSender {
+            sender: Arc::new(Mutex::new(Some(sender))),
+            waiter: Arc::clone(&waiter),
+        };
         let receiver_liveness = Arc::new(());
-        for output in outputs.values() {
-            self.retain_as_subscription(subscription_id, output.node);
-        }
+        // Compilation may add nodes to the shared hash-consed graph, while
+        // hydration keeps its mutable evaluator state operation-local. The
+        // ephemeral guard collects only unretained additions if hydration is
+        // cancelled or fails. On success, adding the subscription retainers
+        // before releasing the guard atomically promotes those additions into
+        // live graph state without cloning unrelated runtime state.
+        let (outputs, initial) = {
+            let mut install = super::graph_lifecycle::EphemeralGraphInstall::new(self);
+            let runtime = install.runtime();
+            runtime.logical_nodes_requested += sinks
+                .iter()
+                .map(|(_, graph)| count_builder_nodes(graph))
+                .sum::<usize>() as u64;
+            let mut outputs = BTreeMap::new();
+            for (sink, graph) in sinks {
+                let compiled = runtime.add_dedup_graph(&graph)?;
+                outputs.insert(sink, compiled);
+            }
+            let initial = runtime
+                .hydration_snapshots_for_subscription(&outputs, storage)
+                .await?;
+            for output in outputs.values() {
+                runtime.retain_as_subscription(subscription_id, output.node);
+            }
+            install.commit();
+            (outputs, initial)
+        };
         self.multisink_subscriptions.insert(
             subscription_id,
             MultisinkSubscriptionState {
@@ -1640,31 +1974,20 @@ impl IvmRuntime {
                 receiver_liveness: Arc::downgrade(&receiver_liveness),
                 outputs: outputs.clone(),
                 target: MultisinkSubscriptionTarget::Direct,
+                failed: false,
             },
         );
-        let initial = match self.hydration_snapshots_for_subscription(&outputs, storage) {
-            Ok(initial) => initial,
-            Err(error) => {
-                self.unsubscribe(subscription_id);
-                return Err(error);
-            }
-        };
-        let queued = self.queued_multisink_deltas(initial);
-        let sent = self
-            .multisink_subscriptions
-            .get(&subscription_id)
-            .is_some_and(|subscription| subscription.sender.send(queued).is_ok());
-        if !sent {
-            self.unsubscribe(subscription_id);
-        }
+        self.index_subscription_outputs(subscription_id, &outputs);
         Ok(MultisinkSubscription {
             id: subscription_id,
+            initial: Mutex::new(Some(initial)),
             receiver,
+            waiter,
             _receiver_liveness: receiver_liveness,
         })
     }
 
-    pub fn prepare<I, S>(
+    pub async fn prepare<I, S>(
         &mut self,
         terminals: I,
         binding_source_shape: impl Into<String>,
@@ -1675,7 +1998,7 @@ impl IvmRuntime {
         I: IntoIterator<Item = RoutedMultisinkTerminal>,
         S: OrderedKvStorage,
     {
-        self.flush_pending_binding_retractions(storage)?;
+        self.flush_pending_binding_retractions(storage).await?;
         let terminals = terminals.into_iter().collect::<Vec<_>>();
         if terminals.is_empty() {
             return Err(IvmRuntimeError::EmptyMultisinkSubscription);
@@ -1759,7 +2082,7 @@ impl IvmRuntime {
         Ok(PreparedShape { id: shape_id })
     }
 
-    pub fn bind_shape<S>(
+    pub async fn bind_shape<S>(
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
@@ -1769,9 +2092,10 @@ impl IvmRuntime {
         S: OrderedKvStorage,
     {
         self.bind_shape_with_public_fields(shape_id, binding_values, BTreeMap::new(), storage)
+            .await
     }
 
-    fn bind_shape_with_public_fields<S>(
+    async fn bind_shape_with_public_fields<S>(
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
@@ -1781,7 +2105,21 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        self.flush_pending_binding_retractions(storage)?;
+        self.bind_shape_with_public_fields_staged(shape_id, binding_values, public_fields, storage)
+            .await
+    }
+
+    async fn bind_shape_with_public_fields_staged<S>(
+        &mut self,
+        shape_id: PreparedShapeId,
+        binding_values: &[Value],
+        public_fields: BTreeMap<String, Vec<String>>,
+        storage: &S,
+    ) -> Result<MultisinkSubscription, IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        self.flush_pending_binding_retractions(storage).await?;
         let shape = self
             .prepared_shapes
             .get(&shape_id)
@@ -1789,40 +2127,48 @@ impl IvmRuntime {
             .clone();
         let binding_record = shape.binding_descriptor.create(binding_values)?;
         let binding_key = BindingKey(binding_record);
-        let mut outputs = BTreeMap::new();
-        self.logical_nodes_requested += shape
-            .terminals
-            .values()
-            .map(|terminal| count_builder_nodes(&terminal.terminal.graph) + 2)
-            .sum::<usize>() as u64;
-        for (sink, terminal) in &shape.terminals {
-            let mut terminal = terminal.terminal.clone();
-            if let Some(fields) = public_fields.get(sink) {
-                terminal.public_fields = fields.clone();
-            }
-            let graph = bound_routed_multisink_graph(&terminal, binding_values);
-            let output = self.add_dedup_graph(&graph)?;
-            outputs.insert(sink.clone(), output);
-        }
         let subscription_id = self.next_subscription_id();
-        for output in outputs.values() {
-            self.retain_as_subscription(subscription_id, output.node);
-        }
-        let binding_delta = match self.add_binding_ref(shape_id, binding_key.clone()) {
-            Ok(delta) => delta,
-            Err(error) => {
-                self.remove_multisink_retainers(subscription_id, &outputs);
-                return Err(error);
+        let (outputs, initial) = {
+            let mut install = super::graph_lifecycle::EphemeralGraphInstall::new(self);
+            let runtime = install.runtime();
+            runtime.logical_nodes_requested += shape
+                .terminals
+                .values()
+                .map(|terminal| count_builder_nodes(&terminal.terminal.graph) + 2)
+                .sum::<usize>() as u64;
+            let mut outputs = BTreeMap::new();
+            for (sink, terminal) in &shape.terminals {
+                let mut terminal = terminal.terminal.clone();
+                if let Some(fields) = public_fields.get(sink) {
+                    terminal.public_fields = fields.clone();
+                }
+                let graph = bound_routed_multisink_graph(&terminal, binding_values);
+                let output = runtime.add_dedup_graph(&graph)?;
+                outputs.insert(sink.clone(), output);
             }
+            let binding_delta = runtime.provisional_binding_delta(shape_id, &binding_key)?;
+            let initial = runtime
+                .hydration_snapshots_for_subscription_with_binding(
+                    &outputs,
+                    storage,
+                    &binding_delta,
+                )
+                .await?;
+            let installed_delta = runtime.add_binding_ref(shape_id, binding_key.clone())?;
+            debug_assert_eq!(installed_delta.deltas, binding_delta.deltas);
+            runtime.bump_input_frontiers(&[], std::slice::from_ref(&installed_delta));
+            for output in outputs.values() {
+                runtime.retain_as_subscription(subscription_id, output.node);
+            }
+            install.commit();
+            (outputs, initial)
         };
-        if !binding_delta.deltas.is_empty()
-            && let Err(error) = self.tick_with_params(Vec::new(), vec![binding_delta], storage)
-        {
-            self.remove_multisink_retainers(subscription_id, &outputs);
-            let _ = self.remove_binding_ref(shape_id, &binding_key);
-            return Err(error);
-        }
         let (sender, receiver) = mpsc::channel();
+        let waiter = Arc::new(Mutex::new(None));
+        let sender = SubscriptionSender {
+            sender: Arc::new(Mutex::new(Some(sender))),
+            waiter: Arc::clone(&waiter),
+        };
         let receiver_liveness = Arc::new(());
         self.multisink_subscriptions.insert(
             subscription_id,
@@ -1834,31 +2180,20 @@ impl IvmRuntime {
                     shape_id,
                     binding_key: binding_key.clone(),
                 },
+                failed: false,
             },
         );
-        let initial = match self.hydration_snapshots_for_subscription(&outputs, storage) {
-            Ok(initial) => initial,
-            Err(error) => {
-                self.unsubscribe(subscription_id);
-                return Err(error);
-            }
-        };
-        let queued = self.queued_multisink_deltas(initial);
-        let sent = self
-            .multisink_subscriptions
-            .get(&subscription_id)
-            .is_some_and(|subscription| subscription.sender.send(queued).is_ok());
-        if !sent {
-            self.unsubscribe(subscription_id);
-        }
+        self.index_subscription_outputs(subscription_id, &outputs);
         Ok(MultisinkSubscription {
             id: subscription_id,
+            initial: Mutex::new(Some(initial)),
             receiver,
+            waiter,
             _receiver_liveness: receiver_liveness,
         })
     }
 
-    pub fn prepare_one_sink(
+    pub async fn prepare_one_sink(
         &mut self,
         graph: GraphBuilder,
         binding_source_shape: impl Into<String>,
@@ -1891,9 +2226,10 @@ impl IvmRuntime {
             binding_descriptor,
             storage,
         )
+        .await
     }
 
-    pub fn prepare_one_sink_with_routing(
+    pub async fn prepare_one_sink_with_routing(
         &mut self,
         output_graph: GraphBuilder,
         routing_graph: GraphBuilder,
@@ -1929,9 +2265,10 @@ impl IvmRuntime {
             binding_descriptor,
             storage,
         )
+        .await
     }
 
-    pub fn bind_shape_one_sink<S>(
+    pub async fn bind_shape_one_sink<S>(
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
@@ -1940,11 +2277,11 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        let multisink = self.bind_shape(shape_id, binding_values, storage)?;
+        let multisink = self.bind_shape(shape_id, binding_values, storage).await?;
         self.single_sink_subscription(multisink, DEFAULT_SINK)
     }
 
-    pub(crate) fn bind_shape_one_sink_with_output<S>(
+    pub(crate) async fn bind_shape_one_sink_with_output<S>(
         &mut self,
         shape_id: PreparedShapeId,
         binding_values: &[Value],
@@ -1962,17 +2299,52 @@ impl IvmRuntime {
             &public_output,
         )?;
         let public_fields = descriptor_field_names(&public_output)?;
-        let multisink = self.bind_shape_with_public_fields(
-            shape_id,
-            binding_values,
-            [(DEFAULT_SINK.to_owned(), public_fields)].into(),
-            storage,
-        )?;
+        let multisink = self
+            .bind_shape_with_public_fields(
+                shape_id,
+                binding_values,
+                [(DEFAULT_SINK.to_owned(), public_fields)].into(),
+                storage,
+            )
+            .await?;
         self.single_sink_subscription(multisink, DEFAULT_SINK)
+    }
+
+    fn index_subscription_outputs(
+        &mut self,
+        subscription_id: SubscriptionId,
+        outputs: &BTreeMap<String, CompiledNode>,
+    ) {
+        for output in outputs.values() {
+            self.subscriptions_by_output_node
+                .entry(output.node)
+                .or_default()
+                .insert(subscription_id);
+        }
+    }
+
+    fn unindex_subscription_outputs(
+        &mut self,
+        subscription_id: SubscriptionId,
+        outputs: &BTreeMap<String, CompiledNode>,
+    ) {
+        for output in outputs.values() {
+            let remove_node = self
+                .subscriptions_by_output_node
+                .get_mut(&output.node)
+                .is_some_and(|subscriptions| {
+                    subscriptions.remove(&subscription_id);
+                    subscriptions.is_empty()
+                });
+            if remove_node {
+                self.subscriptions_by_output_node.remove(&output.node);
+            }
+        }
     }
 
     pub fn unsubscribe(&mut self, subscription_id: SubscriptionId) -> bool {
         if let Some(subscription) = self.multisink_subscriptions.remove(&subscription_id) {
+            self.unindex_subscription_outputs(subscription_id, &subscription.outputs);
             let removed = self.remove_multisink_retainers(subscription_id, &subscription.outputs);
             if let MultisinkSubscriptionTarget::RoutedShape {
                 shape_id,
@@ -1990,7 +2362,7 @@ impl IvmRuntime {
         false
     }
 
-    pub fn unsubscribe_with_storage<S>(
+    pub async fn unsubscribe_with_storage<S>(
         &mut self,
         subscription_id: SubscriptionId,
         storage: &S,
@@ -1999,6 +2371,7 @@ impl IvmRuntime {
         S: OrderedKvStorage,
     {
         if let Some(subscription) = self.multisink_subscriptions.remove(&subscription_id) {
+            self.unindex_subscription_outputs(subscription_id, &subscription.outputs);
             let removed = self.remove_multisink_retainers(subscription_id, &subscription.outputs);
             if let MultisinkSubscriptionTarget::RoutedShape {
                 shape_id,
@@ -2007,7 +2380,13 @@ impl IvmRuntime {
                 && let Some(param_delta) = self.remove_binding_ref(shape_id, &binding_key)
                 && !param_delta.deltas.is_empty()
             {
-                self.tick_with_params(Vec::new(), vec![param_delta], storage)?;
+                self.tick_with_params(
+                    Vec::new(),
+                    vec![param_delta],
+                    OwnedStorage::new(Rc::new(storage)),
+                    None,
+                )
+                .await?;
                 self.remove_unreferenced_auto_family(shape_id);
             }
             return Ok(removed);
@@ -2052,7 +2431,7 @@ impl IvmRuntime {
         Ok(())
     }
 
-    pub(crate) fn prune_dropped_subscriptions_with_storage<S>(
+    pub(crate) async fn prune_dropped_subscriptions_with_storage<S>(
         &mut self,
         storage: &S,
     ) -> Result<usize, IvmRuntimeError>
@@ -2065,7 +2444,7 @@ impl IvmRuntime {
             .filter_map(|(id, state)| state.receiver_liveness.upgrade().is_none().then_some(*id))
             .collect::<Vec<_>>();
         for id in &dropped {
-            self.unsubscribe_with_storage(*id, storage)?;
+            self.unsubscribe_with_storage(*id, storage).await?;
         }
         Ok(dropped.len())
     }
@@ -2226,6 +2605,21 @@ impl IvmRuntime {
                 Ok(table_schema.record_schema())
             }
             GraphBuilder::InlineRecords { output, .. } => Ok(*output),
+            GraphBuilder::Index {
+                table,
+                row_projection: Some(target),
+                ..
+            } => self
+                .variant_projections
+                .get(&VariantProjectionKey {
+                    table: table.clone(),
+                    target: VariantProjectionTarget::Named(target.clone()),
+                })
+                .map(|projection| projection.output)
+                .ok_or_else(|| IvmRuntimeError::VariantProjectionNotFound {
+                    table: table.clone(),
+                    target: target.clone(),
+                }),
             GraphBuilder::Index { .. } => Ok(index_record_descriptor()),
             GraphBuilder::FrontierSource { output, .. }
             | GraphBuilder::BindingSource { output, .. } => Ok(*output),
@@ -2345,6 +2739,30 @@ impl IvmRuntime {
         self.add_binding_ref_for_shape(&shape, binding)
     }
 
+    fn provisional_binding_delta(
+        &self,
+        shape_id: PreparedShapeId,
+        binding: &BindingKey,
+    ) -> Result<BindingDelta, IvmRuntimeError> {
+        let shape = self.binding_source_shape_name(shape_id)?;
+        let source = self
+            .binding_sources
+            .get(&shape)
+            .ok_or_else(|| IvmRuntimeError::BindingSourceNotFound(shape.clone()))?;
+        Ok(BindingDelta {
+            shape,
+            descriptor: source.descriptor,
+            deltas: if source.refcounts.contains_key(binding) {
+                Vec::new()
+            } else {
+                vec![RecordDelta {
+                    record: binding.0.clone().into(),
+                    weight: 1,
+                }]
+            },
+        })
+    }
+
     fn add_binding_ref_for_shape(
         &mut self,
         shape: &str,
@@ -2416,10 +2834,6 @@ impl IvmRuntime {
     }
 
     pub(super) fn binding_snapshot_deltas(&self) -> HashMap<String, RecordDeltas> {
-        debug_assert!(
-            self.pending_binding_retractions.is_empty(),
-            "binding snapshots must not race queued binding retractions"
-        );
         self.binding_sources
             .iter()
             .map(|(shape, source)| {
@@ -2473,10 +2887,5 @@ impl IvmRuntime {
         for node in self.gc_ephemeral_nodes(0) {
             self.remove_node_runtime(node);
         }
-    }
-
-    pub(super) fn advance_tick(&mut self) -> u64 {
-        self.current_tick += 1;
-        self.current_tick
     }
 }

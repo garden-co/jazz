@@ -23,6 +23,7 @@ use super::op_types::*;
 /// prepared.
 ///
 /// ```rust
+/// # futures::executor::block_on(async {
 /// use groove::db::{Database, GraphBuilder, PredicateExpr};
 /// use groove::ivm::ProjectField;
 /// use groove::records::Value;
@@ -44,14 +45,16 @@ use super::op_types::*;
 ///     ])
 ///     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64)),
 /// ]);
-/// let mut database = Database::new(schema, MemoryStorage::new(&["albums", "artists"]))?;
+/// let mut database = Database::new(schema, MemoryStorage::new(&["albums", "artists"])).await?;
 ///
 /// let mut batch = database.open_batch();
 /// batch.insert("artists", vec![Value::U64(1), Value::String("Wayne Shorter".into())]);
 /// batch.insert("artists", vec![Value::U64(2), Value::String("McCoy Tyner".into())]);
 /// batch.insert("albums", vec![Value::U64(10), Value::U64(1), Value::String("Speak No Evil".into())]);
 /// batch.insert("albums", vec![Value::U64(11), Value::U64(2), Value::String("Expansions".into())]);
-/// database.commit_batch(batch)?;
+/// let applied = database.apply_batch(batch).await?;
+/// let persisted = applied.persist().await;
+/// database.finish_persistence(persisted)?;
 ///
 /// let albums = GraphBuilder::table("albums")
 ///     .filter(PredicateExpr::eq("title", Value::String("Speak No Evil".into())));
@@ -61,7 +64,7 @@ use super::op_types::*;
 ///     ProjectField::renamed("right.name", "artist"),
 /// ]);
 ///
-/// let rows = database.query_graph(graph)?;
+/// let rows = database.query_graph(graph).await?;
 /// assert_eq!(
 ///     rows.to_values()?,
 ///     vec![(
@@ -73,6 +76,7 @@ use super::op_types::*;
 ///     )]
 /// );
 /// # Ok::<(), Box<dyn std::error::Error>>(())
+/// # }).unwrap();
 /// ```
 ///
 /// Prepared graph shapes use a named [`GraphBuilder::binding_source`] node. The
@@ -80,6 +84,7 @@ use super::op_types::*;
 /// the graph.
 ///
 /// ```rust
+/// # futures::executor::block_on(async {
 /// use groove::db::{Database, GraphBuilder};
 /// use groove::ivm::ProjectField;
 /// use groove::records::{RecordDescriptor, Value};
@@ -94,7 +99,7 @@ use super::op_types::*;
 ///     ColumnSchema::new("title", ColumnType::String),
 /// ])
 /// .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
-/// let mut database = Database::new(schema, MemoryStorage::new(&["albums"]))?;
+/// let mut database = Database::new(schema, MemoryStorage::new(&["albums"])).await?;
 ///
 /// let binding_descriptor = RecordDescriptor::new([("artist_id", ColumnType::U64.clone())]);
 /// let graph = GraphBuilder::join(
@@ -109,14 +114,16 @@ use super::op_types::*;
 ///     ProjectField::renamed("right.title", "title"),
 /// ]);
 ///
-/// let shape = database.prepare_one_sink(graph, "artist_params", binding_descriptor, ["artist_id"])?;
-/// let subscription = database.bind_shape_one_sink(shape.id(), &[Value::U64(1)])?;
+/// let shape = database.prepare_one_sink(graph, "artist_params", binding_descriptor, ["artist_id"]).await?;
+/// let subscription = database.bind_shape_one_sink(shape.id(), &[Value::U64(1)]).await?;
 /// assert!(subscription.recv()?.is_empty());
 ///
 /// let mut batch = database.open_batch();
 /// batch.insert("albums", vec![Value::U64(10), Value::U64(1), Value::String("Speak No Evil".into())]);
 /// batch.insert("albums", vec![Value::U64(11), Value::U64(2), Value::String("Expansions".into())]);
-/// database.commit_batch(batch)?;
+/// let applied = database.apply_batch(batch).await?;
+/// let persisted = applied.persist().await;
+/// database.finish_persistence(persisted)?;
 ///
 /// assert_eq!(
 ///     subscription.recv()?.to_values()?,
@@ -130,6 +137,7 @@ use super::op_types::*;
 ///     )]
 /// );
 /// # Ok::<(), Box<dyn std::error::Error>>(())
+/// # }).unwrap();
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum GraphBuilder {
@@ -146,6 +154,9 @@ pub enum GraphBuilder {
         table: String,
         index: String,
         scan: Option<StaticScanSpec>,
+        /// When present, fetch indexed table rows and project their variants
+        /// instead of exposing the index's encoded key/value records.
+        row_projection: Option<String>,
     },
     FrontierSource {
         binding: FrontierName,
@@ -435,6 +446,7 @@ impl GraphBuilder {
             table: table.into(),
             index: index.into(),
             scan: None,
+            row_projection: None,
         }
     }
 
@@ -447,6 +459,23 @@ impl GraphBuilder {
             table: table.into(),
             index: index.into(),
             scan: Some(scan),
+            row_projection: None,
+        }
+    }
+
+    /// Read table rows selected by a durable secondary index through one
+    /// fixed-output variant projection target.
+    pub fn variant_index_scan(
+        table: impl Into<String>,
+        index: impl Into<String>,
+        projection_target: impl Into<String>,
+        scan: StaticScanSpec,
+    ) -> Self {
+        Self::Index {
+            table: table.into(),
+            index: index.into(),
+            scan: Some(scan),
+            row_projection: Some(projection_target.into()),
         }
     }
 
@@ -1111,6 +1140,8 @@ pub struct IvmGraph {
     /// Deduplicated node specs. The `NodeId` is derived from the full
     /// descriptor, and insertion asserts that collisions do not merge specs.
     nodes: HashMap<NodeId, GraphNode>,
+    table_sources: HashMap<String, HashSet<NodeId>>,
+    binding_sources: HashMap<String, HashSet<NodeId>>,
 }
 
 impl IvmGraph {
@@ -1135,6 +1166,34 @@ impl IvmGraph {
             if let Some(input_node) = self.nodes.get_mut(input) {
                 input_node.children.insert(id);
             }
+        }
+
+        match &descriptor.operator {
+            OpType::TableSource(source) => {
+                self.table_sources
+                    .entry(source.table.clone())
+                    .or_default()
+                    .insert(id);
+            }
+            OpType::IndexSource(source) => {
+                self.table_sources
+                    .entry(source.table.clone())
+                    .or_default()
+                    .insert(id);
+            }
+            OpType::BindingSource(source) => {
+                self.binding_sources
+                    .entry(source.shape.clone())
+                    .or_default()
+                    .insert(id);
+            }
+            OpType::FrontierSource(source) => {
+                self.binding_sources
+                    .entry(source.binding.0.clone())
+                    .or_default()
+                    .insert(id);
+            }
+            _ => {}
         }
 
         self.nodes
@@ -1181,6 +1240,33 @@ impl IvmGraph {
         &self.nodes
     }
 
+    pub(crate) fn affected_nodes<'a>(
+        &self,
+        tables: impl IntoIterator<Item = &'a str>,
+        bindings: impl IntoIterator<Item = &'a str>,
+    ) -> std::collections::HashSet<NodeId> {
+        let mut affected = std::collections::HashSet::new();
+        let mut pending = tables
+            .into_iter()
+            .filter_map(|table| self.table_sources.get(table))
+            .chain(
+                bindings
+                    .into_iter()
+                    .filter_map(|binding| self.binding_sources.get(binding)),
+            )
+            .flat_map(|nodes| nodes.iter().copied())
+            .collect::<Vec<_>>();
+        while let Some(node) = pending.pop() {
+            if !affected.insert(node) {
+                continue;
+            }
+            if let Some(graph_node) = self.nodes.get(&node) {
+                pending.extend(graph_node.children.iter().copied());
+            }
+        }
+        affected
+    }
+
     pub fn mark_ancestors<S>(&self, id: NodeId, retained: &mut std::collections::HashSet<NodeId, S>)
     where
         S: BuildHasher,
@@ -1206,6 +1292,31 @@ impl IvmGraph {
                 input_node.children.remove(&id);
             }
         }
+        match &node.descriptor.operator {
+            OpType::TableSource(source) => {
+                remove_source_node(&mut self.table_sources, &source.table, id);
+            }
+            OpType::IndexSource(source) => {
+                remove_source_node(&mut self.table_sources, &source.table, id);
+            }
+            OpType::BindingSource(source) => {
+                remove_source_node(&mut self.binding_sources, &source.shape, id);
+            }
+            OpType::FrontierSource(source) => {
+                remove_source_node(&mut self.binding_sources, &source.binding.0, id);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn remove_source_node(sources: &mut HashMap<String, HashSet<NodeId>>, source: &str, node: NodeId) {
+    let remove_source = sources.get_mut(source).is_some_and(|nodes| {
+        nodes.remove(&node);
+        nodes.is_empty()
+    });
+    if remove_source {
+        sources.remove(source);
     }
 }
 

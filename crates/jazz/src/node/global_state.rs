@@ -11,21 +11,24 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    pub(super) fn global_currency_changed_after(
+    pub(super) async fn global_currency_changed_after(
         &mut self,
         table: &str,
         global_base: GlobalTime,
     ) -> Result<bool, Error> {
         let table_id =
             self.physical_table_id_for_schema(self.catalogue.current_schema_version_id, table)?;
-        let Some(raw) = self.database.index_last_raw(
-            "jazz_global_changes",
-            "by_table_global_time",
-            &[
-                Value::U64(table_id.0),
-                Value::Bytes(BranchKey::default().canonical_bytes()),
-            ],
-        )?
+        let Some(raw) = self
+            .database
+            .index_last_raw(
+                "jazz_global_changes",
+                "by_table_global_time",
+                &[
+                    Value::U64(table_id.0),
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                ],
+            )
+            .await?
         else {
             return Ok(false);
         };
@@ -33,13 +36,15 @@ where
         Ok(record.get_u64(GlobalChangeRowRecord::FIELD_GLOBAL_TIME_IDX)? > global_base.0)
     }
 
-    pub(super) fn global_currency_changed_outside_snapshot(
+    pub(super) async fn global_currency_changed_outside_snapshot(
         &mut self,
         table: &str,
         snapshot: &Snapshot,
     ) -> Result<bool, Error> {
         if snapshot.dots.is_empty() {
-            return self.global_currency_changed_after(table, snapshot.global_base);
+            return self
+                .global_currency_changed_after(table, snapshot.global_base)
+                .await;
         }
         let table_id =
             self.physical_table_id_for_schema(self.catalogue.current_schema_version_id, table)?;
@@ -49,7 +54,8 @@ where
                 "jazz_global_changes",
                 "by_table_global_time",
                 &[Value::U64(table_id.0)],
-            )?
+            )
+            .await?
             .into_iter()
             .map(|raw| raw.owned_record())
             .collect::<Vec<_>>();
@@ -68,14 +74,14 @@ where
                 TxTime(record.get_u64(GlobalChangeRowRecord::FIELD_TX_TIME_IDX)?),
                 node,
             );
-            if !self.snapshot_covers(tx_id, snapshot) {
+            if !self.snapshot_covers(tx_id, snapshot).await {
                 return Ok(true);
             }
         }
         Ok(false)
     }
 
-    pub(super) fn visible_global_content_tx_id_now(
+    pub(super) async fn visible_global_content_tx_id_now(
         &mut self,
         table: &str,
         row_uuid: RowUuid,
@@ -98,6 +104,7 @@ where
                     Value::Uuid(row_uuid.0),
                 ],
             )
+            .await
             .ok()?
         {
             let record = raw.record();
@@ -129,6 +136,7 @@ where
                     Value::Uuid(row_uuid.0),
                 ],
             )
+            .await
             .ok()??;
         let record = raw.record();
         let tx_time = TxTime(
@@ -145,14 +153,15 @@ where
         Some(TxId::new(tx_time, tx_node))
     }
 
-    pub(super) fn global_current_updates_for_versions(
+    pub(super) async fn global_current_updates_for_versions(
         &mut self,
         tx_id: TxId,
         versions: &[VersionRow],
     ) -> Result<Vec<VersionRow>, Error> {
         let mut updates = BTreeMap::<(String, BranchKey, RowUuid, VersionLayer), VersionRow>::new();
         let version_made_at = self
-            .transaction_made_at(tx_id)?
+            .transaction_made_at(tx_id)
+            .await?
             .ok_or(Error::MissingTransaction(tx_id))?;
         for version in versions {
             let authored_schema = self
@@ -160,18 +169,20 @@ where
                 .ok_or(Error::InvalidStoredValue(
                     "global version schema alias must exist",
                 ))?;
-            let previous_current = self.query_global_layer_winner_in_schema_and_branch(
-                authored_schema,
-                &version.table,
-                version.branch_key(),
-                version.row_uuid(),
-                version.layer(),
-            )?;
+            let previous_current = self
+                .query_global_layer_winner_in_schema_and_branch(
+                    authored_schema,
+                    &version.table,
+                    version.branch_key(),
+                    version.row_uuid(),
+                    version.layer(),
+                )
+                .await?;
             let previous_winner = if let Some(previous) = previous_current.as_ref() {
                 Some((
                     previous,
                     self.version_tx_id(previous)?,
-                    self.version_made_at(previous)?,
+                    self.version_made_at(previous).await?,
                 ))
             } else {
                 None

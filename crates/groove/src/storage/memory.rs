@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ColumnFamilyName, Error, Key, OrderedKvStorage, ReopenableStorage, ScanVisitor, Value,
-    WriteManyOutcome, WriteOperation, apply_storage_delta, key_codec,
+    ColumnFamilyName, Error, OrderedKvStorage, OwnedWriteOperation, ReadyStorageCursor,
+    ReopenableStorage, StorageFuture, StorageScan, Value, apply_storage_delta, key_codec,
 };
 
 const MEMORY_STORAGE_SNAPSHOT_VERSION: u16 = 1;
@@ -97,169 +97,171 @@ impl MemoryStorage {
 }
 
 impl OrderedKvStorage for MemoryStorage {
-    fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
-        self.with_cf(cf, |values| values.get(key).cloned())
+    fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        Box::pin(async move { self.with_cf(&cf, |values| values.get(&key).cloned()) })
     }
 
-    fn approximate_class_bytes(&self, cf: &ColumnFamilyName) -> Result<Option<u64>, Error> {
-        self.with_cf(cf, |values| {
-            values
-                .iter()
-                .map(|(key, value)| key.len().saturating_add(value.len()) as u64)
-                .sum::<u64>()
+    fn approximate_class_bytes(&self, cf: String) -> StorageFuture<'_, Result<Option<u64>, Error>> {
+        Box::pin(async move {
+            self.with_cf(&cf, |values| {
+                values
+                    .iter()
+                    .map(|(key, value)| key.len().saturating_add(value.len()) as u64)
+                    .sum::<u64>()
+            })
+            .map(Some)
         })
-        .map(Some)
     }
 
-    fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
-        let mut inner = self.inner.lock().expect("memory storage mutex poisoned");
-        let values = inner
-            .get_mut(cf)
-            .ok_or_else(|| Error::ColumnFamilyNotFound(cf.to_owned()))?;
-        values.insert(key.to_vec(), value.to_vec());
-        Ok(())
+    fn set(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async move {
+            let mut inner = self.inner.lock().expect("memory storage mutex poisoned");
+            let values = inner.get_mut(&cf).ok_or(Error::ColumnFamilyNotFound(cf))?;
+            values.insert(key, value);
+            Ok(())
+        })
     }
 
-    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
-        let mut inner = self.inner.lock().expect("memory storage mutex poisoned");
-        let values = inner
-            .get_mut(cf)
-            .ok_or_else(|| Error::ColumnFamilyNotFound(cf.to_owned()))?;
-        values.remove(key);
-        Ok(())
+    fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async move {
+            let mut inner = self.inner.lock().expect("memory storage mutex poisoned");
+            let values = inner.get_mut(&cf).ok_or(Error::ColumnFamilyNotFound(cf))?;
+            values.remove(&key);
+            Ok(())
+        })
     }
 
     fn scan_range(
         &self,
-        cf: &ColumnFamilyName,
-        start: &Key,
-        end: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        let values = self.with_cf(cf, |values| {
-            values
-                .range(start.to_vec()..end.to_vec())
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect::<Vec<_>>()
-        })?;
-        for (key, value) in values {
-            visit(&key, &value)?;
-        }
-        Ok(())
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        Box::pin(async move {
+            let values = self.with_cf(&cf, |values| {
+                values
+                    .range(start..end)
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
+            })?;
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
+        })
     }
 
     fn scan_prefix(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        let values = self.with_cf(cf, |values| {
-            values
-                .range(prefix.to_vec()..)
-                .take_while(|(key, _)| key.starts_with(prefix))
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect::<Vec<_>>()
-        })?;
-        for (key, value) in values {
-            visit(&key, &value)?;
-        }
-        Ok(())
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        Box::pin(async move {
+            let values = self.with_cf(&cf, |values| {
+                values
+                    .range(prefix.clone()..)
+                    .take_while(|(key, _)| key.starts_with(&prefix))
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
+            })?;
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
+        })
     }
 
     fn last_with_prefix(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-    ) -> Result<Option<super::KeyValue>, Error> {
-        self.with_cf(cf, |values| {
-            if let Some(upper) = key_codec::prefix_upper_bound(prefix) {
-                values
-                    .range(prefix.to_vec()..upper)
-                    .next_back()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-            } else {
-                values
-                    .range(prefix.to_vec()..)
-                    .next_back()
-                    .map(|(key, value)| (key.clone(), value.clone()))
-            }
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<super::KeyValue>, Error>> {
+        Box::pin(async move {
+            self.with_cf(&cf, |values| {
+                if let Some(upper) = key_codec::prefix_upper_bound(&prefix) {
+                    values
+                        .range(prefix..upper)
+                        .next_back()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                } else {
+                    values
+                        .range(prefix..)
+                        .next_back()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                }
+            })
         })
     }
 
     fn last_with_prefix_before_or_at(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        upper: &Key,
-    ) -> Result<Option<super::KeyValue>, Error> {
-        self.with_cf(cf, |values| {
-            values
-                .range(prefix.to_vec()..=upper.to_vec())
-                .rev()
-                .find(|(key, _)| key.starts_with(prefix))
-                .map(|(key, value)| (key.clone(), value.clone()))
+        cf: String,
+        prefix: Vec<u8>,
+        upper: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<super::KeyValue>, Error>> {
+        Box::pin(async move {
+            self.with_cf(&cf, |values| {
+                values
+                    .range(prefix.clone()..=upper)
+                    .rev()
+                    .find(|(key, _)| key.starts_with(&prefix))
+                    .map(|(key, value)| (key.clone(), value.clone()))
+            })
         })
     }
 
-    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
-        let mut inner = self.inner.lock().expect("memory storage mutex poisoned");
-        // Validate against a per-key prospective overlay before changing the
-        // store. Delta decoding can fail after earlier operations, but cloning
-        // every table here would make one-row writes scale with retained data.
-        let mut planned = BTreeMap::<(String, Vec<u8>), Option<Vec<u8>>>::new();
-        for operation in operations {
-            match operation {
-                WriteOperation::Set { cf, key, value } => {
-                    if !inner.contains_key(*cf) {
-                        return Err(Error::ColumnFamilyNotFound((*cf).to_owned()));
+    fn write_many(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async move {
+            let mut inner = self.inner.lock().expect("memory storage mutex poisoned");
+            // Validate and evaluate against a per-key prospective overlay
+            // before changing the store. This preserves batch atomicity and
+            // read-your-prior-operation semantics without cloning each table.
+            let mut planned = BTreeMap::<(String, Vec<u8>), Option<Vec<u8>>>::new();
+            for operation in operations {
+                match operation {
+                    OwnedWriteOperation::Set { cf, key, value } => {
+                        if !inner.contains_key(&cf) {
+                            return Err(Error::ColumnFamilyNotFound(cf));
+                        }
+                        planned.insert((cf, key), Some(value));
                     }
-                    planned.insert(((*cf).to_owned(), (*key).to_vec()), Some((*value).to_vec()));
-                }
-                WriteOperation::Delete { cf, key } => {
-                    if !inner.contains_key(*cf) {
-                        return Err(Error::ColumnFamilyNotFound((*cf).to_owned()));
+                    OwnedWriteOperation::Delete { cf, key } => {
+                        if !inner.contains_key(&cf) {
+                            return Err(Error::ColumnFamilyNotFound(cf));
+                        }
+                        planned.insert((cf, key), None);
                     }
-                    planned.insert(((*cf).to_owned(), (*key).to_vec()), None);
-                }
-                WriteOperation::Delta { cf, key, delta } => {
-                    let Some(values) = inner.get(*cf) else {
-                        return Err(Error::ColumnFamilyNotFound((*cf).to_owned()));
-                    };
-                    let planned_key = ((*cf).to_owned(), (*key).to_vec());
-                    let encoded = delta.encode()?;
-                    let existing = match planned.get(&planned_key) {
-                        Some(Some(value)) => Some(value.as_slice()),
-                        // An explicit earlier delete is an observed absence,
-                        // not a miss in the prospective overlay. Falling back
-                        // here would resurrect the pre-batch value.
-                        Some(None) => None,
-                        None => values.get(*key).map(Vec::as_slice),
-                    };
-                    let merged = apply_storage_delta(existing, &encoded)?;
-                    planned.insert(planned_key, Some(merged));
+                    OwnedWriteOperation::Delta { cf, key, delta } => {
+                        let Some(values) = inner.get(&cf) else {
+                            return Err(Error::ColumnFamilyNotFound(cf));
+                        };
+                        let planned_key = (cf, key);
+                        let encoded = delta.encode()?;
+                        let existing = match planned.get(&planned_key) {
+                            Some(Some(value)) => Some(value.as_slice()),
+                            Some(None) => None,
+                            None => values.get(&planned_key.1).map(Vec::as_slice),
+                        };
+                        let merged = apply_storage_delta(existing, &encoded)?;
+                        planned.insert(planned_key, Some(merged));
+                    }
                 }
             }
-        }
-        for ((cf, key), value) in planned {
-            let values = inner.get_mut(&cf).expect("column family was validated");
-            match value {
-                Some(value) => {
-                    values.insert(key, value);
-                }
-                None => {
-                    values.remove(&key);
+            for ((cf, key), value) in planned {
+                let values = inner.get_mut(&cf).expect("column family was validated");
+                match value {
+                    Some(value) => {
+                        values.insert(key, value);
+                    }
+                    None => {
+                        values.remove(&key);
+                    }
                 }
             }
-        }
-        Ok(())
-    }
-
-    fn write_many_outcome(&self, operations: &[WriteOperation<'_>]) -> WriteManyOutcome {
-        match self.write_many(operations) {
-            Ok(()) => WriteManyOutcome::Committed,
-            Err(error) => WriteManyOutcome::DefinitelyNotCommitted(error),
-        }
+            Ok(())
+        })
     }
 
     fn column_family_names(&self) -> Option<Vec<String>> {
@@ -275,9 +277,15 @@ impl OrderedKvStorage for MemoryStorage {
 }
 
 impl ReopenableStorage for MemoryStorage {
-    fn reopen(self, column_families: &[&str]) -> Result<Self, Error> {
-        self.ensure_column_families(column_families);
-        Ok(self)
+    fn reopen(self, column_families: Vec<String>) -> StorageFuture<'static, Result<Self, Error>> {
+        Box::pin(async move {
+            let column_families = column_families
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            self.ensure_column_families(&column_families);
+            Ok(self)
+        })
     }
 }
 
@@ -285,48 +293,87 @@ impl ReopenableStorage for MemoryStorage {
 mod tests {
     use super::*;
 
-    #[test]
-    fn snapshot_round_trip_preserves_column_families_and_values() {
+    #[futures_test::test]
+    async fn snapshot_round_trip_preserves_column_families_and_values() {
         let storage = MemoryStorage::new(&["rows", "meta"]);
-        storage.set("rows", b"a", b"one").unwrap();
-        storage.set("rows", b"b", b"two").unwrap();
-        storage.set("meta", b"schema", b"v1").unwrap();
+        storage
+            .set("rows".into(), b"a".to_vec(), b"one".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("rows".into(), b"b".to_vec(), b"two".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("meta".into(), b"schema".to_vec(), b"v1".to_vec())
+            .await
+            .unwrap();
 
         let snapshot = storage.export_snapshot().unwrap();
         let restored = MemoryStorage::default();
         restored.import_snapshot(&snapshot).unwrap();
 
-        assert_eq!(restored.get("rows", b"a").unwrap(), Some(b"one".to_vec()));
-        assert_eq!(restored.get("rows", b"b").unwrap(), Some(b"two".to_vec()));
         assert_eq!(
-            restored.get("meta", b"schema").unwrap(),
+            restored.get("rows".into(), b"a".to_vec()).await.unwrap(),
+            Some(b"one".to_vec())
+        );
+        assert_eq!(
+            restored.get("rows".into(), b"b".to_vec()).await.unwrap(),
+            Some(b"two".to_vec())
+        );
+        assert_eq!(
+            restored
+                .get("meta".into(), b"schema".to_vec())
+                .await
+                .unwrap(),
             Some(b"v1".to_vec())
         );
     }
 
-    #[test]
-    fn import_snapshot_replaces_existing_contents() {
+    #[futures_test::test]
+    async fn import_snapshot_replaces_existing_contents() {
         let source = MemoryStorage::new(&["rows"]);
-        source.set("rows", b"a", b"one").unwrap();
+        source
+            .set("rows".into(), b"a".to_vec(), b"one".to_vec())
+            .await
+            .unwrap();
         let snapshot = source.export_snapshot().unwrap();
 
         let target = MemoryStorage::new(&["other"]);
-        target.set("other", b"stale", b"value").unwrap();
+        target
+            .set("other".into(), b"stale".to_vec(), b"value".to_vec())
+            .await
+            .unwrap();
         target.import_snapshot(&snapshot).unwrap();
 
-        assert_eq!(target.get("rows", b"a").unwrap(), Some(b"one".to_vec()));
+        assert_eq!(
+            target.get("rows".into(), b"a".to_vec()).await.unwrap(),
+            Some(b"one".to_vec())
+        );
         assert!(matches!(
-            target.get("other", b"stale"),
+            target.get("other".into(), b"stale".to_vec()).await,
             Err(Error::ColumnFamilyNotFound(_))
         ));
     }
 
-    #[test]
-    fn approximate_class_bytes_sums_keys_and_values_exactly() {
+    #[futures_test::test]
+    async fn approximate_class_bytes_sums_keys_and_values_exactly() {
         let storage = MemoryStorage::new(&["rows"]);
-        storage.set("rows", b"a", b"one").unwrap();
-        storage.set("rows", b"bb", b"two").unwrap();
+        storage
+            .set("rows".into(), b"a".to_vec(), b"one".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("rows".into(), b"bb".to_vec(), b"two".to_vec())
+            .await
+            .unwrap();
 
-        assert_eq!(storage.approximate_class_bytes("rows").unwrap(), Some(9));
+        assert_eq!(
+            storage
+                .approximate_class_bytes("rows".into())
+                .await
+                .unwrap(),
+            Some(9)
+        );
     }
 }

@@ -37,7 +37,8 @@ where
             SchemaViewId::for_schema(&config.schema),
             config.schema.clone(),
         )])));
-        let node = NodeState::new(config.identity.node, config.schema.clone(), config.storage)?;
+        let node =
+            NodeState::new(config.identity.node, config.schema.clone(), config.storage).await?;
         let node = Node::new(node);
         node.restore_pending_uploads(config.identity)?;
         Ok(Self {
@@ -71,7 +72,8 @@ where
             config.schema.clone(),
             config.storage,
             false,
-        )?;
+        )
+        .await?;
         let db = Self {
             schema: config.schema,
             schema_version_id,
@@ -103,7 +105,8 @@ where
             config.identity.node,
             config.schema.clone(),
             config.storage,
-        )?;
+        )
+        .await?;
         Ok(Self {
             schema: config.schema,
             schema_version_id,
@@ -126,7 +129,7 @@ where
     /// it to receive one connection-authenticated catalogue snapshot and then
     /// select one of the snapshot's admitted schema views.  Until then the
     /// node has no application schema and rejects ordinary data/sync work.
-    #[cfg(any(feature = "runtime", test))]
+    #[cfg(feature = "runtime")]
     pub(crate) async fn open_catalogue_uninitialized_edge(
         config: DbConfig<S>,
     ) -> Result<Self, Error> {
@@ -136,7 +139,8 @@ where
             SchemaViewId::for_schema(&bootstrap_schema),
             bootstrap_schema.clone(),
         )])));
-        let node = NodeState::new_catalogue_uninitialized(config.identity.node, config.storage)?;
+        let node =
+            NodeState::new_catalogue_uninitialized(config.identity.node, config.storage).await?;
         let node = Node::new(node);
         node.restore_pending_uploads(config.identity)?;
         Ok(Self {
@@ -158,19 +162,21 @@ where
     /// Install a complete catalogue received over the authenticated upstream
     /// bootstrap link.  This is intentionally crate-private: ordinary wire
     /// dispatch must never turn an arbitrary peer's snapshot into authority.
-    #[cfg(any(feature = "runtime", test))]
+    #[cfg(feature = "runtime")]
     pub(crate) fn apply_trusted_catalogue_snapshot(
         &self,
         snapshot: crate::protocol::CatalogueSnapshot,
     ) -> Result<(), Error> {
-        Ok(self
-            .node
-            .node
-            .borrow_mut()
-            .apply_trusted_catalogue_snapshot(snapshot)?)
+        let outcome = crate::db::block_on(
+            self.node
+                .node
+                .borrow_mut()
+                .apply_trusted_catalogue_snapshot(snapshot),
+        )?;
+        crate::db::block_on(self.finish_publication_outcome(outcome))
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(feature = "testing")]
     pub(crate) fn set_catalogue_activation_failpoint(
         &self,
         failpoint: crate::node::CatalogueActivationFailpoint,
@@ -183,7 +189,7 @@ where
 
     /// Produce the authority's complete catalogue for the privileged
     /// snapshot-only transport exchange.
-    #[cfg(any(feature = "runtime", test))]
+    #[cfg(feature = "runtime")]
     pub(crate) fn trusted_catalogue_snapshot(
         &self,
     ) -> Result<crate::protocol::CatalogueSnapshot, Error> {
@@ -192,7 +198,7 @@ where
 
     /// Return the active authority-admitted schema, failing closed when this
     /// dynamic edge still has no bootstrap receipt.
-    #[cfg(any(feature = "runtime", test))]
+    #[cfg(feature = "runtime")]
     pub(crate) fn trusted_current_catalogue_schema(&self) -> Result<JazzSchema, Error> {
         let node = self.node.node.borrow();
         let pointer = node.current_write_schema()?;
@@ -202,7 +208,7 @@ where
             .ok_or_else(|| Error::new(ErrorCode::Schema, "active catalogue schema is missing"))
     }
 
-    #[cfg(any(feature = "runtime", test))]
+    #[cfg(feature = "runtime")]
     pub(crate) fn catalogue_bootstrap_is_ready(&self) -> bool {
         self.node.node.borrow().catalogue_bootstrap_state()
             == crate::node::CatalogueBootstrapState::Ready
@@ -215,10 +221,10 @@ where
     /// write schema. The returned handle shares the owner's node, open batches,
     /// connections, row-id source, and logical clock while validating typed
     /// operations against this exact schema view.
-    pub fn register_schema_view(&self, schema: JazzSchema) -> Result<Self, Error> {
+    pub async fn register_schema_view(&self, schema: JazzSchema) -> Result<Self, Error> {
         let schema_version_id = schema.version_id();
         let schema_view_id = SchemaViewId::for_schema(&schema);
-        self.admit_local_schema_view_if_needed(&schema)?;
+        self.admit_local_schema_view_if_needed(&schema).await?;
         {
             let node = self.node.node.borrow();
             let admitted = node
@@ -263,7 +269,7 @@ where
     }
 
     /// Attach an already-registered typed schema view to this owner.
-    pub fn schema_view(&self, schema_view_id: SchemaViewId) -> Result<Self, Error> {
+    pub async fn schema_view(&self, schema_view_id: SchemaViewId) -> Result<Self, Error> {
         let schema = self
             .schema_views
             .borrow()
@@ -275,7 +281,7 @@ where
                     format!("schema view {schema_view_id:?} is not registered"),
                 )
             })?;
-        self.register_schema_view(schema)
+        self.register_schema_view(schema).await
     }
 
     /// Canonical id of this handle's typed schema view.
@@ -287,7 +293,7 @@ where
     /// with the empty schema. This is the local-first bootstrap equivalent of
     /// having opened the runtime with that schema originally; later schemas
     /// still arrive through ordinary catalogue lineage publication.
-    fn admit_local_schema_view_if_needed(&self, schema: &JazzSchema) -> Result<(), Error> {
+    async fn admit_local_schema_view_if_needed(&self, schema: &JazzSchema) -> Result<(), Error> {
         let empty_schema = JazzSchema::empty();
         let empty_id = empty_schema.version_id();
         let target_id = schema.version_id();
@@ -315,20 +321,29 @@ where
             new_tables,
             dropped_tables,
         );
-        let mut node = self.node.node.borrow_mut();
-        node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
-            catalogue_seq,
-            publication: Box::new(publication),
-        })?;
-        if bootstrap_current {
-            node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        let outcome = {
+            let mut node = self.node.node.lock().await;
+            node.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
                 author: AuthorId::SYSTEM,
-                pointer: CurrentWriteSchema {
-                    revision: 1,
-                    schema: target_id,
-                },
-            })?;
+                catalogue_seq,
+                publication: Box::new(publication),
+            })
+            .await?
+        };
+        self.finish_publication_outcome(outcome).await?;
+        if bootstrap_current {
+            let outcome = {
+                let mut node = self.node.node.lock().await;
+                node.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+                    author: AuthorId::SYSTEM,
+                    pointer: CurrentWriteSchema {
+                        revision: 1,
+                        schema: target_id,
+                    },
+                })
+                .await?
+            };
+            self.finish_publication_outcome(outcome).await?;
         }
         Ok(())
     }
@@ -339,7 +354,7 @@ where
         if self.schema_view_is_fixed {
             return Ok(());
         }
-        Ok(self.node.node.borrow_mut().close()?)
+        Ok(crate::db::block_on(self.node.node.borrow_mut().close())?)
     }
 
     /// Configure this database as the optimistic, non-durable side of a
@@ -347,6 +362,12 @@ where
     /// writes begin.
     pub fn set_non_durable_client(&self) {
         self.node.set_non_durable_client();
+    }
+
+    /// Let a single-threaded host return resident writes synchronously while
+    /// its tick loop owns suspendable persistence and later peer visibility.
+    pub fn set_deferred_local_persistence(&self, deferred: bool) {
+        self.node.set_deferred_local_persistence(deferred);
     }
 
     /// Configure this client database's first-snapshot durability cadence.
@@ -357,11 +378,12 @@ where
         &self,
         cadence: InitialSyncFlushCadence,
     ) -> Result<(), Error> {
-        Ok(self
-            .node
-            .node
-            .borrow_mut()
-            .set_initial_sync_flush_cadence(cadence.writes())?)
+        Ok(crate::db::block_on(
+            self.node
+                .node
+                .borrow_mut()
+                .set_initial_sync_flush_cadence(cadence.writes()),
+        )?)
     }
 
     /// Seed a settled mergeable row for server bootstrap/import flows.
@@ -378,17 +400,25 @@ where
         cells: RowCells,
     ) -> Result<TxId, Error> {
         let cells = self.apply_insert_defaults(table, cells)?;
-        let tx_id = self.node.node.borrow_mut().commit_mergeable_in_schema(
-            self.schema_version_id,
-            MergeableCommit::new(table, row, self.next_now_ms())
-                .made_by(made_by)
-                .cells(cells),
+        let published = crate::db::block_on(
+            self.node.node.borrow_mut().commit_mergeable_in_schema(
+                self.schema_version_id,
+                MergeableCommit::new(table, row, self.next_now_ms())
+                    .made_by(made_by)
+                    .cells(cells),
+            ),
         )?;
-        self.node
-            .node
-            .borrow_mut()
-            .finalize_local_mergeable_commit(tx_id)?;
-        self.refresh_subscriptions()?;
+        let tx_id = published.tx_id;
+        crate::db::block_on(
+            self.finish_publication_outcome(PublicationOutcome::published((), published)),
+        )?;
+        let outcome = crate::db::block_on(
+            self.node
+                .node
+                .borrow_mut()
+                .finalize_local_mergeable_commit(tx_id),
+        )?;
+        crate::db::block_on(self.finish_publication_outcome(outcome))?;
         self.node.mark_subscriber_connections_dirty();
         Ok(tx_id)
     }
@@ -400,18 +430,21 @@ where
     /// before performing the same self-acceptance step as
     /// [`Db::seed_settled_mergeable_for_bootstrap`].
     pub fn finalize_local_mergeable_commit_for_test(&self, tx_id: TxId) -> Result<(), Error> {
-        self.node
-            .node
-            .borrow_mut()
-            .finalize_local_mergeable_commit(tx_id)?;
-        self.refresh_subscriptions()?;
+        let outcome = crate::db::block_on(
+            self.node
+                .node
+                .borrow_mut()
+                .finalize_local_mergeable_commit(tx_id),
+        )?;
+        crate::db::block_on(self.finish_publication_outcome(outcome))?;
         self.node.mark_subscriber_connections_dirty();
         Ok(())
     }
 
     /// Return the locally observed fate and durability for a write transaction.
     pub fn write_state(&self, tx_id: TxId) -> Result<WriteState, Error> {
-        let Some((fate, _, durability)) = self.node.node.borrow_mut().transaction_state(tx_id)
+        let Some((fate, _, durability)) =
+            crate::db::block_on(self.node.node.borrow_mut().transaction_state(tx_id))
         else {
             return Err(Error::new(
                 ErrorCode::NotObserved,
@@ -488,7 +521,7 @@ where
     pub fn connect_upstream(
         &self,
         transport: Box<dyn Transport>,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node.connect_upstream(transport)
     }
 
@@ -537,7 +570,7 @@ where
         &self,
         transport: Box<dyn Transport>,
         identity: AuthorId,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node.accept_subscriber(transport, identity)
     }
 
@@ -547,7 +580,7 @@ where
         transport: Box<dyn Transport>,
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node
             .accept_subscriber_with_claims(transport, identity, claims)
     }
@@ -559,7 +592,7 @@ where
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
         trust: CommitUnitTrust,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node
             .accept_subscriber_with_claims_and_trust(transport, identity, claims, trust)
     }
@@ -570,7 +603,7 @@ where
         transport: Box<dyn Transport>,
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node
             .accept_edge_subscriber_with_claims(transport, identity, claims)
     }
@@ -581,7 +614,7 @@ where
         transport: Box<dyn Transport>,
         identity: AuthorId,
         claims: BTreeMap<String, Value>,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node
             .accept_edge_authority_subscriber_with_claims(transport, identity, claims)
     }
@@ -592,29 +625,31 @@ where
         transport: Box<dyn Transport>,
         identity: AuthorId,
         cursor: ResumeCursor,
-    ) -> Rc<RefCell<PeerConnection<S>>> {
+    ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.node
             .accept_subscriber_with_resume(transport, identity, cursor)
     }
 
     /// Detach a previously attached peer connection from this database.
-    pub fn detach_connection(&self, connection: &Rc<RefCell<PeerConnection<S>>>) -> bool {
+    pub fn detach_connection(&self, connection: &Rc<LocalMutex<PeerConnection<S>>>) -> bool {
         self.node.detach_connection(connection)
     }
 
     /// Service every connection once (a convenience over
     /// [`PeerConnection::tick`] for the common single-upstream client).
-    pub fn tick(&self) -> Result<(), Error> {
-        self.node.tick().map(|_| ())
+    pub async fn tick(&self) -> Result<(), Error> {
+        self.node.settle_local_publications().await?;
+        self.node.tick().await.map(|_| ())
     }
 
     /// Service every connection once and return binding-observable wake counts.
-    pub fn tick_stats(&self) -> Result<DbTickStats, Error> {
-        self.node.tick()
+    pub async fn tick_stats(&self) -> Result<DbTickStats, Error> {
+        self.node.settle_local_publications().await?;
+        self.node.tick().await
     }
 
-    pub(super) fn refresh_subscriptions(&self) -> Result<usize, Error> {
-        let refreshed = self.node.refresh_subscriptions()?;
+    pub(super) async fn refresh_subscriptions(&self) -> Result<usize, Error> {
+        let refreshed = self.node.refresh_subscriptions().await?;
         if refreshed > 0 {
             self.node.mark_subscriber_connections_dirty();
         }
@@ -624,8 +659,14 @@ where
     #[cfg(feature = "testing")]
     /// Test/bench-only history-class byte estimate. This is intentionally the
     /// cheap physical-class counter, not a logical table-prefix scan.
-    pub fn history_class_bytes_for_test(&self) -> Result<Option<u64>, Error> {
-        Ok(self.node.node.borrow().history_class_bytes_for_test()?)
+    pub async fn history_class_bytes_for_test(&self) -> Result<Option<u64>, Error> {
+        Ok(self
+            .node
+            .node
+            .lock()
+            .await
+            .history_class_bytes_for_test()
+            .await?)
     }
 
     /// Apply an in-memory-only mutation to the compiled current schema.
@@ -648,15 +689,21 @@ where
     #[cfg(feature = "testing")]
     /// Test/bench-only encoded storage byte estimate across Jazz physical
     /// classes.
-    pub fn encoded_storage_bytes_for_test(&self) -> Result<u64, Error> {
-        Ok(self.node.node.borrow().encoded_storage_bytes_for_test()?)
+    pub async fn encoded_storage_bytes_for_test(&self) -> Result<u64, Error> {
+        Ok(self
+            .node
+            .node
+            .lock()
+            .await
+            .encoded_storage_bytes_for_test()
+            .await?)
     }
 
     #[cfg(feature = "testing")]
     /// Test/bench-only durability boundary for harnesses that reopen the same
     /// storage path immediately after a synthetic lifecycle transition.
-    pub fn flush_for_test(&self) -> Result<(), Error> {
-        Ok(self.node.node.borrow_mut().flush_query_runtime()?)
+    pub async fn flush_for_test(&self) -> Result<(), Error> {
+        Ok(self.node.node.lock().await.drive_query_runtime().await?)
     }
 
     #[cfg(feature = "testing")]

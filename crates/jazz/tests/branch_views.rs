@@ -35,6 +35,26 @@ fn block_on<F: Future>(future: F) -> F::Output {
     }
 }
 
+trait TestResultFutureExt<T, E>: Future<Output = Result<T, E>> {
+    fn unwrap(self) -> T
+    where
+        Self: Sized,
+        E: std::fmt::Debug,
+    {
+        block_on(self).unwrap()
+    }
+
+    fn expect(self, message: &str) -> T
+    where
+        Self: Sized,
+        E: std::fmt::Debug,
+    {
+        block_on(self).expect(message)
+    }
+}
+
+impl<F, T, E> TestResultFutureExt<T, E> for F where F: Future<Output = Result<T, E>> {}
+
 fn selector(byte: u8) -> BranchSelector {
     BranchSelector::new([("branch_id", Value::Uuid(uuid::Uuid::from_bytes([byte; 16])))])
 }
@@ -1037,50 +1057,45 @@ fn seeded_branch_view_subscription_matches_one_shot_reduction() {
         seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
         let row = rows[(seed as usize) % rows.len()];
         let result = match (seed >> 32) % 5 {
-            0 => db
-                .update_in_branch(
-                    "todos",
-                    base.clone(),
-                    row,
-                    BTreeMap::from([("title".to_owned(), Value::String(format!("base-{step}")))]),
-                )
-                .map(|_| ()),
-            1 => db
-                .update_in_branch_view(
-                    "todos",
-                    head.clone(),
-                    Some(BranchViewBase::Current(base.clone())),
-                    row,
-                    BTreeMap::from([("title".to_owned(), Value::String(format!("head-{step}")))]),
-                )
-                .map(|_| ()),
-            2 => db
-                .delete_in_branch_view(
-                    "todos",
-                    head.clone(),
-                    Some(BranchViewBase::Current(base.clone())),
-                    row,
-                )
-                .map(|_| ()),
-            3 => db
-                .restore_with_cells_in_branch(
-                    "todos",
-                    head.clone(),
-                    row,
-                    BTreeMap::from([(
-                        "title".to_owned(),
-                        Value::String(format!("restored-{step}")),
-                    )]),
-                )
-                .map(|_| ()),
-            _ => db
-                .update_in_branch(
-                    "todos",
-                    head.clone(),
-                    row,
-                    BTreeMap::from([("title".to_owned(), Value::String(format!("exact-{step}")))]),
-                )
-                .map(|_| ()),
+            0 => block_on(db.update_in_branch(
+                "todos",
+                base.clone(),
+                row,
+                BTreeMap::from([("title".to_owned(), Value::String(format!("base-{step}")))]),
+            ))
+            .map(|_| ()),
+            1 => block_on(db.update_in_branch_view(
+                "todos",
+                head.clone(),
+                Some(BranchViewBase::Current(base.clone())),
+                row,
+                BTreeMap::from([("title".to_owned(), Value::String(format!("head-{step}")))]),
+            ))
+            .map(|_| ()),
+            2 => block_on(db.delete_in_branch_view(
+                "todos",
+                head.clone(),
+                Some(BranchViewBase::Current(base.clone())),
+                row,
+            ))
+            .map(|_| ()),
+            3 => block_on(db.restore_with_cells_in_branch(
+                "todos",
+                head.clone(),
+                row,
+                BTreeMap::from([(
+                    "title".to_owned(),
+                    Value::String(format!("restored-{step}")),
+                )]),
+            ))
+            .map(|_| ()),
+            _ => block_on(db.update_in_branch(
+                "todos",
+                head.clone(),
+                row,
+                BTreeMap::from([("title".to_owned(), Value::String(format!("exact-{step}")))]),
+            ))
+            .map(|_| ()),
         };
         if result.is_err() {
             continue;
@@ -1123,7 +1138,6 @@ fn db_exact_mutations_and_branch_view_reads_compose_head_over_base() {
                 head: head.clone(),
                 base: Some(BranchViewBase::Current(base)),
             },
-            ..ReadViewSpec::default()
         },
         ..ReadOpts::default()
     };
@@ -1218,7 +1232,6 @@ fn inherited_delete_is_a_head_register_and_can_be_restored() {
                 head: head.clone(),
                 base: Some(BranchViewBase::Current(base)),
             },
-            ..ReadViewSpec::default()
         },
         ..ReadOpts::default()
     };

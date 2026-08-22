@@ -25,6 +25,7 @@ test("writes source, command, cache, and failure metadata", () => {
   assert.match(value.source.commit, /^[0-9a-f]{40}$/);
   assert.equal(value.command[0], "cargo");
   assert.ok("cargoTargetDir" in value.environment);
+  assert.equal(value.environment.rustMinStack, String(4 * 1024 * 1024));
   assert.equal(value.nextestProfile, hasNextest ? "jazz" : null);
 });
 test("forwards the requested Nextest profile and records it in the receipt", () => {

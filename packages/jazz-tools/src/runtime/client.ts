@@ -123,14 +123,14 @@ export interface Runtime {
     object_id: string,
     values: Record<string, Value>,
     write_context_json?: string | null,
-  ): MutationReceipt;
+  ): MutationResult;
   upsert(
     table: string,
     object_id: string,
     values: InsertValues,
     write_context_json?: string | null,
-  ): MutationReceipt;
-  delete(table: string, object_id: string, write_context_json?: string | null): MutationReceipt;
+  ): MutationResult;
+  delete(table: string, object_id: string, write_context_json?: string | null): MutationResult;
   canInsertLocally?(table: string, values: InsertValues, session?: Session): PermissionAdvice;
   canReadLocally?(table: string, objectId: string, session?: Session): PermissionAdvice;
   canUpdateLocally?(
@@ -208,7 +208,7 @@ export interface TransactionalRuntime extends Runtime {
     id: OpenBatchId,
     sessionJson?: string | null,
   ): OpenBatchId;
-  commitTransaction(id: OpenBatchId): Promise<BatchId>;
+  commitTransaction(id: OpenBatchId): BatchId;
   rollbackTransaction(id: OpenBatchId): Promise<boolean>;
 }
 
@@ -368,7 +368,7 @@ export interface LocalTransactionRecord {
  * A rejected write emitted by {@link JazzClient.onMutationError}.
  *
  * The event is a fallback for writes whose rejection was not handled by an
- * active {@link MutationResult.wait} call.
+ * active {@link WriteHandle.wait} call.
  */
 export interface MutationErrorEvent {
   code: string;
@@ -406,7 +406,7 @@ export type WriteReceipt =
   | { readonly kind: "staged"; readonly openBatchId: OpenBatchId };
 
 export type InsertResult = Row & WriteReceipt;
-export type MutationReceipt = WriteReceipt;
+export type MutationResult = WriteReceipt;
 
 interface WriteContextPayload {
   session?: Session;
@@ -618,43 +618,97 @@ export class PersistedWriteRejectedError extends Error {
 }
 
 /**
- * The result of a mutation.
+ * Returned by upsert, update, delete, and transaction operations.
+ * Allows waiting for the write to be persisted at a given durability tier.
  */
-export class MutationResult<T, TKind extends TransactionKind = "mergeable"> {
+export class WriteHandle<T = void> {
   readonly #client: JazzClient;
-  readonly #kind: TKind;
+  readonly value: T;
+  readonly batchId: Promise<BatchId>;
+  /** @deprecated Use {@link batchId}. */
   readonly transactionId: Promise<BatchId>;
 
-  constructor(
-    readonly value: T,
-    transactionId: BatchId | Promise<BatchId>,
-    client: JazzClient,
-    kind: TKind,
-  ) {
-    this.transactionId = Promise.resolve(transactionId);
+  constructor(batchId: BatchId | Promise<BatchId>, client: JazzClient, value = undefined as T) {
+    this.value = value;
+    this.batchId = Promise.resolve(batchId);
+    this.transactionId = this.batchId;
     this.#client = client;
-    this.#kind = kind;
   }
 
   /**
-   * Wait for the mutation to be confirmed.
-   *
-   * Mergeable mutations require a durability tier. Exclusive mutations are
-   * accepted or rejected by the authority, so callers do not pass options.
+   * Wait for the write to be persisted at a given durability tier.
    *
    * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
    */
-  async wait(
-    ...args: [TKind] extends ["exclusive"] ? [] : [options: { tier: DurabilityTier }]
-  ): Promise<T> {
-    if (this.#kind === "exclusive") {
-      await this.#client.waitForExclusiveTransaction(await this.transactionId);
-      return this.value;
-    }
+  async wait(options: { tier: DurabilityTier }): Promise<T> {
+    return this.#client.waitForTransaction(this.batchId, options.tier) as Promise<T>;
+  }
 
-    const [options] = args as [options: { tier: DurabilityTier }];
-    await this.#client.waitForTransaction(this.transactionId, options.tier);
+  protected client(): JazzClient {
+    return this.#client;
+  }
+}
+
+/**
+ * Returned by insert operations and auto-committed transactions.
+ * Allows getting the inserted value and waiting for the write
+ * to be persisted at a given durability tier.
+ */
+export class WriteResult<T> extends WriteHandle<T> {
+  constructor(value: T, batchId: BatchId | Promise<BatchId>, client: JazzClient) {
+    super(batchId, client, value);
+  }
+
+  /**
+   * Wait for the write to be persisted at a given durability tier.
+   *
+   * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
+   * @returns the inserted row.
+   */
+  override async wait(options: { tier: DurabilityTier }): Promise<T> {
+    await super.wait(options);
     return this.value;
+  }
+
+  mapValue<U>(transformValue: (value: T) => U): WriteResult<U> {
+    return new WriteResult(transformValue(this.value), this.batchId, this.client());
+  }
+}
+
+/**
+ * Returned by explicitly-committed exclusive transactions.
+ *
+ * Exclusive transactions are accepted or rejected by the global authority, so
+ * callers do not choose a durability tier when waiting for confirmation.
+ */
+export class ExclusiveWriteHandle extends WriteHandle<void> {
+  /**
+   * Wait for the exclusive transaction to be accepted or rejected by the authority.
+   *
+   * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected.
+   */
+  override async wait(): Promise<void> {
+    await this.client().waitForExclusiveTransaction(await this.batchId);
+  }
+}
+
+/**
+ * Returned by auto-committed exclusive transactions.
+ */
+export class ExclusiveWriteResult<T> extends WriteResult<T> {
+  /**
+   * Wait for the exclusive transaction to be accepted or rejected by the authority.
+   *
+   * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected.
+   * @returns the callback result.
+   */
+  override async wait(): Promise<T> {
+    await this.client().waitForExclusiveTransaction(await this.batchId);
+    return this.value;
+  }
+
+  override mapValue<U>(transformValue: (value: T) => U): ExclusiveWriteResult<U> {
+    return new ExclusiveWriteResult(transformValue(this.value), this.batchId, this.client());
   }
 }
 
@@ -756,10 +810,9 @@ export class JazzClient {
     this.runtime.onMutationError(listener);
   }
 
-  commitTransaction(id: OpenBatchId): Promise<MutationResult<void>> {
-    return requireTransactionalRuntime(this.runtime)
-      .commitTransaction(id)
-      .then((batchId) => new MutationResult(undefined, batchId, this, "mergeable"));
+  commitTransaction(id: OpenBatchId): WriteHandle {
+    const batchId = requireTransactionalRuntime(this.runtime).commitTransaction(id);
+    return new WriteHandle(batchId, this);
   }
 
   rollbackTransaction(id: OpenBatchId): Promise<boolean> {
@@ -881,9 +934,9 @@ export class JazzClient {
     options?: InsertOptions,
     session?: Session,
     attribution?: string,
-  ): MutationResult<Row> {
+  ): WriteResult<Row> {
     const row = this.insertInternal(table, values, options, session, attribution);
-    return new MutationResult(row, committedBatchId(row), this, "mergeable");
+    return new WriteResult(row, committedBatchId(row), this);
   }
 
   /**
@@ -922,9 +975,9 @@ export class JazzClient {
     options?: RestoreOptions,
     session?: Session,
     attribution?: string,
-  ): MutationResult<Row> {
+  ): WriteResult<Row> {
     const row = this.restoreInternal(table, objectId, values, options, session, attribution);
-    return new MutationResult(row, committedBatchId(row), this, "mergeable");
+    return new WriteResult(row, committedBatchId(row), this);
   }
 
   /**
@@ -964,9 +1017,9 @@ export class JazzClient {
     options?: TimestampOverrideOptions,
     session?: Session,
     attribution?: string,
-  ): MutationResult<void> {
+  ): WriteHandle {
     const result = this.upsertInternal(table, objectId, values, options, session, attribution);
-    return new MutationResult(undefined, committedBatchId(result), this, "mergeable");
+    return new WriteHandle(committedBatchId(result), this);
   }
 
   /**
@@ -980,7 +1033,7 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
     openBatchId?: OpenBatchId,
-  ): MutationReceipt {
+  ): MutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
       effectiveSession,
@@ -1028,7 +1081,7 @@ export class JazzClient {
     options?: UpdateOptions,
     session?: Session,
     attribution?: string,
-  ): MutationResult<void> {
+  ): WriteHandle {
     const result = this.updateInternal(
       table,
       objectId,
@@ -1039,7 +1092,7 @@ export class JazzClient {
       undefined,
       options?.branch,
     );
-    return new MutationResult(undefined, committedBatchId(result), this, "mergeable");
+    return new WriteHandle(committedBatchId(result), this);
   }
 
   /**
@@ -1054,7 +1107,7 @@ export class JazzClient {
     attribution?: string,
     openBatchId?: OpenBatchId,
     branch?: BranchView,
-  ): MutationReceipt {
+  ): MutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
       effectiveSession,
@@ -1075,7 +1128,7 @@ export class JazzClient {
     options?: DeleteOptions,
     session?: Session,
     attribution?: string,
-  ): MutationResult<void> {
+  ): WriteHandle {
     const result = this.deleteInternal(
       table,
       objectId,
@@ -1085,7 +1138,7 @@ export class JazzClient {
       undefined,
       options?.branch,
     );
-    return new MutationResult(undefined, committedBatchId(result), this, "mergeable");
+    return new WriteHandle(committedBatchId(result), this);
   }
 
   canInsertLocally(table: string, values: InsertValues, session?: Session): PermissionAdvice {
@@ -1207,7 +1260,7 @@ export class JazzClient {
     attribution?: string,
     openBatchId?: OpenBatchId,
     branch?: BranchView,
-  ): MutationReceipt {
+  ): MutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
       effectiveSession,

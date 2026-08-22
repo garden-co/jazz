@@ -232,7 +232,7 @@ fn db_sync_surface_preserves_creator_provenance_across_peer_update() {
         .node
         .node
         .borrow_mut()
-        .apply_sync_message(create_unit)
+        .apply_sync_message_settled(create_unit)
         .unwrap();
 
     server.next_now_ms.set(2);
@@ -268,7 +268,7 @@ fn db_sync_surface_preserves_creator_provenance_across_peer_update() {
         .node
         .node
         .borrow_mut()
-        .apply_sync_message(SyncMessage::CommitUnit { tx, versions })
+        .apply_sync_message_settled(SyncMessage::CommitUnit { tx, versions })
         .unwrap();
     assert!(
         receiver_updates.iter().any(|message| {
@@ -454,7 +454,7 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
         .server
         .node()
         .borrow_mut()
-        .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+        .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
             author: AuthorId::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
@@ -1000,7 +1000,7 @@ fn upload_is_not_marked_sent_after_one_shot_backpressure_and_retries() {
         .node
         .node
         .borrow_mut()
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0xf1), client.next_now_ms())
                 .made_by(client_author)
                 .permission_subject(client_author)

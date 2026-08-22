@@ -29,6 +29,7 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
         ));
     let prepared_query = prepared(&db, &query);
     let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    assert_eq!(db.active_groove_subscriptions_for_test(), 1);
 
     let opened = block_on(subscription.next_raw()).unwrap();
     let SubscriptionEvent::Delta { .. } = &opened else {
@@ -189,6 +190,11 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
             ..
         } if terminal_operations.is_empty()
     ));
+    assert_eq!(
+        db.active_groove_subscriptions_for_test(),
+        1,
+        "an authoritative reset must replace, not leak, its Groove terminal"
+    );
 
     db.update(
         "users",

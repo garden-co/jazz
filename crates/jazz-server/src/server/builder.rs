@@ -363,20 +363,19 @@ impl ServerBuilder {
                 std::fs::create_dir_all(path)
                     .map_err(|e| format!("failed to create data dir '{}': {e}", path.display()))?;
 
-                let factory = self.storage_factory.as_deref().ok_or_else(|| {
+                let factory = self.storage_factory.as_ref().ok_or_else(|| {
                     "persistent catalogue storage requires a target-shell storage factory"
                         .to_owned()
                 })?;
                 let db_path = path.join(CATALOGUE_ROCKSDB_DIR);
-                let storage = factory
-                    .open(&db_path, &[CatalogueKvStorage::COLUMN_FAMILY])
+                let storage = CatalogueKvStorage::open(Arc::clone(factory), db_path.clone())
                     .map_err(|error| {
                         format!(
                             "failed to open catalogue storage '{}': {error}",
                             db_path.display()
                         )
                     })?;
-                Ok(Box::new(CatalogueKvStorage::new(storage)))
+                Ok(Box::new(storage))
             }
             #[cfg(feature = "sqlite")]
             StorageBackend::Sqlite { .. } => {

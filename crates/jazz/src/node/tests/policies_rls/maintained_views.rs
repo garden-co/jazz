@@ -8,7 +8,7 @@ fn maintained_view_seeded_query_engine_snapshot_matches_rows_and_witnesses() {
     let author_b = user(0xb2);
 
     let sibling_tx = core
-        .commit_mergeable_many(vec![
+        .commit_mergeable_many_settled(vec![
             MergeableCommit::new("todos", row(0x90), 10).cells(owner_cells(author_a, "include")),
             MergeableCommit::new("todos", row(0x91), 10).cells(owner_cells(author_b, "include")),
             MergeableCommit::new("todos", row(0x92), 10).cells(owner_cells(author_a, "skip")),
@@ -126,7 +126,7 @@ fn maintained_view_cold_snapshot_seeds_maintained_indexes_equal_one_shot() {
     let author_b = user(0xb2);
 
     let sibling_tx = core
-        .commit_mergeable_many(vec![
+        .commit_mergeable_many_settled(vec![
             MergeableCommit::new("todos", row(0x90), 10).cells(owner_cells(author_a, "include")),
             MergeableCommit::new("todos", row(0x91), 10).cells(owner_cells(author_b, "include")),
             MergeableCommit::new("todos", row(0x92), 10).cells(owner_cells(author_a, "skip")),

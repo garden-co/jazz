@@ -31,33 +31,44 @@ fn open_node(byte: u8) -> (tempfile::TempDir, NodeState<RocksDbStorage>) {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
-    let node = NodeState::new(NodeUuid::from_bytes([byte; 16]), schema, storage).unwrap();
+    let node = jazz::block_on(NodeState::new(
+        NodeUuid::from_bytes([byte; 16]),
+        schema,
+        storage,
+    ))
+    .unwrap();
     (temp_dir, node)
 }
 
 #[test]
 fn stale_pending_fate_update_cannot_regress_accepted() {
     let (_dir, mut client) = open_node(1);
-    let (tx_id, _unit) = client
-        .commit_mergeable_unit(
+    let (published, _unit) = jazz::block_on(
+        client.commit_mergeable_unit(
             MergeableCommit::new("todos", RowUuid::from_bytes([7; 16]), 10)
                 .cells(BTreeMap::from([("title".to_owned(), "x".to_owned())])),
-        )
-        .unwrap();
+        ),
+    )
+    .unwrap();
+    let tx_id = jazz::block_on(client.persist_and_settle_transaction(published)).unwrap();
 
-    client
-        .apply_fate_update(
-            tx_id,
-            Fate::Accepted,
-            Some(jazz::time::GlobalTime(1)),
-            Some(DurabilityTier::Global),
-        )
-        .unwrap();
+    jazz::block_on(client.apply_fate_update(
+        tx_id,
+        Fate::Accepted,
+        Some(jazz::time::GlobalTime(1)),
+        Some(DurabilityTier::Global),
+    ))
+    .unwrap();
 
     // A duplicated/reordered stale fate update arrives afterwards.
-    let _ = client.apply_fate_update(tx_id, Fate::Pending, None, Some(DurabilityTier::Global));
+    let _ = jazz::block_on(client.apply_fate_update(
+        tx_id,
+        Fate::Pending,
+        None,
+        Some(DurabilityTier::Global),
+    ));
 
-    let (fate, global_time, durability) = client.transaction_state(tx_id).unwrap();
+    let (fate, global_time, durability) = jazz::block_on(client.transaction_state(tx_id)).unwrap();
     assert_eq!(
         fate,
         Fate::Accepted,

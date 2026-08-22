@@ -6,7 +6,7 @@ use jazz::db::{
     SubscriptionEvent,
 };
 use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
+use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::protocol::{
     CurrentWriteSchema, LensOp, MigrationLens, SchemaLineagePublication, SchemaVersion, TableLens,
@@ -39,7 +39,7 @@ const WRITER: AuthorId = AuthorId(uuid::uuid!("82000000-0000-0000-0000-000000000
 const USER_A: AuthorId = AuthorId(uuid::uuid!("82000000-0000-0000-0000-000000000002"));
 const USER_B: AuthorId = AuthorId(uuid::uuid!("82000000-0000-0000-0000-000000000003"));
 
-type BenchDb = Db<MemoryStorage>;
+type BenchDb = Db<TestStorage>;
 
 fn row(tag: u8) -> RowUuid {
     RowUuid::from_bytes([tag; 16])
@@ -373,7 +373,7 @@ fn open_db_with_schema_as(schema: JazzSchema, author: AuthorId) -> BenchDb {
     block_on(Db::open(
         DbConfig::new(
             schema,
-            MemoryStorage::new(&family_refs),
+            TestStorage::new(&family_refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x82; 16]),
                 author,
@@ -408,18 +408,18 @@ fn opts() -> ReadOpts {
 
 fn seed(db: &BenchDb, team_a: RowUuid, team_b: RowUuid, region_a: &str, region_b: &str) {
     for (team, name) in [(team_a, "Team A"), (team_b, "Team B")] {
-        db.insert_with_id(
+        block_on(db.insert_with_id(
             TEAMS,
             team,
             BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
-        )
+        ))
         .expect("seed team");
     }
     for (membership, team, user, region) in [
         (row(0x31), team_a, USER_A, region_a),
         (row(0x32), team_b, USER_B, region_b),
     ] {
-        db.insert_with_id(
+        block_on(db.insert_with_id(
             MEMBERSHIPS,
             membership,
             BTreeMap::from([
@@ -427,18 +427,18 @@ fn seed(db: &BenchDb, team_a: RowUuid, team_b: RowUuid, region_a: &str, region_b
                 ("user".to_owned(), Value::Uuid(user.0)),
                 ("region".to_owned(), Value::String(region.to_owned())),
             ]),
-        )
+        ))
         .expect("seed membership");
     }
     for (document, team, updated_at) in [(row(0x41), team_a, 10), (row(0x42), team_b, 20)] {
-        db.insert_with_id(
+        block_on(db.insert_with_id(
             DOCUMENTS,
             document,
             BTreeMap::from([
                 ("team".to_owned(), Value::Uuid(team.0)),
                 ("updated_at".to_owned(), Value::U64(updated_at)),
             ]),
-        )
+        ))
         .expect("seed document");
     }
 }
@@ -452,71 +452,71 @@ fn seed_two_hop_reachability_policy(db: &BenchDb) -> (RowUuid, RowUuid, RowUuid,
     let group_b = row(0x72);
 
     for (project, name) in [(project_a, "project-a"), (project_b, "project-b")] {
-        db.insert_with_id(
+        block_on(db.insert_with_id(
             PROJECTS,
             project,
             BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
-        )
+        ))
         .expect("seed project");
     }
     for (group, name) in [(group_a, "group-a"), (group_b, "group-b")] {
-        db.insert_with_id(
+        block_on(db.insert_with_id(
             GROUPS,
             group,
             BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
-        )
+        ))
         .expect("seed group");
     }
     for (document, project, updated_at) in
         [(document_a, project_a, 10), (document_b, project_b, 20)]
     {
-        db.insert_with_id(
+        block_on(db.insert_with_id(
             DOCUMENTS,
             document,
             BTreeMap::from([
                 ("project".to_owned(), Value::Uuid(project.0)),
                 ("updated_at".to_owned(), Value::U64(updated_at)),
             ]),
-        )
+        ))
         .expect("seed document");
     }
     for (membership, document, project) in [
         (row(0x81), document_a, project_a),
         (row(0x82), document_b, project_b),
     ] {
-        db.insert_with_id(
+        block_on(db.insert_with_id(
             MEMBERSHIPS,
             membership,
             BTreeMap::from([
                 ("document".to_owned(), Value::Uuid(document.0)),
                 ("project".to_owned(), Value::Uuid(project.0)),
             ]),
-        )
+        ))
         .expect("seed membership");
     }
     for (access, project, group) in [
         (row(0x91), project_a, group_a),
         (row(0x92), project_b, group_b),
     ] {
-        db.insert_with_id(
+        block_on(db.insert_with_id(
             PROJECT_ACCESS,
             access,
             BTreeMap::from([
                 ("project".to_owned(), Value::Uuid(project.0)),
                 ("group".to_owned(), Value::Uuid(group.0)),
             ]),
-        )
+        ))
         .expect("seed project access");
     }
     for (membership, group, user) in [(row(0xa1), group_a, USER_A), (row(0xa2), group_b, USER_B)] {
-        db.insert_with_id(
+        block_on(db.insert_with_id(
             GROUP_MEMBERS,
             membership,
             BTreeMap::from([
                 ("group".to_owned(), Value::Uuid(group.0)),
                 ("user".to_owned(), Value::Uuid(user.0)),
             ]),
-        )
+        ))
         .expect("seed reachability seed membership");
     }
 
@@ -626,7 +626,7 @@ fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
         USER_B,
         BTreeMap::from([("region".to_owned(), Value::String("region-b".to_owned()))]),
     );
-    db.insert_with_id(
+    block_on(db.insert_with_id(
         DOCUMENTS,
         public,
         BTreeMap::from([
@@ -634,9 +634,9 @@ fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
             ("owner".to_owned(), Value::Uuid(WRITER.0)),
             ("region".to_owned(), Value::String("other".to_owned())),
         ]),
-    )
+    ))
     .expect("seed public document");
-    db.insert_with_id(
+    block_on(db.insert_with_id(
         DOCUMENTS,
         private,
         BTreeMap::from([
@@ -644,9 +644,9 @@ fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
             ("owner".to_owned(), Value::Uuid(USER_A.0)),
             ("region".to_owned(), Value::String("other".to_owned())),
         ]),
-    )
+    ))
     .expect("seed private document");
-    db.insert_with_id(
+    block_on(db.insert_with_id(
         DOCUMENTS,
         regional,
         BTreeMap::from([
@@ -654,7 +654,7 @@ fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
             ("owner".to_owned(), Value::Uuid(WRITER.0)),
             ("region".to_owned(), Value::String("region-a".to_owned())),
         ]),
-    )
+    ))
     .expect("seed regional document");
 
     let prepared = db
@@ -800,7 +800,7 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
         (chat_a, "chat-a", join_code_a),
         (chat_b, "chat-b", join_code_b),
     ] {
-        db.insert_with_id(
+        block_on(db.insert_with_id(
             CHATS,
             chat,
             BTreeMap::from([
@@ -810,7 +810,7 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
                     Value::Nullable(Some(Box::new(Value::String(format!("stored-{join_code}"))))),
                 ),
             ]),
-        )
+        ))
         .expect("seed invite chat");
     }
     for (identity, join_code, user_id) in [
@@ -858,14 +858,14 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
         "a chat without its membership must not be visible"
     );
 
-    db.insert_with_id(
+    block_on(db.insert_with_id(
         CHAT_MEMBERS,
         row(0xc3),
         BTreeMap::from([
             ("chatId".to_owned(), Value::Uuid(chat_a.0)),
             ("userId".to_owned(), Value::String(user_id_a.to_owned())),
         ]),
-    )
+    ))
     .expect("commit membership for binding A");
     let added_rows = |event| match event {
         SubscriptionEvent::Delta {
@@ -892,14 +892,14 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
         "binding A's CommitUnit must not leak into binding B"
     );
 
-    db.insert_with_id(
+    block_on(db.insert_with_id(
         CHAT_MEMBERS,
         row(0xc4),
         BTreeMap::from([
             ("chatId".to_owned(), Value::Uuid(chat_b.0)),
             ("userId".to_owned(), Value::String(user_id_b.to_owned())),
         ]),
-    )
+    ))
     .expect("commit membership for binding B");
     assert_eq!(
         added_rows(
@@ -1053,17 +1053,17 @@ fn mutually_referential_dependency_policies_do_not_recurse() {
     let db = open_db_with_schema(policy_proof_cycle_schema());
     let a = row(0xb1);
     let b = row(0xb2);
-    db.insert_with_id(
+    block_on(db.insert_with_id(
         CYCLE_A,
         a,
         BTreeMap::from([("b".to_owned(), Value::Uuid(b.0))]),
-    )
+    ))
     .expect("seed cycle A");
-    db.insert_with_id(
+    block_on(db.insert_with_id(
         CYCLE_B,
         b,
         BTreeMap::from([("a".to_owned(), Value::Uuid(a.0))]),
-    )
+    ))
     .expect("seed cycle B");
 
     let prepared = db
@@ -1144,15 +1144,15 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
             },
         ],
     );
-    db.publish_schema_with_lens(
+    block_on(db.publish_schema_with_lens(
         1,
         SchemaLineagePublication::new(v2.clone(), lens, Vec::<String>::new(), Vec::<String>::new()),
-    )
+    ))
     .expect("publish v1-to-v2 lineage");
-    db.set_current_write_schema(CurrentWriteSchema {
+    block_on(db.set_current_write_schema(CurrentWriteSchema {
         revision: 1,
         schema: v2.id,
-    })
+    }))
     .expect("select v2 schema");
 
     let prepared_v2_a = db
@@ -1271,27 +1271,27 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
             },
         ],
     );
-    db.publish_schema_with_lens(
+    block_on(db.publish_schema_with_lens(
         1,
         SchemaLineagePublication::new(v2.clone(), lens, Vec::<String>::new(), Vec::<String>::new()),
-    )
+    ))
     .expect("publish v1-to-v2 lineage");
-    db.set_current_write_schema(CurrentWriteSchema {
+    block_on(db.set_current_write_schema(CurrentWriteSchema {
         revision: 1,
         schema: v2.id,
-    })
+    }))
     .expect("activate v2");
-    db.update(
+    block_on(db.update(
         DOCUMENTS,
         row(0x41),
         BTreeMap::from([("updated_at".to_owned(), Value::U64(11))]),
-    )
+    ))
     .expect("trigger A subscription rehydration");
-    db.update(
+    block_on(db.update(
         DOCUMENTS,
         row(0x42),
         BTreeMap::from([("updated_at".to_owned(), Value::U64(21))]),
-    )
+    ))
     .expect("trigger B subscription rehydration");
     assert!(matches!(
         stream_a.try_next_event(),
@@ -1313,14 +1313,14 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
 
     drop(stream_a);
     assert_eq!(db.active_groove_subscriptions_for_test(), 1);
-    db.insert_with_id(
+    block_on(db.insert_with_id(
         DOCUMENTS,
         row(0x43),
         BTreeMap::from([
             ("team".to_owned(), Value::Uuid(team_b.0)),
             ("updated_at".to_owned(), Value::U64(30)),
         ]),
-    )
+    ))
     .expect("write after dropping A");
     assert!(matches!(
         stream_b.try_next_event(),
@@ -1344,20 +1344,20 @@ fn prepared_join_handle_recompiles_after_catalogue_runtime_rebuild() {
     let db = open_db_with_schema_as(v1.clone(), AuthorId::SYSTEM);
     let team = row(0xa1);
     let document = row(0xa2);
-    db.insert_with_id(
+    block_on(db.insert_with_id(
         TEAMS,
         team,
         BTreeMap::from([("name".to_owned(), Value::String("Team A".to_owned()))]),
-    )
+    ))
     .expect("seed team");
-    db.insert_with_id(
+    block_on(db.insert_with_id(
         DOCUMENTS,
         document,
         BTreeMap::from([
             ("team".to_owned(), Value::Uuid(team.0)),
             ("updated_at".to_owned(), Value::U64(1)),
         ]),
-    )
+    ))
     .expect("seed document");
     let join = Query::from(DOCUMENTS).join_via_column(
         TEAMS,
@@ -1400,15 +1400,15 @@ fn prepared_join_handle_recompiles_after_catalogue_runtime_rebuild() {
             },
         ],
     );
-    db.publish_schema_with_lens(
+    block_on(db.publish_schema_with_lens(
         1,
         SchemaLineagePublication::new(v2.clone(), lens, Vec::<String>::new(), Vec::<String>::new()),
-    )
+    ))
     .expect("publish v2 with lineage lens");
-    db.set_current_write_schema(CurrentWriteSchema {
+    block_on(db.set_current_write_schema(CurrentWriteSchema {
         revision: 1,
         schema: v2.id,
-    })
+    }))
     .expect("activate v2");
 
     // A distinct v2 prepared shape occupies the fresh runtime before the old

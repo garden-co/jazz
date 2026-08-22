@@ -32,11 +32,11 @@ fn query_subscription_result_sets_track_bindings_and_rehydrate() {
     let alice_initial = peer
         .rehydrate_query(&mut server, &shape, &alice_binding)
         .unwrap();
-    reader.apply_sync_message(alice_initial).unwrap();
+    reader.apply_sync_message_settled(alice_initial).unwrap();
     let bob_initial = peer
         .rehydrate_query(&mut server, &shape, &bob_binding)
         .unwrap();
-    reader.apply_sync_message(bob_initial).unwrap();
+    reader.apply_sync_message_settled(bob_initial).unwrap();
 
     assert_eq!(
         reader
@@ -61,11 +61,11 @@ fn query_subscription_result_sets_track_bindings_and_rehydrate() {
     let alice_delta = peer
         .query_update(&mut server, &shape, &alice_binding)
         .unwrap();
-    reader.apply_sync_message(alice_delta).unwrap();
+    reader.apply_sync_message_settled(alice_delta).unwrap();
     let bob_delta = peer
         .query_update(&mut server, &shape, &bob_binding)
         .unwrap();
-    reader.apply_sync_message(bob_delta).unwrap();
+    reader.apply_sync_message_settled(bob_delta).unwrap();
     assert_eq!(
         reader
             .query_rows(&shape, &alice_binding, DurabilityTier::Global)
@@ -77,7 +77,7 @@ fn query_subscription_result_sets_track_bindings_and_rehydrate() {
     );
 
     server
-        .apply_sync_message(SyncMessage::Unsubscribe {
+        .apply_sync_message_settled(SyncMessage::Unsubscribe {
             subscription: SubscriptionKey {
                 shape_id: shape.shape_id(),
                 binding_id: alice_binding.binding_id(),
@@ -109,7 +109,7 @@ fn query_subscription_result_sets_track_bindings_and_rehydrate() {
         panic!("expected view update");
     };
     assert!(reset_result_set);
-    reader.apply_sync_message(reset).unwrap();
+    reader.apply_sync_message_settled(reset).unwrap();
     assert_eq!(
         reader
             .query_rows(&shape, &alice_binding, DurabilityTier::Global)
@@ -143,7 +143,7 @@ fn settled_binding_view_sources_provide_source_coverage_metadata() {
     commit_global_user(&mut server, alice, "alice", 1);
     let mut peer = PeerState::new();
     let initial = peer.rehydrate_query(&mut server, &shape, &binding).unwrap();
-    reader.apply_sync_message(initial).unwrap();
+    reader.apply_sync_message_settled(initial).unwrap();
 
     let settled_binding_view = reader
         .settled_binding_view_key_for_query(&shape, &binding)
@@ -219,7 +219,7 @@ fn settled_binding_view_root_with_reference_include_sources_lowers() {
     commit_global_issue(&mut server, 0, "open", alice, 2);
     let mut peer = PeerState::new();
     let initial = peer.rehydrate_query(&mut server, &shape, &binding).unwrap();
-    reader.apply_sync_message(initial).unwrap();
+    reader.apply_sync_message_settled(initial).unwrap();
 
     let settled_binding_view = reader
         .settled_binding_view_key_for_query(&shape, &binding)
@@ -295,7 +295,7 @@ fn query_subscription_ships_provenance_closure_for_local_evaluation() {
             "users".to_owned(),
         ])
     );
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
 
     let local_rows = reader
         .query_rows(&shape, &binding, DurabilityTier::Local)

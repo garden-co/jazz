@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::node::query_engine::BranchViewSourceBase;
-pub(super) struct CurrentQuerySourceResolver<'a, S> {
+pub(super) struct JazzSourceGraphPreparer<'a, S> {
     pub(super) node: &'a mut NodeState<S>,
     pub(super) read_view: &'a ReadView<RequestedSourceStage>,
     pub(super) inline_sources: BTreeMap<SourceId, Vec<CurrentRow>>,
@@ -30,11 +30,11 @@ pub(super) enum CurrentAccessPath {
     Index { column: String, prefix: Vec<Value> },
 }
 
-impl<S> SourceResolver for CurrentQuerySourceResolver<'_, S>
+impl<S> SourceGraphPreparer for JazzSourceGraphPreparer<'_, S>
 where
     S: OrderedKvStorage,
 {
-    fn resolve_source(
+    async fn prepare_source_graph(
         &mut self,
         request: &SourceRequest,
     ) -> Result<ResolvedSource, SourceResolutionError> {
@@ -89,12 +89,16 @@ where
                             SourceGap::SchemaProjection,
                         ));
                     }
-                    match self.node.settled_binding_view_source_rows(
-                        &request.source.table,
-                        self.read_view.read_schema,
-                        *binding_view,
-                        *rows,
-                    ) {
+                    match self
+                        .node
+                        .settled_binding_view_source_rows(
+                            &request.source.table,
+                            self.read_view.read_schema,
+                            *binding_view,
+                            *rows,
+                        )
+                        .await
+                    {
                         Ok(rows) => {
                             let table = self
                                 .node
@@ -105,6 +109,7 @@ where
                             let schema_version_alias = self
                                 .node
                                 .ensure_schema_version_alias(self.read_view.read_schema)
+                                .await
                                 .map_err(|_| {
                                     source_resolution_error(request, SourceGap::Coverage)
                                 })?;
@@ -246,10 +251,12 @@ where
                         head,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                let content =
-                    self.projected_branch_content_source_graph(request, &table, tier, &head_keys)?;
-                let deletions =
-                    self.projected_branch_deletion_source_graph(request, tier, &head_keys)?;
+                let content = self
+                    .projected_branch_content_source_graph(request, &table, tier, &head_keys)
+                    .await?;
+                let deletions = self
+                    .projected_branch_deletion_source_graph(request, tier, &head_keys)
+                    .await?;
                 let base = include_deleted_branch_graph(&table, head, content, deletions)
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 let graph = match &authorization {
@@ -273,10 +280,17 @@ where
                                 plan.binding_user_params.clone(),
                                 plan.binding_claim_params.clone(),
                             );
+                        let policy_request = policy_request.map(|mut request| {
+                            request.reads.primary = policy_read_view_projected_through(
+                                &request.reads.primary,
+                                self.read_view,
+                            );
+                            request
+                        });
                         let mut output_fields = current_row_fields(&table);
                         output_fields.push("__jazz_deleted".to_owned());
                         self.node
-                            .policy_filtered_current_source_graph_via_query_engine(
+                            .compose_policy_filtered_current_source_graph(
                                 policy_request,
                                 base,
                                 &output_fields,
@@ -316,17 +330,21 @@ where
                         head,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                let head_content = self.projected_branch_content_source_graph(
-                    request,
-                    &table,
-                    graph_tier.expect("branch view has a current tier"),
-                    &head_keys,
-                )?;
-                let head_deletions = self.projected_branch_deletion_source_graph(
-                    request,
-                    graph_tier.expect("branch view has a current tier"),
-                    &head_keys,
-                )?;
+                let head_content = self
+                    .projected_branch_content_source_graph(
+                        request,
+                        &table,
+                        graph_tier.expect("branch view has a current tier"),
+                        &head_keys,
+                    )
+                    .await?;
+                let head_deletions = self
+                    .projected_branch_deletion_source_graph(
+                        request,
+                        graph_tier.expect("branch view has a current tier"),
+                        &head_keys,
+                    )
+                    .await?;
                 let (content, deletions) = match base {
                     Some(BranchViewSourceBase::Current(base)) if base != head => {
                         let base_keys = self
@@ -337,17 +355,21 @@ where
                                 base,
                             )
                             .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                        let base_content = self.projected_branch_content_source_graph(
-                            request,
-                            &table,
-                            graph_tier.expect("branch view has a current tier"),
-                            &base_keys,
-                        )?;
-                        let base_deletions = self.projected_branch_deletion_source_graph(
-                            request,
-                            graph_tier.expect("branch view has a current tier"),
-                            &base_keys,
-                        )?;
+                        let base_content = self
+                            .projected_branch_content_source_graph(
+                                request,
+                                &table,
+                                graph_tier.expect("branch view has a current tier"),
+                                &base_keys,
+                            )
+                            .await?;
+                        let base_deletions = self
+                            .projected_branch_deletion_source_graph(
+                                request,
+                                graph_tier.expect("branch view has a current tier"),
+                                &base_keys,
+                            )
+                            .await?;
                         (
                             GraphBuilder::union([
                                 head_content.clone(),
@@ -462,10 +484,12 @@ where
                         head,
                     )
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-                let head_content =
-                    self.projected_branch_content_source_graph(request, &table, tier, &head_keys)?;
-                let head_deletions =
-                    self.projected_branch_deletion_source_graph(request, tier, &head_keys)?;
+                let head_content = self
+                    .projected_branch_content_source_graph(request, &table, tier, &head_keys)
+                    .await?;
+                let head_deletions = self
+                    .projected_branch_deletion_source_graph(request, tier, &head_keys)
+                    .await?;
                 let head_content_presence = head_content.clone().project(["row_uuid"]);
                 let head_deletion_presence = head_deletions.clone().project(["row_uuid"]);
                 let deleted = head_deletions
@@ -512,10 +536,12 @@ where
                         head,
                         base,
                     )
+                    .await
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 let schema_version_alias = self
                     .node
                     .ensure_schema_version_alias(self.read_view.read_schema)
+                    .await
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 let (opening, opening_descriptor, opening_metadata) =
                     inline_current_graph_with_source_metadata_and_branch_witness(
@@ -556,11 +582,16 @@ where
                         permission_subject,
                         plan,
                     } => {
+                        let param_binding_mode = if plan.binding_source_shape.is_some() {
+                            ParamBindingMode::RetainAllParams
+                        } else {
+                            ParamBindingMode::InlineAllReachableSeeds
+                        };
                         let policy_request = self.node.table_read_policy_authorization_request(
                             self.read_view.policy_schema,
                             &table.name,
                             *permission_subject,
-                            ParamBindingMode::InlineAllReachableSeeds,
+                            param_binding_mode,
                             tier,
                             plan.binding_source_shape.clone(),
                             plan.binding_user_params.clone(),
@@ -576,7 +607,7 @@ where
                         let mut output_fields = current_row_fields(&table);
                         output_fields.extend(branch_witness_field.map(str::to_owned));
                         self.node
-                            .policy_filtered_current_source_graph_via_query_engine(
+                            .compose_policy_filtered_current_source_graph(
                                 policy_request,
                                 unfiltered,
                                 &output_fields,
@@ -634,6 +665,7 @@ where
                     head,
                     base,
                 )
+                .await
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
             let (base_graph, descriptor, metadata) = if request.requirements.metadata.is_empty() {
                 (
@@ -646,6 +678,7 @@ where
                 let schema_version_alias = self
                     .node
                     .ensure_schema_version_alias(self.read_view.read_schema)
+                    .await
                     .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
                 inline_current_graph_with_source_metadata(
                     &table,
@@ -672,11 +705,16 @@ where
                     {
                         return Err(source_resolution_error(request, SourceGap::Coverage));
                     }
+                    let param_binding_mode = if plan.binding_source_shape.is_some() {
+                        ParamBindingMode::RetainAllParams
+                    } else {
+                        ParamBindingMode::InlineAllReachableSeeds
+                    };
                     let policy_request = self.node.table_read_policy_authorization_request(
                         self.read_view.policy_schema,
                         &table.name,
                         *permission_subject,
-                        ParamBindingMode::InlineAllReachableSeeds,
+                        param_binding_mode,
                         graph_tier.expect("branch view has a current tier"),
                         plan.binding_source_shape.clone(),
                         plan.binding_user_params.clone(),
@@ -690,7 +728,7 @@ where
                         request
                     });
                     self.node
-                        .policy_filtered_current_source_graph_via_query_engine(
+                        .compose_policy_filtered_current_source_graph(
                             policy_request,
                             base_graph,
                             &current_row_fields(&table),
@@ -721,7 +759,9 @@ where
                 );
             }
             let descriptor = current_row_descriptor_with_hidden_source_fields(&table, &metadata);
-            let base = self.projected_historical_source_graph(request, &table, position)?;
+            let base = self
+                .projected_historical_source_graph(request, &table, position)
+                .await?;
             let base = if needs_settle_position {
                 base.project_fields(
                     current_row_fields(&table)
@@ -766,7 +806,7 @@ where
                         plan.binding_claim_params.clone(),
                     );
                     self.node
-                        .policy_filtered_current_source_graph_via_query_engine(
+                        .compose_policy_filtered_current_source_graph(
                             policy_request,
                             base,
                             &descriptor_field_names(&descriptor).map_err(|_| {
@@ -795,6 +835,7 @@ where
                     self.read_view.read_schema,
                     &snapshot,
                 )
+                .await
                 .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
             let graph = inline_current_graph(&table, rows)
                 .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
@@ -814,6 +855,7 @@ where
                     &request.source.table,
                     include_deleted,
                 )
+                .await
                 .map_err(|_| source_resolution_error(request, SourceGap::TransactionReadOverlay))?;
             let (graph, descriptor) = if include_deleted {
                 let rows = rows
@@ -824,7 +866,7 @@ where
                     })
                     .collect();
                 (
-                    inline_include_deleted_current_graph(&table, rows).map_err(|_| {
+                    inline_snapshot_include_deleted_current_graph(&table, rows).map_err(|_| {
                         source_resolution_error(request, SourceGap::TransactionReadOverlay)
                     })?,
                     include_deleted_current_row_descriptor(&table),
@@ -842,11 +884,13 @@ where
             && self.needs_projected_current_source(&request.source.table)
         {
             if !request.requirements.metadata.is_empty() {
-                let source = self.projected_maintained_visible_current_source_graph(
-                    request,
-                    &table,
-                    graph_tier.expect("visible current source has a tier"),
-                )?;
+                let source = self
+                    .projected_maintained_visible_current_source_graph(
+                        request,
+                        &table,
+                        graph_tier.expect("visible current source has a tier"),
+                    )
+                    .await?;
                 resolved_current_source_graph(
                     self.node,
                     &table,
@@ -854,17 +898,19 @@ where
                     &request.requirements,
                     &authorization,
                     self.read_view.policy_schema,
-                    None,
+                    Some(self.read_view),
                     None,
                     Some(source.graph),
                 )
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
             } else {
-                let source = self.projected_visible_current_source_graph(
-                    request,
-                    &table,
-                    graph_tier.expect("visible current source has a tier"),
-                )?;
+                let source = self
+                    .projected_visible_current_source_graph(
+                        request,
+                        &table,
+                        graph_tier.expect("visible current source has a tier"),
+                    )
+                    .await?;
                 let graph = match &authorization {
                     SourceAuthorizationRequest::System => source.graph,
                     SourceAuthorizationRequest::PolicyFiltered {
@@ -881,18 +927,30 @@ where
                         {
                             return Err(source_resolution_error(request, SourceGap::Coverage));
                         }
+                        let param_binding_mode = if plan.binding_source_shape.is_some() {
+                            ParamBindingMode::RetainAllParams
+                        } else {
+                            ParamBindingMode::InlineAllReachableSeeds
+                        };
                         let policy_request = self.node.table_read_policy_authorization_request(
                             self.read_view.policy_schema,
                             &table.name,
                             *permission_subject,
-                            ParamBindingMode::InlineAllReachableSeeds,
+                            param_binding_mode,
                             graph_tier.expect("visible current source has a tier"),
                             plan.binding_source_shape.clone(),
                             plan.binding_user_params.clone(),
                             plan.binding_claim_params.clone(),
                         );
+                        let policy_request = policy_request.map(|mut request| {
+                            request.reads.primary = policy_read_view_projected_through(
+                                &request.reads.primary,
+                                self.read_view,
+                            );
+                            request
+                        });
                         self.node
-                            .policy_filtered_current_source_graph_via_query_engine(
+                            .compose_policy_filtered_current_source_graph(
                                 policy_request,
                                 source.graph,
                                 &current_row_fields(&table),
@@ -909,16 +967,9 @@ where
             && self.needs_projected_current_source(&request.source.table)
         {
             let tier = graph_tier.expect("visible current source has a tier");
-            let rows = self
-                .node
-                .include_deleted_current_rows_for_schema(
-                    &request.source.table,
-                    self.read_view.read_schema,
-                    tier,
-                )
-                .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
-            let base = inline_include_deleted_current_graph(&table, rows)
-                .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
+            let base = self
+                .projected_include_deleted_current_source_graph(request, &table, tier)
+                .await?;
             let graph = match &authorization {
                 SourceAuthorizationRequest::System => base.clone(),
                 SourceAuthorizationRequest::PolicyFiltered {
@@ -949,7 +1000,7 @@ where
                     let mut output_fields = current_row_fields(&table);
                     output_fields.push("__jazz_deleted".to_owned());
                     self.node
-                        .policy_filtered_current_source_graph_via_query_engine(
+                        .compose_policy_filtered_current_source_graph(
                             policy_request,
                             base.clone(),
                             &output_fields,
@@ -997,7 +1048,7 @@ where
                     let mut output_fields = current_row_fields(&table);
                     output_fields.push("__jazz_deleted".to_owned());
                     self.node
-                        .policy_filtered_current_source_graph_via_query_engine(
+                        .compose_policy_filtered_current_source_graph(
                             policy_request,
                             base,
                             &output_fields,
@@ -1013,11 +1064,13 @@ where
                 BTreeSet::new(),
             )
         } else {
-            let selected_base = self.selected_global_current_source_graph(
-                request,
-                &table,
-                graph_tier.expect("visible current source has a tier"),
-            )?;
+            let selected_base = self
+                .selected_global_current_source_graph(
+                    request,
+                    &table,
+                    graph_tier.expect("visible current source has a tier"),
+                )
+                .await?;
             if selected_base.is_none() {
                 self.node.query_engine_read_metrics.source_full_scans += 1;
             }
@@ -1028,7 +1081,7 @@ where
                 &request.requirements,
                 &authorization,
                 self.read_view.policy_schema,
-                None,
+                Some(self.read_view),
                 None,
                 selected_base,
             )
@@ -1041,13 +1094,15 @@ where
             history_position,
             open_tx_overlay,
         )?;
-        let content_version = self.content_version_source_for_request(
-            request,
-            &table,
-            graph_tier,
-            history_position,
-            open_tx_overlay,
-        )?;
+        let content_version = self
+            .content_version_source_for_request(
+                request,
+                &table,
+                graph_tier,
+                history_position,
+                open_tx_overlay,
+            )
+            .await?;
         Ok(ResolvedSource {
             table_schema: table,
             graph,
@@ -1065,10 +1120,104 @@ where
     }
 }
 
-impl<S> CurrentQuerySourceResolver<'_, S>
+impl<S> JazzSourceGraphPreparer<'_, S>
 where
     S: OrderedKvStorage,
 {
+    pub(super) fn policy_dependency_request(
+        &mut self,
+        request: &SourceRequest,
+    ) -> Result<Option<QueryProgramRequest>, Error> {
+        let SourceAuthorizationRequest::PolicyFiltered {
+            permission_subject,
+            plan,
+        } = &request.authorization
+        else {
+            return Ok(None);
+        };
+        if plan.protected_source.table != request.source.table
+            || plan.role != PolicyDecisionRole::Read
+            || plan.protected_row_field != "row_uuid"
+        {
+            return Err(Error::QueryCapability(
+                "policy authorization plan does not match source dependency".to_owned(),
+            ));
+        }
+        let source = self
+            .read_view
+            .sources
+            .get(&request.source)
+            .ok_or(Error::InvalidStoredValue("query source dependency missing"))?;
+        let binding_source_shape = plan.binding_source_shape.clone();
+        let binding_user_params = plan.binding_user_params.clone();
+        let binding_claim_params = plan.binding_claim_params.clone();
+        let dependency = match source {
+            SourceExpr::HistoryCut {
+                data: DataSource::Current,
+                position,
+                ..
+            } => self.node.table_read_policy_authorization_request_at(
+                self.read_view.policy_schema,
+                &request.source.table,
+                *permission_subject,
+                ParamBindingMode::InlineAllReachableSeeds,
+                *position,
+                binding_source_shape,
+                binding_user_params,
+                binding_claim_params,
+            ),
+            SourceExpr::VisibleCurrent { .. }
+            | SourceExpr::BranchView { .. }
+            | SourceExpr::SettledBindingView { .. } => {
+                let tier = source.current_tier().unwrap_or(DurabilityTier::Global);
+                if request.visibility == RowVisibility::IncludeDeleted {
+                    self.node
+                        .table_read_policy_authorization_request_for_include_deleted(
+                            self.read_view.policy_schema,
+                            &request.source.table,
+                            *permission_subject,
+                            tier,
+                            binding_source_shape,
+                            binding_user_params,
+                            binding_claim_params,
+                        )
+                } else {
+                    let param_binding_mode = if binding_source_shape.is_some() {
+                        ParamBindingMode::RetainAllParams
+                    } else {
+                        ParamBindingMode::InlineAllReachableSeeds
+                    };
+                    self.node.table_read_policy_authorization_request(
+                        self.read_view.policy_schema,
+                        &request.source.table,
+                        *permission_subject,
+                        param_binding_mode,
+                        tier,
+                        binding_source_shape,
+                        binding_user_params,
+                        binding_claim_params,
+                    )
+                }
+            }
+            // Transaction overlays already carry explicitly captured rows and
+            // do not apply a second read-policy program in source preparation.
+            SourceExpr::WithOverlays { .. } => return Ok(None),
+            _ => return Ok(None),
+        };
+        match dependency {
+            Ok(mut dependency) => {
+                dependency.reads.primary =
+                    policy_read_view_projected_through(&dependency.reads.primary, self.read_view);
+                Ok(Some(dependency))
+            }
+            Err(Error::QueryCapability(error)) if error.contains("PolicyProofCycle") => {
+                Err(Error::QueryCapability(error))
+            }
+            Err(Error::QueryCapability(_)) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     pub(crate) fn current_projection_target(
         &mut self,
         request: &SourceRequest,
@@ -1119,7 +1268,7 @@ where
         }
     }
 
-    pub(crate) fn selected_global_current_source_graph(
+    pub(crate) async fn selected_global_current_source_graph(
         &mut self,
         request: &SourceRequest,
         table: &TableSchema,
@@ -1199,7 +1348,7 @@ where
         }))
     }
 
-    pub(crate) fn content_version_source_for_request(
+    pub(crate) async fn content_version_source_for_request(
         &mut self,
         request: &SourceRequest,
         table: &TableSchema,
@@ -1226,7 +1375,8 @@ where
         if self.needs_projected_current_source(&request.source.table) {
             return Ok(Some(ContentVersionSource {
                 graph: self
-                    .projected_content_current_source_graph(request, table, tier, false, false)?,
+                    .projected_content_current_source_graph(request, table, tier, false, false)
+                    .await?,
                 row_uuid_field: "row_uuid".to_owned(),
             }));
         }
@@ -1236,7 +1386,7 @@ where
         }))
     }
 
-    pub(crate) fn projected_historical_source_graph(
+    pub(crate) async fn projected_historical_source_graph(
         &mut self,
         request: &SourceRequest,
         table: &TableSchema,
@@ -1249,6 +1399,7 @@ where
             let rows = self
                 .node
                 .bounded_historical_current_rows(&request.source.table, position)
+                .await
                 .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
             return inline_current_graph(table, rows)
                 .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut));
@@ -1261,12 +1412,13 @@ where
                 self.read_view.read_schema,
                 position,
             )
+            .await
             .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))?;
         inline_current_graph(table, rows)
             .map_err(|_| source_resolution_error(request, SourceGap::HistoricalStorageCut))
     }
 
-    pub(crate) fn projected_maintained_visible_current_source_graph(
+    pub(crate) async fn projected_maintained_visible_current_source_graph(
         &mut self,
         request: &SourceRequest,
         table: &TableSchema,
@@ -1277,8 +1429,9 @@ where
         // graph would independently decode every enum cell, defeating a
         // title-only old-schema subscription before its narrowed source has a
         // chance to replace unused enum values with typed nulls.
-        let projected =
-            self.projected_content_current_source_graph(request, table, tier, true, true)?;
+        let projected = self
+            .projected_content_current_source_graph(request, table, tier, true, true)
+            .await?;
         Ok(CurrentSourceGraph {
             graph: projected,
             descriptor: current_row_descriptor(table),
@@ -1289,7 +1442,7 @@ where
     /// Build the maintained content-winner relation for one logical branch
     /// key. `stored_keys` includes historical short spellings produced before
     /// monotone branch-column additions; they compete as one branch-local row.
-    pub(crate) fn projected_branch_content_source_graph(
+    pub(crate) async fn projected_branch_content_source_graph(
         &mut self,
         request: &SourceRequest,
         table: &TableSchema,
@@ -1303,6 +1456,7 @@ where
                 self.read_view.read_schema,
                 &request.source.table,
             )
+            .await
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
         let post_winner_fields = self
             .node
@@ -1353,7 +1507,7 @@ where
     /// Build the maintained deletion-register winner relation for one logical
     /// branch key, normalizing historical short key spellings before winner
     /// selection.
-    pub(crate) fn projected_branch_deletion_source_graph(
+    pub(crate) async fn projected_branch_deletion_source_graph(
         &mut self,
         request: &SourceRequest,
         tier: DurabilityTier,
@@ -1395,7 +1549,7 @@ where
         .project(fields))
     }
 
-    pub(crate) fn projected_content_current_source_graph(
+    pub(crate) async fn projected_content_current_source_graph(
         &mut self,
         request: &SourceRequest,
         read_table: &TableSchema,
@@ -1473,6 +1627,7 @@ where
                 self.read_view.read_schema,
                 &request.source.table,
             )
+            .await
             .map_err(|_| source_resolution_error(request, SourceGap::SchemaProjection))?;
         let post_winner_fields = self
             .node
@@ -1616,7 +1771,7 @@ where
         .project_fields(fields))
     }
 
-    pub(crate) fn projected_visible_current_source_graph(
+    pub(crate) async fn projected_visible_current_source_graph(
         &mut self,
         request: &SourceRequest,
         table: &TableSchema,
@@ -1626,13 +1781,66 @@ where
             // Project heterogeneous physical rows at the source boundary so the
             // rest of the query graph retains the requested logical descriptor.
             graph: self
-                .projected_content_current_source_graph(request, table, tier, false, true)?
+                .projected_content_current_source_graph(request, table, tier, false, true)
+                .await?
                 .project_fields(storage_to_canonical_current_source_fields(
                     table, true, false,
                 )),
             descriptor: current_row_descriptor(table),
             metadata: BTreeMap::new(),
         })
+    }
+
+    async fn projected_include_deleted_current_source_graph(
+        &mut self,
+        request: &SourceRequest,
+        table: &TableSchema,
+        tier: DurabilityTier,
+    ) -> Result<GraphBuilder, SourceResolutionError> {
+        let content = self
+            .projected_content_current_source_graph(request, table, tier, false, false)
+            .await?
+            .project_fields(storage_to_canonical_current_source_fields(
+                table, true, false,
+            ));
+        let deleted_winners = self
+            .projected_deletion_register_current_source_graph(request, tier)?
+            .filter(PredicateExpr::eq("_deletion", Value::EnumTag(0)))
+            .project_fields([
+                ProjectField::named("row_uuid"),
+                ProjectField::named("tx_time"),
+                ProjectField::named("tx_node_id"),
+                ProjectField::renamed("updated_by", "$updatedBy"),
+                ProjectField::renamed("updated_at", "$updatedAt"),
+            ]);
+        let undeleted = GraphBuilder::anti_join(
+            content.clone(),
+            deleted_winners.clone(),
+            ["row_uuid"],
+            ["row_uuid"],
+        )
+        .project_fields(
+            current_row_fields(table)
+                .into_iter()
+                .map(ProjectField::named)
+                .chain([ProjectField::literal("__jazz_deleted", Value::Bool(false))]),
+        );
+        let deleted = GraphBuilder::join(content, deleted_winners, ["row_uuid"], ["row_uuid"])
+            .project_fields(
+                current_row_fields(table)
+                    .into_iter()
+                    .map(|field| {
+                        let source = match field.as_str() {
+                            "$updatedBy" | "$updatedAt" | "tx_time" | "tx_node_id" => {
+                                right_field(&field)
+                            }
+                            _ => left_field(&field),
+                        };
+                        ProjectField::renamed(source, field)
+                    })
+                    .chain([ProjectField::literal("__jazz_deleted", Value::Bool(true))]),
+            );
+        Ok(GraphBuilder::union([undeleted, deleted]))
     }
 
     pub(crate) fn can_use_bounded_historical_source(&self, table: &str) -> bool {
@@ -1980,14 +2188,12 @@ fn policy_read_view_projected_through(
     policy_view: &ReadView<RequestedSourceStage>,
     enclosing_view: &ReadView<RequestedSourceStage>,
 ) -> ReadView<RequestedSourceStage> {
-    let mut projected = enclosing_view.clone();
+    let mut projected = policy_view.clone();
     // The outer normalized query and the independently normalized policy proof
-    // may use different aliases for one logical table. Keep every policy alias,
-    // but give it the enclosing view's exact current/live/frozen source.
-    for policy_source in policy_view.sources.keys() {
-        if projected.sources.contains_key(policy_source) {
-            continue;
-        }
+    // may use different aliases for one logical table. Preserve every policy
+    // source, including policy-only recursive/access tables, while giving each
+    // source that the outer query also reads its exact current/live/frozen view.
+    for (policy_source, projected_source) in &mut projected.sources {
         if let Some(source) = enclosing_view
             .sources
             .iter()
@@ -1995,7 +2201,7 @@ fn policy_read_view_projected_through(
                 (source_id.table == policy_source.table).then(|| source.clone())
             })
         {
-            projected.sources.insert(policy_source.clone(), source);
+            *projected_source = source;
         }
     }
     projected
@@ -2247,7 +2453,7 @@ where
                 Some(selected_base) => selected_base,
                 None => node.maintained_view_content_current_with_version(table, tier)?,
             };
-            let storage_graph = node.policy_filtered_current_source_graph_via_query_engine(
+            let storage_graph = node.compose_policy_filtered_current_source_graph(
                 policy_request,
                 base.clone(),
                 &output_fields,
@@ -2625,7 +2831,7 @@ where
         column: &str,
         prefix: &[Value],
         projection_target: &str,
-        output: RecordDescriptor,
+        _output: RecordDescriptor,
     ) -> Result<GraphBuilder, Error> {
         let mapping = self
             .catalogue
@@ -2643,23 +2849,12 @@ where
                 "physical current index column mapping missing",
             ))?;
         let storage_table = physical_global_current_table_name(mapping.table_id);
-        let indexed = self.database.index_scan_raw(
-            &storage_table,
-            &physical_current_index_name(column_id),
-            prefix,
-        )?;
-        let mut records = Vec::with_capacity(indexed.len());
-        for raw in indexed {
-            let variant_tag = raw.variant_tag();
-            let record = groove::records::VariantRecord::new(variant_tag, raw.owned_record());
-            if let Some(projected) =
-                self.database
-                    .project_variant_record(&storage_table, projection_target, &record)?
-            {
-                records.push(projected.raw().to_vec());
-            }
-        }
-        Ok(GraphBuilder::inline_records(output, records))
+        Ok(GraphBuilder::variant_index_scan(
+            storage_table,
+            physical_current_index_name(column_id),
+            projection_target,
+            StaticScanSpec::Prefix(prefix.iter().cloned().map(LiteralValue::from).collect()),
+        ))
     }
 }
 
@@ -2949,7 +3144,7 @@ fn inline_current_record_with_source_metadata(
     Ok(descriptor.create(&values)?)
 }
 
-fn inline_include_deleted_current_graph(
+fn inline_snapshot_include_deleted_current_graph(
     table: &TableSchema,
     rows: Vec<(CurrentRow, bool)>,
 ) -> Result<GraphBuilder, Error> {

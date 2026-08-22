@@ -24,7 +24,8 @@ use jazz::tx::{DurabilityTier, Fate};
 use jazz_sim::distributions::Lcg;
 use jazz_sim::fixture::{
     CellValueGen, EdgeSet, EntitySet, Fixture, FixtureBuilder, FixtureCommit, FixtureCommitApply,
-    RefDistribution, apply_fixture_commit,
+    RefDistribution, apply_fixture_commit, apply_sync_message_settled,
+    commit_mergeable_unit_settled, ingest_commit_unit_settled, settle_outcome,
 };
 use jazz_sim::public_schema_fixture::compile_public_schema;
 use jazz_sim::{
@@ -237,9 +238,9 @@ pub fn db_surface_smoke() {
     assert!(subscription2_rows.is_empty());
 
     for commit in &fixture.commits {
-        let handle = db
-            .insert_with_id(&commit.table, commit.row_uuid, commit.cells.clone())
-            .expect("db fixture insert");
+        let handle =
+            block_on(db.insert_with_id(&commit.table, commit.row_uuid, commit.cells.clone()))
+                .expect("db fixture insert");
         block_on(handle.wait(DurabilityTier::Local)).expect("fixture insert local wait");
         oracle.apply_insert(commit);
     }
@@ -282,9 +283,7 @@ pub fn db_surface_smoke() {
             Value::String("db-surface-state-transition".to_owned()),
         ),
     ]);
-    let handle = db
-        .update(ISSUES, edited_issue, patch.clone())
-        .expect("db issue update");
+    let handle = block_on(db.update(ISSUES, edited_issue, patch.clone())).expect("db issue update");
     block_on(handle.wait(DurabilityTier::Local)).expect("issue update local wait");
     oracle.apply_patch(ISSUES, edited_issue, patch);
 
@@ -498,16 +497,16 @@ fn edge_acceptance_phase(
     let mut acceptance = Histogram::new(3).unwrap();
     let issue = row(9_500_000);
     let start = ctx.now_ms();
-    let (tx_id, unit) = client
-        .commit_mergeable_unit(
-            MergeableCommit::new(ISSUES, issue, 950_000)
-                .made_by(AuthorId::SYSTEM)
-                .cells(BTreeMap::from([(
-                    "title".to_owned(),
-                    Value::String("edge-acceptance-probe".to_owned()),
-                )])),
-        )
-        .unwrap();
+    let (tx_id, unit) = commit_mergeable_unit_settled(
+        client,
+        MergeableCommit::new(ISSUES, issue, 950_000)
+            .made_by(AuthorId::SYSTEM)
+            .cells(BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("edge-acceptance-probe".to_owned()),
+            )])),
+    )
+    .unwrap();
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         unreachable!();
     };
@@ -520,9 +519,14 @@ fn edge_acceptance_phase(
     let SyncMessage::CommitUnit { tx, versions } = delivered.message else {
         unreachable!();
     };
-    let updates = PeerState::new()
-        .ingest_edge_mergeable_commit_unit(&mut edge.node, tx, versions, u64::MAX)
-        .unwrap();
+    let outcome = block_on(PeerState::new().ingest_edge_mergeable_commit_unit(
+        &mut edge.node,
+        tx,
+        versions,
+        u64::MAX,
+    ))
+    .unwrap();
+    let updates = settle_outcome(&mut edge.node, outcome).unwrap();
     let _accepted = updates.iter().any(|message| {
         matches!(
             message,
@@ -639,20 +643,16 @@ fn execute(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
 
         for (shape, binding) in [(&query1, &binding1), (&query2, &binding2)] {
             let start_ms = ctx.now_ms();
-            let core_update = edge
-                .core_peer
-                .rehydrate_query(&mut core, shape, binding)
+            let core_update = block_on(edge.core_peer.rehydrate_query(&mut core, shape, binding))
                 .expect("rehydrate query");
             edge_hydration_bytes += view_update_bytes(&core_update);
             edge_hydration_floor_bytes += bytes_floor(&core_update);
             edge_hydration_rows += result_output_count(&core_update, ISSUES);
             ctx.send("core", &edge.name, core_update);
             let delivered_to_edge = ctx.recv(&edge.name);
-            edge.node
-                .apply_sync_message(delivered_to_edge.message)
+            apply_sync_message_settled(&mut edge.node, delivered_to_edge.message)
                 .expect("edge apply view");
-            let update = peer
-                .rehydrate_query(&mut edge.node, shape, binding)
+            let update = block_on(peer.rehydrate_query(&mut edge.node, shape, binding))
                 .expect("edge rehydrate query");
             let bytes = view_update_bytes(&update);
             cold_bytes += bytes;
@@ -661,9 +661,7 @@ fn execute(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
             result_set_rows += result_output_count(&update, ISSUES);
             ctx.send(&edge.name, &plan.name, update);
             let delivered = ctx.recv(&plan.name);
-            client
-                .apply_sync_message(delivered.message)
-                .expect("client apply view");
+            apply_sync_message_settled(client, delivered.message).expect("client apply view");
             cold_latencies.push((ctx.now_ms() - start_ms) * 1_000);
         }
 
@@ -678,13 +676,11 @@ fn execute(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
 
         for (shape, binding) in [(&query1, &binding1), (&query2, &binding2)] {
             let start = Instant::now();
-            let _ = client
-                .query_rows(shape, binding, DurabilityTier::Local)
+            let _ = block_on(client.query_rows(shape, binding, DurabilityTier::Local))
                 .expect("local query");
             warm_local.push(start.elapsed().as_micros() as u64);
             let start = Instant::now();
-            let _ = client
-                .query_rows(shape, binding, DurabilityTier::Global)
+            let _ = block_on(client.query_rows(shape, binding, DurabilityTier::Global))
                 .expect("settled query");
             warm_settled.push(start.elapsed().as_micros() as u64);
         }
@@ -795,14 +791,12 @@ fn reconnect_summaries(config: &Config, profile: PeerProfile) -> Vec<ReconnectSu
                 idx,
             );
             for (shape, binding) in subscriptions {
-                let update = control_link
-                    .query_update(&mut core, shape, binding)
+                let update = block_on(control_link.query_update(&mut core, shape, binding))
                     .expect("control query update while reconnect is disconnected");
                 ctx.send("core", "reconnect", update.clone());
                 ctx.send("core", "control", update);
                 let delivered = ctx.recv("control");
-                control
-                    .apply_sync_message(delivered.message)
+                apply_sync_message_settled(&mut control, delivered.message)
                     .expect("control apply live update");
             }
             total_writes += 1;
@@ -810,13 +804,11 @@ fn reconnect_summaries(config: &Config, profile: PeerProfile) -> Vec<ReconnectSu
         ctx.resume_link("core", "reconnect");
         assert!(!ctx.is_link_paused("core", "reconnect"));
         for (shape, binding) in subscriptions {
-            let update = control_link
-                .query_update(&mut core, shape, binding)
+            let update = block_on(control_link.query_update(&mut core, shape, binding))
                 .expect("control query update");
             ctx.send("core", "control", update);
             let delivered = ctx.recv("control");
-            control
-                .apply_sync_message(delivered.message)
+            apply_sync_message_settled(&mut control, delivered.message)
                 .expect("control apply update");
         }
 
@@ -827,8 +819,7 @@ fn reconnect_summaries(config: &Config, profile: PeerProfile) -> Vec<ReconnectSu
         let mut closure_rows = BTreeSet::new();
         for (shape, binding) in subscriptions {
             register_binding(&mut ctx, &mut core, "reconnect", shape, binding);
-            let update = reconnect_link
-                .rehydrate_query(&mut core, shape, binding)
+            let update = block_on(reconnect_link.rehydrate_query(&mut core, shape, binding))
                 .expect("reconnect rehydrate");
             catchup_bytes += view_update_bytes(&update);
             catchup_floor += bytes_floor(&update);
@@ -837,8 +828,7 @@ fn reconnect_summaries(config: &Config, profile: PeerProfile) -> Vec<ReconnectSu
             collect_result_rows(&update, &mut reconnect_delivered);
             ctx.send("core", "reconnect", update);
             let delivered = ctx.recv("reconnect");
-            reconnect
-                .apply_sync_message(delivered.message)
+            apply_sync_message_settled(&mut reconnect, delivered.message)
                 .expect("reconnect apply catch-up");
         }
         let catchup_us = (ctx.now_ms() - start_ms) * 1_000;
@@ -862,26 +852,22 @@ fn reconnect_summaries(config: &Config, profile: PeerProfile) -> Vec<ReconnectSu
         );
         assert_eq!(
             row_set(
-                reconnect
-                    .query_rows(&query1, &binding1, DurabilityTier::Global)
+                block_on(reconnect.query_rows(&query1, &binding1, DurabilityTier::Global))
                     .expect("reconnect q1")
             ),
             row_set(
-                control
-                    .query_rows(&query1, &binding1, DurabilityTier::Global)
+                block_on(control.query_rows(&query1, &binding1, DurabilityTier::Global))
                     .expect("control q1")
             ),
             "reconnected query1 diverged from control"
         );
         assert_eq!(
             row_set(
-                reconnect
-                    .query_rows(&query2, &binding2, DurabilityTier::Global)
+                block_on(reconnect.query_rows(&query2, &binding2, DurabilityTier::Global))
                     .expect("reconnect q2")
             ),
             row_set(
-                control
-                    .query_rows(&query2, &binding2, DurabilityTier::Global)
+                block_on(control.query_rows(&query2, &binding2, DurabilityTier::Global))
                     .expect("control q2")
             ),
             "reconnected query2 diverged from control"
@@ -979,8 +965,7 @@ fn subscriber_sweep_summary(config: &Config, subscribers: usize) -> SweepSummary
             )]))
             .expect("sweep binding");
         let mut peer = PeerState::new();
-        let _ = peer
-            .rehydrate_query(&mut core, &shape, &binding)
+        let _ = block_on(peer.rehydrate_query(&mut core, &shape, &binding))
             .expect("sweep initial hydrate");
         peer.metrics = Default::default();
         peers.push(peer);
@@ -1002,8 +987,7 @@ fn subscriber_sweep_summary(config: &Config, subscribers: usize) -> SweepSummary
         );
         let start = Instant::now();
         for (peer, binding) in peers.iter_mut().zip(bindings.iter()) {
-            let update = peer
-                .query_update(&mut core, &shape, binding)
+            let update = block_on(peer.query_update(&mut core, &shape, binding))
                 .expect("sweep query update");
             total_notification_bytes += view_update_bytes(&update);
         }
@@ -1121,16 +1105,14 @@ fn high_fan_out_hydration_summary(
     let mut by_tx_index_seeks = 0_u64;
     let history_scan_fallbacks = 0_u64;
 
-    let parent_update = peer
-        .rehydrate_query(&mut core, &parent_shape, &parent_binding)
+    let parent_update = block_on(peer.rehydrate_query(&mut core, &parent_shape, &parent_binding))
         .expect("parent rehydrate");
     hydration_bytes += view_update_bytes(&parent_update);
     hydration_floor_bytes += bytes_floor(&parent_update);
     result_set_rows += result_output_count(&parent_update, HF_PARENTS);
     ctx.send("core", "cold", parent_update);
     let delivered = ctx.recv("cold");
-    cold.apply_sync_message(delivered.message)
-        .expect("apply parent hydration");
+    apply_sync_message_settled(&mut cold, delivered.message).expect("apply parent hydration");
 
     let burst_every = (parents.len() / config.hydration_fate_bursts.max(1)).max(1);
     let mut active_bindings = Vec::new();
@@ -1143,16 +1125,14 @@ fn high_fan_out_hydration_summary(
             .expect("child binding");
         register_binding(&mut ctx, &mut core, "cold", &child_shape, &binding);
         apply_binding(&mut cold, &child_shape, &binding);
-        let update = peer
-            .rehydrate_query(&mut core, &child_shape, &binding)
+        let update = block_on(peer.rehydrate_query(&mut core, &child_shape, &binding))
             .expect("child rehydrate");
         hydration_bytes += view_update_bytes(&update);
         hydration_floor_bytes += bytes_floor(&update);
         result_set_rows += result_output_count(&update, HF_CHILDREN);
         ctx.send("core", "cold", update);
         let delivered = ctx.recv("cold");
-        cold.apply_sync_message(delivered.message)
-            .expect("apply child hydration");
+        apply_sync_message_settled(&mut cold, delivered.message).expect("apply child hydration");
         active_bindings.push(binding);
 
         if (idx + 1) % burst_every == 0 && mid_hydration_fates < config.hydration_fate_bursts {
@@ -1177,13 +1157,12 @@ fn high_fan_out_hydration_summary(
             mid_hydration_fates += 1;
             by_tx_index_seeks += active_bindings.len() as u64;
             for binding in &active_bindings {
-                let update = peer
-                    .query_update(&mut core, &child_shape, binding)
+                let update = block_on(peer.query_update(&mut core, &child_shape, binding))
                     .expect("mid-hydration fate update");
                 mid_hydration_bytes += view_update_bytes(&update);
                 ctx.send("core", "cold", update);
                 let delivered = ctx.recv("cold");
-                cold.apply_sync_message(delivered.message)
+                apply_sync_message_settled(&mut cold, delivered.message)
                     .expect("apply mid-hydration fate");
             }
         }
@@ -1197,11 +1176,11 @@ fn high_fan_out_hydration_summary(
             )]))
             .expect("oracle child binding");
         let local = row_set(
-            cold.query_rows(&child_shape, &binding, DurabilityTier::Local)
+            block_on(cold.query_rows(&child_shape, &binding, DurabilityTier::Local))
                 .expect("cold local child query"),
         );
         let oracle = row_set(
-            core.query_rows(&child_shape, &binding, DurabilityTier::Global)
+            block_on(core.query_rows(&child_shape, &binding, DurabilityTier::Global))
                 .expect("core child oracle"),
         );
         assert_eq!(local, oracle, "high fan-out child result mismatch");
@@ -1252,18 +1231,17 @@ fn commit_hydration_row(
     cells: BTreeMap<String, Value>,
     now_ms: u64,
 ) {
-    let (_tx_id, unit) = writer
-        .commit_mergeable_unit(
-            MergeableCommit::new(table, row_uuid, now_ms)
-                .made_by(AuthorId::SYSTEM)
-                .cells(cells),
-        )
-        .expect("hydration commit");
+    let (_tx_id, unit) = commit_mergeable_unit_settled(
+        writer,
+        MergeableCommit::new(table, row_uuid, now_ms)
+            .made_by(AuthorId::SYSTEM)
+            .cells(cells),
+    )
+    .expect("hydration commit");
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         unreachable!();
     };
-    core.ingest_commit_unit(tx, versions, u64::MAX)
-        .expect("core ingest hydration");
+    ingest_commit_unit_settled(core, tx, versions, u64::MAX).expect("core ingest hydration");
     ctx.record_counter("s1_high_fan_out_hydration_commits", 1);
 }
 
@@ -1289,8 +1267,7 @@ fn register_binding(
     };
     ctx.send(client_name, "core", register);
     let delivered = ctx.recv("core");
-    core.apply_sync_message(delivered.message)
-        .expect("register shape");
+    apply_sync_message_settled(core, delivered.message).expect("register shape");
     let values = shape
         .params()
         .keys()
@@ -1311,32 +1288,37 @@ fn register_binding(
         }),
     );
     let delivered = ctx.recv("core");
-    core.apply_sync_message(delivered.message)
-        .expect("binding delta");
+    apply_sync_message_settled(core, delivered.message).expect("binding delta");
 }
 
 fn apply_binding(node: &mut NodeState<RocksDbStorage>, shape: &ValidatedQuery, binding: &Binding) {
-    node.apply_sync_message(SyncMessage::RegisterShape {
-        shape_id: shape.shape_id(),
-        ast: ShapeAst::from_validated(shape),
-        opts: RegisterShapeOptions::default(),
-    })
+    apply_sync_message_settled(
+        node,
+        SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(shape),
+            opts: RegisterShapeOptions::default(),
+        },
+    )
     .unwrap();
     let values = shape
         .params()
         .keys()
         .map(|name| binding.values().get(name).cloned().unwrap())
         .collect();
-    node.apply_sync_message(SyncMessage::Subscribe(Subscribe {
-        shape_id: shape.shape_id(),
-        subscription: SubscriptionKey {
+    apply_sync_message_settled(
+        node,
+        SyncMessage::Subscribe(Subscribe {
             shape_id: shape.shape_id(),
-            binding_id: binding.binding_id(),
-            read_view: RegisterShapeOptions::default().read_view_key(),
-        },
-        values,
-        known_state: None,
-    }))
+            subscription: SubscriptionKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: RegisterShapeOptions::default().read_view_key(),
+            },
+            values,
+            known_state: None,
+        }),
+    )
     .unwrap();
 }
 
@@ -1352,15 +1334,11 @@ fn hydrate_client(
     for (shape, binding) in subscriptions {
         register_binding(ctx, core, client_name, shape, binding);
         apply_binding(client, shape, binding);
-        let update = peer
-            .rehydrate_query(core, shape, binding)
-            .expect("hydrate query");
+        let update = block_on(peer.rehydrate_query(core, shape, binding)).expect("hydrate query");
         collect_result_rows(&update, &mut delivered_rows);
         ctx.send("core", client_name, update);
         let delivered = ctx.recv(client_name);
-        client
-            .apply_sync_message(delivered.message)
-            .expect("client apply hydrate");
+        apply_sync_message_settled(client, delivered.message).expect("client apply hydrate");
     }
     delivered_rows
 }
@@ -1532,19 +1510,15 @@ fn assert_client_correct(
     label: &str,
 ) {
     let settled = row_set(
-        client
-            .query_rows(shape, binding, DurabilityTier::Global)
+        block_on(client.query_rows(shape, binding, DurabilityTier::Global))
             .expect("client settled"),
     );
     let oracle = row_set(
-        core.query_rows(shape, binding, DurabilityTier::Global)
-            .expect("core oracle"),
+        block_on(core.query_rows(shape, binding, DurabilityTier::Global)).expect("core oracle"),
     );
     assert_eq!(settled, oracle, "{label} settled result set mismatch");
     let local = row_set(
-        client
-            .query_rows(shape, binding, DurabilityTier::Local)
-            .expect("client local"),
+        block_on(client.query_rows(shape, binding, DurabilityTier::Local)).expect("client local"),
     );
     assert_eq!(
         local, settled,
@@ -1568,9 +1542,8 @@ fn assert_no_outside_closure(
     allowed: &BTreeSet<(String, RowUuid)>,
 ) {
     for table in &schema.tables {
-        let rows = client
-            .current_rows(&table.name, DurabilityTier::Local)
-            .expect("local rows");
+        let rows =
+            block_on(client.current_rows(&table.name, DurabilityTier::Local)).expect("local rows");
         for row in rows {
             assert!(
                 allowed.contains(&(table.name.clone(), row.row_uuid())),
@@ -2150,7 +2123,7 @@ fn open_node(
     let storage =
         RocksDbStorage::open_with_durability(temp_dir.path(), &refs, Durability::WalNoSync)
             .expect("open rocksdb");
-    let node = NodeState::new(node_uuid, schema, storage).expect("node");
+    let node = block_on(NodeState::new(node_uuid, schema, storage)).expect("node");
     (temp_dir, node)
 }
 

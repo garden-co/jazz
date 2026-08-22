@@ -44,7 +44,7 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
     let owner = AuthorId::from_bytes([0x48; 16]);
 
     for (row_uuid, title) in [(inherited, "inherited"), (overridden, "base")] {
-        node.commit_mergeable(
+        node.commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 10)
                 .branch(base.clone())
                 .cells(BTreeMap::from([
@@ -54,7 +54,7 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
         )
         .unwrap();
     }
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("todos", overridden, 20)
             .branch(head.clone())
             .cells(BTreeMap::from([
@@ -64,7 +64,7 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
     )
     .unwrap();
     let shared = row(0x47);
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("users", shared, 30)
             .cells(BTreeMap::from([("name".to_owned(), v("shared"))])),
     )
@@ -75,7 +75,6 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
             head: head.clone(),
             base: Some(crate::protocol::BranchViewBase::Current(base)),
         },
-        ..crate::protocol::ReadViewSpec::default()
     };
     let shape = Query::from("todos").validate(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
@@ -157,7 +156,7 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
     assert_eq!(shared_snapshot.root_count, 1);
     assert_eq!(shared_snapshot.rows[0].row_uuid(), shared);
 
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("todos", overridden, 40)
             .branch(head)
             .deletion(DeletionEvent::Deleted),
@@ -184,7 +183,7 @@ fn version_parents_cannot_cross_branch_keys() {
     let row_uuid = row(0x52);
     let owner = AuthorId::from_bytes([0x53; 16]);
     let parent = node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 10)
                 .branch(branch_selector(0x54))
                 .cells(BTreeMap::from([
@@ -203,7 +202,9 @@ fn version_parents_cannot_cross_branch_keys() {
                     ("owner".to_owned(), Value::Uuid(owner.0)),
                 ])),
         )
-        .unwrap_err();
+        .resolve()
+        .err()
+        .expect("cross-branch causal parent is rejected");
     assert!(matches!(error, Error::InvalidMergeableCommit(_)));
 }
 
@@ -229,7 +230,9 @@ fn malformed_branch_key_rejects_multi_key_commit_without_residue() {
                 .branch(BranchSelector::default())
                 .cells(cells("invalid")),
         ])
-        .unwrap_err();
+        .resolve()
+        .err()
+        .expect("malformed branch key is rejected");
     assert!(matches!(error, Error::InvalidBranchKey(_)));
     assert!(
         node.visible_current_cells_in_branch("todos", &branch_selector(0x4d), valid_row)
@@ -382,7 +385,7 @@ fn remote_authored_branch_keys_are_validated_atomically_before_storage() {
             .apply_sync_message(SyncMessage::CommitUnit { tx, versions })
             .unwrap();
         assert!(matches!(
-            updates.as_slice(),
+            updates.value.as_slice(),
             [SyncMessage::FateUpdate {
                 fate: Fate::Rejected(RejectionReason::MalformedCommit(_)),
                 global_time: None,
@@ -412,7 +415,7 @@ fn remote_branch_write_does_not_invalidate_live_branch_view_plans() {
         )
         .unwrap();
     let before = reader.groove_runtime_token();
-    reader.apply_sync_message(unit).unwrap();
+    reader.apply_sync_message_settled(unit).unwrap();
     assert_eq!(reader.groove_runtime_token(), before);
 }
 
@@ -453,7 +456,7 @@ fn calculated_merge_commit_persists_only_emitted_target_coordinates() {
         }],
     )
     .unwrap();
-    let tx_id = node
+    let published = node
         .commit_calculated_merge_many(
             vec![MergeableCommit::new("todos", row_uuid, 10)
                 .branch(target)
@@ -464,6 +467,7 @@ fn calculated_merge_commit_persists_only_emitted_target_coordinates() {
             provenance.clone(),
         )
         .unwrap();
+    let tx_id = node.persist_and_settle_transaction(published).unwrap();
     assert_eq!(
         node.transaction_record(tx_id).unwrap().contribution_merge,
         Some(provenance)
@@ -479,7 +483,7 @@ fn scalar_contribution_merge_is_retry_safe_and_does_not_echo_home() {
     let a = branch_selector(0x6b);
     let b = branch_selector(0x6c);
     let c = branch_selector(0x6d);
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("todos", row_uuid, 10)
             .branch(a.clone())
             .cells(BTreeMap::from([
@@ -503,7 +507,7 @@ fn scalar_contribution_merge_is_retry_safe_and_does_not_echo_home() {
     };
 
     assert!(
-        node.merge_branch_contributions(request(a.clone(), b.clone(), 20))
+        node.merge_branch_contributions_settled(request(a.clone(), b.clone(), 20))
             .unwrap()
             .is_some()
     );
@@ -514,18 +518,18 @@ fn scalar_contribution_merge_is_retry_safe_and_does_not_echo_home() {
         v("from a")
     );
     assert!(
-        node.merge_branch_contributions(request(a.clone(), b.clone(), 30))
+        node.merge_branch_contributions_settled(request(a.clone(), b.clone(), 30))
             .unwrap()
             .is_none(),
         "observed provenance suppresses retry"
     );
     assert!(
-        node.merge_branch_contributions(request(b, c.clone(), 40))
+        node.merge_branch_contributions_settled(request(b, c.clone(), 40))
             .unwrap()
             .is_some()
     );
     assert!(
-        node.merge_branch_contributions(request(c, a, 50))
+        node.merge_branch_contributions_settled(request(c, a, 50))
             .unwrap()
             .is_none(),
         "A -> B -> C -> A must not echo A's native dots home"
@@ -540,7 +544,7 @@ fn contribution_merge_carries_delete_and_restore_register_events() {
     let row_uuid = row(0x6f);
     let source = branch_selector(0x70);
     let target = branch_selector(0x71);
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("todos", row_uuid, 10)
             .branch(source.clone())
             .cells(BTreeMap::from([
@@ -560,27 +564,27 @@ fn contribution_merge_carries_delete_and_restore_register_events() {
         permission_subject: None,
         now_ms,
     };
-    node.merge_branch_contributions(request(20)).unwrap();
-    node.commit_mergeable(
+    node.merge_branch_contributions_settled(request(20)).unwrap();
+    node.commit_mergeable_settled(
         MergeableCommit::new("todos", row_uuid, 30)
             .branch(source.clone())
             .deletion(DeletionEvent::Deleted),
     )
     .unwrap();
-    node.merge_branch_contributions(request(40)).unwrap();
+    node.merge_branch_contributions_settled(request(40)).unwrap();
     assert!(
         node.visible_current_cells_in_branch("todos", &target, row_uuid)
             .unwrap()
             .is_none()
     );
 
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("todos", row_uuid, 50)
             .branch(source.clone())
             .deletion(DeletionEvent::Restored),
     )
     .unwrap();
-    node.merge_branch_contributions(request(60)).unwrap();
+    node.merge_branch_contributions_settled(request(60)).unwrap();
     assert_eq!(
         node.visible_current_cells_in_branch("todos", &target, row_uuid)
             .unwrap()
@@ -604,7 +608,7 @@ fn contribution_merge_receiver_needs_no_source_history() {
     let source = branch_selector(0x75);
     let target = branch_selector(0x76);
     writer
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 10)
                 .branch(source.clone())
                 .cells(BTreeMap::from([
@@ -613,7 +617,7 @@ fn contribution_merge_receiver_needs_no_source_history() {
                 ])),
         )
         .unwrap();
-    let merge = writer
+    let published = writer
         .merge_branch_contributions(ContributionMergeRequest {
             source,
             target: target.clone(),
@@ -627,8 +631,9 @@ fn contribution_merge_receiver_needs_no_source_history() {
         })
         .unwrap()
         .unwrap();
+    let merge = writer.persist_and_settle_transaction(published).unwrap();
     let unit = writer.commit_unit_for(merge).unwrap();
-    receiver.apply_sync_message(unit).unwrap();
+    receiver.apply_sync_message_settled(unit).unwrap();
     assert_eq!(
         receiver
             .visible_current_cells_in_branch("todos", &target, row_uuid)
@@ -646,7 +651,7 @@ fn contribution_merge_denies_unreadable_source_before_minting() {
     let row_uuid = row(0x78);
     let source = branch_selector(0x79);
     let target = branch_selector(0x7a);
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("todos", row_uuid, 10)
             .branch(source.clone())
             .cells(BTreeMap::from([
@@ -668,15 +673,20 @@ fn contribution_merge_denies_unreadable_source_before_minting() {
             permission_subject: Some(unauthorized),
             now_ms: 20,
         })
-        .unwrap_err();
-    assert!(matches!(error, Error::InvalidMergeableCommit(_)));
+        .resolve()
+        .err()
+        .expect("unreadable contribution source is rejected");
+    assert!(
+        matches!(error, Error::InvalidMergeableCommit(_)),
+        "unexpected contribution authorization error: {error:?}"
+    );
     assert!(
         node.visible_current_cells_in_branch("todos", &target, row_uuid)
             .unwrap()
             .is_none()
     );
     let next = node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("users", row(0x7c), 20)
                 .cell("name", v("clock receipt")),
         )
@@ -703,7 +713,7 @@ fn counter_contribution_merge_imports_only_novel_native_deltas() {
     let b = branch_selector(0x81);
     let c = branch_selector(0x82);
     let first = node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("counts", row_uuid, 10)
                 .branch(a.clone())
                 .cell("count", Value::U64(5)),
@@ -722,16 +732,16 @@ fn counter_contribution_merge_imports_only_novel_native_deltas() {
             now_ms,
         }
     };
-    node.merge_branch_contributions(request(a.clone(), b.clone(), 20))
+    node.merge_branch_contributions_settled(request(a.clone(), b.clone(), 20))
         .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("counts", row_uuid, 30)
             .branch(a.clone())
             .parents(vec![first])
             .cell("count", Value::U64(8)),
     )
     .unwrap();
-    node.merge_branch_contributions(request(a.clone(), b.clone(), 40))
+    node.merge_branch_contributions_settled(request(a.clone(), b.clone(), 40))
         .unwrap();
     assert_eq!(
         node.visible_current_cells_in_branch("counts", &b, row_uuid)
@@ -739,10 +749,10 @@ fn counter_contribution_merge_imports_only_novel_native_deltas() {
             .unwrap()["count"],
         Value::U64(8)
     );
-    node.merge_branch_contributions(request(b, c.clone(), 50))
+    node.merge_branch_contributions_settled(request(b, c.clone(), 50))
         .unwrap();
     assert!(
-        node.merge_branch_contributions(request(c, a, 60))
+        node.merge_branch_contributions_settled(request(c, a, 60))
             .unwrap()
             .is_none()
     );
@@ -767,7 +777,7 @@ fn gset_contribution_merge_tracks_elements_as_native_operations() {
     let b = branch_selector(0x87);
     let c = branch_selector(0x88);
     let first = node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("sets", row_uuid, 10)
                 .branch(a.clone())
                 .cell("members", Value::Array(vec![v("one")])),
@@ -786,16 +796,16 @@ fn gset_contribution_merge_tracks_elements_as_native_operations() {
             now_ms,
         }
     };
-    node.merge_branch_contributions(request(a.clone(), b.clone(), 20))
+    node.merge_branch_contributions_settled(request(a.clone(), b.clone(), 20))
         .unwrap();
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("sets", row_uuid, 30)
             .branch(a.clone())
             .parents(vec![first])
             .cell("members", Value::Array(vec![v("two")])),
     )
     .unwrap();
-    node.merge_branch_contributions(request(a.clone(), b.clone(), 40))
+    node.merge_branch_contributions_settled(request(a.clone(), b.clone(), 40))
         .unwrap();
     assert_eq!(
         node.visible_current_cells_in_branch("sets", &b, row_uuid)
@@ -803,10 +813,10 @@ fn gset_contribution_merge_tracks_elements_as_native_operations() {
             .unwrap()["members"],
         Value::Array(vec![v("one"), v("two")])
     );
-    node.merge_branch_contributions(request(b, c.clone(), 50))
+    node.merge_branch_contributions_settled(request(b, c.clone(), 50))
         .unwrap();
     assert!(
-        node.merge_branch_contributions(request(c, a, 60))
+        node.merge_branch_contributions_settled(request(c, a, 60))
             .unwrap()
             .is_none()
     );
@@ -820,7 +830,7 @@ fn maintained_live_base_emits_a_delta_before_facade_refresh() {
     let row_uuid = row(0x5b);
     let base = branch_selector(0x5c);
     let head = branch_selector(0x5d);
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("todos", row_uuid, 10)
             .branch(base.clone())
             .cells(BTreeMap::from([
@@ -857,7 +867,7 @@ fn maintained_live_base_emits_a_delta_before_facade_refresh() {
         .unwrap();
     assert_eq!(initial.root_count, 1);
 
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("todos", row_uuid, 20)
             .branch(base)
             .cells(BTreeMap::from([
@@ -885,7 +895,7 @@ fn added_branch_column_defaults_old_history_and_survives_column_rename() {
     );
     let (dir, mut core) = open_history_complete_node_with_schema(node(0x91), base.clone());
     let inherited = row(0x92);
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("todos", inherited, 10).cells(title_cells("old-default")),
     )
     .unwrap();
@@ -924,7 +934,7 @@ fn added_branch_column_defaults_old_history_and_survives_column_rename() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -934,7 +944,7 @@ fn added_branch_column_defaults_old_history_and_survives_column_rename() {
     .unwrap();
 
     let other = row(0x96);
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("todos", other, 20)
             .branch(BranchSelector::new([(
                 "workspace_id",
@@ -956,7 +966,6 @@ fn added_branch_column_defaults_old_history_and_survives_column_rename() {
                 head: BranchSelector::new([(branch_column, Value::Uuid(workspace))]),
                 base: None,
             },
-            ..Default::default()
         };
         node.query_relation_snapshot_for_serving_in_read_view(
             &shape,
@@ -1012,7 +1021,7 @@ fn added_branch_column_defaults_old_history_and_survives_column_rename() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 2,
@@ -1041,7 +1050,9 @@ fn branched_table_writes_require_an_explicit_exact_selector() {
                 ("owner".to_owned(), Value::Uuid(AuthorId::SYSTEM.0)),
             ])),
         )
-        .unwrap_err();
+        .resolve()
+        .err()
+        .expect("branched write without selector is rejected");
 
     assert!(matches!(
         error,

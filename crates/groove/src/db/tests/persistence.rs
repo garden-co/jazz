@@ -2,12 +2,12 @@
 
 use super::*;
 
-#[test]
-fn query_subscription_matches_one_shot_recompute_under_seeded_interleavings() {
+#[futures_test::test]
+async fn query_subscription_matches_one_shot_recompute_under_seeded_interleavings() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let query = select_query(
         Select::new([SelectItem::expr(col("title"))])
             .from([TableRef::named("albums")])
@@ -17,7 +17,7 @@ fn query_subscription_matches_one_shot_recompute_under_seeded_interleavings() {
                 Expr::Literal(Value::U64(10)),
             )),
     );
-    let subscription = database.subscribe_query(query.clone()).unwrap();
+    let subscription = database.subscribe_query(query.clone()).await.unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut seed = 0x5eed_u64;
@@ -49,7 +49,7 @@ fn query_subscription_matches_one_shot_recompute_under_seeded_interleavings() {
             }
             _ => continue,
         }
-        database.commit_batch(batch).unwrap();
+        database.commit_batch(batch).await.unwrap();
 
         while let Ok(deltas) = subscription.try_recv() {
             for (values, weight) in deltas.to_values().unwrap() {
@@ -61,7 +61,7 @@ fn query_subscription_matches_one_shot_recompute_under_seeded_interleavings() {
             materialized.retain(|_, weight| *weight != 0);
         }
 
-        let recomputed = database.query(query.clone()).unwrap();
+        let recomputed = database.query(query.clone()).await.unwrap();
         let mut expected = std::collections::BTreeMap::<String, i64>::new();
         for (values, weight) in recomputed.to_values().unwrap() {
             let [Value::String(title)] = values.as_slice() else {
@@ -99,21 +99,23 @@ impl FamilyOracleSubscription {
     }
 }
 
-#[test]
-fn shape_subscriptions_match_recompute_under_seeded_interleavings() {
+#[futures_test::test]
+async fn shape_subscriptions_match_recompute_under_seeded_interleavings() {
     for seed in [0xfade_u64, 0xbad5eed_u64, 0x51a7e_u64, 0xaced_u64] {
-        run_shape_subscription_oracle(seed);
+        run_shape_subscription_oracle(seed).await;
     }
 }
 
-fn run_shape_subscription_oracle(mut seed: u64) {
+async fn run_shape_subscription_oracle(mut seed: u64) {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["albums", "artists"],
     )
     .unwrap();
-    let mut database = Database::new(albums_artists_schema(), storage).unwrap();
+    let mut database = Database::new(albums_artists_schema(), storage)
+        .await
+        .unwrap();
     let shape = database
         .prepare_one_sink(
             artist_album_shape_graph(),
@@ -121,6 +123,7 @@ fn run_shape_subscription_oracle(mut seed: u64) {
             artist_binding_descriptor(),
             ["artist_id"],
         )
+        .await
         .unwrap();
     let mut albums = std::collections::BTreeMap::<u64, (u64, String)>::new();
     let mut subscriptions = Vec::<FamilyOracleSubscription>::new();
@@ -136,6 +139,7 @@ fn run_shape_subscription_oracle(mut seed: u64) {
                     param,
                     database
                         .bind_shape_one_sink(shape.id(), &[Value::U64(param)])
+                        .await
                         .unwrap(),
                 );
                 subscription.drain();
@@ -145,7 +149,7 @@ fn run_shape_subscription_oracle(mut seed: u64) {
             2 if !subscriptions.is_empty() => {
                 let idx = (seed as usize) % subscriptions.len();
                 let subscription = subscriptions.swap_remove(idx);
-                assert!(database.unsubscribe(subscription.subscription.id()));
+                assert!(database.unsubscribe(subscription.subscription.id()).await);
             }
             3 if !subscriptions.is_empty() => {
                 let idx = (seed as usize) % subscriptions.len();
@@ -177,7 +181,7 @@ fn run_shape_subscription_oracle(mut seed: u64) {
                         );
                     }
                 }
-                database.commit_batch(batch).unwrap();
+                database.commit_batch(batch).await.unwrap();
                 for subscription in &mut subscriptions {
                     subscription.drain();
                     assert_shape_subscription_matches_oracle(subscription, &albums, seed, step);
@@ -255,21 +259,23 @@ impl OracleSubscription {
     }
 }
 
-#[test]
-fn graph_subscriptions_match_recompute_under_seeded_interleavings() {
+#[futures_test::test]
+async fn graph_subscriptions_match_recompute_under_seeded_interleavings() {
     for seed in [0xc0ffee_u64, 0x5eed_u64, 0xfacefeed_u64, 0xdecafbad_u64] {
-        run_graph_subscription_oracle(seed);
+        run_graph_subscription_oracle(seed).await;
     }
 }
 
-fn run_graph_subscription_oracle(mut seed: u64) {
+async fn run_graph_subscription_oracle(mut seed: u64) {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["edges", "blockers"],
     )
     .unwrap();
-    let mut database = Database::new(edges_blockers_schema(), storage).unwrap();
+    let mut database = Database::new(edges_blockers_schema(), storage)
+        .await
+        .unwrap();
     let mut edges = std::collections::BTreeMap::<u64, (u64, u64)>::new();
     let mut blockers = std::collections::BTreeMap::<u64, (u64, u64)>::new();
     let mut subscriptions = Vec::<OracleSubscription>::new();
@@ -292,19 +298,22 @@ fn run_graph_subscription_oracle(mut seed: u64) {
                 };
                 let mut subscription = OracleSubscription::new(
                     graph,
-                    database.subscribe_one_sink(builder).unwrap(),
+                    database.subscribe_one_sink(builder).await.unwrap(),
                     step,
                 );
                 subscription.drain();
-                assert_eq!(table_pairs_from_query(&mut database, "edges"), edges);
-                assert_eq!(table_pairs_from_query(&mut database, "blockers"), blockers);
+                assert_eq!(table_pairs_from_query(&mut database, "edges").await, edges);
+                assert_eq!(
+                    table_pairs_from_query(&mut database, "blockers").await,
+                    blockers
+                );
                 assert_subscription_matches_oracle(&subscription, &edges, &blockers, seed, step);
                 subscriptions.push(subscription);
             }
             2 if !subscriptions.is_empty() => {
                 let idx = (seed as usize) % subscriptions.len();
                 let subscription = subscriptions.swap_remove(idx);
-                assert!(database.unsubscribe(subscription.subscription.id()));
+                assert!(database.unsubscribe(subscription.subscription.id()).await);
             }
             3 => {
                 let result = database
@@ -312,6 +321,7 @@ fn run_graph_subscription_oracle(mut seed: u64) {
                         Select::new([SelectItem::expr(col("src")), SelectItem::expr(col("dst"))])
                             .from([TableRef::named("edges")]),
                     ))
+                    .await
                     .unwrap();
                 assert_eq!(pairs_from_deltas(result), direct_edge_multiset(&edges));
             }
@@ -332,7 +342,7 @@ fn run_graph_subscription_oracle(mut seed: u64) {
                         step,
                     );
                 }
-                database.commit_batch(batch).unwrap();
+                database.commit_batch(batch).await.unwrap();
                 for subscription in &mut subscriptions {
                     subscription.drain();
                     assert_subscription_matches_oracle(subscription, &edges, &blockers, seed, step);
@@ -342,8 +352,8 @@ fn run_graph_subscription_oracle(mut seed: u64) {
     }
 }
 
-fn table_pairs_from_query(
-    database: &mut Database<TestStorage>,
+async fn table_pairs_from_query(
+    database: &mut Database,
     table: &str,
 ) -> std::collections::BTreeMap<u64, (u64, u64)> {
     let result = database
@@ -355,6 +365,7 @@ fn table_pairs_from_query(
             ])
             .from([TableRef::named(table)]),
         ))
+        .await
         .unwrap();
     result
         .to_values()

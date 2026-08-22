@@ -95,10 +95,7 @@ pub(super) fn validate_table_schema_variants(table: &TableSchema) -> Result<(), 
     Ok(())
 }
 
-impl<S> Database<S>
-where
-    S: OrderedKvStorage,
-{
+impl Database {
     /// Return the live schema for a table.
     pub fn table_schema(&self, table: &str) -> Result<&TableSchema, Error> {
         self.table(table)
@@ -231,7 +228,11 @@ where
     /// Re-registering the same definition is idempotent; changing an existing
     /// index definition is rejected. The storage supplied when opening the
     /// database must already provide the shared `indices` column family.
-    pub fn register_table_index(&mut self, table: &str, index: IndexSchema) -> Result<(), Error> {
+    pub async fn register_table_index(
+        &mut self,
+        table: &str,
+        index: IndexSchema,
+    ) -> Result<(), Error> {
         self.ensure_not_poisoned()?;
         let existing = self.table(table)?.clone();
         if let Some(registered) = existing
@@ -264,6 +265,7 @@ where
         if let Err(error) = self
             .ivm_runtime
             .register_table_index(table, index, &self.storage)
+            .await
         {
             self.poisoned = true;
             return Err(Error::IvmRuntime(error));

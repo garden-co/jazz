@@ -106,7 +106,7 @@ function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
     createSubscription: () => 0,
     executeSubscription: () => {},
     unsubscribe: () => {},
-    commitTransaction: vi.fn(async () => "committed-batch" as BatchId),
+    commitTransaction: vi.fn(() => "committed-batch" as BatchId),
     rollbackTransaction: async () => false,
   };
   const runtime: TransactionalRuntime = { ...runtimeBase, ...runtimeOverrides };

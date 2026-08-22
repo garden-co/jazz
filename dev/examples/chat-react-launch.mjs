@@ -2,6 +2,8 @@
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { deploy, startLocalJazzServer } from "../../packages/jazz-tools/dist/testing/index.js";
+import permissions from "../../examples/chat-react/permissions.ts";
+import { app } from "../../examples/chat-react/schema.ts";
 
 const rootDir = resolve(import.meta.dirname, "../..");
 const exampleDir = resolve(rootDir, "examples/chat-react");
@@ -55,7 +57,8 @@ try {
     appId,
     serverUrl: server.url,
     adminSecret,
-    schemaDir: exampleDir,
+    schema: app,
+    permissions,
   });
 
   const env = {

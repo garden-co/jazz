@@ -2,8 +2,8 @@
 
 use super::*;
 
-#[test]
-fn live_variant_table_evolves_direct_payload_enum_registry_before_new_layout() {
+#[futures_test::test]
+async fn live_variant_table_evolves_direct_payload_enum_registry_before_new_layout() {
     let old_state = payload_enum_type(41, [("draft", ValueType::U64)]).nullable();
     let next_state = payload_enum_type(
         41,
@@ -12,7 +12,7 @@ fn live_variant_table_evolves_direct_payload_enum_registry_before_new_layout() {
     .nullable();
     let schema = DatabaseSchema::new([live_variant_enum_table(old_state)]);
     let storage = MemoryStorage::new(&schema.column_families());
-    let mut database = Database::new(schema, storage).unwrap();
+    let mut database = Database::new(schema, storage).await.unwrap();
 
     database
         .evolve_table_variant_registries("items", &[ColumnSchema::new("state", next_state.clone())])
@@ -59,8 +59,8 @@ fn live_variant_table_evolves_direct_payload_enum_registry_before_new_layout() {
 /// Nested payload and scalar enum occurrences advance through nullable,
 /// array, record, and tuple wrappers without replacing their physical registry
 /// identities.
-#[test]
-fn live_table_evolves_nested_payload_and_scalar_enum_registries() {
+#[futures_test::test]
+async fn live_table_evolves_nested_payload_and_scalar_enum_registries() {
     let old_payload = payload_enum_type(42, [("draft", ValueType::U64)]);
     let next_payload = payload_enum_type(
         42,
@@ -114,7 +114,7 @@ fn live_table_evolves_nested_payload_and_scalar_enum_registries() {
     )
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
     let storage = MemoryStorage::new(&schema.column_families());
-    let mut database = Database::new(schema, storage).unwrap();
+    let mut database = Database::new(schema, storage).await.unwrap();
 
     database
         .evolve_table_variant_registries(
@@ -160,12 +160,12 @@ fn live_table_evolves_nested_payload_and_scalar_enum_registries() {
 /// A registry may only append cases. Reordering, renaming, changing an
 /// existing payload, changing its arity, or replacing a registry identity must
 /// leave the live descriptor untouched and fail before a new layout is staged.
-#[test]
-fn live_table_rejects_non_additive_enum_registry_mutations() {
+#[futures_test::test]
+async fn live_table_rejects_non_additive_enum_registry_mutations() {
     let old_payload = payload_enum_type(44, [("draft", ValueType::U64)]).nullable();
     let schema = DatabaseSchema::new([live_variant_enum_table(old_payload.clone())]);
     let storage = MemoryStorage::new(&schema.column_families());
-    let mut database = Database::new(schema, storage).unwrap();
+    let mut database = Database::new(schema, storage).await.unwrap();
     let incompatible = [
         payload_enum_type(44, [("renamed", ValueType::U64)]).nullable(),
         payload_enum_type(44, [("draft", ValueType::String)]).nullable(),

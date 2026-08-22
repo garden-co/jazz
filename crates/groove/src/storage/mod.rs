@@ -16,9 +16,14 @@
 mod key_codec;
 mod memory;
 mod opfs;
+#[cfg(any(test, feature = "test"))]
+mod test;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::pin::Pin;
+use std::rc::Rc;
 
 use crate::records::{Record, RecordDescriptor};
 use serde::{Deserialize, Serialize};
@@ -26,16 +31,118 @@ use thiserror::Error;
 
 pub use memory::MemoryStorage;
 #[cfg(test)]
-pub type TestStorage = NativeBtreeStorage;
+pub type TestBtreeStorage = NativeBtreeStorage;
 #[cfg(target_arch = "wasm32")]
 pub use opfs::OpfsStorage;
 #[cfg(not(target_arch = "wasm32"))]
 pub use opfs::{BtreeSyncPolicy, NativeBtreeStorage};
+#[cfg(any(test, feature = "test"))]
+pub use test::{TestStorage, TestStorageControl, TestStorageOperation, YieldingStorage};
 
 pub type ColumnFamilyName = str;
 pub type Key = [u8];
 pub type Value = Vec<u8>;
 pub type KeyValue = (Vec<u8>, Vec<u8>);
+/// Object-safe future returned by ordered storage operations.
+///
+/// Storage is permitted to be executor-local (notably in browsers), so this
+/// deliberately does not impose `Send`.
+pub type StorageFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+pub type StorageScan<'a> = Box<dyn StorageCursor + 'a>;
+
+/// Executor-local ownership boundary used by interruptible engine work.
+///
+/// `OrderedKvStorage` deliberately permits futures and cursors that borrow an
+/// adapter. An evaluation session cannot retain such a borrow into its own
+/// fields, so it owns the adapter through `Rc` and completes cursor iteration
+/// inside the outer owned future. The result crossing back into the evaluator
+/// is always owned.
+#[derive(Clone)]
+pub(crate) struct OwnedStorage<'a>(Rc<dyn OrderedKvStorage + 'a>);
+
+impl<'a> OwnedStorage<'a> {
+    pub(crate) fn new<S>(storage: Rc<S>) -> Self
+    where
+        S: OrderedKvStorage + 'a,
+    {
+        Self(storage)
+    }
+
+    pub(crate) fn as_ref(&self) -> &(dyn OrderedKvStorage + 'a) {
+        self.0.as_ref()
+    }
+
+    pub(crate) fn get(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+    ) -> StorageFuture<'a, Result<Option<Value>, Error>> {
+        let storage = Rc::clone(&self.0);
+        Box::pin(async move { storage.get(cf, key).await })
+    }
+
+    pub(crate) fn scan_range(
+        &self,
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> StorageFuture<'a, Result<Vec<KeyValue>, Error>> {
+        let storage = Rc::clone(&self.0);
+        Box::pin(async move {
+            let scan = storage.scan_range(cf, start, end).await?;
+            collect_scan(scan).await
+        })
+    }
+
+    pub(crate) fn scan_prefix(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'a, Result<Vec<KeyValue>, Error>> {
+        let storage = Rc::clone(&self.0);
+        Box::pin(async move {
+            let scan = storage.scan_prefix(cf, prefix).await?;
+            collect_scan(scan).await
+        })
+    }
+}
+
+/// Owned, executor-local cursor over an ordered scan.
+///
+/// Backends choose their own batch size. An empty batch is not an end marker;
+/// only `None` completes the scan.
+pub trait StorageCursor {
+    fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>>;
+}
+
+pub(crate) struct ReadyStorageCursor {
+    values: std::vec::IntoIter<KeyValue>,
+}
+
+impl ReadyStorageCursor {
+    pub(crate) fn new(values: Vec<KeyValue>) -> Self {
+        Self {
+            values: values.into_iter(),
+        }
+    }
+}
+
+impl StorageCursor for ReadyStorageCursor {
+    fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>> {
+        Box::pin(async move {
+            let batch = self.values.by_ref().take(256).collect::<Vec<_>>();
+            Ok((!batch.is_empty()).then_some(batch))
+        })
+    }
+}
+
+async fn collect_scan(mut scan: StorageScan<'_>) -> Result<Vec<KeyValue>, Error> {
+    let mut values = Vec::new();
+    while let Some(batch) = scan.next_batch().await? {
+        values.extend(batch);
+    }
+    Ok(values)
+}
 const STAGED_POINT_READS_BEFORE_INDEX: usize = 16;
 const STAGED_OPS_BEFORE_POINT_INDEX: usize = 64;
 /// Callback form used by scans so storage implementations do not have to
@@ -183,8 +290,15 @@ fn current_winner_key(
 /// names are backing details consumed by record-store plumbing; higher layers
 /// should use typed record-store handles instead of calling these methods
 /// directly. The trait intentionally exposes batch atomicity but no higher
-/// transaction semantics; `commit_batch` owns the tick ordering above this
-/// layer.
+/// transaction semantics; the database apply/persist/finish lifecycle owns
+/// tick and durability ordering above this layer.
+///
+/// A read future's first poll also communicates residency. When a backend has
+/// retained a point or complete scan region, reads fully covered by that
+/// resident data must return `Poll::Ready` on their first poll, including known
+/// absences. Successful writes through the same storage instance must be
+/// reflected by those resident reads. A backend may evict retained data; after
+/// eviction, a later read may become pending again.
 pub trait OrderedKvStorage {
     /// Begin an encoded storage transaction over this backend.
     ///
@@ -199,25 +313,26 @@ pub trait OrderedKvStorage {
         StorageTransaction::new(self)
     }
 
-    fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error>;
-    fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error>;
-    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error>;
+    fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>>;
+    fn set(&self, cf: String, key: Vec<u8>, value: Vec<u8>)
+    -> StorageFuture<'_, Result<(), Error>>;
+    fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>>;
     /// Flush and close any backend resources that require an explicit clean
     /// shutdown boundary. Backends without close-time work may keep the default.
-    fn close(&self) -> Result<(), Error> {
-        Ok(())
+    fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async { Ok(()) })
     }
     /// Configure the number of committed write batches between explicit local
     /// durability boundaries. Backends that do not require an explicit boundary
     /// may keep the default no-op implementation.
-    fn set_write_flush_cadence(&self, _every: usize) -> Result<(), Error> {
-        Ok(())
+    fn set_write_flush_cadence(&self, _every: usize) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async { Ok(()) })
     }
     /// Finish any pending write cadence and make all preceding writes locally
     /// durable. Backends that do not require an explicit boundary may keep the
     /// default no-op implementation.
-    fn flush_write_boundary(&self) -> Result<(), Error> {
-        Ok(())
+    fn flush_write_boundary(&self) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async { Ok(()) })
     }
     /// Process-local identity for cache partitioning. Backends may override
     /// this when cheap clones should share cache entries.
@@ -233,84 +348,63 @@ pub trait OrderedKvStorage {
     /// Backends that cannot meter a family return `Ok(None)`, allowing higher
     /// layers to leave byte-budget features disabled rather than relying on
     /// invented accounting.
-    fn approximate_class_bytes(&self, _cf: &ColumnFamilyName) -> Result<Option<u64>, Error> {
-        Ok(None)
+    fn approximate_class_bytes(
+        &self,
+        _cf: String,
+    ) -> StorageFuture<'_, Result<Option<u64>, Error>> {
+        Box::pin(async { Ok(None) })
     }
     fn scan_range(
         &self,
-        cf: &ColumnFamilyName,
-        start: &Key,
-        end: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error>;
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>>;
     fn scan_prefix(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error>;
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>>;
     fn scan_prefix_reverse(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        let mut values = Vec::new();
-        self.scan_prefix(cf, prefix, &mut |key, value| {
-            values.push((key.to_vec(), value.to_vec()));
-            Ok(())
-        })?;
-        for (key, value) in values.into_iter().rev() {
-            visit(&key, &value)?;
-        }
-        Ok(())
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        Box::pin(async move {
+            let mut values = collect_scan(self.scan_prefix(cf, prefix).await?).await?;
+            values.reverse();
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
+        })
     }
     fn last_with_prefix(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-    ) -> Result<Option<KeyValue>, Error> {
-        let mut last = None;
-        self.scan_prefix(cf, prefix, &mut |key, value| {
-            last = Some((key.to_vec(), value.to_vec()));
-            Ok(())
-        })?;
-        Ok(last)
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
+        Box::pin(async move {
+            Ok(collect_scan(self.scan_prefix(cf, prefix).await?)
+                .await?
+                .pop())
+        })
     }
     fn last_with_prefix_before_or_at(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        upper: &Key,
-    ) -> Result<Option<KeyValue>, Error> {
-        let mut last = None;
-        self.scan_prefix(cf, prefix, &mut |key, value| {
-            if key <= upper {
-                last = Some((key.to_vec(), value.to_vec()));
-            }
-            Ok(())
-        })?;
-        Ok(last)
+        cf: String,
+        prefix: Vec<u8>,
+        upper: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
+        Box::pin(async move {
+            Ok(collect_scan(self.scan_prefix(cf, prefix).await?)
+                .await?
+                .into_iter()
+                .take_while(|(key, _)| key <= &upper)
+                .last())
+        })
     }
-    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error>;
-
-    /// Classify the result of one storage-atomic batch.
-    ///
-    /// An ordinary [`Self::write_many`] error does not establish whether a
-    /// backend committed the batch before reporting the error (for example, a
-    /// transport can lose its acknowledgement after the remote durable write).
-    /// The conservative default therefore reports it as
-    /// [`WriteManyOutcome::PossiblyCommitted`]. Implementations may override
-    /// this only when they can prove that a particular failure leaves the
-    /// complete batch unapplied. Callers that have already advanced in-memory
-    /// state must never roll it back or retry after a possibly-committed
-    /// outcome; they must fail closed and reopen from durable storage.
-    fn write_many_outcome(&self, operations: &[WriteOperation<'_>]) -> WriteManyOutcome {
-        match self.write_many(operations) {
-            Ok(()) => WriteManyOutcome::Committed,
-            Err(error) => WriteManyOutcome::PossiblyCommitted(error),
-        }
-    }
+    fn write_many(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, Result<(), Error>>;
 
     /// Return known column-family names when the backend can enumerate them.
     ///
@@ -321,45 +415,157 @@ pub trait OrderedKvStorage {
         None
     }
 
-    fn range(&self, cf: &ColumnFamilyName, start: &Key, end: &Key) -> Result<Vec<KeyValue>, Error> {
-        let mut values = Vec::new();
-        self.scan_range(cf, start, end, &mut |key, value| {
-            values.push((key.to_vec(), value.to_vec()));
-            Ok(())
-        })?;
-        Ok(values)
+    fn range(
+        &self,
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Vec<KeyValue>, Error>> {
+        Box::pin(async move { collect_scan(self.scan_range(cf, start, end).await?).await })
     }
 
-    fn prefix(&self, cf: &ColumnFamilyName, prefix: &Key) -> Result<Vec<KeyValue>, Error> {
-        let mut values = Vec::new();
-        self.scan_prefix(cf, prefix, &mut |key, value| {
-            values.push((key.to_vec(), value.to_vec()));
-            Ok(())
-        })?;
-        Ok(values)
+    fn prefix(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Vec<KeyValue>, Error>> {
+        Box::pin(async move { collect_scan(self.scan_prefix(cf, prefix).await?).await })
     }
 }
 
-/// The durable outcome of one [`OrderedKvStorage::write_many`] batch.
-///
-/// A failed acknowledgement is not necessarily a failed write. This explicit
-/// distinction is the storage contract used by the database commit lifecycle:
-/// only [`Self::DefinitelyNotCommitted`] permits in-process rollback and
-/// retry; [`Self::PossiblyCommitted`] requires fail-stop recovery from a fresh
-/// database instance.
-#[derive(Debug)]
-pub enum WriteManyOutcome {
-    Committed,
-    DefinitelyNotCommitted(Error),
-    PossiblyCommitted(Error),
+impl<S> OrderedKvStorage for Rc<S>
+where
+    S: OrderedKvStorage,
+{
+    fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        self.as_ref().get(cf, key)
+    }
+
+    fn set(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        self.as_ref().set(cf, key, value)
+    }
+
+    fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
+        self.as_ref().delete(cf, key)
+    }
+
+    fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
+        self.as_ref().close()
+    }
+
+    fn set_write_flush_cadence(&self, every: usize) -> StorageFuture<'_, Result<(), Error>> {
+        self.as_ref().set_write_flush_cadence(every)
+    }
+
+    fn flush_write_boundary(&self) -> StorageFuture<'_, Result<(), Error>> {
+        self.as_ref().flush_write_boundary()
+    }
+
+    fn cache_token(&self) -> usize {
+        self.as_ref().cache_token()
+    }
+
+    fn approximate_class_bytes(&self, cf: String) -> StorageFuture<'_, Result<Option<u64>, Error>> {
+        self.as_ref().approximate_class_bytes(cf)
+    }
+
+    fn scan_range(
+        &self,
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        self.as_ref().scan_range(cf, start, end)
+    }
+
+    fn scan_prefix(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        self.as_ref().scan_prefix(cf, prefix)
+    }
+
+    fn scan_prefix_reverse(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        self.as_ref().scan_prefix_reverse(cf, prefix)
+    }
+
+    fn last_with_prefix(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
+        self.as_ref().last_with_prefix(cf, prefix)
+    }
+
+    fn write_many(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        self.as_ref().write_many(operations)
+    }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        self.as_ref().column_family_names()
+    }
 }
 
-impl WriteManyOutcome {
-    pub fn into_result(self) -> Result<(), Error> {
-        match self {
-            Self::Committed => Ok(()),
-            Self::DefinitelyNotCommitted(error) | Self::PossiblyCommitted(error) => Err(error),
-        }
+impl<S> OrderedKvStorage for &S
+where
+    S: OrderedKvStorage,
+{
+    fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        S::get(*self, cf, key)
+    }
+
+    fn set(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        S::set(*self, cf, key, value)
+    }
+
+    fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
+        S::delete(*self, cf, key)
+    }
+
+    fn scan_range(
+        &self,
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        S::scan_range(*self, cf, start, end)
+    }
+
+    fn scan_prefix(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        S::scan_prefix(*self, cf, prefix)
+    }
+
+    fn write_many(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        S::write_many(*self, operations)
+    }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        S::column_family_names(*self)
     }
 }
 
@@ -463,6 +669,33 @@ struct PhysicalCf<'a> {
     logical_prefix: Option<&'a str>,
 }
 
+struct MappedStorageCursor<'a> {
+    inner: StorageScan<'a>,
+    strip_len: usize,
+}
+
+impl StorageCursor for MappedStorageCursor<'_> {
+    fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>> {
+        Box::pin(async move {
+            let Some(batch) = self.inner.next_batch().await? else {
+                return Ok(None);
+            };
+            batch
+                .into_iter()
+                .map(|(key, value)| {
+                    let logical = key.get(self.strip_len..).ok_or_else(|| {
+                        Error::InvalidStorageKey(
+                            "physical layout key shorter than logical prefix".to_owned(),
+                        )
+                    })?;
+                    Ok((logical.to_vec(), value))
+                })
+                .collect::<Result<Vec<_>, Error>>()
+                .map(Some)
+        })
+    }
+}
+
 fn is_jazz_history_table(name: &str) -> bool {
     name.starts_with("jazz_") && name.ends_with("_history")
 }
@@ -510,51 +743,61 @@ fn jazz_physical_class(logical_cf: &str) -> Option<&'static str> {
 
 /// Storage view that keeps logical CF names at the database boundary while
 /// reading and writing a physical class-CF layout below it.
-pub struct LayoutStorage<S> {
-    inner: S,
+pub struct LayoutStorage {
+    inner: BoxedStorage,
     layout: StorageLayout,
 }
 
-impl<S> LayoutStorage<S>
-where
-    S: OrderedKvStorage,
-{
-    pub fn new(inner: S, layout: StorageLayout) -> Result<Self, Error> {
+impl LayoutStorage {
+    pub async fn new<S>(inner: S, layout: StorageLayout) -> Result<Self, Error>
+    where
+        S: ReopenableStorage + 'static,
+    {
+        Self::new_boxed(BoxedStorage::new(inner), layout).await
+    }
+
+    pub async fn new_boxed(inner: BoxedStorage, layout: StorageLayout) -> Result<Self, Error> {
         let storage = Self { inner, layout };
-        storage.ensure_layout_marker()?;
+        storage.ensure_layout_marker().await?;
         Ok(storage)
     }
 
-    pub fn into_inner(self) -> S {
+    pub fn into_inner(self) -> BoxedStorage {
         self.inner
     }
 
-    fn ensure_layout_marker(&self) -> Result<(), Error> {
+    async fn ensure_layout_marker(&self) -> Result<(), Error> {
         if !self.layout.validates_marker() {
             return Ok(());
         }
 
-        match self.inner.get(CLASS_META_CF, CLASS_LAYOUT_MARKER_KEY)? {
+        match self
+            .inner
+            .get(CLASS_META_CF.to_owned(), CLASS_LAYOUT_MARKER_KEY.to_vec())
+            .await?
+        {
             Some(value) if value == CLASS_LAYOUT_MARKER_VALUE => Ok(()),
             Some(_) => Err(Error::InvalidStorageLayout(
                 "unsupported class-CF storage layout marker".to_owned(),
             )),
             None => {
-                if self.has_class_data_or_legacy_layout()? {
+                if self.has_class_data_or_legacy_layout().await? {
                     return Err(Error::InvalidStorageLayout(
                         "missing class-CF storage layout marker in non-empty store".to_owned(),
                     ));
                 }
-                self.inner.set(
-                    CLASS_META_CF,
-                    CLASS_LAYOUT_MARKER_KEY,
-                    CLASS_LAYOUT_MARKER_VALUE,
-                )
+                self.inner
+                    .set(
+                        CLASS_META_CF.to_owned(),
+                        CLASS_LAYOUT_MARKER_KEY.to_vec(),
+                        CLASS_LAYOUT_MARKER_VALUE.to_vec(),
+                    )
+                    .await
             }
         }
     }
 
-    fn has_class_data_or_legacy_layout(&self) -> Result<bool, Error> {
+    async fn has_class_data_or_legacy_layout(&self) -> Result<bool, Error> {
         if let Some(names) = self.inner.column_family_names()
             && names.iter().any(|name| self.layout.mapped_legacy_cf(name))
         {
@@ -569,7 +812,7 @@ where
             CLASS_INDICES_CF,
             CLASS_META_CF,
         ] {
-            match self.inner.last_with_prefix(cf, b"") {
+            match self.inner.last_with_prefix(cf.to_owned(), Vec::new()).await {
                 Ok(Some(_)) => return Ok(true),
                 Ok(None) | Err(Error::ColumnFamilyNotFound(_)) => {}
                 Err(error) => return Err(error),
@@ -603,6 +846,7 @@ where
         (mapping.physical_cf.to_owned(), physical_prefix, strip_len)
     }
 
+    #[cfg(any())]
     fn strip_key<'a>(&self, key: &'a [u8], strip_len: usize) -> Result<&'a [u8], Error> {
         key.get(strip_len..).ok_or_else(|| {
             Error::InvalidStorageKey("physical layout key shorter than logical prefix".to_owned())
@@ -610,211 +854,188 @@ where
     }
 }
 
-impl<S> OrderedKvStorage for LayoutStorage<S>
-where
-    S: OrderedKvStorage,
-{
-    fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
-        let (physical_cf, physical_key) = self.physical_key(cf, key);
-        self.inner.get(&physical_cf, &physical_key)
+impl OrderedKvStorage for LayoutStorage {
+    fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        let (physical_cf, physical_key) = self.physical_key(&cf, &key);
+        self.inner.get(physical_cf, physical_key)
     }
 
-    fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
-        let (physical_cf, physical_key) = self.physical_key(cf, key);
-        self.inner.set(&physical_cf, &physical_key, value)
+    fn set(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        let (physical_cf, physical_key) = self.physical_key(&cf, &key);
+        self.inner.set(physical_cf, physical_key, value)
     }
 
-    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
-        let (physical_cf, physical_key) = self.physical_key(cf, key);
-        self.inner.delete(&physical_cf, &physical_key)
+    fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
+        let (physical_cf, physical_key) = self.physical_key(&cf, &key);
+        self.inner.delete(physical_cf, physical_key)
     }
 
-    fn close(&self) -> Result<(), Error> {
+    fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
         self.inner.close()
     }
 
-    fn set_write_flush_cadence(&self, every: usize) -> Result<(), Error> {
+    fn set_write_flush_cadence(&self, every: usize) -> StorageFuture<'_, Result<(), Error>> {
         self.inner.set_write_flush_cadence(every)
     }
 
-    fn flush_write_boundary(&self) -> Result<(), Error> {
+    fn flush_write_boundary(&self) -> StorageFuture<'_, Result<(), Error>> {
         self.inner.flush_write_boundary()
     }
 
     fn scan_range(
         &self,
-        cf: &ColumnFamilyName,
-        start: &Key,
-        end: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        let (physical_cf, physical_start, strip_len) = self.physical_prefix(cf, start);
-        let (_, physical_end, _) = self.physical_prefix(cf, end);
-        self.inner.scan_range(
-            &physical_cf,
-            &physical_start,
-            &physical_end,
-            &mut |key, value| visit(self.strip_key(key, strip_len)?, value),
-        )
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        let (physical_cf, physical_start, strip_len) = self.physical_prefix(&cf, &start);
+        let (_, physical_end, _) = self.physical_prefix(&cf, &end);
+        Box::pin(async move {
+            let inner = self
+                .inner
+                .scan_range(physical_cf, physical_start, physical_end)
+                .await?;
+            Ok(Box::new(MappedStorageCursor { inner, strip_len }) as StorageScan<'_>)
+        })
     }
 
     fn scan_prefix(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(cf, prefix);
-        self.inner
-            .scan_prefix(&physical_cf, &physical_prefix, &mut |key, value| {
-                visit(self.strip_key(key, strip_len)?, value)
-            })
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix);
+        Box::pin(async move {
+            let inner = self.inner.scan_prefix(physical_cf, physical_prefix).await?;
+            Ok(Box::new(MappedStorageCursor { inner, strip_len }) as StorageScan<'_>)
+        })
     }
 
     fn scan_prefix_reverse(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(cf, prefix);
-        self.inner
-            .scan_prefix_reverse(&physical_cf, &physical_prefix, &mut |key, value| {
-                visit(self.strip_key(key, strip_len)?, value)
-            })
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix);
+        Box::pin(async move {
+            let inner = self
+                .inner
+                .scan_prefix_reverse(physical_cf, physical_prefix)
+                .await?;
+            Ok(Box::new(MappedStorageCursor { inner, strip_len }) as StorageScan<'_>)
+        })
     }
 
     fn last_with_prefix(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-    ) -> Result<Option<KeyValue>, Error> {
-        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(cf, prefix);
-        Ok(self
-            .inner
-            .last_with_prefix(&physical_cf, &physical_prefix)?
-            .map(|(key, value)| (key[strip_len..].to_vec(), value)))
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
+        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix);
+        Box::pin(async move {
+            Ok(self
+                .inner
+                .last_with_prefix(physical_cf, physical_prefix)
+                .await?
+                .map(|(key, value)| (key[strip_len..].to_vec(), value)))
+        })
     }
 
     fn last_with_prefix_before_or_at(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        upper: &Key,
-    ) -> Result<Option<KeyValue>, Error> {
-        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(cf, prefix);
-        let (_, physical_upper, _) = self.physical_prefix(cf, upper);
-        Ok(self
-            .inner
-            .last_with_prefix_before_or_at(&physical_cf, &physical_prefix, &physical_upper)?
-            .map(|(key, value)| (key[strip_len..].to_vec(), value)))
+        cf: String,
+        prefix: Vec<u8>,
+        upper: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
+        let (physical_cf, physical_prefix, strip_len) = self.physical_prefix(&cf, &prefix);
+        let (_, physical_upper, _) = self.physical_prefix(&cf, &upper);
+        Box::pin(async move {
+            Ok(self
+                .inner
+                .last_with_prefix_before_or_at(physical_cf, physical_prefix, physical_upper)
+                .await?
+                .map(|(key, value)| (key[strip_len..].to_vec(), value)))
+        })
     }
 
-    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
+    fn write_many(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
         let translated = operations
-            .iter()
+            .into_iter()
             .map(|operation| match operation {
-                WriteOperation::Set { cf, key, value } => {
-                    let (physical_cf, physical_key) = self.physical_key(cf, key);
+                OwnedWriteOperation::Set { cf, key, value } => {
+                    let (physical_cf, physical_key) = self.physical_key(&cf, &key);
                     OwnedWriteOperation::Set {
                         cf: physical_cf,
                         key: physical_key,
-                        value: (*value).to_vec(),
+                        value,
                     }
                 }
-                WriteOperation::Delete { cf, key } => {
-                    let (physical_cf, physical_key) = self.physical_key(cf, key);
+                OwnedWriteOperation::Delete { cf, key } => {
+                    let (physical_cf, physical_key) = self.physical_key(&cf, &key);
                     OwnedWriteOperation::Delete {
                         cf: physical_cf,
                         key: physical_key,
                     }
                 }
-                WriteOperation::Delta { cf, key, delta } => {
-                    let (physical_cf, physical_key) = self.physical_key(cf, key);
+                OwnedWriteOperation::Delta { cf, key, delta } => {
+                    let (physical_cf, physical_key) = self.physical_key(&cf, &key);
                     OwnedWriteOperation::Delta {
                         cf: physical_cf,
                         key: physical_key,
-                        delta: (*delta).clone(),
+                        delta,
                     }
                 }
             })
             .collect::<Vec<_>>();
-        let borrowed = translated
-            .iter()
-            .map(OwnedWriteOperation::as_write_operation)
-            .collect::<Vec<_>>();
-        self.inner.write_many(&borrowed)
-    }
-
-    fn write_many_outcome(&self, operations: &[WriteOperation<'_>]) -> WriteManyOutcome {
-        let translated = operations
-            .iter()
-            .map(|operation| match operation {
-                WriteOperation::Set { cf, key, value } => {
-                    let (physical_cf, physical_key) = self.physical_key(cf, key);
-                    OwnedWriteOperation::Set {
-                        cf: physical_cf,
-                        key: physical_key,
-                        value: (*value).to_vec(),
-                    }
-                }
-                WriteOperation::Delete { cf, key } => {
-                    let (physical_cf, physical_key) = self.physical_key(cf, key);
-                    OwnedWriteOperation::Delete {
-                        cf: physical_cf,
-                        key: physical_key,
-                    }
-                }
-                WriteOperation::Delta { cf, key, delta } => {
-                    let (physical_cf, physical_key) = self.physical_key(cf, key);
-                    OwnedWriteOperation::Delta {
-                        cf: physical_cf,
-                        key: physical_key,
-                        delta: (*delta).clone(),
-                    }
-                }
-            })
-            .collect::<Vec<_>>();
-        let borrowed = translated
-            .iter()
-            .map(OwnedWriteOperation::as_write_operation)
-            .collect::<Vec<_>>();
-        self.inner.write_many_outcome(&borrowed)
+        self.inner.write_many(translated)
     }
 
     fn column_family_names(&self) -> Option<Vec<String>> {
         self.inner.column_family_names()
     }
 
-    fn approximate_class_bytes(&self, cf: &ColumnFamilyName) -> Result<Option<u64>, Error> {
-        let physical_cf = self.layout.map_cf(cf).physical_cf.to_owned();
-        self.inner.approximate_class_bytes(&physical_cf)
+    fn approximate_class_bytes(&self, cf: String) -> StorageFuture<'_, Result<Option<u64>, Error>> {
+        let physical_cf = self.layout.map_cf(&cf).physical_cf.to_owned();
+        self.inner.approximate_class_bytes(physical_cf)
     }
 }
 
 /// Storage that can be reconstructed with an expanded table/column-family set.
 pub trait ReopenableStorage: OrderedKvStorage + Sized {
-    fn reopen(self, column_families: &[&str]) -> Result<Self, Error>;
+    fn reopen(self, column_families: Vec<String>) -> StorageFuture<'static, Result<Self, Error>>
+    where
+        Self: 'static;
 }
 
 /// Object-safe form of [`ReopenableStorage`] used at runtime adapter
 /// boundaries.
-pub trait ErasedReopenableStorage: OrderedKvStorage + Send {
+pub trait ErasedReopenableStorage: OrderedKvStorage {
     fn reopen_boxed(
         self: Box<Self>,
-        column_families: &[&str],
-    ) -> Result<Box<dyn ErasedReopenableStorage>, Error>;
+        column_families: Vec<String>,
+    ) -> StorageFuture<'static, Result<Box<dyn ErasedReopenableStorage>, Error>>;
 }
 
 impl<S> ErasedReopenableStorage for S
 where
-    S: ReopenableStorage + Send + 'static,
+    S: ReopenableStorage + 'static,
 {
     fn reopen_boxed(
         self: Box<Self>,
-        column_families: &[&str],
-    ) -> Result<Box<dyn ErasedReopenableStorage>, Error> {
-        Ok(Box::new((*self).reopen(column_families)?))
+        column_families: Vec<String>,
+    ) -> StorageFuture<'static, Result<Box<dyn ErasedReopenableStorage>, Error>> {
+        Box::pin(async move {
+            Ok(Box::new((*self).reopen(column_families).await?)
+                as Box<dyn ErasedReopenableStorage>)
+        })
     }
 }
 
@@ -826,7 +1047,7 @@ pub struct BoxedStorage {
 impl BoxedStorage {
     pub fn new<S>(storage: S) -> Self
     where
-        S: ReopenableStorage + Send + 'static,
+        S: ReopenableStorage + 'static,
     {
         Self {
             inner: Box::new(storage),
@@ -835,85 +1056,86 @@ impl BoxedStorage {
 }
 
 impl OrderedKvStorage for BoxedStorage {
-    fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
+    fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
         self.inner.get(cf, key)
     }
 
-    fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
+    fn set(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
         self.inner.set(cf, key, value)
     }
 
-    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
+    fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
         self.inner.delete(cf, key)
     }
 
-    fn close(&self) -> Result<(), Error> {
+    fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
         self.inner.close()
     }
 
-    fn set_write_flush_cadence(&self, every: usize) -> Result<(), Error> {
+    fn set_write_flush_cadence(&self, every: usize) -> StorageFuture<'_, Result<(), Error>> {
         self.inner.set_write_flush_cadence(every)
     }
 
-    fn flush_write_boundary(&self) -> Result<(), Error> {
+    fn flush_write_boundary(&self) -> StorageFuture<'_, Result<(), Error>> {
         self.inner.flush_write_boundary()
     }
 
-    fn approximate_class_bytes(&self, cf: &ColumnFamilyName) -> Result<Option<u64>, Error> {
+    fn approximate_class_bytes(&self, cf: String) -> StorageFuture<'_, Result<Option<u64>, Error>> {
         self.inner.approximate_class_bytes(cf)
     }
 
     fn scan_range(
         &self,
-        cf: &ColumnFamilyName,
-        start: &Key,
-        end: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        self.inner.scan_range(cf, start, end, visit)
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        self.inner.scan_range(cf, start, end)
     }
 
     fn scan_prefix(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        self.inner.scan_prefix(cf, prefix, visit)
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        self.inner.scan_prefix(cf, prefix)
     }
 
     fn scan_prefix_reverse(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        self.inner.scan_prefix_reverse(cf, prefix, visit)
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        self.inner.scan_prefix_reverse(cf, prefix)
     }
 
     fn last_with_prefix(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-    ) -> Result<Option<KeyValue>, Error> {
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
         self.inner.last_with_prefix(cf, prefix)
     }
 
     fn last_with_prefix_before_or_at(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        upper: &Key,
-    ) -> Result<Option<KeyValue>, Error> {
+        cf: String,
+        prefix: Vec<u8>,
+        upper: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
         self.inner.last_with_prefix_before_or_at(cf, prefix, upper)
     }
 
-    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
+    fn write_many(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
         self.inner.write_many(operations)
-    }
-
-    fn write_many_outcome(&self, operations: &[WriteOperation<'_>]) -> WriteManyOutcome {
-        self.inner.write_many_outcome(operations)
     }
 
     fn column_family_names(&self) -> Option<Vec<String>> {
@@ -922,21 +1144,26 @@ impl OrderedKvStorage for BoxedStorage {
 }
 
 impl ReopenableStorage for BoxedStorage {
-    fn reopen(self, column_families: &[&str]) -> Result<Self, Error> {
-        Ok(Self {
-            inner: self.inner.reopen_boxed(column_families)?,
+    fn reopen(self, column_families: Vec<String>) -> StorageFuture<'static, Result<Self, Error>> {
+        Box::pin(async move {
+            Ok(Self {
+                inner: self.inner.reopen_boxed(column_families).await?,
+            })
         })
     }
 }
 
 /// Opens a persistent ordered-KV backend at an exact target-owned path.
 pub trait StorageFactory: std::fmt::Debug + Send + Sync {
-    fn open(&self, path: &std::path::Path, column_families: &[&str])
-    -> Result<BoxedStorage, Error>;
+    fn open(
+        &self,
+        path: std::path::PathBuf,
+        column_families: Vec<String>,
+    ) -> StorageFuture<'_, Result<BoxedStorage, Error>>;
 }
 
 /// Typed view over one storage column family.
-pub struct RecordStore<'a, S> {
+pub struct RecordStore<'a, S: ?Sized> {
     storage: &'a S,
     /// One table or durable index column family.
     column_family: &'a str,
@@ -944,7 +1171,7 @@ pub struct RecordStore<'a, S> {
     descriptor: &'a RecordDescriptor,
 }
 
-impl<'a, S> RecordStore<'a, S>
+impl<'a, S: ?Sized> RecordStore<'a, S>
 where
     S: OrderedKvStorage,
 {
@@ -964,25 +1191,32 @@ where
         self.column_family
     }
 
-    pub fn get_raw(&self, key: &Key) -> Result<Option<Vec<u8>>, Error> {
-        self.storage.get(self.column_family, key)
+    pub async fn get_raw(&self, key: &Key) -> Result<Option<Vec<u8>>, Error> {
+        self.storage
+            .get(self.column_family.to_owned(), key.to_vec())
+            .await
     }
 
-    pub fn get(&self, key: &Key) -> Result<Option<Record<'_>>, Error> {
+    pub async fn get(&self, key: &Key) -> Result<Option<Record<'_>>, Error> {
         self.get_raw(key)
+            .await
             .map(|record| record.map(|record| self.descriptor.bind_owned(record)))
     }
 
-    pub fn range(&self, start: &Key, end: &Key) -> Result<Vec<KeyValue>, Error> {
-        self.storage.range(self.column_family, start, end)
+    pub async fn range(&self, start: &Key, end: &Key) -> Result<Vec<KeyValue>, Error> {
+        self.storage
+            .range(self.column_family.to_owned(), start.to_vec(), end.to_vec())
+            .await
     }
 
-    pub fn prefix(&self, prefix: &Key) -> Result<Vec<KeyValue>, Error> {
-        self.storage.prefix(self.column_family, prefix)
+    pub async fn prefix(&self, prefix: &Key) -> Result<Vec<KeyValue>, Error> {
+        self.storage
+            .prefix(self.column_family.to_owned(), prefix.to_vec())
+            .await
     }
 
-    pub fn range_reverse(&self, start: &Key, end: &Key) -> Result<Vec<KeyValue>, Error> {
-        let mut records = self.range(start, end)?;
+    pub async fn range_reverse(&self, start: &Key, end: &Key) -> Result<Vec<KeyValue>, Error> {
+        let mut records = self.range(start, end).await?;
         records.reverse();
         Ok(records)
     }
@@ -991,51 +1225,71 @@ where
         &self,
         start: &Key,
         end: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         self.storage
-            .scan_range(self.column_family, start, end, visit)
+            .scan_range(self.column_family.to_owned(), start.to_vec(), end.to_vec())
     }
 
-    pub fn scan_prefix(&self, prefix: &Key, visit: &mut ScanVisitor<'_>) -> Result<(), Error> {
-        self.storage.scan_prefix(self.column_family, prefix, visit)
+    pub fn scan_prefix(&self, prefix: &Key) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        self.storage
+            .scan_prefix(self.column_family.to_owned(), prefix.to_vec())
     }
 
     pub fn scan_prefix_reverse(
         &self,
         prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         self.storage
-            .scan_prefix_reverse(self.column_family, prefix, visit)
+            .scan_prefix_reverse(self.column_family.to_owned(), prefix.to_vec())
     }
 
-    pub fn last_with_prefix(&self, prefix: &Key) -> Result<Option<KeyValue>, Error> {
-        self.storage.last_with_prefix(self.column_family, prefix)
+    pub async fn last_with_prefix(&self, prefix: &Key) -> Result<Option<KeyValue>, Error> {
+        self.storage
+            .last_with_prefix(self.column_family.to_owned(), prefix.to_vec())
+            .await
     }
 
-    pub fn last_with_prefix_before_or_at(
+    pub async fn last_with_prefix_before_or_at(
         &self,
         prefix: &Key,
         upper: &Key,
     ) -> Result<Option<KeyValue>, Error> {
         self.storage
-            .last_with_prefix_before_or_at(self.column_family, prefix, upper)
+            .last_with_prefix_before_or_at(
+                self.column_family.to_owned(),
+                prefix.to_vec(),
+                upper.to_vec(),
+            )
+            .await
     }
 
-    pub fn set<'op>(&'op self, key: &'op Key, record: &'op [u8]) -> WriteOperation<'op> {
-        WriteOperation::set(self.column_family, key, record)
+    pub fn set(&self, key: &Key, record: &[u8]) -> OwnedWriteOperation {
+        OwnedWriteOperation::Set {
+            cf: self.column_family.to_owned(),
+            key: key.to_vec(),
+            value: record.to_vec(),
+        }
     }
 
-    pub fn delete<'op>(&'op self, key: &'op Key) -> WriteOperation<'op> {
-        WriteOperation::delete(self.column_family, key)
+    pub fn delete(&self, key: &Key) -> OwnedWriteOperation {
+        OwnedWriteOperation::Delete {
+            cf: self.column_family.to_owned(),
+            key: key.to_vec(),
+        }
     }
 
-    pub fn delta<'op>(&'op self, key: &'op Key, delta: &'op StorageDelta) -> WriteOperation<'op> {
-        WriteOperation::delta(self.column_family, key, delta)
+    pub fn delta(&self, key: &Key, delta: &StorageDelta) -> OwnedWriteOperation {
+        OwnedWriteOperation::Delta {
+            cf: self.column_family.to_owned(),
+            key: key.to_vec(),
+            delta: delta.clone(),
+        }
     }
 
-    pub fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
+    pub fn write_many(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
         self.storage.write_many(operations)
     }
 }
@@ -1079,6 +1333,40 @@ pub enum OwnedWriteOperation {
 }
 
 impl OwnedWriteOperation {
+    #[cfg(test)]
+    pub(crate) fn set(
+        cf: impl Into<String>,
+        key: impl Into<Vec<u8>>,
+        value: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self::Set {
+            cf: cf.into(),
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn delete(cf: impl Into<String>, key: impl Into<Vec<u8>>) -> Self {
+        Self::Delete {
+            cf: cf.into(),
+            key: key.into(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn delta(
+        cf: impl Into<String>,
+        key: impl Into<Vec<u8>>,
+        delta: StorageDelta,
+    ) -> Self {
+        Self::Delta {
+            cf: cf.into(),
+            key: key.into(),
+            delta,
+        }
+    }
+
     pub fn as_write_operation(&self) -> WriteOperation<'_> {
         match self {
             Self::Set { cf, key, value } => WriteOperation::set(cf, key, value),
@@ -1100,9 +1388,34 @@ impl OwnedWriteOperation {
     }
 }
 
+enum OverlayHandle<'a, T> {
+    Borrowed(&'a T),
+    Owned(Rc<T>),
+}
+
+impl<T> Clone for OverlayHandle<'_, T> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Borrowed(value) => Self::Borrowed(value),
+            Self::Owned(value) => Self::Owned(Rc::clone(value)),
+        }
+    }
+}
+
+impl<T> std::ops::Deref for OverlayHandle<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Borrowed(value) => value,
+            Self::Owned(value) => value,
+        }
+    }
+}
+
 pub struct StagedWriteOverlay<'a, S> {
-    base: &'a S,
-    staged_writes: &'a RefCell<StagedWriteState>,
+    base: OverlayHandle<'a, S>,
+    staged_writes: OverlayHandle<'a, RefCell<StagedWriteState>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1209,17 +1522,9 @@ where
         }
     }
 
-    pub fn commit(self) -> Result<(), Error> {
-        self.commit_outcome().into_result()
-    }
-
-    pub fn commit_outcome(self) -> WriteManyOutcome {
+    pub async fn commit(self) -> Result<(), Error> {
         let operations = self.staged_writes.into_inner().into_operations();
-        let borrowed = operations
-            .iter()
-            .map(OwnedWriteOperation::as_write_operation)
-            .collect::<Vec<_>>();
-        self.base.write_many_outcome(&borrowed)
+        self.base.write_many(operations).await
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1234,6 +1539,7 @@ where
     }
 }
 
+#[cfg(any())]
 impl<S> OrderedKvStorage for StorageTransaction<'_, S>
 where
     S: OrderedKvStorage,
@@ -1313,8 +1619,21 @@ where
 impl<'a, S> StagedWriteOverlay<'a, S> {
     pub(crate) fn new(base: &'a S, staged_writes: &'a RefCell<StagedWriteState>) -> Self {
         Self {
-            base,
-            staged_writes,
+            base: OverlayHandle::Borrowed(base),
+            staged_writes: OverlayHandle::Borrowed(staged_writes),
+        }
+    }
+
+    pub(crate) fn new_owned(
+        base: Rc<S>,
+        staged_writes: Rc<RefCell<StagedWriteState>>,
+    ) -> StagedWriteOverlay<'static, S>
+    where
+        S: 'static,
+    {
+        StagedWriteOverlay {
+            base: OverlayHandle::Owned(base),
+            staged_writes: OverlayHandle::Owned(staged_writes),
         }
     }
 
@@ -1326,8 +1645,368 @@ impl<'a, S> StagedWriteOverlay<'a, S> {
         let state = std::mem::take(&mut *self.staged_writes.borrow_mut());
         target.extend(state.into_operations());
     }
+
+    fn scan_range_from_parts(
+        &self,
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> StorageFuture<'a, Result<StorageScan<'a>, Error>>
+    where
+        S: OrderedKvStorage,
+    {
+        let operations = snapshot_staged_operations(&self.staged_writes, |operation| {
+            operation.cf() == cf
+                && operation.key() >= start.as_slice()
+                && operation.key() < end.as_slice()
+        });
+        let base = self.base.clone();
+        Box::pin(async move {
+            let mut values = collect_scan(
+                base.scan_range(cf.clone(), start.clone(), end.clone())
+                    .await?,
+            )
+            .await?;
+            let staged = RefCell::new(StagedWriteState::from(operations));
+            overlay_values(
+                &mut values,
+                &cf,
+                |key| key >= start.as_slice() && key < end.as_slice(),
+                &staged,
+            )?;
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'a>)
+        })
+    }
+
+    fn scan_prefix_from_parts(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+        reverse: bool,
+    ) -> StorageFuture<'a, Result<StorageScan<'a>, Error>>
+    where
+        S: OrderedKvStorage,
+    {
+        let operations = snapshot_staged_operations(&self.staged_writes, |operation| {
+            operation.cf() == cf && operation.key().starts_with(&prefix)
+        });
+        let base = self.base.clone();
+        Box::pin(async move {
+            let mut values =
+                collect_scan(base.scan_prefix(cf.clone(), prefix.clone()).await?).await?;
+            let staged = RefCell::new(StagedWriteState::from(operations));
+            overlay_values(&mut values, &cf, |key| key.starts_with(&prefix), &staged)?;
+            if reverse {
+                values.reverse();
+            }
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'a>)
+        })
+    }
 }
 
+fn overlay_point_value(
+    mut value: Option<Value>,
+    operations: &[OwnedWriteOperation],
+    cf: &str,
+    key: &[u8],
+) -> Result<Option<Value>, Error> {
+    for operation in operations {
+        if operation.cf() != cf || operation.key() != key {
+            continue;
+        }
+        match operation {
+            OwnedWriteOperation::Set { value: set, .. } => value = Some(set.clone()),
+            OwnedWriteOperation::Delete { .. } => value = None,
+            OwnedWriteOperation::Delta { delta, .. } => {
+                value = Some(apply_storage_delta(value.as_deref(), &delta.encode()?)?);
+            }
+        }
+    }
+    Ok(value)
+}
+
+fn snapshot_staged_operations(
+    staged_writes: &RefCell<StagedWriteState>,
+    include: impl Fn(&OwnedWriteOperation) -> bool,
+) -> Vec<OwnedWriteOperation> {
+    staged_writes
+        .borrow()
+        .operations
+        .iter()
+        .filter(|operation| include(operation))
+        .cloned()
+        .collect()
+}
+
+impl<S> OrderedKvStorage for StagedWriteOverlay<'_, S>
+where
+    S: OrderedKvStorage,
+{
+    fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        let mut staged_writes = self.staged_writes.borrow_mut();
+        if staged_writes.is_empty() {
+            drop(staged_writes);
+            return self.base.get(cf, key);
+        }
+
+        let Some(index) = staged_writes.latest_index(&cf, &key) else {
+            drop(staged_writes);
+            return self.base.get(cf, key);
+        };
+        match &staged_writes.operations[index] {
+            OwnedWriteOperation::Set { value, .. } => {
+                let value = value.clone();
+                return Box::pin(async move { Ok(Some(value)) });
+            }
+            OwnedWriteOperation::Delete { .. } => {
+                return Box::pin(async { Ok(None) });
+            }
+            OwnedWriteOperation::Delta { .. } => {}
+        }
+
+        let operations = staged_writes
+            .operations
+            .iter()
+            .filter(|operation| operation.cf() == cf && operation.key() == key)
+            .cloned()
+            .collect::<Vec<_>>();
+        drop(staged_writes);
+
+        Box::pin(async move {
+            let base = self.base.get(cf.clone(), key.clone()).await?;
+            overlay_point_value(base, &operations, &cf, &key)
+        })
+    }
+
+    fn set(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        self.stage(OwnedWriteOperation::Set { cf, key, value });
+        Box::pin(async { Ok(()) })
+    }
+
+    fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
+        self.stage(OwnedWriteOperation::Delete { cf, key });
+        Box::pin(async { Ok(()) })
+    }
+
+    fn scan_range(
+        &self,
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        self.scan_range_from_parts(cf, start, end)
+    }
+
+    fn scan_prefix(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        self.scan_prefix_from_parts(cf, prefix, false)
+    }
+
+    fn scan_prefix_reverse(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        self.scan_prefix_from_parts(cf, prefix, true)
+    }
+
+    fn last_with_prefix(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
+        let operations = snapshot_staged_operations(&self.staged_writes, |operation| {
+            operation.cf() == cf && operation.key().starts_with(&prefix)
+        });
+        Box::pin(async move {
+            let staged = RefCell::new(StagedWriteState::from(operations));
+            let needs_full_merge = staged.borrow().operations.iter().any(|operation| {
+                operation.cf() == cf
+                    && operation.key().starts_with(&prefix)
+                    && matches!(
+                        operation,
+                        OwnedWriteOperation::Delete { .. } | OwnedWriteOperation::Delta { .. }
+                    )
+            });
+
+            if !needs_full_merge {
+                let largest_staged_set = staged_prefix_overlay_desc(&cf, &prefix, &staged)
+                    .into_iter()
+                    .find_map(|(key, value)| value.map(|value| (key, value)));
+                return match (
+                    self.base
+                        .last_with_prefix(cf.clone(), prefix.clone())
+                        .await?,
+                    largest_staged_set,
+                ) {
+                    (Some(base), Some(staged)) if staged.0 >= base.0 => Ok(Some(staged)),
+                    (Some(base), _) => Ok(Some(base)),
+                    (None, staged) => Ok(staged),
+                };
+            }
+
+            let mut values =
+                collect_scan(self.base.scan_prefix(cf.clone(), prefix.clone()).await?).await?;
+            overlay_values(&mut values, &cf, |key| key.starts_with(&prefix), &staged)?;
+            Ok(values.pop())
+        })
+    }
+
+    fn last_with_prefix_before_or_at(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+        upper: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
+        let operations = snapshot_staged_operations(&self.staged_writes, |operation| {
+            operation.cf() == cf
+                && operation.key().starts_with(&prefix)
+                && operation.key() <= upper.as_slice()
+        });
+        Box::pin(async move {
+            let staged = RefCell::new(StagedWriteState::from(operations));
+            let needs_full_merge = staged.borrow().operations.iter().any(|operation| {
+                operation.cf() == cf
+                    && operation.key().starts_with(&prefix)
+                    && operation.key() <= upper.as_slice()
+                    && matches!(
+                        operation,
+                        OwnedWriteOperation::Delete { .. } | OwnedWriteOperation::Delta { .. }
+                    )
+            });
+
+            if !needs_full_merge {
+                let largest_staged_set =
+                    staged_prefix_overlay_desc_before_or_at(&cf, &prefix, &upper, &staged)
+                        .into_iter()
+                        .find_map(|(key, value)| value.map(|value| (key, value)));
+                return match (
+                    self.base
+                        .last_with_prefix_before_or_at(cf.clone(), prefix.clone(), upper.clone())
+                        .await?,
+                    largest_staged_set,
+                ) {
+                    (Some(base), Some(staged)) if staged.0 >= base.0 => Ok(Some(staged)),
+                    (Some(base), _) => Ok(Some(base)),
+                    (None, staged) => Ok(staged),
+                };
+            }
+
+            let mut values =
+                collect_scan(self.base.scan_prefix(cf.clone(), prefix.clone()).await?).await?;
+            values.retain(|(key, _)| key <= &upper);
+            overlay_values(
+                &mut values,
+                &cf,
+                |key| key.starts_with(&prefix) && key <= upper.as_slice(),
+                &staged,
+            )?;
+            Ok(values.pop())
+        })
+    }
+
+    fn write_many(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        self.staged_writes.borrow_mut().extend(operations);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn approximate_class_bytes(&self, cf: String) -> StorageFuture<'_, Result<Option<u64>, Error>> {
+        self.base.approximate_class_bytes(cf)
+    }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        self.base.column_family_names()
+    }
+}
+
+impl<S> OrderedKvStorage for StorageTransaction<'_, S>
+where
+    S: OrderedKvStorage,
+{
+    fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        Box::pin(async move {
+            StagedWriteOverlay::new(self.base, &self.staged_writes)
+                .get(cf, key)
+                .await
+        })
+    }
+
+    fn set(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        self.staged_writes
+            .borrow_mut()
+            .stage(OwnedWriteOperation::Set { cf, key, value });
+        Box::pin(async { Ok(()) })
+    }
+
+    fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
+        self.staged_writes
+            .borrow_mut()
+            .stage(OwnedWriteOperation::Delete { cf, key });
+        Box::pin(async { Ok(()) })
+    }
+
+    fn scan_range(
+        &self,
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        StagedWriteOverlay::new(self.base, &self.staged_writes)
+            .scan_range_from_parts(cf, start, end)
+    }
+
+    fn scan_prefix(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        StagedWriteOverlay::new(self.base, &self.staged_writes)
+            .scan_prefix_from_parts(cf, prefix, false)
+    }
+
+    fn scan_prefix_reverse(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        StagedWriteOverlay::new(self.base, &self.staged_writes)
+            .scan_prefix_from_parts(cf, prefix, true)
+    }
+
+    fn write_many(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        self.staged_writes.borrow_mut().extend(operations);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn approximate_class_bytes(&self, cf: String) -> StorageFuture<'_, Result<Option<u64>, Error>> {
+        self.base.approximate_class_bytes(cf)
+    }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        self.base.column_family_names()
+    }
+}
+
+#[cfg(any())]
 impl<S> OrderedKvStorage for StagedWriteOverlay<'_, S>
 where
     S: OrderedKvStorage,
@@ -1711,6 +2390,7 @@ fn staged_prefix_overlay_desc_before_or_at(
     overlay.into_iter().rev().collect()
 }
 
+#[cfg(any())]
 fn exclusive_upper_bound(key: &[u8]) -> Vec<u8> {
     let mut upper = key.to_vec();
     if let Some(index) = upper.iter().rposition(|byte| *byte != 0xFF) {
@@ -1769,18 +2449,36 @@ impl From<crate::records::Error> for Error {
 pub(crate) mod conformance {
     use super::*;
 
-    pub(crate) fn persistence_order_and_batch_atomicity<S>(storage: S)
+    pub(crate) async fn persistence_order_and_batch_atomicity<S>(storage: S)
     where
         S: OrderedKvStorage,
     {
-        storage.set("records", b"user:2", b"two").unwrap();
-        storage.set("records", b"user:1", b"one").unwrap();
-        storage.set("records", b"user:10", b"ten").unwrap();
-        storage.set("records", &[0xff, 0x00], b"ff-zero").unwrap();
-        storage.set("records", &[0xff, 0x01], b"ff-one").unwrap();
+        storage
+            .set("records".into(), b"user:2".to_vec(), b"two".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"user:1".to_vec(), b"one".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"user:10".to_vec(), b"ten".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), vec![0xff, 0x00], b"ff-zero".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), vec![0xff, 0x01], b"ff-one".to_vec())
+            .await
+            .unwrap();
 
         assert_eq!(
-            storage.range("records", b"user:", b"user;").unwrap(),
+            storage
+                .range("records".into(), b"user:".to_vec(), b"user;".to_vec())
+                .await
+                .unwrap(),
             vec![
                 (b"user:1".to_vec(), b"one".to_vec()),
                 (b"user:10".to_vec(), b"ten".to_vec()),
@@ -1788,7 +2486,7 @@ pub(crate) mod conformance {
             ]
         );
         assert_eq!(
-            storage.prefix("records", &[0xff]).unwrap(),
+            storage.prefix("records".into(), vec![0xff]).await.unwrap(),
             vec![
                 (vec![0xff, 0x00], b"ff-zero".to_vec()),
                 (vec![0xff, 0x01], b"ff-one".to_vec()),
@@ -1796,22 +2494,33 @@ pub(crate) mod conformance {
         );
 
         let error = storage
-            .write_many(&[
-                WriteOperation::set("records", b"user:3", b"three"),
-                WriteOperation::set("missing", b"user:4", b"four"),
+            .write_many(vec![
+                OwnedWriteOperation::set("records", b"user:3", b"three"),
+                OwnedWriteOperation::set("missing", b"user:4", b"four"),
             ])
+            .await
             .unwrap_err();
         assert!(matches!(error, Error::ColumnFamilyNotFound(_)));
-        assert_eq!(storage.get("records", b"user:3").unwrap(), None);
+        assert_eq!(
+            storage
+                .get("records".into(), b"user:3".to_vec())
+                .await
+                .unwrap(),
+            None
+        );
 
         storage
-            .write_many(&[
-                WriteOperation::set("records", b"user:3", b"three"),
-                WriteOperation::delete("records", b"user:2"),
+            .write_many(vec![
+                OwnedWriteOperation::set("records", b"user:3", b"three"),
+                OwnedWriteOperation::delete("records", b"user:2"),
             ])
+            .await
             .unwrap();
         assert_eq!(
-            storage.prefix("records", b"user:").unwrap(),
+            storage
+                .prefix("records".into(), b"user:".to_vec())
+                .await
+                .unwrap(),
             vec![
                 (b"user:1".to_vec(), b"one".to_vec()),
                 (b"user:10".to_vec(), b"ten".to_vec()),
@@ -1820,26 +2529,38 @@ pub(crate) mod conformance {
         );
     }
 
-    pub(crate) fn reopen_preserves_data_and_adds_families<S>(storage: S)
+    pub(crate) async fn reopen_preserves_data_and_adds_families<S>(storage: S)
     where
-        S: ReopenableStorage,
+        S: ReopenableStorage + 'static,
     {
-        storage.set("records", b"1", b"record").unwrap();
+        storage
+            .set("records".into(), b"1".to_vec(), b"record".to_vec())
+            .await
+            .unwrap();
 
-        let storage = storage.reopen(&["records", "indices"]).unwrap();
-        storage.set("indices", b"name:record", b"1").unwrap();
+        let storage = storage
+            .reopen(vec!["records".into(), "indices".into()])
+            .await
+            .unwrap();
+        storage
+            .set("indices".into(), b"name:record".to_vec(), b"1".to_vec())
+            .await
+            .unwrap();
 
         assert_eq!(
-            storage.get("records", b"1").unwrap(),
+            storage.get("records".into(), b"1".to_vec()).await.unwrap(),
             Some(b"record".to_vec())
         );
         assert_eq!(
-            storage.get("indices", b"name:record").unwrap(),
+            storage
+                .get("indices".into(), b"name:record".to_vec())
+                .await
+                .unwrap(),
             Some(b"1".to_vec())
         );
     }
 
-    pub(crate) fn delta_append_current_winner_observes_merged_state<S>(storage: S)
+    pub(crate) async fn delta_append_current_winner_observes_merged_state<S>(storage: S)
     where
         S: OrderedKvStorage,
     {
@@ -1872,40 +2593,68 @@ pub(crate) mod conformance {
         let loser = record(9, 9, b"loser");
 
         storage
-            .write_many(&[WriteOperation::delta(
+            .write_many(vec![OwnedWriteOperation::delta(
                 "records",
                 b"row",
-                &delta(10, 1, Vec::new(), older.clone()),
+                delta(10, 1, Vec::new(), older.clone()),
             )])
+            .await
             .unwrap();
-        assert_eq!(storage.get("records", b"row").unwrap(), Some(older.clone()));
+        assert_eq!(
+            storage
+                .get("records".into(), b"row".to_vec())
+                .await
+                .unwrap(),
+            Some(older.clone())
+        );
 
         storage
-            .write_many(&[WriteOperation::delta(
+            .write_many(vec![OwnedWriteOperation::delta(
                 "records",
                 b"row",
-                &delta(20, 1, Vec::new(), newer.clone()),
+                delta(20, 1, Vec::new(), newer.clone()),
             )])
+            .await
             .unwrap();
-        assert_eq!(storage.get("records", b"row").unwrap(), Some(newer.clone()));
+        assert_eq!(
+            storage
+                .get("records".into(), b"row".to_vec())
+                .await
+                .unwrap(),
+            Some(newer.clone())
+        );
 
         storage
-            .write_many(&[WriteOperation::delta(
+            .write_many(vec![OwnedWriteOperation::delta(
                 "records",
                 b"row",
-                &delta(11, 2, vec![(20, 1)], child.clone()),
+                delta(11, 2, vec![(20, 1)], child.clone()),
             )])
+            .await
             .unwrap();
-        assert_eq!(storage.get("records", b"row").unwrap(), Some(child.clone()));
+        assert_eq!(
+            storage
+                .get("records".into(), b"row".to_vec())
+                .await
+                .unwrap(),
+            Some(child.clone())
+        );
 
         storage
-            .write_many(&[WriteOperation::delta(
+            .write_many(vec![OwnedWriteOperation::delta(
                 "records",
                 b"row",
-                &delta(9, 9, Vec::new(), loser),
+                delta(9, 9, Vec::new(), loser),
             )])
+            .await
             .unwrap();
-        assert_eq!(storage.get("records", b"row").unwrap(), Some(child));
+        assert_eq!(
+            storage
+                .get("records".into(), b"row".to_vec())
+                .await
+                .unwrap(),
+            Some(child)
+        );
     }
 }
 
@@ -1928,17 +2677,17 @@ mod tests {
         ));
     }
 
-    fn reverse_prefix_values<S: OrderedKvStorage>(
+    async fn reverse_prefix_values<S: OrderedKvStorage>(
         storage: &S,
         cf: &str,
         prefix: &[u8],
     ) -> Result<Vec<KeyValue>, Error> {
-        let mut values = Vec::new();
-        storage.scan_prefix_reverse(cf, prefix, &mut |key, value| {
-            values.push((key.to_vec(), value.to_vec()));
-            Ok(())
-        })?;
-        Ok(values)
+        collect_scan(
+            storage
+                .scan_prefix_reverse(cf.to_owned(), prefix.to_vec())
+                .await?,
+        )
+        .await
     }
 
     fn complex_record_descriptor_and_values() -> (RecordDescriptor, Vec<Value>) {
@@ -1993,57 +2742,86 @@ mod tests {
         )
     }
 
-    #[test]
-    fn record_store_round_trips_exhaustive_record_descriptor() {
+    #[futures_test::test]
+    async fn record_store_round_trips_exhaustive_record_descriptor() {
         let storage = MemoryStorage::new(&["records"]);
         let (descriptor, values) = complex_record_descriptor_and_values();
         let raw = descriptor.create(&values).unwrap();
-        storage.set("records", b"row:1", &raw).unwrap();
+        storage
+            .set("records".into(), b"row:1".to_vec(), raw.clone())
+            .await
+            .unwrap();
         let store = RecordStore::new(&storage, "records", &descriptor);
 
-        let record = store.get(b"row:1").unwrap().unwrap();
+        let record = store.get(b"row:1").await.unwrap().unwrap();
         assert_eq!(record.to_values().unwrap(), values);
-        assert_eq!(store.get_raw(b"row:1").unwrap().unwrap(), raw);
+        assert_eq!(store.get_raw(b"row:1").await.unwrap().unwrap(), raw);
 
-        let prefix = store.prefix(b"row:").unwrap();
+        let prefix = store.prefix(b"row:").await.unwrap();
         assert_eq!(prefix, vec![(b"row:1".to_vec(), raw.clone())]);
-        let ranged = store.range(b"row:", b"row;").unwrap();
+        let ranged = store.range(b"row:", b"row;").await.unwrap();
         assert_eq!(ranged, vec![(b"row:1".to_vec(), raw)]);
     }
 
-    #[test]
-    fn class_layout_keeps_logical_keys_isolated_inside_shared_physical_cf() {
+    #[futures_test::test]
+    async fn class_layout_keeps_logical_keys_isolated_inside_shared_physical_cf() {
         let physical_cfs = StorageLayout::jazz_class_v1().physical_column_families([
             "jazz_albums_history",
             "jazz_tracks_history",
             "jazz_albums_register",
         ]);
         let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage =
-            LayoutStorage::new(MemoryStorage::new(&refs), StorageLayout::jazz_class_v1()).unwrap();
+        let storage = LayoutStorage::new(MemoryStorage::new(&refs), StorageLayout::jazz_class_v1())
+            .await
+            .unwrap();
 
         storage
-            .set("jazz_albums_history", b"row:1", b"album-one")
+            .set(
+                "jazz_albums_history".into(),
+                b"row:1".to_vec(),
+                b"album-one".to_vec(),
+            )
+            .await
             .unwrap();
         storage
-            .set("jazz_albums_history", b"row:3", b"album-three")
+            .set(
+                "jazz_albums_history".into(),
+                b"row:3".to_vec(),
+                b"album-three".to_vec(),
+            )
+            .await
             .unwrap();
         storage
-            .set("jazz_tracks_history", b"row:2", b"track-two")
+            .set(
+                "jazz_tracks_history".into(),
+                b"row:2".to_vec(),
+                b"track-two".to_vec(),
+            )
+            .await
             .unwrap();
         storage
-            .set("jazz_albums_register", b"row:2", b"album-register")
+            .set(
+                "jazz_albums_register".into(),
+                b"row:2".to_vec(),
+                b"album-register".to_vec(),
+            )
+            .await
             .unwrap();
 
         assert_eq!(
-            storage.prefix("jazz_albums_history", b"row:").unwrap(),
+            storage
+                .prefix("jazz_albums_history".into(), b"row:".to_vec())
+                .await
+                .unwrap(),
             vec![
                 (b"row:1".to_vec(), b"album-one".to_vec()),
                 (b"row:3".to_vec(), b"album-three".to_vec()),
             ]
         );
         assert_eq!(
-            reverse_prefix_values(&storage, "jazz_albums_history", b"row:").unwrap(),
+            reverse_prefix_values(&storage, "jazz_albums_history", b"row:")
+                .await
+                .unwrap(),
             vec![
                 (b"row:3".to_vec(), b"album-three".to_vec()),
                 (b"row:1".to_vec(), b"album-one".to_vec()),
@@ -2051,13 +2829,19 @@ mod tests {
         );
         assert_eq!(
             storage
-                .last_with_prefix("jazz_albums_history", b"row:")
+                .last_with_prefix("jazz_albums_history".into(), b"row:".to_vec())
+                .await
                 .unwrap(),
             Some((b"row:3".to_vec(), b"album-three".to_vec()))
         );
         assert_eq!(
             storage
-                .range("jazz_albums_history", b"row:1", b"row:4")
+                .range(
+                    "jazz_albums_history".into(),
+                    b"row:1".to_vec(),
+                    b"row:4".to_vec()
+                )
+                .await
                 .unwrap(),
             vec![
                 (b"row:1".to_vec(), b"album-one".to_vec()),
@@ -2066,8 +2850,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn class_layout_isolates_every_jazz_physical_class() {
+    #[futures_test::test]
+    async fn class_layout_isolates_every_jazz_physical_class() {
         let logical_cfs = [
             ("jazz_albums_history", "jazz_tracks_history"),
             ("jazz_albums_register", "jazz_tracks_register"),
@@ -2091,108 +2875,166 @@ mod tests {
         let layout = StorageLayout::jazz_class_v1_for(all_logical.iter().copied());
         let physical_cfs = layout.physical_column_families(all_logical.iter().copied());
         let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = LayoutStorage::new(MemoryStorage::new(&refs), layout).unwrap();
+        let storage = LayoutStorage::new(MemoryStorage::new(&refs), layout)
+            .await
+            .unwrap();
 
         for (left, right) in logical_cfs {
-            storage.set(left, b"k:1", left.as_bytes()).unwrap();
-            storage.set(right, b"k:2", right.as_bytes()).unwrap();
+            storage
+                .set(left.into(), b"k:1".to_vec(), left.as_bytes().to_vec())
+                .await
+                .unwrap();
+            storage
+                .set(right.into(), b"k:2".to_vec(), right.as_bytes().to_vec())
+                .await
+                .unwrap();
 
             assert_eq!(
-                storage.prefix(left, b"k:").unwrap(),
+                storage.prefix(left.into(), b"k:".to_vec()).await.unwrap(),
                 vec![(b"k:1".to_vec(), left.as_bytes().to_vec())],
                 "{left} must not read rows from {right}"
             );
             assert_eq!(
-                reverse_prefix_values(&storage, right, b"k:").unwrap(),
+                reverse_prefix_values(&storage, right, b"k:").await.unwrap(),
                 vec![(b"k:2".to_vec(), right.as_bytes().to_vec())],
                 "{right} reverse scan must not read rows from {left}"
             );
             assert_eq!(
-                storage.last_with_prefix(left, b"k:").unwrap(),
+                storage
+                    .last_with_prefix(left.into(), b"k:".to_vec())
+                    .await
+                    .unwrap(),
                 Some((b"k:1".to_vec(), left.as_bytes().to_vec())),
                 "{left} last_with_prefix must stay within its logical prefix"
             );
         }
     }
 
-    #[test]
-    fn class_layout_rejects_missing_marker_with_legacy_mapped_families() {
+    #[futures_test::test]
+    async fn class_layout_rejects_missing_marker_with_legacy_mapped_families() {
         let storage = MemoryStorage::new(&["__groove_class_meta", "jazz_albums_history"]);
         assert!(matches!(
-            LayoutStorage::new(storage, StorageLayout::jazz_class_v1()),
+            LayoutStorage::new(storage, StorageLayout::jazz_class_v1()).await,
             Err(Error::InvalidStorageLayout(_))
         ));
     }
 
-    #[test]
-    fn class_layout_accepts_truly_empty_store_and_writes_marker() {
+    #[futures_test::test]
+    async fn class_layout_accepts_truly_empty_store_and_writes_marker() {
         let storage = MemoryStorage::new(&["__groove_class_meta", "__groove_class_history"]);
-        let storage = LayoutStorage::new(storage, StorageLayout::jazz_class_v1()).unwrap();
+        let storage = LayoutStorage::new(storage, StorageLayout::jazz_class_v1())
+            .await
+            .unwrap();
         assert_eq!(
             storage
                 .inner
-                .get("__groove_class_meta", CLASS_LAYOUT_MARKER_KEY)
+                .get(
+                    "__groove_class_meta".into(),
+                    CLASS_LAYOUT_MARKER_KEY.to_vec()
+                )
+                .await
                 .unwrap(),
             Some(CLASS_LAYOUT_MARKER_VALUE.to_vec())
         );
     }
 
-    #[test]
-    fn class_layout_preserves_missing_logical_cf_errors_when_declared_set_is_known() {
+    #[futures_test::test]
+    async fn class_layout_preserves_missing_logical_cf_errors_when_declared_set_is_known() {
         let layout = StorageLayout::jazz_class_v1_for(["jazz_albums_history"]);
         let physical_cfs = layout.physical_column_families(["jazz_albums_history"]);
         let refs = physical_cfs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = LayoutStorage::new(MemoryStorage::new(&refs), layout).unwrap();
+        let storage = LayoutStorage::new(MemoryStorage::new(&refs), layout)
+            .await
+            .unwrap();
 
         storage
-            .set("jazz_albums_history", b"row:1", b"album-one")
+            .set(
+                "jazz_albums_history".into(),
+                b"row:1".to_vec(),
+                b"album-one".to_vec(),
+            )
+            .await
             .unwrap();
         assert!(matches!(
-            storage.get("jazz_tracks_history", b"row:1"),
+            storage
+                .get("jazz_tracks_history".into(), b"row:1".to_vec())
+                .await,
             Err(Error::ColumnFamilyNotFound(_))
         ));
     }
 
-    #[test]
-    fn get_set_and_delete_values() {
+    #[futures_test::test]
+    async fn get_set_and_delete_values() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
-            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
+            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                .unwrap();
 
-        storage.set("records", b"a", b"one").unwrap();
-        assert_eq!(storage.get("records", b"a").unwrap(), Some(b"one".to_vec()));
+        storage
+            .set("records".into(), b"a".to_vec(), b"one".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.get("records".into(), b"a".to_vec()).await.unwrap(),
+            Some(b"one".to_vec())
+        );
 
-        storage.delete("records", b"a").unwrap();
-        assert_eq!(storage.get("records", b"a").unwrap(), None);
+        storage
+            .delete("records".into(), b"a".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            storage.get("records".into(), b"a".to_vec()).await.unwrap(),
+            None
+        );
     }
 
-    #[test]
-    fn native_durable_test_store_keeps_writes_enabled() {
+    #[futures_test::test]
+    async fn native_durable_test_store_keeps_writes_enabled() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let storage = TestStorage::open_with_sync_policy(
+        let storage = TestBtreeStorage::open_with_sync_policy(
             temp_dir.path().join("groove-test.btree"),
             &["records"],
             BtreeSyncPolicy::OnClose,
         )
         .unwrap();
 
-        storage.set("records", b"a", b"one").unwrap();
-
-        assert_eq!(storage.get("records", b"a").unwrap(), Some(b"one".to_vec()));
-    }
-
-    #[test]
-    fn range_returns_ordered_values_between_start_and_end() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let storage =
-            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
-
-        storage.set("records", b"a", b"one").unwrap();
-        storage.set("records", b"b", b"two").unwrap();
-        storage.set("records", b"c", b"three").unwrap();
+        storage
+            .set("records".into(), b"a".to_vec(), b"one".to_vec())
+            .await
+            .unwrap();
 
         assert_eq!(
-            storage.range("records", b"a", b"c").unwrap(),
+            storage.get("records".into(), b"a".to_vec()).await.unwrap(),
+            Some(b"one".to_vec())
+        );
+    }
+
+    #[futures_test::test]
+    async fn range_returns_ordered_values_between_start_and_end() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage =
+            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                .unwrap();
+
+        storage
+            .set("records".into(), b"a".to_vec(), b"one".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"b".to_vec(), b"two".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"c".to_vec(), b"three".to_vec())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage
+                .range("records".into(), b"a".to_vec(), b"c".to_vec())
+                .await
+                .unwrap(),
             vec![
                 (b"a".to_vec(), b"one".to_vec()),
                 (b"b".to_vec(), b"two".to_vec())
@@ -2200,18 +3042,31 @@ mod tests {
         );
     }
 
-    #[test]
-    fn prefix_returns_ordered_values_with_matching_prefix() {
+    #[futures_test::test]
+    async fn prefix_returns_ordered_values_with_matching_prefix() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
-            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
+            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                .unwrap();
 
-        storage.set("records", b"user:1", b"a").unwrap();
-        storage.set("records", b"user:2", b"b").unwrap();
-        storage.set("records", b"view:1", b"c").unwrap();
+        storage
+            .set("records".into(), b"user:1".to_vec(), b"a".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"user:2".to_vec(), b"b".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"view:1".to_vec(), b"c".to_vec())
+            .await
+            .unwrap();
 
         assert_eq!(
-            storage.prefix("records", b"user:").unwrap(),
+            storage
+                .prefix("records".into(), b"user:".to_vec())
+                .await
+                .unwrap(),
             vec![
                 (b"user:1".to_vec(), b"a".to_vec()),
                 (b"user:2".to_vec(), b"b".to_vec())
@@ -2219,18 +3074,28 @@ mod tests {
         );
     }
 
-    #[test]
-    fn prefix_handles_prefixes_without_a_finite_upper_bound() {
+    #[futures_test::test]
+    async fn prefix_handles_prefixes_without_a_finite_upper_bound() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
-            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
+            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                .unwrap();
 
-        storage.set("records", &[0xfe], b"before").unwrap();
-        storage.set("records", &[0xff, 0x00], b"a").unwrap();
-        storage.set("records", &[0xff, 0x01], b"b").unwrap();
+        storage
+            .set("records".into(), vec![0xfe], b"before".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), vec![0xff, 0x00], b"a".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), vec![0xff, 0x01], b"b".to_vec())
+            .await
+            .unwrap();
 
         assert_eq!(
-            storage.prefix("records", &[0xff]).unwrap(),
+            storage.prefix("records".into(), vec![0xff]).await.unwrap(),
             vec![
                 (vec![0xff, 0x00], b"a".to_vec()),
                 (vec![0xff, 0x01], b"b".to_vec())
@@ -2238,59 +3103,71 @@ mod tests {
         );
     }
 
-    #[test]
-    fn direct_operations_report_missing_column_families() {
+    #[futures_test::test]
+    async fn direct_operations_report_missing_column_families() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
-            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
+            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                .unwrap();
 
         assert!(matches!(
-            storage.get("missing", b"a"),
+            storage.get("missing".into(), b"a".to_vec()).await,
             Err(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
         ));
         assert!(matches!(
-            storage.set("missing", b"a", b"one"),
+            storage.set("missing".into(), b"a".to_vec(), b"one".to_vec()).await,
             Err(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
         ));
         assert!(matches!(
-            storage.delete("missing", b"a"),
+            storage.delete("missing".into(), b"a".to_vec()).await,
             Err(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
         ));
         assert!(matches!(
-            storage.range("missing", b"a", b"z"),
+            storage.range("missing".into(), b"a".to_vec(), b"z".to_vec()).await,
             Err(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
         ));
         assert!(matches!(
-            storage.prefix("missing", b"a"),
+            storage.prefix("missing".into(), b"a".to_vec()).await,
             Err(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
         ));
         assert!(matches!(
-            storage.scan_range("missing", b"a", b"z", &mut |_, _| Ok(())),
+            storage.scan_range("missing".into(), b"a".to_vec(), b"z".to_vec()).await,
             Err(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
         ));
         assert!(matches!(
-            storage.scan_prefix("missing", b"a", &mut |_, _| Ok(())),
+            storage.scan_prefix("missing".into(), b"a".to_vec()).await,
             Err(Error::ColumnFamilyNotFound(cf)) if cf == "missing"
         ));
     }
 
-    #[test]
-    fn scans_visit_ordered_values_without_materializing_in_storage_api() {
+    #[futures_test::test]
+    async fn scans_visit_ordered_values_without_materializing_in_storage_api() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
-            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
+            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                .unwrap();
 
-        storage.set("records", b"a", b"one").unwrap();
-        storage.set("records", b"b", b"two").unwrap();
-        storage.set("records", b"c", b"three").unwrap();
-
-        let mut visited = Vec::new();
         storage
-            .scan_range("records", b"a", b"c", &mut |key, value| {
-                visited.push((key.to_vec(), value.to_vec()));
-                Ok(())
-            })
+            .set("records".into(), b"a".to_vec(), b"one".to_vec())
+            .await
             .unwrap();
+        storage
+            .set("records".into(), b"b".to_vec(), b"two".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"c".to_vec(), b"three".to_vec())
+            .await
+            .unwrap();
+
+        let visited = collect_scan(
+            storage
+                .scan_range("records".into(), b"a".to_vec(), b"c".to_vec())
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             visited,
@@ -2301,37 +3178,47 @@ mod tests {
         );
     }
 
-    #[test]
-    fn write_many_writes_all_operations_atomically() {
+    #[futures_test::test]
+    async fn write_many_writes_all_operations_atomically() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let storage = TestStorage::open(
+        let storage = TestBtreeStorage::open(
             temp_dir.path().join("groove-test.btree"),
             &["records", "indices"],
         )
         .unwrap();
 
         storage
-            .write_many(&[
-                WriteOperation::set("records", b"1", b"record"),
-                WriteOperation::set("indices", b"name:record", b"1"),
+            .write_many(vec![
+                OwnedWriteOperation::set("records", b"1", b"record"),
+                OwnedWriteOperation::set("indices", b"name:record", b"1"),
             ])
+            .await
             .unwrap();
 
         assert_eq!(
-            storage.get("records", b"1").unwrap(),
+            storage.get("records".into(), b"1".to_vec()).await.unwrap(),
             Some(b"record".to_vec())
         );
         assert_eq!(
-            storage.get("indices", b"name:record").unwrap(),
+            storage
+                .get("indices".into(), b"name:record".to_vec())
+                .await
+                .unwrap(),
             Some(b"1".to_vec())
         );
     }
 
-    #[test]
-    fn staged_overlay_reads_staged_sets_and_deletes_before_base_storage() {
+    #[futures_test::test]
+    async fn staged_overlay_reads_staged_sets_and_deletes_before_base_storage() {
         let storage = MemoryStorage::new(&["indices"]);
-        storage.set("indices", b"a", b"base-a").unwrap();
-        storage.set("indices", b"b", b"base-b").unwrap();
+        storage
+            .set("indices".into(), b"a".to_vec(), b"base-a".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("indices".into(), b"b".to_vec(), b"base-b".to_vec())
+            .await
+            .unwrap();
         let staged = RefCell::new(StagedWriteState::from(vec![
             OwnedWriteOperation::Set {
                 cf: "indices".to_owned(),
@@ -2351,43 +3238,160 @@ mod tests {
         let overlay = StagedWriteOverlay::new(&storage, &staged);
 
         assert_eq!(
-            overlay.get("indices", b"a").unwrap(),
+            overlay.get("indices".into(), b"a".to_vec()).await.unwrap(),
             Some(b"staged-a".to_vec())
         );
-        assert_eq!(overlay.get("indices", b"b").unwrap(), None);
         assert_eq!(
-            overlay.get("indices", b"c").unwrap(),
+            overlay.get("indices".into(), b"b".to_vec()).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            overlay.get("indices".into(), b"c".to_vec()).await.unwrap(),
             Some(b"staged-c".to_vec())
         );
         assert_eq!(
-            overlay.prefix("indices", b"").unwrap(),
+            overlay.prefix("indices".into(), Vec::new()).await.unwrap(),
             vec![
                 (b"a".to_vec(), b"staged-a".to_vec()),
                 (b"c".to_vec(), b"staged-c".to_vec()),
             ]
         );
         assert_eq!(
-            storage.get("indices", b"a").unwrap(),
+            storage.get("indices".into(), b"a".to_vec()).await.unwrap(),
             Some(b"base-a".to_vec())
         );
     }
 
-    #[test]
-    fn storage_transaction_reads_own_writes_and_commits_atomically() {
+    // Internal receipt: the regression is work performed inside the storage overlay and is not
+    // observable through a higher-level public API except as elapsed time.
+    #[futures_test::test]
+    #[ignore = "manual scaling receipt for narrow reads over a large staged transaction"]
+    async fn staged_overlay_narrow_scan_scaling_receipt() {
+        const UNRELATED_ROWS: usize = 20_000;
+        const REPETITIONS: usize = 20;
+
         let storage = MemoryStorage::new(&["records"]);
-        storage.set("records", b"a", b"base-a").unwrap();
-        storage.set("records", b"b", b"base-b").unwrap();
+        let transaction = StorageTransaction::new(&storage);
+        let payload = vec![7; 512];
+        transaction.stage_owned_operations((0..UNRELATED_ROWS).map(|index| {
+            OwnedWriteOperation::set(
+                "records",
+                format!("unrelated:{index:05}").as_bytes(),
+                payload.clone(),
+            )
+        }));
+        transaction.stage_owned_operations((0..10).map(|index| {
+            OwnedWriteOperation::set(
+                "records",
+                format!("target:{index:05}").as_bytes(),
+                index.to_string().as_bytes(),
+            )
+        }));
+
+        let whole_snapshot_started = std::time::Instant::now();
+        for _ in 0..(REPETITIONS * 5) {
+            std::hint::black_box(transaction.staged_writes.borrow().operations.clone());
+        }
+        let whole_snapshot_elapsed = whole_snapshot_started.elapsed();
+
+        let started = std::time::Instant::now();
+        for _ in 0..REPETITIONS {
+            let range = collect_scan(
+                transaction
+                    .scan_range("records".into(), b"target:".to_vec(), b"target;".to_vec())
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(range.len(), 10);
+
+            let prefix = collect_scan(
+                transaction
+                    .scan_prefix("records".into(), b"target:".to_vec())
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(prefix.len(), 10);
+
+            let reverse = collect_scan(
+                transaction
+                    .scan_prefix_reverse("records".into(), b"target:".to_vec())
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reverse.len(), 10);
+
+            assert_eq!(
+                transaction
+                    .last_with_prefix("records".into(), b"target:".to_vec())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .0,
+                b"target:00009"
+            );
+            assert_eq!(
+                transaction
+                    .last_with_prefix_before_or_at(
+                        "records".into(),
+                        b"target:".to_vec(),
+                        b"target:00004".to_vec(),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .0,
+                b"target:00004"
+            );
+        }
+
+        println!(
+            "staged_overlay_narrow_scan_scaling_receipt unrelated_rows={UNRELATED_ROWS} repetitions={REPETITIONS} removed_whole_snapshot_ms={:.3} five_filtered_read_shapes_ms={:.3}",
+            whole_snapshot_elapsed.as_secs_f64() * 1000.0,
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+
+    #[futures_test::test]
+    async fn storage_transaction_reads_own_writes_and_commits_atomically() {
+        let storage = MemoryStorage::new(&["records"]);
+        storage
+            .set("records".into(), b"a".to_vec(), b"base-a".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"b".to_vec(), b"base-b".to_vec())
+            .await
+            .unwrap();
 
         let txn = storage.begin_txn();
-        txn.set("records", b"a", b"txn-a").unwrap();
-        txn.delete("records", b"b").unwrap();
-        txn.set("records", b"c", b"txn-c").unwrap();
+        txn.set("records".into(), b"a".to_vec(), b"txn-a".to_vec())
+            .await
+            .unwrap();
+        txn.delete("records".into(), b"b".to_vec()).await.unwrap();
+        txn.set("records".into(), b"c".to_vec(), b"txn-c".to_vec())
+            .await
+            .unwrap();
 
-        assert_eq!(txn.get("records", b"a").unwrap(), Some(b"txn-a".to_vec()));
-        assert_eq!(txn.get("records", b"b").unwrap(), None);
-        assert_eq!(txn.get("records", b"c").unwrap(), Some(b"txn-c".to_vec()));
         assert_eq!(
-            txn.prefix("records", b"").unwrap(),
+            txn.get("records".into(), b"a".to_vec()).await.unwrap(),
+            Some(b"txn-a".to_vec())
+        );
+        assert_eq!(
+            txn.get("records".into(), b"b".to_vec()).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            txn.get("records".into(), b"c".to_vec()).await.unwrap(),
+            Some(b"txn-c".to_vec())
+        );
+        assert_eq!(
+            txn.prefix("records".into(), Vec::new()).await.unwrap(),
             vec![
                 (b"a".to_vec(), b"txn-a".to_vec()),
                 (b"c".to_vec(), b"txn-c".to_vec()),
@@ -2395,47 +3399,58 @@ mod tests {
         );
 
         assert_eq!(
-            storage.get("records", b"a").unwrap(),
+            storage.get("records".into(), b"a".to_vec()).await.unwrap(),
             Some(b"base-a".to_vec())
         );
         assert_eq!(
-            storage.get("records", b"b").unwrap(),
+            storage.get("records".into(), b"b".to_vec()).await.unwrap(),
             Some(b"base-b".to_vec())
         );
-        assert_eq!(storage.get("records", b"c").unwrap(), None);
+        assert_eq!(
+            storage.get("records".into(), b"c".to_vec()).await.unwrap(),
+            None
+        );
 
-        txn.commit().unwrap();
+        txn.commit().await.unwrap();
 
         assert_eq!(
-            storage.get("records", b"a").unwrap(),
+            storage.get("records".into(), b"a".to_vec()).await.unwrap(),
             Some(b"txn-a".to_vec())
         );
-        assert_eq!(storage.get("records", b"b").unwrap(), None);
         assert_eq!(
-            storage.get("records", b"c").unwrap(),
+            storage.get("records".into(), b"b".to_vec()).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            storage.get("records".into(), b"c".to_vec()).await.unwrap(),
             Some(b"txn-c".to_vec())
         );
     }
 
-    #[test]
-    fn write_many_fails_without_writing_when_column_family_is_missing() {
+    #[futures_test::test]
+    async fn write_many_fails_without_writing_when_column_family_is_missing() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
-            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
+            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                .unwrap();
 
         let error = storage
-            .write_many(&[
-                WriteOperation::set("records", b"1", b"record"),
-                WriteOperation::set("missing", b"2", b"nope"),
+            .write_many(vec![
+                OwnedWriteOperation::set("records", b"1", b"record"),
+                OwnedWriteOperation::set("missing", b"2", b"nope"),
             ])
+            .await
             .unwrap_err();
 
         assert!(matches!(error, Error::ColumnFamilyNotFound(_)));
-        assert_eq!(storage.get("records", b"1").unwrap(), None);
+        assert_eq!(
+            storage.get("records".into(), b"1".to_vec()).await.unwrap(),
+            None
+        );
     }
 
-    #[test]
-    fn memory_write_many_keeps_earlier_sets_private_when_a_later_delta_is_malformed() {
+    #[futures_test::test]
+    async fn memory_write_many_keeps_earlier_sets_private_when_a_later_delta_is_malformed() {
         let storage = MemoryStorage::new(&["records"]);
         let malformed_delta = StorageDelta {
             kind: StorageDeltaKind::CurrentWinnerV1,
@@ -2443,22 +3458,28 @@ mod tests {
         };
 
         let error = storage
-            .write_many(&[
-                WriteOperation::set("records", b"first", b"must not leak"),
-                WriteOperation::delta("records", b"later", &malformed_delta),
+            .write_many(vec![
+                OwnedWriteOperation::set("records", b"first", b"must not leak"),
+                OwnedWriteOperation::delta("records", b"later", malformed_delta),
             ])
+            .await
             .expect_err("the malformed later delta must reject the whole batch");
 
         assert!(matches!(error, Error::InvalidStorageDelta(_)));
-        assert_eq!(storage.get("records", b"first").unwrap(), None);
-        assert_eq!(storage.get("records", b"later").unwrap(), None);
-        assert!(matches!(
-            storage.write_many_outcome(&[
-                WriteOperation::set("records", b"first", b"must not leak"),
-                WriteOperation::delta("records", b"later", &malformed_delta),
-            ]),
-            WriteManyOutcome::DefinitelyNotCommitted(Error::InvalidStorageDelta(_))
-        ));
+        assert_eq!(
+            storage
+                .get("records".into(), b"first".to_vec())
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            storage
+                .get("records".into(), b"later".to_vec())
+                .await
+                .unwrap(),
+            None
+        );
     }
 
     fn current_winner_test_record(time: u64, node: u8, payload: &[u8]) -> Vec<u8> {
@@ -2484,26 +3505,36 @@ mod tests {
     /// An explicit delete in a batch is a prospective absence. A following
     /// delta must use that absence rather than falling through to the durable
     /// predecessor, otherwise delete→delta resurrects the old winner.
-    #[test]
-    fn memory_write_many_delete_then_delta_uses_post_delete_absence() {
+    #[futures_test::test]
+    async fn memory_write_many_delete_then_delta_uses_post_delete_absence() {
         let storage = MemoryStorage::new(&["records"]);
         let old = current_winner_test_record(30, 1, b"old");
         let candidate = current_winner_test_record(20, 2, b"candidate");
         let delta = current_winner_test_delta(20, 2, candidate.clone());
-        storage.set("records", b"row", &old).unwrap();
-
         storage
-            .write_many(&[
-                WriteOperation::delete("records", b"row"),
-                WriteOperation::delta("records", b"row", &delta),
-            ])
+            .set("records".into(), b"row".to_vec(), old)
+            .await
             .unwrap();
 
-        assert_eq!(storage.get("records", b"row").unwrap(), Some(candidate));
+        storage
+            .write_many(vec![
+                OwnedWriteOperation::delete("records", b"row"),
+                OwnedWriteOperation::delta("records", b"row", delta),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage
+                .get("records".into(), b"row".to_vec())
+                .await
+                .unwrap(),
+            Some(candidate)
+        );
     }
 
-    #[test]
-    fn memory_write_many_same_key_operation_sequences_use_the_prospective_value() {
+    #[futures_test::test]
+    async fn memory_write_many_same_key_operation_sequences_use_the_prospective_value() {
         let old = current_winner_test_record(10, 1, b"old");
         let set = current_winner_test_record(15, 1, b"set");
         let later_set = current_winner_test_record(25, 1, b"later set");
@@ -2512,146 +3543,199 @@ mod tests {
         let first_delta = current_winner_test_delta(20, 2, first_delta_record.clone());
         let second_delta = current_winner_test_delta(30, 3, second_delta_record.clone());
 
-        let assert_sequence = |operations: &[WriteOperation<'_>], expected: Option<Vec<u8>>| {
-            let storage = MemoryStorage::new(&["records"]);
-            storage.set("records", b"row", &old).unwrap();
-            storage.write_many(operations).unwrap();
-            assert_eq!(storage.get("records", b"row").unwrap(), expected);
-        };
+        let cases = vec![
+            (
+                vec![
+                    OwnedWriteOperation::set("records", b"row", set.clone()),
+                    OwnedWriteOperation::set("records", b"row", later_set.clone()),
+                ],
+                Some(later_set.clone()),
+            ),
+            (
+                vec![
+                    OwnedWriteOperation::set("records", b"row", set.clone()),
+                    OwnedWriteOperation::delete("records", b"row"),
+                ],
+                None,
+            ),
+            (
+                vec![
+                    OwnedWriteOperation::delete("records", b"row"),
+                    OwnedWriteOperation::set("records", b"row", set.clone()),
+                ],
+                Some(set.clone()),
+            ),
+            (
+                vec![
+                    OwnedWriteOperation::delete("records", b"row"),
+                    OwnedWriteOperation::delete("records", b"row"),
+                ],
+                None,
+            ),
+            (
+                vec![
+                    OwnedWriteOperation::set("records", b"row", set.clone()),
+                    OwnedWriteOperation::delta("records", b"row", first_delta.clone()),
+                ],
+                Some(first_delta_record.clone()),
+            ),
+            (
+                vec![
+                    OwnedWriteOperation::delta("records", b"row", first_delta.clone()),
+                    OwnedWriteOperation::set("records", b"row", later_set.clone()),
+                ],
+                Some(later_set.clone()),
+            ),
+            (
+                vec![
+                    OwnedWriteOperation::delete("records", b"row"),
+                    OwnedWriteOperation::delta("records", b"row", first_delta.clone()),
+                ],
+                Some(first_delta_record.clone()),
+            ),
+            (
+                vec![
+                    OwnedWriteOperation::delta("records", b"row", first_delta.clone()),
+                    OwnedWriteOperation::delete("records", b"row"),
+                ],
+                None,
+            ),
+            (
+                vec![
+                    OwnedWriteOperation::delta("records", b"row", first_delta),
+                    OwnedWriteOperation::delta("records", b"row", second_delta),
+                ],
+                Some(second_delta_record),
+            ),
+        ];
 
-        assert_sequence(
-            &[
-                WriteOperation::set("records", b"row", &set),
-                WriteOperation::set("records", b"row", &later_set),
-            ],
-            Some(later_set.clone()),
-        );
-        assert_sequence(
-            &[
-                WriteOperation::set("records", b"row", &set),
-                WriteOperation::delete("records", b"row"),
-            ],
-            None,
-        );
-        assert_sequence(
-            &[
-                WriteOperation::delete("records", b"row"),
-                WriteOperation::set("records", b"row", &set),
-            ],
-            Some(set.clone()),
-        );
-        assert_sequence(
-            &[
-                WriteOperation::delete("records", b"row"),
-                WriteOperation::delete("records", b"row"),
-            ],
-            None,
-        );
-        assert_sequence(
-            &[
-                WriteOperation::set("records", b"row", &set),
-                WriteOperation::delta("records", b"row", &first_delta),
-            ],
-            Some(first_delta_record.clone()),
-        );
-        assert_sequence(
-            &[
-                WriteOperation::delta("records", b"row", &first_delta),
-                WriteOperation::set("records", b"row", &later_set),
-            ],
-            Some(later_set.clone()),
-        );
-        assert_sequence(
-            &[
-                WriteOperation::delete("records", b"row"),
-                WriteOperation::delta("records", b"row", &first_delta),
-            ],
-            Some(first_delta_record.clone()),
-        );
-        assert_sequence(
-            &[
-                WriteOperation::delta("records", b"row", &first_delta),
-                WriteOperation::delete("records", b"row"),
-            ],
-            None,
-        );
-        assert_sequence(
-            &[
-                WriteOperation::delta("records", b"row", &first_delta),
-                WriteOperation::delta("records", b"row", &second_delta),
-            ],
-            Some(second_delta_record),
-        );
+        for (operations, expected) in cases {
+            let storage = MemoryStorage::new(&["records"]);
+            storage
+                .set("records".into(), b"row".to_vec(), old.clone())
+                .await
+                .unwrap();
+            storage.write_many(operations).await.unwrap();
+            assert_eq!(
+                storage
+                    .get("records".into(), b"row".to_vec())
+                    .await
+                    .unwrap(),
+                expected
+            );
+        }
     }
 
-    #[test]
-    fn memory_write_many_prospective_overlay_is_isolated_per_key() {
+    #[futures_test::test]
+    async fn memory_write_many_prospective_overlay_is_isolated_per_key() {
         let storage = MemoryStorage::new(&["records"]);
         let old = current_winner_test_record(10, 1, b"old");
         let candidate = current_winner_test_record(20, 2, b"candidate");
         let delta = current_winner_test_delta(20, 2, candidate.clone());
-        storage.set("records", b"row-a", &old).unwrap();
-        storage.set("records", b"row-b", b"old-b").unwrap();
-
         storage
-            .write_many(&[
-                WriteOperation::delete("records", b"row-a"),
-                WriteOperation::set("records", b"row-b", b"new-b"),
-                WriteOperation::delta("records", b"row-a", &delta),
-            ])
+            .set("records".into(), b"row-a".to_vec(), old)
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"row-b".to_vec(), b"old-b".to_vec())
+            .await
             .unwrap();
 
-        assert_eq!(storage.get("records", b"row-a").unwrap(), Some(candidate));
+        storage
+            .write_many(vec![
+                OwnedWriteOperation::delete("records", b"row-a"),
+                OwnedWriteOperation::set("records", b"row-b", b"new-b"),
+                OwnedWriteOperation::delta("records", b"row-a", delta),
+            ])
+            .await
+            .unwrap();
+
         assert_eq!(
-            storage.get("records", b"row-b").unwrap(),
+            storage
+                .get("records".into(), b"row-a".to_vec())
+                .await
+                .unwrap(),
+            Some(candidate)
+        );
+        assert_eq!(
+            storage
+                .get("records".into(), b"row-b".to_vec())
+                .await
+                .unwrap(),
             Some(b"new-b".to_vec())
         );
     }
 
-    #[test]
-    fn write_many_can_mix_sets_and_deletes_atomically() {
+    #[futures_test::test]
+    async fn write_many_can_mix_sets_and_deletes_atomically() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
-            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
+            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                .unwrap();
 
-        storage.set("records", b"old", b"value").unwrap();
         storage
-            .write_many(&[
-                WriteOperation::set("records", b"new", b"value"),
-                WriteOperation::delete("records", b"old"),
+            .set("records".into(), b"old".to_vec(), b"value".to_vec())
+            .await
+            .unwrap();
+        storage
+            .write_many(vec![
+                OwnedWriteOperation::set("records", b"new", b"value"),
+                OwnedWriteOperation::delete("records", b"old"),
             ])
+            .await
             .unwrap();
 
         assert_eq!(
-            storage.get("records", b"new").unwrap(),
+            storage
+                .get("records".into(), b"new".to_vec())
+                .await
+                .unwrap(),
             Some(b"value".to_vec())
         );
-        assert_eq!(storage.get("records", b"old").unwrap(), None);
+        assert_eq!(
+            storage
+                .get("records".into(), b"old".to_vec())
+                .await
+                .unwrap(),
+            None
+        );
     }
 
-    #[test]
-    fn memory_storage_orders_scans_and_errors_on_missing_column_families() {
+    #[futures_test::test]
+    async fn memory_storage_orders_scans_and_errors_on_missing_column_families() {
         let storage = MemoryStorage::new(&["records"]);
-        storage.set("records", b"b", b"two").unwrap();
-        storage.set("records", b"a", b"one").unwrap();
-        storage.set("records", b"aa", b"one-one").unwrap();
-
-        assert!(matches!(
-            storage.get("missing", b"a"),
-            Err(Error::ColumnFamilyNotFound(_))
-        ));
-        assert!(matches!(
-            storage.set("missing", b"a", b"one"),
-            Err(Error::ColumnFamilyNotFound(_))
-        ));
-
-        let mut range = Vec::new();
         storage
-            .scan_range("records", b"a", b"b", &mut |key, value| {
-                range.push((key.to_vec(), value.to_vec()));
-                Ok(())
-            })
+            .set("records".into(), b"b".to_vec(), b"two".to_vec())
+            .await
             .unwrap();
+        storage
+            .set("records".into(), b"a".to_vec(), b"one".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("records".into(), b"aa".to_vec(), b"one-one".to_vec())
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            storage.get("missing".into(), b"a".to_vec()).await,
+            Err(Error::ColumnFamilyNotFound(_))
+        ));
+        assert!(matches!(
+            storage
+                .set("missing".into(), b"a".to_vec(), b"one".to_vec())
+                .await,
+            Err(Error::ColumnFamilyNotFound(_))
+        ));
+
+        let range = collect_scan(
+            storage
+                .scan_range("records".into(), b"a".to_vec(), b"b".to_vec())
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             range,
             vec![
@@ -2660,13 +3744,14 @@ mod tests {
             ]
         );
 
-        let mut prefix = Vec::new();
-        storage
-            .scan_prefix("records", b"a", &mut |key, value| {
-                prefix.push((key.to_vec(), value.to_vec()));
-                Ok(())
-            })
-            .unwrap();
+        let prefix = collect_scan(
+            storage
+                .scan_prefix("records".into(), b"a".to_vec())
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             prefix,
             vec![
@@ -2676,51 +3761,61 @@ mod tests {
         );
     }
 
-    #[test]
-    fn staged_overlay_reverse_prefix_scans_match_trait_default() {
+    #[futures_test::test]
+    async fn staged_overlay_reverse_prefix_scans_match_trait_default() {
         struct DefaultReverse<'a, S>(&'a StagedWriteOverlay<'a, S>);
 
         impl<S> OrderedKvStorage for DefaultReverse<'_, S>
         where
             S: OrderedKvStorage,
         {
-            fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Vec<u8>>, Error> {
+            fn get(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+            ) -> StorageFuture<'_, Result<Option<Vec<u8>>, Error>> {
                 self.0.get(cf, key)
             }
 
-            fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
+            fn set(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+                value: Vec<u8>,
+            ) -> StorageFuture<'_, Result<(), Error>> {
                 self.0.set(cf, key, value)
             }
 
-            fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
+            fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
                 self.0.delete(cf, key)
             }
 
             fn scan_range(
                 &self,
-                cf: &ColumnFamilyName,
-                start: &Key,
-                end: &Key,
-                visit: &mut ScanVisitor<'_>,
-            ) -> Result<(), Error> {
-                self.0.scan_range(cf, start, end, visit)
+                cf: String,
+                start: Vec<u8>,
+                end: Vec<u8>,
+            ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+                self.0.scan_range(cf, start, end)
             }
 
             fn scan_prefix(
                 &self,
-                cf: &ColumnFamilyName,
-                prefix: &Key,
-                visit: &mut ScanVisitor<'_>,
-            ) -> Result<(), Error> {
-                self.0.scan_prefix(cf, prefix, visit)
+                cf: String,
+                prefix: Vec<u8>,
+            ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+                self.0.scan_prefix(cf, prefix)
             }
 
-            fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
+            fn write_many(
+                &self,
+                operations: Vec<OwnedWriteOperation>,
+            ) -> StorageFuture<'_, Result<(), Error>> {
                 self.0.write_many(operations)
             }
         }
 
-        fn assert_case(
+        async fn assert_case(
             name: &str,
             base_rows: &[(&[u8], &[u8])],
             staged_rows: Vec<OwnedWriteOperation>,
@@ -2729,34 +3824,48 @@ mod tests {
         ) {
             let storage = MemoryStorage::new(&["indices"]);
             for (key, value) in base_rows {
-                storage.set("indices", key, value).unwrap();
+                storage
+                    .set("indices".into(), key.to_vec(), value.to_vec())
+                    .await
+                    .unwrap();
             }
-            storage.set("indices", b"view:1", b"base-view").unwrap();
+            storage
+                .set("indices".into(), b"view:1".to_vec(), b"base-view".to_vec())
+                .await
+                .unwrap();
             let staged = RefCell::new(StagedWriteState::from(staged_rows));
             let overlay = StagedWriteOverlay::new(&storage, &staged);
             let default_reverse = DefaultReverse(&overlay);
 
-            let mut optimized = Vec::new();
-            overlay
-                .scan_prefix_reverse("indices", prefix, &mut |key, value| {
-                    optimized.push((key.to_vec(), value.to_vec()));
-                    Ok(())
-                })
-                .unwrap();
+            let optimized = collect_scan(
+                overlay
+                    .scan_prefix_reverse("indices".into(), prefix.to_vec())
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
-            let mut defaulted = Vec::new();
-            default_reverse
-                .scan_prefix_reverse("indices", prefix, &mut |key, value| {
-                    defaulted.push((key.to_vec(), value.to_vec()));
-                    Ok(())
-                })
-                .unwrap();
+            let defaulted = collect_scan(
+                default_reverse
+                    .scan_prefix_reverse("indices".into(), prefix.to_vec())
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
 
             assert_eq!(optimized, defaulted, "{name}");
             assert_eq!(optimized, expected, "{name}");
             assert_eq!(
-                overlay.last_with_prefix("indices", prefix).unwrap(),
-                default_reverse.last_with_prefix("indices", prefix).unwrap(),
+                overlay
+                    .last_with_prefix("indices".into(), prefix.to_vec())
+                    .await
+                    .unwrap(),
+                default_reverse
+                    .last_with_prefix("indices".into(), prefix.to_vec())
+                    .await
+                    .unwrap(),
                 "{name}"
             );
         }
@@ -2795,7 +3904,8 @@ mod tests {
                 (b"user:2".to_vec(), b"staged-2".to_vec()),
                 (b"user:1".to_vec(), b"base-1".to_vec()),
             ],
-        );
+        )
+        .await;
 
         assert_case(
             "staged delete of base last key",
@@ -2813,7 +3923,8 @@ mod tests {
                 (b"user:2".to_vec(), b"base-2".to_vec()),
                 (b"user:1".to_vec(), b"base-1".to_vec()),
             ],
-        );
+        )
+        .await;
 
         assert_case(
             "empty staged buffer",
@@ -2824,7 +3935,8 @@ mod tests {
                 (b"user:2".to_vec(), b"base-2".to_vec()),
                 (b"user:1".to_vec(), b"base-1".to_vec()),
             ],
-        );
+        )
+        .await;
 
         assert_case(
             "staged-only prefix",
@@ -2836,7 +3948,8 @@ mod tests {
             }],
             b"team:",
             vec![(b"team:1".to_vec(), b"staged-team".to_vec())],
-        );
+        )
+        .await;
 
         assert_case(
             "base empty for prefix",
@@ -2858,11 +3971,12 @@ mod tests {
                 (b"user:3".to_vec(), b"staged-3".to_vec()),
                 (b"user:1".to_vec(), b"staged-1".to_vec()),
             ],
-        );
+        )
+        .await;
     }
 
-    #[test]
-    fn staged_overlay_last_with_prefix_no_delete_uses_one_base_seek() {
+    #[futures_test::test]
+    async fn staged_overlay_last_with_prefix_no_delete_uses_one_base_seek() {
         struct CountingStorage<S> {
             inner: S,
             prefix_scans: Cell<usize>,
@@ -2885,67 +3999,82 @@ mod tests {
         where
             S: OrderedKvStorage,
         {
-            fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Vec<u8>>, Error> {
+            fn get(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+            ) -> StorageFuture<'_, Result<Option<Vec<u8>>, Error>> {
                 self.inner.get(cf, key)
             }
 
-            fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
+            fn set(
+                &self,
+                cf: String,
+                key: Vec<u8>,
+                value: Vec<u8>,
+            ) -> StorageFuture<'_, Result<(), Error>> {
                 self.inner.set(cf, key, value)
             }
 
-            fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
+            fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
                 self.inner.delete(cf, key)
             }
 
             fn scan_range(
                 &self,
-                cf: &ColumnFamilyName,
-                start: &Key,
-                end: &Key,
-                visit: &mut ScanVisitor<'_>,
-            ) -> Result<(), Error> {
-                self.inner.scan_range(cf, start, end, visit)
+                cf: String,
+                start: Vec<u8>,
+                end: Vec<u8>,
+            ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+                self.inner.scan_range(cf, start, end)
             }
 
             fn scan_prefix(
                 &self,
-                cf: &ColumnFamilyName,
-                prefix: &Key,
-                visit: &mut ScanVisitor<'_>,
-            ) -> Result<(), Error> {
+                cf: String,
+                prefix: Vec<u8>,
+            ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
                 self.prefix_scans.set(self.prefix_scans.get() + 1);
-                self.inner.scan_prefix(cf, prefix, visit)
+                self.inner.scan_prefix(cf, prefix)
             }
 
             fn scan_prefix_reverse(
                 &self,
-                cf: &ColumnFamilyName,
-                prefix: &Key,
-                visit: &mut ScanVisitor<'_>,
-            ) -> Result<(), Error> {
+                cf: String,
+                prefix: Vec<u8>,
+            ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
                 self.reverse_prefix_scans
                     .set(self.reverse_prefix_scans.get() + 1);
-                self.inner.scan_prefix_reverse(cf, prefix, visit)
+                self.inner.scan_prefix_reverse(cf, prefix)
             }
 
             fn last_with_prefix(
                 &self,
-                cf: &ColumnFamilyName,
-                prefix: &Key,
-            ) -> Result<Option<KeyValue>, Error> {
+                cf: String,
+                prefix: Vec<u8>,
+            ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
                 self.last_with_prefix_calls
                     .set(self.last_with_prefix_calls.get() + 1);
                 self.inner.last_with_prefix(cf, prefix)
             }
 
-            fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
+            fn write_many(
+                &self,
+                operations: Vec<OwnedWriteOperation>,
+            ) -> StorageFuture<'_, Result<(), Error>> {
                 self.inner.write_many(operations)
             }
         }
 
         let storage = CountingStorage::new(MemoryStorage::new(&["indices"]));
-        storage.set("indices", b"user:1", b"base-1").unwrap();
-        storage.set("indices", b"user:2", b"base-2").unwrap();
+        storage
+            .set("indices".into(), b"user:1".to_vec(), b"base-1".to_vec())
+            .await
+            .unwrap();
+        storage
+            .set("indices".into(), b"user:2".to_vec(), b"base-2".to_vec())
+            .await
+            .unwrap();
         let staged = RefCell::new(StagedWriteState::from(vec![
             OwnedWriteOperation::Set {
                 cf: "indices".to_owned(),
@@ -2961,7 +4090,10 @@ mod tests {
         let overlay = StagedWriteOverlay::new(&storage, &staged);
 
         assert_eq!(
-            overlay.last_with_prefix("indices", b"user:").unwrap(),
+            overlay
+                .last_with_prefix("indices".into(), b"user:".to_vec())
+                .await
+                .unwrap(),
             Some((b"user:3".to_vec(), b"staged-3".to_vec()))
         );
         assert_eq!(storage.last_with_prefix_calls.get(), 1);
@@ -2969,65 +4101,71 @@ mod tests {
         assert_eq!(storage.reverse_prefix_scans.get(), 0);
     }
 
-    #[test]
-    fn memory_storage_write_many_validates_column_families_before_writing() {
+    #[futures_test::test]
+    async fn memory_storage_write_many_validates_column_families_before_writing() {
         let storage = MemoryStorage::new(&["records"]);
         let error = storage
-            .write_many(&[
-                WriteOperation::set("records", b"1", b"record"),
-                WriteOperation::set("missing", b"2", b"nope"),
+            .write_many(vec![
+                OwnedWriteOperation::set("records", b"1", b"record"),
+                OwnedWriteOperation::set("missing", b"2", b"nope"),
             ])
+            .await
             .unwrap_err();
 
         assert!(matches!(error, Error::ColumnFamilyNotFound(_)));
-        assert_eq!(storage.get("records", b"1").unwrap(), None);
+        assert_eq!(
+            storage.get("records".into(), b"1".to_vec()).await.unwrap(),
+            None
+        );
     }
 
-    #[test]
-    fn memory_storage_conforms_to_order_and_atomic_batch_contract() {
+    #[futures_test::test]
+    async fn memory_storage_conforms_to_order_and_atomic_batch_contract() {
         let storage = MemoryStorage::new(&["records"]);
-        conformance::persistence_order_and_batch_atomicity(storage);
+        conformance::persistence_order_and_batch_atomicity(storage).await;
     }
 
-    #[test]
-    fn memory_storage_reopen_adds_column_families_without_losing_data() {
+    #[futures_test::test]
+    async fn memory_storage_reopen_adds_column_families_without_losing_data() {
         let storage = MemoryStorage::new(&["records"]);
-        conformance::reopen_preserves_data_and_adds_families(storage);
+        conformance::reopen_preserves_data_and_adds_families(storage).await;
     }
 
-    #[test]
-    fn memory_storage_conforms_to_delta_append_contract() {
+    #[futures_test::test]
+    async fn memory_storage_conforms_to_delta_append_contract() {
         let storage = MemoryStorage::new(&["records"]);
-        conformance::delta_append_current_winner_observes_merged_state(storage);
+        conformance::delta_append_current_winner_observes_merged_state(storage).await;
     }
 
-    #[test]
-    fn record_store_writes_and_reads_typed_records() {
+    #[futures_test::test]
+    async fn record_store_writes_and_reads_typed_records() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
-            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
+            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                .unwrap();
         let descriptor = RecordDescriptor::new([("id", ValueType::U64)]);
         let store = RecordStore::new(&storage, "records", &descriptor);
         let key = b"1".as_slice();
         let record = descriptor.create(&[Value::U64(42)]).unwrap();
         let op = store.set(key, &record);
 
-        storage.write_many(&[op]).unwrap();
+        storage.write_many(vec![op]).await.unwrap();
 
-        let stored = store.get(key).unwrap().unwrap();
+        let stored = store.get(key).await.unwrap().unwrap();
         assert_eq!(stored.get_idx(0).unwrap(), Value::U64(42));
     }
 
-    #[test]
-    fn native_durable_test_store_conforms_to_delta_append_contract() {
+    #[futures_test::test]
+    async fn native_durable_test_store_conforms_to_delta_append_contract() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage =
-            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
-        conformance::delta_append_current_winner_observes_merged_state(storage);
+            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                .unwrap();
+        conformance::delta_append_current_winner_observes_merged_state(storage).await;
     }
 
-    #[test]
-    fn native_durable_delta_append_survives_reopen() {
+    #[futures_test::test]
+    async fn native_durable_delta_append_survives_reopen() {
         fn record(time: u64, node: u8, payload: &[u8]) -> Vec<u8> {
             let mut bytes = Vec::new();
             bytes.extend(time.to_le_bytes());
@@ -3050,26 +4188,33 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         {
             let storage =
-                TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
+                TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                    .unwrap();
             storage
-                .write_many(&[WriteOperation::delta(
+                .write_many(vec![OwnedWriteOperation::delta(
                     "records",
                     b"row",
-                    &delta(10, 1, record(10, 1, b"older")),
+                    delta(10, 1, record(10, 1, b"older")),
                 )])
+                .await
                 .unwrap();
             storage
-                .write_many(&[WriteOperation::delta(
+                .write_many(vec![OwnedWriteOperation::delta(
                     "records",
                     b"row",
-                    &delta(20, 2, record(20, 2, b"newer")),
+                    delta(20, 2, record(20, 2, b"newer")),
                 )])
+                .await
                 .unwrap();
         }
         let reopened =
-            TestStorage::open(temp_dir.path().join("groove-test.btree"), &["records"]).unwrap();
+            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
+                .unwrap();
         assert_eq!(
-            reopened.get("records", b"row").unwrap(),
+            reopened
+                .get("records".into(), b"row".to_vec())
+                .await
+                .unwrap(),
             Some(record(20, 2, b"newer"))
         );
     }

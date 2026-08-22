@@ -2,11 +2,14 @@
 
 use super::*;
 
-#[test]
-fn collect_by_round_trips_ordered_explicit_child_ids() {
+#[futures_test::test]
+async fn collect_by_round_trips_ordered_explicit_child_ids() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
-    let mut database = Database::new(history_schema(), storage).unwrap();
-    let subscription = database.subscribe_one_sink(history_collect_by(3)).unwrap();
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+    let subscription = database
+        .subscribe_one_sink(history_collect_by(3))
+        .await
+        .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
@@ -14,7 +17,7 @@ fn collect_by_round_trips_ordered_explicit_child_ids() {
     batch.insert("history", history_values(1, 30, 30, "third"));
     batch.insert("history", history_values(1, 10, 10, "first"));
     batch.insert("history", history_values(1, 20, 20, "second"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         subscription.recv().unwrap().to_values().unwrap(),
@@ -25,12 +28,13 @@ fn collect_by_round_trips_ordered_explicit_child_ids() {
     );
 }
 
-#[test]
-fn collect_by_expand_renders_selected_tuples_in_source_order() {
+#[futures_test::test]
+async fn collect_by_expand_renders_selected_tuples_in_source_order() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
-    let mut database = Database::new(history_schema(), storage).unwrap();
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_collect_by_expand(0, 3))
+        .await
         .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
@@ -40,7 +44,7 @@ fn collect_by_expand_renders_selected_tuples_in_source_order() {
     batch.insert("history", history_values(1, 30, 30, "third"));
     batch.insert("history", history_values(1, 10, 10, "first"));
     batch.insert("history", history_values(1, 20, 20, "second"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         subscription.recv().unwrap().to_values().unwrap(),
@@ -72,24 +76,25 @@ fn collect_by_expand_renders_selected_tuples_in_source_order() {
         ]
     );
 }
-#[test]
-fn collect_by_expand_diffs_only_selected_tuple_occurrences() {
+#[futures_test::test]
+async fn collect_by_expand_diffs_only_selected_tuple_occurrences() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
-    let mut database = Database::new(history_schema(), storage).unwrap();
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_collect_by_expand(0, 2))
+        .await
         .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
     batch.insert("history", history_values(1, 10, 10, "first"));
     batch.insert("history", history_values(1, 20, 20, "second"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let _initial = subscription.recv().unwrap();
 
     let mut batch = database.open_batch();
     batch.insert("history", history_values(1, 5, 5, "front"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         subscription.recv().unwrap().to_values().unwrap(),
         [
@@ -113,33 +118,35 @@ fn collect_by_expand_diffs_only_selected_tuple_occurrences() {
     );
 }
 
-#[test]
-fn collect_by_expand_suppresses_byte_equal_selected_tuples() {
+#[futures_test::test]
+async fn collect_by_expand_suppresses_byte_equal_selected_tuples() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
-    let mut database = Database::new(history_schema(), storage).unwrap();
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_collect_by_expand(0, 2))
+        .await
         .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
     batch.insert("history", history_values(1, 10, 10, "first"));
     batch.insert("history", history_values(1, 20, 20, "second"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let _initial = subscription.recv().unwrap();
 
     let mut batch = database.open_batch();
     batch.insert("history", history_values(1, 30, 30, "outside"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
 }
 
-#[test]
-fn collect_by_expand_honors_order_tie_offset_and_limit() {
+#[futures_test::test]
+async fn collect_by_expand_honors_order_tie_offset_and_limit() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
-    let mut database = Database::new(history_schema(), storage).unwrap();
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_collect_by_expand(1, 2))
+        .await
         .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
@@ -148,7 +155,7 @@ fn collect_by_expand_honors_order_tie_offset_and_limit() {
     batch.insert("history", history_values(1, 10, 20, "tied-second"));
     batch.insert("history", history_values(1, 20, 30, "third"));
     batch.insert("history", history_values(1, 30, 40, "outside"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         subscription.recv().unwrap().to_values().unwrap(),
         [
@@ -172,27 +179,29 @@ fn collect_by_expand_honors_order_tie_offset_and_limit() {
     );
 }
 
-#[test]
-fn collect_by_expand_rejects_duplicate_occurrence_source_ids() {
+#[futures_test::test]
+async fn collect_by_expand_rejects_duplicate_occurrence_source_ids() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
-    let mut database = Database::new(history_schema(), storage).unwrap();
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
     let mut batch = database.open_batch();
     batch.insert("history", history_values(1, 10, 7, "first"));
     batch.insert("history", history_values(1, 20, 7, "ambiguous"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert!(matches!(
-        database.subscribe_one_sink(history_collect_by_expand(0, 3)),
+        database
+            .subscribe_one_sink(history_collect_by_expand(0, 3))
+            .await,
         Err(Error::IvmRuntime(
             IvmRuntimeError::DuplicateCollectByOccurrenceId
         ))
     ));
 }
 
-#[test]
-fn collect_by_rejects_join_and_nested_collector_consumers() {
+#[futures_test::test]
+async fn collect_by_rejects_join_and_nested_collector_consumers() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
-    let mut database = Database::new(history_schema(), storage).unwrap();
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
     let collector = history_collect_by(2);
     let relational_consumers = [
         GraphBuilder::join(
@@ -215,33 +224,36 @@ fn collect_by_rejects_join_and_nested_collector_consumers() {
     ];
     for graph in relational_consumers {
         assert!(matches!(
-            database.subscribe_one_sink(graph),
+            database.subscribe_one_sink(graph).await,
             Err(Error::IvmRuntime(IvmRuntimeError::CollectByMustBeTerminal))
         ));
     }
 }
 
-#[test]
-fn collect_by_suppresses_unchanged_rendered_group_and_replaces_once_at_boundary() {
+#[futures_test::test]
+async fn collect_by_suppresses_unchanged_rendered_group_and_replaces_once_at_boundary() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
-    let mut database = Database::new(history_schema(), storage).unwrap();
-    let subscription = database.subscribe_one_sink(history_collect_by(2)).unwrap();
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
+    let subscription = database
+        .subscribe_one_sink(history_collect_by(2))
+        .await
+        .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
     batch.insert("history", history_values(1, 10, 10, "first"));
     batch.insert("history", history_values(1, 20, 20, "second"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let _initial = subscription.recv().unwrap();
 
     let mut batch = database.open_batch();
     batch.insert("history", history_values(1, 30, 30, "outside"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
 
     let mut batch = database.open_batch();
     batch.insert("history", history_values(1, 5, 5, "front"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let replacement = subscription.recv().unwrap().to_values().unwrap();
     assert_eq!(replacement.len(), 2);
     assert_eq!(
@@ -254,12 +266,13 @@ fn collect_by_suppresses_unchanged_rendered_group_and_replaces_once_at_boundary(
     );
 }
 
-#[test]
-fn collect_by_multisink_emits_descendant_terminal_operations() {
+#[futures_test::test]
+async fn collect_by_multisink_emits_descendant_terminal_operations() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
-    let mut database = Database::new(history_schema(), storage).unwrap();
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe([("rows", history_collect_by(2))])
+        .await
         .unwrap();
     let initial = subscription.recv().unwrap();
     assert!(initial.terminal_sinks.is_empty());
@@ -267,7 +280,7 @@ fn collect_by_multisink_emits_descendant_terminal_operations() {
     let mut batch = database.open_batch();
     batch.insert("history", history_values(1, 10, 10, "first"));
     batch.insert("history", history_values(1, 20, 20, "second"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let initial_rows = subscription.recv().unwrap();
     assert!(matches!(
         initial_rows.terminal_sinks["rows"].operations.as_slice(),
@@ -280,7 +293,7 @@ fn collect_by_multisink_emits_descendant_terminal_operations() {
 
     let mut batch = database.open_batch();
     batch.insert("history", history_values(1, 5, 5, "front"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let update = subscription.recv().unwrap();
     let operations = &update.terminal_sinks["rows"].operations;
     assert!(operations.iter().all(|operation| {
@@ -303,15 +316,18 @@ fn collect_by_multisink_emits_descendant_terminal_operations() {
     );
 }
 
-#[test]
-fn one_shot_query_does_not_discard_live_collect_by_arrangement() {
+#[futures_test::test]
+async fn one_shot_query_does_not_discard_live_collect_by_arrangement() {
     let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
-    let mut database = Database::new(history_schema(), storage).unwrap();
+    let mut database = Database::new(history_schema(), storage).await.unwrap();
     let mut batch = database.open_batch();
     batch.insert("history", history_values(1, 10, 10, "first"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
-    let subscription = database.subscribe_one_sink(history_collect_by(2)).unwrap();
+    let subscription = database
+        .subscribe_one_sink(history_collect_by(2))
+        .await
+        .unwrap();
     assert_eq!(
         subscription.recv().unwrap().to_values().unwrap(),
         [(collect_parent(1, &[(10, "first")]), 1)]
@@ -319,12 +335,15 @@ fn one_shot_query_does_not_discard_live_collect_by_arrangement() {
 
     // One-shot queries collect their ephemeral graph immediately. That GC
     // boundary must retain arrangements owned by an unrelated live terminal.
-    let snapshot = database.query_graph(GraphBuilder::table("rows")).unwrap();
+    let snapshot = database
+        .query_graph(GraphBuilder::table("rows"))
+        .await
+        .unwrap();
     assert!(snapshot.is_empty());
 
     let mut batch = database.open_batch();
     batch.insert("history", history_values(1, 20, 20, "second"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         subscription.recv().unwrap().to_values().unwrap(),
         [
@@ -334,11 +353,14 @@ fn one_shot_query_does_not_discard_live_collect_by_arrangement() {
     );
 }
 
-#[test]
-fn collect_by_tree_renders_sibling_slots_and_grandchildren_with_independent_windows() {
+#[futures_test::test]
+async fn collect_by_tree_renders_sibling_slots_and_grandchildren_with_independent_windows() {
     let storage = MemoryStorage::new(&["tree"]);
-    let mut database = Database::new(collect_tree_schema(), storage).unwrap();
-    let subscription = database.subscribe_one_sink(collect_tree_graph()).unwrap();
+    let mut database = Database::new(collect_tree_schema(), storage).await.unwrap();
+    let subscription = database
+        .subscribe_one_sink(collect_tree_graph())
+        .await
+        .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
@@ -354,7 +376,7 @@ fn collect_by_tree_renders_sibling_slots_and_grandchildren_with_independent_wind
         "tree",
         collect_tree_values([3, 20, 10, 200, 10, 2, 2, 7, 7]),
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let initial = subscription.recv().unwrap().to_values().unwrap();
     assert_eq!(initial.len(), 1);
     let root = &initial[0].0;
@@ -409,12 +431,15 @@ fn collect_by_tree_renders_sibling_slots_and_grandchildren_with_independent_wind
     }
 }
 
-#[test]
-fn collect_by_tree_keeps_routed_owner_keys_internal_and_isolated() {
+#[futures_test::test]
+async fn collect_by_tree_keeps_routed_owner_keys_internal_and_isolated() {
     let storage = MemoryStorage::new(&["routed_tree"]);
-    let mut database = Database::new(routed_collect_tree_schema(), storage).unwrap();
+    let mut database = Database::new(routed_collect_tree_schema(), storage)
+        .await
+        .unwrap();
     let subscription = database
         .subscribe_one_sink(routed_collect_tree_graph())
+        .await
         .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
@@ -446,7 +471,7 @@ fn collect_by_tree_keeps_routed_owner_keys_internal_and_isolated() {
             Value::U64(1),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let rows = subscription.recv().unwrap().to_values().unwrap();
     assert_eq!(rows.len(), 2);
 
@@ -477,8 +502,8 @@ fn collect_by_tree_keeps_routed_owner_keys_internal_and_isolated() {
     assert_eq!(grandchildren, vec![Value::U64(100), Value::U64(200)]);
 }
 
-#[test]
-fn collect_by_tree_rejects_non_grouping_internal_owner_key() {
+#[futures_test::test]
+async fn collect_by_tree_rejects_non_grouping_internal_owner_key() {
     let graph = GraphBuilder::collect_by_tree(
         GraphBuilder::table("routed_tree"),
         ["root", "route"],
@@ -498,19 +523,25 @@ fn collect_by_tree_rejects_non_grouping_internal_owner_key() {
         .with_owner_key_cols(["grandchild"])],
     );
     let storage = MemoryStorage::new(&["routed_tree"]);
-    let mut database = Database::new(routed_collect_tree_schema(), storage).unwrap();
+    let mut database = Database::new(routed_collect_tree_schema(), storage)
+        .await
+        .unwrap();
     assert!(matches!(
-        database.subscribe_one_sink(graph),
+        database.subscribe_one_sink(graph).await,
         Err(Error::IvmRuntime(IvmRuntimeError::InvalidCollectBy(message)))
             if message == "a slot owner key must also be a grouping field"
     ));
 }
 
-#[test]
-fn collect_by_tree_grandchild_change_replaces_one_whole_parent_and_suppresses_unrendered_change() {
+#[futures_test::test]
+async fn collect_by_tree_grandchild_change_replaces_one_whole_parent_and_suppresses_unrendered_change()
+ {
     let storage = MemoryStorage::new(&["tree"]);
-    let mut database = Database::new(collect_tree_schema(), storage).unwrap();
-    let subscription = database.subscribe_one_sink(collect_tree_graph()).unwrap();
+    let mut database = Database::new(collect_tree_schema(), storage).await.unwrap();
+    let subscription = database
+        .subscribe_one_sink(collect_tree_graph())
+        .await
+        .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
     let mut batch = database.open_batch();
     batch.insert(
@@ -521,7 +552,7 @@ fn collect_by_tree_grandchild_change_replaces_one_whole_parent_and_suppresses_un
         "tree",
         collect_tree_values([2, 10, 20, 101, 20, 1, 1, 5, 5]),
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let _initial = subscription.recv().unwrap();
 
     // Planted positive: this is inside the rendered grandchild window, so the
@@ -529,7 +560,7 @@ fn collect_by_tree_grandchild_change_replaces_one_whole_parent_and_suppresses_un
     // not a child delta or one replacement at each descriptor level.
     let mut batch = database.open_batch();
     batch.insert("tree", collect_tree_values([3, 10, 20, 99, 0, 2, 2, 7, 7]));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let replacement = subscription.recv().unwrap().to_values().unwrap();
     assert_eq!(replacement.len(), 2);
     assert_eq!(replacement[0].1, -1);
@@ -566,12 +597,12 @@ fn collect_by_tree_grandchild_change_replaces_one_whole_parent_and_suppresses_un
         "tree",
         collect_tree_values([4, 10, 20, 999, 999, 999, 999, 1, 1]),
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert!(matches!(subscription.try_recv(), Err(TryRecvError::Empty)));
 }
 
-#[test]
-fn collect_by_tree_rejects_depth_beyond_descriptor_bound() {
+#[futures_test::test]
+async fn collect_by_tree_rejects_depth_beyond_descriptor_bound() {
     fn nested(depth: usize) -> CollectBySlotBuilder {
         CollectBySlotBuilder::new(
             ["child"],
@@ -600,28 +631,29 @@ fn collect_by_tree_rejects_depth_beyond_descriptor_bound() {
         )],
     );
     let storage = MemoryStorage::new(&["tree"]);
-    let mut database = Database::new(collect_tree_schema(), storage).unwrap();
+    let mut database = Database::new(collect_tree_schema(), storage).await.unwrap();
     assert!(matches!(
-        database.subscribe_one_sink(graph),
+        database.subscribe_one_sink(graph).await,
         Err(Error::IvmRuntime(IvmRuntimeError::InvalidCollectBy(_)))
     ));
 }
 
-#[test]
-fn collect_by_after_recursive_closure_keeps_recursive_state_outside_limit() {
-    fn run(chain_len: u64) -> (usize, usize, Vec<(Vec<Value>, i64)>) {
+#[futures_test::test]
+async fn collect_by_after_recursive_closure_keeps_recursive_state_outside_limit() {
+    async fn run(chain_len: u64) -> (usize, usize, Vec<(Vec<Value>, i64)>) {
         let storage = MemoryStorage::new(&["edges"]);
-        let mut database = Database::new(edges_schema(), storage).unwrap();
+        let mut database = Database::new(edges_schema(), storage).await.unwrap();
         database.set_tick_runtime_stats_enabled(true);
         let subscription = database
             .subscribe_one_sink(reachability_collect_by(1))
+            .await
             .unwrap();
         assert!(subscription.recv().unwrap().is_empty());
         let mut batch = database.open_batch();
         for edge in 1..chain_len {
             insert_edge(&mut batch, edge, edge, edge + 1);
         }
-        database.commit_batch(batch).unwrap();
+        database.commit_batch(batch).await.unwrap();
         let output = subscription.recv().unwrap().to_values().unwrap();
         let stats = &database.last_commit_metrics().unwrap().tick.runtime_stats;
         (
@@ -631,8 +663,8 @@ fn collect_by_after_recursive_closure_keeps_recursive_state_outside_limit() {
         )
     }
 
-    let (small_recursive_rows, small_arrangement_rows, small_output) = run(4);
-    let (large_recursive_rows, large_arrangement_rows, large_output) = run(6);
+    let (small_recursive_rows, small_arrangement_rows, small_output) = run(4).await;
+    let (large_recursive_rows, large_arrangement_rows, large_output) = run(6).await;
     assert!(
         small_recursive_rows > 1,
         "the collector limit must not cap closure state"

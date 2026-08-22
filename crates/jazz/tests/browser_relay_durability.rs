@@ -1,12 +1,14 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::fmt::Debug;
+use std::future::Future;
 use std::rc::Rc;
 
 mod common;
 
 use jazz::db::{Db, DbConfig, DbIdentity, Propagation, ReadOpts, SubscriptionEvent, block_on};
 use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
+use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorId, NodeUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
@@ -16,6 +18,17 @@ use jazz_storage_rocksdb::RocksDbStorage;
 use jazz_testkit::duplex_transport::duplex;
 
 use common::compile_schema;
+
+trait FutureResultExpectExt<T, E>: Future<Output = Result<T, E>> + Sized {
+    fn expect(self, message: &str) -> T
+    where
+        E: Debug,
+    {
+        block_on(self).expect(message)
+    }
+}
+
+impl<F, T, E> FutureResultExpectExt<T, E> for F where F: Future<Output = Result<T, E>> {}
 
 fn schema() -> JazzSchema {
     compile_schema(
@@ -39,7 +52,7 @@ fn included_relation_schema() -> JazzSchema {
     )
 }
 
-fn open_db(node: u8, author: AuthorId, schema: &JazzSchema) -> Db<MemoryStorage> {
+fn open_db(node: u8, author: AuthorId, schema: &JazzSchema) -> Db<TestStorage> {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -47,7 +60,7 @@ fn open_db(node: u8, author: AuthorId, schema: &JazzSchema) -> Db<MemoryStorage>
         .collect::<Vec<_>>();
     block_on(Db::open(DbConfig::new(
         schema.clone(),
-        MemoryStorage::new(&refs),
+        TestStorage::new(&refs),
         DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
             author,
@@ -56,7 +69,7 @@ fn open_db(node: u8, author: AuthorId, schema: &JazzSchema) -> Db<MemoryStorage>
     .expect("open database")
 }
 
-fn open_core(node: u8, schema: &JazzSchema) -> Db<MemoryStorage> {
+fn open_core(node: u8, schema: &JazzSchema) -> Db<TestStorage> {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -64,7 +77,7 @@ fn open_core(node: u8, schema: &JazzSchema) -> Db<MemoryStorage> {
         .collect::<Vec<_>>();
     block_on(Db::open_history_complete(DbConfig::new(
         schema.clone(),
-        MemoryStorage::new(&refs),
+        TestStorage::new(&refs),
         DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
             author: AuthorId::SYSTEM,

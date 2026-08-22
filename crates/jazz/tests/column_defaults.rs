@@ -4,7 +4,7 @@ mod common;
 
 use jazz::db::{Db, DbConfig, DbIdentity};
 use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
+use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::schema::JazzSchema;
 use jazz::tools::{
@@ -38,13 +38,13 @@ fn schema() -> JazzSchema {
     compile_schema(&source)
 }
 
-fn open_db() -> Db<MemoryStorage> {
+fn open_db() -> Db<TestStorage> {
     let schema = schema();
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     jazz::db::block_on(Db::open(DbConfig {
         schema,
-        storage: MemoryStorage::new(&refs),
+        storage: TestStorage::new(&refs),
         identity: DbIdentity {
             node: NodeUuid::from_bytes([0x11; 16]),
             author: AuthorId::from_bytes([0xa1; 16]),
@@ -61,7 +61,7 @@ fn cells(values: impl IntoIterator<Item = (&'static str, Value)>) -> BTreeMap<St
         .collect()
 }
 
-fn stored_row(db: &Db<MemoryStorage>, row_id: RowUuid) -> BTreeMap<String, Value> {
+fn stored_row(db: &Db<TestStorage>, row_id: RowUuid) -> BTreeMap<String, Value> {
     let table = schema()
         .tables()
         .iter()
@@ -90,11 +90,11 @@ fn stored_row(db: &Db<MemoryStorage>, row_id: RowUuid) -> BTreeMap<String, Value
 fn core_insert_applies_literal_defaults_for_omitted_columns() {
     let db = open_db();
 
-    db.insert_with_id(
+    jazz::block_on(db.insert_with_id(
         "events",
         row(1),
         cells([("title", Value::String("created".to_owned()))]),
-    )
+    ))
     .expect("insert row");
 
     let stored = stored_row(&db, row(1));
@@ -119,14 +119,14 @@ fn core_insert_applies_literal_defaults_for_omitted_columns() {
 fn core_insert_preserves_explicit_null_instead_of_using_default() {
     let db = open_db();
 
-    db.insert_with_id(
+    jazz::block_on(db.insert_with_id(
         "events",
         row(2),
         cells([
             ("title", Value::String("created".to_owned())),
             ("note", Value::Nullable(None)),
         ]),
-    )
+    ))
     .expect("insert row");
 
     let stored = stored_row(&db, row(2));
@@ -138,7 +138,7 @@ fn core_insert_preserves_explicit_null_instead_of_using_default() {
 fn core_insert_keeps_explicit_values_for_defaulted_columns() {
     let db = open_db();
 
-    db.insert_with_id(
+    jazz::block_on(db.insert_with_id(
         "events",
         row(3),
         cells([
@@ -150,7 +150,7 @@ fn core_insert_keeps_explicit_values_for_defaulted_columns() {
                 Value::Nullable(Some(Box::new(Value::String("explicit note".to_owned())))),
             ),
         ]),
-    )
+    ))
     .expect("insert row");
 
     let stored = stored_row(&db, row(3));

@@ -2,12 +2,12 @@
 
 use super::*;
 
-#[test]
-fn query_returns_filtered_current_rows() {
+#[futures_test::test]
+async fn query_returns_filtered_current_rows() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -18,7 +18,7 @@ fn query_returns_filtered_current_rows() {
         "albums",
         vec![Value::U64(11), Value::String("Blue Train".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let result = database
         .query(select_query(
@@ -30,6 +30,7 @@ fn query_returns_filtered_current_rows() {
                     Expr::Literal(Value::U64(10)),
                 )),
         ))
+        .await
         .unwrap();
     assert_eq!(
         result.to_values().unwrap(),
@@ -37,15 +38,15 @@ fn query_returns_filtered_current_rows() {
     );
 }
 
-#[test]
-fn enum_predicates_resolve_variant_names_at_plan_time() {
+#[futures_test::test]
+async fn enum_predicates_resolve_variant_names_at_plan_time() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["tasks", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(enum_tasks_schema(), storage).unwrap();
+    let mut database = Database::new(enum_tasks_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -66,7 +67,7 @@ fn enum_predicates_resolve_variant_names_at_plan_time() {
             Value::String("two".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let result = database
         .query(select_query(
@@ -78,19 +79,20 @@ fn enum_predicates_resolve_variant_names_at_plan_time() {
                     Expr::Literal(Value::String("todo".to_owned())),
                 )),
         ))
+        .await
         .unwrap();
     assert_eq!(result.to_values().unwrap(), [(vec!["two".into()], 1)]);
 }
 
-#[test]
-fn enum_index_keys_follow_declaration_order() {
+#[futures_test::test]
+async fn enum_index_keys_follow_declaration_order() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["tasks", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(enum_tasks_schema(), storage).unwrap();
+    let mut database = Database::new(enum_tasks_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
     for (id, status) in [(1, "done"), (2, "todo"), (3, "doing")] {
@@ -104,12 +106,13 @@ fn enum_index_keys_follow_declaration_order() {
             ],
         );
     }
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         record_values(
             database
                 .index_scan("tasks", "tasks_by_status", &[])
+                .await
                 .unwrap()
         )
         .into_iter()
@@ -125,6 +128,7 @@ fn enum_index_keys_follow_declaration_order() {
                     "tasks_by_status",
                     &[Value::String("doing".to_owned())]
                 )
+                .await
                 .unwrap()
         )
         .into_iter()
@@ -134,12 +138,14 @@ fn enum_index_keys_follow_declaration_order() {
     );
 }
 
-#[test]
-fn nullable_comparisons_unwrap_present_values_and_skip_nulls() {
+#[futures_test::test]
+async fn nullable_comparisons_unwrap_present_values_and_skip_nulls() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["markers"]).unwrap();
-    let mut database = Database::new(nullable_markers_schema(), storage).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["markers"]).unwrap();
+    let mut database = Database::new(nullable_markers_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert("markers", vec![Value::U64(1), Value::Nullable(None)]);
@@ -150,7 +156,7 @@ fn nullable_comparisons_unwrap_present_values_and_skip_nulls() {
             Value::Nullable(Some(Box::new(Value::String("deleted".to_owned())))),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let result = database
         .query(select_query(
@@ -162,16 +168,19 @@ fn nullable_comparisons_unwrap_present_values_and_skip_nulls() {
                     Expr::Literal(Value::String("deleted".to_owned())),
                 )),
         ))
+        .await
         .unwrap();
     assert_eq!(result.to_values().unwrap(), [(vec![Value::U64(2)], 1)]);
 }
 
-#[test]
-fn query_lowers_is_null_and_is_not_null_predicates() {
+#[futures_test::test]
+async fn query_lowers_is_null_and_is_not_null_predicates() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["markers"]).unwrap();
-    let mut database = Database::new(nullable_markers_schema(), storage).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["markers"]).unwrap();
+    let mut database = Database::new(nullable_markers_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert("markers", vec![Value::U64(1), Value::Nullable(None)]);
@@ -182,7 +191,7 @@ fn query_lowers_is_null_and_is_not_null_predicates() {
             Value::Nullable(Some(Box::new(Value::String("present".to_owned())))),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let is_null = database
         .query(select_query(
@@ -193,6 +202,7 @@ fn query_lowers_is_null_and_is_not_null_predicates() {
                     expr: Box::new(col("marker")),
                 }),
         ))
+        .await
         .unwrap();
     let is_not_null = database
         .query(select_query(
@@ -203,18 +213,21 @@ fn query_lowers_is_null_and_is_not_null_predicates() {
                     expr: Box::new(col("marker")),
                 }),
         ))
+        .await
         .unwrap();
 
     assert_eq!(is_null.to_values().unwrap(), [(vec![Value::U64(1)], 1)]);
     assert_eq!(is_not_null.to_values().unwrap(), [(vec![Value::U64(2)], 1)]);
 }
 
-#[test]
-fn is_null_matches_nested_nullable_none() {
+#[futures_test::test]
+async fn is_null_matches_nested_nullable_none() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["markers"]).unwrap();
-    let mut database = Database::new(nested_nullable_markers_schema(), storage).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["markers"]).unwrap();
+    let mut database = Database::new(nested_nullable_markers_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -233,7 +246,7 @@ fn is_null_matches_nested_nullable_none() {
             )))))),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let is_null = database
         .query(select_query(
@@ -244,6 +257,7 @@ fn is_null_matches_nested_nullable_none() {
                     expr: Box::new(col("marker")),
                 }),
         ))
+        .await
         .unwrap();
     let is_not_null = database
         .query(select_query(
@@ -254,27 +268,30 @@ fn is_null_matches_nested_nullable_none() {
                     expr: Box::new(col("marker")),
                 }),
         ))
+        .await
         .unwrap();
 
     assert_eq!(is_null.to_values().unwrap(), [(vec![Value::U64(1)], 1)]);
     assert_eq!(is_not_null.to_values().unwrap(), [(vec![Value::U64(2)], 1)]);
 }
 
-#[test]
-fn unwrap_nullable_graph_drops_none_and_unwraps_present_values() {
+#[futures_test::test]
+async fn unwrap_nullable_graph_drops_none_and_unwraps_present_values() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["tracks", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(indexed_tracks_schema(), storage).unwrap();
+    let mut database = Database::new(indexed_tracks_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     batch.insert("tracks", track_values(1, 7, Some(1), "Intro"));
     batch.insert("tracks", track_values(2, 7, None, "Hidden"));
     batch.insert("tracks", track_values(3, 7, Some(2), "Outro"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let result = database
         .query_graph(
@@ -282,6 +299,7 @@ fn unwrap_nullable_graph_drops_none_and_unwraps_present_values() {
                 .unwrap_nullable("disc")
                 .project(["id", "disc"]),
         )
+        .await
         .unwrap();
     assert_eq!(
         result.to_values().unwrap(),
@@ -292,18 +310,20 @@ fn unwrap_nullable_graph_drops_none_and_unwraps_present_values() {
     );
 }
 
-#[test]
+#[futures_test::test]
 #[ignore = "receipt-only timing for batch-general schema index maintenance"]
-fn indexed_batch_commit_timing_receipt_20k_and_single_row() {
+async fn indexed_batch_commit_timing_receipt_20k_and_single_row() {
     jazz_benchmark_guard::refuse_contaminated_measurement();
     const ROWS: u64 = 20_000;
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["tracks", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(indexed_tracks_schema(), storage).unwrap();
+    let mut database = Database::new(indexed_tracks_schema(), storage)
+        .await
+        .unwrap();
 
     let mut batch = database.open_batch();
     for id in 0..ROWS {
@@ -314,7 +334,7 @@ fn indexed_batch_commit_timing_receipt_20k_and_single_row() {
     }
 
     let bulk_start = Instant::now();
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let bulk_elapsed = bulk_start.elapsed();
 
     let album_rows = database
@@ -326,6 +346,7 @@ fn indexed_batch_commit_timing_receipt_20k_and_single_row() {
                 Value::Nullable(Some(Box::new(Value::U64(2)))),
             ],
         )
+        .await
         .unwrap();
     assert_eq!(album_rows.len(), 667);
     assert_eq!(
@@ -335,6 +356,7 @@ fn indexed_batch_commit_timing_receipt_20k_and_single_row() {
                 "tracks_by_title_unique",
                 &[Value::String("bulk-track-12345".to_owned())],
             )
+            .await
             .unwrap()
             .len(),
         1
@@ -346,7 +368,7 @@ fn indexed_batch_commit_timing_receipt_20k_and_single_row() {
         track_values(ROWS + 1, 7, Some(2), "single-after-bulk"),
     );
     let single_start = Instant::now();
-    database.commit_batch(single).unwrap();
+    database.commit_batch(single).await.unwrap();
     let single_elapsed = single_start.elapsed();
 
     println!(
@@ -362,17 +384,18 @@ fn indexed_batch_commit_timing_receipt_20k_and_single_row() {
                     Value::Nullable(Some(Box::new(Value::U64(2)))),
                 ],
             )
+            .await
             .unwrap()
             .len()
     );
 }
 
-#[test]
-fn query_graphs_returns_named_one_shot_snapshots() {
+#[futures_test::test]
+async fn query_graphs_returns_named_one_shot_snapshots() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -383,13 +406,14 @@ fn query_graphs_returns_named_one_shot_snapshots() {
         "albums",
         vec![Value::U64(2), Value::String("Giant Steps".to_owned())],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let snapshots = database
         .query_graphs([
             ("ids", GraphBuilder::table("albums").project(["id"])),
             ("titles", GraphBuilder::table("albums").project(["title"])),
         ])
+        .await
         .unwrap();
 
     assert_eq!(
@@ -405,27 +429,30 @@ fn query_graphs_returns_named_one_shot_snapshots() {
     );
 }
 
-#[test]
-fn unwrap_nullable_retractions_flow_symmetrically() {
+#[futures_test::test]
+async fn unwrap_nullable_retractions_flow_symmetrically() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["tracks", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(indexed_tracks_schema(), storage).unwrap();
+    let mut database = Database::new(indexed_tracks_schema(), storage)
+        .await
+        .unwrap();
     let subscription = database
         .subscribe_one_sink(
             GraphBuilder::table("tracks")
                 .unwrap_nullable("disc")
                 .project(["id", "disc"]),
         )
+        .await
         .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
     batch.insert("tracks", track_values(1, 7, Some(1), "Intro"));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         subscription.recv().unwrap().to_values().unwrap(),
         [(vec![Value::U64(1), Value::U64(1)], 1)]
@@ -433,22 +460,22 @@ fn unwrap_nullable_retractions_flow_symmetrically() {
 
     let mut batch = database.open_batch();
     batch.delete("tracks", PrimaryKeyValue::U64(1));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         subscription.recv().unwrap().to_values().unwrap(),
         [(vec![Value::U64(1), Value::U64(1)], -1)]
     );
 }
 
-#[test]
-fn project_nullable_wraps_uuid_and_string_fields() {
+#[futures_test::test]
+async fn project_nullable_wraps_uuid_and_string_fields() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["docs", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(uuid_docs_schema(), storage).unwrap();
+    let mut database = Database::new(uuid_docs_schema(), storage).await.unwrap();
     let id = uuid(1);
 
     let mut batch = database.open_batch();
@@ -460,13 +487,14 @@ fn project_nullable_wraps_uuid_and_string_fields() {
             Value::String("draft".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let result = database
         .query_graph(GraphBuilder::table("docs").project_fields([
             ProjectField::nullable("id", "maybe_id"),
             ProjectField::nullable("title", "maybe_title"),
         ]))
+        .await
         .unwrap();
 
     assert_eq!(
@@ -481,15 +509,15 @@ fn project_nullable_wraps_uuid_and_string_fields() {
     );
 }
 
-#[test]
-fn project_nullable_can_union_with_typed_null_projection() {
+#[futures_test::test]
+async fn project_nullable_can_union_with_typed_null_projection() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["docs", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(uuid_docs_schema(), storage).unwrap();
+    let mut database = Database::new(uuid_docs_schema(), storage).await.unwrap();
     let id = uuid(2);
 
     let mut batch = database.open_batch();
@@ -501,7 +529,7 @@ fn project_nullable_can_union_with_typed_null_projection() {
             Value::String("published".to_owned()),
         ],
     );
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let mut values = database
         .query_graph(GraphBuilder::union([
@@ -520,6 +548,7 @@ fn project_nullable_can_union_with_typed_null_projection() {
                 ),
             ]),
         ]))
+        .await
         .unwrap()
         .to_values()
         .unwrap();
@@ -546,12 +575,12 @@ fn project_nullable_can_union_with_typed_null_projection() {
     );
 }
 
-#[test]
-fn query_returns_empty_result_for_empty_answers() {
+#[futures_test::test]
+async fn query_returns_empty_result_for_empty_answers() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
-    let mut database = Database::new(albums_schema(), storage).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
 
     let result = database
         .query(select_query(
@@ -563,33 +592,35 @@ fn query_returns_empty_result_for_empty_answers() {
                     Expr::Literal(Value::U64(10)),
                 )),
         ))
+        .await
         .unwrap();
 
     assert!(result.is_empty());
 }
 
-#[test]
-fn table_static_scan_specs_hydrate_like_full_scan_then_filter() {
+#[futures_test::test]
+async fn table_static_scan_specs_hydrate_like_full_scan_then_filter() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["docs", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(scan_spec_schema(), storage).unwrap();
+    let mut database = Database::new(scan_spec_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
     insert_scan_doc(&mut batch, "a", 1, "/alpha", b"\0first");
     insert_scan_doc(&mut batch, "a", 2, "/beta", b"second");
     insert_scan_doc(&mut batch, "équipe", 1, "/unicode", b"\xffthird");
     insert_scan_doc(&mut batch, "z", 1, "/zeta", b"last");
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let prefix = database
         .query_graph(GraphBuilder::table_scan(
             "docs",
             StaticScanSpec::Prefix(vec![LiteralValue::String("a".to_owned())]),
         ))
+        .await
         .unwrap()
         .to_values()
         .unwrap();
@@ -625,6 +656,7 @@ fn table_static_scan_specs_hydrate_like_full_scan_then_filter() {
                 LiteralValue::U64(1),
             ]),
         ))
+        .await
         .unwrap()
         .to_values()
         .unwrap();
@@ -639,6 +671,7 @@ fn table_static_scan_specs_hydrate_like_full_scan_then_filter() {
                 end: vec![LiteralValue::String("z".to_owned())],
             },
         ))
+        .await
         .unwrap()
         .to_values()
         .unwrap();
@@ -658,25 +691,26 @@ fn table_static_scan_specs_hydrate_like_full_scan_then_filter() {
                 end: vec![LiteralValue::String("a".to_owned())],
             },
         ))
+        .await
         .unwrap();
     assert!(empty.is_empty());
 }
 
-#[test]
-fn index_static_scan_specs_filter_index_records() {
+#[futures_test::test]
+async fn index_static_scan_specs_filter_index_records() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["docs", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(scan_spec_schema(), storage).unwrap();
+    let mut database = Database::new(scan_spec_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
     insert_scan_doc(&mut batch, "a", 1, "/alpha", b"first");
     insert_scan_doc(&mut batch, "b", 2, "/alpha", b"second");
     insert_scan_doc(&mut batch, "b", 3, "/beta", b"third");
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     let prefix = database
         .query_graph(GraphBuilder::index_scan(
@@ -684,6 +718,7 @@ fn index_static_scan_specs_filter_index_records() {
             "docs_by_path",
             StaticScanSpec::Prefix(vec![LiteralValue::String("/alpha".to_owned())]),
         ))
+        .await
         .unwrap()
         .to_values()
         .unwrap();
@@ -698,6 +733,7 @@ fn index_static_scan_specs_filter_index_records() {
                 LiteralValue::String("b".to_owned()),
             ]),
         ))
+        .await
         .unwrap()
         .to_values()
         .unwrap();
@@ -712,21 +748,22 @@ fn index_static_scan_specs_filter_index_records() {
                 end: vec![LiteralValue::String("/beta".to_owned())],
             },
         ))
+        .await
         .unwrap()
         .to_values()
         .unwrap();
     assert_eq!(range.len(), 2);
 }
 
-#[test]
-fn static_scan_specs_participate_in_node_identity() {
+#[futures_test::test]
+async fn static_scan_specs_participate_in_node_identity() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["docs", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(scan_spec_schema(), storage).unwrap();
+    let mut database = Database::new(scan_spec_schema(), storage).await.unwrap();
 
     let same_a = GraphBuilder::table_scan(
         "docs",
@@ -738,11 +775,11 @@ fn static_scan_specs_participate_in_node_identity() {
         StaticScanSpec::Prefix(vec![LiteralValue::String("b".to_owned())]),
     );
 
-    let first_subscription = database.subscribe_one_sink(same_a).unwrap();
+    let first_subscription = database.subscribe_one_sink(same_a).await.unwrap();
     let after_first = database.ivm_runtime.graph().nodes().len();
-    let second_subscription = database.subscribe_one_sink(same_b).unwrap();
+    let second_subscription = database.subscribe_one_sink(same_b).await.unwrap();
     let after_same = database.ivm_runtime.graph().nodes().len();
-    let different_subscription = database.subscribe_one_sink(different).unwrap();
+    let different_subscription = database.subscribe_one_sink(different).await.unwrap();
     let after_different = database.ivm_runtime.graph().nodes().len();
 
     assert_eq!(after_first, after_same);
@@ -754,23 +791,24 @@ fn static_scan_specs_participate_in_node_identity() {
     ));
 }
 
-#[test]
-fn one_shot_static_scan_does_not_perturb_existing_subscription() {
+#[futures_test::test]
+async fn one_shot_static_scan_does_not_perturb_existing_subscription() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(
+    let storage = TestBtreeStorage::open(
         temp_dir.path().join("groove-test.btree"),
         &["docs", "indices"],
     )
     .unwrap();
-    let mut database = Database::new(scan_spec_schema(), storage).unwrap();
+    let mut database = Database::new(scan_spec_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(GraphBuilder::table("docs").project(["tenant", "id"]))
+        .await
         .unwrap();
 
     let mut batch = database.open_batch();
     insert_scan_doc(&mut batch, "a", 1, "/alpha", b"first");
     insert_scan_doc(&mut batch, "b", 2, "/beta", b"second");
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let initial = expect_recv_vals(&subscription);
     assert_eq!(initial.len(), 2);
 
@@ -779,31 +817,36 @@ fn one_shot_static_scan_does_not_perturb_existing_subscription() {
             "docs",
             StaticScanSpec::Prefix(vec![LiteralValue::String("a".to_owned())]),
         ))
+        .await
         .unwrap();
     assert_eq!(queried.deltas.len(), 1);
 
     let mut batch = database.open_batch();
     insert_scan_doc(&mut batch, "c", 3, "/gamma", b"third");
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         expect_recv_vals(&subscription),
         [(vec![Value::String("c".to_owned()), Value::U64(3)], 1)]
     );
 }
 
-#[test]
-fn subscribe_supports_recursive_hydration_snapshot_message() {
+#[futures_test::test]
+async fn subscribe_supports_recursive_hydration_snapshot_message() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
-    let mut database = Database::new(edges_schema(), storage).unwrap();
+    let storage =
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let mut database = Database::new(edges_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 1, 1, 2);
     insert_edge(&mut batch, 2, 2, 3);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
-    let subscription = database.subscribe_one_sink(reachability_graph(16)).unwrap();
-    database.flush().unwrap();
+    let subscription = database
+        .subscribe_one_sink(reachability_graph(16))
+        .await
+        .unwrap();
+    database.flush().await.unwrap();
     let mut values = expect_recv_vals(&subscription);
     sort_pairs_by_value(&mut values);
 
@@ -818,7 +861,7 @@ fn subscribe_supports_recursive_hydration_snapshot_message() {
 
     let mut batch = database.open_batch();
     insert_edge(&mut batch, 3, 3, 4);
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     let mut values = expect_recv_vals(&subscription);
     sort_pairs_by_value(&mut values);
 

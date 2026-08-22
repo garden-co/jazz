@@ -4,6 +4,25 @@ fn node(byte: u8) -> NodeUuid {
 fn row(byte: u8) -> RowUuid {
     RowUuid::from_bytes([byte; 16])
 }
+fn settle_published<S>(
+    node: &mut NodeState<S>,
+    published: PublishedTransaction,
+) -> Result<TxId, Error>
+where
+    S: OrderedKvStorage,
+{
+    crate::db::block_on(node.persist_and_settle_transaction(published))
+}
+
+fn settle_outcome<S, T>(
+    node: &mut NodeState<S>,
+    outcome: PublicationOutcome<T>,
+) -> Result<T, Error>
+where
+    S: OrderedKvStorage + ReopenableStorage,
+{
+    crate::db::block_on(node.persist_and_settle_outcome(outcome))
+}
 fn version_bundles_for_update(update: &SyncMessage) -> Vec<VersionBundle> {
     match update {
         SyncMessage::ViewUpdate {
@@ -276,11 +295,14 @@ where
         new_tables.into_iter().map(Into::into),
         dropped_tables.into_iter().map(Into::into),
     );
-    core.apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
-        author: AuthorId::SYSTEM,
-        catalogue_seq: core.active_catalogue_seq().saturating_add(1),
-        publication: Box::new(publication),
-    })
+    let outcome = crate::db::block_on(core.apply_trusted_catalogue_message(
+        SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: core.active_catalogue_seq().saturating_add(1),
+            publication: Box::new(publication),
+        },
+    ))?;
+    settle_outcome(core, outcome)
 }
 fn owner_cells(author: AuthorId, title: impl Into<String>) -> BTreeMap<String, Value> {
     BTreeMap::from([
@@ -356,7 +378,7 @@ fn run_lens_parallel_materialization_seed(seed: u64) {
         )
         .unwrap();
     }
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 4,
@@ -370,12 +392,12 @@ fn run_lens_parallel_materialization_seed(seed: u64) {
         if (seed + idx as u64).is_multiple_of(2) {
             let title = format!("v1-{seed}-{idx}");
             let (_tx, unit) = writer_v1
-                .commit_mergeable_unit(
+                .commit_mergeable_unit_settled(
                     MergeableCommit::new("todos", row_uuid, 1_000 + idx as u64)
                         .cells(title_cells(title.clone())),
                 )
                 .unwrap();
-            core.apply_sync_message(unit).unwrap();
+            core.apply_sync_message_settled(unit).unwrap();
             oracle.apply_accepted_write(
                 schemas[0].version_id(),
                 row_uuid,
@@ -388,12 +410,12 @@ fn run_lens_parallel_materialization_seed(seed: u64) {
                 ("search_name".to_owned(), v(name.clone())),
             ]);
             let (_tx, unit) = writer_v4
-                .commit_mergeable_unit(
+                .commit_mergeable_unit_settled(
                     MergeableCommit::new("todos", row_uuid, 1_000 + idx as u64)
                         .cells(cells.clone()),
                 )
                 .unwrap();
-            core.apply_sync_message(unit).unwrap();
+            core.apply_sync_message_settled(unit).unwrap();
             oracle.apply_accepted_write(schemas[3].version_id(), row_uuid, cells);
         }
     }
@@ -509,71 +531,75 @@ impl ReopenRefusingMemoryStorage {
 impl OrderedKvStorage for ReopenRefusingMemoryStorage {
     fn get(
         &self,
-        cf: &ColumnFamilyName,
-        key: &Key,
-    ) -> Result<Option<StorageValue>, groove::storage::Error> {
+        cf: String,
+        key: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<Option<Vec<u8>>, groove::storage::Error>> {
         self.inner.get(cf, key)
     }
 
     fn set(
         &self,
-        cf: &ColumnFamilyName,
-        key: &Key,
-        value: &[u8],
-    ) -> Result<(), groove::storage::Error> {
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {
         self.inner.set(cf, key, value)
     }
 
-    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), groove::storage::Error> {
+    fn delete(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {
         self.inner.delete(cf, key)
     }
 
     fn scan_range(
         &self,
-        cf: &ColumnFamilyName,
-        start: &Key,
-        end: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), groove::storage::Error> {
-        self.inner.scan_range(cf, start, end, visit)
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<groove::storage::StorageScan<'_>, groove::storage::Error>> {
+        self.inner.scan_range(cf, start, end)
     }
 
     fn scan_prefix(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), groove::storage::Error> {
-        self.inner.scan_prefix(cf, prefix, visit)
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<groove::storage::StorageScan<'_>, groove::storage::Error>> {
+        self.inner.scan_prefix(cf, prefix)
     }
 
     fn scan_prefix_reverse(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), groove::storage::Error> {
-        self.inner.scan_prefix_reverse(cf, prefix, visit)
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<groove::storage::StorageScan<'_>, groove::storage::Error>> {
+        self.inner.scan_prefix_reverse(cf, prefix)
     }
 
     fn last_with_prefix(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-    ) -> Result<Option<groove::storage::KeyValue>, groove::storage::Error> {
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<Option<groove::storage::KeyValue>, groove::storage::Error>> {
         self.inner.last_with_prefix(cf, prefix)
     }
 
     fn last_with_prefix_before_or_at(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        upper: &Key,
-    ) -> Result<Option<groove::storage::KeyValue>, groove::storage::Error> {
+        cf: String,
+        prefix: Vec<u8>,
+        upper: Vec<u8>,
+    ) -> groove::storage::StorageFuture<'_, Result<Option<groove::storage::KeyValue>, groove::storage::Error>> {
         self.inner.last_with_prefix_before_or_at(cf, prefix, upper)
     }
 
-    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), groove::storage::Error> {
+    fn write_many(
+        &self,
+        operations: Vec<groove::storage::OwnedWriteOperation>,
+    ) -> groove::storage::StorageFuture<'_, Result<(), groove::storage::Error>> {
         self.inner.write_many(operations)
     }
 
@@ -583,10 +609,15 @@ impl OrderedKvStorage for ReopenRefusingMemoryStorage {
 }
 
 impl ReopenableStorage for ReopenRefusingMemoryStorage {
-    fn reopen(self, _column_families: &[&str]) -> Result<Self, groove::storage::Error> {
-        Err(groove::storage::Error::InvalidStorageLayout(
-            "test storage must not reopen for logical table additions".to_owned(),
-        ))
+    fn reopen(
+        self,
+        _column_families: Vec<String>,
+    ) -> groove::storage::StorageFuture<'static, Result<Self, groove::storage::Error>> {
+        Box::pin(async {
+            Err(groove::storage::Error::InvalidStorageLayout(
+                "test storage must not reopen for logical table additions".to_owned(),
+            ))
+        })
     }
 }
 
@@ -775,7 +806,8 @@ fn commit_and_oracle(
     let parents = commit.parents.clone();
     let cells = commit.cells.clone();
     let deletion = commit.deletion;
-    let tx_id = node.commit_mergeable(commit).unwrap();
+    let published = node.commit_mergeable(commit).unwrap();
+    let tx_id = settle_published(node, published).unwrap();
     let made_at = node.transaction_record(tx_id).unwrap().tx_id.time;
     let mut version = ModelRowVersion::new(row_uuid, tx_id, made_at);
     version.parents = parents;
@@ -794,13 +826,16 @@ fn commit_global_and_oracle(
     let parents = commit.parents.clone();
     let cells = commit.cells.clone();
     let deletion = commit.deletion;
-    let (tx_id, unit) = writer.commit_mergeable_unit(commit).unwrap();
-    let [fate] = core.apply_sync_message(unit).unwrap().try_into().unwrap();
+    let (published, unit) = writer.commit_mergeable_unit(commit).unwrap();
+    let tx_id = settle_published(writer, published).unwrap();
+    let outcome = core.apply_sync_message(unit).unwrap();
+    let [fate] = settle_outcome(core, outcome).unwrap().try_into().unwrap();
     let SyncMessage::FateUpdate { global_time, .. } = &fate else {
         panic!("expected accepted fate update");
     };
     let global_time = global_time.expect("core commit is globally accepted");
-    writer.apply_sync_message(fate).unwrap();
+    let outcome = writer.apply_sync_message(fate).unwrap();
+    settle_outcome(writer, outcome).unwrap();
     let mut version = ModelRowVersion::new(row_uuid, tx_id, tx_id.time);
     version.parents = parents;
     version.cells = cells;
@@ -1264,9 +1299,12 @@ fn commit_mergeable_global(
     core: &mut NodeState<RocksDbStorage>,
     commit: MergeableCommit,
 ) -> TxId {
-    let (tx_id, unit) = writer.commit_mergeable_unit(commit).unwrap();
-    let [fate] = core.apply_sync_message(unit).unwrap().try_into().unwrap();
-    writer.apply_sync_message(fate).unwrap();
+    let (published, unit) = writer.commit_mergeable_unit(commit).unwrap();
+    let tx_id = settle_published(writer, published).unwrap();
+    let outcome = core.apply_sync_message(unit).unwrap();
+    let [fate] = settle_outcome(core, outcome).unwrap().try_into().unwrap();
+    let outcome = writer.apply_sync_message(fate).unwrap();
+    settle_outcome(writer, outcome).unwrap();
     tx_id
 }
 fn ingest_relay_version(
@@ -1309,7 +1347,7 @@ fn sync_current_rows_to(
 ) {
     let mut peer = PeerState::new();
     let update = peer.current_rows_update(core, "todos").unwrap();
-    reader.apply_sync_message(update).unwrap();
+    reader.apply_sync_message_settled(update).unwrap();
 }
 fn register_shape_binding<S>(
     node: &mut NodeState<S>,
@@ -1318,7 +1356,7 @@ fn register_shape_binding<S>(
 ) where
     S: OrderedKvStorage + ReopenableStorage,
 {
-    node.apply_sync_message(SyncMessage::RegisterShape {
+    node.apply_sync_message_settled(SyncMessage::RegisterShape {
         shape_id: shape.shape_id(),
         ast: crate::protocol::ShapeAst::from_validated(shape),
         opts: crate::protocol::RegisterShapeOptions::default(),
@@ -1329,7 +1367,7 @@ fn register_shape_binding<S>(
         .keys()
         .map(|name| binding.values().get(name).cloned().unwrap())
         .collect::<Vec<_>>();
-    node.apply_sync_message(SyncMessage::Subscribe(crate::protocol::Subscribe {
+    node.apply_sync_message_settled(SyncMessage::Subscribe(crate::protocol::Subscribe {
         shape_id: shape.shape_id(),
         subscription: crate::protocol::SubscriptionKey {
             shape_id: shape.shape_id(),
@@ -1350,16 +1388,18 @@ fn commit_owner_policy_global(
     title: &str,
     now_ms: u64,
 ) -> TxId {
-    let (tx_id, unit) = writer
+    let (published, unit) = writer
         .commit_mergeable_unit(
             MergeableCommit::new("todos", row_uuid, now_ms)
                 .made_by(made_by)
                 .cells(owner_cells(owner, title)),
         )
         .unwrap();
+    let tx_id = settle_published(writer, published).unwrap();
     let expected_global_time =
         GlobalTime::tick(core.clock.global_time_register, tx_id.time.physical_ms()).unwrap();
-    let [fate] = core.apply_sync_message(unit).unwrap().try_into().unwrap();
+    let outcome = core.apply_sync_message(unit).unwrap();
+    let [fate] = settle_outcome(core, outcome).unwrap().try_into().unwrap();
     assert_eq!(
         fate,
         SyncMessage::FateUpdate {
@@ -1369,7 +1409,8 @@ fn commit_owner_policy_global(
             durability: Some(DurabilityTier::Global),
         }
     );
-    writer.apply_sync_message(fate).unwrap();
+    let outcome = writer.apply_sync_message(fate).unwrap();
+    settle_outcome(writer, outcome).unwrap();
     tx_id
 }
 fn commit_core_owner_fixture(
@@ -1379,13 +1420,14 @@ fn commit_core_owner_fixture(
     title: &str,
     now_ms: u64,
 ) -> TxId {
-    let tx_id = core
+    let published = core
         .commit_mergeable(
             MergeableCommit::new("todos", row_uuid, now_ms)
                 .made_by(owner)
                 .cells(owner_cells(owner, title)),
         )
         .unwrap();
+    let tx_id = settle_published(core, published).unwrap();
     core.accept_global_for_test(tx_id).unwrap();
     tx_id
 }
@@ -1500,7 +1542,12 @@ fn node_summary(node: &mut NodeState<RocksDbStorage>, tx_ids: &BTreeSet<TxId>) -
         global_rows: node.current_rows("todos", DurabilityTier::Global).unwrap(),
         transaction_records: tx_ids
             .iter()
-            .map(|tx_id| (*tx_id, node.transaction_record(*tx_id)))
+            .map(|tx_id| {
+                (
+                    *tx_id,
+                    crate::db::block_on(node.transaction_record(*tx_id)),
+                )
+            })
             .collect(),
         sync_metrics: node.sync_metrics().clone(),
     }
@@ -1602,10 +1649,15 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 let parents = commit.parents.clone();
                 let cells = commit.cells.clone();
                 let deletion = commit.deletion;
-                let (tx_id, message) = if use_writer_a {
+                let (published, message) = if use_writer_a {
                     writer_a.commit_mergeable_unit(commit).unwrap()
                 } else {
                     writer_b.commit_mergeable_unit(commit).unwrap()
+                };
+                let tx_id = if use_writer_a {
+                    settle_published(&mut writer_a, published).unwrap()
+                } else {
+                    settle_published(&mut writer_b, published).unwrap()
                 };
                 if use_writer_a {
                     writer_known_a.record_local_commit(tx_id);
@@ -1681,9 +1733,10 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                         )
                         .unwrap();
                 }
-                let (tx_id, message) = writer
+                let (published, message) = writer
                     .commit_exclusive(tx_id, made_by, 1_100 + rng.choose(12) as u64)
                     .unwrap();
+                let tx_id = settle_published(writer, published).unwrap();
                 if tx_id.node == node(1) {
                     writer_known_a.record_local_commit(tx_id);
                 } else {
@@ -1724,10 +1777,15 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                         ));
                 commits_started += 1;
                 let use_writer_a = rng.chance(1, 2);
-                let (tx_id, message) = if use_writer_a {
+                let (published, message) = if use_writer_a {
                     writer_a.commit_mergeable_unit(commit).unwrap()
                 } else {
                     writer_b.commit_mergeable_unit(commit).unwrap()
+                };
+                let tx_id = if use_writer_a {
+                    settle_published(&mut writer_a, published).unwrap()
+                } else {
+                    settle_published(&mut writer_b, published).unwrap()
                 };
                 if use_writer_a {
                     writer_known_a.record_local_commit(tx_id);
@@ -1781,9 +1839,10 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                         None,
                     )
                     .unwrap();
-                let (parent_ref, parent_message) = writer
+                let (parent_publication, parent_message) = writer
                     .commit_exclusive(tx_id, made_by, 1_200 + rng.choose(12) as u64)
                     .unwrap();
+                let parent_ref = settle_published(writer, parent_publication).unwrap();
                 let child_commit = MergeableCommit::new(
                     "todos",
                     rows[rng.choose(rows.len())],
@@ -1795,8 +1854,9 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                     owner,
                     format!("child-{commits_started}-{}", rng.next_u64() % 1_000),
                 ));
-                let (child_ref, child_message) =
+                let (child_publication, child_message) =
                     writer.commit_mergeable_unit(child_commit).unwrap();
+                let child_ref = settle_published(writer, child_publication).unwrap();
                 if parent_ref.node == node(1) {
                     writer_known_a.record_local_commit(parent_ref);
                     writer_known_a.record_local_commit(child_ref);
@@ -1845,9 +1905,10 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 let SyncMessage::CommitUnit { tx, versions } = &message else {
                     panic!("upstream should only contain commit units");
                 };
-                let updates = core
+                let outcome = core
                     .ingest_commit_unit(tx.clone(), versions.clone(), now_ms)
                     .unwrap();
+                let updates = settle_outcome(&mut core, outcome).unwrap();
                 for fate in updates {
                     let SyncMessage::FateUpdate { tx_id, .. } = &fate else {
                         panic!("core should only emit fate updates here");
@@ -1878,14 +1939,14 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 if deliver_a {
                     writer_known_a.record_fate_delivery(&message);
                     writer_a
-                        .apply_sync_message(message.clone())
+                        .apply_sync_message_settled(message.clone())
                         .unwrap_or_else(|err| {
                             panic!("seed {seed}: writer A failed to apply {message:?}: {err:?}")
                         });
                 } else {
                     writer_known_b.record_fate_delivery(&message);
                     writer_b
-                        .apply_sync_message(message.clone())
+                        .apply_sync_message_settled(message.clone())
                         .unwrap_or_else(|err| {
                             panic!("seed {seed}: writer B failed to apply {message:?}: {err:?}")
                         });
@@ -1923,10 +1984,10 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 message_counts.view_delivered += 1;
                 if deliver_a {
                     delivered_a.record_view_delivery(&message);
-                    reader_a.apply_sync_message(message).unwrap();
+                    reader_a.apply_sync_message_settled(message).unwrap();
                 } else {
                     delivered_b.record_view_delivery(&message);
-                    reader_b.apply_sync_message(message).unwrap();
+                    reader_b.apply_sync_message_settled(message).unwrap();
                 }
             }
             6 if reader_restarts < 2 => {
@@ -1989,10 +2050,10 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
         message_counts.view_delivered += 1;
         if deliver_a {
             delivered_a.record_view_delivery(&message);
-            reader_a.apply_sync_message(message).unwrap();
+            reader_a.apply_sync_message_settled(message).unwrap();
         } else {
             delivered_b.record_view_delivery(&message);
-            reader_b.apply_sync_message(message).unwrap();
+            reader_b.apply_sync_message_settled(message).unwrap();
         }
     }
 

@@ -22,7 +22,7 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    pub(super) fn materialize_authoritative_reset_member(
+    pub(super) async fn materialize_authoritative_reset_member(
         &mut self,
         query: &crate::query::Query,
         member: &ResultMemberEntry,
@@ -61,15 +61,17 @@ where
                 "authoritative reset cannot materialize non-row result without payload",
             ));
         };
-        if let Some(row) =
-            self.materialize_authoritative_reset_current_row(table_name.as_str(), row_uuid)?
+        if let Some(row) = self
+            .materialize_authoritative_reset_current_row(table_name.as_str(), row_uuid)
+            .await?
         {
             return Ok(Some(row));
         }
         self.materialize_authoritative_reset_version_row(table_name.as_str(), row_uuid, tx_id, None)
+            .await
     }
 
-    fn materialize_authoritative_reset_current_row(
+    async fn materialize_authoritative_reset_current_row(
         &mut self,
         table_name: &str,
         row_uuid: RowUuid,
@@ -88,19 +90,24 @@ where
         let content = self
             .database
             .query_graph(content_graph)
+            .await
             .map_err(|error| Self::malformed_current_query_error(table_name, row_uuid, error))?;
         let Some(content_delta) = content.deltas.into_iter().find(|delta| delta.weight > 0) else {
             return Ok(None);
         };
         let content_record = BorrowedRecord::new(&content_delta.record, &content.descriptor);
         let content_tx = self.current_record_sort_key(table_name, row_uuid, content_record)?;
-        if let Some(deletion_raw) = self.database.primary_key_get_raw(
-            &physical_register_global_current_table_name(table_id),
-            &[
-                Value::Bytes(BranchKey::default().canonical_bytes()),
-                Value::Uuid(row_uuid.0),
-            ],
-        )? {
+        if let Some(deletion_raw) = self
+            .database
+            .primary_key_get_raw(
+                &physical_register_global_current_table_name(table_id),
+                &[
+                    Value::Bytes(BranchKey::default().canonical_bytes()),
+                    Value::Uuid(row_uuid.0),
+                ],
+            )
+            .await?
+        {
             let deletion_record = deletion_raw.record();
             let deletion_tx =
                 self.current_record_sort_key(table_name, row_uuid, deletion_record)?;
@@ -115,7 +122,7 @@ where
         self.materialize_current_row(&table, row).map(Some)
     }
 
-    pub(super) fn materialize_authoritative_reset_version_row(
+    pub(super) async fn materialize_authoritative_reset_version_row(
         &mut self,
         table_name: &str,
         row_uuid: RowUuid,
@@ -126,13 +133,15 @@ where
         let Some(tx_node_alias) = self.node_aliases.get(&tx_id.node).copied() else {
             return Err(Error::MissingTransaction(tx_id));
         };
-        let version = self.query_version_by_alias(
-            table_name,
-            row_uuid,
-            VersionLayer::Content,
-            tx_id.time,
-            tx_node_alias,
-        )?;
+        let version = self
+            .query_version_by_alias(
+                table_name,
+                row_uuid,
+                VersionLayer::Content,
+                tx_id.time,
+                tx_node_alias,
+            )
+            .await?;
         let version = if let Some(version) = version {
             version
         } else {
@@ -141,7 +150,7 @@ where
             // version itself. The legacy point lookup above addresses the
             // shared/default branch; fall back to the transaction bundle so a
             // branch-keyed witness can be materialized after selected delivery.
-            let versions = self.query_versions_for_tx(tx_id)?;
+            let versions = self.query_versions_for_tx(tx_id).await?;
             if let Some(version) = self.maintained_witness_for_result_member(
                 &versions,
                 self.catalogue.current_schema_version_id,
@@ -150,7 +159,7 @@ where
             )? {
                 version.clone()
             } else {
-                if self.query_transaction(tx_id)?.is_some() {
+                if self.query_transaction(tx_id).await?.is_some() {
                     return Ok(None);
                 }
                 return Err(Error::MissingTransaction(tx_id));
@@ -163,15 +172,16 @@ where
         Ok(Some(row))
     }
 
-    pub(super) fn materialize_authoritative_reset_relation_edge_target(
+    pub(super) async fn materialize_authoritative_reset_relation_edge_target(
         &mut self,
         read_schema: SchemaVersionId,
         target_table_name: &str,
         target_row: RowUuid,
         version_ref: &RowVersionRefEntry,
     ) -> Result<Option<CurrentRow>, Error> {
-        let version =
-            self.resolve_relation_edge_version(target_table_name, target_row, version_ref)?;
+        let version = self
+            .resolve_relation_edge_version(target_table_name, target_row, version_ref)
+            .await?;
         // Relation-edge facts retain the canonical authored table name.  A
         // read schema can have renamed that table, so resolving the edge name
         // directly against the read descriptor would reject an otherwise
@@ -198,31 +208,35 @@ where
         current_row_from_materialized_cells(&projected_table, &version, &cells).map(Some)
     }
 
-    pub(super) fn project_relation_edge_through_read_schema(
+    pub(super) async fn project_relation_edge_through_read_schema(
         &mut self,
         edge: &RelationEdgeEntry,
         read_schema: SchemaVersionId,
     ) -> Result<RelationEdge, Error> {
         Ok(RelationEdge {
-            source_table: self.project_relation_edge_table_through_read_schema(
-                edge.source_table.as_str(),
-                edge.source_row,
-                edge.source_version.as_ref(),
-                read_schema,
-            )?,
+            source_table: self
+                .project_relation_edge_table_through_read_schema(
+                    edge.source_table.as_str(),
+                    edge.source_row,
+                    edge.source_version.as_ref(),
+                    read_schema,
+                )
+                .await?,
             source_row: edge.source_row,
             relation: edge.path.clone(),
-            target_table: self.project_relation_edge_table_through_read_schema(
-                edge.target_table.as_str(),
-                edge.target_row,
-                edge.target_version.as_ref(),
-                read_schema,
-            )?,
+            target_table: self
+                .project_relation_edge_table_through_read_schema(
+                    edge.target_table.as_str(),
+                    edge.target_row,
+                    edge.target_version.as_ref(),
+                    read_schema,
+                )
+                .await?,
             target_row: edge.target_row,
         })
     }
 
-    fn project_relation_edge_table_through_read_schema(
+    async fn project_relation_edge_table_through_read_schema(
         &mut self,
         canonical_table: &str,
         row_uuid: RowUuid,
@@ -235,7 +249,9 @@ where
             self.table_in_schema(canonical_table, read_schema)?;
             return Ok(canonical_table.to_owned());
         };
-        let version = self.resolve_relation_edge_version(canonical_table, row_uuid, version_ref)?;
+        let version = self
+            .resolve_relation_edge_version(canonical_table, row_uuid, version_ref)
+            .await?;
         let authored_schema = self
             .schema_version_for_alias(version.schema_version_alias())
             .ok_or(Error::InvalidStoredValue(
@@ -248,7 +264,7 @@ where
             ))
     }
 
-    pub(super) fn resolve_relation_edge_version(
+    pub(super) async fn resolve_relation_edge_version(
         &mut self,
         canonical_table: &str,
         row_uuid: RowUuid,
@@ -266,12 +282,13 @@ where
                 VersionLayer::Content,
                 version_ref.tx.time,
                 tx_node_alias,
-            )?
+            )
+            .await?
             .ok_or(Error::MissingTransaction(version_ref.tx))?;
         Ok(version)
     }
 
-    pub(super) fn resolve_relation_terminal_version(
+    pub(super) async fn resolve_relation_terminal_version(
         &mut self,
         emitted_table: &str,
         row_uuid: RowUuid,
@@ -279,7 +296,8 @@ where
         read_schema: SchemaVersionId,
     ) -> Result<VersionRow, Error> {
         let candidates = self
-            .query_versions_for_tx(version_ref.tx)?
+            .query_versions_for_tx(version_ref.tx)
+            .await?
             .into_iter()
             .filter(|version| {
                 version.row_uuid() == row_uuid && version.layer() == VersionLayer::Content
@@ -388,7 +406,7 @@ where
         Ok(rows)
     }
 
-    fn preload_local_maintained_materialization_cache(
+    async fn preload_local_maintained_materialization_cache(
         &mut self,
         local: &LocalMaintainedViewSubscription,
     ) -> Result<LocalMaintainedMaterializationCache, Error> {
@@ -417,11 +435,12 @@ where
                 .entry(version.tx)
                 .or_insert_with(|| local.maintained.versions_by_tx(version.tx));
         }
-        self.preload_tx_versions_for_materialization(tx_ids, &mut cache.tx_versions)?;
+        self.preload_tx_versions_for_materialization(tx_ids, &mut cache.tx_versions)
+            .await?;
         Ok(cache)
     }
 
-    pub(super) fn materialize_local_maintained_view_relation_edge_row(
+    pub(super) async fn materialize_local_maintained_view_relation_edge_row(
         &mut self,
         local: &LocalMaintainedViewSubscription,
         table_name: &str,
@@ -440,7 +459,7 @@ where
         )
     }
 
-    fn materialize_local_maintained_view_relation_edge_row_with_cache(
+    async fn materialize_local_maintained_view_relation_edge_row_with_cache(
         &mut self,
         local: &LocalMaintainedViewSubscription,
         table_name: &str,
@@ -461,7 +480,7 @@ where
         )
     }
 
-    pub(super) fn materialize_local_maintained_view_result_member(
+    pub(super) async fn materialize_local_maintained_view_result_member(
         &mut self,
         local: &LocalMaintainedViewSubscription,
         member: &ResultMemberEntry,
@@ -537,7 +556,7 @@ where
                 // bundle; use that member's exact `(table, row, tx)` witness
                 // to materialize the newly admitted row. This is payload
                 // lookup, not a facade-side query or recompute.
-                let tx_versions = self.query_versions_for_tx(entry.2)?;
+                let tx_versions = self.query_versions_for_tx(entry.2).await?;
                 let Some(version) = self.maintained_witness_for_result_member(
                     &tx_versions,
                     local.result_schema_version,
@@ -564,7 +583,7 @@ where
         Ok(Some(row))
     }
 
-    fn materialize_local_maintained_view_result_member_with_cache(
+    async fn materialize_local_maintained_view_result_member_with_cache(
         &mut self,
         local: &LocalMaintainedViewSubscription,
         member: &ResultMemberEntry,
@@ -615,7 +634,7 @@ where
         )? {
             version.clone()
         } else {
-            let tx_versions = self.query_versions_for_tx(entry.2)?;
+            let tx_versions = self.query_versions_for_tx(entry.2).await?;
             let Some(version) = self.maintained_witness_for_result_member(
                 &tx_versions,
                 local.result_schema_version,
@@ -647,7 +666,7 @@ where
             .as_slice()
     }
 
-    fn preload_tx_versions_for_materialization(
+    async fn preload_tx_versions_for_materialization(
         &mut self,
         tx_ids: impl IntoIterator<Item = TxId>,
         cache: &mut BTreeMap<TxId, Vec<VersionRow>>,
@@ -682,7 +701,7 @@ where
             for (start, end) in contiguous_tx_time_spans(&times) {
                 let Some(end) = end else {
                     let tx_id = TxId::new(start, node);
-                    let versions = self.query_versions_for_tx(tx_id)?;
+                    let versions = self.query_versions_for_tx(tx_id).await?;
                     cache.insert(tx_id, versions);
                     continue;
                 };
@@ -699,7 +718,8 @@ where
                                 "by_tx",
                                 &[Value::U64(start.0), Value::U64(alias.0)],
                                 &[Value::U64(end.0), Value::U64(0)],
-                            )?
+                            )
+                            .await?
                             .into_iter()
                             .map(|raw| raw.owned_record())
                             .collect::<Vec<_>>();
@@ -842,7 +862,7 @@ where
         self.materialize_current_row(table, row)
     }
 
-    pub(super) fn materialize_relation_snapshot_from_query_engine(
+    pub(super) async fn materialize_relation_snapshot_from_query_engine(
         &mut self,
         shape: &ValidatedQuery,
         read_view: &ReadViewSpec,
@@ -968,30 +988,38 @@ where
                 target_tx_node,
                 branch_discriminator(target_branch_idx)?,
             )?;
-            let canonical_source_version = self.resolve_relation_terminal_version(
-                &source_table,
-                source_row,
-                &source_version,
-                shape.schema_version(),
-            )?;
-            let canonical_target_version = self.resolve_relation_terminal_version(
-                &target_table_name,
-                target_row,
-                &target_version,
-                shape.schema_version(),
-            )?;
-            let projected_source_table = self.project_relation_edge_table_through_read_schema(
-                canonical_source_version.table(),
-                source_row,
-                Some(&source_version),
-                shape.schema_version(),
-            )?;
-            let projected_target_table = self.project_relation_edge_table_through_read_schema(
-                canonical_target_version.table(),
-                target_row,
-                Some(&target_version),
-                shape.schema_version(),
-            )?;
+            let canonical_source_version = self
+                .resolve_relation_terminal_version(
+                    &source_table,
+                    source_row,
+                    &source_version,
+                    shape.schema_version(),
+                )
+                .await?;
+            let canonical_target_version = self
+                .resolve_relation_terminal_version(
+                    &target_table_name,
+                    target_row,
+                    &target_version,
+                    shape.schema_version(),
+                )
+                .await?;
+            let projected_source_table = self
+                .project_relation_edge_table_through_read_schema(
+                    canonical_source_version.table(),
+                    source_row,
+                    Some(&source_version),
+                    shape.schema_version(),
+                )
+                .await?;
+            let projected_target_table = self
+                .project_relation_edge_table_through_read_schema(
+                    canonical_target_version.table(),
+                    target_row,
+                    Some(&target_version),
+                    shape.schema_version(),
+                )
+                .await?;
             candidates.push(RelationEdgeCandidate {
                 edge: RelationEdge {
                     source_table: projected_source_table,
@@ -1043,14 +1071,16 @@ where
                 candidate.edge.target_table.clone(),
                 candidate.edge.target_row,
             )) {
-                let row = self.materialize_relation_edge_target_row(
-                    read_view,
-                    shape.schema_version(),
-                    &candidate.canonical_target_table,
-                    candidate.edge.target_row,
-                    candidate.target_tx_time,
-                    candidate.target_tx_node,
-                )?;
+                let row = self
+                    .materialize_relation_edge_target_row(
+                        read_view,
+                        shape.schema_version(),
+                        &candidate.canonical_target_table,
+                        candidate.edge.target_row,
+                        candidate.target_tx_time,
+                        candidate.target_tx_node,
+                    )
+                    .await?;
                 snapshot.rows.push(row);
             }
             snapshot.edges.push(candidate.edge);
@@ -1058,7 +1088,7 @@ where
         Ok(snapshot)
     }
 
-    pub(super) fn materialize_relation_edge_target_row(
+    pub(super) async fn materialize_relation_edge_target_row(
         &mut self,
         _read_view: &ReadViewSpec,
         read_schema: SchemaVersionId,
@@ -1067,13 +1097,16 @@ where
         target_tx_time: TxTime,
         target_tx_node: NodeAlias,
     ) -> Result<CurrentRow, Error> {
-        if let Some(version) = self.query_version_by_alias(
-            target_table_name,
-            target_row,
-            VersionLayer::Content,
-            target_tx_time,
-            target_tx_node,
-        )? {
+        if let Some(version) = self
+            .query_version_by_alias(
+                target_table_name,
+                target_row,
+                VersionLayer::Content,
+                target_tx_time,
+                target_tx_node,
+            )
+            .await?
+        {
             return self
                 .projected_current_row_from_materialized_version_in_read_schema(
                     read_schema,
@@ -1332,7 +1365,7 @@ where
         Ok(true)
     }
 
-    pub(crate) fn materialize_local_maintained_relation_snapshot_with_occurrences(
+    pub(crate) async fn materialize_local_maintained_relation_snapshot_with_occurrences(
         &mut self,
         local: &LocalMaintainedViewSubscription,
     ) -> Result<LocalMaintainedRelationSnapshot, Error> {
@@ -1357,14 +1390,19 @@ where
                 root_occurrence_ids,
             });
         }
-        let mut cache = self.preload_local_maintained_materialization_cache(local)?;
+        let mut cache = self
+            .preload_local_maintained_materialization_cache(local)
+            .await?;
         let mut rows = Vec::with_capacity(local.result_set.len());
         let mut root_occurrence_ids = Vec::with_capacity(local.result_set.len());
         let mut row_keys = BTreeSet::new();
         for member in &local.result_set {
-            if let Some(row) = self.materialize_local_maintained_view_result_member_with_cache(
-                local, member, &mut cache,
-            )? {
+            if let Some(row) = self
+                .materialize_local_maintained_view_result_member_with_cache(
+                    local, member, &mut cache,
+                )
+                .await?
+            {
                 let occurrence_id = public_result_member_occurrence_id(
                     member,
                     local.result_table.as_str(),
@@ -1400,8 +1438,9 @@ where
             let ProgramFactEntry::RelationEdge(edge) = fact else {
                 continue;
             };
-            let read_edge =
-                self.project_relation_edge_through_read_schema(edge, local.result_schema_version)?;
+            let read_edge = self
+                .project_relation_edge_through_read_schema(edge, local.result_schema_version)
+                .await?;
             if row_keys.insert((read_edge.target_table.clone(), read_edge.target_row))
                 && let Some(version) = &edge.target_version
                 && let Some(row) = self
@@ -1411,7 +1450,8 @@ where
                         edge.target_row,
                         version.tx,
                         &mut cache,
-                    )?
+                    )
+                    .await?
             {
                 rows.push(row);
             }

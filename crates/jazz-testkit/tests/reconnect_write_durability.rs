@@ -160,15 +160,14 @@ fn detaching_the_upstream_resolves_pending_global_wait() {
     let (upstream_transport, _held_far_end) = duplex();
     let upstream = node.connect_upstream(upstream_transport);
 
-    let write = node
-        .insert(
-            "documents",
-            std::collections::BTreeMap::from([(
-                "title".to_owned(),
-                Value::String("pending for a silent upstream".to_owned()),
-            )]),
-        )
-        .expect("insert local document");
+    let write = block_on(node.insert(
+        "documents",
+        std::collections::BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("pending for a silent upstream".to_owned()),
+        )]),
+    ))
+    .expect("insert local document");
     let tx_id = write.mergeable_tx_id();
     assert_eq!(
         node.write_state(tx_id)
@@ -184,8 +183,7 @@ fn detaching_the_upstream_resolves_pending_global_wait() {
         observed_wait.set(Some(result.is_ok()));
     });
     for _ in 0..3 {
-        node.tick()
-            .expect("queue the write for the silent upstream");
+        block_on(node.tick()).expect("queue the write for the silent upstream");
     }
     assert_eq!(
         global_wait.get(),
@@ -195,7 +193,7 @@ fn detaching_the_upstream_resolves_pending_global_wait() {
 
     assert!(node.detach_connection(&upstream));
     for _ in 0..3 {
-        node.tick().expect("collapse the settlement expectation");
+        block_on(node.tick()).expect("collapse the settlement expectation");
     }
     assert!(
         global_wait.get().is_some(),

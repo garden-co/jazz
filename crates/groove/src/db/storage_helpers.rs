@@ -3,6 +3,7 @@ use super::*;
 /// Typed facade over one schema-declared direct record store.
 ///
 /// ```
+/// # futures::executor::block_on(async {
 /// use groove::db::Database;
 /// use groove::records::{RecordDescriptor, Value, ValueType};
 /// use groove::schema::{DatabaseSchema, DirectRecordStoreSchema};
@@ -15,27 +16,25 @@ use super::*;
 /// ));
 /// let column_families = schema.column_families();
 /// let storage = MemoryStorage::new(&column_families);
-/// let database = Database::new(schema, storage)?;
+/// let database = Database::new(schema, storage).await?;
 /// let art = database.direct_record_store("album_art")?;
 ///
-/// art.set(&[Value::U64(1)], &[Value::Bytes(b"front-cover-bytes".to_vec())])?;
+/// art.set(&[Value::U64(1)], &[Value::Bytes(b"front-cover-bytes".to_vec())]).await?;
 /// assert_eq!(
-///     art.get(&[Value::U64(1)])?.unwrap().get("bytes")?,
+///     art.get(&[Value::U64(1)]).await?.unwrap().get("bytes")?,
 ///     Value::Bytes(b"front-cover-bytes".to_vec())
 /// );
 /// # Ok::<(), Box<dyn std::error::Error>>(())
+/// # }).unwrap();
 /// ```
-pub struct DirectRecordStore<'a, S> {
-    pub(super) storage: &'a LayoutStorage<S>,
+pub struct DirectRecordStore<'a> {
+    pub(super) storage: &'a LayoutStorage,
     pub(super) name: String,
     pub(super) key: RecordDescriptor,
     pub(super) value: RecordDescriptor,
 }
 
-impl<S> DirectRecordStore<'_, S>
-where
-    S: OrderedKvStorage,
-{
+impl DirectRecordStore<'_> {
     /// Return the schema-declared column family name backing this direct store.
     pub fn name(&self) -> &str {
         &self.name
@@ -49,40 +48,51 @@ where
         &self.value
     }
 
-    pub fn set(&self, key: &[Value], value: &[Value]) -> Result<(), Error> {
+    pub async fn set(&self, key: &[Value], value: &[Value]) -> Result<(), Error> {
         let key = self.key_bytes(key)?;
         let record = self.value.create(value)?;
         self.storage
-            .write_many(&[WriteOperation::set(&self.name, &key, &record)])
+            .write_many(vec![OwnedWriteOperation::Set {
+                cf: self.name.clone(),
+                key,
+                value: record,
+            }])
+            .await
             .map_err(Error::from)
     }
 
-    pub fn get(&self, key: &[Value]) -> Result<Option<Record<'_>>, Error> {
+    pub async fn get(&self, key: &[Value]) -> Result<Option<Record<'_>>, Error> {
         let key = self.key_bytes(key)?;
         Ok(self
             .record_store()
-            .get_raw(&key)?
+            .get_raw(&key)
+            .await?
             .map(|record| self.value.bind_owned(record)))
     }
 
-    pub fn delete(&self, key: &[Value]) -> Result<(), Error> {
+    pub async fn delete(&self, key: &[Value]) -> Result<(), Error> {
         let key = self.key_bytes(key)?;
         self.storage
-            .write_many(&[WriteOperation::delete(&self.name, &key)])
+            .write_many(vec![OwnedWriteOperation::Delete {
+                cf: self.name.clone(),
+                key,
+            }])
+            .await
             .map_err(Error::from)
     }
 
-    pub fn range(&self, start: &[Value], end: &[Value]) -> Result<Vec<Record<'_>>, Error> {
+    pub async fn range(&self, start: &[Value], end: &[Value]) -> Result<Vec<Record<'_>>, Error> {
         let start = self.key_prefix_bytes(start)?;
         let end = self.key_prefix_bytes(end)?;
         self.record_store()
-            .range(&start, &end)?
+            .range(&start, &end)
+            .await?
             .into_iter()
             .map(|(_, value)| Ok(self.value.bind_owned(value)))
             .collect()
     }
 
-    pub fn range_entries(
+    pub async fn range_entries(
         &self,
         start: &[Value],
         end: &[Value],
@@ -90,7 +100,8 @@ where
         let start = self.key_prefix_bytes(start)?;
         let end = self.key_prefix_bytes(end)?;
         self.record_store()
-            .range(&start, &end)?
+            .range(&start, &end)
+            .await?
             .into_iter()
             .map(|(key, value)| {
                 Ok(DirectRecordStoreEntry {
@@ -101,22 +112,24 @@ where
             .collect()
     }
 
-    pub fn prefix(&self, prefix: &[Value]) -> Result<Vec<Record<'_>>, Error> {
+    pub async fn prefix(&self, prefix: &[Value]) -> Result<Vec<Record<'_>>, Error> {
         let prefix = self.key_prefix_bytes(prefix)?;
         self.record_store()
-            .prefix(&prefix)?
+            .prefix(&prefix)
+            .await?
             .into_iter()
             .map(|(_, value)| Ok(self.value.bind_owned(value)))
             .collect()
     }
 
-    pub fn prefix_entries(
+    pub async fn prefix_entries(
         &self,
         prefix: &[Value],
     ) -> Result<Vec<DirectRecordStoreEntry<'_>>, Error> {
         let prefix = self.key_prefix_bytes(prefix)?;
         self.record_store()
-            .prefix(&prefix)?
+            .prefix(&prefix)
+            .await?
             .into_iter()
             .map(|(key, value)| {
                 Ok(DirectRecordStoreEntry {
@@ -127,7 +140,7 @@ where
             .collect()
     }
 
-    pub fn write_many(&self, operations: &[DirectRecordStoreWrite]) -> Result<(), Error> {
+    pub async fn write_many(&self, operations: &[DirectRecordStoreWrite]) -> Result<(), Error> {
         let mut encoded = Vec::with_capacity(operations.len());
         for operation in operations {
             match operation {
@@ -146,11 +159,7 @@ where
                 }
             }
         }
-        let borrowed = encoded
-            .iter()
-            .map(OwnedWriteOperation::as_write_operation)
-            .collect::<Vec<_>>();
-        self.storage.write_many(&borrowed).map_err(Error::from)
+        self.storage.write_many(encoded).await.map_err(Error::from)
     }
 
     pub(super) fn key_bytes(&self, values: &[Value]) -> Result<Vec<u8>, Error> {
@@ -187,7 +196,7 @@ where
         Ok(bytes)
     }
 
-    pub(super) fn record_store(&self) -> RecordStore<'_, LayoutStorage<S>> {
+    pub(super) fn record_store(&self) -> RecordStore<'_, LayoutStorage> {
         RecordStore::new(self.storage, &self.name, &self.value)
     }
 
@@ -390,14 +399,72 @@ impl StorageReadBucket {
     }
 }
 
+enum LocalHandle<'a, T> {
+    Borrowed(&'a T),
+    Owned(Rc<T>),
+}
+
+impl<T> std::ops::Deref for LocalHandle<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Borrowed(value) => value,
+            Self::Owned(value) => value,
+        }
+    }
+}
+
 pub(crate) struct MeteredStorage<'a, S> {
-    storage: &'a S,
-    metrics: &'a RefCell<StorageReadMetrics>,
+    storage: LocalHandle<'a, S>,
+    metrics: LocalHandle<'a, RefCell<StorageReadMetrics>>,
 }
 
 impl<'a, S> MeteredStorage<'a, S> {
     pub(crate) fn new(storage: &'a S, metrics: &'a RefCell<StorageReadMetrics>) -> Self {
-        Self { storage, metrics }
+        Self {
+            storage: LocalHandle::Borrowed(storage),
+            metrics: LocalHandle::Borrowed(metrics),
+        }
+    }
+
+    pub(crate) fn new_owned(
+        storage: Rc<S>,
+        metrics: Rc<RefCell<StorageReadMetrics>>,
+    ) -> MeteredStorage<'static, S>
+    where
+        S: 'static,
+    {
+        MeteredStorage {
+            storage: LocalHandle::Owned(storage),
+            metrics: LocalHandle::Owned(metrics),
+        }
+    }
+}
+
+struct MeteredStorageCursor<'a> {
+    inner: crate::storage::StorageScan<'a>,
+    column_family: String,
+    metrics: &'a RefCell<StorageReadMetrics>,
+}
+
+impl crate::storage::StorageCursor for MeteredStorageCursor<'_> {
+    fn next_batch(
+        &mut self,
+    ) -> crate::storage::StorageFuture<
+        '_,
+        Result<Option<Vec<crate::storage::KeyValue>>, crate::storage::Error>,
+    > {
+        Box::pin(async move {
+            let batch = self.inner.next_batch().await?;
+            if let Some(batch) = &batch {
+                let mut metrics = self.metrics.borrow_mut();
+                for (key, _) in batch {
+                    metrics.record_range_row(&self.column_family, key);
+                }
+            }
+            Ok(batch)
+        })
     }
 }
 
@@ -405,106 +472,162 @@ impl<S> OrderedKvStorage for MeteredStorage<'_, S>
 where
     S: OrderedKvStorage,
 {
+    fn close(&self) -> crate::storage::StorageFuture<'_, Result<(), crate::storage::Error>> {
+        self.storage.close()
+    }
+
+    fn set_write_flush_cadence(
+        &self,
+        every: usize,
+    ) -> crate::storage::StorageFuture<'_, Result<(), crate::storage::Error>> {
+        self.storage.set_write_flush_cadence(every)
+    }
+
+    fn flush_write_boundary(
+        &self,
+    ) -> crate::storage::StorageFuture<'_, Result<(), crate::storage::Error>> {
+        self.storage.flush_write_boundary()
+    }
+
+    fn approximate_class_bytes(
+        &self,
+        cf: String,
+    ) -> crate::storage::StorageFuture<'_, Result<Option<u64>, crate::storage::Error>> {
+        self.storage.approximate_class_bytes(cf)
+    }
+
+    fn column_family_names(&self) -> Option<Vec<String>> {
+        self.storage.column_family_names()
+    }
+
     fn get(
         &self,
-        cf: &crate::storage::ColumnFamilyName,
-        key: &crate::storage::Key,
-    ) -> Result<Option<crate::storage::Value>, crate::storage::Error> {
-        self.metrics.borrow_mut().record_point(cf, key);
+        cf: String,
+        key: Vec<u8>,
+    ) -> crate::storage::StorageFuture<
+        '_,
+        Result<Option<crate::storage::Value>, crate::storage::Error>,
+    > {
+        self.metrics.borrow_mut().record_point(&cf, &key);
         self.storage.get(cf, key)
     }
 
     fn set(
         &self,
-        cf: &crate::storage::ColumnFamilyName,
-        key: &crate::storage::Key,
-        value: &[u8],
-    ) -> Result<(), crate::storage::Error> {
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> crate::storage::StorageFuture<'_, Result<(), crate::storage::Error>> {
         self.storage.set(cf, key, value)
     }
 
     fn delete(
         &self,
-        cf: &crate::storage::ColumnFamilyName,
-        key: &crate::storage::Key,
-    ) -> Result<(), crate::storage::Error> {
+        cf: String,
+        key: Vec<u8>,
+    ) -> crate::storage::StorageFuture<'_, Result<(), crate::storage::Error>> {
         self.storage.delete(cf, key)
     }
 
     fn scan_range(
         &self,
-        cf: &crate::storage::ColumnFamilyName,
-        start: &crate::storage::Key,
-        end: &crate::storage::Key,
-        visit: &mut crate::storage::ScanVisitor<'_>,
-    ) -> Result<(), crate::storage::Error> {
-        self.metrics.borrow_mut().record_range(cf, start);
-        self.storage.scan_range(cf, start, end, &mut |key, value| {
-            self.metrics.borrow_mut().record_range_row(cf, key);
-            visit(key, value)
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> crate::storage::StorageFuture<
+        '_,
+        Result<crate::storage::StorageScan<'_>, crate::storage::Error>,
+    > {
+        self.metrics.borrow_mut().record_range(&cf, &start);
+        Box::pin(async move {
+            Ok(Box::new(MeteredStorageCursor {
+                inner: self.storage.scan_range(cf.clone(), start, end).await?,
+                column_family: cf,
+                metrics: &self.metrics,
+            }) as crate::storage::StorageScan<'_>)
         })
     }
 
     fn scan_prefix(
         &self,
-        cf: &crate::storage::ColumnFamilyName,
-        prefix: &crate::storage::Key,
-        visit: &mut crate::storage::ScanVisitor<'_>,
-    ) -> Result<(), crate::storage::Error> {
-        self.metrics.borrow_mut().record_range(cf, prefix);
-        self.storage.scan_prefix(cf, prefix, &mut |key, value| {
-            self.metrics.borrow_mut().record_range_row(cf, key);
-            visit(key, value)
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> crate::storage::StorageFuture<
+        '_,
+        Result<crate::storage::StorageScan<'_>, crate::storage::Error>,
+    > {
+        self.metrics.borrow_mut().record_range(&cf, &prefix);
+        Box::pin(async move {
+            Ok(Box::new(MeteredStorageCursor {
+                inner: self.storage.scan_prefix(cf.clone(), prefix).await?,
+                column_family: cf,
+                metrics: &self.metrics,
+            }) as crate::storage::StorageScan<'_>)
         })
     }
 
     fn scan_prefix_reverse(
         &self,
-        cf: &crate::storage::ColumnFamilyName,
-        prefix: &crate::storage::Key,
-        visit: &mut crate::storage::ScanVisitor<'_>,
-    ) -> Result<(), crate::storage::Error> {
-        self.metrics.borrow_mut().record_range(cf, prefix);
-        self.storage
-            .scan_prefix_reverse(cf, prefix, &mut |key, value| {
-                self.metrics.borrow_mut().record_range_row(cf, key);
-                visit(key, value)
-            })
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> crate::storage::StorageFuture<
+        '_,
+        Result<crate::storage::StorageScan<'_>, crate::storage::Error>,
+    > {
+        self.metrics.borrow_mut().record_range(&cf, &prefix);
+        Box::pin(async move {
+            Ok(Box::new(MeteredStorageCursor {
+                inner: self.storage.scan_prefix_reverse(cf.clone(), prefix).await?,
+                column_family: cf,
+                metrics: &self.metrics,
+            }) as crate::storage::StorageScan<'_>)
+        })
     }
 
     fn last_with_prefix(
         &self,
-        cf: &crate::storage::ColumnFamilyName,
-        prefix: &crate::storage::Key,
-    ) -> Result<Option<crate::storage::KeyValue>, crate::storage::Error> {
-        self.metrics.borrow_mut().record_range(cf, prefix);
-        let value = self.storage.last_with_prefix(cf, prefix)?;
-        if let Some((key, _)) = &value {
-            self.metrics.borrow_mut().record_range_row(cf, key);
-        }
-        Ok(value)
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> crate::storage::StorageFuture<
+        '_,
+        Result<Option<crate::storage::KeyValue>, crate::storage::Error>,
+    > {
+        self.metrics.borrow_mut().record_range(&cf, &prefix);
+        Box::pin(async move {
+            let value = self.storage.last_with_prefix(cf.clone(), prefix).await?;
+            if let Some((key, _)) = &value {
+                self.metrics.borrow_mut().record_range_row(&cf, key);
+            }
+            Ok(value)
+        })
     }
 
     fn last_with_prefix_before_or_at(
         &self,
-        cf: &crate::storage::ColumnFamilyName,
-        prefix: &crate::storage::Key,
-        upper: &crate::storage::Key,
-    ) -> Result<Option<crate::storage::KeyValue>, crate::storage::Error> {
-        self.metrics.borrow_mut().record_range(cf, prefix);
-        let value = self
-            .storage
-            .last_with_prefix_before_or_at(cf, prefix, upper)?;
-        if let Some((key, _)) = &value {
-            self.metrics.borrow_mut().record_range_row(cf, key);
-        }
-        Ok(value)
+        cf: String,
+        prefix: Vec<u8>,
+        upper: Vec<u8>,
+    ) -> crate::storage::StorageFuture<
+        '_,
+        Result<Option<crate::storage::KeyValue>, crate::storage::Error>,
+    > {
+        self.metrics.borrow_mut().record_range(&cf, &prefix);
+        Box::pin(async move {
+            let value = self
+                .storage
+                .last_with_prefix_before_or_at(cf.clone(), prefix, upper)
+                .await?;
+            if let Some((key, _)) = &value {
+                self.metrics.borrow_mut().record_range_row(&cf, key);
+            }
+            Ok(value)
+        })
     }
 
     fn write_many(
         &self,
-        operations: &[crate::storage::WriteOperation<'_>],
-    ) -> Result<(), crate::storage::Error> {
+        operations: Vec<crate::storage::OwnedWriteOperation>,
+    ) -> crate::storage::StorageFuture<'_, Result<(), crate::storage::Error>> {
         self.storage.write_many(operations)
     }
 }
@@ -765,7 +888,7 @@ impl PendingTableWrite {
     }
 }
 
-pub(super) fn compute_table_deltas<S>(
+pub(super) async fn compute_table_deltas<S>(
     pending_writes: &[PendingTableWrite],
     stores: &[RecordStore<'_, S>],
     schema: &DatabaseSchema,
@@ -792,7 +915,7 @@ where
         ) {
             None
         } else {
-            store.get_raw(write.key())?
+            store.get_raw(write.key()).await?
         };
         if matches!(
             write,

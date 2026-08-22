@@ -430,7 +430,7 @@ where
         ))
     }
 
-    pub(crate) fn authoritative_reset_snapshot_for_binding_view(
+    pub(crate) async fn authoritative_reset_snapshot_for_binding_view(
         &mut self,
         shape: &ValidatedQuery,
         binding_view_key: BindingViewKey,
@@ -465,11 +465,9 @@ where
         for member in result_members.iter().filter(|member| {
             is_public_result_member(member, result_table, shape.query().aggregate.is_some())
         }) {
-            let Some(row) = self.materialize_authoritative_reset_member(
-                shape.query(),
-                member,
-                &result_payloads,
-            )?
+            let Some(row) = self
+                .materialize_authoritative_reset_member(shape.query(), member, &result_payloads)
+                .await?
             else {
                 continue;
             };
@@ -494,16 +492,19 @@ where
             // subscription read schema; project the edge identity alongside
             // the row it references rather than mixing canonical `users`
             // with a materialized `people` row.
-            let read_edge =
-                self.project_relation_edge_through_read_schema(&edge, shape.schema_version())?;
+            let read_edge = self
+                .project_relation_edge_through_read_schema(&edge, shape.schema_version())
+                .await?;
             if row_keys.insert((read_edge.target_table.clone(), read_edge.target_row))
                 && let Some(version) = &edge.target_version
-                && let Some(row) = self.materialize_authoritative_reset_relation_edge_target(
-                    shape.schema_version(),
-                    edge.target_table.as_str(),
-                    edge.target_row,
-                    version,
-                )?
+                && let Some(row) = self
+                    .materialize_authoritative_reset_relation_edge_target(
+                        shape.schema_version(),
+                        edge.target_table.as_str(),
+                        edge.target_row,
+                        version,
+                    )
+                    .await?
             {
                 rows.push(row);
             }
@@ -526,7 +527,7 @@ where
             .copied()
     }
 
-    pub(crate) fn known_state_declaration_for_subscription(
+    pub(crate) async fn known_state_declaration_for_subscription(
         &mut self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -540,7 +541,7 @@ where
             read_view: subscription.read_view,
         };
         if !self.has_settled_result_set(binding_view_key) {
-            let _ = self.load_known_state_fact(binding_view_key)?;
+            let _ = self.load_known_state_fact(binding_view_key).await?;
             // Slow exact declarations are still known-state declarations: they
             // must describe a binding view the server has previously settled
             // for this client. A purely local first subscription could include
@@ -569,15 +570,18 @@ where
                 },
             }));
         }
-        if let Some(position) = self.load_known_state_fact(binding_view_key)? {
+        if let Some(position) = self.load_known_state_fact(binding_view_key).await? {
             return Ok(Some(KnownStateDeclaration::Fast {
                 completeness: KnownStateCompleteness::FastCurrentMembership,
                 position,
             }));
         }
         let mut refs = Vec::new();
-        for row in self.query_rows_for_link(shape, binding, DurabilityTier::Local, identity)? {
-            let Some(tx_id) = self.current_row_tx_id(&row) else {
+        for row in self
+            .query_rows_for_link(shape, binding, DurabilityTier::Local, identity)
+            .await?
+        {
+            let Some(tx_id) = self.current_row_tx_id(&row).await else {
                 continue;
             };
             refs.push(RowVersionRef::new(

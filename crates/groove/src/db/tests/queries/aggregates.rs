@@ -93,14 +93,15 @@ fn apply_materialized(
     materialized.retain(|_, (_, weight)| *weight != 0);
 }
 
-#[test]
-fn aggregate_hydrates_and_updates_group_summaries() {
+#[futures_test::test]
+async fn aggregate_hydrates_and_updates_group_summaries() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["metrics"]).unwrap();
-    let mut database = Database::new(metric_schema(), storage).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["metrics"]).unwrap();
+    let mut database = Database::new(metric_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(metric_aggregate_table_graph())
+        .await
         .unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
@@ -108,7 +109,7 @@ fn aggregate_hydrates_and_updates_group_summaries() {
     batch.insert("metrics", metric_values(1, 10, 5));
     batch.insert("metrics", metric_values(2, 10, 7));
     batch.insert("metrics", metric_values(3, 20, 11));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         sorted_values(subscription.recv().unwrap().to_values().unwrap()),
         [
@@ -139,7 +140,7 @@ fn aggregate_hydrates_and_updates_group_summaries() {
 
     let mut batch = database.open_batch();
     batch.update("metrics", metric_values(2, 10, 3));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         sorted_values(subscription.recv().unwrap().to_values().unwrap()),
         [
@@ -171,7 +172,7 @@ fn aggregate_hydrates_and_updates_group_summaries() {
     let mut batch = database.open_batch();
     batch.delete("metrics", PrimaryKeyValue::U64(2));
     batch.delete("metrics", PrimaryKeyValue::U64(1));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         sorted_values(subscription.recv().unwrap().to_values().unwrap()),
         [(
@@ -187,23 +188,23 @@ fn aggregate_hydrates_and_updates_group_summaries() {
         )]
     );
 }
-#[test]
-fn aggregate_counts_weighted_multiplicity_from_bag_union() {
+#[futures_test::test]
+async fn aggregate_counts_weighted_multiplicity_from_bag_union() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["metrics"]).unwrap();
-    let mut database = Database::new(metric_schema(), storage).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["metrics"]).unwrap();
+    let mut database = Database::new(metric_schema(), storage).await.unwrap();
     let graph = metric_aggregate_graph(GraphBuilder::union([
         GraphBuilder::table("metrics"),
         GraphBuilder::table("metrics"),
     ]));
-    let subscription = database.subscribe_one_sink(graph).unwrap();
+    let subscription = database.subscribe_one_sink(graph).await.unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
     batch.insert("metrics", metric_values(1, 10, 5));
     batch.insert("metrics", metric_values(2, 10, 7));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
 
     assert_eq!(
         subscription.recv().unwrap().to_values().unwrap(),
@@ -221,14 +222,14 @@ fn aggregate_counts_weighted_multiplicity_from_bag_union() {
     );
 }
 
-#[test]
-fn aggregate_incremental_matches_recompute_under_seeded_changes() {
+#[futures_test::test]
+async fn aggregate_incremental_matches_recompute_under_seeded_changes() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["metrics"]).unwrap();
-    let mut database = Database::new(metric_schema(), storage).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["metrics"]).unwrap();
+    let mut database = Database::new(metric_schema(), storage).await.unwrap();
     let graph = metric_aggregate_table_graph();
-    let subscription = database.subscribe_one_sink(graph.clone()).unwrap();
+    let subscription = database.subscribe_one_sink(graph.clone()).await.unwrap();
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut materialized = std::collections::BTreeMap::new();
@@ -255,7 +256,7 @@ fn aggregate_incremental_matches_recompute_under_seeded_changes() {
             }
             live.insert(id, (bucket, score));
         }
-        database.commit_batch(batch).unwrap();
+        database.commit_batch(batch).await.unwrap();
         match subscription.try_recv() {
             Ok(emitted) => apply_materialized(&mut materialized, emitted),
             Err(TryRecvError::Empty) => {}
@@ -264,6 +265,7 @@ fn aggregate_incremental_matches_recompute_under_seeded_changes() {
         let recomputed = sorted_values(
             database
                 .query_graph(graph.clone())
+                .await
                 .unwrap()
                 .to_values()
                 .unwrap(),
@@ -276,20 +278,26 @@ fn aggregate_incremental_matches_recompute_under_seeded_changes() {
     }
 }
 
-#[test]
-fn aggregate_query_hydration_does_not_perturb_subscription_deltas() {
+#[futures_test::test]
+async fn aggregate_query_hydration_does_not_perturb_subscription_deltas() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage =
-        TestStorage::open(temp_dir.path().join("groove-test.btree"), &["metrics"]).unwrap();
-    let mut database = Database::new(metric_schema(), storage).unwrap();
+        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["metrics"]).unwrap();
+    let mut database = Database::new(metric_schema(), storage).await.unwrap();
     let graph = metric_aggregate_table_graph();
-    let subscription = database.subscribe_one_sink(graph.clone()).unwrap();
+    let subscription = database.subscribe_one_sink(graph.clone()).await.unwrap();
     assert!(subscription.recv().unwrap().is_empty());
-    assert!(database.query_graph(graph.clone()).unwrap().is_empty());
+    assert!(
+        database
+            .query_graph(graph.clone())
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     let mut batch = database.open_batch();
     batch.insert("metrics", metric_values(1, 10, 5));
-    database.commit_batch(batch).unwrap();
+    database.commit_batch(batch).await.unwrap();
     assert_eq!(
         subscription.recv().unwrap().to_values().unwrap(),
         [(
@@ -308,10 +316,18 @@ fn aggregate_query_hydration_does_not_perturb_subscription_deltas() {
     let first = sorted_values(
         database
             .query_graph(graph.clone())
+            .await
             .unwrap()
             .to_values()
             .unwrap(),
     );
-    let second = sorted_values(database.query_graph(graph).unwrap().to_values().unwrap());
+    let second = sorted_values(
+        database
+            .query_graph(graph)
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap(),
+    );
     assert_eq!(first, second);
 }

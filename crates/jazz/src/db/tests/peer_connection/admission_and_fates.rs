@@ -17,7 +17,7 @@ fn authenticated_client_upload_uses_authority_clock_for_forward_skew() {
     let (tx_id, unit) = client
         .node()
         .borrow_mut()
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", RowUuid::from_bytes([0xf1; 16]), future_ms)
                 .made_by(identity)
                 .cells(cells("future", false, identity)),
@@ -119,7 +119,7 @@ fn catalogue_fingerprint_change_is_eager_only_on_trusted_backend_link() {
     core.server
         .node()
         .borrow_mut()
-        .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
+        .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
             author: AuthorId::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(SchemaLineagePublication::new(
@@ -321,11 +321,11 @@ fn distinct_advice_actions_with_one_compiled_scope_hydrate_once() {
     assert_eq!(block_on(second), PermissionAdvice::Denied);
 
     let hydration_count = match &subscriber.borrow().link {
-        ConnectionLink::Subscriber {
+        ConnectionLink::Subscriber(SubscriberConnectionState {
             authority_scope_hydration_count,
             ..
-        } => *authority_scope_hydration_count,
-        ConnectionLink::Upstream { .. } => unreachable!("server link is a subscriber"),
+        }) => *authority_scope_hydration_count,
+        ConnectionLink::Upstream(_) => unreachable!("server link is a subscriber"),
     };
     assert_eq!(
         hydration_count, 1,
@@ -394,11 +394,11 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
     assert_eq!(block_on(advanced), PermissionAdvice::Allowed);
 
     let hydration_count = match &subscriber.borrow().link {
-        ConnectionLink::Subscriber {
+        ConnectionLink::Subscriber(SubscriberConnectionState {
             authority_scope_hydration_count,
             ..
-        } => *authority_scope_hydration_count,
-        ConnectionLink::Upstream { .. } => unreachable!("server link is a subscriber"),
+        }) => *authority_scope_hydration_count,
+        ConnectionLink::Upstream(_) => unreachable!("server link is a subscriber"),
     };
     assert_eq!(
         hydration_count, 3,
@@ -467,8 +467,10 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
     ));
 
     let proofs = match &subscriber.borrow().link {
-        ConnectionLink::Subscriber { peer, .. } => peer.terminal_authority_scope_proof_count(),
-        ConnectionLink::Upstream { .. } => unreachable!("server link is a subscriber"),
+        ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. }) => {
+            peer.terminal_authority_scope_proof_count()
+        }
+        ConnectionLink::Upstream(_) => unreachable!("server link is a subscriber"),
     };
     assert_eq!(
         proofs, 3,
@@ -508,7 +510,7 @@ fn concurrent_upstreams_keep_selected_owner_until_detach_handoff() {
     let tx_id = edge
         .node()
         .borrow_mut()
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x91), 1).cells(cells("handoff", false, identity)),
         )
         .unwrap();
@@ -667,10 +669,10 @@ fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
     // authority: FateUpdate carries no receipt generation of its own.
     {
         let mut edge_upstream = edge_upstream.borrow_mut();
-        let ConnectionLink::Upstream {
+        let ConnectionLink::Upstream(UpstreamConnectionState {
             expected_scope_authority,
             ..
-        } = &mut edge_upstream.link
+        }) = &mut edge_upstream.link
         else {
             panic!("edge upstream must retain its admitted authority context");
         };
@@ -696,10 +698,10 @@ fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
     // remain unable to discharge Alice's parked route.
     let advanced_context = {
         let edge_upstream = edge_upstream.borrow();
-        let ConnectionLink::Upstream {
+        let ConnectionLink::Upstream(UpstreamConnectionState {
             expected_scope_authority,
             ..
-        } = &edge_upstream.link
+        }) = &edge_upstream.link
         else {
             panic!("edge upstream must retain its admitted authority context");
         };
@@ -725,10 +727,10 @@ fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
     ] {
         {
             let mut edge_upstream = edge_upstream.borrow_mut();
-            let ConnectionLink::Upstream {
+            let ConnectionLink::Upstream(UpstreamConnectionState {
                 expected_scope_authority,
                 ..
-            } = &mut edge_upstream.link
+            }) = &mut edge_upstream.link
             else {
                 unreachable!("edge upstream shape remains stable");
             };
@@ -752,17 +754,21 @@ fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
             "a physically distinct authority context must not reach Alice"
         );
         assert_eq!(
-            edge.node().borrow_mut().transaction_state(tx_id).unwrap().0,
+            edge.node()
+                .borrow_mut()
+                .transaction_state_settled(tx_id)
+                .unwrap()
+                .0,
             Fate::Pending,
             "a rejected fate from a different physical link must not alter edge state"
         );
     }
     {
         let mut edge_upstream = edge_upstream.borrow_mut();
-        let ConnectionLink::Upstream {
+        let ConnectionLink::Upstream(UpstreamConnectionState {
             expected_scope_authority,
             ..
-        } = &mut edge_upstream.link
+        }) = &mut edge_upstream.link
         else {
             unreachable!("edge upstream shape remains stable");
         };
@@ -820,7 +826,7 @@ fn stale_upstream_epoch_cannot_settle_routed_local_fate_before_selected_epoch() 
     let tx_id = edge
         .node()
         .borrow_mut()
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x44), 1).cells(cells("pending", false, identity)),
         )
         .unwrap();
@@ -842,7 +848,11 @@ fn stale_upstream_epoch_cannot_settle_routed_local_fate_before_selected_epoch() 
         .unwrap();
     edge.server.tick().unwrap();
     assert!(matches!(
-        edge.node().borrow_mut().transaction_state(tx_id).unwrap().0,
+        edge.node()
+            .borrow_mut()
+            .transaction_state_settled(tx_id)
+            .unwrap()
+            .0,
         Fate::Pending
     ));
     assert!(downstream.borrow().is_empty());
@@ -856,7 +866,11 @@ fn stale_upstream_epoch_cannot_settle_routed_local_fate_before_selected_epoch() 
         .unwrap();
     edge.server.tick().unwrap();
     assert!(matches!(
-        edge.node().borrow_mut().transaction_state(tx_id).unwrap().0,
+        edge.node()
+            .borrow_mut()
+            .transaction_state_settled(tx_id)
+            .unwrap()
+            .0,
         Fate::Accepted
     ));
     assert_eq!(downstream.borrow().len(), 1);
@@ -935,7 +949,8 @@ fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() 
     );
     {
         let edge_b = edge_b.borrow();
-        let ConnectionLink::Upstream { uploaded, .. } = &edge_b.link else {
+        let ConnectionLink::Upstream(UpstreamConnectionState { uploaded, .. }) = &edge_b.link
+        else {
             panic!("B must be an upstream connection");
         };
         assert!(
@@ -949,7 +964,8 @@ fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() 
     // re-upload even though it was already connected before selection.
     {
         let edge_b = edge_b.borrow();
-        let ConnectionLink::Upstream { uploaded, .. } = &edge_b.link else {
+        let ConnectionLink::Upstream(UpstreamConnectionState { uploaded, .. }) = &edge_b.link
+        else {
             panic!("B must remain the upstream handoff connection");
         };
         assert!(

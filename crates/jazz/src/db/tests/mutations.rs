@@ -664,7 +664,7 @@ fn session_upload_rejects_forged_made_by_without_ingesting_rows() {
         .node
         .node
         .borrow_mut()
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0xf1), client.next_now_ms())
                 .made_by(forged_author)
                 .cells(cells("forged", false, session_author)),
@@ -965,7 +965,7 @@ fn trusted_backend_upload_uses_backend_policy_and_stores_user_made_by() {
         .node
         .node
         .borrow_mut()
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0xf2), backend.next_now_ms())
                 .made_by(attributed_user)
                 .permission_subject(backend_author)
@@ -1162,7 +1162,7 @@ fn client_delete_advice_is_unknown_without_mutating() {
         .node
         .node
         .borrow_mut()
-        .apply_sync_message(
+        .apply_sync_message_settled(
             owner_db
                 .node
                 .node
@@ -1230,11 +1230,14 @@ fn client_attributed_insert_to_different_user_is_rejected() {
     let attributed_user = AuthorId::from_bytes([0xa1; 16]);
     let client = open_db(0xc1, client_author, &schema);
 
-    let err = match client.insert_attributed(
-        attributed_user,
-        "todos",
-        cells("forged", false, client_author),
-    ) {
+    let err = match client
+        .insert_attributed(
+            attributed_user,
+            "todos",
+            cells("forged", false, client_author),
+        )
+        .resolve()
+    {
         Ok(_) => panic!("client attribution should be rejected"),
         Err(err) => err,
     };

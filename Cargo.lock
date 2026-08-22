@@ -1292,6 +1292,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "037711b3d59c33004d3856fbdc83b99d4ff37a24768fa1be9ce3538a1cde4393"
 
 [[package]]
+name = "futures-test"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32d24b40cb9018c6b0f9d891b74a86a777d5db37972a115016d1150257b1c793"
+dependencies = [
+ "futures-core",
+ "futures-executor",
+ "futures-io",
+ "futures-macro",
+ "futures-sink",
+ "futures-task",
+ "futures-util",
+ "pin-project",
+]
+
+[[package]]
 name = "futures-util"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1377,6 +1393,8 @@ name = "groove"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "futures",
+ "futures-test",
  "hdrhistogram",
  "internment",
  "jazz-benchmark-guard",
@@ -1960,6 +1978,7 @@ name = "jazz-napi"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "futures",
  "jazz",
  "jazz-native-transport",
  "jazz-otel",
@@ -2058,6 +2077,7 @@ dependencies = [
  "automerge",
  "backtrace",
  "diamond-types",
+ "futures",
  "hdrhistogram",
  "jazz",
  "jazz-benchmark-guard",

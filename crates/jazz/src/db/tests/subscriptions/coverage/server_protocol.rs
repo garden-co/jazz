@@ -314,15 +314,16 @@ fn subscriber_connection_rejects_subscribe_without_link_shape_options() {
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let shape = Query::from("todos").validate(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    server
-        .node()
-        .borrow_mut()
-        .apply_sync_message(SyncMessage::RegisterShape {
-            shape_id: shape.shape_id(),
-            ast: ShapeAst::from_validated(&shape),
-            opts: RegisterShapeOptions::default(),
-        })
-        .unwrap();
+    let shared_node = server.node();
+    let mut node = shared_node.borrow_mut();
+    let outcome = crate::db::block_on(node.apply_sync_message(SyncMessage::RegisterShape {
+        shape_id: shape.shape_id(),
+        ast: ShapeAst::from_validated(&shape),
+        opts: RegisterShapeOptions::default(),
+    }))
+    .unwrap();
+    crate::db::block_on(node.persist_and_settle_outcome(outcome)).unwrap();
+    drop(node);
 
     client_transport
         .send(SyncMessage::Subscribe(Subscribe {
@@ -562,9 +563,9 @@ fn local_live_subscription_requests_global_upstream_coverage() {
     // the remote coverage request must be settled-only because local state is
     // link-local to the subscribing client.
     let subscriber_ref = subscriber.borrow();
-    let ConnectionLink::Subscriber {
+    let ConnectionLink::Subscriber(SubscriberConnectionState {
         coverage_groups, ..
-    } = &subscriber_ref.link
+    }) = &subscriber_ref.link
     else {
         panic!("expected subscriber connection");
     };
@@ -596,9 +597,9 @@ fn edge_live_subscription_requests_global_upstream_coverage() {
     // link-local; the subscription's settled contract is satisfied when the
     // globally settled coverage arrives back at the client.
     let subscriber_ref = subscriber.borrow();
-    let ConnectionLink::Subscriber {
+    let ConnectionLink::Subscriber(SubscriberConnectionState {
         coverage_groups, ..
-    } = &subscriber_ref.link
+    }) = &subscriber_ref.link
     else {
         panic!("expected subscriber connection");
     };

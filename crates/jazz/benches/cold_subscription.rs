@@ -4,6 +4,7 @@ use std::time::Instant;
 mod schema_fixture;
 mod support;
 
+use jazz::block_on;
 use jazz::groove::records::Value;
 use jazz::ids::{NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
@@ -66,10 +67,11 @@ impl ColdSubscriptionBench {
             if let Some(parent_tx_id) = parent {
                 commit = commit.parents(vec![parent_tx_id]);
             }
-            let (tx_id, unit) = self
-                .writer
-                .commit_mergeable_unit(commit)
-                .expect("mergeable commit");
+            let (publication, unit) =
+                block_on(self.writer.commit_mergeable_unit(commit)).expect("mergeable commit");
+            let tx_id = publication.tx_id();
+            block_on(self.writer.persist_and_settle_transaction(publication))
+                .expect("persist mergeable commit");
             let fate = core_ingest(&mut self.core, &unit, u64::MAX - SKEW_TOLERANCE_MS);
             assert!(matches!(
                 fate,
@@ -81,28 +83,27 @@ impl ColdSubscriptionBench {
             parent = Some(tx_id);
         }
 
-        let rows = self
-            .core
-            .current_rows(TABLE, DurabilityTier::Global)
-            .expect("current rows");
+        let rows =
+            block_on(self.core.current_rows(TABLE, DurabilityTier::Global)).expect("current rows");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].row_uuid(), row_uuid);
     }
 
     fn seed_pending(&mut self, ahead: usize) {
         for idx in 0..ahead {
-            self.core
-                .commit_mergeable(
+            let publication = block_on(
+                self.core.commit_mergeable(
                     MergeableCommit::new(TABLE, pending_row(idx), 10_000_000 + idx as u64)
                         .cells(cells(idx)),
-                )
-                .expect("pending commit");
+                ),
+            )
+            .expect("pending commit");
+            block_on(self.core.persist_and_settle_transaction(publication))
+                .expect("persist pending commit");
         }
 
-        let rows = self
-            .core
-            .current_rows(TABLE, DurabilityTier::Local)
-            .expect("current rows");
+        let rows =
+            block_on(self.core.current_rows(TABLE, DurabilityTier::Local)).expect("current rows");
         assert_eq!(rows.len(), ahead + 1);
     }
 
@@ -112,14 +113,11 @@ impl ColdSubscriptionBench {
         let start = Instant::now();
         match tier {
             DurabilityTier::Global => {
-                let _ = peer
-                    .current_rows_update(&mut self.core, TABLE)
+                let _ = block_on(peer.current_rows_update(&mut self.core, TABLE))
                     .expect("cold global current rows update");
             }
             DurabilityTier::Local => {
-                let _ = self
-                    .core
-                    .current_rows(TABLE, DurabilityTier::Local)
+                let _ = block_on(self.core.current_rows(TABLE, DurabilityTier::Local))
                     .expect("cold local current rows");
             }
             DurabilityTier::None | DurabilityTier::Edge => {
@@ -160,9 +158,10 @@ fn core_ingest(
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
-    let [fate] = core
-        .ingest_commit_unit(tx.clone(), versions.clone(), now_ms)
-        .expect("core ingest")
+    let outcome = block_on(core.ingest_commit_unit(tx.clone(), versions.clone(), now_ms))
+        .expect("core ingest");
+    let [fate] = block_on(core.persist_and_settle_outcome(outcome))
+        .expect("persist core ingest")
         .try_into()
         .expect("one fate update");
     fate
@@ -193,7 +192,7 @@ fn open_node(
     let storage =
         RocksDbStorage::open_with_durability(temp_dir.path(), &refs, Durability::WalNoSync)
             .expect("open rocksdb");
-    let node = NodeState::new(node_uuid, schema, storage).expect("single node");
+    let node = block_on(NodeState::new(node_uuid, schema, storage)).expect("single node");
     (temp_dir, node)
 }
 

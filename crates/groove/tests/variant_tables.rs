@@ -70,12 +70,12 @@ fn enum_projection_schema() -> DatabaseSchema {
     DatabaseSchema::new([table])
 }
 
-#[test]
-fn variant_enum_projection_normalizes_layout_tags_and_matches_named_case()
+#[futures_test::test]
+async fn variant_enum_projection_normalizes_layout_tags_and_matches_named_case()
 -> Result<(), Box<dyn std::error::Error>> {
     let schema = enum_projection_schema();
     let storage = MemoryStorage::new(&schema.column_families());
-    let mut database = Database::new(schema.clone(), storage)?;
+    let mut database = Database::new(schema.clone(), storage).await?;
     let event = EnumSchema::new(
         "event",
         [
@@ -101,8 +101,9 @@ fn variant_enum_projection_normalizes_layout_tags_and_matches_named_case()
     }
 
     let projected = GraphBuilder::variant_source("events", "logical-event");
-    let subscription =
-        database.subscribe_one_sink(projected.clone().variant_project("event", "text"))?;
+    let subscription = database
+        .subscribe_one_sink(projected.clone().variant_project("event", "text"))
+        .await?;
     assert!(subscription.recv()?.is_empty());
 
     let descriptors = (1..=4)
@@ -147,9 +148,12 @@ fn variant_enum_projection_normalizes_layout_tags_and_matches_named_case()
             &[Value::U64(4), Value::U64(9), Value::Bool(true)],
         )?,
     );
-    database.commit_batch(batch)?;
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
+    drop(applied);
 
-    let all = database.query_graph(projected.clone())?.to_values()?;
+    let all = database.query_graph(projected.clone()).await?.to_values()?;
     assert_eq!(all.len(), 4);
     let mut tags = all
         .iter()
@@ -187,7 +191,10 @@ fn variant_enum_projection_normalizes_layout_tags_and_matches_named_case()
             ],
         )?,
     );
-    database.commit_batch(batch)?;
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
+    drop(applied);
     let mut revised_deltas = subscription.recv()?.to_values()?;
     revised_deltas.sort_by_key(|(_, weight)| *weight);
     assert_eq!(
@@ -200,8 +207,8 @@ fn variant_enum_projection_normalizes_layout_tags_and_matches_named_case()
     Ok(())
 }
 
-#[test]
-fn case_local_same_name_may_have_different_types_when_not_shared()
+#[futures_test::test]
+async fn case_local_same_name_may_have_different_types_when_not_shared()
 -> Result<(), Box<dyn std::error::Error>> {
     let table = TableSchema::new("events", [ColumnSchema::new("id", ColumnType::U64)])
         .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
@@ -222,7 +229,7 @@ fn case_local_same_name_may_have_different_types_when_not_shared()
         );
     let schema = DatabaseSchema::new([table]);
     let storage = MemoryStorage::new(&schema.column_families());
-    let mut database = Database::new(schema.clone(), storage)?;
+    let mut database = Database::new(schema.clone(), storage).await?;
     let v1 = schema
         .table("events")
         .unwrap()
@@ -242,20 +249,23 @@ fn case_local_same_name_may_have_different_types_when_not_shared()
         "events",
         VariantRecord::create(2, v2, &[Value::U64(2), Value::U64(404)])?,
     );
-    database.commit_batch(batch)?;
-    let rows = database.primary_key_scan("events", &[])?;
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
+    drop(applied);
+    let rows = database.primary_key_scan("events", &[]).await?;
     assert_eq!(rows[0].get("value")?, Value::String("opened".into()));
     assert_eq!(rows[1].get("value")?, Value::U64(404));
 
     let storage = database.into_storage();
-    let reopened = Database::new(schema, storage)?;
-    let indexed = reopened.index_scan("events", "events_by_id", &[])?;
+    let reopened = Database::new(schema, storage).await?;
+    let indexed = reopened.index_scan("events", "events_by_id", &[]).await?;
     assert_eq!(
         indexed.len(),
         2,
         "shared id index spans both local payloads"
     );
-    assert_eq!(reopened.primary_key_scan("events", &[])?.len(), 2);
+    assert_eq!(reopened.primary_key_scan("events", &[]).await?.len(), 2);
     Ok(())
 }
 
@@ -269,12 +279,12 @@ fn variant_row(tag: u32, values: &[Value]) -> VariantRecord {
     VariantRecord::create(tag, descriptor, values).unwrap()
 }
 
-#[test]
-fn user_enum_nested_in_layout_enum_normalizes_immediately() -> Result<(), Box<dyn std::error::Error>>
-{
+#[futures_test::test]
+async fn user_enum_nested_in_layout_enum_normalizes_immediately()
+-> Result<(), Box<dyn std::error::Error>> {
     let schema = enum_schema();
     let storage = MemoryStorage::new(&schema.column_families());
-    let mut database = Database::new(schema, storage)?;
+    let mut database = Database::new(schema, storage).await?;
     let normalized = RecordDescriptor::new([
         ("id", ColumnType::U64),
         ("kind", ColumnType::String),
@@ -322,8 +332,9 @@ fn user_enum_nested_in_layout_enum_normalizes_immediately() -> Result<(), Box<dy
         ],
     )?;
 
-    let subscription =
-        database.subscribe_one_sink(GraphBuilder::variant_source("entries", "public-entry"))?;
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::variant_source("entries", "public-entry"))
+        .await?;
     assert!(subscription.recv()?.is_empty());
 
     let mut batch = database.open_batch();
@@ -346,7 +357,10 @@ fn user_enum_nested_in_layout_enum_normalizes_immediately() -> Result<(), Box<dy
             ],
         ),
     );
-    database.commit_batch(batch)?;
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
+    drop(applied);
 
     let mut rows = subscription.recv()?.to_values()?;
     rows.sort_by_key(|(values, _)| match values[0] {
@@ -397,9 +411,10 @@ fn table_variant_tags_use_canonical_bounded_varints() {
 /// schema-version path. The IVM path is intentionally the same implementation;
 /// this exercises write, index maintenance, immediate projection, and delivery
 /// together while the codec test above isolates the changed prefix.
-#[test]
+#[futures_test::test]
 #[ignore = "manual performance receipt"]
-fn measure_variant_write_projection_and_index_path() -> Result<(), Box<dyn std::error::Error>> {
+async fn measure_variant_write_projection_and_index_path() -> Result<(), Box<dyn std::error::Error>>
+{
     const ROWS: u64 = 20_000;
     let schema = enum_schema();
     let descriptors = (1..=4)
@@ -412,7 +427,7 @@ fn measure_variant_write_projection_and_index_path() -> Result<(), Box<dyn std::
         })
         .collect::<Vec<_>>();
     let storage = MemoryStorage::new(&schema.column_families());
-    let mut database = Database::new(schema, storage)?;
+    let mut database = Database::new(schema, storage).await?;
     let normalized = RecordDescriptor::new([
         ("id", ColumnType::U64),
         ("kind", ColumnType::String),
@@ -436,8 +451,9 @@ fn measure_variant_write_projection_and_index_path() -> Result<(), Box<dyn std::
             ],
         )?;
     }
-    let subscription =
-        database.subscribe_one_sink(GraphBuilder::variant_source("entries", "receipt"))?;
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::variant_source("entries", "receipt"))
+        .await?;
     assert!(subscription.recv()?.is_empty());
 
     let started = std::time::Instant::now();
@@ -461,7 +477,10 @@ fn measure_variant_write_projection_and_index_path() -> Result<(), Box<dyn std::
             VariantRecord::create(tag as u32, descriptors[tag - 1], &values)?,
         );
     }
-    database.commit_batch(batch)?;
+    let applied = database.apply_batch(batch).await?;
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted)?;
+    drop(applied);
     let committed = started.elapsed();
     let deltas = subscription.recv()?;
     let delivered = started.elapsed();
@@ -474,7 +493,7 @@ fn measure_variant_write_projection_and_index_path() -> Result<(), Box<dyn std::
     drop(subscription);
     let storage = database.into_storage();
     let schema = enum_schema();
-    let mut reopened = Database::new(schema, storage)?;
+    let mut reopened = Database::new(schema, storage).await?;
     let normalized = RecordDescriptor::new([
         ("id", ColumnType::U64),
         ("kind", ColumnType::String),
@@ -500,7 +519,8 @@ fn measure_variant_write_projection_and_index_path() -> Result<(), Box<dyn std::
     }
     let scan_started = std::time::Instant::now();
     let hydration = reopened
-        .subscribe_one_sink(GraphBuilder::variant_source("entries", "receipt"))?
+        .subscribe_one_sink(GraphBuilder::variant_source("entries", "receipt"))
+        .await?
         .recv()?;
     assert_eq!(hydration.deltas.len(), ROWS as usize);
     eprintln!(

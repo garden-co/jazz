@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { schema as s } from "../index.js";
 import {
   JazzClient,
-  MutationResult,
+  WriteResult,
   type BatchId,
   type InsertResult,
   type Runtime,
@@ -340,7 +340,7 @@ describe("runtime/Db native runtime path upstream wiring", () => {
       batchId: "transaction-1" as BatchId,
     };
     const client = {
-      insert: vi.fn(() => new MutationResult(runtimeRow, runtimeRow.batchId, client, "mergeable")),
+      insert: vi.fn(() => new WriteResult(runtimeRow, runtimeRow.batchId, client)),
       shutdown: vi.fn(async () => undefined),
       updateAuthToken: vi.fn(),
       connectTransport: vi.fn(),

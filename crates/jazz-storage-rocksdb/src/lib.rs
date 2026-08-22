@@ -13,15 +13,15 @@ use std::path::{Path, PathBuf};
 
 use rocksdb::{
     BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, DBCompactionStyle, DBCompressionType,
-    Direction, IteratorMode, MergeOperands, Options, ReadOptions, UniversalCompactOptions,
-    WriteBatch, WriteBufferManager, WriteOptions, properties,
+    DBIteratorWithThreadMode, Direction, IteratorMode, MergeOperands, Options, ReadOptions,
+    UniversalCompactOptions, WriteBatch, WriteBufferManager, WriteOptions, properties,
 };
 use serde::Serialize;
 
 use groove::storage::{
-    BoxedStorage, ColumnFamilyName, Error, Key, KeyValue, OrderedKvStorage, ReopenableStorage,
-    ScanVisitor, StorageFactory, Value, WriteOperation, apply_storage_delta,
-    compact_storage_delta_operand,
+    BoxedStorage, ColumnFamilyName, Error, KeyValue, OrderedKvStorage, OwnedWriteOperation,
+    ReopenableStorage, StorageCursor, StorageFactory, StorageFuture, StorageScan, Value,
+    apply_storage_delta, compact_storage_delta_operand,
 };
 
 trait RocksResultExt<T> {
@@ -77,17 +77,69 @@ pub struct RocksDbStorage {
 pub struct RocksDbStorageFactory;
 
 impl StorageFactory for RocksDbStorageFactory {
-    fn open(&self, path: &Path, column_families: &[&str]) -> Result<BoxedStorage, Error> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| Error::Backend {
-                backend: "rocksdb",
-                message: error.to_string(),
-            })?;
+    fn open(
+        &self,
+        path: PathBuf,
+        column_families: Vec<String>,
+    ) -> StorageFuture<'_, Result<BoxedStorage, Error>> {
+        Box::pin(async move {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| Error::Backend {
+                    backend: "rocksdb",
+                    message: error.to_string(),
+                })?;
+            }
+            let column_families = column_families
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            Ok(BoxedStorage::new(RocksDbStorage::open(
+                path,
+                &column_families,
+            )?))
+        })
+    }
+}
+
+struct RocksDbCursor<'a> {
+    iterator: DBIteratorWithThreadMode<'a, DB>,
+    prefix: Option<Vec<u8>>,
+    done: bool,
+}
+
+impl<'a> RocksDbCursor<'a> {
+    fn new(iterator: DBIteratorWithThreadMode<'a, DB>, prefix: Option<Vec<u8>>) -> Self {
+        Self {
+            iterator,
+            prefix,
+            done: false,
         }
-        Ok(BoxedStorage::new(RocksDbStorage::open(
-            path,
-            column_families,
-        )?))
+    }
+}
+
+impl StorageCursor for RocksDbCursor<'_> {
+    fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>> {
+        Box::pin(async move {
+            if self.done {
+                return Ok(None);
+            }
+            let mut batch = Vec::with_capacity(256);
+            while batch.len() < 256 {
+                let Some(item) = self.iterator.next() else {
+                    self.done = true;
+                    break;
+                };
+                let (key, value) = item.storage()?;
+                if let Some(prefix) = &self.prefix
+                    && !key.starts_with(prefix)
+                {
+                    self.done = true;
+                    break;
+                }
+                batch.push((key.into_vec(), value.into_vec()));
+            }
+            Ok((!batch.is_empty()).then_some(batch))
+        })
     }
 }
 
@@ -356,154 +408,165 @@ impl RocksDbClassProfile {
 }
 
 impl ReopenableStorage for RocksDbStorage {
-    fn reopen(self, column_families: &[&str]) -> Result<Self, Error> {
-        if column_families
-            .iter()
-            .all(|name| self.column_families.contains(*name))
-        {
-            return Ok(self);
-        }
-        let path = self.path.clone();
-        let durability = self.durability;
-        drop(self);
-        Self::open_with_durability(path, column_families, durability)
+    fn reopen(self, column_families: Vec<String>) -> StorageFuture<'static, Result<Self, Error>> {
+        Box::pin(async move {
+            if column_families
+                .iter()
+                .all(|name| self.column_families.contains(name))
+            {
+                return Ok(self);
+            }
+            let path = self.path.clone();
+            let durability = self.durability;
+            drop(self);
+            let column_families = column_families
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            Self::open_with_durability(path, &column_families, durability)
+        })
     }
 }
 
 impl OrderedKvStorage for RocksDbStorage {
-    fn get(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Option<Value>, Error> {
-        if cf == "default" {
-            self.db.get(key).storage()
-        } else {
-            self.db.get_cf(self.cf_handle(cf)?, key).storage()
-        }
+    fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        Box::pin(async move {
+            if cf == "default" {
+                self.db.get(key).storage()
+            } else {
+                self.db.get_cf(self.cf_handle(&cf)?, key).storage()
+            }
+        })
     }
 
-    fn approximate_class_bytes(&self, cf: &ColumnFamilyName) -> Result<Option<u64>, Error> {
-        if cf == "default" {
+    fn approximate_class_bytes(&self, cf: String) -> StorageFuture<'_, Result<Option<u64>, Error>> {
+        Box::pin(async move {
+            if cf == "default" {
+                let sst = self
+                    .db
+                    .property_int_value(properties::TOTAL_SST_FILES_SIZE)
+                    .storage()?
+                    .unwrap_or(0);
+                let mem = self
+                    .db
+                    .property_int_value(properties::SIZE_ALL_MEM_TABLES)
+                    .storage()?
+                    .unwrap_or(0);
+                return Ok(Some(sst.saturating_add(mem)));
+            }
+            let handle = self.cf_handle(&cf)?;
             let sst = self
                 .db
-                .property_int_value(properties::TOTAL_SST_FILES_SIZE)
+                .property_int_value_cf(handle, properties::TOTAL_SST_FILES_SIZE)
                 .storage()?
                 .unwrap_or(0);
             let mem = self
                 .db
-                .property_int_value(properties::SIZE_ALL_MEM_TABLES)
+                .property_int_value_cf(handle, properties::SIZE_ALL_MEM_TABLES)
                 .storage()?
                 .unwrap_or(0);
-            return Ok(Some(sst.saturating_add(mem)));
-        }
-        let handle = self.cf_handle(cf)?;
-        let sst = self
-            .db
-            .property_int_value_cf(handle, properties::TOTAL_SST_FILES_SIZE)
-            .storage()?
-            .unwrap_or(0);
-        let mem = self
-            .db
-            .property_int_value_cf(handle, properties::SIZE_ALL_MEM_TABLES)
-            .storage()?
-            .unwrap_or(0);
-        Ok(Some(sst.saturating_add(mem)))
+            Ok(Some(sst.saturating_add(mem)))
+        })
     }
 
-    fn set(&self, cf: &ColumnFamilyName, key: &Key, value: &[u8]) -> Result<(), Error> {
-        if cf == "default" {
-            self.db.put_opt(key, value, &self.write_options).storage()
-        } else {
-            self.db
-                .put_cf_opt(self.cf_handle(cf)?, key, value, &self.write_options)
-                .storage()
-        }
+    fn set(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async move {
+            if cf == "default" {
+                self.db.put_opt(key, value, &self.write_options).storage()
+            } else {
+                self.db
+                    .put_cf_opt(self.cf_handle(&cf)?, key, value, &self.write_options)
+                    .storage()
+            }
+        })
     }
 
-    fn delete(&self, cf: &ColumnFamilyName, key: &Key) -> Result<(), Error> {
-        if cf == "default" {
-            self.db.delete_opt(key, &self.write_options).storage()
-        } else {
-            self.db
-                .delete_cf_opt(self.cf_handle(cf)?, key, &self.write_options)
-                .storage()
-        }
+    fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async move {
+            if cf == "default" {
+                self.db.delete_opt(key, &self.write_options).storage()
+            } else {
+                self.db
+                    .delete_cf_opt(self.cf_handle(&cf)?, key, &self.write_options)
+                    .storage()
+            }
+        })
     }
 
-    fn set_write_flush_cadence(&self, every: usize) -> Result<(), Error> {
-        assert!(every > 0, "write flush cadence must be non-zero");
-        *self.write_flush_cadence.borrow_mut() = Some(WriteFlushCadence { every, pending: 0 });
-        Ok(())
+    fn set_write_flush_cadence(&self, every: usize) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async move {
+            assert!(every > 0, "write flush cadence must be non-zero");
+            *self.write_flush_cadence.borrow_mut() = Some(WriteFlushCadence { every, pending: 0 });
+            Ok(())
+        })
     }
 
-    fn flush_write_boundary(&self) -> Result<(), Error> {
-        self.db.flush_wal(true).storage()?;
-        if let Some(cadence) = self.write_flush_cadence.borrow_mut().as_mut() {
-            cadence.pending = 0;
-        }
-        Ok(())
+    fn flush_write_boundary(&self) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async move {
+            self.db.flush_wal(true).storage()?;
+            if let Some(cadence) = self.write_flush_cadence.borrow_mut().as_mut() {
+                cadence.pending = 0;
+            }
+            Ok(())
+        })
     }
 
     fn scan_range(
         &self,
-        cf: &ColumnFamilyName,
-        start: &Key,
-        end: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        let mut options = ReadOptions::default();
-        options.set_iterate_upper_bound(end.to_vec());
+        cf: String,
+        start: Vec<u8>,
+        end: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        Box::pin(async move {
+            let mut options = ReadOptions::default();
+            options.set_iterate_upper_bound(end.to_vec());
 
-        let mode = IteratorMode::From(start, Direction::Forward);
-        let iterator = if cf == "default" {
-            self.db.iterator_opt(mode, options)
-        } else {
-            self.db.iterator_cf_opt(self.cf_handle(cf)?, options, mode)
-        };
-        for item in iterator {
-            let (key, value) = item.storage()?;
-            visit(&key, &value)?;
-        }
-        Ok(())
+            let mode = IteratorMode::From(&start, Direction::Forward);
+            let iterator = if cf == "default" {
+                self.db.iterator_opt(mode, options)
+            } else {
+                self.db.iterator_cf_opt(self.cf_handle(&cf)?, options, mode)
+            };
+            Ok(Box::new(RocksDbCursor::new(iterator, None)) as StorageScan<'_>)
+        })
     }
 
     fn scan_prefix(
         &self,
-        cf: &ColumnFamilyName,
-        prefix: &Key,
-        visit: &mut ScanVisitor<'_>,
-    ) -> Result<(), Error> {
-        let mut upper_bound = prefix.to_vec();
-        if !advance_prefix_upper_bound(&mut upper_bound) {
-            let mode = IteratorMode::From(prefix, Direction::Forward);
-            let iterator = if cf == "default" {
-                self.db.iterator(mode)
-            } else {
-                self.db.iterator_cf(self.cf_handle(cf)?, mode)
-            };
-            for item in iterator {
-                let (key, value) = item.storage()?;
-                if !key.starts_with(prefix) {
-                    break;
-                }
-                visit(&key, &value)?;
+        cf: String,
+        prefix: Vec<u8>,
+    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        Box::pin(async move {
+            let mut upper_bound = prefix.to_vec();
+            if !advance_prefix_upper_bound(&mut upper_bound) {
+                let mode = IteratorMode::From(&prefix, Direction::Forward);
+                let iterator = if cf == "default" {
+                    self.db.iterator(mode)
+                } else {
+                    self.db.iterator_cf(self.cf_handle(&cf)?, mode)
+                };
+                return Ok(Box::new(RocksDbCursor::new(iterator, Some(prefix))) as StorageScan<'_>);
             }
-            return Ok(());
-        }
 
-        let mut options = ReadOptions::default();
-        options.set_iterate_upper_bound(upper_bound);
+            let mut options = ReadOptions::default();
+            options.set_iterate_upper_bound(upper_bound);
 
-        let mode = IteratorMode::From(prefix, Direction::Forward);
-        let iterator = if cf == "default" {
-            self.db.iterator_opt(mode, options)
-        } else {
-            self.db.iterator_cf_opt(self.cf_handle(cf)?, options, mode)
-        };
-        for item in iterator {
-            let (key, value) = item.storage()?;
-            visit(&key, &value)?;
-        }
-        Ok(())
+            let mode = IteratorMode::From(&prefix, Direction::Forward);
+            let iterator = if cf == "default" {
+                self.db.iterator_opt(mode, options)
+            } else {
+                self.db.iterator_cf_opt(self.cf_handle(&cf)?, options, mode)
+            };
+            Ok(Box::new(RocksDbCursor::new(iterator, None)) as StorageScan<'_>)
+        })
     }
 
+    #[cfg(any())]
     fn scan_prefix_reverse(
         &self,
         cf: &ColumnFamilyName,
@@ -545,6 +608,7 @@ impl OrderedKvStorage for RocksDbStorage {
         Ok(())
     }
 
+    #[cfg(any())]
     fn last_with_prefix(
         &self,
         cf: &ColumnFamilyName,
@@ -573,6 +637,7 @@ impl OrderedKvStorage for RocksDbStorage {
         Ok(None)
     }
 
+    #[cfg(any())]
     fn last_with_prefix_before_or_at(
         &self,
         cf: &ColumnFamilyName,
@@ -597,54 +662,59 @@ impl OrderedKvStorage for RocksDbStorage {
         Ok(None)
     }
 
-    fn write_many(&self, operations: &[WriteOperation<'_>]) -> Result<(), Error> {
-        let mut batch = WriteBatch::default();
+    fn write_many(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async move {
+            let mut batch = WriteBatch::default();
 
-        for operation in operations {
-            match operation {
-                WriteOperation::Set { cf, key, value } => {
-                    if *cf == "default" {
-                        batch.put(key, value);
-                    } else {
-                        batch.put_cf(self.cf_handle(cf)?, key, value);
+            for operation in operations {
+                match operation {
+                    OwnedWriteOperation::Set { cf, key, value } => {
+                        if cf == "default" {
+                            batch.put(key, value);
+                        } else {
+                            batch.put_cf(self.cf_handle(&cf)?, key, value);
+                        }
                     }
-                }
-                WriteOperation::Delete { cf, key } => {
-                    if *cf == "default" {
-                        batch.delete(key);
-                    } else {
-                        batch.delete_cf(self.cf_handle(cf)?, key);
+                    OwnedWriteOperation::Delete { cf, key } => {
+                        if cf == "default" {
+                            batch.delete(key);
+                        } else {
+                            batch.delete_cf(self.cf_handle(&cf)?, key);
+                        }
                     }
-                }
-                WriteOperation::Delta { cf, key, delta } => {
-                    if *cf == "default" {
-                        batch.merge(key, delta.encode()?);
-                    } else {
-                        batch.merge_cf(self.cf_handle(cf)?, key, delta.encode()?);
+                    OwnedWriteOperation::Delta { cf, key, delta } => {
+                        if cf == "default" {
+                            batch.merge(key, delta.encode()?);
+                        } else {
+                            batch.merge_cf(self.cf_handle(&cf)?, key, delta.encode()?);
+                        }
                     }
                 }
             }
-        }
 
-        let should_flush = match self.write_flush_cadence.borrow_mut().as_mut() {
-            Some(cadence) => {
-                cadence.pending += 1;
-                if cadence.pending == cadence.every {
-                    cadence.pending = 0;
-                    true
-                } else {
-                    false
+            let should_flush = match self.write_flush_cadence.borrow_mut().as_mut() {
+                Some(cadence) => {
+                    cadence.pending += 1;
+                    if cadence.pending == cadence.every {
+                        cadence.pending = 0;
+                        true
+                    } else {
+                        false
+                    }
                 }
+                None => return self.db.write_opt(&batch, &self.write_options).storage(),
+            };
+            let mut write_options = WriteOptions::default();
+            write_options.disable_wal(false);
+            self.db.write_opt(&batch, &write_options).storage()?;
+            if should_flush {
+                self.db.flush_wal(true).storage()?;
             }
-            None => return self.db.write_opt(&batch, &self.write_options).storage(),
-        };
-        let mut write_options = WriteOptions::default();
-        write_options.disable_wal(false);
-        self.db.write_opt(&batch, &write_options).storage()?;
-        if should_flush {
-            self.db.flush_wal(true).storage()?;
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     fn column_family_names(&self) -> Option<Vec<String>> {
@@ -701,11 +771,24 @@ fn advance_prefix_upper_bound(prefix: &mut [u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+
     use crate::{
         CLASS_AHEAD_CURRENT_CF, CLASS_CHANGES_CF, CLASS_GLOBAL_CURRENT_CF, CLASS_HISTORY_CF,
         CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, RocksDbClassProfile, RocksDbStorage,
         any_available, rocksdb_class_profile, sum_available,
     };
+
+    fn ready<F: Future>(future: F) -> F::Output {
+        let mut future = pin!(future);
+        let mut cx = Context::from_waker(Waker::noop());
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(output) => output,
+            Poll::Pending => panic!("RocksDB storage operation unexpectedly suspended"),
+        }
+    }
 
     #[test]
     fn class_cfs_select_storage_physics_profiles() {
@@ -753,10 +836,9 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
-        storage.set("records", b"a", b"one").unwrap();
+        ready(storage.set("records".into(), b"a".to_vec(), b"one".to_vec())).unwrap();
         assert!(
-            storage
-                .approximate_class_bytes("records")
+            ready(storage.approximate_class_bytes("records".into()))
                 .unwrap()
                 .is_some()
         );
@@ -769,8 +851,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let storage = RocksDbStorage::open(dir.path(), &["left", "right"]).unwrap();
         let before = storage.metrics().unwrap();
-        storage.set("left", b"a", &vec![7; 32 * 1024]).unwrap();
-        storage.set("right", b"b", &vec![9; 32 * 1024]).unwrap();
+        ready(storage.set("left".into(), b"a".to_vec(), vec![7; 32 * 1024])).unwrap();
+        ready(storage.set("right".into(), b"b".to_vec(), vec![9; 32 * 1024])).unwrap();
         let after = storage.metrics().unwrap();
 
         assert!(

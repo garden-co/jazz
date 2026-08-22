@@ -132,7 +132,24 @@ impl IvmRuntime {
         Ok(())
     }
 
-    pub(crate) fn register_table_index<S>(
+    pub(crate) async fn register_table_index<S>(
+        &mut self,
+        table: &str,
+        index: IndexSchema,
+        storage: &S,
+    ) -> Result<(), IvmRuntimeError>
+    where
+        S: OrderedKvStorage,
+    {
+        let mut staged = self.clone();
+        staged
+            .register_table_index_staged(table, index, storage)
+            .await?;
+        *self = staged;
+        Ok(())
+    }
+
+    async fn register_table_index_staged<S>(
         &mut self,
         table: &str,
         index: IndexSchema,
@@ -164,7 +181,28 @@ impl IvmRuntime {
         }
         let persist = self.add_dedup_schema_index(&table_schema, &index)?;
         self.invalidate_table_inputs(table);
-        self.hydration_snapshot(persist, storage, HydrationMode::Ordinary)?;
+        let persist_node = self
+            .graph
+            .node(persist)
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(persist))?;
+        let OpType::Persist(persist_op) = persist_node.descriptor.operator.clone() else {
+            return Err(IvmRuntimeError::UnsupportedOperator);
+        };
+        let [input] = persist_node.descriptor.inputs.as_slice() else {
+            return Err(IvmRuntimeError::GraphInputArityMismatch(persist));
+        };
+        let input = *input;
+        let snapshot = self
+            .hydration_snapshot(input, storage, HydrationMode::Ordinary)
+            .await?;
+        apply_persist_delta(
+            storage,
+            &persist_op.storage,
+            &persist_op.key_fields,
+            persist_op.unique,
+            &snapshot,
+        )
+        .await?;
         Ok(())
     }
 
@@ -689,7 +727,7 @@ impl IvmRuntime {
         self.schema.direct_record_store(store)
     }
 
-    pub fn query_snapshot<S>(
+    pub async fn query_snapshot<S>(
         &mut self,
         graph: GraphBuilder,
         storage: &S,
@@ -697,28 +735,28 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        self.flush_pending_binding_retractions(storage)?;
+        self.flush_pending_binding_retractions(storage).await?;
         if builder_contains_binding_source(&graph) {
             return Err(IvmRuntimeError::BindingSourceRequiresPrepare);
         }
-        self.logical_nodes_requested += count_builder_nodes(&graph) as u64;
+        let mut query = super::graph_lifecycle::EphemeralGraphInstall::new(self);
+        let runtime = query.runtime();
+        runtime.logical_nodes_requested += count_builder_nodes(&graph) as u64;
         let CompiledNode {
             output,
             node: output_node,
             ..
-        } = self.add_dedup_graph(&graph)?;
-        let records = self.hydration_snapshot(output_node, storage, HydrationMode::Ordinary);
-        for node in self.gc_ephemeral_nodes(0) {
-            self.remove_node_runtime(node);
-        }
-        let records = records?;
+        } = runtime.add_dedup_graph(&graph)?;
+        let records = runtime
+            .hydration_snapshot(output_node, storage, HydrationMode::Ordinary)
+            .await?;
         if !records.descriptor.registry_compatible_with(&output) {
             return Err(IvmRuntimeError::GraphOutputMismatch);
         }
         Ok(records)
     }
 
-    pub fn query_snapshots<I, K, S>(
+    pub async fn query_snapshots<I, K, S>(
         &mut self,
         sinks: I,
         storage: &S,
@@ -728,11 +766,11 @@ impl IvmRuntime {
         K: Into<String>,
         S: OrderedKvStorage,
     {
-        self.flush_pending_binding_retractions(storage)?;
         let sinks = sinks
             .into_iter()
             .map(|(sink, graph)| (sink.into(), graph))
             .collect::<Vec<_>>();
+        self.flush_pending_binding_retractions(storage).await?;
         if sinks.is_empty() {
             return Err(IvmRuntimeError::EmptyMultisinkSubscription);
         }
@@ -745,19 +783,19 @@ impl IvmRuntime {
                 return Err(IvmRuntimeError::MultisinkSinkRequiresPrepare(sink.clone()));
             }
         }
-        self.logical_nodes_requested += sinks
+        let mut query = super::graph_lifecycle::EphemeralGraphInstall::new(self);
+        let runtime = query.runtime();
+        runtime.logical_nodes_requested += sinks
             .iter()
             .map(|(_, graph)| count_builder_nodes(graph))
             .sum::<usize>() as u64;
         let mut outputs = BTreeMap::new();
         for (sink, graph) in sinks {
-            outputs.insert(sink, self.add_dedup_graph(&graph)?);
+            outputs.insert(sink, runtime.add_dedup_graph(&graph)?);
         }
-        let snapshots = self.hydration_snapshots(&outputs, storage, HydrationMode::Ordinary);
-        for node in self.gc_ephemeral_nodes(0) {
-            self.remove_node_runtime(node);
-        }
-        snapshots
+        runtime
+            .hydration_snapshots(&outputs, storage, HydrationMode::Ordinary)
+            .await
     }
 }
 

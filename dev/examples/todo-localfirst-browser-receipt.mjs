@@ -4,11 +4,6 @@ import { dirname, resolve } from "node:path";
 import { chromium } from "playwright";
 
 const appUrl = process.env.JAZZ_TODO_APP_URL ?? "http://127.0.0.1:5173";
-const expectedMode = process.argv.includes("--async-mode")
-  ? "async"
-  : process.argv.includes("--sync-mode")
-    ? "sync"
-    : undefined;
 const screenshotPath = resolve(
   process.env.JAZZ_TODO_BROWSER_SCREENSHOT ?? "scratchpad/todo-localfirst-browser-receipt.png",
 );
@@ -25,26 +20,15 @@ page.on("console", (message) => {
 });
 
 try {
-  await page.goto(appUrl, { waitUntil: "networkidle" });
-  if (expectedMode) {
-    const actualMode = await page.waitForFunction(
-      () => {
-        const client = globalThis.jazzClient;
-        if (!client?.db) return null;
-        return "all" in client.db ? "sync" : "async";
-      },
-      undefined,
-      { timeout: 15_000 },
-    );
-    const mode = await actualMode.jsonValue();
-    if (mode !== expectedMode) {
-      throw new Error(`Expected ${expectedMode} Jazz client mode, got ${mode}`);
-    }
-  }
+  await page.goto(appUrl, { waitUntil: "domcontentloaded" });
   await page.getByPlaceholder("What needs to be done?").fill(title);
   await page.getByRole("button", { name: "Add" }).click();
   const item = page.locator("#todo-list li", { hasText: title });
-  await item.waitFor({ state: "visible", timeout: 15_000 });
+  await item.first().waitFor({ state: "visible", timeout: 15_000 });
+  const insertedCount = await item.count();
+  if (insertedCount !== 1) {
+    throw new Error(`Expected exactly one inserted todo, found ${insertedCount}`);
+  }
   await item.locator(".toggle").click();
   await page.waitForFunction(
     (text) => {
@@ -55,14 +39,17 @@ try {
     { timeout: 15_000 },
   );
   await item.locator(".delete-btn").click();
-  await item.waitFor({ state: "detached", timeout: 15_000 });
+  await item.first().waitFor({ state: "detached", timeout: 15_000 });
+  const deletedCount = await item.count();
+  if (deletedCount !== 0) {
+    throw new Error(`Expected deleted todo to be absent, found ${deletedCount}`);
+  }
   await page.screenshot({ path: screenshotPath, fullPage: true });
   console.log(
     JSON.stringify(
       {
         ok: true,
         appUrl,
-        mode: expectedMode ?? "unchecked",
         title,
         screenshotPath,
         consoleMessages,

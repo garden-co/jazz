@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
+import { ExclusiveWriteHandle } from "./client.js";
 import { createDb, type Db } from "./db.js";
 
 const todoSchema = {
@@ -282,8 +283,8 @@ describe("Db transactions", () => {
     }
   });
 
-  it("types exclusive transaction waits without durability options", () => {
-    const checkTypes = async () => {
+  it("types exclusive transaction waits without durability options", async () => {
+    if (false) {
       const result = await db.exclusiveTransaction((tx) => tx.kind);
       void result.wait();
       // @ts-expect-error - exclusive transactions are confirmed by the global authority.
@@ -294,17 +295,14 @@ describe("Db transactions", () => {
       void committed.wait();
       // @ts-expect-error - exclusive transactions are confirmed by the global authority.
       void committed.wait({ tier: "global" });
-    };
-    void checkTypes;
+    }
   });
 
-  it("commits an empty exclusive transaction opened at begin", async () => {
+  it("commits an empty exclusive transaction synchronously at begin", async () => {
     await allTodos();
     const tx = db.beginExclusiveTransaction();
-    await expect(tx.commit()).resolves.toMatchObject({
-      value: undefined,
-      wait: expect.any(Function),
-    });
+    const committed = tx.commit();
+    expect(committed).toBeInstanceOf(ExclusiveWriteHandle);
   });
 
   it("rejects exclusive transaction operations after commit", async () => {
@@ -435,8 +433,7 @@ describe("Db mergeable transactions", () => {
     try {
       const tx = sessionDb.beginTransaction();
       tx.insert(app.todos, { title: "Session-scoped transaction", done: false });
-      const result = await tx.commit();
-      expect(result).toMatchObject({ value: undefined, wait: expect.any(Function) });
+      await tx.commit();
       await expect(sessionDb.all(app.todos.where({}), { tier: "local" })).resolves.toEqual([
         { id: expect.any(String), title: "Session-scoped transaction", done: false },
       ]);

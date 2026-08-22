@@ -7,63 +7,75 @@ where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     /// Publish an immutable schema-version payload through the catalogue lane.
-    pub fn publish_schema(&self, schema: SchemaVersion) -> Result<Vec<SyncMessage>, Error> {
+    pub async fn publish_schema(&self, schema: SchemaVersion) -> Result<Vec<SyncMessage>, Error> {
         self.check_catalogue_admin()?;
-        self.node
+        let outcome = self
             .node
-            .borrow_mut()
+            .node
+            .lock()
+            .await
             .apply_trusted_catalogue_message(SyncMessage::PublishSchema {
                 author: self.identity.author,
                 schema: Box::new(schema),
             })
-            .map_err(Into::into)
+            .await?;
+        self.finish_publication_outcome(outcome).await
     }
 
     /// Atomically publish a non-genesis schema and its lineage-defining lens.
-    pub fn publish_schema_with_lens(
+    pub async fn publish_schema_with_lens(
         &self,
         catalogue_seq: u64,
         publication: SchemaLineagePublication,
     ) -> Result<Vec<SyncMessage>, Error> {
         self.check_catalogue_admin()?;
-        self.node
+        let outcome = self
             .node
-            .borrow_mut()
+            .node
+            .lock()
+            .await
             .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
                 author: self.identity.author,
                 catalogue_seq,
                 publication: Box::new(publication),
             })
-            .map_err(Into::into)
+            .await?;
+        self.finish_publication_outcome(outcome).await
     }
 
     /// Publish an immutable migration lens through the catalogue lane.
-    pub fn publish_lens(&self, lens: MigrationLens) -> Result<Vec<SyncMessage>, Error> {
+    pub async fn publish_lens(&self, lens: MigrationLens) -> Result<Vec<SyncMessage>, Error> {
         self.check_catalogue_admin()?;
-        self.node
+        let outcome = self
             .node
-            .borrow_mut()
+            .node
+            .lock()
+            .await
             .apply_trusted_catalogue_message(SyncMessage::PublishLens {
                 author: self.identity.author,
                 lens,
             })
-            .map_err(Into::into)
+            .await?;
+        self.finish_publication_outcome(outcome).await
     }
 
     /// Set the current write-schema pointer through the catalogue lane.
-    pub fn set_current_write_schema(
+    pub async fn set_current_write_schema(
         &self,
         pointer: CurrentWriteSchema,
     ) -> Result<Vec<SyncMessage>, Error> {
         self.check_catalogue_admin()?;
-        self.node
+        let outcome = self
             .node
-            .borrow_mut()
+            .node
+            .lock()
+            .await
             .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
                 author: self.identity.author,
                 pointer,
             })
-            .map_err(Into::into)
+            .await?;
+        self.finish_publication_outcome(outcome).await
     }
 
     /// Set whether this authority may settle session-scoped reads and writes.

@@ -15,15 +15,16 @@ use std::time::Duration;
 use web_time::Instant;
 
 use groove::db::{
-    CommitMetrics, Database, DatabaseBatch, DirectRecordStoreWrite, Error as GrooveDbError,
-    GraphBuilder, PredicateExpr, PrimaryKeyValue, Subscription,
+    AppliedBatch, CommitMetrics, Database, DatabaseBatch, DirectRecordStoreWrite,
+    Error as GrooveDbError, GraphBuilder, PersistedBatch, PredicateExpr, PrimaryKeyValue,
+    Subscription,
 };
 use groove::ivm::PreparedShapeId;
 use groove::ivm::ProjectField;
 #[cfg(test)]
 use groove::queries::{Query, Select, SelectItem, TableRef};
 use groove::records::{self, BorrowedRecord, OwnedRecord, Value};
-use groove::storage::{self, OrderedKvStorage, ReopenableStorage, StorageLayout};
+use groove::storage::{self, BoxedStorage, OrderedKvStorage, ReopenableStorage, StorageLayout};
 use thiserror::Error;
 
 use self::query_engine::{QueryAuthorizationMode, user_column_field};
@@ -538,7 +539,8 @@ pub struct NodeState<S> {
     /// Rejected transaction records and pending-cascade parent/child indexes.
     rejections: RejectionTracking,
     /// Groove database slot over this node's storage.
-    database: DatabaseSlot<S>,
+    database: DatabaseSlot,
+    storage_type: std::marker::PhantomData<fn() -> S>,
     /// Process-local identity for runtime-local Groove handles such as prepared shape ids.
     groove_runtime_token: u64,
     /// Whether this node has complete settled history for historical reads.
@@ -549,6 +551,8 @@ pub struct NodeState<S> {
     /// runtime uses `None` because its in-memory preview is not durable until
     /// the dedicated worker acknowledges persistence.
     authored_commit_durability: DurabilityTier,
+    /// Resident transactions whose Groove persistence receipt has not settled.
+    pending_persistence: BTreeSet<TxId>,
     /// Mapping from stable node UUIDs to compact on-disk aliases.
     pub(crate) node_aliases: BTreeMap<NodeUuid, NodeAlias>,
     /// Ahead-current overlay keys for rows whose non-global versions can affect local reads.
@@ -676,12 +680,12 @@ where
 
     fn accept_global_for_test(&mut self, tx_id: TxId) -> Result<(), Error> {
         let global_time = self.allocate_global_time_for_test();
-        self.apply_fate_update(
+        crate::db::block_on(self.apply_fate_update(
             tx_id,
             Fate::Accepted,
             Some(global_time),
             Some(DurabilityTier::Global),
-        )
+        ))
     }
 }
 
@@ -1527,8 +1531,95 @@ struct IngestMemo {
     tx_made_at: BTreeMap<TxId, Option<TxTime>>,
 }
 
-struct CatalogueOpenState<S> {
-    storage: S,
+/// A Jazz transaction whose resident Groove publication is visible while its
+/// owned durable write is still pending.
+/// A transaction that is resident and locally visible, with persistence still
+/// owned by the caller.
+#[must_use = "a published transaction must be persisted and settled"]
+pub struct PublishedTransaction {
+    pub(crate) tx_id: TxId,
+    persistence: AppliedBatch,
+}
+
+impl PublishedTransaction {
+    /// The transaction made resident by this publication.
+    pub fn tx_id(&self) -> TxId {
+        self.tx_id
+    }
+
+    /// Persist the resident publication in storage order.
+    pub async fn persist(&self) -> PersistedBatch {
+        self.persistence.persist().await
+    }
+}
+
+/// The logical result of an operation together with every resident write that
+/// must be observed locally before it is persisted and released externally.
+/// A logical operation result and the resident publications it created.
+#[must_use = "publication outcomes must be persisted and settled"]
+pub struct PublicationOutcome<T> {
+    pub(crate) value: T,
+    pub(crate) publications: Vec<PublishedTransaction>,
+    /// Same-node messages that may enter normal ingest only after every
+    /// publication ahead of them has settled successfully.
+    pub(crate) post_settlement_work: VecDeque<SyncMessage>,
+}
+
+impl<T> PublicationOutcome<T> {
+    /// Borrow the logical operation result without consuming its receipts.
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+
+    /// Split the logical result from the publications awaiting persistence.
+    pub fn into_parts(self) -> (T, Vec<PublishedTransaction>, VecDeque<SyncMessage>) {
+        (self.value, self.publications, self.post_settlement_work)
+    }
+
+    pub(crate) fn settled(value: T) -> Self {
+        Self {
+            value,
+            publications: Vec::new(),
+            post_settlement_work: VecDeque::new(),
+        }
+    }
+
+    pub(crate) fn published(value: T, publication: PublishedTransaction) -> Self {
+        Self {
+            value,
+            publications: vec![publication],
+            post_settlement_work: VecDeque::new(),
+        }
+    }
+
+    pub(crate) fn published_then(
+        value: T,
+        publication: PublishedTransaction,
+        work: SyncMessage,
+    ) -> Self {
+        Self {
+            value,
+            publications: vec![publication],
+            post_settlement_work: VecDeque::from([work]),
+        }
+    }
+}
+
+impl<T> PublicationOutcome<Vec<T>> {
+    pub(crate) fn extend(&mut self, other: Self) {
+        self.append_outcome(other);
+    }
+
+    pub(crate) fn append_outcome(&mut self, mut other: Self) {
+        self.value.append(&mut other.value);
+        self.publications.append(&mut other.publications);
+        self.post_settlement_work
+            .append(&mut other.post_settlement_work);
+    }
+}
+
+struct CatalogueOpenState {
+    storage: BoxedStorage,
     schemas: BTreeMap<SchemaVersionId, SchemaVersion>,
     lenses: BTreeMap<MigrationLensId, MigrationLens>,
     schema_version_aliases: BTreeMap<SchemaVersionId, SchemaVersionAlias>,

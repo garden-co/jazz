@@ -28,7 +28,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
         .rehydrate_query_with_opts(&mut server, &shape, &binding, opts.clone())
         .expect("serve initial settled issues view");
     client
-        .apply_sync_message(initial)
+        .apply_sync_message_settled(initial)
         .expect("apply initial settled issues view");
     let binding_view = *client
         .query
@@ -62,7 +62,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
     client.seed_local_maintained_authoritative_generation(&mut local, binding_view);
 
     let updated_tx = client
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("issues", issue, 2_000)
                 .made_by(AuthorId::SYSTEM)
                 .parents(vec![initial_tx])

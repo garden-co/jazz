@@ -9,7 +9,7 @@ use jazz::db::{
     SeededRowIdSource,
 };
 use jazz::groove::records::Value;
-use jazz::groove::storage::MemoryStorage;
+use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{Query, col, eq, lit};
 use jazz::schema::JazzSchema;
@@ -32,7 +32,7 @@ fn schema() -> JazzSchema {
     )
 }
 
-fn open_client(seed: u8, schema: JazzSchema) -> Db<MemoryStorage> {
+fn open_client(seed: u8, schema: JazzSchema) -> Db<TestStorage> {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -41,7 +41,7 @@ fn open_client(seed: u8, schema: JazzSchema) -> Db<MemoryStorage> {
     block_on(Db::open(
         DbConfig::new(
             schema,
-            MemoryStorage::new(&refs),
+            TestStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([seed; 16]),
                 author: AuthorId::from_bytes([seed; 16]),
@@ -52,7 +52,7 @@ fn open_client(seed: u8, schema: JazzSchema) -> Db<MemoryStorage> {
     .expect("open client")
 }
 
-fn open_server(schema: JazzSchema) -> Db<MemoryStorage> {
+fn open_server(schema: JazzSchema) -> Db<TestStorage> {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -61,7 +61,7 @@ fn open_server(schema: JazzSchema) -> Db<MemoryStorage> {
     block_on(Db::open_history_complete(
         DbConfig::new(
             schema,
-            MemoryStorage::new(&refs),
+            TestStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x5e; 16]),
                 author: AuthorId::SYSTEM,
@@ -89,8 +89,8 @@ fn row(seed: u64) -> RowUuid {
 }
 
 struct CoverageGroupFixture {
-    _client: Db<MemoryStorage>,
-    server: Db<MemoryStorage>,
+    _client: Db<TestStorage>,
+    server: Db<TestStorage>,
     _attachments: Vec<QueryAttachment>,
     next_row: u64,
 }
@@ -117,9 +117,9 @@ fn prepare_coverage_group_fixture(group_count: usize) -> CoverageGroupFixture {
         .collect::<Vec<_>>();
 
     for _ in 0..100 {
-        client.tick().expect("send coverage groups");
-        server.tick().expect("serve coverage groups");
-        client.tick().expect("receive coverage groups");
+        block_on(client.tick()).expect("send coverage groups");
+        block_on(server.tick()).expect("serve coverage groups");
+        block_on(client.tick()).expect("receive coverage groups");
         if attachments
             .iter()
             .all(|attachment| client.query_attachment_is_covered(attachment))
@@ -158,7 +158,7 @@ impl CoverageGroupFixture {
         self.next_row += 1;
 
         let start = Instant::now();
-        self.server.tick().expect("serve unrelated row change");
+        block_on(self.server.tick()).expect("serve unrelated row change");
         start.elapsed()
     }
 }

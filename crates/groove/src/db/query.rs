@@ -1,28 +1,182 @@
 use super::*;
 
-impl<S> Database<S>
-where
-    S: OrderedKvStorage,
-{
+impl Database {
+    /// Drive every suspended incremental evaluation until the runtime is
+    /// either quiescent or waiting for storage.
+    ///
+    /// Resident writes already perform this same work before `apply_batch`
+    /// returns. Runtime owners use this poll boundary to resume cold work when
+    /// its storage futures wake; individual subscriptions do not own separate
+    /// evaluators.
+    pub fn poll_progress(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Error>> {
+        if let Err(error) = self.ensure_not_poisoned() {
+            return std::task::Poll::Ready(Err(error));
+        }
+        match self.ivm_runtime.poll_pending_incremental(cx) {
+            std::task::Poll::Ready(Ok(())) => std::task::Poll::Ready(Ok(())),
+            std::task::Poll::Ready(Err(error)) => {
+                self.poisoned = true;
+                std::task::Poll::Ready(Err(Error::IvmRuntime(error)))
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+
+    /// Await completion of all currently suspended incremental evaluation.
+    pub async fn drive_progress(&mut self) -> Result<(), Error> {
+        std::future::poll_fn(|cx| self.poll_progress(cx)).await
+    }
+
+    pub fn poll_subscription(
+        &mut self,
+        subscription: &Subscription,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<RecordDeltas, Error>> {
+        if let std::task::Poll::Ready(event) = subscription.poll_next_event(cx) {
+            return std::task::Poll::Ready(match event {
+                SubscriptionEvent::Update(update) => Ok(update.deltas),
+                SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
+                SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
+            });
+        }
+        if let std::task::Poll::Ready(result) = self.poll_progress(cx)
+            && let Err(error) = result
+        {
+            return std::task::Poll::Ready(Err(error));
+        }
+        subscription.poll_next_event(cx).map(|event| match event {
+            SubscriptionEvent::Update(update) => Ok(update.deltas),
+            SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
+            SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
+        })
+    }
+
+    pub async fn next_subscription(
+        &mut self,
+        subscription: &Subscription,
+    ) -> Result<RecordDeltas, Error> {
+        std::future::poll_fn(|cx| self.poll_subscription(subscription, cx)).await
+    }
+
+    pub fn poll_subscription_with_publication(
+        &mut self,
+        subscription: &Subscription,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<PublicationUpdate<RecordDeltas>, Error>> {
+        if let std::task::Poll::Ready(event) = subscription.poll_next_event(cx) {
+            return std::task::Poll::Ready(match event {
+                SubscriptionEvent::Update(update) => Ok(update),
+                SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
+                SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
+            });
+        }
+        if let std::task::Poll::Ready(result) = self.poll_progress(cx)
+            && let Err(error) = result
+        {
+            return std::task::Poll::Ready(Err(error));
+        }
+        subscription.poll_next_event(cx).map(|event| match event {
+            SubscriptionEvent::Update(update) => Ok(update),
+            SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
+            SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
+        })
+    }
+
+    pub async fn next_subscription_with_publication(
+        &mut self,
+        subscription: &Subscription,
+    ) -> Result<PublicationUpdate<RecordDeltas>, Error> {
+        std::future::poll_fn(|cx| self.poll_subscription_with_publication(subscription, cx)).await
+    }
+
+    pub fn poll_multisink_subscription(
+        &mut self,
+        subscription: &MultisinkSubscription,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<MultisinkDeltas, Error>> {
+        if let std::task::Poll::Ready(event) = subscription.poll_next_event(cx) {
+            return std::task::Poll::Ready(match event {
+                SubscriptionEvent::Update(update) => Ok(update.deltas),
+                SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
+                SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
+            });
+        }
+        if let std::task::Poll::Ready(result) = self.poll_progress(cx)
+            && let Err(error) = result
+        {
+            return std::task::Poll::Ready(Err(error));
+        }
+        subscription.poll_next_event(cx).map(|event| match event {
+            SubscriptionEvent::Update(update) => Ok(update.deltas),
+            SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
+            SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
+        })
+    }
+
+    pub async fn next_multisink_subscription(
+        &mut self,
+        subscription: &MultisinkSubscription,
+    ) -> Result<MultisinkDeltas, Error> {
+        std::future::poll_fn(|cx| self.poll_multisink_subscription(subscription, cx)).await
+    }
+
+    pub fn poll_multisink_subscription_with_publication(
+        &mut self,
+        subscription: &MultisinkSubscription,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<PublicationUpdate<MultisinkDeltas>, Error>> {
+        if let std::task::Poll::Ready(event) = subscription.poll_next_event(cx) {
+            return std::task::Poll::Ready(match event {
+                SubscriptionEvent::Update(update) => Ok(update),
+                SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
+                SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
+            });
+        }
+        if let std::task::Poll::Ready(result) = self.poll_progress(cx)
+            && let Err(error) = result
+        {
+            return std::task::Poll::Ready(Err(error));
+        }
+        subscription.poll_next_event(cx).map(|event| match event {
+            SubscriptionEvent::Update(update) => Ok(update),
+            SubscriptionEvent::Error(SubscriptionError::Ended) => Err(Error::SubscriptionEnded),
+            SubscriptionEvent::Error(error) => Err(Error::SubscriptionFailed(error)),
+        })
+    }
+
+    pub async fn next_multisink_subscription_with_publication(
+        &mut self,
+        subscription: &MultisinkSubscription,
+    ) -> Result<PublicationUpdate<MultisinkDeltas>, Error> {
+        std::future::poll_fn(|cx| {
+            self.poll_multisink_subscription_with_publication(subscription, cx)
+        })
+        .await
+    }
+
     /// Subscribe to an IVM graph and receive an initial snapshot followed by
     /// deltas from committed batches.
     ///
     /// ```rust
+    /// # futures::executor::block_on(async {
     /// # use groove::db::{Database, GraphBuilder};
     /// # use groove::records::Value;
     /// # use groove::schema::{ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema};
     /// # use groove::storage::MemoryStorage;
-    /// # fn db() -> Result<Database<MemoryStorage>, groove::db::Error> {
+    /// # async fn db() -> Result<Database, groove::db::Error> {
     /// #     let schema = DatabaseSchema::new([TableSchema::new("albums", [
     /// #         ColumnSchema::new("id", ColumnType::U64),
     /// #         ColumnSchema::new("title", ColumnType::String),
     /// #         ColumnSchema::new("year", ColumnType::U64),
     /// #     ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #       .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// #     Database::new(schema, MemoryStorage::new(&["albums", "indices"]))
+    /// #     Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await
     /// # }
-    /// # let mut database = db()?;
-    /// let subscription = database.subscribe_one_sink(GraphBuilder::table("albums"))?;
+    /// # let mut database = db().await?;
+    /// let subscription = database.subscribe_one_sink(GraphBuilder::table("albums")).await?;
     /// assert!(subscription.recv()?.is_empty());
     ///
     /// let mut batch = database.open_batch();
@@ -30,19 +184,27 @@ where
     ///     "albums",
     ///     vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)],
     /// );
-    /// database.commit_batch(batch)?;
+    /// let applied = database.apply_batch(batch).await?;
+    /// let persisted = applied.persist().await;
+    /// database.finish_persistence(persisted)?;
     ///
     /// assert_eq!(
     ///     subscription.recv()?.to_values()?,
     ///     vec![(vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)], 1)]
     /// );
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # }).unwrap();
     /// ```
-    pub fn subscribe_one_sink(&mut self, graph: GraphBuilder) -> Result<Subscription, Error> {
+    pub async fn subscribe_one_sink(&mut self, graph: GraphBuilder) -> Result<Subscription, Error> {
         self.ensure_not_poisoned()?;
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let overlay = Rc::new(StagedWriteOverlay::new_owned(
+            Rc::clone(&self.storage),
+            Rc::clone(&self.resident_writes),
+        ));
+        let storage = MeteredStorage::new_owned(overlay, Rc::clone(&self.storage_read_metrics));
         self.ivm_runtime
             .subscribe_one_sink(graph, &storage)
+            .await
             .map_err(Error::IvmRuntime)
     }
 
@@ -50,15 +212,20 @@ where
     ///
     /// The initial message includes every sink, even if that sink is empty.
     /// Later messages are sent only when at least one sink has deltas.
-    pub fn subscribe<I, K>(&mut self, sinks: I) -> Result<MultisinkSubscription, Error>
+    pub async fn subscribe<I, K>(&mut self, sinks: I) -> Result<MultisinkSubscription, Error>
     where
         I: IntoIterator<Item = (K, GraphBuilder)>,
         K: Into<String>,
     {
         self.ensure_not_poisoned()?;
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let overlay = Rc::new(StagedWriteOverlay::new_owned(
+            Rc::clone(&self.storage),
+            Rc::clone(&self.resident_writes),
+        ));
+        let storage = MeteredStorage::new_owned(overlay, Rc::clone(&self.storage_read_metrics));
         self.ivm_runtime
             .subscribe(sinks, &storage)
+            .await
             .map_err(Error::IvmRuntime)
     }
 
@@ -66,25 +233,28 @@ where
     /// graph.
     ///
     /// ```rust
+    /// # futures::executor::block_on(async {
     /// # use groove::db::Database;
     /// # use groove::queries::{BinaryOp, Expr, Query, Select, SelectItem, TableRef};
     /// # use groove::records::Value;
     /// # use groove::schema::{ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema};
     /// # use groove::storage::MemoryStorage;
-    /// # fn db() -> Result<Database<MemoryStorage>, groove::db::Error> {
+    /// # async fn db() -> Result<Database, groove::db::Error> {
     /// #     let schema = DatabaseSchema::new([TableSchema::new("albums", [
     /// #         ColumnSchema::new("id", ColumnType::U64),
     /// #         ColumnSchema::new("title", ColumnType::String),
     /// #         ColumnSchema::new("year", ColumnType::U64),
     /// #     ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #       .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// #     Database::new(schema, MemoryStorage::new(&["albums", "indices"]))
+    /// #     Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await
     /// # }
-    /// # let mut database = db()?;
+    /// # let mut database = db().await?;
     /// # let mut batch = database.open_batch();
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
     /// # batch.insert("albums", vec![Value::U64(2), Value::String("Blue Train".into()), Value::U64(1957)]);
-    /// # database.commit_batch(batch)?;
+    /// # let applied = database.apply_batch(batch).await?;
+    /// # let persisted = applied.persist().await;
+    /// # database.finish_persistence(persisted)?;
     /// let query = Query::Select(Box::new(
     ///     Select::new([SelectItem::expr(Expr::column("title"))])
     ///         .from([TableRef::named("albums")])
@@ -94,23 +264,25 @@ where
     ///             Expr::Literal(Value::U64(1959)),
     ///         )),
     /// ));
-    /// let subscription = database.subscribe_query(query)?;
+    /// let subscription = database.subscribe_query(query).await?;
     ///
     /// assert_eq!(
     ///     subscription.recv()?.to_values()?,
     ///     vec![(vec![Value::String("Kind of Blue".into())], 1)]
     /// );
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # }).unwrap();
     /// ```
-    pub fn subscribe_query(&mut self, query: Query) -> Result<Subscription, Error> {
+    pub async fn subscribe_query(&mut self, query: Query) -> Result<Subscription, Error> {
         let planned = plan_query(&query, self.ivm_runtime.schema())?;
-        self.subscribe_one_sink(planned.graph)
+        self.subscribe_one_sink(planned.graph).await
     }
 
     /// Prepare a parameterized SQL-ish query shape once so callers can bind many
     /// concrete parameter sets without replanning.
     ///
     /// ```rust
+    /// # futures::executor::block_on(async {
     /// # use groove::db::Database;
     /// # use groove::queries::{BinaryOp, Expr, Query, Select, SelectItem, TableRef};
     /// # use groove::records::Value;
@@ -122,7 +294,7 @@ where
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]))?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
     /// let query = Query::Select(Box::new(
     ///     Select::new([SelectItem::Wildcard])
     ///         .from([TableRef::named("albums")])
@@ -133,11 +305,12 @@ where
     ///         )),
     /// ));
     ///
-    /// let prepared = database.prepare_query(query)?;
+    /// let prepared = database.prepare_query(query).await?;
     /// assert_eq!(prepared.parameters()[0].name, "year");
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # }).unwrap();
     /// ```
-    pub fn prepare_query(&mut self, query: Query) -> Result<PreparedShape, Error> {
+    pub async fn prepare_query(&mut self, query: Query) -> Result<PreparedShape, Error> {
         self.ensure_not_poisoned()?;
         let planned = plan_prepared_shape(&query, self.ivm_runtime.schema())?;
         let output = RecordDescriptor::new(
@@ -146,12 +319,14 @@ where
                 .iter()
                 .map(|field| (field.name.clone(), field.value_type.clone())),
         );
-        let shape = self.prepare_one_sink(
-            planned.planned.graph,
-            planned.shape,
-            planned.binding_descriptor,
-            planned.output_key_fields,
-        )?;
+        let shape = self
+            .prepare_one_sink(
+                planned.planned.graph,
+                planned.shape,
+                planned.binding_descriptor,
+                planned.output_key_fields,
+            )
+            .await?;
         Ok(PreparedShape {
             id: shape.id(),
             parameters: planned.parameters,
@@ -162,6 +337,7 @@ where
     /// Bind a prepared query shape by named parameter.
     ///
     /// ```rust
+    /// # futures::executor::block_on(async {
     /// # use groove::db::Database;
     /// # use groove::queries::{BinaryOp, Expr, Query, Select, SelectItem, TableRef};
     /// # use groove::records::Value;
@@ -173,13 +349,15 @@ where
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]))?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
     /// # let mut batch = database.open_batch();
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
-    /// # database.commit_batch(batch)?;
+    /// # let applied = database.apply_batch(batch).await?;
+    /// # let persisted = applied.persist().await;
+    /// # database.finish_persistence(persisted)?;
     /// # let query = Query::Select(Box::new(Select::new([SelectItem::Wildcard]).from([TableRef::named("albums")]).where_(Expr::binary(Expr::column("year"), BinaryOp::Eq, Expr::parameter("year")))));
-    /// # let prepared = database.prepare_query(query)?;
-    /// let subscription = database.bind(&prepared, &[("year", Value::U64(1959))])?;
+    /// # let prepared = database.prepare_query(query).await?;
+    /// let subscription = database.bind(&prepared, &[("year", Value::U64(1959))]).await?;
     ///
     /// assert_eq!(
     ///     subscription.recv()?.to_values()?,
@@ -193,8 +371,9 @@ where
     ///     )]
     /// );
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # }).unwrap();
     /// ```
-    pub fn bind(
+    pub async fn bind(
         &mut self,
         prepared: &PreparedShape,
         bindings: &[(&str, Value)],
@@ -221,9 +400,11 @@ where
                 return Err(Error::UnknownParameter((*name).to_owned()));
             }
         }
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.ivm_runtime
             .bind_shape_one_sink_with_output(prepared.id, &values, prepared.output, &storage)
+            .await
             .map_err(Error::IvmRuntime)
     }
 
@@ -235,7 +416,7 @@ where
     /// registered as the single route-carrying terminal, `output_key_fields`
     /// name the hidden route fields, and [`Database::bind_shape_one_sink`] adapts the
     /// one sink back to a [`Subscription`].
-    pub fn prepare_one_sink(
+    pub async fn prepare_one_sink(
         &mut self,
         graph: GraphBuilder,
         binding_source_shape: impl Into<String>,
@@ -243,7 +424,8 @@ where
         output_key_fields: impl IntoIterator<Item = impl Into<String>>,
     ) -> Result<crate::ivm::PreparedShape, Error> {
         self.ensure_not_poisoned()?;
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.ivm_runtime
             .prepare_one_sink(
                 graph,
@@ -252,6 +434,7 @@ where
                 output_key_fields,
                 &storage,
             )
+            .await
             .map_err(Error::IvmRuntime)
     }
 
@@ -263,7 +446,7 @@ where
     /// the graph Groove maintains and routes by; `output_graph` only supplies
     /// the subscriber-visible field names and types that are projected from the
     /// routed terminal.
-    pub fn prepare_one_sink_with_routing(
+    pub async fn prepare_one_sink_with_routing(
         &mut self,
         output_graph: GraphBuilder,
         routing_graph: GraphBuilder,
@@ -272,7 +455,8 @@ where
         routing_key_fields: impl IntoIterator<Item = impl Into<String>>,
     ) -> Result<crate::ivm::PreparedShape, Error> {
         self.ensure_not_poisoned()?;
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.ivm_runtime
             .prepare_one_sink_with_routing(
                 output_graph,
@@ -282,6 +466,7 @@ where
                 routing_key_fields,
                 &storage,
             )
+            .await
             .map_err(Error::IvmRuntime)
     }
 
@@ -291,14 +476,15 @@ where
     /// columns. Binding appends ordinary filter/project graph nodes for each
     /// sink, so callers with one-sink needs should treat [`Database::prepare_one_sink`]
     /// and [`Database::prepare_one_sink_with_routing`] as thin convenience wrappers.
-    pub fn prepare(
+    pub async fn prepare(
         &mut self,
         terminals: impl IntoIterator<Item = RoutedMultisinkTerminal>,
         binding_source_shape: impl Into<String>,
         binding_descriptor: RecordDescriptor,
     ) -> Result<crate::ivm::PreparedShape, Error> {
         self.ensure_not_poisoned()?;
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.ivm_runtime
             .prepare(
                 terminals,
@@ -306,12 +492,14 @@ where
                 binding_descriptor,
                 &storage,
             )
+            .await
             .map_err(Error::IvmRuntime)
     }
 
     /// Bind a prepared one-sink graph shape by positional values.
     ///
     /// ```rust
+    /// # futures::executor::block_on(async {
     /// # use groove::db::{Database, GraphBuilder};
     /// # use groove::ivm::ProjectField;
     /// # use groove::records::{RecordDescriptor, Value};
@@ -323,7 +511,7 @@ where
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]))?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
     /// let binding_descriptor = RecordDescriptor::new([("year", ColumnType::U64.clone())]);
     /// let shape = database.prepare_one_sink(
     ///     GraphBuilder::join(
@@ -340,21 +528,24 @@ where
     ///     "year_params",
     ///     binding_descriptor,
     ///     ["id"],
-    /// )?;
+    /// ).await?;
     ///
-    /// let subscription = database.bind_shape_one_sink(shape.id(), &[Value::U64(1959)])?;
+    /// let subscription = database.bind_shape_one_sink(shape.id(), &[Value::U64(1959)]).await?;
     /// assert!(subscription.recv()?.is_empty());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # }).unwrap();
     /// ```
-    pub fn bind_shape_one_sink(
+    pub async fn bind_shape_one_sink(
         &mut self,
         shape: PreparedShapeId,
         binding_values: &[Value],
     ) -> Result<Subscription, Error> {
         self.ensure_not_poisoned()?;
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.ivm_runtime
             .bind_shape_one_sink(shape, binding_values, &storage)
+            .await
             .map_err(Error::IvmRuntime)
     }
 
@@ -365,35 +556,40 @@ where
     /// The prepared terminal may contain hidden routing fields from
     /// `output_key_fields` or `routing_key_fields`; `public_output` selects the
     /// descriptor that bound subscribers receive.
-    pub fn bind_shape_one_sink_with_output(
+    pub async fn bind_shape_one_sink_with_output(
         &mut self,
         shape: PreparedShapeId,
         binding_values: &[Value],
         public_output: RecordDescriptor,
     ) -> Result<Subscription, Error> {
         self.ensure_not_poisoned()?;
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.ivm_runtime
             .bind_shape_one_sink_with_output(shape, binding_values, public_output, &storage)
+            .await
             .map_err(Error::IvmRuntime)
     }
 
     /// Bind a routed multisink shape by positional values.
-    pub fn bind_shape(
+    pub async fn bind_shape(
         &mut self,
         shape: PreparedShapeId,
         binding_values: &[Value],
     ) -> Result<MultisinkSubscription, Error> {
         self.ensure_not_poisoned()?;
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.ivm_runtime
             .bind_shape(shape, binding_values, &storage)
+            .await
             .map_err(Error::IvmRuntime)
     }
 
     /// Run a one-shot SQL-ish query against the current storage snapshot.
     ///
     /// ```rust
+    /// # futures::executor::block_on(async {
     /// # use groove::db::Database;
     /// # use groove::queries::{BinaryOp, Expr, Query, Select, SelectItem, TableRef};
     /// # use groove::records::Value;
@@ -405,11 +601,13 @@ where
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]))?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
     /// # let mut batch = database.open_batch();
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
     /// # batch.insert("albums", vec![Value::U64(2), Value::String("Blue Train".into()), Value::U64(1957)]);
-    /// # database.commit_batch(batch)?;
+    /// # let applied = database.apply_batch(batch).await?;
+    /// # let persisted = applied.persist().await;
+    /// # database.finish_persistence(persisted)?;
     /// let query = Query::Select(Box::new(
     ///     Select::new([SelectItem::expr(Expr::column("title"))])
     ///         .from([TableRef::named("albums")])
@@ -420,13 +618,14 @@ where
     ///         )),
     /// ));
     ///
-    /// let rows = database.query(query)?;
+    /// let rows = database.query(query).await?;
     /// assert_eq!(rows.to_values()?, vec![(vec![Value::String("Kind of Blue".into())], 1)]);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # }).unwrap();
     /// ```
-    pub fn query(&mut self, query: Query) -> Result<RecordDeltas, Error> {
+    pub async fn query(&mut self, query: Query) -> Result<RecordDeltas, Error> {
         let planned = plan_query(&query, self.ivm_runtime.schema())?;
-        self.query_graph(planned.graph)
+        self.query_graph(planned.graph).await
     }
 
     /// Run a one-shot graph query against the current storage snapshot.
@@ -435,6 +634,7 @@ where
     /// snapshot-query path.
     ///
     /// ```rust
+    /// # futures::executor::block_on(async {
     /// # use groove::db::{Database, GraphBuilder, PredicateExpr};
     /// # use groove::records::Value;
     /// # use groove::schema::{ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema};
@@ -445,45 +645,53 @@ where
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]))?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
     /// # let mut batch = database.open_batch();
     /// # batch.insert("albums", vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)]);
-    /// # database.commit_batch(batch)?;
+    /// # let applied = database.apply_batch(batch).await?;
+    /// # let persisted = applied.persist().await;
+    /// # database.finish_persistence(persisted)?;
     /// let rows = database.query_graph(
     ///     GraphBuilder::table("albums").filter(PredicateExpr::eq("year", Value::U64(1959))),
-    /// )?;
+    /// ).await?;
     ///
     /// assert_eq!(
     ///     rows.to_values()?,
     ///     vec![(vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)], 1)]
     /// );
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # }).unwrap();
     /// ```
-    pub fn query_graph(&mut self, graph: GraphBuilder) -> Result<RecordDeltas, Error> {
+    pub async fn query_graph(&mut self, graph: GraphBuilder) -> Result<RecordDeltas, Error> {
         self.ensure_not_poisoned()?;
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.ivm_runtime
             .query_snapshot(graph, &storage)
+            .await
             .map_err(Error::IvmRuntime)
     }
 
     /// Run several named graph outputs against the same current storage
     /// snapshot without registering a live subscription.
-    pub fn query_graphs<I, K>(&mut self, sinks: I) -> Result<MultisinkDeltas, Error>
+    pub async fn query_graphs<I, K>(&mut self, sinks: I) -> Result<MultisinkDeltas, Error>
     where
         I: IntoIterator<Item = (K, GraphBuilder)>,
         K: Into<String>,
     {
         self.ensure_not_poisoned()?;
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
         self.ivm_runtime
             .query_snapshots(sinks, &storage)
+            .await
             .map_err(Error::IvmRuntime)
     }
 
-    pub fn unsubscribe(&mut self, subscription_id: SubscriptionId) -> bool {
+    pub async fn unsubscribe(&mut self, subscription_id: SubscriptionId) -> bool {
         self.ivm_runtime
             .unsubscribe_with_storage(subscription_id, &self.storage)
+            .await
             .unwrap_or(false)
     }
 
@@ -500,10 +708,11 @@ where
     /// Retire subscriptions whose receiving handles have already been
     /// dropped, even when no later data delta exists to discover the closed
     /// notification channel.
-    pub fn prune_dropped_subscriptions(&mut self) -> Result<usize, Error> {
+    pub async fn prune_dropped_subscriptions(&mut self) -> Result<usize, Error> {
         self.ensure_not_poisoned()?;
         self.ivm_runtime
             .prune_dropped_subscriptions_with_storage(&self.storage)
+            .await
             .map_err(Error::IvmRuntime)
     }
 }

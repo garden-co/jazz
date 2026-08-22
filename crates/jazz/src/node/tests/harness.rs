@@ -28,10 +28,29 @@ use crate::tools::public_schema::{
 use crate::tx::MergeAspect;
 use groove::schema::{ColumnSchema, ColumnType};
 use groove::storage::{
-    BtreeSyncPolicy, ColumnFamilyName, Key, MemoryStorage, NativeBtreeStorage, OrderedKvStorage,
-    ReopenableStorage, ScanVisitor, Value as StorageValue, WriteManyOutcome, WriteOperation,
+    BtreeSyncPolicy, MemoryStorage, NativeBtreeStorage, OrderedKvStorage, ReopenableStorage,
+    Value as StorageValue, YieldingStorage,
 };
-use jazz_storage_rocksdb::RocksDbStorage;
+use jazz_storage_rocksdb::RocksDbStorage as ImmediateRocksDbStorage;
+use std::path::Path;
+
+type RocksDbStorage = YieldingStorage<ImmediateRocksDbStorage>;
+
+trait TestRocksOpen: Sized {
+    fn open(
+        path: impl AsRef<Path>,
+        column_families: &[&str],
+    ) -> Result<Self, groove::storage::Error>;
+}
+
+impl TestRocksOpen for RocksDbStorage {
+    fn open(
+        path: impl AsRef<Path>,
+        column_families: &[&str],
+    ) -> Result<Self, groove::storage::Error> {
+        ImmediateRocksDbStorage::open(path, column_families).map(YieldingStorage::wrap)
+    }
+}
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 include!("support.rs");

@@ -28,7 +28,7 @@ fn lowered_record_wrapper_field_indexes_match_open_descriptors() {
     let schema = two_column_schema();
     debug_assert_lowered_layouts(&schema);
     let (_temp_dir, mut node) = open_node_with_schema(node(0x19), schema.clone());
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("todos", row(0x19), 10).cells(BTreeMap::from([
             ("title".to_owned(), Value::String("layout".to_owned())),
             ("body".to_owned(), Value::String("descriptor".to_owned())),
@@ -204,7 +204,7 @@ fn mergeable_commits_persist_transaction_and_history_rows() {
     let (_temp_dir, mut node) = open_node();
     let row = row(7);
     let tx = node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([(
                 "title".to_owned(),
                 "write tests".to_owned(),
@@ -239,7 +239,7 @@ fn authoring_stamps_explicit_child_after_parent_time() {
     let (_temp_dir, mut core) = open_node();
     let parent = TxId::new(TxTime::from(10_000), node(0x77));
     let child = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x71), 1)
                 .parents(vec![parent])
                 .cells(title_cells("child")),
@@ -255,18 +255,18 @@ fn authoring_stamps_explicit_child_after_parent_time() {
 fn deletion_register_hides_and_restore_reveals_current_content() {
     let (_temp_dir, mut node) = open_node();
     let row = row(7);
-    node.commit_mergeable(MergeableCommit::new("todos", row, 10).cells(title_cells("base")))
+    node.commit_mergeable_settled(MergeableCommit::new("todos", row, 10).cells(title_cells("base")))
         .unwrap();
-    node.commit_mergeable(MergeableCommit::new("todos", row, 12).deletion(DeletionEvent::Deleted))
+    node.commit_mergeable_settled(MergeableCommit::new("todos", row, 12).deletion(DeletionEvent::Deleted))
         .unwrap();
 
     assert!(node.visible_current_cells("todos", row).unwrap().is_none());
 
-    node.commit_mergeable(MergeableCommit::new("todos", row, 13).cells(title_cells("revived")))
+    node.commit_mergeable_settled(MergeableCommit::new("todos", row, 13).cells(title_cells("revived")))
         .unwrap();
     assert!(node.visible_current_cells("todos", row).unwrap().is_none());
 
-    node.commit_mergeable(MergeableCommit::new("todos", row, 14).deletion(DeletionEvent::Restored))
+    node.commit_mergeable_settled(MergeableCommit::new("todos", row, 14).deletion(DeletionEvent::Restored))
         .unwrap();
 
     assert_eq!(
@@ -303,7 +303,7 @@ fn durability_tier_ladder_orders_edge_between_local_and_global() {
 fn edge_current_rows_exclude_purely_local_pending_writes() {
     let (_temp_dir, mut node) = open_node();
     let row = row(0xe1);
-    node.commit_mergeable(
+    node.commit_mergeable_settled(
         MergeableCommit::new("todos", row, 10).cells(title_cells("local only")),
     )
     .unwrap();
@@ -328,7 +328,7 @@ fn edge_current_rows_include_edge_accepted_ahead_versions() {
     let (_temp_dir, mut node) = open_node();
     let row = row(0xe2);
     let tx_id = node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row, 10).cells(title_cells("edge accepted")),
         )
         .unwrap();
@@ -358,7 +358,7 @@ fn global_fate_cleans_ahead_current_overlay() {
     let (_temp_dir, mut node) = open_node();
     let row = row(0xe3);
     let tx_id = node
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row, 10).cells(title_cells("globally accepted")),
         )
         .unwrap();
@@ -390,7 +390,7 @@ fn writer_subscription_reads_own_pending_at_local_tier() {
     let mut peer = PeerState::new();
     let row = row(7);
     let (tx_id, unit) = client
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([(
                 "title".to_owned(),
                 "optimistic".to_owned(),
@@ -415,18 +415,18 @@ fn writer_subscription_reads_own_pending_at_local_tier() {
         panic!("expected commit unit");
     };
     let [fate] = core
-        .ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
+        .ingest_commit_unit_settled(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
         .unwrap()
         .try_into()
         .unwrap();
-    client.apply_sync_message(fate).unwrap();
+    client.apply_sync_message_settled(fate).unwrap();
     assert_eq!(
-        client.transaction_state(tx_id).unwrap(),
+        client.transaction_state_settled(tx_id).unwrap(),
         (Fate::Accepted, Some(GlobalTime::new(10, 0).unwrap()), DurabilityTier::Global)
     );
 
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
-    client.apply_sync_message(update).unwrap();
+    client.apply_sync_message_settled(update).unwrap();
     assert_eq!(
         client
             .subscription_current_rows("todos", DurabilityTier::Global)
@@ -444,7 +444,7 @@ fn late_lower_hlc_child_is_rejected_at_admission() {
     let child = TxId::new(TxTime::from(50), node(1));
 
     let [parent_fate] = core
-        .ingest_commit_unit(
+        .ingest_commit_unit_settled(
             Transaction {
                 tx_id: parent,
                 kind: TxKind::Mergeable,
@@ -473,7 +473,7 @@ fn late_lower_hlc_child_is_rejected_at_admission() {
     ));
 
     let [child_fate] = core
-        .ingest_commit_unit(
+        .ingest_commit_unit_settled(
             Transaction {
                 tx_id: child,
                 kind: TxKind::Mergeable,
@@ -526,7 +526,7 @@ fn unlawful_child_with_known_parent_rejects_before_global_state() {
     let child = TxId::new(TxTime::from(100), node(1));
 
     let parent_state = core
-        .ingest_commit_unit(
+        .ingest_commit_unit_settled(
             Transaction {
                 tx_id: parent,
                 kind: TxKind::Mergeable,
@@ -554,7 +554,7 @@ fn unlawful_child_with_known_parent_rejects_before_global_state() {
     ));
 
     let child_state = core
-        .ingest_commit_unit(
+        .ingest_commit_unit_settled(
             Transaction {
                 tx_id: child,
                 kind: TxKind::Mergeable,

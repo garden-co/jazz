@@ -1,10 +1,5 @@
 use super::*;
-use crate::storage::WriteManyOutcome;
-
-impl<S> Database<S>
-where
-    S: OrderedKvStorage,
-{
+impl Database {
     /// Run one IVM tick without base-table writes.
     ///
     /// Commiting a batch ticks automatically; `flush` is useful after creating
@@ -12,6 +7,7 @@ where
     /// the same public tick path.
     ///
     /// ```rust
+    /// # futures::executor::block_on(async {
     /// # use groove::db::{Database, GraphBuilder};
     /// # use groove::schema::{ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema};
     /// # use groove::storage::MemoryStorage;
@@ -21,20 +17,27 @@ where
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]))?;
-    /// let subscription = database.subscribe_one_sink(GraphBuilder::table("albums"))?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
+    /// let subscription = database.subscribe_one_sink(GraphBuilder::table("albums")).await?;
     /// assert!(subscription.recv()?.is_empty());
     ///
-    /// database.flush()?;
+    /// database.flush().await?;
     /// assert!(database.last_tick_metrics().is_some());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # }).unwrap();
     /// ```
-    pub fn flush(&mut self) -> Result<(), Error> {
+    pub async fn flush(&mut self) -> Result<(), Error> {
         self.ensure_not_poisoned()?;
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
+        self.ivm_runtime
+            .drive_pending_incremental()
+            .await
+            .map_err(Error::IvmRuntime)?;
+        let resident = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
+        let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
         let tick = self
             .ivm_runtime
             .tick(Vec::new(), &storage)
+            .await
             .map_err(Error::IvmRuntime)?;
         self.last_tick_metrics = Some(tick);
         Ok(())
@@ -65,6 +68,7 @@ where
     /// Commit a batch of table writes and synchronously tick maintained views.
     ///
     /// ```rust
+    /// # futures::executor::block_on(async {
     /// # use groove::db::Database;
     /// # use groove::records::Value;
     /// # use groove::schema::{ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey, TableSchema};
@@ -75,46 +79,44 @@ where
     /// #     ColumnSchema::new("year", ColumnType::U64),
     /// # ]).with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))
     /// #   .with_index(IndexSchema::new("albums_by_year", ["year"]))]);
-    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"]))?;
+    /// # let mut database = Database::new(schema, MemoryStorage::new(&["albums", "indices"])).await?;
     /// let mut batch = database.open_batch();
     /// batch.insert(
     ///     "albums",
     ///     vec![Value::U64(1), Value::String("Kind of Blue".into()), Value::U64(1959)],
     /// );
-    /// database.commit_batch(batch)?;
+    /// let applied = database.apply_batch(batch).await?;
+    /// let persisted = applied.persist().await;
+    /// database.finish_persistence(persisted)?;
     ///
-    /// let rows = database.primary_key_scan("albums", &[Value::U64(1)])?;
+    /// let rows = database.primary_key_scan("albums", &[Value::U64(1)]).await?;
     /// assert_eq!(rows[0].get("title")?, Value::String("Kind of Blue".into()));
     /// assert_eq!(database.last_commit_metrics().unwrap().storage_write_count, 2);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// # }).unwrap();
     /// ```
-    pub fn commit_batch(&mut self, batch: DatabaseBatch) -> Result<(), Error> {
+    #[cfg(any(test, feature = "test"))]
+    pub async fn commit_batch(&mut self, batch: DatabaseBatch) -> Result<(), Error> {
+        let publication = self.apply_batch(batch).await?;
+        let persistence = publication.persist().await;
+        self.finish_persistence(persistence)?;
+        Ok(())
+    }
+
+    /// Apply resident rows and unblocked terminal deltas before ordered
+    /// persistence. The returned handle owns the pending persistence work and
+    /// no longer borrows this database, so resident queries may continue while
+    /// storage suspends.
+    pub async fn apply_batch(&mut self, batch: DatabaseBatch) -> Result<AppliedBatch, Error> {
+        self.ensure_not_poisoned()?;
+        let defer_notifications_until_durable =
+            batch.notification_timing == NotificationTiming::AfterPersistence;
         let pending_writes = self.pending_writes_from_batch(batch)?;
-        self.commit_pending_writes(pending_writes)
-    }
-
-    pub fn update_raw(
-        &mut self,
-        table: &str,
-        key: PrimaryKeyValue,
-        record: impl Into<RawRecordInput>,
-    ) -> Result<(), Error> {
-        let pending = self.pending_write_from_operation(&BatchOperation::UpdateRaw {
-            table: table.to_owned(),
-            key,
-            record: record.into(),
-        })?;
-        self.commit_pending_writes(vec![pending])
-    }
-
-    pub(super) fn commit_pending_writes(
-        &mut self,
-        pending_writes: Vec<PendingTableWrite>,
-    ) -> Result<(), Error> {
         let descriptors = pending_writes
             .iter()
             .map(PendingTableWrite::descriptor)
             .collect::<Vec<_>>();
+        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
         let stores = pending_writes
             .iter()
             .zip(&descriptors)
@@ -123,12 +125,12 @@ where
                     .table(write.table())
                     .ok()
                     .and_then(|table| table.primary_key.as_ref().map(primary_key_descriptor));
-                record_store_for_table(&self.storage, write.table(), key_descriptor, descriptor)
+                record_store_for_table(&overlay, write.table(), key_descriptor, descriptor)
             })
             .collect::<Vec<_>>();
         let table_deltas =
-            compute_table_deltas(&pending_writes, &stores, self.ivm_runtime.schema())?;
-        let mut staged_operations = pending_writes
+            compute_table_deltas(&pending_writes, &stores, self.ivm_runtime.schema()).await?;
+        let staged_operations = pending_writes
             .iter()
             .map(|write| match write {
                 PendingTableWrite::Set { key, .. } => OwnedWriteOperation::Set {
@@ -142,88 +144,103 @@ where
                 },
             })
             .collect::<Vec<_>>();
+        let resident_overlay = Rc::new(StagedWriteOverlay::new_owned(
+            Rc::clone(&self.storage),
+            Rc::clone(&self.resident_writes),
+        ));
+        let staged_state = Rc::new(RefCell::new(StagedWriteState::from(staged_operations)));
+        let storage = Rc::new(StagedWriteOverlay::new_owned(
+            resident_overlay,
+            Rc::clone(&staged_state),
+        ));
+        let publication = PublicationId(self.next_publication_id);
+        self.next_publication_id = self.next_publication_id.saturating_add(1);
         let tick_start = Instant::now();
-        let storage = MeteredStorage::new(&self.storage, &self.storage_read_metrics);
-        // A storage transaction can fail after the runtime has applied the
-        // corresponding tick. Keep the inverse delta so a rare failure can
-        // undo just this tick without cloning all retained runtime state on
-        // every successful commit.
-        let rollback_deltas = table_deltas
-            .iter()
-            .cloned()
-            .map(|mut delta| {
-                for record in &mut delta.deltas {
-                    record.weight = -record.weight;
-                }
-                delta
-            })
-            .collect::<Vec<_>>();
-        let tick = self
+        let tick = match self
             .ivm_runtime
-            .tick_staged(table_deltas, &storage, &mut staged_operations)
-            .map_err(Error::IvmRuntime)?;
+            .tick_resident_staged(
+                table_deltas,
+                OwnedStorage::new(storage),
+                publication,
+                defer_notifications_until_durable,
+            )
+            .await
+        {
+            Ok(tick) => tick,
+            Err(error) => {
+                self.poisoned = true;
+                return Err(Error::IvmRuntime(error));
+            }
+        };
         let ivm_tick_time = tick_start.elapsed();
+        let staged_operations = std::mem::take(&mut *staged_state.borrow_mut()).into_operations();
         let operations = staged_operations
             .iter()
             .map(OwnedWriteOperation::as_write_operation)
             .collect::<Vec<_>>();
         let storage_writes = StorageWriteMetrics::from_operations(&operations);
-        let storage_write_count = storage_writes.total.count;
-        let storage_write_bytes = storage_writes.total.bytes;
-        let storage_start = Instant::now();
-        let txn = self.storage.begin_txn();
-        drop(operations);
-        txn.stage_owned_operations(staged_operations);
-        match txn.commit_outcome() {
-            WriteManyOutcome::Committed => {}
-            WriteManyOutcome::DefinitelyNotCommitted(error) => {
-                self.ivm_runtime.discard_staged_subscription_notifications();
-                let mut rollback_operations = Vec::new();
-                if self
-                    .ivm_runtime
-                    .tick_staged(rollback_deltas, &storage, &mut rollback_operations)
-                    .is_err()
-                {
-                    self.poisoned = true;
-                }
-                self.ivm_runtime.discard_staged_subscription_notifications();
-                return Err(Error::from(error));
-            }
-            WriteManyOutcome::PossiblyCommitted(error) => {
-                // The batch might be durable even though its acknowledgement
-                // failed. Replaying or rolling back in-process would split
-                // durable history from IVM/subscription state, so fail closed
-                // until a fresh open reconstructs the runtime from storage.
-                self.ivm_runtime.discard_staged_subscription_notifications();
-                self.poisoned = true;
-                return Err(Error::from(error));
-            }
-        }
-        if self
-            .durable_publication_state
-            .lock()
-            .expect("durable publication state mutex poisoned")
-            .depth
-            == 0
-        {
-            self.ivm_runtime.publish_staged_subscription_notifications();
-        } else {
-            self.durable_publication_state
-                .lock()
-                .expect("durable publication state mutex poisoned")
-                .successful_commits += 1;
-        }
-        let storage_write_time = storage_start.elapsed();
-        self.last_tick_metrics = Some(tick.clone());
-        self.last_commit_metrics = Some(CommitMetrics {
-            storage_write_time,
+
+        self.resident_writes
+            .borrow_mut()
+            .extend(staged_operations.iter().cloned());
+        self.resident_publications
+            .insert(publication, staged_operations.clone());
+        Ok(AppliedBatch {
+            publication,
+            storage: Rc::clone(&self.storage),
+            operations: staged_operations,
+            order: Rc::clone(&self.publication_persistence),
             ivm_tick_time,
-            storage_write_count,
-            storage_write_bytes,
             storage_writes,
             tick,
-        });
-        Ok(())
+            notifications_deferred: defer_notifications_until_durable,
+            lifecycle: Rc::new(Cell::new(AppliedBatchLifecycle::Applied)),
+            abandoned_application: Rc::clone(&self.abandoned_application),
+        })
+    }
+
+    /// Install one persistence result and advance only the contiguous durable
+    /// publication frontier.
+    pub fn finish_persistence(
+        &mut self,
+        persistence: PersistedBatch,
+    ) -> Result<PublicationId, Error> {
+        persistence.receipt.finish();
+        self.last_tick_metrics = Some(persistence.metrics.tick.clone());
+        self.last_commit_metrics = Some(persistence.metrics.clone());
+        if let Err(error) = persistence.result {
+            if persistence.notifications_deferred {
+                self.ivm_runtime
+                    .discard_deferred_notifications(persistence.publication);
+            }
+            self.poisoned = true;
+            return Err(Error::from(error));
+        }
+        if !self
+            .resident_publications
+            .contains_key(&persistence.publication)
+        {
+            return Err(Error::PublicationNotFound(persistence.publication));
+        }
+        self.persisted_publications.insert(persistence.publication);
+        let mut frontier = self
+            .durable_publication_frontier
+            .map_or(1, |publication| publication.0.saturating_add(1));
+        while self.persisted_publications.remove(&PublicationId(frontier)) {
+            self.resident_publications.remove(&PublicationId(frontier));
+            self.durable_publication_frontier = Some(PublicationId(frontier));
+            frontier = frontier.saturating_add(1);
+        }
+        let mut resident_writes = StagedWriteState::default();
+        for operations in self.resident_publications.values() {
+            resident_writes.extend(operations.iter().cloned());
+        }
+        *self.resident_writes.borrow_mut() = resident_writes;
+        if persistence.notifications_deferred {
+            self.ivm_runtime
+                .settle_deferred_notifications(persistence.publication);
+        }
+        Ok(persistence.publication)
     }
 
     pub(super) fn pending_writes_from_batch(
@@ -365,13 +382,7 @@ where
     }
 
     pub(super) fn ensure_not_poisoned(&self) -> Result<(), Error> {
-        if self.poisoned
-            || self
-                .durable_publication_state
-                .lock()
-                .expect("durable publication state mutex poisoned")
-                .aborted
-        {
+        if self.poisoned || self.abandoned_application.get() {
             Err(Error::DatabasePoisoned)
         } else {
             Ok(())

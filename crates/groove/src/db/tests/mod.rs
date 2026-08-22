@@ -26,7 +26,10 @@ use crate::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, DirectRecordStoreSchema, IndexSchema, IntegerKeyType,
     PrimaryKey, PrimaryKeyColumn, PrimaryKeyType, TableVariant, TableVariantField,
 };
-use crate::storage::{MemoryStorage, OrderedKvStorage, StorageLayout, TestStorage};
+use crate::storage::{
+    MemoryStorage, OrderedKvStorage, StorageLayout, TestBtreeStorage, TestStorage,
+    TestStorageOperation,
+};
 
 use support::*;
 

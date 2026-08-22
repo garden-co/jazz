@@ -58,9 +58,14 @@ export class DedicatedBrowserWorkerConnection implements BrowserWorkerConnection
     });
 
     const transport = runtime.connectUpstreamPeer();
-    this.pump = new BrowserWorkerTransportPump(runtime, transport, (frames) => {
-      this.postFrames(frames);
-    });
+    this.pump = new BrowserWorkerTransportPump(
+      runtime,
+      transport,
+      (frames) => {
+        this.postFrames(frames);
+      },
+      (error) => this.fail(error instanceof Error ? error : new Error(String(error))),
+    );
   }
 
   async ready(): Promise<void> {

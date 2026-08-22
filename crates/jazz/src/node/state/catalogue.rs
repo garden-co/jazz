@@ -2,7 +2,7 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    fn persist_catalogue_schema(&mut self, schema: &SchemaVersion) -> Result<(), Error> {
+    async fn persist_catalogue_schema(&mut self, schema: &SchemaVersion) -> Result<(), Error> {
         let mut batch = self.database.open_batch();
         batch.update(
             "jazz_catalogue",
@@ -12,7 +12,9 @@ where
                 Value::Bytes(serde_json::to_vec(schema)?),
             ],
         );
-        self.database.commit_batch(batch)?;
+        let applied = self.database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+self.database.finish_persistence(persisted)?;
         Ok(())
     }
 
@@ -116,7 +118,7 @@ where
         Ok(())
     }
 
-    fn ensure_provisional_physical_mapping(
+    async fn ensure_provisional_physical_mapping(
         &mut self,
         schema_version: SchemaVersionId,
     ) -> Result<(), Error> {
@@ -214,7 +216,9 @@ where
                 ))?;
         let mut batch = self.database.open_batch();
         Self::write_schema_version_mapping_to_batch(&mut batch, alias, schema_version, &mapping)?;
-        self.database.commit_batch(batch)?;
+        let applied = self.database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+self.database.finish_persistence(persisted)?;
         self.catalogue
             .schema_version_aliases
             .insert(schema_version, alias);
@@ -640,7 +644,7 @@ where
         Ok(source_mapping)
     }
 
-    fn persist_catalogue_schema_lineage(
+    async fn persist_catalogue_schema_lineage(
         &mut self,
         staged: &StagedSchemaLineage,
     ) -> Result<(), Error> {
@@ -653,11 +657,13 @@ where
                 Value::Bytes(serde_json::to_vec(staged)?),
             ],
         );
-        self.database.commit_batch(batch)?;
+        let applied = self.database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+self.database.finish_persistence(persisted)?;
         Ok(())
     }
 
-    fn persist_pending_schema_lineage(
+    async fn persist_pending_schema_lineage(
         &mut self,
         pending: &PendingSchemaLineage,
     ) -> Result<(), Error> {
@@ -670,11 +676,13 @@ where
                 Value::Bytes(serde_json::to_vec(pending)?),
             ],
         );
-        self.database.commit_batch(batch)?;
+        let applied = self.database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+self.database.finish_persistence(persisted)?;
         Ok(())
     }
 
-    fn remove_pending_schema_lineage(
+    async fn remove_pending_schema_lineage(
         &mut self,
         catalogue_seq: u64,
         publication_id: SchemaLineagePublicationId,
@@ -687,7 +695,9 @@ where
                 PrimaryKeyValue::Uuid(publication_id.0),
             ]),
         );
-        self.database.commit_batch(batch)?;
+        let applied = self.database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+self.database.finish_persistence(persisted)?;
         self.catalogue.pending_lineages.remove(&catalogue_seq);
         Ok(())
     }
@@ -746,7 +756,7 @@ where
         Ok(())
     }
 
-    fn persist_catalogue_lens_with_physical_metadata(
+    async fn persist_catalogue_lens_with_physical_metadata(
         &mut self,
         lens: &MigrationLens,
         mapping: Option<&SchemaPhysicalMapping>,
@@ -770,7 +780,9 @@ where
                 ))?;
             Self::write_schema_version_mapping_to_batch(&mut batch, alias, lens.target, mapping)?;
         }
-        self.database.commit_batch(batch)?;
+        let applied = self.database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+self.database.finish_persistence(persisted)?;
         Ok(())
     }
 
@@ -791,17 +803,22 @@ where
         Ok(())
     }
 
-    fn persist_catalogue_pointer(&mut self, pointer: CurrentWriteSchema) -> Result<(), Error> {
+    async fn persist_catalogue_pointer(
+        &mut self,
+        pointer: CurrentWriteSchema,
+    ) -> Result<(), Error> {
         let mut batch = self.database.open_batch();
         batch.update(
             "jazz_catalogue_pointer",
             vec![Value::U64(pointer.revision), Value::Uuid(pointer.schema.0)],
         );
-        self.database.commit_batch(batch)?;
+        let applied = self.database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+self.database.finish_persistence(persisted)?;
         Ok(())
     }
 
-    fn persist_pending_catalogue_pointer(
+    async fn persist_pending_catalogue_pointer(
         &mut self,
         pointer: CurrentWriteSchema,
     ) -> Result<(), Error> {
@@ -815,11 +832,13 @@ where
                 Value::Bytes(serde_json::to_vec(&pointer)?),
             ],
         );
-        self.database.commit_batch(batch)?;
+        let applied = self.database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+self.database.finish_persistence(persisted)?;
         Ok(())
     }
 
-    fn ensure_node_alias(&mut self, node_uuid: NodeUuid) -> Result<NodeAlias, Error> {
+    async fn ensure_node_alias(&mut self, node_uuid: NodeUuid) -> Result<NodeAlias, Error> {
         if node_uuid == self.node_uuid
             && let Some(alias) = self.self_node_alias
         {
@@ -837,7 +856,11 @@ where
             .map(|alias| alias.0)
             .max()
             .unwrap_or(0);
-        for raw in self.database.primary_key_scan_raw("jazz_nodes", &[])? {
+        for raw in self
+            .database
+            .primary_key_scan_raw("jazz_nodes", &[])
+            .await?
+        {
             let record = raw.record();
             let alias = NodeAlias(record.get_u64(NodeAliasRowRecord::FIELD_ID_IDX)?);
             max_alias = max_alias.max(alias.0);
@@ -859,11 +882,13 @@ where
             "jazz_nodes",
             vec![Value::U64(alias.0), Value::Uuid(node_uuid.0)],
         );
-        self.database.commit_batch(batch)?;
+        let applied = self.database.apply_batch(batch).await?;
+let persisted = applied.persist().await;
+self.database.finish_persistence(persisted)?;
         Ok(alias)
     }
 
-    fn ensure_schema_version_alias(
+    async fn ensure_schema_version_alias(
         &mut self,
         schema_version_id: SchemaVersionId,
     ) -> Result<SchemaVersionAlias, Error> {
@@ -877,7 +902,8 @@ where
             }
             return Ok(*alias);
         }
-        self.ensure_provisional_physical_mapping(schema_version_id)?;
+        self.ensure_provisional_physical_mapping(schema_version_id)
+            .await?;
         self.catalogue
             .schema_version_aliases
             .get(&schema_version_id)
@@ -897,9 +923,10 @@ where
             .find_map(|(id, candidate)| (*candidate == alias).then_some(*id))
     }
 
-    fn record_child_edges(&mut self, child: TxId, parents: impl IntoIterator<Item = TxId>) {
+    async fn record_child_edges(&mut self, child: TxId, parents: impl IntoIterator<Item = TxId>) {
         if self
             .query_transaction(child)
+            .await
             .ok()
             .flatten()
             .is_some_and(|tx| !matches!(tx.fate, Fate::Pending))
@@ -909,6 +936,7 @@ where
         for parent in parents {
             if self
                 .query_transaction(parent)
+                .await
                 .ok()
                 .flatten()
                 .is_some_and(|tx| !matches!(tx.fate, Fate::Pending))

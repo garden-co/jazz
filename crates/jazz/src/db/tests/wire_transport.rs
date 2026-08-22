@@ -143,7 +143,7 @@ fn schema_lineage_publication_fragments_before_atomic_admission() {
     authority
         .node()
         .borrow_mut()
-        .apply_trusted_catalogue_message(reassembled)
+        .apply_trusted_catalogue_message_settled(reassembled)
         .unwrap();
     assert!(
         authority

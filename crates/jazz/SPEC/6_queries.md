@@ -10,6 +10,49 @@ Queries lower onto groove
 prepared shapes (ch. 14), and provide the substrate used by authorization
 (ch. 7) and sync (ch. 8).
 
+### Responsibility boundary
+
+Jazz owns query meaning and lowering. It validates schema-stamped shapes,
+selects durability/read-view semantics and physical access paths, projects lens
+lineages, and lowers those decisions into one Groove graph. Jazz does not
+materialize a Groove source by launching another Jazz query. In particular,
+policy preparation, source resolution, and schema projection MUST NOT call the
+ordinary one-shot query pipeline to obtain an input relation.
+
+Lowering itself is synchronous and pure. The implementation separates any
+currently necessary asynchronous source preparation from
+`lower_resolved_query_program`: preparation produces owned declarative source
+descriptions, and lowering consumes only those descriptions plus validated
+Jazz metadata. An `await` in lowering is a boundary violation. Async
+preparation is migration debt unless it captures a snapshot explicitly named by
+the read view; live-source preparation should disappear as Groove gains the
+corresponding declarative source primitive.
+
+Policy programs are explicit compilation dependencies, not work performed by
+source preparation. Compilation first analyzes all `SourceRequest`s, derives
+and deduplicates their policy-program requests by structural cache identity,
+and prepares those programs. Source preparation may then only look up the
+prepared policy graph and compose it synchronously with the protected source.
+A missing dependency is an orchestration error; it MUST NOT trigger recursive
+compilation, evaluation, or a retry from inside source preparation. Policy
+dependency sources remain raw evidence as described below, so they do not
+recursively apply their own read policy.
+
+Groove owns evaluation of the lowered graph. Its evaluation session discovers
+which concrete table, index, or arrangement inputs are not resident, suspends
+the affected nodes, shares hydration work, and resumes them through Groove's
+single work queue. Missing data is not represented by Jazz retries, nested
+queries, or a second Jazz evaluation queue.
+
+A Jazz operation may perform a keyed physical lookup when the operation itself
+asks for one identified storage fact, such as the settled content winner for a
+write-policy subject. That is not source evaluation: it neither lowers nor
+executes a nested query and it cannot broaden into a relation scan. Frozen
+historical or transaction-overlay values may be embedded as explicit graph
+inputs when their snapshot identity is part of the requested read view. Live
+current relations must remain graph sources so Groove can maintain and hydrate
+them incrementally.
+
 Invariant digest:
 
 - `groove/SPEC/INVARIANTS.md::INV-INC-1`: Incremental delivery invariant (mechanism law). For any maintained view, the work performed to ingest, apply, and publish a change — including snapshot assembly, diffi...

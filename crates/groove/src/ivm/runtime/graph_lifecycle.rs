@@ -2,6 +2,47 @@
 
 use super::*;
 
+/// Owns unretained graph additions until an operation promotes them by adding
+/// retainers. Cancellation or failure eagerly collects only ephemeral nodes;
+/// hash-equal nodes retained by unrelated live operations remain installed.
+pub(super) struct EphemeralGraphInstall<'a> {
+    runtime: &'a mut IvmRuntime,
+    committed: bool,
+}
+
+impl<'a> EphemeralGraphInstall<'a> {
+    pub(super) fn new(runtime: &'a mut IvmRuntime) -> Self {
+        Self {
+            runtime,
+            committed: false,
+        }
+    }
+
+    pub(super) fn runtime(&mut self) -> &mut IvmRuntime {
+        self.runtime
+    }
+
+    /// Promote this provisional installation after its roots have retainers.
+    ///
+    /// Successful installs need no cleanup: graph nodes are hash-shared and
+    /// reachable from the newly retained roots. Cancellation and failure keep
+    /// the eager cleanup path until arrangement ownership is operation-scoped.
+    pub(super) fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for EphemeralGraphInstall<'_> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        for node in self.runtime.gc_ephemeral_nodes(0) {
+            self.runtime.remove_node_runtime(node);
+        }
+    }
+}
+
 impl IvmRuntime {
     pub fn retained_node_ids(&self) -> HashSet<NodeId> {
         let mut retained = HashSet::new();
@@ -155,19 +196,30 @@ impl IvmRuntime {
     pub(super) fn remove_node_runtime(&mut self, node: NodeId) {
         self.operator_states.retain(|key, _| key.node != node);
         self.arrangement_states.retain(|key, _| key.input != node);
+        self.arrangement_keys_by_input.remove(&node);
         self.eval_memo.retain(|key, _| key.node != node);
         self.node_meta.remove(&node);
     }
 
-    pub(super) fn retained_recursive_nodes_are_current(&self, current_tick: u64) -> bool {
-        let retained = self.retained_node_ids();
-        self.operator_states.iter().all(|(key, state)| {
-            !retained.contains(&key.node)
-                || !matches!(state, OperatorState::Recursive(_))
-                || matches!(
-                    state,
-                    OperatorState::Recursive(recursive) if recursive.as_of() == Some(Tick(current_tick))
-                )
+    pub(super) fn affected_recursive_nodes_are_current(
+        &self,
+        affected: &std::collections::HashSet<NodeId>,
+        current_tick: u64,
+    ) -> bool {
+        affected.iter().all(|node| {
+            self.operator_states
+                .get(&OperatorStateKey {
+                    scope: ScopeId::root(),
+                    node: *node,
+                })
+                .is_none_or(|state| {
+                    !matches!(state, OperatorState::Recursive(_))
+                        || matches!(
+                            state,
+                            OperatorState::Recursive(recursive)
+                                if recursive.as_of() == Some(Tick(current_tick))
+                        )
+                })
         })
     }
 

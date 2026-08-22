@@ -3,57 +3,27 @@ use super::*;
 /// Mutable staged table writes whose reads observe writes already added to the
 /// stage. Commit runs one normal database batch commit, so current callers of
 /// [`Database::commit_batch`] and staged callers share the final tick/write path.
-pub struct StagedDatabaseBatch<'a, S>
-where
-    S: OrderedKvStorage,
-{
-    pub(super) database: &'a mut Database<S>,
+#[cfg(test)]
+pub(crate) struct StagedDatabaseBatch<'a> {
+    pub(super) database: &'a mut Database,
     pub(super) batch: DatabaseBatch,
 }
 
-impl<S> StagedDatabaseBatch<'_, S>
-where
-    S: OrderedKvStorage,
-{
-    pub fn reserve(&mut self, additional: usize) {
-        self.batch.reserve(additional);
-    }
-
+#[cfg(test)]
+impl StagedDatabaseBatch<'_> {
     pub fn insert(&mut self, table: impl Into<String>, record: impl Into<RecordInput>) {
         self.batch.insert(table, record);
-    }
-
-    pub fn insert_raw(
-        &mut self,
-        table: impl Into<String>,
-        key: PrimaryKeyValue,
-        record: impl Into<RawRecordInput>,
-    ) {
-        self.batch.insert_raw(table, key, record);
     }
 
     pub fn update(&mut self, table: impl Into<String>, record: impl Into<RecordInput>) {
         self.batch.update(table, record);
     }
 
-    pub fn update_raw(
-        &mut self,
-        table: impl Into<String>,
-        key: PrimaryKeyValue,
-        record: impl Into<RawRecordInput>,
-    ) {
-        self.batch.update_raw(table, key, record);
-    }
-
     pub fn delete(&mut self, table: impl Into<String>, key: PrimaryKeyValue) {
         self.batch.delete(table, key);
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.batch.is_empty()
-    }
-
-    pub fn primary_key_scan(
+    pub async fn primary_key_scan(
         &self,
         table: &str,
         prefix: &[Value],
@@ -63,34 +33,11 @@ where
         let storage = MeteredStorage::new(&overlay, &self.database.storage_read_metrics);
         self.database
             .primary_key_scan_with_storage(&storage, table, prefix)
+            .await
     }
 
-    pub fn primary_key_scan_raw(
-        &self,
-        table: &str,
-        prefix: &[Value],
-    ) -> Result<Vec<EncodedKeyValue<'_>>, Error> {
-        self.database.ensure_batch_storage_txn(&self.batch)?;
-        let overlay = StagedWriteOverlay::new(&self.database.storage, &self.batch.txn_operations);
-        let storage = MeteredStorage::new(&overlay, &self.database.storage_read_metrics);
-        self.database
-            .primary_key_scan_raw_with_storage(&storage, table, prefix)
-    }
-
-    pub fn primary_key_last_raw(
-        &self,
-        table: &str,
-        prefix: &[Value],
-    ) -> Result<Option<EncodedKeyValue<'_>>, Error> {
-        self.database.ensure_batch_storage_txn(&self.batch)?;
-        let overlay = StagedWriteOverlay::new(&self.database.storage, &self.batch.txn_operations);
-        let storage = MeteredStorage::new(&overlay, &self.database.storage_read_metrics);
-        self.database
-            .primary_key_last_raw_with_storage(&storage, table, prefix)
-    }
-
-    pub fn commit(self) -> Result<(), Error> {
-        self.database.commit_batch(self.batch)
+    pub async fn commit(self) -> Result<(), Error> {
+        self.database.commit_batch(self.batch).await
     }
 }
 
@@ -100,15 +47,32 @@ pub struct DatabaseBatch {
     pub(super) operations: Vec<BatchOperation>,
     pub(super) txn_operations: RefCell<StagedWriteState>,
     pub(super) txn_indexed_operations: Cell<usize>,
+    pub(super) notification_timing: NotificationTiming,
 }
 
 impl PartialEq for DatabaseBatch {
     fn eq(&self, other: &Self) -> bool {
-        self.operations == other.operations
+        self.operations == other.operations && self.notification_timing == other.notification_timing
     }
 }
 
+/// When subscription notifications produced by a batch become observable.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NotificationTiming {
+    /// Publish every resident terminal reached before [`Database::apply_batch`]
+    /// returns.
+    #[default]
+    Immediate,
+    /// Hold notifications until the batch's persistence receipt is finished;
+    /// discard them if persistence fails.
+    AfterPersistence,
+}
+
 impl DatabaseBatch {
+    pub fn deliver_notifications(&mut self, timing: NotificationTiming) {
+        self.notification_timing = timing;
+    }
+
     pub fn reserve(&mut self, additional: usize) {
         self.operations.reserve(additional);
     }

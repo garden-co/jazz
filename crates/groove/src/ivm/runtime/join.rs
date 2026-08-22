@@ -11,6 +11,7 @@ use bytes::{Bytes, BytesMut};
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use smallvec::SmallVec;
 use std::ops::Range;
+use std::rc::Rc;
 
 use crate::{
     ivm::ValueComparison,
@@ -48,7 +49,7 @@ pub(super) struct AntiJoinState;
 pub(super) struct ArrangementState {
     /// key -> record multiset. Records are kept as encoded bytes so probing can
     /// build output records without rehydrating whole tables.
-    index: JoinIndex,
+    index: Rc<JoinIndex>,
 }
 
 impl JoinState {
@@ -458,7 +459,9 @@ impl ArrangementState {
                 index.insert(key, bucket.clone());
             }
         }
-        Self { index }
+        Self {
+            index: Rc::new(index),
+        }
     }
 
     pub(super) fn replace_keys<'a>(
@@ -468,10 +471,10 @@ impl ArrangementState {
     ) {
         for key in keys {
             let key = JoinKey::from_slice(key);
-            if let Some(bucket) = replacement.index.remove(&key) {
-                self.index.insert(key, bucket);
+            if let Some(bucket) = Rc::make_mut(&mut replacement.index).remove(&key) {
+                Rc::make_mut(&mut self.index).insert(key, bucket);
             } else {
-                self.index.remove(&key);
+                Rc::make_mut(&mut self.index).remove(&key);
             }
         }
     }
@@ -499,10 +502,10 @@ impl ArrangementState {
     ) {
         match update_mode {
             ArrangementUpdateMode::Accumulate => {
-                apply_join_delta_to_index(&mut self.index, deltas);
+                apply_join_delta_to_index(Rc::make_mut(&mut self.index), deltas);
             }
             ArrangementUpdateMode::Replace => {
-                self.index = build_join_delta_index(deltas);
+                self.index = Rc::new(build_join_delta_index(deltas));
             }
         }
     }
@@ -1074,5 +1077,29 @@ mod tests {
 
         assert_eq!(replacement, incremental);
         assert_eq!(replacement.values().copied().collect::<Vec<_>>(), [6, 3]);
+    }
+
+    #[test]
+    fn arrangement_snapshot_clone_shares_payload_until_first_write() {
+        let mut bucket = HashMap::default();
+        bucket.insert(Bytes::from_static(b"row-one"), 1);
+        let mut index = HashMap::default();
+        index.insert(JoinKey::from_slice(b"one"), bucket);
+        let original = ArrangementState {
+            index: Rc::new(index),
+        };
+
+        let mut prepared = original.clone();
+        assert!(
+            Rc::ptr_eq(&original.index, &prepared.index),
+            "starting an evaluation must not copy resident arrangement rows"
+        );
+
+        let mut second_bucket = HashMap::default();
+        second_bucket.insert(Bytes::from_static(b"row-two"), 1);
+        Rc::make_mut(&mut prepared.index).insert(JoinKey::from_slice(b"two"), second_bucket);
+        assert!(!Rc::ptr_eq(&original.index, &prepared.index));
+        assert_eq!(original.row_count(), 1);
+        assert_eq!(prepared.row_count(), 2);
     }
 }

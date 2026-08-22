@@ -59,22 +59,26 @@ fn sorted(mut values: Vec<(Vec<Value>, i64)>) -> Vec<(Vec<Value>, i64)> {
     values
 }
 
-#[test]
-fn incremental_ticks_converge_on_cycles() {
+#[futures_test::test]
+async fn incremental_ticks_converge_on_cycles() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
-    let mut db = Database::new(edges_schema(), storage).unwrap();
-    let sub = db.subscribe_one_sink(reachability_graph()).unwrap();
+    let mut db = Database::new(edges_schema(), storage).await.unwrap();
+    let sub = db.subscribe_one_sink(reachability_graph()).await.unwrap();
     let _initial = sub.recv().unwrap();
 
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
-    db.commit_batch(batch).unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
     let _t1 = sub.recv().unwrap();
 
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(1)]);
-    db.commit_batch(batch).unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     assert_eq!(
         sorted(sub.recv().unwrap().to_values().unwrap()),
@@ -86,19 +90,22 @@ fn incremental_ticks_converge_on_cycles() {
     );
 }
 
-#[test]
-fn recompute_converges_on_cycles_at_subscribe() {
+#[futures_test::test]
+async fn recompute_converges_on_cycles_at_subscribe() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
-    let mut db = Database::new(edges_schema(), storage).unwrap();
+    let mut db = Database::new(edges_schema(), storage).await.unwrap();
 
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
     batch.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(1)]);
-    db.commit_batch(batch).unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
 
     let sub = db
         .subscribe_one_sink(reachability_graph())
+        .await
         .expect("subscribing over a cyclic graph must not hit the iteration limit");
     assert_eq!(
         sorted(sub.recv().unwrap().to_values().unwrap()),
@@ -106,27 +113,34 @@ fn recompute_converges_on_cycles_at_subscribe() {
     );
 }
 
-#[test]
-fn retraction_recompute_converges_while_a_cycle_exists() {
+#[futures_test::test]
+async fn retraction_recompute_converges_while_a_cycle_exists() {
     let temp_dir = tempfile::tempdir().unwrap();
     let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
-    let mut db = Database::new(edges_schema(), storage).unwrap();
-    let sub = db.subscribe_one_sink(reachability_graph()).unwrap();
+    let mut db = Database::new(edges_schema(), storage).await.unwrap();
+    let sub = db.subscribe_one_sink(reachability_graph()).await.unwrap();
     let _initial = sub.recv().unwrap();
 
     let mut batch = db.open_batch();
     batch.insert("edges", vec![Value::U64(1), Value::U64(1), Value::U64(2)]);
     batch.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(1)]);
     batch.insert("edges", vec![Value::U64(3), Value::U64(2), Value::U64(3)]);
-    db.commit_batch(batch).unwrap();
+    let applied = db.apply_batch(batch).await.unwrap();
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted).unwrap();
     let _t1 = sub.recv().unwrap();
 
     // Deleting the unrelated edge triggers a retraction recompute while the
     // 1 <-> 2 cycle is still present in the base table.
     let mut batch = db.open_batch();
     batch.delete("edges", groove::db::PrimaryKeyValue::U64(3));
-    db.commit_batch(batch)
+    let applied = db
+        .apply_batch(batch)
+        .await
         .expect("retraction ticks must not fail while the base data contains a cycle");
+    let persisted = applied.persist().await;
+    db.finish_persistence(persisted)
+        .expect("retraction persistence must not fail");
 
     assert_eq!(
         sorted(sub.recv().unwrap().to_values().unwrap()),

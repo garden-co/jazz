@@ -14,7 +14,7 @@ import type {
   BatchId,
   InsertResult,
   MutationErrorEvent,
-  MutationReceipt,
+  MutationResult,
   OpenBatchId,
   PermissionAdvice,
   Runtime,
@@ -270,7 +270,7 @@ type NativeDb = {
     localEpoch: bigint,
   ): Transport;
   acceptSubscriber?(author: Uint8Array, claims: Record<string, unknown>): Transport;
-  tick(): void;
+  tick(): void | Promise<void>;
   close?(): void;
   free?(): void;
 };
@@ -351,8 +351,8 @@ export type Transport = {
   recvWireFrames(): unknown[];
   sendWireFrame(frame: Uint8Array): void;
   sendWireFrames?(frames: readonly Uint8Array[]): void;
-  tick(): number;
-  updateAuthenticatedClaims?(claims: Record<string, unknown>): void;
+  tick(): number | Promise<number>;
+  updateAuthenticatedClaims?(claims: Record<string, unknown>): void | Promise<void>;
   free?(): void;
 };
 
@@ -505,7 +505,9 @@ export class NativeRuntimeAdapter implements Runtime {
   private coreTickRunning = false;
   private coreTickAgain = false;
   private serverPumpScheduled = false;
+  private serverPumpRunning = false;
   private serverPumpAgain = false;
+  private serverConnectionGeneration = 0;
   private closed = false;
   private nextSubscriptionId = 1;
 
@@ -787,7 +789,7 @@ export class NativeRuntimeAdapter implements Runtime {
     objectId: string,
     values: Record<string, Value>,
     writeContext?: string | null,
-  ): MutationReceipt {
+  ): MutationResult {
     const rowId = parseUuid(objectId);
     const patch = encodeCellsForPatch(this.table(table), values);
     const writeSession = sessionFromWriteContext(writeContext);
@@ -852,7 +854,7 @@ export class NativeRuntimeAdapter implements Runtime {
     objectId: string,
     values: InsertValues,
     writeContext?: string | null,
-  ): MutationReceipt {
+  ): MutationResult {
     const rowId = parseUuid(objectId);
     const definition = this.table(table);
     const writeSession = sessionFromWriteContext(writeContext);
@@ -890,7 +892,7 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.finishMutation(write);
   }
 
-  delete(table: string, objectId: string, writeContext?: string | null): MutationReceipt {
+  delete(table: string, objectId: string, writeContext?: string | null): MutationResult {
     this.table(table);
     const rowId = parseUuid(objectId);
     const writeSession = sessionFromWriteContext(writeContext);
@@ -1045,7 +1047,7 @@ export class NativeRuntimeAdapter implements Runtime {
     return id;
   }
 
-  commitTransaction(openBatchId: OpenBatchId): Promise<BatchId> {
+  commitTransaction(openBatchId: OpenBatchId): BatchId {
     if (this !== this.ownerRuntime) return this.ownerRuntime.commitTransaction(openBatchId);
     const pending = this.pendingTxs.get(openBatchId);
     if (!pending) {
@@ -1057,17 +1059,13 @@ export class NativeRuntimeAdapter implements Runtime {
       );
     }
     let write: Write;
-    try {
-      write = this.db.commitTransaction(openBatchId, pending.kind);
-    } catch (error) {
-      return Promise.reject(error);
-    }
+    write = this.db.commitTransaction(openBatchId, pending.kind);
     this.pendingTxs.delete(openBatchId);
     this.completedTxs.set(openBatchId, { kind: pending.kind, state: "committed" });
     this.pumpSubscriptions();
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
-    return Promise.resolve(recordWrite(write, this.writes));
+    return recordWrite(write, this.writes);
   }
 
   async waitForTransaction(batchId: BatchId | Promise<BatchId>, tier: string): Promise<void> {
@@ -1082,7 +1080,7 @@ export class NativeRuntimeAdapter implements Runtime {
     for (;;) {
       this.throwServerTransportErrorForTier(tier);
       const observedServerWorkEpoch = this.serverTransportWorkEpoch;
-      this.pumpServerTransport();
+      void this.pumpServerTransport();
       this.throwServerTransportErrorForTier(tier);
       const settlement = write.wait(tier);
       const transportError = this.waitForServerTransportError(tier);
@@ -1328,6 +1326,7 @@ export class NativeRuntimeAdapter implements Runtime {
     // waits are still meaningful across that transition, so only an explicit runtime
     // shutdown is allowed to reject them.
     void this.disconnect({ rejectWaiters: false });
+    const generation = ++this.serverConnectionGeneration;
     this.serverTransportError = null;
     this.serverEndpointUrl = url;
     const carrier = new WebSocketCarrier({
@@ -1335,27 +1334,34 @@ export class NativeRuntimeAdapter implements Runtime {
       peerIdentity: this.peerIdentity,
       authJson,
       onFrame: (frame) => {
+        if (generation !== this.serverConnectionGeneration) return;
         this.pendingInboundServerFrames.push(frame);
         this.notifyServerTransportWork();
         this.scheduleServerPump();
       },
       onError: (error) => {
-        this.handleServerTransportError(error);
+        this.handleServerTransportError(error, generation);
         const reason = wireAuthFailureReason(error);
         if (reason) this.authFailureCallback?.(reason);
       },
     });
     this.serverCarrier = carrier;
     this.serverCarrierPromise = carrier.ready().then((negotiation) => {
+      if (generation !== this.serverConnectionGeneration || carrier !== this.serverCarrier) {
+        carrier.close();
+        return carrier;
+      }
       const transport = this.connectNegotiatedUpstream(negotiation);
       this.serverTransport = transport;
       this.flushQueuedServerFrames(carrier);
-      this.pumpServerTransport();
+      void this.pumpServerTransport().catch((error) =>
+        this.handleServerTransportError(error, generation),
+      );
       this.pumpSubscriptions();
       return carrier;
     });
     this.serverCarrierPromise.catch((error) => {
-      this.handleServerTransportError(error);
+      this.handleServerTransportError(error, generation);
     });
   }
 
@@ -1377,6 +1383,7 @@ export class NativeRuntimeAdapter implements Runtime {
 
   disconnect(options: { rejectWaiters?: boolean } = {}): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.disconnect(options);
+    this.serverConnectionGeneration += 1;
     this.serverCarrier?.close();
     this.serverCarrier = null;
     this.serverCarrierPromise = null;
@@ -1427,7 +1434,7 @@ export class NativeRuntimeAdapter implements Runtime {
     return { id: row.id, values: row.values, kind: "committed", batchId };
   }
 
-  private finishMutation(write: Write): MutationReceipt {
+  private finishMutation(write: Write): MutationResult {
     const batchId = recordWrite(write, this.writes);
     this.pumpSubscriptions();
     this.scheduleServerPump();
@@ -1710,7 +1717,7 @@ export class NativeRuntimeAdapter implements Runtime {
       // that boundary.
       if (this.closed) return;
       this.throwServerTransportErrorForTier(tier);
-      this.pumpServerTransport();
+      await this.pumpServerTransport();
       this.throwServerTransportErrorForTier(tier);
       if (this.db.queryAttachmentIsCovered) {
         const peerHasResponded =
@@ -1855,15 +1862,15 @@ export class NativeRuntimeAdapter implements Runtime {
     this.coreTickScheduled = true;
     queueMicrotask(() => {
       this.coreTickScheduled = false;
-      this.runCoreTick();
+      void this.runCoreTick().catch(reportAsyncRuntimeError);
     });
   }
 
-  private runCoreTick(): void {
+  private async runCoreTick(): Promise<void> {
     if (this.closed || this.coreTickRunning) return;
     this.coreTickRunning = true;
     try {
-      this.db.tick();
+      await this.db.tick();
       this.pumpSubscriptions();
       this.scheduleServerPump();
       this.notifyPeerTransportWork();
@@ -2175,16 +2182,17 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private scheduleServerPump(): void {
-    if (this.closed || !this.serverTransport || this.serverPumpScheduled) return;
+    if (this.closed || !this.serverTransport) return;
+    if (this.serverPumpRunning) {
+      this.serverPumpAgain = true;
+      return;
+    }
+    if (this.serverPumpScheduled) return;
     this.serverPumpScheduled = true;
     setTimeout(() => {
       this.serverPumpScheduled = false;
       if (this.closed) return;
-      this.pumpServerTransport();
-      if (this.serverPumpAgain) {
-        this.serverPumpAgain = false;
-        this.scheduleServerPump();
-      }
+      void this.pumpServerTransport().catch((error) => this.handleServerTransportError(error));
     }, SERVER_PUMP_DEBOUNCE_MS);
   }
 
@@ -2198,22 +2206,45 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.serverTransport != null || this.peerUpstreamAttached;
   }
 
-  private pumpServerTransport(): void {
+  private async pumpServerTransport(): Promise<void> {
     const transport = this.serverTransport;
-    if (this.closed || !transport) return;
-    this.drainPendingInboundServerFrames(transport);
-    for (let round = 0; round < 32; round += 1) {
-      transport.tick();
-      const frames = normalizeTransportFrames(transport.recvWireFrames());
-      if (frames.length > 0) {
-        this.sendServerFrames(frames);
+    const carrier = this.serverCarrier;
+    const generation = this.serverConnectionGeneration;
+    if (this.closed || !transport || !carrier) return;
+    if (this.serverPumpRunning) {
+      this.serverPumpAgain = true;
+      return;
+    }
+    this.serverPumpRunning = true;
+    try {
+      this.drainPendingInboundServerFrames(transport);
+      for (let round = 0; round < 32; round += 1) {
+        await transport.tick();
+        if (
+          this.closed ||
+          generation !== this.serverConnectionGeneration ||
+          transport !== this.serverTransport ||
+          carrier !== this.serverCarrier
+        ) {
+          return;
+        }
+        const frames = normalizeTransportFrames(transport.recvWireFrames());
+        if (frames.length > 0) {
+          this.sendServerFrames(frames, carrier, generation);
+        }
+        this.pumpSubscriptions();
+        if (frames.length === 0) {
+          return;
+        }
       }
-      this.pumpSubscriptions();
-      if (frames.length === 0) {
-        return;
+      this.serverPumpAgain = true;
+    } finally {
+      this.serverPumpRunning = false;
+      if (this.serverPumpAgain) {
+        this.serverPumpAgain = false;
+        this.scheduleServerPump();
       }
     }
-    this.serverPumpAgain = true;
   }
 
   private drainPendingInboundServerFrames(transport: Transport): void {
@@ -2226,14 +2257,21 @@ export class NativeRuntimeAdapter implements Runtime {
     for (const frame of frames) transport.sendWireFrame(frame);
   }
 
-  private sendServerFrames(frames: Uint8Array[]): void {
-    const carrier = this.serverCarrier;
-    if (!carrier) {
+  private sendServerFrames(
+    frames: Uint8Array[],
+    carrier = this.serverCarrier,
+    generation = this.serverConnectionGeneration,
+  ): void {
+    if (
+      !carrier ||
+      generation !== this.serverConnectionGeneration ||
+      carrier !== this.serverCarrier
+    ) {
       this.queuedServerFrames.push(...frames);
       return;
     }
     void carrier.sendBatch(frames).catch((error) => {
-      this.handleServerTransportError(error);
+      this.handleServerTransportError(error, generation);
     });
   }
 
@@ -2245,7 +2283,11 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
-  private handleServerTransportError(error: unknown): void {
+  private handleServerTransportError(
+    error: unknown,
+    generation = this.serverConnectionGeneration,
+  ): void {
+    if (generation !== this.serverConnectionGeneration) return;
     const message = errorMessage(error);
     if (this.serverTransportError && message === "websocket closed") return;
     this.serverTransportError = error instanceof Error ? error : new Error(message);
@@ -5110,4 +5152,10 @@ function assertBytes(value: unknown, label: string): Uint8Array {
   if (value instanceof Uint8Array) return value;
   if (Array.isArray(value)) return Uint8Array.from(value);
   throw new Error(`expected ${label} bytes`);
+}
+
+function reportAsyncRuntimeError(error: unknown): void {
+  queueMicrotask(() => {
+    throw error;
+  });
 }

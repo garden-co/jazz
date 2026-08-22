@@ -37,12 +37,11 @@ use crate::records::{
     RawProjectionScratch, RecordDescriptor, Value, ValueType,
 };
 use crate::schema::{DatabaseSchema, IndexSchema, TableSchema};
-use crate::storage::{
-    OrderedKvStorage, OwnedWriteOperation, RecordStore, StagedWriteOverlay, StagedWriteState,
-};
+use crate::storage::{OrderedKvStorage, RecordStore};
 use thiserror::Error;
 
 mod aggregate;
+mod evaluation_session;
 mod join;
 mod persist;
 mod recursion;
@@ -54,7 +53,7 @@ use join::{AntiJoinState, ArrangementState, JoinState, touched_join_keys};
 use persist::apply_persist_delta;
 use recursion::{
     RecursiveState, hydrate_recursive_arrangements, recompute_recursive, recursive_delta,
-    recursive_read_tables, snapshot_table_deltas,
+    recursive_read_tables, require_snapshot_inputs, snapshot_requirement,
 };
 use state::{
     ArrangementKey, ArrangementUpdateMode, AsOf, EvalContext, EvalMemoEntry, EvalMemoKey, EvalMode,
@@ -158,17 +157,17 @@ pub struct IvmRuntime {
     variant_projections: HashMap<VariantProjectionKey, VariantProjection>,
     graph: IvmGraph,
     multisink_subscriptions: HashMap<SubscriptionId, MultisinkSubscriptionState>,
-    /// Output from a staged durable tick.  `Database::commit_batch` releases
-    /// this only after its storage transaction commits, so a failed write can
-    /// never leak a speculative subscription delta.
-    staged_subscription_notifications: Vec<(SubscriptionId, QueuedMultisinkDeltas)>,
-    defer_subscription_notifications: bool,
+    subscriptions_by_output_node: HashMap<NodeId, HashSet<SubscriptionId>>,
+    pending_incremental: runtime_tick::PendingIncrementalEvaluation,
     prepared_shapes: HashMap<PreparedShapeId, RoutedMultisinkShapeState>,
     auto_direct_families: HashMap<AutoDirectFamilyKey, PreparedShapeId>,
     binding_sources: HashMap<String, BindingSourceState>,
     /// Binding retractions discovered while routing notifications cannot tick
     /// recursively; the next public tick drains them before user deltas run.
     pending_binding_retractions: Vec<BindingDelta>,
+    deferred_notifications: HashMap<PublicationId, Vec<(SubscriptionId, QueuedMultisinkDeltas)>>,
+    durable_notification_publications: HashSet<PublicationId>,
+    completed_deferred_publications: HashSet<PublicationId>,
     /// Persistent operator state keyed by scope and node. This survives ticks;
     /// see [`EvalMemoKey`] for per-evaluation caching.
     operator_states: HashMap<OperatorStateKey, OperatorState>,
@@ -176,6 +175,7 @@ pub struct IvmRuntime {
     /// fragment, key fields, descriptor, and scope so similar queries can share
     /// expensive context-independent arrangements.
     arrangement_states: HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
+    arrangement_keys_by_input: HashMap<NodeId, HashSet<ArrangementKey>>,
     /// Input-owned memoization for pure node evaluation results. Entries are
     /// keyed by node/scope/context inputs and validated against per-input
     /// frontier counters before reuse; operator state remains owned separately.
@@ -212,10 +212,11 @@ impl IvmRuntime {
             variant_projections: HashMap::default(),
             graph: IvmGraph::new(),
             multisink_subscriptions: HashMap::default(),
-            staged_subscription_notifications: Vec::new(),
-            defer_subscription_notifications: false,
+            subscriptions_by_output_node: HashMap::default(),
+            pending_incremental: runtime_tick::PendingIncrementalEvaluation::default(),
             operator_states: HashMap::default(),
             arrangement_states: HashMap::default(),
+            arrangement_keys_by_input: HashMap::default(),
             eval_memo: HashMap::default(),
             table_frontiers: HashMap::default(),
             binding_frontiers: HashMap::default(),
@@ -235,6 +236,9 @@ impl IvmRuntime {
             auto_direct_families: HashMap::default(),
             binding_sources: HashMap::default(),
             pending_binding_retractions: Vec::new(),
+            deferred_notifications: HashMap::default(),
+            durable_notification_publications: HashSet::default(),
+            completed_deferred_publications: HashSet::default(),
         };
         runtime.define_schema_index_variant_projections()?;
         runtime.add_dedup_schema_indices()?;
@@ -310,6 +314,8 @@ pub enum IvmRuntimeError {
     EnumProjectionNonEnum,
     #[error("index not found: {0}")]
     IndexNotFound(String),
+    #[error("invalid persisted index entry: {0}")]
+    InvalidPersistedIndex(String),
     #[error("join key arity mismatch: left={left}, right={right}")]
     JoinKeyArityMismatch { left: usize, right: usize },
     #[error("shape key field not found: {0}")]
@@ -352,6 +358,8 @@ pub enum IvmRuntimeError {
     Storage(#[from] crate::storage::Error),
     #[error("storage unavailable for durable node")]
     StorageUnavailable,
+    #[error("evaluation blocked on a non-resident storage input")]
+    EvaluationBlocked,
     #[error("subscription shape not found: {0:?}")]
     PreparedShapeNotFound(PreparedShapeId),
     #[error("cannot retire prepared shape {0:?} while it has active bindings")]

@@ -12,22 +12,22 @@ fn merge_heads_match_history_for_ordinary_concurrent_units() {
     let row = row(0xaa);
 
     let (_left, left_unit) = writer_a
-        .commit_mergeable_unit(MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([(
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([(
             "title".to_owned(),
             "left".to_owned(),
         )])))
         .unwrap();
     let (_right, right_unit) = writer_b
-        .commit_mergeable_unit(MergeableCommit::new("todos", row, 11).cells(BTreeMap::from([(
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 11).cells(BTreeMap::from([(
             "body".to_owned(),
             "right".to_owned(),
         )])))
         .unwrap();
 
-    core.apply_sync_message(right_unit).unwrap();
+    core.apply_sync_message_settled(right_unit).unwrap();
     core.assert_merge_heads_match_history_for_test("todos", row)
         .unwrap();
-    core.apply_sync_message(left_unit).unwrap();
+    core.apply_sync_message_settled(left_unit).unwrap();
     core.assert_merge_heads_match_history_for_test("todos", row)
         .unwrap();
 }
@@ -41,13 +41,13 @@ fn merge_heads_match_history_for_edge_accepted_units() {
     let row = row(0xea);
 
     let (_left, left_unit) = writer_a
-        .commit_mergeable_unit(MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([(
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([(
             "title".to_owned(),
             "left".to_owned(),
         )])))
         .unwrap();
     let (_right, right_unit) = writer_b
-        .commit_mergeable_unit(MergeableCommit::new("todos", row, 11).cells(BTreeMap::from([(
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 11).cells(BTreeMap::from([(
             "body".to_owned(),
             "right".to_owned(),
         )])))
@@ -67,20 +67,22 @@ fn merge_heads_match_history_for_edge_accepted_units() {
         panic!("expected commit unit");
     };
 
-    edge.ingest_edge_authority_mergeable_commit_unit(
+    let outcome = crate::db::block_on(edge.ingest_edge_authority_mergeable_commit_unit(
         right_tx,
         right_versions,
         u64::MAX - SKEW_TOLERANCE_MS,
-    )
+    ))
     .unwrap();
+    settle_outcome(&mut edge, outcome).unwrap();
     edge.assert_merge_heads_match_history_for_test("todos", row)
         .unwrap();
-    edge.ingest_edge_authority_mergeable_commit_unit(
+    let outcome = crate::db::block_on(edge.ingest_edge_authority_mergeable_commit_unit(
         left_tx,
         left_versions,
         u64::MAX - SKEW_TOLERANCE_MS,
-    )
+    ))
     .unwrap();
+    settle_outcome(&mut edge, outcome).unwrap();
     edge.assert_merge_heads_match_history_for_test("todos", row)
         .unwrap();
 }
@@ -94,13 +96,13 @@ fn merge_heads_match_history_for_relay_pending_then_edge_fate() {
     let row = row(0xfa);
 
     let (left, left_unit) = writer_a
-        .commit_mergeable_unit(MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([(
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([(
             "title".to_owned(),
             "left".to_owned(),
         )])))
         .unwrap();
     let (right, right_unit) = writer_b
-        .commit_mergeable_unit(MergeableCommit::new("todos", row, 11).cells(BTreeMap::from([(
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 11).cells(BTreeMap::from([(
             "body".to_owned(),
             "right".to_owned(),
         )])))
@@ -143,21 +145,21 @@ fn merge_heads_match_history_after_parked_unit_resolves() {
     let row = row(0xba);
 
     let (parent_tx, parent_unit) = parent_writer
-        .commit_mergeable_unit(MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([(
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([(
             "title".to_owned(),
             "parent".to_owned(),
         )])))
         .unwrap();
     let (_child_tx, child_unit) = child_writer
-        .commit_mergeable_unit(
+        .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row, 11)
                 .parents(vec![parent_tx])
                 .cells(BTreeMap::from([("body".to_owned(), "child".to_owned())])),
         )
         .unwrap();
 
-    core.apply_sync_message(child_unit).unwrap();
-    core.apply_sync_message(parent_unit).unwrap();
+    core.apply_sync_message_settled(child_unit).unwrap();
+    core.apply_sync_message_settled(parent_unit).unwrap();
     core.assert_merge_heads_match_history_for_test("todos", row)
         .unwrap();
 }
@@ -171,24 +173,24 @@ fn merge_heads_match_history_across_restart_between_concurrent_units() {
     let row = row(0xca);
 
     let (_left, left_unit) = writer_a
-        .commit_mergeable_unit(MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([(
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([(
             "title".to_owned(),
             "left".to_owned(),
         )])))
         .unwrap();
     let (_right, right_unit) = writer_b
-        .commit_mergeable_unit(MergeableCommit::new("todos", row, 11).cells(BTreeMap::from([(
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 11).cells(BTreeMap::from([(
             "body".to_owned(),
             "right".to_owned(),
         )])))
         .unwrap();
 
-    core.apply_sync_message(left_unit).unwrap();
+    core.apply_sync_message_settled(left_unit).unwrap();
     drop(core);
     let mut core = reopen_node_at(&core_dir, node(0xc9), schema);
     core.assert_merge_heads_match_history_for_test("todos", row)
         .unwrap();
-    core.apply_sync_message(right_unit).unwrap();
+    core.apply_sync_message_settled(right_unit).unwrap();
     core.assert_merge_heads_match_history_for_test("todos", row)
         .unwrap();
 }
@@ -203,7 +205,7 @@ fn merge_heads_share_physical_identity_across_table_rename_and_restart() {
     let (dir, mut core) = open_node_with_schema(node(0xcb), base.clone());
     let row_uuid = row(0xcb);
     let before = core
-        .commit_mergeable(
+        .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 10)
                 .cells(BTreeMap::from([("title".to_owned(), v("before"))])),
         )
@@ -234,7 +236,7 @@ fn merge_heads_share_physical_identity_across_table_rename_and_restart() {
         Vec::<String>::new(),
     )
     .unwrap();
-    core.apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
+    core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
         author: AuthorId::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
@@ -242,7 +244,7 @@ fn merge_heads_share_physical_identity_across_table_rename_and_restart() {
         },
     })
     .unwrap();
-    core.commit_mergeable(
+    core.commit_mergeable_settled(
         MergeableCommit::new("tasks", row_uuid, 11)
             .parents(vec![before])
             .cells(BTreeMap::from([("name".to_owned(), v("after"))])),
@@ -281,20 +283,20 @@ fn merge_heads_match_history_after_merge_version_application() {
     let row = row(0xda);
 
     let (_left, left_unit) = writer_a
-        .commit_mergeable_unit(MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([(
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 10).cells(BTreeMap::from([(
             "title".to_owned(),
             "left".to_owned(),
         )])))
         .unwrap();
     let (_right, right_unit) = writer_b
-        .commit_mergeable_unit(MergeableCommit::new("todos", row, 11).cells(BTreeMap::from([(
+        .commit_mergeable_unit_settled(MergeableCommit::new("todos", row, 11).cells(BTreeMap::from([(
             "body".to_owned(),
             "right".to_owned(),
         )])))
         .unwrap();
 
-    core.apply_sync_message(left_unit).unwrap();
-    core.apply_sync_message(right_unit).unwrap();
+    core.apply_sync_message_settled(left_unit).unwrap();
+    core.apply_sync_message_settled(right_unit).unwrap();
     let _ = core.view_update_for_current_rows("todos").unwrap();
     core.assert_merge_heads_match_history_for_test("todos", row)
         .unwrap();

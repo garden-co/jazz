@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 mod common;
 
+use jazz::block_on;
 use jazz::groove::records::Value;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
@@ -96,7 +97,7 @@ fn open_node(
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
-    let node = NodeState::new(node_uuid, schema, storage).unwrap();
+    let node = block_on(NodeState::new(node_uuid, schema, storage)).unwrap();
     (temp_dir, node)
 }
 
@@ -108,7 +109,7 @@ fn reopen_node(
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
-    NodeState::new(node_uuid, schema, storage).unwrap()
+    block_on(NodeState::new(node_uuid, schema, storage)).unwrap()
 }
 
 fn cells(title: &str, owner: AuthorId) -> BTreeMap<String, Value> {
@@ -163,9 +164,16 @@ fn invite_cells(canvas: RowUuid, user: AuthorId) -> BTreeMap<String, Value> {
 }
 
 fn commit_local_global(node: &mut NodeState<RocksDbStorage>, commit: MergeableCommit) -> TxId {
-    let tx_id = node.commit_mergeable(commit).unwrap();
-    node.finalize_local_mergeable_commit(tx_id).unwrap();
-    tx_id
+    block_on(async {
+        let published = node.commit_mergeable(commit).await.unwrap();
+        let tx_id = node
+            .persist_and_settle_transaction(published)
+            .await
+            .unwrap();
+        let outcome = node.finalize_local_mergeable_commit(tx_id).await.unwrap();
+        node.persist_and_settle_outcome(outcome).await.unwrap();
+        tx_id
+    })
 }
 
 fn commit(
@@ -176,13 +184,19 @@ fn commit(
     owner: AuthorId,
     parents: impl IntoIterator<Item = TxId>,
 ) -> (TxId, SyncMessage) {
-    ui.commit_mergeable_unit(
-        MergeableCommit::new("todos", row_uuid, made_at)
-            .made_by(AuthorId::from_bytes([7; 16]))
-            .parents(parents.into_iter().collect())
-            .cells(cells(title, owner)),
-    )
-    .unwrap()
+    block_on(async {
+        let (published, unit) = ui
+            .commit_mergeable_unit(
+                MergeableCommit::new("todos", row_uuid, made_at)
+                    .made_by(AuthorId::from_bytes([7; 16]))
+                    .parents(parents.into_iter().collect())
+                    .cells(cells(title, owner)),
+            )
+            .await
+            .unwrap();
+        let tx_id = ui.persist_and_settle_transaction(published).await.unwrap();
+        (tx_id, unit)
+    })
 }
 
 fn commit_as(
@@ -193,14 +207,20 @@ fn commit_as(
     writer: AuthorId,
     parents: impl IntoIterator<Item = TxId>,
 ) -> (TxId, SyncMessage) {
-    ui.commit_mergeable_unit(
-        MergeableCommit::new("todos", row_uuid, made_at)
-            .made_by(writer)
-            .permission_subject(writer)
-            .parents(parents.into_iter().collect())
-            .cells(cells(title, writer)),
-    )
-    .unwrap()
+    block_on(async {
+        let (published, unit) = ui
+            .commit_mergeable_unit(
+                MergeableCommit::new("todos", row_uuid, made_at)
+                    .made_by(writer)
+                    .permission_subject(writer)
+                    .parents(parents.into_iter().collect())
+                    .cells(cells(title, writer)),
+            )
+            .await
+            .unwrap();
+        let tx_id = ui.persist_and_settle_transaction(published).await.unwrap();
+        (tx_id, unit)
+    })
 }
 
 fn deletion(
@@ -209,20 +229,70 @@ fn deletion(
     made_at: u64,
     event: DeletionEvent,
 ) -> (TxId, SyncMessage) {
-    ui.commit_mergeable_unit(
-        MergeableCommit::new("todos", row_uuid, made_at)
-            .made_by(AuthorId::from_bytes([7; 16]))
-            .deletion(event),
-    )
-    .unwrap()
+    block_on(async {
+        let (published, unit) = ui
+            .commit_mergeable_unit(
+                MergeableCommit::new("todos", row_uuid, made_at)
+                    .made_by(AuthorId::from_bytes([7; 16]))
+                    .deletion(event),
+            )
+            .await
+            .unwrap();
+        let tx_id = ui.persist_and_settle_transaction(published).await.unwrap();
+        (tx_id, unit)
+    })
 }
 
 fn relay_ingest(node: &mut NodeState<RocksDbStorage>, message: &SyncMessage) {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
-    node.ingest_relay_commit_unit(tx.clone(), versions.clone())
-        .unwrap();
+    block_on(async {
+        node.ingest_relay_commit_unit(tx.clone(), versions.clone())
+            .await
+            .unwrap();
+    });
+}
+
+fn apply_message(node: &mut NodeState<RocksDbStorage>, message: SyncMessage) -> Vec<SyncMessage> {
+    block_on(async {
+        let outcome = node.apply_sync_message(message).await.unwrap();
+        node.persist_and_settle_outcome(outcome).await.unwrap()
+    })
+}
+
+fn transaction_state(
+    node: &mut NodeState<RocksDbStorage>,
+    tx_id: TxId,
+) -> (Fate, Option<jazz::time::GlobalTime>, DurabilityTier) {
+    block_on(node.transaction_state(tx_id)).unwrap()
+}
+
+fn edge_ingest(
+    peer: &mut PeerState,
+    node: &mut NodeState<RocksDbStorage>,
+    tx: jazz::tx::Transaction,
+    versions: Vec<jazz::protocol::VersionRecord>,
+    now_ms: u64,
+) -> Vec<SyncMessage> {
+    block_on(async {
+        let outcome = peer
+            .ingest_edge_mergeable_commit_unit(node, tx, versions, now_ms)
+            .await
+            .unwrap();
+        node.persist_and_settle_outcome(outcome).await.unwrap()
+    })
+}
+
+fn drain_edge_fates(
+    peer: &mut PeerState,
+    node: &mut NodeState<RocksDbStorage>,
+    now_ms: u64,
+) -> Vec<SyncMessage> {
+    block_on(async {
+        let outcome = peer.drain_deferred_edge_fates(node, now_ms).await.unwrap();
+        node.persist_and_settle_outcome(outcome).await.unwrap()
+    })
 }
 
 fn core_ingest(
@@ -233,17 +303,22 @@ fn core_ingest(
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
-    let [fate] = node
-        .ingest_commit_unit(tx.clone(), versions.clone(), now)
-        .unwrap()
-        .try_into()
-        .unwrap();
+    let [fate] = block_on(async {
+        let outcome = node
+            .ingest_commit_unit(tx.clone(), versions.clone(), now)
+            .await
+            .unwrap();
+        node.persist_and_settle_outcome(outcome).await.unwrap()
+    })
+    .try_into()
+    .unwrap();
     fate
 }
 
 fn apply_fate(node: &mut NodeState<RocksDbStorage>, fate: &SyncMessage) {
-    node.apply_sync_message(fate.clone()).unwrap();
-    node.apply_sync_message(fate.clone()).unwrap();
+    for message in [fate.clone(), fate.clone()] {
+        apply_message(node, message);
+    }
 }
 
 fn refresh(
@@ -251,14 +326,14 @@ fn refresh(
     downstream: &mut NodeState<RocksDbStorage>,
     peer: &mut PeerState,
 ) {
-    let update = peer.current_rows_update(upstream, "todos").unwrap();
-    downstream.apply_sync_message(update).unwrap();
+    let update = block_on(peer.current_rows_update(upstream, "todos")).unwrap();
+    apply_message(downstream, update);
 }
 
 fn rows(node: &mut NodeState<RocksDbStorage>) -> Vec<(RowUuid, Value)> {
     let schema = schema();
     let table = &schema.tables[0];
-    node.current_rows("todos", DurabilityTier::Global)
+    block_on(node.current_rows("todos", DurabilityTier::Global))
         .unwrap()
         .into_iter()
         .map(|row| (row.row_uuid(), row.cell(table, "title").expect("title")))
@@ -268,7 +343,7 @@ fn rows(node: &mut NodeState<RocksDbStorage>) -> Vec<(RowUuid, Value)> {
 fn edge_rows(node: &mut NodeState<RocksDbStorage>) -> Vec<(RowUuid, Value)> {
     let schema = schema();
     let table = &schema.tables[0];
-    node.current_rows("todos", DurabilityTier::Edge)
+    block_on(node.current_rows("todos", DurabilityTier::Edge))
         .unwrap()
         .into_iter()
         .map(|row| (row.row_uuid(), row.cell(table, "title").expect("title")))
@@ -278,7 +353,7 @@ fn edge_rows(node: &mut NodeState<RocksDbStorage>) -> Vec<(RowUuid, Value)> {
 fn subscription_rows(node: &mut NodeState<RocksDbStorage>) -> Vec<(RowUuid, Value)> {
     let schema = schema();
     let table = &schema.tables[0];
-    node.subscription_current_rows("todos", DurabilityTier::Global)
+    block_on(node.subscription_current_rows("todos", DurabilityTier::Global))
         .unwrap()
         .into_iter()
         .map(|row| (row.row_uuid(), row.cell(table, "title").expect("title")))
@@ -344,20 +419,24 @@ fn four_tier_topology_relays_pending_units_and_core_fates() {
     refresh(&mut worker, &mut ui, &mut worker_to_ui);
 
     let tx_id = OpenTransactionId::new();
-    ui.open_exclusive(tx_id).unwrap();
+    block_on(ui.open_exclusive(tx_id)).unwrap();
     assert_eq!(
-        ui.tx_read(tx_id, "todos", exclusive_row).unwrap(),
+        block_on(ui.tx_read(tx_id, "todos", exclusive_row)).unwrap(),
         Some(cells("exclusive base", ui_owner))
     );
-    ui.tx_write(
+    block_on(ui.tx_write(
         tx_id,
         "todos",
         exclusive_row,
         cells("exclusive committed", ui_owner),
         None,
-    )
+    ))
     .unwrap();
-    let (exclusive_tx, exclusive_unit) = ui.commit_exclusive(tx_id, ui_author, 17).unwrap();
+    let (exclusive_tx, exclusive_unit) = block_on(async {
+        let (published, unit) = ui.commit_exclusive(tx_id, ui_author, 17).await.unwrap();
+        let tx_id = ui.persist_and_settle_transaction(published).await.unwrap();
+        (tx_id, unit)
+    });
 
     let (skewed_tx, skewed_unit) = commit(&mut ui, skewed_row, 100_000, "too new", ui_owner, []);
     let tail = [
@@ -405,15 +484,15 @@ fn four_tier_topology_relays_pending_units_and_core_fates() {
 
     for node in [&mut ui, &mut worker, &mut edge, &mut core] {
         assert_eq!(
-            node.transaction_state(skewed_tx).unwrap().0,
+            transaction_state(node, skewed_tx).0,
             Fate::Rejected(RejectionReason::ClientClockTooFarAhead)
         );
     }
 
-    let (_, global_time, _) = core.transaction_state(exclusive_tx).unwrap();
+    let (_, global_time, _) = transaction_state(&mut core, exclusive_tx);
     for node in [&mut ui, &mut worker, &mut edge, &mut core] {
         assert_eq!(
-            node.transaction_state(exclusive_tx).unwrap(),
+            transaction_state(node, exclusive_tx),
             (Fate::Accepted, global_time, DurabilityTier::Global)
         );
     }
@@ -471,7 +550,7 @@ fn edge_peer_terminates_client_identity_and_relays_upstream() {
         apply_fate(&mut edge, &fate);
         apply_fate(&mut client, &fate);
         assert_eq!(
-            client.transaction_state(tx_id).unwrap().0,
+            transaction_state(&mut client, tx_id).0,
             Fate::Accepted,
             "test setup should accept all relayed units"
         );
@@ -514,25 +593,22 @@ fn edge_defers_mergeable_fate_until_permission_scope_settles() {
         panic!("expected commit unit");
     };
 
-    let first = edge_to_client
-        .ingest_edge_mergeable_commit_unit(
-            &mut edge,
-            tx.clone(),
-            versions.clone(),
-            u64::MAX - SKEW_TOLERANCE_MS,
-        )
-        .unwrap();
+    let first = edge_ingest(
+        &mut edge_to_client,
+        &mut edge,
+        tx.clone(),
+        versions.clone(),
+        u64::MAX - SKEW_TOLERANCE_MS,
+    );
     assert!(
         first.is_empty(),
         "edge must not assign fate before scope settles"
     );
     assert_eq!(edge_to_client.deferred_edge_fate_count(), 1);
     assert_eq!(edge_to_client.edge_scope_subscription_count(), 1);
-    assert_eq!(edge.transaction_state(tx_id).unwrap().0, Fate::Pending);
+    assert_eq!(transaction_state(&mut edge, tx_id).0, Fate::Pending);
 
-    let [fate] = edge_to_client
-        .drain_deferred_edge_fates(&mut edge, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
+    let [fate] = drain_edge_fates(&mut edge_to_client, &mut edge, u64::MAX - SKEW_TOLERANCE_MS)
         .try_into()
         .unwrap();
     assert_eq!(edge_to_client.deferred_edge_fate_count(), 0);
@@ -547,7 +623,7 @@ fn edge_defers_mergeable_fate_until_permission_scope_settles() {
         }
     );
     assert_eq!(
-        edge.transaction_state(tx_id).unwrap(),
+        transaction_state(&mut edge, tx_id),
         (Fate::Accepted, None, DurabilityTier::Edge)
     );
 }
@@ -567,15 +643,14 @@ fn edge_permission_scope_is_write_policy_claim_not_whole_table() {
     };
 
     assert!(
-        edge_to_client
-            .ingest_edge_mergeable_commit_unit(
-                &mut edge,
-                tx,
-                versions,
-                u64::MAX - SKEW_TOLERANCE_MS,
-            )
-            .unwrap()
-            .is_empty()
+        edge_ingest(
+            &mut edge_to_client,
+            &mut edge,
+            tx,
+            versions,
+            u64::MAX - SKEW_TOLERANCE_MS,
+        )
+        .is_empty()
     );
 
     let scope_key = permission_scope_key(&schema, "todos", client_author);
@@ -588,7 +663,7 @@ fn edge_permission_scope_is_write_policy_claim_not_whole_table() {
             .is_none()
     );
     assert_eq!(edge_to_client.deferred_edge_fate_count(), 1);
-    assert_eq!(edge.transaction_state(tx_id).unwrap().0, Fate::Pending);
+    assert_eq!(transaction_state(&mut edge, tx_id).0, Fate::Pending);
 }
 
 #[test]
@@ -602,29 +677,36 @@ fn edge_permission_scope_uses_link_identity_not_made_by_provenance() {
     let mut edge_to_backend = PeerState::edge_client(backend_author);
 
     let row_uuid = row(20);
-    let (tx_id, unit) = backend
-        .commit_mergeable_unit(
-            MergeableCommit::new("todos", row_uuid, 10)
-                .made_by(attributed_user)
-                .permission_subject(backend_author)
-                .cells(cells("attributed via backend", backend_author)),
-        )
-        .unwrap();
+    let (tx_id, unit) = block_on(async {
+        let (published, unit) = backend
+            .commit_mergeable_unit(
+                MergeableCommit::new("todos", row_uuid, 10)
+                    .made_by(attributed_user)
+                    .permission_subject(backend_author)
+                    .cells(cells("attributed via backend", backend_author)),
+            )
+            .await
+            .unwrap();
+        let tx_id = backend
+            .persist_and_settle_transaction(published)
+            .await
+            .unwrap();
+        (tx_id, unit)
+    });
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("expected commit unit");
     };
 
     assert_ne!(tx.made_by, edge_to_backend.identity());
     assert!(
-        edge_to_backend
-            .ingest_edge_mergeable_commit_unit(
-                &mut edge,
-                tx.clone(),
-                versions.clone(),
-                u64::MAX - SKEW_TOLERANCE_MS,
-            )
-            .unwrap()
-            .is_empty()
+        edge_ingest(
+            &mut edge_to_backend,
+            &mut edge,
+            tx.clone(),
+            versions.clone(),
+            u64::MAX - SKEW_TOLERANCE_MS,
+        )
+        .is_empty()
     );
 
     let backend_scope = permission_scope_key(&schema, "todos", backend_author);
@@ -640,11 +722,13 @@ fn edge_permission_scope_uses_link_identity_not_made_by_provenance() {
             .is_none()
     );
 
-    let [fate] = edge_to_backend
-        .drain_deferred_edge_fates(&mut edge, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
-        .try_into()
-        .unwrap();
+    let [fate] = drain_edge_fates(
+        &mut edge_to_backend,
+        &mut edge,
+        u64::MAX - SKEW_TOLERANCE_MS,
+    )
+    .try_into()
+    .unwrap();
     assert_eq!(
         fate,
         SyncMessage::FateUpdate {
@@ -655,10 +739,12 @@ fn edge_permission_scope_uses_link_identity_not_made_by_provenance() {
         }
     );
     assert_eq!(
-        edge.transaction_state(tx_id).unwrap(),
+        transaction_state(&mut edge, tx_id),
         (Fate::Accepted, None, DurabilityTier::Edge)
     );
-    let SyncMessage::CommitUnit { tx: stored_tx, .. } = edge.commit_unit_for(tx_id).unwrap() else {
+    let SyncMessage::CommitUnit { tx: stored_tx, .. } =
+        block_on(edge.commit_unit_for(tx_id)).unwrap()
+    else {
         panic!("expected stored commit unit");
     };
     assert_eq!(stored_tx.made_by, attributed_user);
@@ -686,15 +772,14 @@ fn edge_deduplicates_scope_subscription_for_repeated_deferred_units() {
             panic!("expected commit unit");
         };
         assert!(
-            edge_to_client
-                .ingest_edge_mergeable_commit_unit(
-                    &mut edge,
-                    tx,
-                    versions,
-                    u64::MAX - SKEW_TOLERANCE_MS,
-                )
-                .unwrap()
-                .is_empty(),
+            edge_ingest(
+                &mut edge_to_client,
+                &mut edge,
+                tx,
+                versions,
+                u64::MAX - SKEW_TOLERANCE_MS
+            )
+            .is_empty(),
             "{tx_id:?} should defer behind the shared scope"
         );
     }
@@ -728,15 +813,14 @@ fn edge_permission_scopes_are_keyed_by_policy_shape_and_writer_claim() {
             panic!("expected commit unit");
         };
         assert!(
-            edge_to_a
-                .ingest_edge_mergeable_commit_unit(
-                    &mut edge,
-                    tx,
-                    versions,
-                    u64::MAX - SKEW_TOLERANCE_MS,
-                )
-                .unwrap()
-                .is_empty()
+            edge_ingest(
+                &mut edge_to_a,
+                &mut edge,
+                tx,
+                versions,
+                u64::MAX - SKEW_TOLERANCE_MS
+            )
+            .is_empty()
         );
     }
 
@@ -745,15 +829,14 @@ fn edge_permission_scopes_are_keyed_by_policy_shape_and_writer_claim() {
         panic!("expected commit unit");
     };
     assert!(
-        edge_to_b
-            .ingest_edge_mergeable_commit_unit(
-                &mut edge,
-                tx,
-                versions,
-                u64::MAX - SKEW_TOLERANCE_MS,
-            )
-            .unwrap()
-            .is_empty()
+        edge_ingest(
+            &mut edge_to_b,
+            &mut edge,
+            tx,
+            versions,
+            u64::MAX - SKEW_TOLERANCE_MS
+        )
+        .is_empty()
     );
 
     let scope_a = permission_scope_key(&schema, "todos", writer_a);
@@ -799,23 +882,20 @@ fn settled_permission_scope_for_one_writer_claim_does_not_unlock_whole_table() {
         panic!("expected commit unit");
     };
     assert!(
-        edge_to_a
-            .ingest_edge_mergeable_commit_unit(
-                &mut edge,
-                tx,
-                versions,
-                u64::MAX - SKEW_TOLERANCE_MS,
-            )
-            .unwrap()
-            .is_empty()
+        edge_ingest(
+            &mut edge_to_a,
+            &mut edge,
+            tx,
+            versions,
+            u64::MAX - SKEW_TOLERANCE_MS
+        )
+        .is_empty()
     );
-    let [_fate] = edge_to_a
-        .drain_deferred_edge_fates(&mut edge, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
+    let [_fate] = drain_edge_fates(&mut edge_to_a, &mut edge, u64::MAX - SKEW_TOLERANCE_MS)
         .try_into()
         .unwrap();
     assert_eq!(
-        edge.transaction_state(first_a).unwrap(),
+        transaction_state(&mut edge, first_a),
         (Fate::Accepted, None, DurabilityTier::Edge)
     );
 
@@ -823,11 +903,15 @@ fn settled_permission_scope_for_one_writer_claim_does_not_unlock_whole_table() {
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("expected commit unit");
     };
-    let [a_fate] = edge_to_a
-        .ingest_edge_mergeable_commit_unit(&mut edge, tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
-        .try_into()
-        .unwrap();
+    let [a_fate] = edge_ingest(
+        &mut edge_to_a,
+        &mut edge,
+        tx,
+        versions,
+        u64::MAX - SKEW_TOLERANCE_MS,
+    )
+    .try_into()
+    .unwrap();
     assert_eq!(
         a_fate,
         SyncMessage::FateUpdate {
@@ -843,19 +927,18 @@ fn settled_permission_scope_for_one_writer_claim_does_not_unlock_whole_table() {
         panic!("expected commit unit");
     };
     assert!(
-        edge_to_b
-            .ingest_edge_mergeable_commit_unit(
-                &mut edge,
-                tx,
-                versions,
-                u64::MAX - SKEW_TOLERANCE_MS,
-            )
-            .unwrap()
-            .is_empty()
+        edge_ingest(
+            &mut edge_to_b,
+            &mut edge,
+            tx,
+            versions,
+            u64::MAX - SKEW_TOLERANCE_MS
+        )
+        .is_empty()
     );
     assert_eq!(edge_to_b.deferred_edge_fate_count(), 1);
     assert_eq!(
-        edge.transaction_state(first_b).unwrap().0,
+        transaction_state(&mut edge, first_b).0,
         Fate::Pending,
         "settled writer-A scope must not satisfy missing writer-B scope"
     );
@@ -882,20 +965,17 @@ fn edge_releases_scope_subscription_after_last_deferred_unit_resolves() {
         let SyncMessage::CommitUnit { tx, versions } = unit else {
             panic!("expected commit unit");
         };
-        edge_to_client
-            .ingest_edge_mergeable_commit_unit(
-                &mut edge,
-                tx,
-                versions,
-                u64::MAX - SKEW_TOLERANCE_MS,
-            )
-            .unwrap();
+        edge_ingest(
+            &mut edge_to_client,
+            &mut edge,
+            tx,
+            versions,
+            u64::MAX - SKEW_TOLERANCE_MS,
+        );
     }
     assert_eq!(edge_to_client.edge_scope_subscription_count(), 1);
 
-    let updates = edge_to_client
-        .drain_deferred_edge_fates(&mut edge, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap();
+    let updates = drain_edge_fates(&mut edge_to_client, &mut edge, u64::MAX - SKEW_TOLERANCE_MS);
     assert_eq!(updates.len(), 2);
     assert_eq!(edge_to_client.deferred_edge_fate_count(), 0);
     assert_eq!(edge_to_client.edge_scope_subscription_count(), 0);
@@ -924,20 +1004,19 @@ fn edge_restart_recovers_deferred_fate_from_client_outbox_redelivery() {
     };
 
     assert!(
-        edge_to_client
-            .ingest_edge_mergeable_commit_unit(
-                &mut edge,
-                tx,
-                versions,
-                u64::MAX - SKEW_TOLERANCE_MS,
-            )
-            .unwrap()
-            .is_empty(),
+        edge_ingest(
+            &mut edge_to_client,
+            &mut edge,
+            tx,
+            versions,
+            u64::MAX - SKEW_TOLERANCE_MS
+        )
+        .is_empty(),
         "edge must defer until the permission scope settles"
     );
     assert_eq!(edge_to_client.deferred_edge_fate_count(), 1);
     assert_eq!(edge_to_client.edge_scope_subscription_count(), 1);
-    assert_eq!(edge.transaction_state(tx_id).unwrap().0, Fate::Pending);
+    assert_eq!(transaction_state(&mut edge, tx_id).0, Fate::Pending);
     drop(edge);
     drop(edge_to_client);
 
@@ -959,7 +1038,7 @@ fn edge_restart_recovers_deferred_fate_from_client_outbox_redelivery() {
         "scope subscription result state must not survive through a fresh peer after restart"
     );
     assert_eq!(
-        edge.transaction_state(tx_id).unwrap().0,
+        transaction_state(&mut edge, tx_id).0,
         Fate::Pending,
         "the pending relay history survives restart, but not the in-memory gate"
     );
@@ -969,22 +1048,23 @@ fn edge_restart_recovers_deferred_fate_from_client_outbox_redelivery() {
     };
     let mut redelivered_edge_to_client = PeerState::edge_client(client_author);
     assert!(
-        redelivered_edge_to_client
-            .ingest_edge_mergeable_commit_unit(
-                &mut edge,
-                tx,
-                versions,
-                u64::MAX - SKEW_TOLERANCE_MS,
-            )
-            .unwrap()
-            .is_empty(),
+        edge_ingest(
+            &mut redelivered_edge_to_client,
+            &mut edge,
+            tx,
+            versions,
+            u64::MAX - SKEW_TOLERANCE_MS
+        )
+        .is_empty(),
         "redelivered unit reopens the permission-scope gate after restart"
     );
-    let [fate] = redelivered_edge_to_client
-        .drain_deferred_edge_fates(&mut edge, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
-        .try_into()
-        .unwrap();
+    let [fate] = drain_edge_fates(
+        &mut redelivered_edge_to_client,
+        &mut edge,
+        u64::MAX - SKEW_TOLERANCE_MS,
+    )
+    .try_into()
+    .unwrap();
     assert_eq!(
         fate,
         SyncMessage::FateUpdate {
@@ -995,7 +1075,7 @@ fn edge_restart_recovers_deferred_fate_from_client_outbox_redelivery() {
         }
     );
     assert_eq!(
-        edge.transaction_state(tx_id).unwrap(),
+        transaction_state(&mut edge, tx_id),
         (Fate::Accepted, None, DurabilityTier::Edge)
     );
     assert_eq!(
@@ -1029,11 +1109,15 @@ fn edge_restart_preserves_edge_accepted_unit_without_redelivery() {
         panic!("expected commit unit");
     };
 
-    let [fate] = edge_to_client
-        .ingest_edge_mergeable_commit_unit(&mut edge, tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
-        .try_into()
-        .unwrap();
+    let [fate] = edge_ingest(
+        &mut edge_to_client,
+        &mut edge,
+        tx,
+        versions,
+        u64::MAX - SKEW_TOLERANCE_MS,
+    )
+    .try_into()
+    .unwrap();
     assert_eq!(
         fate,
         SyncMessage::FateUpdate {
@@ -1044,7 +1128,7 @@ fn edge_restart_preserves_edge_accepted_unit_without_redelivery() {
         }
     );
     assert_eq!(
-        edge.transaction_state(tx_id).unwrap(),
+        transaction_state(&mut edge, tx_id),
         (Fate::Accepted, None, DurabilityTier::Edge)
     );
     drop(edge);
@@ -1052,7 +1136,7 @@ fn edge_restart_preserves_edge_accepted_unit_without_redelivery() {
 
     let mut reopened = reopen_node(&edge_dir, node(3), schema);
     assert_eq!(
-        reopened.transaction_state(tx_id).unwrap(),
+        transaction_state(&mut reopened, tx_id),
         (Fate::Accepted, None, DurabilityTier::Edge),
         "edge-accepted fate must persist in edge storage across restart"
     );
@@ -1079,11 +1163,15 @@ fn edge_public_write_table_settles_without_deferral_or_scope() {
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("expected commit unit");
     };
-    let [fate] = edge_to_client
-        .ingest_edge_mergeable_commit_unit(&mut edge, tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
-        .try_into()
-        .unwrap();
+    let [fate] = edge_ingest(
+        &mut edge_to_client,
+        &mut edge,
+        tx,
+        versions,
+        u64::MAX - SKEW_TOLERANCE_MS,
+    )
+    .try_into()
+    .unwrap();
 
     assert_eq!(
         fate,
@@ -1122,37 +1210,42 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
     );
 
     let mut core_to_edge = PeerState::relay();
-    let grant_update = core_to_edge
-        .current_rows_update(&mut core, "canvasInvites")
-        .unwrap();
-    edge.apply_sync_message(grant_update).unwrap();
+    let grant_update =
+        block_on(core_to_edge.current_rows_update(&mut core, "canvasInvites")).unwrap();
+    apply_message(&mut edge, grant_update);
 
-    let (tx_id, unit) = client
-        .commit_mergeable_unit(
-            MergeableCommit::new("canvases", canvas_row, 20)
-                .made_by(client_author)
-                .cells(title_only_cells("edge final")),
-        )
-        .unwrap();
+    let (tx_id, unit) = block_on(async {
+        let (published, unit) = client
+            .commit_mergeable_unit(
+                MergeableCommit::new("canvases", canvas_row, 20)
+                    .made_by(client_author)
+                    .cells(title_only_cells("edge final")),
+            )
+            .await
+            .unwrap();
+        let tx_id = client
+            .persist_and_settle_transaction(published)
+            .await
+            .unwrap();
+        (tx_id, unit)
+    });
     let SyncMessage::CommitUnit { tx, versions } = unit.clone() else {
         panic!("expected commit unit");
     };
 
     let mut edge_to_client = PeerState::edge_client(client_author);
-    let first = edge_to_client
-        .ingest_edge_mergeable_commit_unit(
-            &mut edge,
-            tx.clone(),
-            versions.clone(),
-            u64::MAX - SKEW_TOLERANCE_MS,
-        )
-        .unwrap();
+    let first = edge_ingest(
+        &mut edge_to_client,
+        &mut edge,
+        tx.clone(),
+        versions.clone(),
+        u64::MAX - SKEW_TOLERANCE_MS,
+    );
     assert!(first.is_empty());
-    let [edge_fate] = edge_to_client
-        .drain_deferred_edge_fates(&mut edge, u64::MAX - SKEW_TOLERANCE_MS)
-        .unwrap()
-        .try_into()
-        .unwrap();
+    let [edge_fate] =
+        drain_edge_fates(&mut edge_to_client, &mut edge, u64::MAX - SKEW_TOLERANCE_MS)
+            .try_into()
+            .unwrap();
     assert_eq!(
         edge_fate,
         SyncMessage::FateUpdate {
@@ -1172,11 +1265,7 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
         MergeableCommit::new("canvasInvites", invite_row, 30).deletion(DeletionEvent::Deleted),
     );
 
-    let [control_fate] = control_core
-        .apply_sync_message(unit)
-        .unwrap()
-        .try_into()
-        .unwrap();
+    let [control_fate] = apply_message(&mut control_core, unit).try_into().unwrap();
     assert!(matches!(
         control_fate,
         SyncMessage::FateUpdate {
@@ -1187,33 +1276,35 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
 
     let shape = Query::from("canvases").validate(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    core.apply_sync_message(SyncMessage::ViewUpdate {
-        subscription: SubscriptionKey {
-            shape_id: shape.shape_id(),
-            binding_id: binding.binding_id(),
-            read_view: Default::default(),
+    apply_message(
+        &mut core,
+        SyncMessage::ViewUpdate {
+            subscription: SubscriptionKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: Default::default(),
+            },
+            settled_through: jazz::time::GlobalTime(0),
+            reset_result_set: false,
+            version_carriers: Vec::new(),
+            version_bundles: vec![VersionBundle {
+                tx,
+                versions,
+                scope: jazz::protocol::VersionBundleScope::CompleteTransaction,
+                fate: Fate::Accepted,
+                global_time: None,
+                durability: DurabilityTier::Edge,
+            }],
+            peer_payload_inventory: PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
         },
-        settled_through: jazz::time::GlobalTime(0),
-        reset_result_set: false,
-        version_carriers: Vec::new(),
-        version_bundles: vec![VersionBundle {
-            tx,
-            versions,
-            scope: jazz::protocol::VersionBundleScope::CompleteTransaction,
-            fate: Fate::Accepted,
-            global_time: None,
-            durability: DurabilityTier::Edge,
-        }],
-        peer_payload_inventory: PeerPayloadInventory::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
-    })
-    .unwrap();
+    );
 
-    let (fate, global_time, durability) = core.transaction_state(tx_id).unwrap();
+    let (fate, global_time, durability) = transaction_state(&mut core, tx_id);
     assert_eq!(fate, Fate::Accepted);
     assert!(global_time.is_none());
     assert_eq!(durability, DurabilityTier::Edge);
@@ -1223,7 +1314,7 @@ fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
         .find(|table| table.name == "canvases")
         .expect("canvases schema");
     assert_eq!(
-        core.current_rows("canvases", DurabilityTier::Edge)
+        block_on(core.current_rows("canvases", DurabilityTier::Edge))
             .unwrap()
             .into_iter()
             .map(|row| (

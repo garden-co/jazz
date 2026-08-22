@@ -106,10 +106,18 @@ pub(crate) enum FieldRequirement {
     Fields(BTreeSet<String>),
 }
 
-/// Resolver that turns logical Jazz source requests into concrete groove inputs.
-pub(crate) trait SourceResolver {
-    /// Resolve a source request into a concrete groove graph and row shape.
-    fn resolve_source(
+/// Async preparation boundary that turns logical Jazz source requests into
+/// owned, declarative Groove inputs before synchronous lowering begins.
+///
+/// Implementations may currently capture frozen snapshots or prepare physical
+/// metadata. They must not execute the query being lowered. Live data loading
+/// and residency belong to Groove evaluation, not this trait.
+///
+/// This is not the Groove runtime source resolver. New code must keep this
+/// trait on the preparation side of `lower_resolved_query_program`.
+pub(crate) trait SourceGraphPreparer {
+    /// Prepare one source request into a concrete Groove graph and row shape.
+    async fn prepare_source_graph(
         &mut self,
         request: &SourceRequest,
     ) -> Result<ResolvedSource, SourceResolutionError>;
