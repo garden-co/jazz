@@ -1797,7 +1797,7 @@ fn run_oneshot_subscribe() {
         let start = Instant::now();
         let subscription = block_on(db.subscribe_one_sink(post_graph(author))).expect("subscribe");
         let result = subscription.recv().expect("initial");
-        block_on(db.unsubscribe(subscription.id()));
+        db.unsubscribe(subscription.id());
         metrics.record_commit(start.elapsed());
         metrics.notification_records += result.deltas.len();
     }
