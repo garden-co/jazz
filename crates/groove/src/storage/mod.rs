@@ -34,8 +34,6 @@ pub use idb::IdbStorage;
 pub use memory::MemoryStorage;
 #[cfg(test)]
 pub type TestBtreeStorage = NativeBtreeStorage;
-#[cfg(target_arch = "wasm32")]
-pub use opfs::OpfsStorage;
 #[cfg(not(target_arch = "wasm32"))]
 pub use opfs::{BtreeSyncPolicy, NativeBtreeStorage};
 #[cfg(any(test, feature = "test"))]
