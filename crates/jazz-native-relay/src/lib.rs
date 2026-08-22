@@ -119,6 +119,8 @@ struct RelayInner {
     jobs: Mutex<Option<mpsc::Sender<RelayCommand>>>,
     join: Mutex<Option<thread::JoinHandle<()>>>,
     wire: NativeRelayWire,
+    sqlite_path: PathBuf,
+    schema_version: jazz::ids::SchemaVersionId,
 }
 
 impl Drop for RelayInner {
@@ -302,17 +304,17 @@ impl RelayWorker {
     }
 
     fn pump(&mut self) -> Result<(), RelayError> {
-        // Keep cycling until the directly attached peer graph makes no new
-        // observable work. The bound makes a malformed loop fail loudly rather
-        // than keeping a mobile event-loop hot forever.
-        for _ in 0..64 {
-            block_on(self.persistent.tick()).map_err(RelayError::Db)?;
-            for client in self.clients.values() {
-                block_on(client.db.tick()).map_err(RelayError::Db)?;
-            }
-            // The public Db tick currently does not expose a "made progress"
-            // flag. Two passes are sufficient for the in-process duplex hops;
-            // continue the bounded loop to flush any cascading subscriptions.
+        // One fair relay turn has exactly three protocol phases. A UI upload
+        // becomes relay input, the relay applies/forwards it, then UI clients
+        // observe resulting view/fate messages. More cascades schedule another
+        // host turn; spinning until quiescence here would make a busy
+        // subscription graph monopolize the native owner thread.
+        for client in self.clients.values() {
+            block_on(client.db.tick()).map_err(RelayError::Db)?;
+        }
+        block_on(self.persistent.tick()).map_err(RelayError::Db)?;
+        for client in self.clients.values() {
+            block_on(client.db.tick()).map_err(RelayError::Db)?;
         }
         Ok(())
     }
@@ -328,6 +330,8 @@ enum RelayCommand {
 impl NativeRelay {
     pub fn spawn(config: RelayOpenConfig) -> Result<Self, RelayError> {
         config.scope.validate()?;
+        let sqlite_path = config.sqlite_path.clone();
+        let schema_version = config.schema.version_id();
         let wire = NativeRelayWire::default();
         let (commands, receiver) = mpsc::channel::<RelayCommand>();
         let (started_tx, started_rx) = mpsc::channel();
@@ -365,6 +369,8 @@ impl NativeRelay {
                 jobs: Mutex::new(Some(commands)),
                 join: Mutex::new(Some(join)),
                 wire,
+                sqlite_path,
+                schema_version,
             }),
         })
     }
@@ -429,6 +435,11 @@ impl NativeRelayRegistry {
             .lock()
             .map_err(|_| RelayError::Poisoned("relay registry"))?;
         if let Some(existing) = relays.get(&config.scope) {
+            if existing.inner.sqlite_path != config.sqlite_path
+                || existing.inner.schema_version != config.schema.version_id()
+            {
+                return Err(RelayError::ScopeConfigurationMismatch);
+            }
             return Ok(existing.clone());
         }
         let relay = NativeRelay::spawn(config.clone())?;
@@ -458,6 +469,8 @@ pub enum RelayError {
     Poisoned(&'static str),
     #[error("native relay does not know UI client {0}")]
     UnknownClient(u64),
+    #[error("a native relay scope is already open with a different storage path or schema")]
+    ScopeConfigurationMismatch,
     #[error("native relay UI client id space exhausted")]
     ClientIdExhausted,
     #[error("SQLite storage failed: {0}")]
@@ -517,6 +530,10 @@ mod tests {
             .unwrap();
         assert!(Arc::ptr_eq(&first.inner, &same.inner));
         assert!(!Arc::ptr_eq(&first.inner, &other.inner));
+        assert!(matches!(
+            registry.open(config(directory.path().join("wrong.sqlite"), Some("alice"))),
+            Err(RelayError::ScopeConfigurationMismatch)
+        ));
 
         let first_client = first
             .attach_client(
