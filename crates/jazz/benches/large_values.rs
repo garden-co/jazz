@@ -1,10 +1,13 @@
 use std::hint::black_box;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use jazz::large_values::{
-    BytePatch, ContentDomain, ContentTree, LargeValue, MemoryContentStore, TailBounds, ValueEdit,
-    ValueKind, ValueSelection,
+    BytePatch, ChunkedValue, ContentDomain, ContentTree, KvContentStore, LargeValue,
+    MemoryContentStore, TailBounds, ValueEdit, ValueKind, ValueSelection,
 };
+use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use tempfile::TempDir;
 
 fn elapsed_us(start: Instant) -> u128 {
     start.elapsed().as_micros()
@@ -31,6 +34,216 @@ fn deterministic_text(size: usize) -> String {
         .into_iter()
         .map(|byte| char::from(b'a' + byte % 26))
         .collect()
+}
+
+/// A reproducible source which keeps only the current transport buffer alive.
+struct DeterministicChunks {
+    remaining: usize,
+    chunk_bytes: usize,
+    state: u64,
+}
+
+impl DeterministicChunks {
+    fn new(bytes: usize, chunk_bytes: usize) -> Self {
+        Self {
+            remaining: bytes,
+            chunk_bytes,
+            state: 0x4c61_7267_6556_616c_u64,
+        }
+    }
+}
+
+impl Iterator for DeterministicChunks {
+    type Item = Vec<u8>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let len = self.remaining.min(self.chunk_bytes);
+        if len == 0 {
+            return None;
+        }
+        self.remaining -= len;
+        let mut bytes = Vec::with_capacity(len);
+        for _ in 0..len {
+            self.state ^= self.state << 13;
+            self.state ^= self.state >> 7;
+            self.state ^= self.state << 17;
+            bytes.push(self.state as u8);
+        }
+        Some(bytes)
+    }
+}
+
+/// Linux resident-set snapshot. This intentionally reports both current RSS
+/// and high-water mark: RocksDB has a fixed cache/write-buffer floor, while
+/// the deltas between workload phases expose value-size-dependent memory.
+fn rss_bytes() -> serde_json::Value {
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return serde_json::Value::Null;
+    };
+    let kb = |field| {
+        status.lines().find_map(|line| {
+            line.strip_prefix(field)
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse::<u64>().ok())
+                .map(|value| value * 1024)
+        })
+    };
+    serde_json::json!({ "current": kb("VmRSS:"), "peak": kb("VmHWM:") })
+}
+
+fn rss_current(snapshot: &serde_json::Value) -> Option<u64> {
+    snapshot.get("current")?.as_u64()
+}
+
+fn rss_delta_from_open(
+    snapshot: &serde_json::Value,
+    after_open: &serde_json::Value,
+) -> Option<i64> {
+    Some(rss_current(snapshot)? as i64 - rss_current(after_open)? as i64)
+}
+
+fn directory_bytes(path: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => directory_bytes(&path),
+                Ok(kind) if kind.is_file() => entry.metadata().map(|meta| meta.len()).unwrap_or(0),
+                _ => 0,
+            }
+        })
+        .sum()
+}
+
+fn rocks_streaming_receipt() {
+    // 64 MiB keeps the default developer receipt practical. A one-GiB receipt
+    // is deliberately one environment variable away:
+    // JAZZ_LARGE_VALUE_ROCKS_BYTES=1073741824 cargo bench -p jazz --bench large_values
+    let size = std::env::var("JAZZ_LARGE_VALUE_ROCKS_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(64 * 1024 * 1024);
+    let chunk_bytes = std::env::var("JAZZ_LARGE_VALUE_ROCKS_CHUNK_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(64 * 1024);
+    let domain = ContentDomain::new(b"large-value-rocks-benchmark".to_vec()).unwrap();
+    let tree = ContentTree::new(Default::default()).unwrap();
+    let directory = TempDir::new().expect("create RocksDB benchmark directory");
+    let storage = RocksDbStorage::open_with_durability(
+        directory.path(),
+        &[jazz::large_values::CONTENT_OBJECTS_CF],
+        Durability::WalNoSync,
+    )
+    .expect("open RocksDB content storage");
+    let rss_after_open = rss_bytes();
+    let start = Instant::now();
+    let (root, root_byte_len) = {
+        let mut store = KvContentStore::new(&storage);
+        tree.build_streaming(
+            &domain,
+            DeterministicChunks::new(size, chunk_bytes),
+            &mut store,
+        )
+        .expect("stream content into RocksDB")
+    };
+    let create_elapsed = start.elapsed();
+    let rss_after_create = rss_bytes();
+    let metrics_after_create = storage.metrics().expect("read RocksDB metrics");
+    let directory_bytes_after_create = directory_bytes(directory.path());
+    let value = LargeValue::Chunked(ChunkedValue {
+        root,
+        root_byte_len,
+        edit_tail: Vec::new(),
+    });
+
+    // Reopen before reads to ensure this is a persisted-lookup receipt rather
+    // than a favorable path through the writer's just-populated RocksDB cache.
+    drop(storage);
+    let rss_after_close = rss_bytes();
+    let start = Instant::now();
+    let storage = RocksDbStorage::open_with_durability(
+        directory.path(),
+        &[jazz::large_values::CONTENT_OBJECTS_CF],
+        Durability::WalNoSync,
+    )
+    .expect("reopen RocksDB content storage");
+    let reopen_us = elapsed_us(start);
+    let rss_after_reopen = rss_bytes();
+
+    let range_len = 4096_u64;
+    let offsets = [0, root_byte_len / 2, root_byte_len - range_len];
+    let mut range_us = Vec::new();
+    for offset in offsets {
+        let start = Instant::now();
+        let selected = {
+            let store = KvContentStore::new(&storage);
+            value
+                .select(
+                    ValueKind::Bytes,
+                    &ValueSelection::ByteRange {
+                        offset,
+                        len: range_len,
+                    },
+                    &domain,
+                    tree,
+                    &store,
+                )
+                .expect("read bounded byte range")
+        };
+        black_box(selected);
+        range_us.push(elapsed_us(start));
+    }
+    let rss_after_ranges = rss_bytes();
+
+    println!(
+        "{}",
+        serde_json::json!({
+            "scenario": "large_value_rocksdb_streaming",
+            "logical_bytes": root_byte_len,
+            "source_chunk_bytes": chunk_bytes,
+            "active_streaming_bytes_upper_bound": streaming_memory_upper_bound(size, chunk_bytes),
+            "create_us": create_elapsed.as_micros(),
+            "create_mib_per_s": mib_per_second(size, create_elapsed),
+            "range_bytes": range_len,
+            "range_offsets": offsets,
+            "range_us": range_us,
+            "rss_after_open": rss_after_open,
+            "rss_after_create": rss_after_create,
+            "rss_after_close": rss_after_close,
+            "rss_after_reopen": rss_after_reopen,
+            "rss_after_ranges": rss_after_ranges,
+            "rss_current_delta_after_create_from_open": rss_delta_from_open(&rss_after_create, &rss_after_open),
+            "rss_current_delta_after_reopen_from_open": rss_delta_from_open(&rss_after_reopen, &rss_after_open),
+            "rss_current_delta_after_ranges_from_open": rss_delta_from_open(&rss_after_ranges, &rss_after_open),
+            "reopen_us": reopen_us,
+            "rocksdb_after_create": metrics_after_create,
+            "directory_bytes_after_create": directory_bytes_after_create,
+            "note": "RSS includes RocksDB's shared cache/write-buffer floor; compare phase deltas and active_streaming_bytes_upper_bound, not RSS to logical_bytes directly.",
+        })
+    );
+}
+
+fn streaming_memory_upper_bound(logical_bytes: usize, source_chunk_bytes: usize) -> usize {
+    // Default profile: one <=64KiB leaf, the current source buffer, and at
+    // most one unfinished 128-child descriptor list per live level. Count
+    // levels using the *minimum* fanout, making this a conservative bound even
+    // when content-defined boundaries happen unusually early.
+    let profile = jazz::large_values::ChunkingProfile::default();
+    let mut children = logical_bytes.div_ceil(profile.min_leaf_bytes).max(1);
+    let mut levels = 1;
+    while children > 1 {
+        children = children.div_ceil(profile.min_children);
+        levels += 1;
+    }
+    source_chunk_bytes
+        + profile.max_leaf_bytes
+        + levels * profile.max_children * (32 + std::mem::size_of::<u64>())
 }
 
 fn main() {
@@ -201,4 +414,6 @@ fn main() {
             "json_replace_insert_bytes": inserted_patch_bytes,
         })
     );
+
+    rocks_streaming_receipt();
 }

@@ -720,6 +720,30 @@ impl ContentTree {
         Ok((root.id, root.byte_len))
     }
 
+    /// Persist a byte stream without retaining the complete logical value.
+    ///
+    /// Chunks are only transport buffers: boundaries are calculated over the
+    /// continuous byte stream, so changing their size does not change the
+    /// resulting root.  The builder retains one leaf and one incomplete branch
+    /// per tree level, bounded by this tree's profile.
+    pub fn build_streaming<S, I, B>(
+        &self,
+        domain: &ContentDomain,
+        chunks: I,
+        store: &mut S,
+    ) -> Result<(ContentId, u64), ContentError>
+    where
+        S: ImmutableContentStore,
+        I: IntoIterator<Item = B>,
+        B: AsRef<[u8]>,
+    {
+        let mut builder = StreamingContentBuilder::new(*self, domain, store);
+        for chunk in chunks {
+            builder.push(chunk.as_ref())?;
+        }
+        builder.finish()
+    }
+
     /// Materialize the complete bytes below one root.
     pub fn materialize<S: ImmutableContentStore>(
         &self,
@@ -866,6 +890,158 @@ impl ContentTree {
             }
         }
         Ok(())
+    }
+}
+
+/// Online counterpart to [`ContentTree::build`].
+///
+/// This is intentionally internal: callers use `build_streaming`, while this
+/// type keeps the memory invariant explicit and testable near the tree format.
+struct StreamingContentBuilder<'a, S> {
+    tree: ContentTree,
+    domain: &'a ContentDomain,
+    store: &'a mut S,
+    leaf: Vec<u8>,
+    rolling: u64,
+    window: [u8; LEAF_HASH_WINDOW],
+    window_len: usize,
+    window_cursor: usize,
+    // Each entry is the unfinished child list for one branch level.  Complete
+    // branches immediately become one descriptor in the next level.
+    levels: Vec<Vec<ChildDescriptor>>,
+    saw_bytes: bool,
+}
+
+const LEAF_HASH_WINDOW: usize = 63;
+
+impl<'a, S: ImmutableContentStore> StreamingContentBuilder<'a, S> {
+    fn new(tree: ContentTree, domain: &'a ContentDomain, store: &'a mut S) -> Self {
+        Self {
+            tree,
+            domain,
+            store,
+            leaf: Vec::with_capacity(tree.profile.max_leaf_bytes),
+            rolling: 0,
+            window: [0; LEAF_HASH_WINDOW],
+            window_len: 0,
+            window_cursor: 0,
+            levels: Vec::new(),
+            saw_bytes: false,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) -> Result<(), ContentError> {
+        for byte in bytes.iter().copied() {
+            self.saw_bytes = true;
+            self.push_byte(byte)?;
+        }
+        Ok(())
+    }
+
+    fn push_byte(&mut self, byte: u8) -> Result<(), ContentError> {
+        if self.window_len < LEAF_HASH_WINDOW {
+            self.rolling = self.rolling.rotate_left(1) ^ gear(byte);
+            self.window_len += 1;
+        } else {
+            let outgoing = self.window[self.window_cursor];
+            self.rolling = self.rolling.rotate_left(1)
+                ^ gear(byte)
+                ^ gear(outgoing).rotate_left(LEAF_HASH_WINDOW as u32);
+        }
+        self.window[self.window_cursor] = byte;
+        self.window_cursor = (self.window_cursor + 1) % LEAF_HASH_WINDOW;
+        self.leaf.push(byte);
+
+        let profile = self.tree.profile;
+        let mask = u64::try_from(profile.target_leaf_bytes - 1).expect("target fits u64");
+        if (self.leaf.len() >= profile.min_leaf_bytes && self.rolling & mask == 0)
+            || self.leaf.len() >= profile.max_leaf_bytes
+        {
+            self.finish_leaf()?;
+        }
+        Ok(())
+    }
+
+    fn finish_leaf(&mut self) -> Result<(), ContentError> {
+        let bytes = std::mem::take(&mut self.leaf);
+        self.leaf = Vec::with_capacity(self.tree.profile.max_leaf_bytes);
+        self.rolling = 0;
+        self.window_len = 0;
+        self.window_cursor = 0;
+        let descriptor =
+            self.tree
+                .persist_object(self.domain, ContentObject::Leaf(bytes), self.store)?;
+        self.push_descriptor(0, descriptor)
+    }
+
+    fn push_descriptor(
+        &mut self,
+        level: usize,
+        descriptor: ChildDescriptor,
+    ) -> Result<(), ContentError> {
+        if self.levels.len() <= level {
+            self.levels.resize_with(level + 1, Vec::new);
+        }
+        self.levels[level].push(descriptor);
+        let children = &self.levels[level];
+        let profile = self.tree.profile;
+        if (children.len() >= profile.min_children
+            && descriptor_boundary(children.last().unwrap(), profile))
+            || children.len() >= profile.max_children
+        {
+            let children = std::mem::take(&mut self.levels[level]);
+            let parent = self.tree.persist_object(
+                self.domain,
+                ContentObject::Branch(children),
+                self.store,
+            )?;
+            self.push_descriptor(level + 1, parent)?;
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<(ContentId, u64), ContentError> {
+        if self.saw_bytes {
+            if !self.leaf.is_empty() {
+                self.finish_leaf()?;
+            }
+        } else {
+            self.finish_leaf()?;
+        }
+
+        // This is the online equivalent of the batch `while level.len() > 1`:
+        // an incomplete lower group becomes a branch only when it has siblings
+        // or an already-emitted group at the next level.
+        let mut level = 0;
+        loop {
+            let Some(last_nonempty) = self.levels.iter().rposition(|items| !items.is_empty())
+            else {
+                unreachable!("stream always persists an empty or non-empty leaf");
+            };
+            if level > last_nonempty {
+                unreachable!("finalization advances through all non-empty levels");
+            }
+            if self.levels[level].is_empty() {
+                level += 1;
+                continue;
+            }
+            let has_parent = self
+                .levels
+                .get(level + 1)
+                .is_some_and(|items| !items.is_empty());
+            if self.levels[level].len() == 1 && !has_parent {
+                let root = self.levels[level].pop().expect("non-empty level");
+                return Ok((root.id, root.byte_len));
+            }
+            let children = std::mem::take(&mut self.levels[level]);
+            let parent = self.tree.persist_object(
+                self.domain,
+                ContentObject::Branch(children),
+                self.store,
+            )?;
+            self.push_descriptor(level + 1, parent)?;
+            level += 1;
+        }
     }
 }
 
@@ -1584,7 +1760,7 @@ fn leaf_ranges(bytes: &[u8], profile: ChunkingProfile) -> Vec<std::ops::Range<us
     // A finite window is what lets boundaries converge again after an insert:
     // once the inserted bytes leave the window, unchanged suffixes have the
     // same hash (and therefore the same boundaries) as before.
-    const WINDOW: usize = 63;
+    const WINDOW: usize = LEAF_HASH_WINDOW;
     let mut rolling = 0_u64;
     let mut window = [0_u8; WINDOW];
     let mut window_len = 0_usize;
@@ -1620,25 +1796,14 @@ fn descriptor_groups(
     children: &[ChildDescriptor],
     profile: ChunkingProfile,
 ) -> Vec<std::ops::Range<usize>> {
-    let mask = u64::try_from(profile.target_children - 1).expect("target fits u64");
     let mut groups = Vec::new();
     let mut start = 0;
     for (index, child) in children.iter().enumerate() {
         // A descriptor is the indivisible unit at this level. Its stable
         // identity provides a boundary predicate that survives insertions and
         // deletions of neighboring descriptors.
-        let mut rolling = 0_u64;
-        for byte in child
-            .id
-            .as_bytes()
-            .iter()
-            .copied()
-            .chain(child.byte_len.to_le_bytes())
-        {
-            rolling = rolling.rotate_left(1) ^ gear(byte);
-        }
         let len = index + 1 - start;
-        let boundary = len >= profile.min_children && rolling & mask == 0;
+        let boundary = len >= profile.min_children && descriptor_boundary(child, profile);
         if boundary || len >= profile.max_children {
             groups.push(start..index + 1);
             start = index + 1;
@@ -1648,6 +1813,21 @@ fn descriptor_groups(
         groups.push(start..children.len());
     }
     groups
+}
+
+fn descriptor_boundary(child: &ChildDescriptor, profile: ChunkingProfile) -> bool {
+    let mask = u64::try_from(profile.target_children - 1).expect("target fits u64");
+    let mut rolling = 0_u64;
+    for byte in child
+        .id
+        .as_bytes()
+        .iter()
+        .copied()
+        .chain(child.byte_len.to_le_bytes())
+    {
+        rolling = rolling.rotate_left(1) ^ gear(byte);
+    }
+    rolling & mask == 0
 }
 
 fn gear(byte: u8) -> u64 {
@@ -1708,6 +1888,29 @@ mod tests {
                 .unwrap(),
             bytes[997..1208]
         );
+    }
+
+    // Internal because the public behavior being protected is the exact
+    // content-addressed format identity, not a user-visible database flow.
+    #[test]
+    fn streaming_build_matches_slice_build_across_transport_chunk_sizes() {
+        let tree = ContentTree::new(tiny_profile()).unwrap();
+        let bytes = (0..=255).cycle().take(16_777).collect::<Vec<_>>();
+        let mut expected_store = MemoryContentStore::default();
+        let expected = tree.build(&domain(), &bytes, &mut expected_store).unwrap();
+
+        for chunk_size in [1, 3, 17, 64, 513, 4096] {
+            let mut actual_store = MemoryContentStore::default();
+            let actual = tree
+                .build_streaming(&domain(), bytes.chunks(chunk_size), &mut actual_store)
+                .unwrap();
+            assert_eq!(actual, expected, "chunk size {chunk_size}");
+            assert_eq!(
+                tree.materialize(&domain(), actual.0, actual.1, &actual_store)
+                    .unwrap(),
+                bytes,
+            );
+        }
     }
 
     #[test]
