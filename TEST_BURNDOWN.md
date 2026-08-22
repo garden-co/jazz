@@ -120,16 +120,14 @@ A future fix must remove both the matching visible skip marker and this entry, t
 | `groove::db::tests::queries::indexed_batch_commit_timing_receipt_20k_and_single_row`                     | `crates/groove/src/db/tests/queries/mod.rs`              | timing receipt                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `jazz::node::tests::harness::policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt`               | `crates/jazz/src/node/tests/sync/performance_receipt.rs` | timing receipt                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 
-## Active TypeScript/browser quarantine (1)
+## Active TypeScript/browser quarantine (0)
 
 The original measured TypeScript/browser failure set is burned down. The former
 catalogue-rehydration case is now an active browser receipt in
 `worker-bridge.test.ts`, with a fresh release-NAPI/fast-WASM run on the trusted
 catalogue-lineage persistence fix.
 
-| Test                                                                                                                                | Definition                                              | Current reason                                                                                                                                                                            |
-| ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `registerWindowJazzStorageClient > scopes the reported namespace for cookie sessions and leaves anonymous cookie sessions unscoped` | `packages/jazz-tools/src/window-client-storage.test.ts` | resolveStorageNamespace resolves the session from jwtToken only, so an external cookie session reports the unscoped appId namespace and the anonymous authMode carve-out is never applied |
+There are currently no quarantined TypeScript/browser tests.
 
 ## Manual starter E2E stabilization (not quarantine)
 
