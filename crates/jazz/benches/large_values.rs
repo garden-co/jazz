@@ -3,8 +3,8 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use jazz::large_values::{
-    BytePatch, ChunkedValue, ContentDomain, ContentTree, KvContentStore, LargeValue,
-    MemoryContentStore, TailBounds, ValueEdit, ValueKind, ValueSelection,
+    BytePatch, ContentDomain, ContentTree, KvContentStore, LargeValue, MemoryContentStore,
+    TailBounds, ValueEdit, ValueKind, ValueSelection,
 };
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use tempfile::TempDir;
@@ -143,25 +143,21 @@ fn rocks_streaming_receipt() {
     .expect("open RocksDB content storage");
     let rss_after_open = rss_bytes();
     let start = Instant::now();
-    let (root, root_byte_len) = {
+    let value = {
         let mut store = KvContentStore::new(&storage);
-        tree.build_streaming(
+        LargeValue::create_streaming_bytes(
             &domain,
             DeterministicChunks::new(size, chunk_bytes),
+            tree,
             &mut store,
         )
         .expect("stream content into RocksDB")
     };
     let create_elapsed = start.elapsed();
+    let root_byte_len = value.byte_len().expect("read streamed value length");
     let rss_after_create = rss_bytes();
     let metrics_after_create = storage.metrics().expect("read RocksDB metrics");
     let directory_bytes_after_create = directory_bytes(directory.path());
-    let value = LargeValue::Chunked(ChunkedValue {
-        root,
-        root_byte_len,
-        edit_tail: Vec::new(),
-    });
-
     // Reopen before reads to ensure this is a persisted-lookup receipt rather
     // than a favorable path through the writer's just-populated RocksDB cache.
     drop(storage);

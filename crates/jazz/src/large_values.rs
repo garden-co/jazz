@@ -1046,6 +1046,16 @@ impl<'a, S: ImmutableContentStore> StreamingContentBuilder<'a, S> {
 }
 
 impl LargeValue {
+    /// Return the assembled logical byte length without loading tree payloads.
+    pub fn byte_len(&self) -> Result<u64, ContentError> {
+        match self {
+            Self::Inline(bytes) => {
+                u64::try_from(bytes.len()).map_err(|_| ContentError::LengthOverflow)
+            }
+            Self::Chunked(large) => patched_length(large),
+        }
+    }
+
     /// Encode the complete atomic physical cell for ordinary Jazz storage and
     /// wire transport.
     pub fn encode_cell(&self) -> Result<Vec<u8>, ContentError> {
@@ -1191,6 +1201,31 @@ impl LargeValue {
             return Ok(Self::Inline(bytes));
         }
         let (root, root_byte_len) = tree.build(domain, &bytes, store)?;
+        Ok(Self::Chunked(ChunkedValue {
+            root,
+            root_byte_len,
+            edit_tail: Vec::new(),
+        }))
+    }
+
+    /// Create a chunked bytes value from bounded transport buffers.
+    ///
+    /// Unlike [`Self::create`], this never retains the complete logical value
+    /// and deliberately always returns the chunked representation. Text and
+    /// JSON require streaming logical validation and are not accepted by this
+    /// bytes-specific entry point.
+    pub fn create_streaming_bytes<S, I, B>(
+        domain: &ContentDomain,
+        chunks: I,
+        tree: ContentTree,
+        store: &mut S,
+    ) -> Result<Self, ContentError>
+    where
+        S: ImmutableContentStore,
+        I: IntoIterator<Item = B>,
+        B: AsRef<[u8]>,
+    {
+        let (root, root_byte_len) = tree.build_streaming(domain, chunks, store)?;
         Ok(Self::Chunked(ChunkedValue {
             root,
             root_byte_len,
@@ -1901,9 +1936,17 @@ mod tests {
 
         for chunk_size in [1, 3, 17, 64, 513, 4096] {
             let mut actual_store = MemoryContentStore::default();
-            let actual = tree
-                .build_streaming(&domain(), bytes.chunks(chunk_size), &mut actual_store)
-                .unwrap();
+            let value = LargeValue::create_streaming_bytes(
+                &domain(),
+                bytes.chunks(chunk_size),
+                tree,
+                &mut actual_store,
+            )
+            .unwrap();
+            let LargeValue::Chunked(large) = value else {
+                panic!("streaming create must be chunked");
+            };
+            let actual = (large.root, large.root_byte_len);
             assert_eq!(actual, expected, "chunk size {chunk_size}");
             assert_eq!(
                 tree.materialize(&domain(), actual.0, actual.1, &actual_store)
