@@ -84,3 +84,14 @@ JSON, and public enum record fields now carry the inline/indirect scalar tag;
 binding decoders consume exactly one inline tag and reject an indirect arm at a
 logical result boundary. Tests and golden snapshots were updated rather than
 adding a compatibility decoder for the unreleased format.
+
+## 2026-08-23 — Invariant coverage boundary
+
+The implementation checkpoint promotes only invariants exercised by concrete
+tests. Locator-discovery authorization and all-retainer collection remain
+explicit Jazz targets, and persistent reusable derived-state identity remains
+an explicit Groove target. They are not silently treated as completed by the
+high-level API slice: the current bearer-locator read model, refcount-aware row
+mutation, streaming operators, and owned-result bindings are independently
+covered, while the broader future capabilities retain `target | untested`
+registry status until their own designs and adversarial suites land.
