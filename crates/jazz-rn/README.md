@@ -18,10 +18,12 @@ not the planned command/codec ABI; in particular it must not be treated as an
 implementation of the relay.
 
 The package now reserves a generated `JazzRelay` TurboModule boundary. Android
-registers its ABI probe and explicitly rejects commands until an Android build
-embeds the shared Rust relay artifact. This is a thin platform checkpoint, not
-device support: there is still no executable relay command codec, XCFramework,
-AAR, or Expo development-build receipt.
+registers the generated module but reports ABI `0` (unavailable) and explicitly
+rejects commands until an Android build embeds the shared Rust relay artifact.
+The shared host codec now stages `Open`, `Attach`, `CloseClient`, `CloseRelay`,
+and bounded `Pump`; no Android artifact calls it yet. This is a thin platform
+checkpoint, not device support: there is still no linked JNI artifact,
+XCFramework, AAR, or Expo development-build receipt.
 
 The shared artifact seam is `jazz_native_relay_abi_version` from
 `jazz-native-relay`'s C ABI (`include/jazz_native_relay.h`). Android/JNI will
@@ -32,8 +34,8 @@ artifact.
 
 ## What remains before React Native is supported
 
-1. Define and implement the relay command/event codecs, then generate a small
-   TurboModule around them (not an object-per-row API).
+1. Link the staged host lifecycle codec through thin JNI/Swift translation and
+   extend it with shared event/peer-frame drainage (not an object-per-row API).
 2. Replace the stale UniFFI surface and build real iOS XCFramework and Android
    AAR/shared-library slices from that module.
 3. Verify bare React Native autolinking plus Expo prebuild/development builds

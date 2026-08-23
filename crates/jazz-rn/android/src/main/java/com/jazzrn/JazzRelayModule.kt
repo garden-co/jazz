@@ -15,7 +15,9 @@ import com.facebook.react.module.annotations.ReactModule
  */
 @ReactModule(name = JazzRelayModule.NAME)
 class JazzRelayModule(reactContext: ReactApplicationContext) : NativeJazzRelaySpec(reactContext) {
-  override fun getAbiVersion(): Double = 1.0
+  // Zero is the stable unavailable sentinel. This module is registered for
+  // Codegen/autolinking receipts, but no shared Rust artifact is linked yet.
+  override fun getAbiVersion(): Double = 0.0
 
   override fun execute(encodedCommand: String, promise: Promise) {
     promise.reject(

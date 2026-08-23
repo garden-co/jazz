@@ -31,6 +31,14 @@ int main(void) {
     return 1;
   }
   jazz_native_relay_bytes_free(&response);
+  response.data = (uint8_t *)(uintptr_t)1;
+  response.len = 17;
+  if (jazz_native_relay_host_execute(NULL, probe, sizeof(probe), &response) !=
+          JAZZ_NATIVE_RELAY_INVALID_ARGUMENT ||
+      response.data != NULL || response.len != 0) {
+    fprintf(stderr, "invalid host did not reset output\n");
+    return 1;
+  }
   jazz_native_relay_host_free(host);
   if (jazz_native_relay_execute((const uint8_t *)"\xff", 1, &response) !=
       JAZZ_NATIVE_RELAY_INVALID_COMMAND) {

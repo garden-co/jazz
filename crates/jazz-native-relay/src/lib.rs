@@ -34,13 +34,14 @@ pub const NATIVE_RELAY_ABI_VERSION: u16 = 1;
 
 /// Codec-owned commands accepted by the native relay C ABI.
 ///
-/// `Probe` is intentionally the only command until the shared relay command
-/// taxonomy is specified. JNI/Swift wrappers must carry these postcard bytes
-/// unchanged; they must not recreate database, query, or mutation semantics.
+/// This surface owns relay lifecycle only. JNI/Swift wrappers carry these
+/// postcard bytes unchanged; query, mutation, and row semantics remain absent.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum RelayCommandRequest {
     Probe,
     Open {
+        supported_abi_minimum: u16,
+        supported_abi_maximum: u16,
         scope: RelayScopeRequest,
         sqlite_path: String,
         schema_json: String,
@@ -117,6 +118,8 @@ pub enum JazzNativeRelayStatus {
     EncodeFailure = 3,
     InvalidHandle = 4,
     LifecycleFailure = 5,
+    InvalidAbiRange = 6,
+    IncompatibleAbi = 7,
 }
 
 /// Explicit host-owned lifecycle registry for JNI/Swift. No global relay map.
@@ -125,6 +128,8 @@ pub struct NativeRelayHost {
     relays: BTreeMap<u64, (RelayScope, NativeRelay)>,
     clients: BTreeMap<u64, (u64, NativeRelayClient)>,
     next_handle: u64,
+    #[cfg(test)]
+    thread_start_counter: Option<Arc<AtomicUsize>>,
 }
 
 impl Default for NativeRelayHost {
@@ -134,6 +139,8 @@ impl Default for NativeRelayHost {
             relays: BTreeMap::new(),
             clients: BTreeMap::new(),
             next_handle: 1,
+            #[cfg(test)]
+            thread_start_counter: None,
         }
     }
 }
@@ -157,11 +164,22 @@ impl NativeRelayHost {
                 abi_version: NATIVE_RELAY_ABI_VERSION,
             }),
             RelayCommandRequest::Open {
+                supported_abi_minimum,
+                supported_abi_maximum,
                 scope,
                 sqlite_path,
                 schema_json,
                 identity,
             } => {
+                let supported_abi = NativeRelayAbiRange {
+                    minimum: supported_abi_minimum,
+                    maximum: supported_abi_maximum,
+                };
+                ensure_native_relay_abi_compatible(supported_abi).map_err(|error| match error {
+                    RelayError::InvalidAbiRange { .. } => JazzNativeRelayStatus::InvalidAbiRange,
+                    RelayError::IncompatibleAbi { .. } => JazzNativeRelayStatus::IncompatibleAbi,
+                    _ => JazzNativeRelayStatus::LifecycleFailure,
+                })?;
                 let public_schema = serde_json::from_str(&schema_json)
                     .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
                 let schema = JazzSchema::new(&public_schema)
@@ -170,16 +188,13 @@ impl NativeRelayHost {
                 let relay = self
                     .registry
                     .open(RelayOpenConfig {
-                        supported_abi: NativeRelayAbiRange {
-                            minimum: NATIVE_RELAY_ABI_VERSION,
-                            maximum: NATIVE_RELAY_ABI_VERSION,
-                        },
+                        supported_abi,
                         scope: scope.clone(),
                         sqlite_path: PathBuf::from(sqlite_path),
                         schema,
                         identity,
                         #[cfg(test)]
-                        thread_start_counter: None,
+                        thread_start_counter: self.thread_start_counter.clone(),
                     })
                     .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
                 let handle = self
@@ -229,11 +244,16 @@ impl NativeRelayHost {
                         let _ = client.close();
                     }
                 }
-                let closed = self
-                    .registry
-                    .close(&scope)
-                    .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
-                Ok(RelayCommandResponse::Closed { closed })
+                let final_alias = !self
+                    .relays
+                    .values()
+                    .any(|(remaining_scope, _)| remaining_scope == &scope);
+                if final_alias {
+                    self.registry
+                        .close(&scope)
+                        .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+                }
+                Ok(RelayCommandResponse::Closed { closed: true })
             }
             RelayCommandRequest::Pump { relay } => {
                 self.relays
@@ -263,7 +283,8 @@ pub extern "C" fn jazz_native_relay_abi_version() -> u16 {
 /// `request` is a complete postcard [`RelayCommandRequest`]. On `Ok`, `out`
 /// receives Rust-owned postcard [`RelayCommandResponse`] bytes. On any error,
 /// `out` is reset to an empty buffer. This function has no storage side effects
-/// until a future command explicitly defines them.
+/// until a future command explicitly defines them. `out` must already be empty
+/// or freed before reuse; resetting an owned buffer would lose its allocation.
 ///
 /// # Safety
 ///
@@ -275,12 +296,15 @@ pub unsafe extern "C" fn jazz_native_relay_execute(
     request_len: usize,
     out: *mut JazzNativeRelayBytes,
 ) -> JazzNativeRelayStatus {
-    if out.is_null() || (request.is_null() && request_len != 0) {
+    if out.is_null() {
         return JazzNativeRelayStatus::InvalidArgument;
     }
     // SAFETY: `out` is non-null and exclusively owned by the caller for this
     // call. Reset it before decoding so every error has one unambiguous state.
     unsafe { *out = JazzNativeRelayBytes::EMPTY };
+    if request.is_null() && request_len != 0 {
+        return JazzNativeRelayStatus::InvalidArgument;
+    }
     let request = if request_len == 0 {
         &[]
     } else {
@@ -341,6 +365,7 @@ pub unsafe extern "C" fn jazz_native_relay_host_free(host: *mut JazzNativeRelayH
 }
 
 /// Execute lifecycle commands against one explicit host context.
+/// `out` must already be empty or freed before reuse.
 ///
 /// # Safety
 /// `host`, request bytes, and `out` follow the same validity rules as
@@ -352,11 +377,14 @@ pub unsafe extern "C" fn jazz_native_relay_host_execute(
     request_len: usize,
     out: *mut JazzNativeRelayBytes,
 ) -> JazzNativeRelayStatus {
-    if host.is_null() || out.is_null() || (request.is_null() && request_len != 0) {
+    if out.is_null() {
         return JazzNativeRelayStatus::InvalidArgument;
     }
     unsafe {
         *out = JazzNativeRelayBytes::EMPTY;
+    }
+    if host.is_null() || (request.is_null() && request_len != 0) {
+        return JazzNativeRelayStatus::InvalidArgument;
     }
     let request = if request_len == 0 {
         &[]
@@ -1301,6 +1329,8 @@ mod tests {
             author: AuthorId::from_bytes([0x72; 16]),
         };
         let open = RelayCommandRequest::Open {
+            supported_abi_minimum: NATIVE_RELAY_ABI_VERSION,
+            supported_abi_maximum: NATIVE_RELAY_ABI_VERSION,
             scope: RelayScopeRequest {
                 app_namespace: "host-receipt".to_owned(),
                 storage_namespace: "default".to_owned(),
@@ -1329,10 +1359,21 @@ mod tests {
             unsafe { jazz_native_relay_bytes_free(&mut output) };
             Ok(response)
         }
-        let relay = match unsafe { command(host, open) }.unwrap() {
+        let relay = match unsafe { command(host, open.clone()) }.unwrap() {
             RelayCommandResponse::Opened { relay } => relay,
             response => panic!("unexpected open response: {response:?}"),
         };
+        let alias = match unsafe { command(host, open.clone()) }.unwrap() {
+            RelayCommandResponse::Opened { relay } => relay,
+            response => panic!("unexpected alias response: {response:?}"),
+        };
+        assert_ne!(relay, alias);
+        unsafe {
+            assert!(Arc::ptr_eq(
+                &(*host).inner.relays.get(&relay).unwrap().1.inner,
+                &(*host).inner.relays.get(&alias).unwrap().1.inner,
+            ));
+        }
         let client = match unsafe {
             command(
                 host,
@@ -1356,17 +1397,27 @@ mod tests {
             Ok(RelayCommandResponse::Pumped)
         ));
         assert_eq!(
-            unsafe { command(host, RelayCommandRequest::CloseClient { client }) }.unwrap(),
+            unsafe { command(host, RelayCommandRequest::CloseRelay { relay }) }.unwrap(),
             RelayCommandResponse::Closed { closed: true }
         );
+        assert!(matches!(
+            unsafe { command(host, RelayCommandRequest::Pump { relay: alias }) },
+            Ok(RelayCommandResponse::Pumped)
+        ));
         assert_eq!(
             unsafe { command(host, RelayCommandRequest::CloseClient { client }) }.unwrap(),
             RelayCommandResponse::Closed { closed: false }
         );
-        assert_eq!(
-            unsafe { command(host, RelayCommandRequest::CloseRelay { relay }) }.unwrap(),
-            RelayCommandResponse::Closed { closed: true }
-        );
+        let reopened = match unsafe { command(host, open) }.unwrap() {
+            RelayCommandResponse::Opened { relay } => relay,
+            response => panic!("unexpected reopen response: {response:?}"),
+        };
+        unsafe {
+            assert!(Arc::ptr_eq(
+                &(*host).inner.relays.get(&alias).unwrap().1.inner,
+                &(*host).inner.relays.get(&reopened).unwrap().1.inner,
+            ));
+        }
         assert_eq!(
             unsafe { command(host, RelayCommandRequest::CloseRelay { relay }) }.unwrap(),
             RelayCommandResponse::Closed { closed: false }
@@ -1375,6 +1426,85 @@ mod tests {
             unsafe { command(host, RelayCommandRequest::Pump { relay }) },
             Err(JazzNativeRelayStatus::InvalidHandle)
         ));
+        assert_eq!(
+            unsafe { command(host, RelayCommandRequest::CloseRelay { relay: alias }) }.unwrap(),
+            RelayCommandResponse::Closed { closed: true }
+        );
+        assert!(matches!(
+            unsafe { command(host, RelayCommandRequest::Pump { relay: reopened }) },
+            Ok(RelayCommandResponse::Pumped)
+        ));
+        assert_eq!(
+            unsafe { command(host, RelayCommandRequest::CloseRelay { relay: reopened }) }.unwrap(),
+            RelayCommandResponse::Closed { closed: true }
+        );
+        unsafe { jazz_native_relay_host_free(host) };
+    }
+
+    #[test]
+    fn c_host_open_rejects_wrapper_abi_before_storage_and_resets_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let sqlite_path = directory.path().join("must-not-open.sqlite");
+        let host = jazz_native_relay_host_new();
+        let threads_started = Arc::new(AtomicUsize::new(0));
+        unsafe { (*host).inner.thread_start_counter = Some(Arc::clone(&threads_started)) };
+        let request = |minimum, maximum| RelayCommandRequest::Open {
+            supported_abi_minimum: minimum,
+            supported_abi_maximum: maximum,
+            scope: RelayScopeRequest {
+                app_namespace: "abi-rejection".to_owned(),
+                storage_namespace: "default".to_owned(),
+                auth_scope: None,
+            },
+            sqlite_path: sqlite_path.display().to_string(),
+            schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
+            identity: DbIdentity {
+                node: NodeUuid::from_bytes([0x81; 16]),
+                author: AuthorId::from_bytes([0x82; 16]),
+            },
+        };
+        for (request, expected) in [
+            (request(2, 1), JazzNativeRelayStatus::InvalidAbiRange),
+            (request(2, 2), JazzNativeRelayStatus::IncompatibleAbi),
+        ] {
+            let encoded = postcard::to_allocvec(&request).unwrap();
+            let mut output = JazzNativeRelayBytes {
+                data: std::ptr::dangling_mut(),
+                len: 99,
+            };
+            assert_eq!(
+                unsafe {
+                    jazz_native_relay_host_execute(
+                        host,
+                        encoded.as_ptr(),
+                        encoded.len(),
+                        &mut output,
+                    )
+                },
+                expected
+            );
+            assert!(output.data.is_null());
+            assert_eq!(output.len, 0);
+            assert!(!sqlite_path.exists());
+            assert_eq!(threads_started.load(Ordering::Relaxed), 0);
+        }
+        let mut output = JazzNativeRelayBytes {
+            data: std::ptr::dangling_mut(),
+            len: 77,
+        };
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_execute(
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                    1,
+                    &mut output,
+                )
+            },
+            JazzNativeRelayStatus::InvalidArgument
+        );
+        assert!(output.data.is_null());
+        assert_eq!(output.len, 0);
         unsafe { jazz_native_relay_host_free(host) };
     }
 }

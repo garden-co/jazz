@@ -52,6 +52,13 @@ test("jazz-rn reserves a thin binary relay TurboModule boundary for matching nat
     new URL("../../../crates/jazz-rn/scripts/test-codegen.sh", import.meta.url),
     "utf8",
   );
+  const androidRelay = await readFile(
+    new URL(
+      "../../../crates/jazz-rn/android/src/main/java/com/jazzrn/JazzRelayModule.kt",
+      import.meta.url,
+    ),
+    "utf8",
+  );
 
   assert.equal(packageJson.exports["./relay"].source, "./src/relay.ts");
   assert.equal(packageJson.scripts["test:codegen"], "bash scripts/test-codegen.sh");
@@ -61,4 +68,6 @@ test("jazz-rn reserves a thin binary relay TurboModule boundary for matching nat
   assert.match(relay, /matching native development or release build/);
   assert.match(codegenGate, /for platform in android ios/);
   assert.match(codegenGate, /NativeJazzRelay/);
+  assert.match(androidRelay, /getAbiVersion\(\): Double = 0\.0/);
+  assert.match(androidRelay, /E_JAZZ_RELAY_UNAVAILABLE/);
 });

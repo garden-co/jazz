@@ -4,6 +4,10 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * Return the shared native relay ABI version embedded in this artifact.
  *
@@ -24,6 +28,8 @@ typedef enum jazz_native_relay_status {
   JAZZ_NATIVE_RELAY_ENCODE_FAILURE = 3,
   JAZZ_NATIVE_RELAY_INVALID_HANDLE = 4,
   JAZZ_NATIVE_RELAY_LIFECYCLE_FAILURE = 5,
+  JAZZ_NATIVE_RELAY_INVALID_ABI_RANGE = 6,
+  JAZZ_NATIVE_RELAY_INCOMPATIBLE_ABI = 7,
 } jazz_native_relay_status;
 
 typedef struct jazz_native_relay_host jazz_native_relay_host;
@@ -38,7 +44,9 @@ jazz_native_relay_status jazz_native_relay_host_execute(
 /*
  * Execute one complete postcard RelayCommandRequest. On success, response
  * bytes are Rust-owned and must be released with jazz_native_relay_bytes_free.
- * On error, out is reset to {NULL, 0}. Passing NULL for out is invalid.
+ * On error, out is reset to {NULL, 0}. Passing NULL for out is invalid. Before
+ * every call, out must already be empty or have been freed; resetting an owned
+ * buffer would otherwise discard its only pointer.
  */
 jazz_native_relay_status jazz_native_relay_execute(
     const uint8_t *request,
@@ -48,5 +56,9 @@ jazz_native_relay_status jazz_native_relay_execute(
 /* Free one returned response and reset it to {NULL, 0}. Repeating this call on
  * the same struct is safe; copying the struct before freeing is not. */
 void jazz_native_relay_bytes_free(jazz_native_relay_bytes *bytes);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
