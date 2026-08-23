@@ -100,6 +100,16 @@ _Further invariants._ `INV-DATA-11` — a merge-strategy declaration names an
 existing user column. `INV-DATA-12` — a table policy validates against the whole
 schema.
 
+### 2.3.1 Ordinary-value baseline
+
+`string` and `bytes` are ordinary column values with ordinary Jazz row history.
+The current core has no specialized Text/Blob large-value type, edit API,
+materialized value handle, content store, extent/chunk protocol traffic, or
+large-value query source. Sync transports only ordinary commit, schema, query,
+and subscription data. A future large-value design is tracked in
+[#1757](https://github.com/garden-co/jazz/issues/1757); it must be introduced as
+new semantics rather than inferred from this baseline.
+
 ### 2.4 Schema identity is content-addressed
 
 Schema identity is derived from schema content so independently observed copies

@@ -70,8 +70,8 @@ surface an application calls. Dip back into 2–8 as the API references them. Yo
 do not need the groove spec to build an app: lowering to groove (ch. 14) is an
 implementation concern, not an app-facing one. A rough reading path: minimum
 for a local app is ch. 1, 13, §2.3, §7.1; add §3.3 / §5.1 / §8.1 / §9.2 for
-client–server sync; add §12.1–12.4 for `text`/`blob` columns. To operate a
-deployment, read ch. 3, 8, and 9.
+client–server sync. `string` and `bytes` use the ordinary-value baseline in
+§2.3.1. To operate a deployment, read ch. 3, 8, and 9.
 
 ### 1.2 Design principles
 
