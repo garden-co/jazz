@@ -6,6 +6,14 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Return whether two schema facades share one open-transaction runtime.
+    ///
+    /// This compares the private runtime capability, not caller-controlled ids.
+    #[doc(hidden)]
+    pub fn shares_runtime_with(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.node, &other.node)
+    }
+
     /// Build a mergeable transaction that commits multiple writes under one id.
     pub async fn mergeable_tx(&self) -> Result<MergeableTx<'_, S>, Error> {
         let tx_id = OpenTransactionId::new();

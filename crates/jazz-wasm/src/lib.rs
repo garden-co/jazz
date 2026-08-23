@@ -296,9 +296,9 @@ impl Clone for WasmDbInner {
 impl WasmDbInner {
     fn shares_runtime_with(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Memory(left), Self::Memory(right)) => Rc::ptr_eq(left, right),
+            (Self::Memory(left), Self::Memory(right)) => left.shares_runtime_with(right),
             #[cfg(target_arch = "wasm32")]
-            (Self::Browser(left), Self::Browser(right)) => Rc::ptr_eq(left, right),
+            (Self::Browser(left), Self::Browser(right)) => left.shares_runtime_with(right),
             _ => false,
         }
     }
@@ -3913,6 +3913,38 @@ mod dynamic_schema_view_tests {
                     )
                     .is_ok(),
                 "planted positive: Alice retains the bound capability"
+            );
+            let view_binding = WasmDb {
+                inner: WasmDbInner::Memory(Rc::clone(&view)),
+                owns_runtime: false,
+            };
+            let view_query = WasmPreparedQuery {
+                inner: view.prepare_query(&view.table("items")).unwrap(),
+            };
+            assert!(view_binding
+                .all_in_transaction(&view_query, &tx, JsValue::NULL)
+                .is_ok());
+            assert!(view_binding
+                .all_in_transaction_for_identity(
+                    &view_query,
+                    &tx,
+                    alice.0.as_bytes().to_vec(),
+                    JsValue::NULL,
+                )
+                .is_ok());
+            assert!(view_binding
+                .one_in_transaction(&view_query, &tx, JsValue::NULL)
+                .is_ok());
+            assert!(
+                view_binding
+                    .one_in_transaction_for_identity(
+                        &view_query,
+                        &tx,
+                        alice.0.as_bytes().to_vec(),
+                        JsValue::NULL,
+                    )
+                    .is_ok(),
+                "registered schema facades share all owner transaction read overloads"
             );
 
             let other_owner = Rc::new(

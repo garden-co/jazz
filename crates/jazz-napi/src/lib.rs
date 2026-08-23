@@ -124,8 +124,8 @@ enum NapiDbInnerStorage {
 impl NapiDbInnerStorage {
     fn shares_runtime_with(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Memory(left), Self::Memory(right)) => Rc::ptr_eq(left, right),
-            (Self::Persistent(left), Self::Persistent(right)) => Rc::ptr_eq(left, right),
+            (Self::Memory(left), Self::Memory(right)) => left.shares_runtime_with(right),
+            (Self::Persistent(left), Self::Persistent(right)) => left.shares_runtime_with(right),
             _ => false,
         }
     }
@@ -4167,6 +4167,21 @@ mod tests {
         assert!(
             binding.all_in_transaction(&query, &tx, None).is_ok(),
             "planted positive: the bound capability reads successfully"
+        );
+        let view_binding = NapiDb {
+            inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::clone(
+                &view,
+            ))))),
+            owns_runtime: false,
+        };
+        let view_query = PreparedQuery {
+            inner: view.prepare_query(&view.table("items")).unwrap(),
+        };
+        assert!(
+            view_binding
+                .all_in_transaction(&view_query, &tx, None)
+                .is_ok(),
+            "a registered schema facade shares its owner's transaction runtime"
         );
 
         let other_owner = Rc::new(
