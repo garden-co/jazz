@@ -4,9 +4,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { parse } from "yaml";
 
 const root = path.resolve(import.meta.dirname, "../../..");
 const workflow = fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8");
+const workflowSuite = fs.readFileSync(path.join(root, ".github/workflows/ci-suite.yml"), "utf8");
 const setupBuildAction = fs.readFileSync(
   path.join(root, ".github/actions/setup-build/action.yml"),
   "utf8",
@@ -25,7 +27,7 @@ const packageBuild = fs.readFileSync(
 );
 const otherWorkflows = fs
   .readdirSync(path.join(root, ".github/workflows"))
-  .filter((name) => name.endsWith(".yml") && name !== "ci.yml")
+  .filter((name) => name.endsWith(".yml") && !["ci.yml", "ci-suite.yml"].includes(name))
   .map((name) => fs.readFileSync(path.join(root, ".github/workflows", name), "utf8"));
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 const toolBundleValidator = fs.readFileSync(
@@ -37,16 +39,16 @@ const m3Differential = fs.readFileSync(
   "utf8",
 );
 const jobs = (() => {
-  const jobsStart = workflow.indexOf("\njobs:\n");
+  const jobsStart = workflowSuite.indexOf("\njobs:\n");
   assert.notEqual(jobsStart, -1, "missing jobs section");
-  const matches = [...workflow.slice(jobsStart).matchAll(/^  ([A-Za-z0-9_-]+):\s*$/gm)];
+  const matches = [...workflowSuite.slice(jobsStart).matchAll(/^  ([A-Za-z0-9_-]+):\s*$/gm)];
   assert.ok(matches.length > 0, "CI workflow must define at least one job");
   return new Map(
     matches.map((match, index) => [
       match[1],
-      workflow.slice(
+      workflowSuite.slice(
         jobsStart + match.index,
-        index + 1 < matches.length ? jobsStart + matches[index + 1].index : workflow.length,
+        index + 1 < matches.length ? jobsStart + matches[index + 1].index : workflowSuite.length,
       ),
     ]),
   );
@@ -82,36 +84,136 @@ const assertIntegrationCheckIsGating = (typescriptJob) => {
     "integration workspace check must not suppress its failure",
   );
 };
-const trustedCachePush =
-  "github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/jazz-core-engine-swap')";
-const sccacheReader = "github.event_name == 'pull_request'";
-const sccacheWriter = `${trustedCachePush} && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''`;
-const sccacheS3 = `(${sccacheReader} && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') || (${sccacheWriter})`;
-const turboCache = `(${trustedCachePush}) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)`;
+const trustedCachePullRequest =
+  'github.event_name == \'pull_request\' && github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON(\'["OWNER","MEMBER","COLLABORATOR"]\'), github.event.pull_request.author_association)';
+const trustedCacheCondition =
+  "github.event_name == 'push' && github.ref == 'refs/heads/main' || " + trustedCachePullRequest;
+const untrustedCacheCondition = "github.event_name != 'push' && !(" + trustedCachePullRequest + ")";
+const sccacheWriter =
+  "inputs.trusted-cache && inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''";
+const sccacheReader =
+  "inputs.trusted-cache && !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''";
+const sccacheS3 =
+  "inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '')";
+const turboCache = "inputs.trusted-cache";
 const regex = (source) => new RegExp(source.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
 const assertSccacheTrustBoundary = (source) => {
-  assert.match(source, regex(`if: ${sccacheReader} && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''`));
   assert.match(source, regex(`if: ${sccacheWriter}`));
+  assert.match(source, regex(`if: ${sccacheReader}`));
   assert.match(source, regex("sccache-s3: ${{ " + sccacheS3 + " }}"));
-  assert.doesNotMatch(
-    source,
-    /github\.event_name != 'pull_request'/,
-    "a non-PR condition would give workflow_dispatch the writer role",
-  );
 };
-const cacheAccessFor = ({ eventName, ref, sameRepositoryPr = false }) => ({
-  sccache:
-    eventName === "pull_request"
-      ? "reader"
-      : eventName === "push" &&
-          ["refs/heads/main", "refs/heads/codex/jazz-core-engine-swap"].includes(ref)
-        ? "writer"
-        : "none",
-  turbo:
-    (eventName === "push" &&
-      ["refs/heads/main", "refs/heads/codex/jazz-core-engine-swap"].includes(ref)) ||
-    (eventName === "pull_request" && sameRepositoryPr),
-});
+const s3Environment = [
+  "SCCACHE_BUCKET",
+  "SCCACHE_REGION",
+  "SCCACHE_S3_KEY_PREFIX",
+  "SCCACHE_S3_USE_SSL",
+];
+const assertSuiteS3ConfigurationBoundary = (source) => {
+  const document = parse(source);
+  for (const name of s3Environment)
+    assert.equal(
+      document.env?.[name],
+      undefined,
+      `untrusted suite callers must not inherit ${name}`,
+    );
+
+  for (const name of ["lint", "test-rust-workspace", "test-rust-differential", "test-ts"]) {
+    const parsedJob = document.jobs[name];
+    assert.equal(parsedJob.env, undefined, `${name} must not configure S3 at job scope`);
+    const exportIndex = parsedJob.steps.findIndex(
+      (step) => step.name === "Export trusted sccache configuration",
+    );
+    const setupIndex = parsedJob.steps.findIndex(
+      (step) => step.uses === "./.github/actions/setup-blacksmith",
+    );
+    assert.notEqual(exportIndex, -1, `${name} is missing trusted S3 configuration export`);
+    assert.ok(exportIndex < setupIndex, `${name} must export S3 configuration before setup`);
+    const exportStep = parsedJob.steps[exportIndex];
+    assert.equal(exportStep.if, sccacheS3);
+    assert.deepEqual(exportStep.env, {
+      CACHE_BUCKET: "${{ vars.SCCACHE_BUCKET }}",
+      CACHE_REGION: "${{ vars.SCCACHE_REGION }}",
+    });
+    for (const variable of s3Environment)
+      assert.match(exportStep.run, new RegExp(`echo "${variable}=`));
+    assert.equal(parsedJob.steps[setupIndex].with["sccache-s3"], "${{ " + sccacheS3 + " }}");
+  }
+};
+const cacheAccessFor = ({ eventName, ref, sameRepository = false, authorAssociation = "NONE" }) => {
+  const trustedPullRequest =
+    eventName === "pull_request" &&
+    sameRepository &&
+    ["OWNER", "MEMBER", "COLLABORATOR"].includes(authorAssociation);
+  const trusted = (eventName === "push" && ref === "refs/heads/main") || trustedPullRequest;
+  return {
+    invocation: trusted ? "trusted" : "untrusted",
+    idToken: trusted ? "write" : "none",
+    sccache: trusted ? (eventName === "push" ? "writer" : "reader") : "none",
+    turbo: trusted,
+  };
+};
+const workflowDocumentFor = (source) => {
+  const document = parse(source);
+  assert.equal(typeof document, "object", "CI entry workflow must be a YAML mapping");
+  assert.equal(typeof document.jobs, "object", "CI entry workflow must define a jobs mapping");
+  return document;
+};
+const assertEntryCacheTrustBoundary = (source) => {
+  const document = workflowDocumentFor(source);
+  const entryJobs = document.jobs;
+  assert.deepEqual(
+    Object.keys(entryJobs).sort(),
+    ["test-rust", "trusted", "untrusted"],
+    "the credential boundary must account for every entry-workflow job",
+  );
+  const { untrusted, trusted, "test-rust": aggregate } = entryJobs;
+  assert.deepEqual(
+    Object.keys(untrusted).sort(),
+    ["if", "permissions", "uses", "with"],
+    "untrusted caller must expose no additional execution or credential surface",
+  );
+  assert.equal(untrusted.if, untrustedCacheCondition);
+  assert.deepEqual(untrusted.permissions, {
+    contents: "read",
+    "id-token": "none",
+    packages: "read",
+  });
+  assert.equal(untrusted.uses, "./.github/workflows/ci-suite.yml");
+  assert.deepEqual(untrusted.with, { "sccache-write": false, "trusted-cache": false });
+
+  assert.deepEqual(
+    Object.keys(trusted).sort(),
+    ["if", "permissions", "secrets", "uses", "with"],
+    "trusted caller credential surface must stay explicit",
+  );
+  assert.equal(trusted.if, trustedCacheCondition);
+  assert.deepEqual(trusted.permissions, {
+    contents: "read",
+    "id-token": "write",
+    packages: "read",
+  });
+  assert.equal(trusted.uses, "./.github/workflows/ci-suite.yml");
+  assert.deepEqual(trusted.with, {
+    "sccache-write": "${{ github.event_name == 'push' }}",
+    "trusted-cache": true,
+  });
+  assert.equal(trusted.secrets, "inherit");
+
+  assert.deepEqual(Object.keys(aggregate).sort(), [
+    "if",
+    "needs",
+    "permissions",
+    "runs-on",
+    "steps",
+    "timeout-minutes",
+  ]);
+  assert.equal(aggregate.if, "always()");
+  assert.deepEqual(aggregate.needs, ["untrusted", "trusted"]);
+  assert.deepEqual(aggregate.permissions, { contents: "read" });
+  assert.equal(document.on.pull_request_target, undefined);
+  assert.equal(document.on.pull_request, null, "stacked PR bases must not be branch-filtered");
+  assert.deepEqual(document.on.push, { branches: ["main"] });
+};
 const assertTurboSigningKeyTrustBoundary = (typescriptJob) => {
   assert.doesNotMatch(
     typescriptJob,
@@ -134,7 +236,7 @@ const assertTurboSigningKeyTrustBoundary = (typescriptJob) => {
 };
 const assertTurboCredentialConditions = (typescriptJob) => {
   assertTurboSigningKeyTrustBoundary(typescriptJob);
-  const trustedConditions = typescriptJob.match(new RegExp(regex(`if: ${turboCache}`).source, "g"));
+  const trustedConditions = typescriptJob.match(/^        if: inputs\.trusted-cache$/gm);
   assert.equal(
     trustedConditions?.length,
     2,
@@ -148,7 +250,7 @@ test("Rust CI uses pinned prebuilt tools without charging Rust-only jobs for was
   const differentialRust = job("test-rust-differential");
   const typescript = job("test-ts");
 
-  assert.doesNotMatch(workflow, /cargo install cargo-nextest/);
+  assert.doesNotMatch(workflowSuite, /cargo install cargo-nextest/);
   assert.match(setupBlacksmithAction, /cargo-nextest --version \| grep -F "0\.9\.143"/);
   assert.match(setupBlacksmithAction, /wasm-pack --version \| grep -F "0\.13\.1"/);
   for (const rust of [workspaceRust, differentialRust]) {
@@ -470,7 +572,7 @@ test("the TypeScript CI job checks the integration workspace before TypeScript a
   );
 
   // Keeping these phases together avoids a separate checkout/setup phase.
-  assert.doesNotMatch(workflow, /^  build-integration:/m);
+  assert.doesNotMatch(workflowSuite, /^  build-integration:/m);
   assert.match(
     typescript,
     /name: Check integration workspace\s+run: cargo check --workspace --all-targets/,
@@ -490,7 +592,7 @@ test("every CI job uses an independently sized Blacksmith runner", () => {
   }
 });
 
-test("Turbo cache uses pinned OIDC policy only for trusted pushes and same-repository PRs", () => {
+test("Turbo cache uses its pinned OIDC policy only inside the trusted suite invocation", () => {
   const typescript = job("test-ts");
   assertTurboCredentialConditions(typescript);
   assert.match(typescript, /policy: pol_0b019736-e95d-4f60-a5dd-e9415148834c/);
@@ -510,64 +612,106 @@ test("Turbo cache uses pinned OIDC policy only for trusted pushes and same-repos
     );
 });
 
-test("shared Rust cache separates read-only PRs from trusted writers", () => {
+test("shared Rust cache writes are main-only while trusted PRs receive read access", () => {
   for (const name of ["lint", "test-rust-workspace", "test-rust-differential", "test-ts"]) {
     const source = job(name);
-    assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_PR_READER_AWS_ROLE_ARN \}\}/);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN \}\}/);
+    assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_PR_READER_AWS_ROLE_ARN \}\}/);
     assertSccacheTrustBoundary(source);
   }
-  assert.match(workflow, /SCCACHE_S3_KEY_PREFIX: jazz-ci\/v1\/production\/blacksmith-v1/);
+  assertSuiteS3ConfigurationBoundary(workflowSuite);
   assert.doesNotMatch(
-    workflow,
+    workflowSuite,
     /SCCACHE_S3_RW_MODE/,
-    "sccache has no S3 read-only switch; the distinct IAM roles enforce this boundary",
+    "sccache has no S3 read-only switch; untrusted jobs must not enable the S3 tier",
   );
   assert.match(setupBlacksmithAction, /SCCACHE_MULTILEVEL_CHAIN=disk,s3/);
   assert.match(setupBlacksmithAction, /SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0/);
 });
 
-test("cache credential policy has no manual-dispatch writer path", () => {
+test("entry workflow grants credentialed cross-ref caches to main and trusted stacked PRs", () => {
   const cases = [
     [
       "main push",
       { eventName: "push", ref: "refs/heads/main" },
-      { sccache: "writer", turbo: true },
-    ],
-    [
-      "integration push",
-      { eventName: "push", ref: "refs/heads/codex/jazz-core-engine-swap" },
-      { sccache: "writer", turbo: true },
+      { invocation: "trusted", idToken: "write", sccache: "writer", turbo: true },
     ],
     [
       "feature push",
       { eventName: "push", ref: "refs/heads/feature/cache-auth" },
-      { sccache: "none", turbo: false },
+      { invocation: "untrusted", idToken: "none", sccache: "none", turbo: false },
     ],
     [
-      "same-repository PR",
-      { eventName: "pull_request", ref: "refs/pull/1/merge", sameRepositoryPr: true },
-      { sccache: "reader", turbo: true },
+      "trusted same-repository PR",
+      {
+        eventName: "pull_request",
+        ref: "refs/pull/1/merge",
+        sameRepository: true,
+        authorAssociation: "MEMBER",
+      },
+      { invocation: "trusted", idToken: "write", sccache: "reader", turbo: true },
+    ],
+    [
+      "trusted upper stack layer",
+      {
+        eventName: "pull_request",
+        ref: "refs/pull/2/merge",
+        sameRepository: true,
+        authorAssociation: "COLLABORATOR",
+      },
+      { invocation: "trusted", idToken: "write", sccache: "reader", turbo: true },
+    ],
+    [
+      "outside contributor on same repository",
+      {
+        eventName: "pull_request",
+        ref: "refs/pull/3/merge",
+        sameRepository: true,
+        authorAssociation: "CONTRIBUTOR",
+      },
+      { invocation: "untrusted", idToken: "none", sccache: "none", turbo: false },
     ],
     [
       "fork PR",
-      { eventName: "pull_request", ref: "refs/pull/1/merge" },
-      { sccache: "reader", turbo: false },
+      {
+        eventName: "pull_request",
+        ref: "refs/pull/4/merge",
+        sameRepository: false,
+        authorAssociation: "MEMBER",
+      },
+      { invocation: "untrusted", idToken: "none", sccache: "none", turbo: false },
+    ],
+    [
+      "Dependabot PR",
+      {
+        eventName: "pull_request",
+        ref: "refs/pull/5/merge",
+        sameRepository: true,
+        authorAssociation: "CONTRIBUTOR",
+      },
+      { invocation: "untrusted", idToken: "none", sccache: "none", turbo: false },
     ],
     [
       "manual main",
       { eventName: "workflow_dispatch", ref: "refs/heads/main" },
-      { sccache: "none", turbo: false },
+      { invocation: "untrusted", idToken: "none", sccache: "none", turbo: false },
     ],
     [
       "manual feature",
       { eventName: "workflow_dispatch", ref: "refs/heads/feature/cache-auth" },
-      { sccache: "none", turbo: false },
+      { invocation: "untrusted", idToken: "none", sccache: "none", turbo: false },
     ],
   ];
 
   for (const [name, input, expected] of cases)
     assert.deepEqual(cacheAccessFor(input), expected, name);
+
+  assertEntryCacheTrustBoundary(workflow);
+  assert.doesNotMatch(
+    workflowSuite,
+    /^\s+id-token:/m,
+    "the reusable suite must inherit the caller's job-level OIDC ceiling",
+  );
 });
 
 test("Blacksmith and cache trust contracts reject planted unsafe changes", () => {
@@ -576,30 +720,58 @@ test("Blacksmith and cache trust contracts reject planted unsafe changes", () =>
     () => assertUsesBlacksmithRunner("test-ts", typescript.replace("blacksmith-16vcpu", "jazz-ci")),
     /blacksmith-16vcpu/,
   );
-  assert.doesNotMatch(
-    typescript.replace(
-      "github.event.pull_request.head.repo.full_name == github.repository",
-      "true",
-    ),
-    /if: github\.event_name != 'pull_request' \|\| github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
+  assert.throws(
+    () => assertEntryCacheTrustBoundary(workflow.replace("id-token: none", "id-token: write")),
+    /strictly deep-equal/,
+  );
+  assert.throws(
+    () =>
+      assertEntryCacheTrustBoundary(
+        workflow.replace(
+          "\n  trusted:\n",
+          '\n  "credential:escape":\n    permissions:\n      id-token: write\n    runs-on: ubuntu-latest\n    env:\n      AWS_SECRET_ACCESS_KEY: ${{ secrets.CACHE_ESCAPE_KEY }}\n    steps:\n      - run: echo unsafe\n\n  trusted:\n',
+        ),
+      ),
+    /credential boundary must account for every entry-workflow job/,
+  );
+  assert.throws(
+    () =>
+      assertEntryCacheTrustBoundary(
+        workflow.replace(trustedCacheCondition, "github.event_name != 'pull_request'"),
+      ),
+    /strictly equal/,
+  );
+  assert.throws(
+    () =>
+      assertSuiteS3ConfigurationBoundary(
+        workflowSuite.replace(
+          "env:\n  CACHE_SCOPE_REPOSITORY_ID:",
+          "env:\n  SCCACHE_BUCKET: unsafe\n  CACHE_SCOPE_REPOSITORY_ID:",
+        ),
+      ),
+    /untrusted suite callers must not inherit SCCACHE_BUCKET/,
+  );
+  assert.throws(
+    () =>
+      assertSuiteS3ConfigurationBoundary(
+        workflowSuite.replace(
+          `name: Export trusted sccache configuration\n        if: ${sccacheS3}`,
+          "name: Export trusted sccache configuration\n        if: true",
+        ),
+      ),
+    /strictly equal/,
   );
   assert.throws(
     () =>
       assertSccacheTrustBoundary(
-        typescript.replace(
-          sccacheWriter,
-          "github.event_name != 'pull_request' && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''",
-        ),
+        typescript.replace("sccache-s3: ${{ " + sccacheS3 + " }}", "sccache-s3: true"),
       ),
-    /a non-PR condition|github\.event_name == 'push'/,
+    /sccache-s3/,
   );
   assert.throws(
     () =>
       assertTurboCredentialConditions(
-        typescript.replace(
-          turboCache,
-          "github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository",
-        ),
+        typescript.replace("if: inputs.trusted-cache\n        env:", "if: true\n        env:"),
       ),
     /if:/,
   );

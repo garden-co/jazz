@@ -427,7 +427,7 @@ test("aborting a real subprocess terminates its spawned child", async () => {
 
 test("CI uses the correctness artifact path while package builds keep release WASM", () => {
   const workflow = readFileSync(
-    new URL("../../../.github/workflows/ci.yml", import.meta.url),
+    new URL("../../../.github/workflows/ci-suite.yml", import.meta.url),
     "utf8",
   );
   const packageJson = readFileSync(new URL("../../../package.json", import.meta.url), "utf8");

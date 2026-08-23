@@ -2,10 +2,11 @@ name: CI
 
 on:
   workflow_dispatch:
+  # Deliberately unfiltered so every layer of a stacked PR receives CI even
+  # when its base is another feature branch.
   pull_request:
-    branches: [main, codex/jazz-core-engine-swap]
   push:
-    branches: [main, codex/jazz-core-engine-swap]
+    branches: [main]
 
 concurrency:
   # For pushes, this lets concurrent runs happen, so each push gets a result.
@@ -13,265 +14,52 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
-env:
-  CACHE_SCOPE_REPOSITORY_ID: ${{ github.event.pull_request.head.repo.id || github.repository_id }}
-  SCCACHE_BUCKET: ${{ vars.SCCACHE_BUCKET }}
-  SCCACHE_REGION: ${{ vars.SCCACHE_REGION }}
-  SCCACHE_S3_USE_SSL: "true"
-  SCCACHE_S3_KEY_PREFIX: jazz-ci/v1/production/blacksmith-v1
-  # The AWS roles enforce the cache boundary: PR credentials cannot PutObject,
-  # while trusted branch-push credentials can. workflow_dispatch never receives
-  # either role, even when dispatched from a trusted branch. sccache has no S3
-  # read-only switch.
-
+# Security boundary: the repository's workflow maintainers and write-capable
+# collaborators are trusted. A same-repository author who can modify this file
+# could directly request OIDC or reference Actions secrets, which YAML in this
+# same repository cannot prevent. For the unmodified base workflow enforced
+# below, untrusted PRs (including forks and Dependabot) and workflow_dispatch
+# receive no OIDC permission, inherited secrets, or credentialed cross-ref
+# cache access. GitHub's native repository/ref-scoped cache remains available
+# without any explicit cloud credential from this workflow.
 jobs:
-  lint:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 10
+  untrusted:
+    if: github.event_name != 'push' && !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association))
+    permissions:
+      contents: read
+      id-token: none
+      packages: read
+    uses: ./.github/workflows/ci-suite.yml
+    with:
+      trusted-cache: false
+      sccache-write: false
+
+  trusted:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association)
     permissions:
       contents: read
       id-token: write
       packages: read
-    container:
-      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - name: Authenticate read-only PR sccache
-        if: github.event_name == 'pull_request' && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''
-        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
-        with:
-          role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
-          aws-region: ${{ vars.SCCACHE_REGION }}
-      - name: Authenticate trusted sccache writer
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/jazz-core-engine-swap') && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
-        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
-        with:
-          role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
-          aws-region: ${{ vars.SCCACHE_REGION }}
-      - uses: ./.github/actions/setup-blacksmith
-        with:
-          sccache-s3: ${{ (github.event_name == 'pull_request' && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/jazz-core-engine-swap') && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '') }}
+    uses: ./.github/workflows/ci-suite.yml
+    with:
+      trusted-cache: true
+      sccache-write: ${{ github.event_name == 'push' }}
+    secrets: inherit
 
-      - run: pnpm format:check
-      - run: pnpm lint
-      # Keep workflow assertions required without adding another Rust build.
-      - run: pnpm test:ci-workflow
-      - name: Verify Turbo artifact cache inputs
-        run: pnpm test:turbo-cache-inputs
-      - name: Report sccache statistics
-        if: always()
-        run: sccache --show-stats
-
-  test-rust-workspace:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      id-token: write
-      packages: read
-    container:
-      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - name: Authenticate read-only PR sccache
-        if: github.event_name == 'pull_request' && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''
-        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
-        with:
-          role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
-          aws-region: ${{ vars.SCCACHE_REGION }}
-      - name: Authenticate trusted sccache writer
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/jazz-core-engine-swap') && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
-        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
-        with:
-          role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
-          aws-region: ${{ vars.SCCACHE_REGION }}
-      - uses: ./.github/actions/setup-blacksmith
-        with:
-          sccache-s3: ${{ (github.event_name == 'pull_request' && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/jazz-core-engine-swap') && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '') }}
-      - name: Workspace Rust tests (bounded, sharded, receipted)
-        run: node dev/gates/run-rust-tests.mjs --timeout-seconds 780 --nextest-profile jazz-ci -- --workspace --lib --bins --tests --features jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test
-      - name: Verify Nextest partition coverage
-        run: node --test dev/gates/test/nextest-partitions.test.mjs
-      - name: Upload Rust test receipt
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: rust-test-receipt
-          path: target/test-receipts/*.json
-          if-no-files-found: error
-      - name: Report sccache statistics
-        if: always()
-        run: sccache --show-stats
-
-  # This runs a bounded real M3 oracle smoke separately from the workspace
-  # suite. The Rust test remains #[ignore] because its full randomized matrix
-  # is a long-running manual soak; CI deliberately invokes the bounded,
-  # deterministic canonical seed 11. Do not persist this randomized test
-  # job's target directory in the Rust artifact cache.
-  test-rust-differential:
-    # The full randomized matrix remains a long-running manual soak; this job
-    # intentionally exercises one bounded deterministic seed.
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      id-token: write
-      packages: read
-    container:
-      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - name: Authenticate read-only PR sccache
-        if: github.event_name == 'pull_request' && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''
-        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
-        with:
-          role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
-          aws-region: ${{ vars.SCCACHE_REGION }}
-      - name: Authenticate trusted sccache writer
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/jazz-core-engine-swap') && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
-        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
-        with:
-          role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
-          aws-region: ${{ vars.SCCACHE_REGION }}
-      - uses: ./.github/actions/setup-blacksmith
-        with:
-          sccache-s3: ${{ (github.event_name == 'pull_request' && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/jazz-core-engine-swap') && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '') }}
-          rust-cache: "false"
-      # Compile only the library test binary first. The semantic oracle timeout
-      # below must not charge a cold compile or unrelated integration binaries.
-      - name: Compile M3 differential oracle libtest
-        shell: bash
-        run: |
-          set -euo pipefail
-          test_binary="$(cargo test -p jazz --lib --features testing,transport-compression-zstd --no-run --message-format=json | node -e '
-            const readline = require("node:readline");
-            let executable;
-            const lines = readline.createInterface({ input: process.stdin });
-            lines.on("line", (line) => {
-              try {
-                const message = JSON.parse(line);
-                if (message.reason === "compiler-artifact" && message.target.name === "jazz" && message.executable)
-                  executable = message.executable;
-              } catch {}
-            });
-            lines.on("close", () => {
-              if (!executable) process.exitCode = 1;
-              else console.log(executable);
-            });
-          ')"
-          test -x "${test_binary}"
-          echo "M3_ORACLE_TEST_BINARY=${test_binary}" >> "${GITHUB_ENV}"
-      # The smallest stable real oracle smoke: fixed seed 11, the two smallest
-      # aggregate churn depths, and the normal three differential steps.
-      - name: Run maintained-vs-one-shot differential oracle smoke
-        shell: bash
-        run: |
-          timeout 60s env \
-            JAZZ_SEED=11 \
-            JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000 \
-            JAZZ_DIFFERENTIAL_STEP_COUNT=3 \
-            "${M3_ORACLE_TEST_BINARY}" node::tests::harness::m3_maintained_one_shot_differential_oracle --exact --ignored
-      - name: Report sccache statistics
-        if: always()
-        run: sccache --show-stats
-
-  # Branch protection requires this stable check name. It aggregates both Rust
-  # correctness jobs and stays red whenever either dependency fails or is cancelled.
+  # Preserve the branch-protection check name while the implementation jobs
+  # live in the reusable suite. Exactly one invocation must have completed.
   test-rust:
     if: always()
-    needs: [test-rust-workspace, test-rust-differential]
+    needs: [untrusted, trusted]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 2
     permissions:
       contents: read
     steps:
-      - name: Require all Rust partitions
+      - name: Require the selected CI suite
         env:
-          WORKSPACE_RESULT: ${{ needs.test-rust-workspace.result }}
-          DIFFERENTIAL_RESULT: ${{ needs.test-rust-differential.result }}
+          UNTRUSTED_RESULT: ${{ needs.untrusted.result }}
+          TRUSTED_RESULT: ${{ needs.trusted.result }}
         run: |
-          test "${WORKSPACE_RESULT}" = success
-          test "${DIFFERENTIAL_RESULT}" = success
-
-  test-ts:
-    runs-on: blacksmith-16vcpu-ubuntu-2404
-    timeout-minutes: 20
-    # JAZZ_NAPI_RELEASE=0 (debug builds) removed 2026-07-19: debug-profile
-    # jazz-napi .node files fail dlopen on the Linux runners deterministically
-    # (root cause TBD; see dev/CI_NOTES.md). Release builds load fine.
-
-    permissions:
-      contents: read
-      id-token: write
-      packages: read
-    container:
-      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-      - name: Authenticate read-only PR sccache
-        if: github.event_name == 'pull_request' && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''
-        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
-        with:
-          role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
-          aws-region: ${{ vars.SCCACHE_REGION }}
-      - name: Authenticate trusted sccache writer
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/jazz-core-engine-swap') && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
-        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
-        with:
-          role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
-          aws-region: ${{ vars.SCCACHE_REGION }}
-      - name: Export trusted Turbo cache signing key
-        if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/jazz-core-engine-swap')) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
-        env:
-          CACHE_SIGNATURE_KEY: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
-        run: echo "TURBO_REMOTE_CACHE_SIGNATURE_KEY=${CACHE_SIGNATURE_KEY}" >> "${GITHUB_ENV}"
-      - name: Set up signed Turbo Remote Cache
-        if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/jazz-core-engine-swap')) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
-        uses: vercel/setup-turborepo-remote-cache-action@135046f5efcadb17337d9b29b8d5b4035ae64b10 # v1.0.0
-        with:
-          team: garden-co
-          policy: pol_0b019736-e95d-4f60-a5dd-e9415148834c
-          audience: https://github.com/garden-co
-      - uses: ./.github/actions/setup-blacksmith
-        with:
-          sccache-s3: ${{ (github.event_name == 'pull_request' && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/jazz-core-engine-swap') && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '') }}
-
-      # Keep the integration-branch compile gate, but run it as the first
-      # phase of this trusted-runner job. Keeping it here avoids a separate
-      # checkout/setup phase on the PR critical path.
-      #
-      # PR-level checks cannot catch two independently green PRs whose merged
-      # tree no longer compiles. This runs on every push to the integration
-      # branch before building the TypeScript correctness artifacts.
-      - name: Check integration workspace
-        run: cargo check --workspace --all-targets
-
-      # Correctness tests use an unoptimised, provenance-checked WASM build.
-      # Package/publish workflows continue to use jazz-wasm's release build.
-      # The script reuses the restored default Cargo target, runs NAPI alone,
-      # then overlaps CLI with fast WASM. Each deterministic build is a signed
-      # Turbo task; the nondeterministic test suites below remain uncached.
-      - name: Build correctness-test artifacts
-        run: pnpm build:test-artifacts
-      - name: Verify preinstalled Chromium
-        run: pnpm exec playwright install --dry-run chromium
-      # Both suites consume the already-built artifacts and do not write shared
-      # outputs. Running them together avoids extending the PR critical path
-      # while retaining the complete Node and browser coverage in this gate.
-      - name: Run Node and browser test suites in parallel
-        run: dev/gates/run-ts-tests.sh
-      - name: Report sccache statistics
-        if: always()
-        run: sccache --show-stats
+          test "${UNTRUSTED_RESULT}:${TRUSTED_RESULT}" = "success:skipped" || \
+            test "${UNTRUSTED_RESULT}:${TRUSTED_RESULT}" = "skipped:success"
