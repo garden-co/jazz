@@ -131,27 +131,15 @@ not a fallback to one-shot sorting. Prepared graph lowering MUST preserve the
 semantics of every accepted predicate shape and explicitly reject unsupported
 predicate shapes (`INV-LOWER-11`).
 
-🔶 **Open question: how should queries name the physical row id when a schema
-declares an `id` column?** A declared `id` is user data, while every stored row
-also has an engine-owned `RowUuid`. The query language needs one consistent
-answer for addressing that physical identity. `_id` is a possible reserved
-alias, but its contract has not been chosen and its current partial use MUST NOT
-be treated as the final public design.
+The engine-owned `RowUuid` is distinct from a declared `id` user column. Its
+public query spelling is intentionally not standardized yet; see the linked
+open question below rather than treating any current partial alias as API.
 
-Before standardizing an alias, decide all of the following together:
-
-- whether it is accepted everywhere a column operand is accepted, including
-  filters, ordering, aggregates, joins, correlations, reachability, and nested
-  queries;
-- whether it can be selected and appears in returned row shapes, or exists only
-  as an input operand;
-- its exact type and nullability;
-- whether `_id` is reserved and therefore forbidden as a declared column, or
-  how a collision with a user-declared `_id` is resolved;
-- whether bare `id` continues to mean the physical `RowUuid` for legacy schemas
-  that do not declare an `id` column; and
-- whether explicit row-id join APIs remain a separate typed operation or become
-  syntax over the same alias.
+Any eventual alias must jointly define where it is accepted (filters, ordering,
+aggregates, joins, correlations, reachability, and nested queries), whether it
+can be selected, its type and nullability, collisions with declared `_id`, the
+meaning of bare `id` in legacy schemas, and its relationship to typed row-id
+join APIs.
 
 Until this is resolved, implementations MUST preserve the documented declared
 `id` semantics and existing explicit `RowId` operations, and MUST NOT infer a
@@ -220,19 +208,10 @@ into an array-valued literal only when they preserve that array shape. Any
 broader literal-vs-column coercion needs an explicit spec decision before
 implementation.
 
-🔶 **Open question: a subset/superset predicate over array columns.** Rejecting
-a scalar `in` candidate for `Array<T>` is correct, but it is worth naming why
-that shape gets written at all. `in` gives whole-value membership and `contains`
-gives single-element membership; there is currently nothing for "this array
-contains all of these" or "this array is contained by these". A user wanting
-that has no operator to reach for, and `in` with a list of elements is the
-natural wrong guess.
-
-If we add the capability it MUST be an explicit predicate with its own
-semantics — never an implicit reinterpretation of `in` that changes meaning
-depending on whether the column happens to be an array. The value of rejecting
-today is exactly that the gap stays visible, rather than being filled by a
-coercion whose meaning nobody chose (Anselm, 2026-07-29).
+`in` is whole-value membership and `contains` is single-element membership;
+neither is an array subset/superset operator. A scalar `in` candidate for an
+`Array<T>` remains invalid. Any future array-set predicate must be explicit,
+never an implicit reinterpretation of `in`.
 
 ### 6.2 Shapes: validated, content-addressed, schema-stamped
 
@@ -897,3 +876,4 @@ parallel query identities.
 - 🔶 [#1783](https://github.com/garden-co/jazz/issues/1783) — Read settling, cancellation, offline authority-tier behavior, and relay coverage.
 - 🔶 [#1776](https://github.com/garden-co/jazz/issues/1776) — Query IDs, aggregates, SQL boundary, and ordered windows.
 - 🔶 [#1765](https://github.com/garden-co/jazz/issues/1765) — Array subquery maintenance and sharing.
+- 🔶 [#1776](https://github.com/garden-co/jazz/issues/1776) — Public physical-row-id query spelling and array subset/superset predicates.

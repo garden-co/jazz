@@ -417,6 +417,15 @@ columns, and nullable branch columns. An ordinary column rename is allowed
 because schema lineage retains its physical column identity; no branch-specific
 identity is stored.
 
+### Current limitation: distributed uniqueness
+
+Jazz has no convergent distributed uniqueness mechanism today. Groove can
+reject a conflicting write to one local unique index, but offline replicas can
+independently accept distinct `RowUuid`s for the same value; arrival order is
+not a replicated winner rule. Branch-aware uniqueness therefore remains
+unavailable until its replicated claim identity, deterministic arbitration,
+authorization, selected delivery, and recovery semantics are specified.
+
 ## Open Questions
 
 - 🔶 [#1780](https://github.com/garden-co/jazz/issues/1780) — Branch-view semantics beyond v1.

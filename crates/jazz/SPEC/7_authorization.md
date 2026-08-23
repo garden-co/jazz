@@ -336,6 +336,19 @@ policy should be able to distinguish anonymous/local/authenticated/backend/syste
 admission modes through trusted session claims or first-class admission facts;
 client-supplied values must not widen those facts.
 
+### Established permission-introspection boundary
+
+Permission introspection is an authority dry-run API, not a family of magic
+columns. `$can*` columns cannot express can-insert or richer probes. The facade
+methods (`can_insert`, `can_read`, `can_update`, and `can_delete`; ch. 13)
+return `Allowed`, `Denied`, or `Unknown`; only the serving authority may return
+a definitive answer. A local, offline, incomplete, not-ready, or timed-out
+client receives `Unknown`, never a local policy decision. Requests run under
+the authenticated link identity and reveal only an opaque correlation id plus
+the advice value—not supporting rows, policy reasons, or hidden dependency
+facts. Advice is non-mutating and neither reserves nor authorizes a following
+optimistic write (`INV-API-28`).
+
 ## Open Questions
 
 - 🔶 [#1758](https://github.com/garden-co/jazz/issues/1758) — Canonical session subject/authorship and provenance.

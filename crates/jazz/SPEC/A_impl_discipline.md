@@ -181,6 +181,8 @@ Durable style rules:
    different roles, the names must carry the roles.
 3. No wrapper without semantics: forwarding-only types and value round-trips are
    debt by definition.
+4. A source or test file growing beyond roughly 2,000 lines is a prompt to find
+   a real concept boundary, not a mechanical file-splitting target.
 
 ## Open Questions
 

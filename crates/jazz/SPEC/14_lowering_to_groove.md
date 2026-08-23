@@ -457,6 +457,14 @@ requested order and filters can be satisfied by storage. The fallback remains
 correct materialize/sort/limit behavior, but the optimized path must preserve
 policy filtering, pagination, and live subscription maintenance.
 
+### Established policy-lowering boundary
+
+`INV-LOWER-20` is settled: both read policy and write admission lower through
+`node/query_engine`. Write admission supplies policy-pinned old and candidate
+rows as inline roots, then evaluates them with the authenticated identity over
+current or branch-view sources. The former direct policy interpreter is not an
+alternative execution path and has been removed.
+
 ## Open Questions
 
 - 🔶 [#1777](https://github.com/garden-co/jazz/issues/1777) — Core-owned query output and authorization-source lowering.

@@ -26,6 +26,16 @@ This roadmap does not redefine jazz semantics. When there is tension, the data
 model, transaction, sync, topology, API, lowering, branch-view, lens, and maintained
 subscription chapters win.
 
+### Package-boundary direction
+
+The intended dependency direction is a featureless semantic core with thin
+runtime, target, storage, server, binding, telemetry, CLI, and test shells
+depending inward. A boundary earns its cost by clarifying semantic ownership,
+target ownership, or feature selection; splitting crates merely because a file
+is large, or because it might improve a serial build, is not sufficient.
+Native and WASM targets cannot share compiled artifacts across triples. The
+remaining package work is tracked in [#1773](https://github.com/garden-co/jazz/issues/1773).
+
 ### 17.2 P0 — lock the integration contract
 
 Milestone: **one runnable local app can use the public TypeScript API through

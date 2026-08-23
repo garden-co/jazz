@@ -425,19 +425,12 @@ currently required to bound it. Drift may accumulate across a long-lived
 subscription; a maintained `F64` `sum` or `avg` is permitted to move further
 from its one-shot value the longer the subscription runs.
 
-🔶 **Open question: the constant of proportionality, and whether to bound
-drift at all.** Both are deliberately unfixed.
-
-The first is a measurement problem: the differential oracle reports observed
-divergence against update count, and that data should set the constant rather
-than an assumed value.
-
-The second is a design decision with a consequence worth stating plainly. With
-update count unbounded, the `ε × (input rows + maintenance updates) × Σ|x|`
-term is unbounded too, so the guarantee weakens toward vacuity over a
-sufficiently long-lived subscription — it constrains a young view tightly and
-an old one barely at all. That is an accepted trade for now, on the grounds
-that no current workload runs a single maintained `F64` aggregate long enough
+The constant of proportionality and whether to bound drift remain deliberately
+unfixed. The differential oracle should set the constant from observed
+divergence against update count. With update count unbounded, the
+`ε × (input rows + maintenance updates) × Σ|x|` term becomes weak for a
+sufficiently long-lived view; that is an accepted temporary trade because no
+current workload runs one long enough
 for the drift to matter, and that recomputation has its own cost.
 
 The remedy, when it is wanted, is to recompute a group from its inputs after a
@@ -499,3 +492,4 @@ result changes back to the correct parent output.
 - 🔶 [#1783](https://github.com/garden-co/jazz/issues/1783) — Subscription patch and first-result API.
 - 🔶 [#1765](https://github.com/garden-co/jazz/issues/1765) — Correlated subquery maintenance.
 - 🔶 [#1784](https://github.com/garden-co/jazz/issues/1784) — Partition-aware deletion witnesses.
+- 🔶 [#1777](https://github.com/garden-co/jazz/issues/1777) — `F64` maintained-aggregate drift constant and long-lived bound.

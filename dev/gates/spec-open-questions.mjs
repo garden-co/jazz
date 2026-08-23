@@ -4,7 +4,7 @@ import path from "node:path";
 
 const root = path.resolve(import.meta.dirname, "../..");
 const specs = ["crates/jazz/SPEC", "crates/groove/SPEC"];
-const issueLink = /https:\/\/github\.com\/garden-co\/jazz\/issues\/\d+/;
+const issueLink = /\[#(\d+)\]\(https:\/\/github\.com\/garden-co\/jazz\/issues\/(\d+)\)/g;
 
 function fail(message) {
   throw new Error(`spec-open-questions: ${message}`);
@@ -18,25 +18,31 @@ function files(directory) {
 }
 
 function check(text, file) {
-  const start = text.indexOf("## Open Questions");
-  if (start < 0) return;
-  const next = text.indexOf("\n## ", start + 1);
-  const section = text.slice(start, next < 0 ? text.length : next);
-  for (const [offset, line] of section.split("\n").entries()) {
-    if (/^[-*] .*🔶/.test(line) && !issueLink.test(line))
-      fail(`${file}:${offset + 1} open question lacks a GitHub issue link`);
+  for (const [offset, line] of text.split("\n").entries()) {
+    if (!line.includes("🔶")) continue;
+    const links = [...line.matchAll(issueLink)];
+    if (links.length === 0)
+      fail(`${file}:${offset + 1} unresolved question lacks a GitHub issue link`);
+    for (const match of links)
+      if (match[1] !== match[2])
+        fail(`${file}:${offset + 1} issue label #${match[1]} does not match issue URL #${match[2]}`);
   }
 }
 
 function selfTest() {
-  check("## Open Questions\n\n- 🔶 [#1](https://github.com/garden-co/jazz/issues/1) — linked.\n", "good.md");
-  let rejected = false;
-  try {
-    check("## Open Questions\n\n- 🔶 missing link.\n", "bad.md");
-  } catch {
-    rejected = true;
+  check("🔶 [#1](https://github.com/garden-co/jazz/issues/1) — linked.\n", "good.md");
+  for (const [name, text] of [
+    ["unbulleted.md", "🔶 missing link.\n"],
+    ["mismatched.md", "- 🔶 [#99999](https://github.com/garden-co/jazz/issues/1) — mismatched.\n"],
+  ]) {
+    let rejected = false;
+    try {
+      check(text, name);
+    } catch {
+      rejected = true;
+    }
+    if (!rejected) fail(`self-test did not reject ${name}`);
   }
-  if (!rejected) fail("self-test did not reject an unlinked question");
   console.log("spec-open-questions: self-test passed");
 }
 
