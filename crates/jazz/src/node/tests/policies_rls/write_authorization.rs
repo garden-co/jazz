@@ -77,6 +77,73 @@ impl ReopenableStorage for FailTransactionReadMemoryStorage {
     }
 }
 
+/// Pending local versions are materialized before self-finalization.  Their
+/// presence must not turn a new row into an update and thereby let an update
+/// policy stand in for a missing or rejecting INSERT policy.
+#[test]
+fn local_authority_keeps_insert_and_update_policies_distinct() {
+    let update_policy = || {
+        PublicTablePolicies::new()
+            .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+    };
+    let schema_for = |insert_policy: Option<PublicPolicyExpr>| {
+        let policies = insert_policy.map_or_else(update_policy, |insert| {
+            update_policy().with_insert(insert)
+        });
+        build_public_test_schema(PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(policies),
+        ))
+    };
+    let author = user(0xa1);
+
+    for (label, insert_policy) in [
+        ("omitted", None),
+        ("false", Some(PublicPolicyExpr::False)),
+    ] {
+        let schema = schema_for(insert_policy);
+        let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+        let tx_id = core
+            .commit_mergeable_settled(
+                MergeableCommit::new("todos", row(0x91), 10)
+                    .made_by(author)
+                    .cells(owner_cells(author, "must not insert")),
+            )
+            .unwrap();
+        core.finalize_local_mergeable_commit_settled(tx_id).unwrap();
+        assert!(matches!(
+            core.transaction_state_settled(tx_id),
+            Some((
+                Fate::Rejected(RejectionReason::AuthorizationDenied),
+                None,
+                DurabilityTier::Local
+            ))
+        ), "{label} INSERT policy must deny a new local row");
+    }
+
+    let schema = schema_for(None);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let existing = row(0x92);
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", existing, 20).cells(owner_cells(author, "before")),
+    );
+    let tx_id = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", existing, 21)
+                .made_by(author)
+                .cells(owner_cells(author, "after")),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit_settled(tx_id).unwrap();
+    assert!(matches!(
+        core.transaction_state_settled(tx_id),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ), "declared UPDATE policy must still permit an existing row");
+}
+
 #[test]
 fn attributed_write_retry_preserves_permission_subject_after_rejection_error() {
     let schema = owner_policy_schema();

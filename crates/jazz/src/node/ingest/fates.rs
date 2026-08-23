@@ -382,7 +382,7 @@ where
         };
         for version in versions {
             if !self
-                .version_satisfies_write_policy(version, permission_subject)
+                .version_satisfies_write_policy(version, permission_subject, tx.tx_id)
                 .await?
             {
                 return Ok(false);
@@ -395,8 +395,10 @@ where
         &mut self,
         version: &VersionRecord,
         author: AuthorId,
+        candidate_tx_id: TxId,
     ) -> Result<bool, Error> {
-        self.write_policy_allows_version_record(version, author).await
+        self.write_policy_allows_version_record(version, author, Some(candidate_tx_id))
+            .await
     }
 
     pub(super) async fn cascade_root_for_versions(

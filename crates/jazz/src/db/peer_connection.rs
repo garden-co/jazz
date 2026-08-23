@@ -222,6 +222,7 @@ where
                         &mut node,
                         ingest_context.identity,
                         &versions,
+                        tx.tx_id,
                     )
                     .await?;
                 }

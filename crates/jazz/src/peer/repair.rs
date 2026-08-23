@@ -27,6 +27,7 @@ impl PeerState {
             node,
             permission_identity,
             &versions,
+            Some(tx.tx_id),
             true,
         )
         .await?
@@ -81,6 +82,7 @@ impl PeerState {
                     node,
                     fate.permission_identity,
                     &fate.versions,
+                    Some(tx_id),
                     false,
                 )
                 .await?
@@ -154,11 +156,15 @@ impl PeerState {
         node: &mut NodeState<S>,
         writer: AuthorId,
         versions: &[VersionRecord],
+        candidate_tx_id: TxId,
     ) -> Result<(), Error>
     where
         S: OrderedKvStorage,
     {
-        for action in node.authorization_actions_for_versions(versions).await? {
+        for action in node
+            .authorization_actions_for_versions_in_transaction(versions, Some(candidate_tx_id))
+            .await?
+        {
             let scope = node.authorization_support_scope(writer, &action)?;
             if scope.subscriptions.is_empty() {
                 continue;
@@ -247,13 +253,17 @@ impl PeerState {
         node: &mut NodeState<S>,
         writer: AuthorId,
         versions: &[VersionRecord],
+        candidate_tx_id: Option<TxId>,
         retained_scope_is_unsettled: bool,
     ) -> Result<Option<Vec<SubscriptionKey>>, Error>
     where
         S: OrderedKvStorage,
     {
         let mut unsettled = Vec::new();
-        for action in node.authorization_actions_for_versions(versions).await? {
+        for action in node
+            .authorization_actions_for_versions_in_transaction(versions, candidate_tx_id)
+            .await?
+        {
             let scope = node.authorization_support_scope(writer, &action)?;
             if scope.subscriptions.is_empty() {
                 // A policy with no support clauses is structurally complete;
