@@ -82,6 +82,36 @@ const assertIntegrationCheckIsGating = (typescriptJob) => {
     "integration workspace check must not suppress its failure",
   );
 };
+const trustedCachePush =
+  "github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/jazz-core-engine-swap')";
+const sccacheReader = "github.event_name == 'pull_request'";
+const sccacheWriter = `${trustedCachePush} && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''`;
+const sccacheS3 = `(${sccacheReader} && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') || (${sccacheWriter})`;
+const turboCache = `(${trustedCachePush}) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)`;
+const regex = (source) => new RegExp(source.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+const assertSccacheTrustBoundary = (source) => {
+  assert.match(source, regex(`if: ${sccacheReader} && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != ''`));
+  assert.match(source, regex(`if: ${sccacheWriter}`));
+  assert.match(source, regex("sccache-s3: ${{ " + sccacheS3 + " }}"));
+  assert.doesNotMatch(
+    source,
+    /github\.event_name != 'pull_request'/,
+    "a non-PR condition would give workflow_dispatch the writer role",
+  );
+};
+const cacheAccessFor = ({ eventName, ref, sameRepositoryPr = false }) => ({
+  sccache:
+    eventName === "pull_request"
+      ? "reader"
+      : eventName === "push" &&
+          ["refs/heads/main", "refs/heads/codex/jazz-core-engine-swap"].includes(ref)
+        ? "writer"
+        : "none",
+  turbo:
+    (eventName === "push" &&
+      ["refs/heads/main", "refs/heads/codex/jazz-core-engine-swap"].includes(ref)) ||
+    (eventName === "pull_request" && sameRepositoryPr),
+});
 
 test("Rust CI uses pinned prebuilt tools without charging Rust-only jobs for wasm-pack", () => {
   const lint = job("lint");
@@ -431,12 +461,9 @@ test("every CI job uses an independently sized Blacksmith runner", () => {
   }
 });
 
-test("Turbo cache uses pinned OIDC policy, signing, and excludes fork PRs", () => {
+test("Turbo cache uses pinned OIDC policy only for trusted pushes and same-repository PRs", () => {
   const typescript = job("test-ts");
-  assert.match(
-    typescript,
-    /if: github\.event_name != 'pull_request' \|\| github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
-  );
+  assert.match(typescript, regex(`if: ${turboCache}`));
   assert.match(typescript, /policy: pol_0b019736-e95d-4f60-a5dd-e9415148834c/);
   assert.match(typescript, /audience: https:\/\/github\.com\/garden-co/);
   assert.match(typescript, /team: garden-co/);
@@ -458,6 +485,7 @@ test("shared Rust cache separates read-only PRs from trusted writers", () => {
     const source = job(name);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_PR_READER_AWS_ROLE_ARN \}\}/);
     assert.match(source, /role-to-assume: \$\{\{ vars\.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN \}\}/);
+    assertSccacheTrustBoundary(source);
   }
   assert.match(workflow, /SCCACHE_S3_KEY_PREFIX: jazz-ci\/v1\/production\/blacksmith-v1/);
   assert.doesNotMatch(
@@ -467,6 +495,49 @@ test("shared Rust cache separates read-only PRs from trusted writers", () => {
   );
   assert.match(setupBlacksmithAction, /SCCACHE_MULTILEVEL_CHAIN=disk,s3/);
   assert.match(setupBlacksmithAction, /SCCACHE_MULTILEVEL_WRITE_ERROR_POLICY=l0/);
+});
+
+test("cache credential policy has no manual-dispatch writer path", () => {
+  const cases = [
+    [
+      "main push",
+      { eventName: "push", ref: "refs/heads/main" },
+      { sccache: "writer", turbo: true },
+    ],
+    [
+      "integration push",
+      { eventName: "push", ref: "refs/heads/codex/jazz-core-engine-swap" },
+      { sccache: "writer", turbo: true },
+    ],
+    [
+      "feature push",
+      { eventName: "push", ref: "refs/heads/feature/cache-auth" },
+      { sccache: "none", turbo: false },
+    ],
+    [
+      "same-repository PR",
+      { eventName: "pull_request", ref: "refs/pull/1/merge", sameRepositoryPr: true },
+      { sccache: "reader", turbo: true },
+    ],
+    [
+      "fork PR",
+      { eventName: "pull_request", ref: "refs/pull/1/merge" },
+      { sccache: "reader", turbo: false },
+    ],
+    [
+      "manual main",
+      { eventName: "workflow_dispatch", ref: "refs/heads/main" },
+      { sccache: "none", turbo: false },
+    ],
+    [
+      "manual feature",
+      { eventName: "workflow_dispatch", ref: "refs/heads/feature/cache-auth" },
+      { sccache: "none", turbo: false },
+    ],
+  ];
+
+  for (const [name, input, expected] of cases)
+    assert.deepEqual(cacheAccessFor(input), expected, name);
 });
 
 test("Blacksmith and cache trust contracts reject planted unsafe changes", () => {
@@ -481,6 +552,27 @@ test("Blacksmith and cache trust contracts reject planted unsafe changes", () =>
       "true",
     ),
     /if: github\.event_name != 'pull_request' \|\| github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
+  );
+  assert.throws(
+    () =>
+      assertSccacheTrustBoundary(
+        typescript.replace(
+          sccacheWriter,
+          "github.event_name != 'pull_request' && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''",
+        ),
+      ),
+    /a non-PR condition|github\.event_name == 'push'/,
+  );
+  assert.throws(
+    () =>
+      assert.match(
+        typescript.replace(
+          turboCache,
+          "github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository",
+        ),
+        regex(`if: ${turboCache}`),
+      ),
+    /if:/,
   );
 });
 

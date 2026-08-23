@@ -20,7 +20,9 @@ env:
   SCCACHE_S3_USE_SSL: "true"
   SCCACHE_S3_KEY_PREFIX: jazz-ci/v1/production/blacksmith-v1
   # The AWS roles enforce the cache boundary: PR credentials cannot PutObject,
-  # while trusted branch credentials can. sccache has no S3 read-only switch.
+  # while trusted branch-push credentials can. workflow_dispatch never receives
+  # either role, even when dispatched from a trusted branch. sccache has no S3
+  # read-only switch.
 
 jobs:
   lint:
@@ -44,14 +46,14 @@ jobs:
           role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
           aws-region: ${{ vars.SCCACHE_REGION }}
       - name: Authenticate trusted sccache writer
-        if: github.event_name != 'pull_request' && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/jazz-core-engine-swap') && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
         uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
         with:
           role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
           aws-region: ${{ vars.SCCACHE_REGION }}
       - uses: ./.github/actions/setup-blacksmith
         with:
-          sccache-s3: ${{ (github.event_name == 'pull_request' && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') || (github.event_name != 'pull_request' && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '') }}
+          sccache-s3: ${{ (github.event_name == 'pull_request' && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/jazz-core-engine-swap') && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '') }}
 
       - run: pnpm format:check
       - run: pnpm lint
@@ -84,14 +86,14 @@ jobs:
           role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
           aws-region: ${{ vars.SCCACHE_REGION }}
       - name: Authenticate trusted sccache writer
-        if: github.event_name != 'pull_request' && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/jazz-core-engine-swap') && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
         uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
         with:
           role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
           aws-region: ${{ vars.SCCACHE_REGION }}
       - uses: ./.github/actions/setup-blacksmith
         with:
-          sccache-s3: ${{ (github.event_name == 'pull_request' && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') || (github.event_name != 'pull_request' && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '') }}
+          sccache-s3: ${{ (github.event_name == 'pull_request' && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/jazz-core-engine-swap') && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '') }}
       - name: Workspace Rust tests (bounded, sharded, receipted)
         run: node dev/gates/run-rust-tests.mjs --timeout-seconds 780 --nextest-profile jazz-ci -- --workspace --lib --bins --tests --features jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test
       - name: Verify Nextest partition coverage
@@ -135,14 +137,14 @@ jobs:
           role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
           aws-region: ${{ vars.SCCACHE_REGION }}
       - name: Authenticate trusted sccache writer
-        if: github.event_name != 'pull_request' && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/jazz-core-engine-swap') && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
         uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
         with:
           role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
           aws-region: ${{ vars.SCCACHE_REGION }}
       - uses: ./.github/actions/setup-blacksmith
         with:
-          sccache-s3: ${{ (github.event_name == 'pull_request' && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') || (github.event_name != 'pull_request' && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '') }}
+          sccache-s3: ${{ (github.event_name == 'pull_request' && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/jazz-core-engine-swap') && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '') }}
           rust-cache: "false"
       # Compile only the library test binary first. The semantic oracle timeout
       # below must not charge a cold compile or unrelated integration binaries.
@@ -227,13 +229,13 @@ jobs:
           role-to-assume: ${{ vars.SCCACHE_PR_READER_AWS_ROLE_ARN }}
           aws-region: ${{ vars.SCCACHE_REGION }}
       - name: Authenticate trusted sccache writer
-        if: github.event_name != 'pull_request' && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/jazz-core-engine-swap') && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != ''
         uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100 # v5
         with:
           role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
           aws-region: ${{ vars.SCCACHE_REGION }}
       - name: Set up signed Turbo Remote Cache
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/jazz-core-engine-swap')) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
         uses: vercel/setup-turborepo-remote-cache-action@135046f5efcadb17337d9b29b8d5b4035ae64b10 # v1.0.0
         with:
           team: garden-co
@@ -241,7 +243,7 @@ jobs:
           audience: https://github.com/garden-co
       - uses: ./.github/actions/setup-blacksmith
         with:
-          sccache-s3: ${{ (github.event_name == 'pull_request' && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') || (github.event_name != 'pull_request' && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '') }}
+          sccache-s3: ${{ (github.event_name == 'pull_request' && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') || (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/jazz-core-engine-swap') && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '') }}
 
       # Keep the integration-branch compile gate, but run it as the first
       # phase of this trusted-runner job. Keeping it here avoids a separate
