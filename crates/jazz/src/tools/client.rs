@@ -131,6 +131,25 @@ struct ClientDb {
     query_decoder: PublicQueryDecoder,
 }
 
+/// Ensures a usage-site coverage attachment is released even when the caller
+/// cancels a one-shot Edge/Global read while it is waiting for coverage.
+struct QueryAttachmentLease {
+    backend: Backend,
+    attachment: crate::db::QueryAttachment,
+}
+
+impl QueryAttachmentLease {
+    fn attachment(&self) -> &crate::db::QueryAttachment {
+        &self.attachment
+    }
+}
+
+impl Drop for QueryAttachmentLease {
+    fn drop(&mut self) {
+        self.backend.detach_query(self.attachment.clone());
+    }
+}
+
 #[derive(Clone)]
 struct PublicQueryDecoder {
     schema: Rc<Schema>,
@@ -1139,35 +1158,33 @@ impl ClientDbInner {
         table: String,
         wait_for_coverage: bool,
     ) -> Result<Vec<crate::node::CurrentRow>> {
-        let prepared = {
+        let (db, prepared) = {
             let inner = inner.borrow();
-            inner
-                .db
-                .prepare_query(&query)
-                .map_err(|error| JazzError::Query(error.to_string()))?
+            (
+                inner.db.clone(),
+                inner
+                    .db
+                    .prepare_query(&query)
+                    .map_err(|error| JazzError::Query(error.to_string()))?,
+            )
         };
-        let attachment = if wait_for_coverage {
-            let attachment = inner
-                .borrow()
-                .db
+        let _attachment = if wait_for_coverage {
+            let attachment = db
                 .attach_query(&prepared, opts.clone())
                 .map_err(|error| JazzError::Query(error.to_string()))?;
-            Self::wait_for_query_coverage(inner, &attachment).await?;
+            let attachment = QueryAttachmentLease {
+                backend: db.clone(),
+                attachment,
+            };
+            Self::wait_for_query_coverage(inner, attachment.attachment()).await?;
             Some(attachment)
         } else {
             None
-        };
-        let (db, prepared) = {
-            let inner = inner.borrow();
-            (inner.db.clone(), prepared)
         };
         let rows = db
             .all(&prepared, opts)
             .await
             .map_err(|error| JazzError::Query(error.to_string()))?;
-        if let Some(attachment) = attachment {
-            db.detach_query(attachment);
-        }
         inner.borrow_mut().remember_rows(&table, &rows);
         Ok(rows)
     }
@@ -3328,6 +3345,41 @@ mod tests {
         assert!(
             default_session_from_context(&context).is_none(),
             "backend/admin clients should keep using explicit session scopes"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cancelled_edge_query_attachment_is_released() {
+        let client = JazzClient::connect(make_offline_context(
+            AppId::from_name("cancelled-edge-query-attachment"),
+            TempDir::new().expect("tempdir").keep(),
+            declared_todo_schema(),
+        ))
+        .await
+        .expect("connect offline client");
+        let (backend, prepared) = {
+            let inner = client.db.inner.borrow();
+            (
+                inner.db.clone(),
+                inner
+                    .db
+                    .prepare_query(&Query::from("todos"))
+                    .expect("prepare query"),
+            )
+        };
+        let lease = QueryAttachmentLease {
+            backend: backend.clone(),
+            attachment: backend
+                .attach_query(&prepared, CoreReadOpts::default())
+                .expect("attach query"),
+        };
+
+        drop(lease);
+
+        assert_eq!(
+            backend.0.query_coverage_attachment_counts_for_test(),
+            (0, 0),
+            "cancelling the read must release its coverage refcount and usage-site registration"
         );
     }
 
