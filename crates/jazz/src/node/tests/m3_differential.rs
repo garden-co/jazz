@@ -911,7 +911,7 @@ fn m3_differential_schema() -> JazzSchema {
             )
             .table(
                 PublicTableSchemaBuilder::new("group_access_edges")
-                    .column("user_id", PublicColumnType::Uuid)
+                    .column("user_id", PublicColumnType::Text)
                     .fk_column("group_id", "teams")
                     .policies(public_all_policies()),
             )
@@ -1209,7 +1209,7 @@ fn seed_m3_differential_base(core: &mut NodeState<RocksDbStorage>, seed: u64) {
     accept_global(
         core,
         MergeableCommit::new("group_access_edges", row(0x42), 3).cells(BTreeMap::from([
-            ("user_id".to_owned(), Value::Uuid(alice.test_uuid())),
+            ("user_id".to_owned(), Value::String(alice.canonical().to_owned())),
             ("group_id".to_owned(), Value::Uuid(row(0x31).0)),
         ])),
     );
