@@ -269,6 +269,24 @@ test("Rust CI uses pinned prebuilt tools without charging Rust-only jobs for was
     assert.match(source, /uses: \.\/\.github\/actions\/setup-blacksmith/);
 });
 
+test("continuous soak precompiles outside seed watchdogs and preserves failure artifacts", () => {
+  const workflow = fs.readFileSync(
+    path.join(root, ".github/workflows/continuous-simulation-soak.yml"),
+    "utf8",
+  );
+  const compile = workflow.indexOf("name: Precompile exact Jazz soak test binary");
+  const shard = workflow.indexOf("name: Run deterministic shard 1 of 2");
+  assert.ok(compile >= 0 && compile < shard, "cold compile must precede seeded cases");
+  assert.match(
+    workflow,
+    /timeout --kill-after=30s "\$\{PRECOMPILE_TIMEOUT_SECONDS\}s"[\s\S]*cargo test -p jazz --lib --no-default-features[\s\S]*--features testing,transport-compression-zstd --no-run/,
+  );
+  assert.match(workflow, /if: steps\.precompile\.outcome == 'success'/);
+  assert.match(workflow, /name: Upload soak receipts\n\s+if: always\(\)/);
+  assert.match(workflow, /steps\.precompile\.outcome == 'failure'/);
+  assert.match(workflow, /phase:\s*"precompile"/);
+});
+
 test("build setup scopes mutable pnpm and sccache state to the agent temp directory", () => {
   assert.match(setupBuildAction, /dest: \$\{\{ runner\.temp \}\}\/setup-pnpm/);
   assert.match(setupBuildAction, /sccache_dir="\$\{RUNNER_TEMP\}\/sccache"/);
