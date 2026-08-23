@@ -246,9 +246,9 @@ or type-mismatched params (`INV-QUERY-3`).
 Claims are a separate input channel. `Operand::Claim` is _not_
 client-supplied binding data: claim bindings are injected server-side from the
 subscriber's authenticated identity and admission/session claims by policy
-composition (ch. 7). `sub` is the canonical identity claim and resolves to the
-authenticated `AuthorSubject` JSON string `[iss,sub]`; raw provider claims stay
-available through their admission-defined names. Additional claim names are product/admission-defined
+composition (ch. 7). `author` is the reserved logical identity claim and
+resolves to the authenticated `AuthorSubject` JSON string `[iss,sub]`; provider
+claims such as `sub` and `user_id` retain their admission-defined values. Additional claim names are product/admission-defined
 and must come from the trusted admission/session context, never from ordinary
 query bindings.
 

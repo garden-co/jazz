@@ -26,7 +26,21 @@ fn note_input(title: &str) -> HashMap<String, Value> {
 }
 
 fn provenance_values(title: &str, created_by: &str, updated_by: &str) -> Vec<Value> {
-    vec![title.into(), created_by.into(), updated_by.into()]
+    vec![
+        title.into(),
+        canonical_user_principal(created_by),
+        canonical_user_principal(updated_by),
+    ]
+}
+
+fn canonical_user_principal(user_id: &str) -> Value {
+    Value::from(
+        Session::new("urn:jazz:test", user_id)
+            .author_subject()
+            .expect("test session has a canonical author subject")
+            .canonical()
+            .to_owned(),
+    )
 }
 
 async fn create_note_as(client: &JazzClient, user_id: &str, title: &str) -> ObjectId {
@@ -85,7 +99,7 @@ async fn created_by_policies_scope_crud_to_creators() {
 }
 
 async fn created_by_policies_scope_crud_to_creators_inner() {
-    let created_by_policy = pe::eq("$createdBy", pe::session("user_id"));
+    let created_by_policy = pe::eq("$createdBy", pe::session("author"));
     let schema = SchemaBuilder::new()
         .table(make_notes_schema(
             "notes",
@@ -204,7 +218,7 @@ async fn created_by_policies_hide_server_generated_rows_without_attribution() {
 }
 
 async fn created_by_policies_hide_server_generated_rows_without_attribution_inner() {
-    let created_by_policy = pe::eq("$createdBy", pe::session("user_id"));
+    let created_by_policy = pe::eq("$createdBy", pe::session("author"));
     let schema = SchemaBuilder::new()
         .table(make_notes_schema(
             "notes",
@@ -241,7 +255,10 @@ async fn created_by_policies_hide_server_generated_rows_without_attribution_inne
     .await;
     assert_eq!(
         alice_rows[0].1,
-        vec![Value::from("alice note"), super::ALICE_ID.into()]
+        vec![
+            Value::from("alice note"),
+            canonical_user_principal(super::ALICE_ID),
+        ]
     );
     assert!(
         alice_rows.iter().all(|(id, _)| *id != system_note),
@@ -286,7 +303,7 @@ async fn created_by_policies_can_allow_reads_from_system_author() {
 }
 
 async fn created_by_policies_can_allow_reads_from_system_author_inner() {
-    let created_by_policy = pe::eq("$createdBy", pe::session("user_id"));
+    let created_by_policy = pe::eq("$createdBy", pe::session("author"));
     let system_author_policy = pe::eq("$createdBy", "jazz:system");
     let schema = SchemaBuilder::new()
         .table(make_notes_schema(
@@ -385,7 +402,7 @@ async fn created_by_policies_allow_backend_attribution_to_specific_user() {
 }
 
 async fn created_by_policies_allow_backend_attribution_to_specific_user_inner() {
-    let created_by_policy = pe::eq("$createdBy", pe::session("user_id"));
+    let created_by_policy = pe::eq("$createdBy", pe::session("author"));
     let schema = SchemaBuilder::new()
         .table(make_notes_schema(
             "notes",
@@ -458,7 +475,7 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor() {
 }
 
 async fn updated_by_select_policy_moves_visibility_to_last_editor_inner() {
-    let updated_by_policy = pe::eq("$updatedBy", pe::session("user_id"));
+    let updated_by_policy = pe::eq("$updatedBy", pe::session("author"));
     let shared_policy = pe::eq("shared", true);
     let schema = SchemaBuilder::new()
         .table(
@@ -507,8 +524,14 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor_inner() {
     .await;
     assert_eq!(initial_rows[0].1[0], Value::from("draft"));
     assert_eq!(initial_rows[0].1[1], Value::from(true));
-    assert_eq!(initial_rows[0].1[2], Value::from(super::ALICE_ID));
-    assert_eq!(initial_rows[0].1[3], Value::from(super::ALICE_ID));
+    assert_eq!(
+        initial_rows[0].1[2],
+        canonical_user_principal(super::ALICE_ID)
+    );
+    assert_eq!(
+        initial_rows[0].1[3],
+        canonical_user_principal(super::ALICE_ID)
+    );
     let Value::Timestamp(initial_created_at) = initial_rows[0].1[4] else {
         panic!("$createdAt should decode as timestamp")
     };
@@ -525,8 +548,8 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor_inner() {
     .await;
     assert_eq!(bob_rows[0].1[0], Value::from("draft"));
     assert_eq!(bob_rows[0].1[1], Value::from(true));
-    assert_eq!(bob_rows[0].1[2], Value::from(super::ALICE_ID));
-    assert_eq!(bob_rows[0].1[3], Value::from(super::ALICE_ID));
+    assert_eq!(bob_rows[0].1[2], canonical_user_principal(super::ALICE_ID));
+    assert_eq!(bob_rows[0].1[3], canonical_user_principal(super::ALICE_ID));
 
     bob.for_session(Session::new("urn:jazz:test", super::BOB_ID))
         .update(
@@ -556,8 +579,8 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor_inner() {
     .await;
     assert_eq!(bob_rows[0].1[0], Value::from("revised by bob"));
     assert_eq!(bob_rows[0].1[1], Value::from(false));
-    assert_eq!(bob_rows[0].1[2], Value::from(super::ALICE_ID));
-    assert_eq!(bob_rows[0].1[3], Value::from(super::BOB_ID));
+    assert_eq!(bob_rows[0].1[2], canonical_user_principal(super::ALICE_ID));
+    assert_eq!(bob_rows[0].1[3], canonical_user_principal(super::BOB_ID));
     let Value::Timestamp(updated_created_at) = bob_rows[0].1[4] else {
         panic!("updated $createdAt should decode as timestamp")
     };
@@ -633,8 +656,8 @@ async fn provenance_columns_expose_user_principals_and_insert_timestamps_inner()
         .find(|(id, _)| *id == alice_note)
         .expect("alice-authored row should be present");
     assert_eq!(alice_row.1[0], Value::from("alice note"));
-    assert_eq!(alice_row.1[1], Value::from(super::ALICE_ID));
-    assert_eq!(alice_row.1[2], Value::from(super::ALICE_ID));
+    assert_eq!(alice_row.1[1], canonical_user_principal(super::ALICE_ID));
+    assert_eq!(alice_row.1[2], canonical_user_principal(super::ALICE_ID));
     let Value::Timestamp(alice_created_at) = alice_row.1[3] else {
         panic!("alice $createdAt should decode as timestamp")
     };
@@ -648,8 +671,8 @@ async fn provenance_columns_expose_user_principals_and_insert_timestamps_inner()
         .find(|(id, _)| *id == bob_note)
         .expect("bob-authored row should be present");
     assert_eq!(bob_row.1[0], Value::from("bob note"));
-    assert_eq!(bob_row.1[1], Value::from(super::BOB_ID));
-    assert_eq!(bob_row.1[2], Value::from(super::BOB_ID));
+    assert_eq!(bob_row.1[1], canonical_user_principal(super::BOB_ID));
+    assert_eq!(bob_row.1[2], canonical_user_principal(super::BOB_ID));
     let Value::Timestamp(bob_created_at) = bob_row.1[3] else {
         panic!("bob $createdAt should decode as timestamp")
     };

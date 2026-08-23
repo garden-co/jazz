@@ -27,6 +27,8 @@ use crate::tools::public_schema::{
 
 const DIRECT_USER_ID_CLAIM: &str = "user_id";
 const PUBLIC_USER_ID_SESSION_PATHS: &[&str] = &["user_id", "userId"];
+const DIRECT_AUTHOR_CLAIM: &str = "author";
+const PUBLIC_AUTHOR_SESSION_PATHS: &[&str] = &["author"];
 const DIRECT_AUTH_MODE_CLAIM: &str = "authMode";
 const PUBLIC_AUTH_MODE_SESSION_PATHS: &[&str] = &["authMode", "auth_mode"];
 const RESERVED_AGGREGATE_OUTPUT_PREFIX: &str = "__jazz_aggregate_";
@@ -2519,6 +2521,10 @@ fn convert_session_path_operand(
     {
         return Ok(Operand::Claim(DIRECT_USER_ID_CLAIM.to_owned()));
     }
+    if path_segments.len() == 1 && PUBLIC_AUTHOR_SESSION_PATHS.contains(&path_segments[0].as_str())
+    {
+        return Ok(Operand::Claim(DIRECT_AUTHOR_CLAIM.to_owned()));
+    }
     if path_segments.len() == 1
         && PUBLIC_AUTH_MODE_SESSION_PATHS.contains(&path_segments[0].as_str())
     {
@@ -2530,7 +2536,7 @@ fn convert_session_path_operand(
     Err(err(
         format!("$.{}.{}", table.as_str(), path),
         format!(
-            "core schema policies only support session.user_id, session.authMode, and session.claims.* references, got session.{}",
+            "core schema policies only support session.author, session.user_id, session.authMode, and session.claims.* references, got session.{}",
             path_segments.join(".")
         ),
     ))
@@ -3385,7 +3391,7 @@ mod tests {
             LoweredRelValue::Operand(Operand::Claim(claim)) if claim == DIRECT_USER_ID_CLAIM
         ));
 
-        for path_segments in [["user_id"], ["authMode"], ["auth_mode"]] {
+        for path_segments in [["author"], ["user_id"], ["authMode"], ["auth_mode"]] {
             rel_value_to_policy_operand(
                 &table,
                 path,
