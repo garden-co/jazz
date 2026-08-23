@@ -9,14 +9,27 @@ function rows(section) {
     ([, test, path]) => ({ test, path }),
   );
 }
+function declaredCount(section, label) {
+  const heading = section.match(/^## .+?\((\d+)(?:;[^)]*)?\)$/m);
+  if (!heading) fail(`missing ${label} count in section heading`);
+  return Number(heading[1]);
+}
 function parse(doc) {
   const activeStart = doc.indexOf("## Active Rust quarantine");
   const dormantStart = doc.indexOf("## Pre-existing/dormant Rust ignores");
   const tsStart = doc.indexOf("## Active TypeScript/browser quarantine");
   if (activeStart < 0 || dormantStart < 0 || tsStart < 0)
     fail("missing Rust or TypeScript quarantine section");
-  const active = rows(doc.slice(activeStart, dormantStart));
-  const dormant = rows(doc.slice(dormantStart, tsStart));
+  const activeSection = doc.slice(activeStart, dormantStart);
+  const dormantSection = doc.slice(dormantStart, tsStart);
+  const active = rows(activeSection);
+  const dormant = rows(dormantSection);
+  const declaredActive = declaredCount(activeSection, "active Rust quarantine");
+  const declaredDormant = declaredCount(dormantSection, "dormant Rust ignores");
+  if (active.length !== declaredActive)
+    fail(`active heading declares ${declaredActive} rows but table contains ${active.length}`);
+  if (dormant.length !== declaredDormant)
+    fail(`dormant heading declares ${declaredDormant} rows but table contains ${dormant.length}`);
   const all = [...active, ...dormant];
   const seen = new Set();
   for (const row of all) {
@@ -52,6 +65,9 @@ function compiledIgnored() {
 function same(a, b) {
   return a.size === b.size && [...a].every((x) => b.has(x));
 }
+function difference(a, b) {
+  return [...a].filter((value) => !b.has(value)).sort();
+}
 function verifyMarkers(active) {
   const markerLocations = new Set();
   for (const row of active) {
@@ -71,11 +87,12 @@ function verifyMarkers(active) {
 }
 function selfTest() {
   const base =
-    "## Active Rust quarantine\n| `a` | `x.rs` |\n## Pre-existing/dormant Rust ignores\n| `b` | `y.rs` |\n## Active TypeScript/browser quarantine\n";
+    "## Active Rust quarantine (1)\n| `a` | `x.rs` |\n## Pre-existing/dormant Rust ignores (1; separately registered)\n| `b` | `y.rs` |\n## Active TypeScript/browser quarantine\n";
   if (parse(base).all.length !== 2) fail("self-test base");
   for (const [label, mutation] of [
     ["duplicate doc FQN", base.replace("`b`", "`a`")],
     ["missing row", base.replace("| `b` | `y.rs` |\n", "")],
+    ["stale heading count", base.replace("quarantine (1)", "quarantine (2)")],
   ]) {
     let failed = false;
     try {
@@ -89,7 +106,7 @@ function selfTest() {
   if (same(new Set(["a"]), new Set(["a", "extra"]))) fail("self-test extra ignore");
   if (same(new Set(["a"]), new Set(["b"]))) fail("self-test swapped green ignore");
   console.log(
-    "burndown gate self-tests: duplicate doc FQN, missing row, extra ignore, swapped ignore, and wrong identity rejected.",
+    "burndown gate self-tests: duplicate doc FQN, missing row, stale heading count, extra ignore, swapped ignore, and wrong identity rejected.",
   );
 }
 if (process.argv.includes("--self-test")) {
@@ -98,8 +115,12 @@ if (process.argv.includes("--self-test")) {
 }
 const doc = fs.readFileSync("TEST_BURNDOWN.md", "utf8");
 const { active, dormant, documented } = parse(doc);
-if (active.length !== 68 || dormant.length !== 10) fail("expected 68 active + 10 dormant rows");
 const ignored = compiledIgnored();
-if (!same(ignored, documented)) fail("compiled ignored set differs from documented set");
+if (!same(ignored, documented))
+  fail(
+    `compiled ignored set differs from documented set\ncompiled only:\n${difference(ignored, documented).join("\n")}\ndocumented only:\n${difference(documented, ignored).join("\n")}`,
+  );
 verifyMarkers(active);
-console.log("Rust burndown: exact 68 active + 10 dormant identity bijection.");
+console.log(
+  `Rust burndown: exact ${active.length} active + ${dormant.length} dormant identity bijection.`,
+);
