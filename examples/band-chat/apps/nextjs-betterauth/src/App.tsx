@@ -3,7 +3,6 @@ import { JazzProvider, useAll, useDb, useLocalFirstAuth, useSession } from "jazz
 import type { DbConfig } from "jazz-tools";
 import { app } from "../schema";
 import { provisionDemo } from "./provisioning";
-import "./app.css";
 
 const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID,
   serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL;
@@ -29,6 +28,10 @@ export function App({ config }: { config?: Partial<DbConfig> } = {}) {
       />
     );
   return <LocalFirstApp config={config} />;
+}
+/** Ordinary authenticated UI for hosts that already mounted a Jazz provider. */
+export function BandChat() {
+  return <SessionShell />;
 }
 function LocalFirstApp({ config }: { config?: Partial<DbConfig> }) {
   const auth = useLocalFirstAuth();

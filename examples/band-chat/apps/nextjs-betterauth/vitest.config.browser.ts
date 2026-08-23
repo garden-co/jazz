@@ -8,14 +8,18 @@ import {
   jazzServerInfo,
   jazzServerJwtForUser,
   unblockJazzServerNetwork,
-} from "../../packages/jazz-tools/tests/browser/testing-server-node.js";
+} from "../../../../packages/jazz-tools/tests/browser/testing-server-node.js";
 
 export default defineConfig({
+  define: {
+    "process.env.NEXT_PUBLIC_JAZZ_APP_ID": JSON.stringify("band-chat-browser-tests"),
+    "process.env.NEXT_PUBLIC_JAZZ_SERVER_URL": "undefined",
+  },
   plugins: [wasm(), topLevelAwait(), react()],
   worker: { plugins: () => [wasm(), topLevelAwait()] },
   test: {
     include: ["tests/browser/**/*.test.tsx"],
-    globalSetup: ["../../packages/jazz-tools/tests/browser/global-setup.ts"],
+    globalSetup: ["../../../../packages/jazz-tools/tests/browser/global-setup.ts"],
     browser: {
       enabled: true,
       provider: playwright(),

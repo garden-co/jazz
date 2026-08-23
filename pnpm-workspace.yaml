@@ -5,6 +5,7 @@ packages:
   - starters/*
   - examples/*
   - examples/*/apps/*
+  - examples/*/benchmarks/*
   # React Native/Expo surfaces are paused; keep their source archived but out of active workspace installs.
   - "!examples/todo-client-localfirst-expo"
   - examples/docs/*

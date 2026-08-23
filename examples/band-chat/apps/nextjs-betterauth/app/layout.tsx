@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import "../src/app.css";
+import "./globals.css";
 export const metadata: Metadata = {
   title: "BandChat",
   description: "Local-first band chat with Jazz",

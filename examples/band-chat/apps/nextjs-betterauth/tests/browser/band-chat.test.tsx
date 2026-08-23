@@ -4,7 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
 import { createSmokeScenario } from "../../src/scenario.js";
 import type { DbConfig } from "jazz-tools";
-import { deploy } from "../../../../packages/jazz-tools/src/dev/catalogue.js";
+import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
 import {
@@ -12,7 +12,7 @@ import {
   getJazzServerInfo,
   getJazzServerJwtForUser,
   unblockJazzServerNetwork,
-} from "../../../../packages/jazz-tools/tests/browser/testing-server.js";
+} from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
 
 // A valid local-first identity seed; fixed so the persistence receipt reopens
 // as the same member identity.

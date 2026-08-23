@@ -13,16 +13,17 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
-    "jsx": "preserve",
+    "jsx": "react-jsx",
+    "paths": { "@/*": ["./*"] },
+    "types": ["node"],
     "plugins": [{ "name": "next" }]
   },
   "include": [
     "next-env.d.ts",
     ".next/types/**/*.ts",
-    "src",
-    "app",
-    "tests",
-    "schema.ts",
-    "permissions.ts"
-  ]
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/dev/types/**/*.ts"
+  ],
+  "exclude": ["node_modules", "tests", "vitest.config.ts", "vitest.config.browser.ts"]
 }

@@ -1,0 +1,20 @@
+{
+  "name": "band-chat-benchmarks-typescript",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bench": "vitest bench --run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "jazz-tools": "workspace:*"
+  },
+  "devDependencies": {
+    "@codspeed/vitest-plugin": "5.7.1",
+    "@types/node": "catalog:default",
+    "typescript": "catalog:default",
+    "vite": "7.3.6",
+    "vitest": "catalog:default"
+  }
+}

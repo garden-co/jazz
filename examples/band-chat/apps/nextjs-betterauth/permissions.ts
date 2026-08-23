@@ -40,6 +40,7 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
   // The creating identity bootstraps its own membership and is the sole
   // admission authority. There is deliberately no self-join rule.
   policy.roomMembers.allowInsert.where(allowedTo.update("roomId"));
+  policy.roomMembers.allowUpdate.never();
   policy.roomMembers.allowDelete.where(allowedTo.update("roomId"));
 
   policy.messages.allowRead.where((message) =>
@@ -51,6 +52,7 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
       policy.profiles.exists.where({ id: message.senderId, userId: session.user_id }),
     ]),
   );
+  policy.messages.allowUpdate.never();
   policy.messages.allowDelete.where((message) =>
     policy.profiles.exists.where({ id: message.senderId, userId: session.user_id }),
   );
