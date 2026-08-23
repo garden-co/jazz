@@ -11,6 +11,21 @@ in the `jazz-private` repo.
 
 ## Work style
 
+### Durable follow-up and WIP visibility
+
+GitHub Issues are the durable follow-up system. Before an orchestrator session
+or lane is retired, capture or link every finding, decision, deferred task,
+unresolved question, or adopter surprise that still needs follow-up in a GitHub
+Issue. Specs and local executable manifests may link to those issues, but must
+not duplicate a backlog. Do not issue-track ephemeral status or work that is
+already complete.
+
+An implementation lane reports its first coherent local commit immediately.
+The coordinator then pushes it and opens or updates a clearly marked draft PR
+as soon as work begins or that first commit exists; the PR may be red/WIP and
+must not wait for completion or review. Lanes remain local-only: they must not
+push, create or modify PRs, comment on GitHub, or merge.
+
 **Testing:** prefer black-boxed integration tests over unit tests or white-box tests.
 Do not use JSON-like schema/permissions/query definitions. Always use the public API to build them in the tests.
 Before writing any test in Rust crates, always read `crates/jazz/TESTING_GUIDELINES.md` in full and follow it.
@@ -48,6 +63,12 @@ For ordinary Rust/core work, the full gate set is:
   but does not fail — that is documented debt the registry deliberately keeps
   visible. Both registries escape literal `|` inside table cells as `\|`; an
   unescaped pipe silently shreds a row.
+- `node dev/gates/spec-open-questions.mjs` keeps every unresolved SPEC open
+  question linked to a GitHub Issue while remaining fully offline.
+- `node dev/gates/ignored-tests.mjs` validates the exact compiled Rust ignored
+  inventory and all TypeScript quarantine markers directly from source. Every
+  ignore annotation must state `#NNNN: reason`; there is no separate burndown
+  manifest.
 - `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
   for maintained-vs-one-shot equivalence coverage (Anselm-approved 2026-07-08)
 - `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact`

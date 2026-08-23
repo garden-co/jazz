@@ -441,7 +441,7 @@ async fn admin_role_claims_reject_member_mutations_inner() {
 /// observer ────────────────────────────► sees only the allowed update persist
 /// ```
 #[tokio::test]
-#[ignore = "an allowed update using id IN session.claims.editable_doc_ids is not persisted by the server"]
+#[ignore = "#1760: an allowed update using id IN session.claims.editable_doc_ids is not persisted by the server"]
 async fn claim_array_id_policy_gates_updates_by_primary_key() {
     tokio::task::LocalSet::new()
         .run_until(claim_array_id_policy_gates_updates_by_primary_key_inner())
@@ -614,7 +614,7 @@ async fn claim_array_id_policy_gates_updates_by_primary_key_inner() {
 /// role missing   ──query──► {}
 /// ```
 #[tokio::test]
-#[ignore = "server schema conversion does not support SessionIsNotNull for claims paths"]
+#[ignore = "#1760: server schema conversion does not support SessionIsNotNull for claims paths"]
 async fn role_claim_presence_gates_row_visibility() {
     tokio::task::LocalSet::new()
         .run_until(role_claim_presence_gates_row_visibility_inner())
@@ -754,7 +754,7 @@ async fn role_claim_presence_gates_row_visibility_inner() {
 /// claims[] or missing   ──query/stream──► {}
 /// ```
 #[tokio::test]
-#[ignore = "multiple claim-array-scoped live subscriptions hang for more than 60 seconds waiting for follow-up delivery"]
+#[ignore = "#1760: multiple claim-array-scoped live subscriptions hang for more than 60 seconds waiting for follow-up delivery"]
 async fn groups_allowed_claim_arrays_gate_visibility_and_live_updates() {
     tokio::task::LocalSet::new()
         .run_until(groups_allowed_claim_arrays_gate_visibility_and_live_updates_inner())
@@ -978,7 +978,7 @@ async fn groups_allowed_claim_arrays_gate_visibility_and_live_updates_inner() {
 /// claims.revoked_at is missing  ──► matches neither table
 /// ```
 #[tokio::test]
-#[ignore = "server schema conversion does not support SessionIsNull for claims paths"]
+#[ignore = "#1760: server schema conversion does not support SessionIsNull for claims paths"]
 async fn claim_null_checks_distinguish_explicit_null_from_missing_paths() {
     tokio::task::LocalSet::new()
         .run_until(claim_null_checks_distinguish_explicit_null_from_missing_paths_inner())
@@ -1143,7 +1143,7 @@ async fn claim_null_checks_distinguish_explicit_null_from_missing_paths_inner() 
 /// anyOf: group="public" OR (group="eng" AND groups CONTAINS "eng")
 /// ```
 #[tokio::test]
-#[ignore = "server schema conversion does not support nested session claim paths such as claims.org.slug"]
+#[ignore = "#1760: server schema conversion does not support nested session claim paths such as claims.org.slug"]
 async fn row_and_claim_predicates_compose_under_and_and_or() {
     tokio::task::LocalSet::new()
         .run_until(row_and_claim_predicates_compose_under_and_and_or_inner())

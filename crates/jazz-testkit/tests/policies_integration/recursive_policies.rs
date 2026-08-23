@@ -371,7 +371,7 @@ async fn create_title_document(client: &JazzClient, title: &str) -> ObjectId {
 ///   -> {Platform, API}
 /// ```
 #[tokio::test]
-#[ignore = "recursive query magic-column evaluation hangs for more than 90 seconds"]
+#[ignore = "#1761: recursive query magic-column evaluation hangs for more than 90 seconds"]
 async fn recursive_query_step_magic_columns_use_reader_session() {
     tokio::task::LocalSet::new()
         .run_until(recursive_query_step_magic_columns_use_reader_session_inner())
@@ -603,7 +603,7 @@ async fn recursive_inherits_respects_max_depth_boundaries_inner() {
 ///              └► cycle rows remain hidden
 /// ```
 #[tokio::test]
-#[ignore = "recursive INHERITS cycles currently overflow the server evaluator stack"]
+#[ignore = "#1763: recursive INHERITS cycles currently overflow the server evaluator stack"]
 async fn recursive_inherits_cycles_fail_closed_without_poisoning_acyclic_branch() {
     tokio::task::LocalSet::new()
         .run_until(recursive_inherits_cycles_fail_closed_without_poisoning_acyclic_branch_inner())
@@ -794,7 +794,7 @@ async fn recursive_inherits_subscription_updates_when_graph_edges_change_inner()
 /// dave query ─► {}
 /// ```
 #[tokio::test]
-#[ignore = "read-side recursive ExistsRel never grants rows in integration"]
+#[ignore = "#1761: read-side recursive ExistsRel never grants rows in integration"]
 async fn recursive_exists_rel_gather_hop_grants_reachable_ancestor_and_denies_without_path() {
     tokio::task::LocalSet::new()
         .run_until(
@@ -875,7 +875,7 @@ async fn recursive_exists_rel_gather_hop_grants_reachable_ancestor_and_denies_wi
 /// bob should keep exactly one visible document, with no second add delta.
 /// ```
 #[tokio::test]
-#[ignore = "recursive ExistsRel grant path is still invisible, so diamond dedupe never settles"]
+#[ignore = "#1761: recursive ExistsRel grant path is still invisible, so diamond dedupe never settles"]
 async fn recursive_exists_rel_diamond_paths_do_not_duplicate_visibility_or_deltas() {
     tokio::task::LocalSet::new()
         .run_until(recursive_exists_rel_diamond_paths_do_not_duplicate_visibility_or_deltas_inner())

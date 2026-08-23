@@ -228,7 +228,7 @@ where
     apply_elapsed
 }
 
-#[ignore]
+#[ignore = "#1787: manual receipt"]
 #[test]
 fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
     jazz_benchmark_guard::refuse_contaminated_measurement();

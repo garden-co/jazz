@@ -1071,15 +1071,4 @@ headline artifacts — and only those — are what end up in README-level claims
 
 ## Open Questions
 
-### Open questions
-
-- 🔶 **Db-surface migration status** is mixed: some scenarios (S1/S2/S3/S5)
-  have Db-surface smoke/summary paths while others remain peer-layer; state it
-  per-scenario rather than as a blanket "blocked."
-- 🔶 **S7 is smoke-sized**; define the retained-run fields and matrix it must
-  emit to graduate from an interactive harness to a reporting benchmark.
-- 🔶 **Dirty-tree retention.** `git_dirty` is recorded but a dirty run is still
-  appendable when retention is on — decide whether tooling should refuse to quote
-  dirty-tree results or rely on author discipline.
-
----
+- 🔶 [#1787](https://github.com/garden-co/jazz/issues/1787) — Benchmark ownership, Db-surface migration, retained-run evidence, and dirty-tree policy.

@@ -359,7 +359,7 @@ async fn select_policies_boolean_inner() {
 /// query must still return the protected row without a prior explicit grant
 /// query.
 #[tokio::test]
-#[ignore = "server schema conversion requires the SELECT EXISTS dependency to include an outer-row equality"]
+#[ignore = "#1759: server schema conversion requires the SELECT EXISTS dependency to include an outer-row equality"]
 async fn select_policy_dependency_data_is_retrieved_as_part_of_query() {
     tokio::task::LocalSet::new()
         .run_until(select_policy_dependency_data_is_retrieved_as_part_of_query_inner())
@@ -1635,7 +1635,7 @@ async fn row_level_contains_and_in_list_policies_filter_rows_inner() {
 /// bob ──query write_only─────────────► sees row once it satisfies SELECT
 /// ```
 #[tokio::test]
-#[ignore = "the Rust client rejects UPDATE on a write-authorized but read-hidden row with `read policy denied UPSERT`"]
+#[ignore = "#1762: the Rust client rejects UPDATE on a write-authorized but read-hidden row with `read policy denied UPSERT`"]
 async fn read_and_write_policies_remain_independent() {
     tokio::task::LocalSet::new()
         .run_until(read_and_write_policies_remain_independent_inner())
@@ -1808,7 +1808,7 @@ async fn read_and_write_policies_remain_independent_inner() {
 /// alice ──update true→false──────► observer stream (add ✓)
 /// ```
 #[tokio::test]
-#[ignore = "updating a row from visible to hidden is rejected locally with `read policy denied UPSERT` before removal-delta behavior can be tested"]
+#[ignore = "#1762: updating a row from visible to hidden is rejected locally with `read policy denied UPSERT` before removal-delta behavior can be tested"]
 async fn authorized_mutations_emit_visibility_scoped_subscription_deltas() {
     tokio::task::LocalSet::new()
         .run_until(authorized_mutations_emit_visibility_scoped_subscription_deltas_inner())

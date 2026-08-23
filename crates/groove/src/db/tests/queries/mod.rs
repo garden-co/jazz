@@ -288,7 +288,7 @@ async fn unwrap_nullable_graph_drops_none_and_unwraps_present_values() {
 }
 
 #[futures_test::test]
-#[ignore = "receipt-only timing for batch-general schema index maintenance"]
+#[ignore = "#1787: receipt-only timing for batch-general schema index maintenance"]
 async fn indexed_batch_commit_timing_receipt_20k_and_single_row() {
     jazz_benchmark_guard::refuse_contaminated_measurement();
     const ROWS: u64 = 20_000;

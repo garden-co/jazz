@@ -269,28 +269,5 @@ enough resume/catalogue state to refetch accurately.
 
 ## Open Questions
 
-### Open questions
-
-- 🔶 **Server shell responsibilities.** The production server should be a small
-  shell around `Node`: listener setup, auth admission, storage configuration,
-  health/metrics, protocol version reporting, migration status, and shutdown.
-  It must not introduce a second transaction/query/sync engine. Decide which
-  pieces live in a `jazz-server` crate/package versus examples while topology is
-  still stabilizing.
-- 🔶 **True read-recency LRU** — v1 eviction uses write/settle recency because it
-  is already present in history. True least-recently-read eviction would require
-  per-read metadata writes; that is a product-data decision, not a correctness
-  requirement for the v1 byte-budget trigger.
-- 🔶 **Client TTL configuration.** The old hardcoded client-state TTL should
-  become an explicit cache/staleness option with clear interaction between
-  local, edge, and global durability tiers.
-- 🔶 **CORS and admission routes.** Server shells must accept normal browser
-  authorization headers and preflight behavior without weakening admission; this
-  belongs in shell conformance, not the core protocol.
-- 🔶 **Edge-local catalogue pruning.** When an edge reconnects with stale
-  catalogue state, core replay must be able to remove edge-local catalogue rows
-  absent from the authoritative catalogue without deleting unrelated local
-  state.
-- 🔶 **Edge transaction authorities.** Future edge authority placement must say
-  which scopes an edge may decide, how leases or ownership move, and how that
-  composes with sharding.
+- 🔶 [#1778](https://github.com/garden-co/jazz/issues/1778) — Server shell responsibilities and admission routes.
+- 🔶 [#1785](https://github.com/garden-co/jazz/issues/1785) — Topology cache, TTL, eviction, and edge catalogue lifecycle.

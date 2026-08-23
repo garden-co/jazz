@@ -190,7 +190,7 @@ async fn run_recursive_folder_update(max_depth: Option<usize>) -> (bool, bool) {
 /// Verifies recursive inherited UPDATE checks: too-shallow depth denies and
 /// preserves the row, while sufficient depth allows the update.
 #[tokio::test]
-#[ignore = "the depth-2 inherited UPDATE remains pending and times out before EdgeServer durability"]
+#[ignore = "#1762: the depth-2 inherited UPDATE remains pending and times out before EdgeServer durability"]
 async fn rebac_recursive_inherits_write_checks_allow_and_deny() {
     tokio::task::LocalSet::new()
         .run_until(rebac_recursive_inherits_write_checks_allow_and_deny_inner())
