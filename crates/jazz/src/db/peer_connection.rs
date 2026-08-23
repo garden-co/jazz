@@ -3552,20 +3552,15 @@ where
         peer.declare_known_state(subscription, None);
         let update = {
             let mut node = node.lock().await;
-            peer.rehydrate_query_for_subscription_with_opts(
+            peer.rehydrate_authorization_support_query_for_identity(
                 &mut node,
+                identity,
                 subscription,
                 shape,
                 binding,
                 scope.options.clone(),
             )
             .await?
-        };
-        let Some(update) = update else {
-            transport
-                .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
-                .map_err(transport_error)?;
-            return Ok(());
         };
         let SyncMessage::ViewUpdate {
             settled_through: cut,
