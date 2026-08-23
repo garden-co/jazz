@@ -343,16 +343,20 @@ pub(super) fn lower_correlated_path_relation_graph_from_parent(
 }
 
 fn child_steps_for_relation_edges(steps: &[LinearStep]) -> Vec<LinearStep> {
-    // Relation edges are the authorized association carrier, not the public
-    // structured result. Keep every matching child available to the sole
-    // structured collector terminal, which owns the per-parent order/window.
-    // Applying an explicit child window here made ordered edges disappear
-    // from a settled remote view before that collector could reconstruct it.
-    steps
-        .iter()
-        .filter(|step| !matches!(step, LinearStep::OrderBy(_) | LinearStep::Slice { .. }))
-        .cloned()
-        .collect()
+    let mut previous_was_order_by = false;
+    let mut filtered = Vec::with_capacity(steps.len());
+    for step in steps {
+        match step {
+            LinearStep::Slice { .. } if !previous_was_order_by => {
+                previous_was_order_by = false;
+            }
+            _ => {
+                previous_was_order_by = matches!(step, LinearStep::OrderBy(_));
+                filtered.push(step.clone());
+            }
+        }
+    }
+    filtered
 }
 
 fn unwrap_join_key_if_nullable(

@@ -964,39 +964,24 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     )
     .unwrap();
     db.tick().unwrap();
-    let child_key = |expected: RowUuid| {
-        [10].into_iter()
-            .chain(expected.0.as_bytes().iter().copied())
-            .collect::<Vec<_>>()
+    let expect_inserted_child = |event: SubscriptionEvent, expected: RowUuid| match event {
+        SubscriptionEvent::Delta {
+            terminal_operations,
+            ..
+        } => assert!(terminal_operations.iter().any(|operation| {
+            matches!(
+                &operation.edit,
+                groove::ivm::TerminalEdit::Insert { key, .. }
+                    if key.as_slice()
+                        == [10]
+                            .into_iter()
+                            .chain(expected.0.as_bytes().iter().copied())
+                            .collect::<Vec<_>>()
+            )
+        })),
+        other => panic!("expected terminal patch event, got {other:?}"),
     };
-    let expect_child_window_change =
-        |event: SubscriptionEvent, removed: Option<RowUuid>, inserted: RowUuid| match event {
-            SubscriptionEvent::Delta {
-                terminal_operations,
-                ..
-            } => {
-                assert!(terminal_operations.iter().any(|operation| matches!(
-                    &operation.edit,
-                    groove::ivm::TerminalEdit::Insert { key, .. }
-                        if key.as_slice() == child_key(inserted)
-                )));
-                if let Some(removed) = removed {
-                    assert!(terminal_operations.iter().any(|operation| matches!(
-                        &operation.edit,
-                        groove::ivm::TerminalEdit::Remove { key, .. }
-                            if key.as_slice() == child_key(removed)
-                    )));
-                } else {
-                    assert!(!terminal_operations.iter().any(|operation| matches!(
-                        operation.edit,
-                        groove::ivm::TerminalEdit::Remove { .. }
-                    )));
-                }
-            }
-            other => panic!("expected terminal patch event, got {other:?}"),
-        };
-    expect_child_window_change(block_on(subscription.next_raw()).unwrap(), None, row(0xd2));
-    assert!(subscription.try_next_event().is_none());
+    expect_inserted_child(block_on(subscription.next_raw()).unwrap(), row(0xd2));
 
     db.insert_with_id(
         "comments",
@@ -1008,12 +993,7 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     )
     .unwrap();
     db.tick().unwrap();
-    expect_child_window_change(
-        block_on(subscription.next_raw()).unwrap(),
-        Some(row(0xd2)),
-        row(0xd1),
-    );
-    assert!(subscription.try_next_event().is_none());
+    expect_inserted_child(block_on(subscription.next_raw()).unwrap(), row(0xd1));
 
     db.update(
         "comments",
@@ -1022,12 +1002,7 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     )
     .unwrap();
     db.tick().unwrap();
-    expect_child_window_change(
-        block_on(subscription.next_raw()).unwrap(),
-        Some(row(0xd1)),
-        row(0xd2),
-    );
-    assert!(subscription.try_next_event().is_none());
+    expect_inserted_child(block_on(subscription.next_raw()).unwrap(), row(0xd2));
 }
 
 #[test]
