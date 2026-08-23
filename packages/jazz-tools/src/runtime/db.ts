@@ -604,7 +604,7 @@ function resolveNativeSubscriptionColumns(
  * @typeParam T - The row type (e.g., `{ id: string; title: string; done: boolean }`)
  * @typeParam Init - The init type for inserts (e.g., `{ title: string; done: boolean }`)
  */
-export interface TableProxy<T, Init> {
+export interface TableProxy<T, Init, StreamingInit = unknown> {
   /** Table name */
   readonly _table: string;
   /** Schema reference */
@@ -615,6 +615,8 @@ export interface TableProxy<T, Init> {
   readonly _rowType: T;
   /** @internal Phantom brand — enables TypeScript to infer Init from usage */
   readonly _initType: Init;
+  /** @internal Phantom brand — enables exact streaming-insert inference. */
+  readonly _streamingInitType?: StreamingInit;
 }
 
 export interface ColumnTransform {
@@ -666,7 +668,7 @@ function transformOutputColumns(
 }
 
 function transformInputColumns(
-  table: TableProxy<unknown, unknown>,
+  table: TableProxy<unknown, unknown, unknown>,
   data: unknown,
 ): Record<string, unknown> {
   const record = data as Record<string, unknown>;
@@ -681,6 +683,46 @@ function transformInputColumns(
     }
   }
   return transformed;
+}
+
+function splitStreamingInsert(
+  table: TableProxy<unknown, unknown, unknown>,
+  data: unknown,
+): {
+  column: string;
+  source: StreamingValueSource;
+  values: Record<string, unknown>;
+} {
+  if (typeof data !== "object" || data === null) {
+    throw new Error("Streaming insert data must be an object");
+  }
+  const record = data as Record<string, unknown>;
+  const streamableColumns = table._schema[table._table]?.columns.filter((column) =>
+    ["Text", "Json", "Bytea"].includes(column.column_type.type),
+  );
+  const streamed = streamableColumns?.filter(
+    (column) => Object.hasOwn(record, column.name) && isStreamingValueSource(record[column.name]),
+  );
+  if (streamed?.length !== 1) {
+    throw new Error("Streaming insert requires exactly one streamed Text, Json, or Bytea column");
+  }
+  const column = streamed[0]!.name;
+  const source = record[column] as StreamingValueSource;
+  const values = { ...record };
+  delete values[column];
+  return { column, source, values };
+}
+
+function isStreamingValueSource(value: unknown): value is StreamingValueSource {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as {
+    getReader?: unknown;
+    [Symbol.asyncIterator]?: unknown;
+  };
+  return (
+    typeof candidate.getReader === "function" ||
+    typeof candidate[Symbol.asyncIterator] === "function"
+  );
 }
 
 export type { TransactionKind } from "./client.js";
@@ -1464,15 +1506,14 @@ export class Db {
    * before publishing. Its handle returns only the generated id so the complete
    * streamed value is not copied back into JavaScript memory.
    */
-  async insertStreaming<T, Init, Column extends keyof Init & string>(
-    table: TableProxy<T, Init>,
-    data: Omit<Init, Column>,
-    column: Column,
-    source: StreamingValueSource,
+  async insertStreaming<T, Init, StreamingInit>(
+    table: TableProxy<T, Init, StreamingInit>,
+    data: StreamingInit,
     options?: InsertOptions,
   ): Promise<WriteHandle<{ id: string }>> {
     const client = this.getClient(table._schema);
-    const transformedData = transformInputColumns(table, data);
+    const { column, source, values: ordinaryData } = splitStreamingInsert(table, data);
+    const transformedData = transformInputColumns(table, ordinaryData);
     const values = toWriteRecordForOperation(
       "Insert",
       transformedData,

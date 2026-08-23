@@ -127,10 +127,13 @@ builder and incremental staging channel. It accepts the other ordinary row
 cells plus one streamed string, bytes, or JSON column and publishes only after
 the stream and validation finish.
 
-The TypeScript API is
-`await db.insertStreaming(table, otherData, column, source)`. Its generic shape
-infers the column from the table initializer and omits it from `otherData`; the
-runtime schema infers Text, JSON, or Bytea rather than trusting a caller tag.
+The TypeScript API uses the ordinary insert payload shape:
+`await db.insertStreaming(table, { streamedColumn: source, ...otherData })`.
+The schema DSL derives a separate streaming-init union from exact SQL column
+metadata, replacing exactly one Text, JSON, or Bytea field with the source while
+retaining every other ordinary insert constraint. This avoids treating UUIDs as
+streamable merely because both UUID and Text map to TypeScript `string`. The
+runtime schema infers the physical kind rather than trusting a caller tag.
 Node/NAPI accepts a `ReadableStream` or `AsyncIterable`, spools each awaited
 chunk to an unlink-on-drop temporary file, then finishes through the native
 reader API. Producer failure aborts before any root is staged. We still do not

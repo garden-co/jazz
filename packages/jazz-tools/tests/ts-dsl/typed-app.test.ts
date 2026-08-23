@@ -274,11 +274,26 @@ describe("typed app prototype", () => {
 
     type TodoRow = s.RowOf<typeof app.todos>;
     type TodoInsert = s.InsertOf<typeof app.todos>;
+    type TodoStreamingInsert = s.StreamingInsertOf<typeof app.todos>;
     type TodoWhere = s.WhereOf<typeof app.todos>;
     type TodoWithProject = s.RowOf<typeof todoWithProjectQuery>;
     type ProjectWithTitles = s.RowOf<typeof projectWithTitlesQuery>;
     const todoRow = {} as TodoRow;
     const todoInsert = {} as TodoInsert;
+    const streamedTitle = {
+      title: new ReadableStream<string>(),
+      done: false,
+      tags: [],
+      attachment: new Uint8Array(),
+      project: "project-id",
+    } satisfies TodoStreamingInsert;
+    const streamedAttachment = {
+      title: "todo",
+      done: false,
+      tags: [],
+      attachment: new ReadableStream<Uint8Array>(),
+      project: "project-id",
+    } satisfies TodoStreamingInsert;
     const todoWithProject = {} as TodoWithProject;
     const projectWithTitles = {} as ProjectWithTitles;
 
@@ -296,6 +311,8 @@ describe("typed app prototype", () => {
     expectTypeOf(todoInsert.attachment).toEqualTypeOf<Uint8Array>();
     expectTypeOf(todoInsert.project).toEqualTypeOf<string>();
     expectTypeOf(todoInsert.owner).toEqualTypeOf<string | null | undefined>();
+    expectTypeOf(streamedTitle.title).toEqualTypeOf<ReadableStream<string>>();
+    expectTypeOf(streamedAttachment.attachment).toEqualTypeOf<ReadableStream<Uint8Array>>();
 
     expectTypeOf<TodoWhere["project"]>().branded.toEqualTypeOf<
       string | { eq?: string; ne?: string; in?: string[] } | undefined
@@ -324,6 +341,8 @@ describe("typed app prototype", () => {
 
     void projectRecord;
     void todoTitleRecords;
+    void streamedTitle;
+    void streamedAttachment;
     void queryContract;
     void typedQueryContract;
     void tableProxyContract;
@@ -332,6 +351,15 @@ describe("typed app prototype", () => {
     if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
       // @ts-expect-error invalid root key
       void app.unknown;
+      const invalidStreamedReference: TodoStreamingInsert = {
+        title: "todo",
+        done: false,
+        tags: [],
+        attachment: new Uint8Array(),
+        // @ts-expect-error UUID references are not streamable despite being strings in TypeScript.
+        project: new ReadableStream<string>(),
+      };
+      void invalidStreamedReference;
 
       // @ts-expect-error invalid where column
       app.todos.where({ missing: true });

@@ -9,9 +9,12 @@ import type {
 
 type Todo = { id: string; title: string; done: boolean };
 type TodoInit = { title: string; done: boolean };
+type TodoStreamingInit =
+  | { title: ReadableStream<string | Uint8Array>; done: boolean }
+  | { title: AsyncIterable<string | Uint8Array>; done: boolean };
 
 declare const db: Db;
-declare const todos: TableProxy<Todo, TodoInit>;
+declare const todos: TableProxy<Todo, TodoInit, TodoStreamingInit>;
 
 async function assertWriteHandleContract() {
   const inserted: WriteResult<Todo> = db.insert(todos, { title: "todo", done: false });
@@ -22,20 +25,18 @@ async function assertWriteHandleContract() {
   const updated: WriteHandle = db.update(todos, "todo-1", { done: true });
   const upserted: WriteHandle = db.upsert(todos, "todo-1", { title: "todo", done: false });
   const deleted: WriteHandle = db.delete(todos, "todo-1");
-  const streamed: Promise<WriteHandle<{ id: string }>> = db.insertStreaming(
-    todos,
-    { done: false },
-    "title",
-    (async function* () {
+  const streamed: Promise<WriteHandle<{ id: string }>> = db.insertStreaming(todos, {
+    done: false,
+    title: (async function* () {
       yield "streamed ";
       yield new TextEncoder().encode("title");
     })(),
-  );
+  });
 
   // @ts-expect-error Every required non-streamed column remains required.
-  db.insertStreaming(todos, {}, "title", (async function* () {})());
-  // @ts-expect-error The streamed column must belong to the table initializer.
-  db.insertStreaming(todos, { title: "todo", done: false }, "missing", new ReadableStream());
+  db.insertStreaming(todos, { title: new ReadableStream() });
+  // @ts-expect-error A streaming insert must put its source in the derived streamed column.
+  db.insertStreaming(todos, { title: "todo", done: false });
 
   const batchId: Promise<string> = inserted.batchId;
 

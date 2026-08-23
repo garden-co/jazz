@@ -48,6 +48,52 @@ function makeWriteHandle(transactionId: string): WriteHandle {
 }
 
 describe("Db runtime schema order", () => {
+  it("extracts a schema-derived stream from the ordinary insert payload shape", async () => {
+    const runtimeSchema: WasmSchema = {
+      todos: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        ],
+      },
+    };
+    const handle = makeWriteHandle("streaming-insert");
+    const insertStreaming = vi.fn(async () => handle);
+    const client = {
+      getSchema: () => new Map(Object.entries(runtimeSchema)),
+      insertStreaming,
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+    const table = {
+      _table: "todos",
+      _schema: runtimeSchema,
+      _rowType: {} as { id: string; title: string; done: boolean },
+      _initType: {} as { title: string; done: boolean },
+      _streamingInitType: {} as {
+        title: AsyncIterable<string | Uint8Array>;
+        done: boolean;
+      },
+    } satisfies TableProxy<
+      { id: string; title: string; done: boolean },
+      { title: string; done: boolean },
+      { title: AsyncIterable<string | Uint8Array>; done: boolean }
+    >;
+    const source = (async function* () {
+      yield "streamed title";
+    })();
+
+    await expect(db.insertStreaming(table, { title: source, done: false })).resolves.toBe(handle);
+    expect(insertStreaming).toHaveBeenCalledWith(
+      "todos",
+      { done: { type: "Boolean", value: false } },
+      "title",
+      source,
+      undefined,
+      undefined,
+      undefined,
+    );
+  });
+
   it("uses the generated schema order for inserts when the runtime schema is sorted", async () => {
     const generatedSchema: WasmSchema = {
       todos: {

@@ -382,12 +382,15 @@ leave only an expiring unpublished staging claim. The API validates the target
 column and physical kind before consuming the reader and preserves a present
 nullable wrapper where required.
 
-TypeScript exposes the same operation as
-`Db.insertStreaming(table, otherData, column, source)`. The table initializer
-type determines the omitted streamed column and continues to require every
-other required insert column. The runtime schema, rather than a caller-supplied
-physical tag, determines whether that column is Text, JSON, or Bytea. Sources
-are `ReadableStream<Uint8Array | string>` or
+TypeScript exposes the same operation with the ordinary insert payload shape as
+`Db.insertStreaming(table, { streamedColumn: source, ...otherData })`. From the
+exact DSL column metadata, each typed table derives a separate streaming-init
+union with one Text, JSON, or Bytea column replaced by a required stream source;
+all other columns retain their ordinary insert types and required/defaulted
+status. UUID and other columns whose TypeScript values merely resemble a
+streamable scalar are therefore rejected statically. The runtime schema remains
+the final authority and determines the physical kind without a caller-supplied
+tag. Sources are `ReadableStream<Uint8Array | string>` or
 `AsyncIterable<Uint8Array | string>`; Bytea accepts only byte chunks. The
 operation returns a promise for a write handle containing the generated row id,
 not a materialized copy of the streamed value.
