@@ -235,12 +235,10 @@ Window limitations:
   an `array_subquery`: without child `order_by`, each parent/correlation group
   is ordered by ascending child row id before its child-local `offset` and
   `limit`; explicit child keys retain ascending child row id as their stable
-  tie-break. The sole structured collector terminal applies that child window
-  per correlation/parent key; relation-edge carriers retain the complete
-  authorized association so a settled receiver can reconstruct the same
-  window. A child in one parent group therefore cannot displace a child in
-  another. This is the ch. 6 structured-child ordering contract made executable
-  in maintained lowering, not source scan order.
+  tie-break. The child `TopBy` is partitioned by its correlation/parent key, so
+  a child in one parent group cannot displace a child in another. This is the
+  ch. 6 structured-child ordering contract made executable in maintained
+  lowering, not source scan order.
 - A bounded window over a recursive closure remains rejected loudly. A recursive
   graph produces closure tuples across seed/step iterations and depths, and its
   current public relation does not carry one source-child row id that totals
