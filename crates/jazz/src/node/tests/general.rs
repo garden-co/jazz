@@ -1,4 +1,157 @@
 #[test]
+fn ordinary_oversized_scalar_write_is_staged_indirect_and_reads_logically_inline() {
+    let schema = two_column_schema();
+    let node_uuid = node(0x71);
+    let (temp_dir, mut node) = open_node_with_schema(node_uuid, schema.clone());
+    let backend = std::rc::Rc::new(groove::chunks::MemoryChunkStorage::new());
+    node.set_chunk_storage(backend.clone());
+    let body = "large logical body/".repeat(20_000);
+    node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(0x71), 10).cells(BTreeMap::from([
+            ("title".to_owned(), Value::String("title".to_owned())),
+            ("body".to_owned(), Value::String(body.clone())),
+        ])),
+    )
+    .unwrap();
+
+    let stored = node.query_table_versions("todos").unwrap();
+    assert!(matches!(
+        stored[0].cell(node.table("todos").unwrap(), "body"),
+        Ok(Some(Value::Large(_)))
+    ));
+    let current = node.current_rows("todos", DurabilityTier::Local).unwrap();
+    assert_eq!(
+        current[0].cell(node.table("todos").unwrap(), "body"),
+        Some(Value::String(body.clone()))
+    );
+    assert!(!backend.is_empty());
+
+    node.database.close().unwrap();
+    drop(node);
+    let cfs = schema.column_families();
+    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+    let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
+    let mut reopened = NodeState::new(node_uuid, schema, storage).unwrap();
+    reopened.set_chunk_storage(backend);
+    assert_eq!(
+        reopened.current_rows("todos", DurabilityTier::Local).unwrap()[0]
+            .cell(reopened.table("todos").unwrap(), "body"),
+        Some(Value::String(body))
+    );
+}
+
+#[test]
+fn failed_large_scalar_staging_publishes_no_row() {
+    #[derive(Clone)]
+    struct FailingStage;
+    impl groove::chunks::ChunkStorage for FailingStage {
+        fn get(
+            &self,
+            _locator: Vec<u8>,
+            _expected_hash: groove::large_values::ContentHash,
+        ) -> groove::chunks::ChunkFuture<'_, Result<bytes::Bytes, groove::chunks::ChunkStorageError>> {
+            Box::pin(async { Err(groove::chunks::ChunkStorageError::Unavailable) })
+        }
+
+        fn stage(
+            &self,
+            _chunks: Vec<groove::large_values::StagedChunk>,
+        ) -> groove::chunks::ChunkFuture<'_, Result<(), groove::chunks::ChunkStorageError>> {
+            Box::pin(async { Err(groove::chunks::ChunkStorageError::Backend("planted".to_owned())) })
+        }
+    }
+
+    let schema = two_column_schema();
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x72), schema);
+    node.set_chunk_storage(std::rc::Rc::new(FailingStage));
+    let result = node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(0x72), 10).cells(BTreeMap::from([
+            ("title".to_owned(), Value::String("title".to_owned())),
+            ("body".to_owned(), Value::String("x".repeat(70_000))),
+        ])),
+    );
+
+    assert!(matches!(
+        result,
+        Err(Error::Groove(GrooveDbError::IvmRuntime(
+            groove::ivm::runtime::IvmRuntimeError::Chunk(
+                groove::chunks::ChunkError::Backend(message)
+            )
+        ))) if message.contains("planted")
+    ));
+    assert!(node
+        .current_rows("todos", DurabilityTier::Local)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn synced_descriptor_reads_through_shared_opaque_chunk_backend() {
+    let schema = two_column_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0x73), schema.clone());
+    let (_reader_dir, mut reader) = open_node_with_schema(node(0x74), schema);
+    let backend = std::rc::Rc::new(groove::chunks::MemoryChunkStorage::new());
+    writer.set_chunk_storage(backend.clone());
+    reader.set_chunk_storage(backend);
+    let body = "shared backend value/".repeat(15_000);
+    let (_, unit) = writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", row(0x73), 10).cells(BTreeMap::from([
+                ("title".to_owned(), Value::String("title".to_owned())),
+                ("body".to_owned(), Value::String(body.clone())),
+            ])),
+        )
+        .unwrap();
+
+    reader.apply_sync_message_settled(unit).unwrap();
+
+    let rows = reader.current_rows("todos", DurabilityTier::Local).unwrap();
+    assert_eq!(
+        rows[0].cell(reader.table("todos").unwrap(), "body"),
+        Some(Value::String(body))
+    );
+}
+
+#[test]
+fn handcrafted_large_descriptor_is_rejected_but_node_staged_preparation_can_publish() {
+    let schema = two_column_schema();
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x75), schema);
+    let logical = "prepared logical value/".repeat(10_000);
+    let prepared = groove::large_values::prepare(
+        groove::large_values::LargeValueKind::String,
+        logical.as_bytes(),
+        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
+    )
+    .unwrap();
+    let forged = MergeableCommit::new("todos", row(0x75), 10).cells(BTreeMap::from([
+        ("title".to_owned(), Value::String("title".to_owned())),
+        ("body".to_owned(), Value::Large(prepared.value_ref.clone())),
+    ]));
+    assert!(matches!(
+        node.commit_mergeable_settled(forged),
+        Err(Error::InvalidMergeableCommit(_))
+    ));
+
+    let logical_commit = MergeableCommit::new("todos", row(0x75), 11).cells(BTreeMap::from([(
+        "title".to_owned(),
+        Value::String("title".to_owned()),
+    )]));
+    let admitted = crate::db::block_on(node.attach_prepared_large_cell(
+        logical_commit,
+        "body",
+        &prepared,
+    ))
+    .unwrap();
+    node.commit_mergeable_settled(admitted).unwrap();
+
+    let rows = node.current_rows("todos", DurabilityTier::Local).unwrap();
+    assert_eq!(
+        rows[0].cell(node.table("todos").unwrap(), "body"),
+        Some(Value::String(logical))
+    );
+}
+
+#[test]
 fn parent_tuple_encoding_matches_tx_id_tuple_order() {
     let tx_id = TxId::new(TxTime::from(0x0102_0304_0506), node(0x12));
     let parent_value = Value::Tuple(vec![Value::U64(tx_id.time.0), Value::Uuid(tx_id.node.0)]);

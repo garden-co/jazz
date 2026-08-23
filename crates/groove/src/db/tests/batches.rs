@@ -3,6 +3,77 @@
 use super::*;
 
 #[futures_test::test]
+async fn staged_large_value_is_consumed_atomically_with_its_referencing_row() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    database.set_chunk_storage(chunks.clone());
+    let staged = database
+        .prepare_and_stage_large_value(
+            crate::large_values::LargeValueKind::Bytes,
+            &vec![9; crate::large_values::INLINE_VALUE_MAX_BYTES + 1],
+        )
+        .await
+        .unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "objects",
+        vec![Value::U64(1), Value::Large(staged.value_ref.clone())],
+    );
+    batch.accept_large_value(staged.id);
+    database.commit_batch(batch).await.unwrap();
+
+    let mut replay = database.open_batch();
+    replay.insert(
+        "objects",
+        vec![Value::U64(2), Value::Large(staged.value_ref)],
+    );
+    replay.accept_large_value(staged.id);
+    assert!(matches!(
+        database.commit_batch(replay).await,
+        Err(Error::InvalidLargeValueMetadata(_))
+    ));
+
+    let rejected = database
+        .prepare_and_stage_large_value(
+            crate::large_values::LargeValueKind::Bytes,
+            &vec![3; crate::large_values::INLINE_VALUE_MAX_BYTES + 1],
+        )
+        .await
+        .unwrap();
+    let before = chunks.len();
+    assert!(
+        database
+            .evict_staged_large_value(rejected.id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        !database
+            .evict_staged_large_value(rejected.id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap()
+            > 0
+    );
+    assert!(chunks.len() < before);
+}
+
+#[futures_test::test]
 async fn failed_persistence_does_not_retract_an_applied_subscription_delta() {
     let (storage, control) = TestStorage::controlled(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
@@ -718,7 +789,7 @@ async fn direct_record_store_stores_ordered_records_independent_of_tables() {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(raw_value, b"one");
+        assert_eq!(raw_value, b"\0one");
 
         store
             .delete(&[

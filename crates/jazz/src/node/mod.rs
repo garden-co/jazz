@@ -7,6 +7,7 @@
 //! `Db` facade and groove storage/IVM.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "testing")]
@@ -540,6 +541,14 @@ pub struct NodeState<S> {
     rejections: RejectionTracking,
     /// Groove database slot over this node's storage.
     database: DatabaseSlot,
+    /// Policy-blind immutable chunk storage owned by Groove and retained across rebuilds.
+    chunk_storage: Rc<dyn groove::chunks::ChunkStorage>,
+    local_chunk_reader: groove::chunks::LocalChunkReader,
+    chunk_resolver: Rc<dyn groove::chunks::MissingChunkResolver>,
+    /// Stateless direct adapter from Groove evaluation to its chunk storage.
+    content_provider: groove::chunks::StorageChunkProvider<Rc<dyn groove::chunks::ChunkStorage>>,
+    /// Groove-owned verified cache retained across internal database rebuilds.
+    content_runtime_provider: groove::chunks::OwnedChunkProvider,
     storage_type: std::marker::PhantomData<fn() -> S>,
     /// Process-local identity for runtime-local Groove handles such as prepared shape ids.
     groove_runtime_token: u64,
@@ -1429,6 +1438,10 @@ pub struct MergeableCommit {
     pub parents: Vec<TxId>,
     /// Optional application metadata.
     pub user_metadata_json: Option<String>,
+    /// Columns carrying Groove preparations staged through this node. Private
+    /// provenance prevents callers from handcrafting physical descriptors.
+    prepared_large_columns: BTreeSet<String>,
+    staged_large_values: Vec<groove::large_values::StagedLargeValueId>,
 }
 
 impl MergeableCommit {
@@ -1446,6 +1459,8 @@ impl MergeableCommit {
             deletion: None,
             parents: Vec::new(),
             user_metadata_json: None,
+            prepared_large_columns: BTreeSet::new(),
+            staged_large_values: Vec::new(),
         }
     }
 
@@ -1512,7 +1527,34 @@ impl MergeableCommit {
     }
 
     fn validate(&self) -> Result<(), Error> {
-        validate_mergeable_write_shape(self.cells.is_empty(), self.deletion.is_some())
+        validate_mergeable_write_shape(self.cells.is_empty(), self.deletion.is_some())?;
+        if self.cells.iter().any(|(column, value)| {
+            value_contains_indirect_descriptor(value)
+                && !self.prepared_large_columns.contains(column)
+        }) {
+            return Err(Error::InvalidMergeableCommit(
+                "callers must author logical scalar values, not physical large descriptors",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn value_contains_indirect_descriptor(value: &Value) -> bool {
+    match value {
+        Value::Large(_) => true,
+        Value::Tuple(values) | Value::Array(values) => {
+            values.iter().any(value_contains_indirect_descriptor)
+        }
+        Value::Nullable(Some(value)) => value_contains_indirect_descriptor(value),
+        Value::Record(record) => record
+            .to_values()
+            .is_ok_and(|values| values.iter().any(value_contains_indirect_descriptor)),
+        Value::Enum(value) => value
+            .record()
+            .to_values()
+            .is_ok_and(|values| values.iter().any(value_contains_indirect_descriptor)),
+        _ => false,
     }
 }
 
@@ -1801,6 +1843,12 @@ pub enum Error {
     /// Error returned by groove.
     #[error(transparent)]
     Groove(#[from] GrooveDbError),
+    /// Error returned by Groove-owned chunk storage.
+    #[error(transparent)]
+    ChunkStorage(#[from] groove::chunks::ChunkStorageError),
+    /// Groove rejected a malformed logical value or indirect descriptor.
+    #[error(transparent)]
+    LargeValue(#[from] groove::large_values::Error),
     /// Error returned by groove records.
     #[error(transparent)]
     Record(#[from] records::Error),

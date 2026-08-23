@@ -312,11 +312,14 @@ where
             catalogue,
             catalogue_bootstrap_state,
             database,
+            chunk_storage,
+            chunk_resolver,
+            content_provider,
             history_complete,
             ..
         } = self;
         let storage = database.into_inner().into_storage();
-        let reopened = match catalogue_bootstrap_state {
+        let mut reopened = match catalogue_bootstrap_state {
             CatalogueBootstrapState::Uninitialized => {
                 NodeState::<BoxedStorage>::new_catalogue_uninitialized(node_uuid, storage).await?
             }
@@ -328,6 +331,15 @@ where
             )
             .await?,
         };
+        reopened.database.set_chunk_storage(chunk_storage.clone());
+        reopened
+            .database
+            .set_missing_chunk_resolver(chunk_resolver.clone());
+        reopened.chunk_storage = chunk_storage;
+        reopened.local_chunk_reader = reopened.database.local_chunk_reader();
+        reopened.chunk_resolver = chunk_resolver;
+        reopened.content_provider = content_provider;
+        reopened.content_runtime_provider = reopened.database.owned_chunk_provider();
         Ok(reopened)
     }
 
@@ -501,6 +513,16 @@ database.finish_persistence(persisted)?;
             .unwrap_or_else(|| schema.clone());
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| Instant::now());
+        let chunk_storage: Rc<dyn groove::chunks::ChunkStorage> =
+            Rc::new(groove::chunks::MemoryChunkStorage::new());
+        let chunk_resolver: Rc<dyn groove::chunks::MissingChunkResolver> =
+            Rc::new(groove::chunks::UnavailableChunkResolver);
+        let content_provider =
+            groove::chunks::StorageChunkProvider::new(chunk_storage.clone());
+        database.set_chunk_storage(chunk_storage.clone());
+        database.set_missing_chunk_resolver(chunk_resolver.clone());
+        let content_runtime_provider = database.owned_chunk_provider();
+        let local_chunk_reader = database.local_chunk_reader();
         let mut node = Self {
             node_uuid,
             self_node_alias: None,
@@ -565,6 +587,11 @@ database.finish_persistence(persisted)?;
             },
             rejections: RejectionTracking::default(),
             database: DatabaseSlot::new(database),
+            chunk_storage,
+            local_chunk_reader,
+            chunk_resolver,
+            content_provider,
+            content_runtime_provider,
             storage_type: std::marker::PhantomData,
             groove_runtime_token: next_groove_runtime_token(),
             history_complete,
@@ -741,6 +768,156 @@ database.finish_persistence(persisted)?;
         self.permissions_ready
     }
 
+    /// Replace the policy-blind immutable content backend used by Groove.
+    /// The backend instance and verified cache survive catalogue rebuilds.
+    pub fn set_chunk_storage(
+        &mut self,
+        storage: Rc<dyn groove::chunks::ChunkStorage>,
+    ) {
+        let provider = groove::chunks::StorageChunkProvider::new(storage.clone());
+        self.database.set_chunk_storage(storage.clone());
+        self.database
+            .set_missing_chunk_resolver(self.chunk_resolver.clone());
+        let runtime_provider = self.database.owned_chunk_provider();
+        self.chunk_storage = storage;
+        self.local_chunk_reader = self.database.local_chunk_reader();
+        self.content_provider = provider;
+        self.content_runtime_provider = runtime_provider;
+    }
+
+    /// Install Jazz's sync-plane fallback for chunks absent from Groove's
+    /// local storage. The resolver carries no authorization state; ordinary
+    /// row/view delivery is what discloses locators to callers.
+    pub fn set_missing_chunk_resolver(
+        &mut self,
+        resolver: Rc<dyn groove::chunks::MissingChunkResolver>,
+    ) {
+        self.database.set_missing_chunk_resolver(resolver.clone());
+        let runtime_provider = self.database.owned_chunk_provider();
+        self.chunk_resolver = resolver;
+        self.content_runtime_provider = runtime_provider;
+    }
+
+    /// Consult Groove's local immutable storage without invoking the peer
+    /// fallback. Peer forwarding uses this to avoid recursive request loops.
+    pub async fn local_chunk(
+        &self,
+        locator: Vec<u8>,
+        expected_hash: groove::large_values::ContentHash,
+    ) -> Result<bytes::Bytes, groove::chunks::ChunkStorageError> {
+        self.local_chunk_reader.get(locator, expected_hash).await
+    }
+
+    pub(crate) fn local_chunk_reader_handle(&self) -> groove::chunks::LocalChunkReader {
+        self.local_chunk_reader.clone()
+    }
+
+    /// Stage the immutable chunks from a Groove preparation. This does not
+    /// publish an owning Jazz row; normal commit authorization and publication
+    /// remain a separate boundary.
+    pub async fn stage_large_value(
+        &self,
+        prepared: &groove::large_values::PreparedLargeValue,
+    ) -> Result<groove::large_values::StagedLargeValue, Error> {
+        Ok(self
+            .database
+            .stage_large_value_preparation(prepared.clone())
+            .await?)
+    }
+
+    /// Apply Jazz staging policy by evicting an opaque Groove staging root.
+    /// Quota/expiry selection stays in Jazz; all persisted mechanics remain in
+    /// Groove and repeated eviction is harmless.
+    pub async fn evict_staged_large_value(
+        &self,
+        id: groove::large_values::StagedLargeValueId,
+    ) -> Result<bool, Error> {
+        Ok(self.database.evict_staged_large_value(id).await?)
+    }
+
+    /// Prepare and incrementally stage a native reader without retaining the
+    /// logical input or all emitted chunks. Immutable nodes may be staged
+    /// before validation completes, but the root is authorized—and therefore
+    /// publishable—only after the complete preparation succeeds.
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn prepare_and_stage_large_value_streaming<R>(
+        &self,
+        kind: groove::large_values::LargeValueKind,
+        reader: R,
+    ) -> Result<
+        (
+            groove::large_values::StagedLargeValue,
+            groove::large_values::StreamingPrepareStats,
+        ),
+        Error,
+    >
+    where
+        R: std::io::Read + Send + 'static,
+    {
+        Ok(self
+            .database
+            .prepare_and_stage_large_value_streaming(kind, reader)
+            .await?)
+    }
+
+    /// Stage one Groove-owned preparation and attach its physical descriptor
+    /// to an otherwise ordinary authorized Jazz commit. The private marker is
+    /// admission provenance, not canonical row state.
+    pub async fn attach_prepared_large_cell(
+        &self,
+        mut commit: MergeableCommit,
+        column: impl Into<String>,
+        prepared: &groove::large_values::PreparedLargeValue,
+    ) -> Result<MergeableCommit, Error> {
+        let staged = self.stage_large_value(prepared).await?;
+        let column = column.into();
+        commit
+            .cells
+            .insert(column.clone(), Value::Large(prepared.value_ref.clone()));
+        commit.prepared_large_columns.insert(column);
+        commit.staged_large_values.push(staged.id);
+        Ok(commit)
+    }
+
+    /// Consolidate through Groove-owned storage. Jazz receives only the
+    /// publishable descriptor used by its high-level row-write API.
+    pub async fn consolidate_and_stage_large_value(
+        &self,
+        value: groove::large_values::LargeValueRef,
+    ) -> Result<groove::large_values::LargeValueRef, Error> {
+        Ok(self
+            .database
+            .consolidate_and_stage_large_value(value)
+            .await?)
+    }
+
+    /// Prepare and stage a logical append through Groove's bounded tail and
+    /// localized consolidation path.
+    pub async fn append_and_stage_large_value(
+        &self,
+        value: groove::large_values::LargeValueRef,
+        bytes: Vec<u8>,
+    ) -> Result<groove::large_values::LargeValueRef, Error> {
+        Ok(self
+            .database
+            .append_and_stage_large_value(value, bytes)
+            .await?)
+    }
+
+    /// Prepare and stage a logical byte-coordinate splice through Groove.
+    pub async fn edit_and_stage_large_value(
+        &self,
+        value: groove::large_values::LargeValueRef,
+        offset: u64,
+        delete_length: u64,
+        insert_bytes: Vec<u8>,
+    ) -> Result<groove::large_values::LargeValueRef, Error> {
+        Ok(self
+            .database
+            .edit_and_stage_large_value(value, offset, delete_length, insert_bytes)
+            .await?)
+    }
+
     async fn rebuild_database_slot(&mut self) -> Result<(), Error> {
         // Reopening the database refreshes Groove's physical table catalogue.
         // Parking is in-memory delivery state, not derivable from storage, so a
@@ -748,7 +925,7 @@ database.finish_persistence(persisted)?;
         let parking = self.parking.clone();
         let old_database = self.database.take();
         let storage = old_database.into_storage();
-        let database = Self::open_full_database(
+        let mut database = Self::open_full_database(
             &self.catalogue.schema,
             &self.catalogue.catalogue_schemas,
             &self.catalogue.schema_version_aliases,
@@ -756,6 +933,9 @@ database.finish_persistence(persisted)?;
             storage,
         )
         .await?;
+        database.set_chunk_storage(self.chunk_storage.clone());
+        database.set_missing_chunk_resolver(self.chunk_resolver.clone());
+        self.content_runtime_provider = database.owned_chunk_provider();
         self.database.replace(database);
         self.register_physical_history_variant_projections().await?;
         self.register_physical_current_variant_projections().await?;

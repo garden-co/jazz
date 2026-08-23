@@ -1,0 +1,3968 @@
+//! Canonical indirect representation for large logical scalar values.
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::chunks::ChunkRequest;
+use crate::ivm::runtime::IvmRuntimeError;
+use crate::ivm::runtime::evaluation_session::EvaluationInputs;
+use crate::records::{RecordDescriptor, Value};
+
+pub const FORMAT_VERSION: u8 = 1;
+/// Logical scalar size above which ordinary writes use indirect storage.
+pub const INLINE_VALUE_MAX_BYTES: usize = 64 * 1024;
+pub const LEAF_MIN_BYTES: usize = 16 * 1024;
+pub const LEAF_TARGET_BYTES: usize = 64 * 1024;
+pub const LEAF_MAX_BYTES: usize = 256 * 1024;
+pub const BRANCH_MIN_CHILDREN: usize = 4;
+pub const BRANCH_TARGET_CHILDREN: usize = 16;
+pub const BRANCH_MAX_CHILDREN: usize = 64;
+pub const MAX_TREE_DEPTH: usize = 32;
+pub const MAX_EDIT_COUNT: usize = 64;
+pub const MAX_EDIT_TAIL_BYTES: usize = 256 * 1024;
+pub const MAX_LOCATOR_BYTES: usize = 128;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ContentHash(pub [u8; 32]);
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct Locator(pub Vec<u8>);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LargeValueKind {
+    Bytes,
+    String,
+    Json,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct NodeRef {
+    pub object_hash: ContentHash,
+    pub locator: Locator,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct NodeMetrics {
+    pub byte_length: u64,
+    pub utf16_length: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchChild {
+    pub node_ref: NodeRef,
+    pub metrics: NodeMetrics,
+    /// Deterministic subtree identity excluding retrieval locators.
+    pub logical_hash: ContentHash,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChunkNode {
+    Leaf {
+        format: u8,
+        bytes: Vec<u8>,
+    },
+    Branch {
+        format: u8,
+        children: Vec<BranchChild>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplaceEdit {
+    pub offset: u64,
+    pub delete_length: u64,
+    pub insert_bytes: Vec<u8>,
+    /// Text-coordinate form of the same replacement. These are zero for byte
+    /// values and let UTF-16 reads map through the bounded tail without
+    /// scanning the logical prefix to rediscover every edit coordinate.
+    pub utf16_offset: u64,
+    pub delete_utf16_length: u64,
+    pub insert_utf16_length: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LargeValueRef {
+    pub kind: LargeValueKind,
+    pub format_version: u8,
+    pub logical_hash: ContentHash,
+    pub root: NodeRef,
+    pub byte_length: u64,
+    pub utf16_length: Option<u64>,
+    pub edit_tail: Vec<ReplaceEdit>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StagedChunk {
+    pub node_ref: NodeRef,
+    pub encoded: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedLargeValue {
+    pub value_ref: LargeValueRef,
+    pub staged_chunks: Vec<StagedChunk>,
+}
+
+/// Opaque identity for a persisted Groove staging root.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct StagedLargeValueId(pub [u8; 16]);
+
+/// Storage accounting returned to Jazz for quota and eviction policy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagedLargeValueAccounting {
+    pub encoded_bytes: u64,
+    pub node_count: u64,
+}
+
+/// Opaque staged root plus the descriptor a later authorized row write may
+/// publish. Jazz never receives or manages the underlying chunk set.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StagedLargeValue {
+    pub id: StagedLargeValueId,
+    pub value_ref: LargeValueRef,
+    pub accounting: StagedLargeValueAccounting,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StreamingPrepareStats {
+    pub input_bytes: u64,
+    pub peak_leaf_buffer_bytes: usize,
+    pub peak_frontier_nodes: usize,
+    pub staged_chunk_count: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct LargeValueCursor {
+    value: LargeValueRef,
+    offset: u64,
+    window_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StreamingExecutionStats {
+    pub logical_bytes_consumed: u64,
+    pub windows_consumed: u64,
+    pub cooperative_yields: u64,
+}
+
+/// Resumable fixed-memory state for the reference streaming operator.
+///
+/// The state owns the exact source descriptor, so resuming it against a
+/// replacement value is impossible. A caller may publish `finish()` only after
+/// every logical window has been consumed.
+#[derive(Clone, Debug)]
+pub struct StreamingChecksum {
+    cursor: LargeValueCursor,
+    hasher: blake3::Hasher,
+    max_bytes_per_turn: usize,
+    bytes_this_turn: usize,
+    stats: StreamingExecutionStats,
+}
+
+impl StreamingChecksum {
+    pub fn new(
+        value: LargeValueRef,
+        window_bytes: usize,
+        max_bytes_per_turn: usize,
+    ) -> Result<Self, Error> {
+        if max_bytes_per_turn == 0 {
+            return Err(Error::MalformedScalar);
+        }
+        Ok(Self {
+            cursor: LargeValueCursor::new(value, window_bytes.min(max_bytes_per_turn))?,
+            hasher: blake3::Hasher::new(),
+            max_bytes_per_turn,
+            bytes_this_turn: 0,
+            stats: StreamingExecutionStats::default(),
+        })
+    }
+
+    pub fn cursor(&self) -> &LargeValueCursor {
+        &self.cursor
+    }
+
+    pub fn stats(&self) -> StreamingExecutionStats {
+        self.stats
+    }
+
+    /// Commit one complete cursor window to private operator state. Returns
+    /// `true` when the caller must cooperatively yield before consuming more.
+    pub(crate) fn consume_window(&mut self, bytes: &[u8]) -> Result<bool, Error> {
+        let Some(range) = self.cursor.next_range() else {
+            return Err(Error::MalformedScalar);
+        };
+        if u64::try_from(bytes.len()).map_err(|_| Error::MetricOverflow)? != range.end - range.start
+        {
+            return Err(Error::MalformedScalar);
+        }
+        self.hasher.update(bytes);
+        self.cursor.advance_to(range.end);
+        self.stats.logical_bytes_consumed = self
+            .stats
+            .logical_bytes_consumed
+            .checked_add(u64::try_from(bytes.len()).map_err(|_| Error::MetricOverflow)?)
+            .ok_or(Error::MetricOverflow)?;
+        self.stats.windows_consumed = self
+            .stats
+            .windows_consumed
+            .checked_add(1)
+            .ok_or(Error::MetricOverflow)?;
+        self.bytes_this_turn = self
+            .bytes_this_turn
+            .checked_add(bytes.len())
+            .ok_or(Error::MetricOverflow)?;
+        Ok(self.bytes_this_turn >= self.max_bytes_per_turn && self.cursor.remaining_bytes() != 0)
+    }
+
+    pub(crate) fn record_yield(&mut self) -> Result<(), Error> {
+        self.stats.cooperative_yields = self
+            .stats
+            .cooperative_yields
+            .checked_add(1)
+            .ok_or(Error::MetricOverflow)?;
+        self.bytes_this_turn = 0;
+        Ok(())
+    }
+
+    pub fn finish(self) -> Result<(ContentHash, StreamingExecutionStats), Error> {
+        if self.cursor.remaining_bytes() != 0 {
+            return Err(Error::RequiresEvaluation);
+        }
+        Ok((ContentHash(*self.hasher.finalize().as_bytes()), self.stats))
+    }
+}
+
+impl LargeValueCursor {
+    pub fn new(value: LargeValueRef, window_bytes: usize) -> Result<Self, Error> {
+        validate_descriptor(&value)?;
+        let window_bytes = u64::try_from(window_bytes).map_err(|_| Error::MetricOverflow)?;
+        if window_bytes == 0 {
+            return Err(Error::MalformedScalar);
+        }
+        Ok(Self {
+            value,
+            offset: 0,
+            window_bytes,
+        })
+    }
+
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+    pub fn remaining_bytes(&self) -> u64 {
+        self.value.byte_length - self.offset
+    }
+    pub fn value(&self) -> &LargeValueRef {
+        &self.value
+    }
+
+    pub(crate) fn next_range(&self) -> Option<std::ops::Range<u64>> {
+        if self.offset == self.value.byte_length {
+            return None;
+        }
+        Some(
+            self.offset
+                ..self
+                    .offset
+                    .saturating_add(self.window_bytes)
+                    .min(self.value.byte_length),
+        )
+    }
+
+    pub(crate) fn advance_to(&mut self, offset: u64) {
+        self.offset = offset;
+    }
+}
+
+/// Construct the canonical tree from a reader without retaining the logical
+/// value or emitted chunks. `stage` receives immutable nodes as soon as their
+/// content boundary is final. A failed text/JSON validation may leave
+/// unreachable staged chunks, but never returns a publishable descriptor.
+pub fn prepare_streaming<R: std::io::Read>(
+    kind: LargeValueKind,
+    mut reader: R,
+    locator_for: impl FnMut(ContentHash) -> Locator,
+    stage: impl FnMut(StagedChunk) -> Result<(), Error>,
+) -> Result<(LargeValueRef, StreamingPrepareStats), Error> {
+    let mut builder = StreamingTreeBuilder::new(kind, locator_for, stage);
+    if kind == LargeValueKind::Json {
+        let mut input = StreamingBuilderReader {
+            reader: &mut reader,
+            builder: &mut builder,
+        };
+        let mut deserializer = serde_json::Deserializer::from_reader(&mut input);
+        serde::de::IgnoredAny::deserialize(&mut deserializer).map_err(|_| Error::InvalidJson)?;
+        deserializer.end().map_err(|_| Error::InvalidJson)?;
+    } else {
+        let mut read_buffer = vec![0_u8; LEAF_MIN_BYTES];
+        loop {
+            let count = reader
+                .read(&mut read_buffer)
+                .map_err(|_| Error::MalformedScalar)?;
+            if count == 0 {
+                break;
+            }
+            builder.feed(&read_buffer[..count])?;
+        }
+    }
+    builder.finish()
+}
+
+struct StreamingBuilderReader<'a, R, L, S> {
+    reader: &'a mut R,
+    builder: &'a mut StreamingTreeBuilder<L, S>,
+}
+
+impl<R, L, S> std::io::Read for StreamingBuilderReader<'_, R, L, S>
+where
+    R: std::io::Read,
+    L: FnMut(ContentHash) -> Locator,
+    S: FnMut(StagedChunk) -> Result<(), Error>,
+{
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let count = self.reader.read(buffer)?;
+        self.builder
+            .feed(&buffer[..count])
+            .map_err(std::io::Error::other)?;
+        Ok(count)
+    }
+}
+
+struct StreamingLevel {
+    pending: Vec<BuiltNode>,
+    hash: u64,
+    total: usize,
+}
+
+struct StreamingTreeBuilder<L, S> {
+    kind: LargeValueKind,
+    locator_for: L,
+    stage: S,
+    leaf: Vec<u8>,
+    leaf_scan: usize,
+    leaf_hash: u64,
+    levels: Vec<StreamingLevel>,
+    stats: StreamingPrepareStats,
+}
+
+impl<L, S> StreamingTreeBuilder<L, S>
+where
+    L: FnMut(ContentHash) -> Locator,
+    S: FnMut(StagedChunk) -> Result<(), Error>,
+{
+    fn new(kind: LargeValueKind, locator_for: L, stage: S) -> Self {
+        Self {
+            kind,
+            locator_for,
+            stage,
+            leaf: Vec::new(),
+            leaf_scan: 0,
+            leaf_hash: 0,
+            levels: Vec::new(),
+            stats: StreamingPrepareStats::default(),
+        }
+    }
+
+    fn feed(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        self.stats.input_bytes = self
+            .stats
+            .input_bytes
+            .checked_add(bytes.len() as u64)
+            .ok_or(Error::MetricOverflow)?;
+        self.leaf.extend_from_slice(bytes);
+        self.stats.peak_leaf_buffer_bytes = self.stats.peak_leaf_buffer_bytes.max(self.leaf.len());
+        loop {
+            let mut boundary = None;
+            while self.leaf_scan < self.leaf.len().min(LEAF_MAX_BYTES) {
+                self.leaf_hash = self
+                    .leaf_hash
+                    .wrapping_shl(1)
+                    .wrapping_add(gear(self.leaf[self.leaf_scan]));
+                self.leaf_scan += 1;
+                let length = self.leaf_scan;
+                let cut = length >= LEAF_MIN_BYTES
+                    && if length < LEAF_TARGET_BYTES {
+                        self.leaf_hash & (LEAF_TARGET_BYTES as u64 * 2 - 1) == 0
+                    } else {
+                        self.leaf_hash & (LEAF_TARGET_BYTES as u64 / 2 - 1) == 0
+                    };
+                if cut || length == LEAF_MAX_BYTES {
+                    boundary = Some(length);
+                    break;
+                }
+            }
+            let Some(mut end) = boundary else {
+                break;
+            };
+            if self.kind != LargeValueKind::Bytes {
+                match std::str::from_utf8(&self.leaf[..end]) {
+                    Ok(_) => {}
+                    Err(error) if error.error_len().is_none() => end = error.valid_up_to(),
+                    Err(_) => return Err(Error::InvalidUtf8),
+                }
+                if end == 0 {
+                    break;
+                }
+            }
+            let leaf = self.leaf.drain(..end).collect::<Vec<_>>();
+            self.leaf_scan = 0;
+            self.leaf_hash = 0;
+            self.emit_leaf(leaf)?;
+        }
+        Ok(())
+    }
+
+    fn emit_leaf(&mut self, bytes: Vec<u8>) -> Result<(), Error> {
+        let metrics = metrics(self.kind, &bytes)?;
+        let structural_hash = hash_domain(b"groove-large-leaf-logical-v1", &bytes);
+        let node = self.stage_node_to(
+            ChunkNode::Leaf {
+                format: FORMAT_VERSION,
+                bytes,
+            },
+            metrics,
+            structural_hash,
+        )?;
+        self.add_node(0, node)
+    }
+
+    fn stage_node_to(
+        &mut self,
+        node: ChunkNode,
+        metrics: NodeMetrics,
+        structural_hash: ContentHash,
+    ) -> Result<BuiltNode, Error> {
+        let encoded = postcard::to_allocvec(&node).map_err(|_| Error::MalformedNode)?;
+        let object_hash = object_hash(&encoded);
+        let node_ref = NodeRef {
+            object_hash,
+            locator: (self.locator_for)(object_hash),
+        };
+        (self.stage)(StagedChunk {
+            node_ref: node_ref.clone(),
+            encoded,
+        })?;
+        self.stats.staged_chunk_count = self
+            .stats
+            .staged_chunk_count
+            .checked_add(1)
+            .ok_or(Error::MetricOverflow)?;
+        Ok(BuiltNode {
+            node_ref,
+            metrics,
+            structural_hash,
+        })
+    }
+
+    fn add_node(&mut self, mut level: usize, mut node: BuiltNode) -> Result<(), Error> {
+        loop {
+            if level >= MAX_TREE_DEPTH {
+                return Err(Error::MalformedNode);
+            }
+            while self.levels.len() <= level {
+                self.levels.push(StreamingLevel {
+                    pending: Vec::new(),
+                    hash: 0,
+                    total: 0,
+                });
+            }
+            let (count, boundary) = {
+                let state = &mut self.levels[level];
+                for byte in node.structural_hash.0 {
+                    state.hash = state.hash.wrapping_shl(1).wrapping_add(gear(byte));
+                }
+                state.pending.push(node);
+                state.total += 1;
+                let count = state.pending.len();
+                let boundary = count >= BRANCH_MIN_CHILDREN
+                    && if count < BRANCH_TARGET_CHILDREN {
+                        state.hash & (BRANCH_TARGET_CHILDREN as u64 * 2 - 1) == 0
+                    } else {
+                        state.hash & (BRANCH_TARGET_CHILDREN as u64 / 2 - 1) == 0
+                    };
+                (count, boundary)
+            };
+            self.stats.peak_frontier_nodes = self
+                .stats
+                .peak_frontier_nodes
+                .max(self.levels.iter().map(|level| level.pending.len()).sum());
+            if !boundary && count < BRANCH_MAX_CHILDREN {
+                return Ok(());
+            }
+            node = self.flush_group(level)?;
+            level += 1;
+        }
+    }
+
+    fn flush_group(&mut self, level: usize) -> Result<BuiltNode, Error> {
+        let group = std::mem::take(&mut self.levels[level].pending);
+        self.levels[level].hash = 0;
+        let mut group_metrics = group.iter().map(|child| child.metrics);
+        let first = group_metrics.next().ok_or(Error::MalformedNode)?;
+        let metrics = group_metrics.try_fold(first, add_metrics)?;
+        let mut logical = Vec::with_capacity(group.len() * 48);
+        let children = group
+            .iter()
+            .map(|child| {
+                logical.extend_from_slice(&child.structural_hash.0);
+                logical.extend_from_slice(&child.metrics.byte_length.to_le_bytes());
+                logical.extend_from_slice(
+                    &child.metrics.utf16_length.unwrap_or(u64::MAX).to_le_bytes(),
+                );
+                BranchChild {
+                    node_ref: child.node_ref.clone(),
+                    metrics: child.metrics,
+                    logical_hash: child.structural_hash,
+                }
+            })
+            .collect();
+        let structural_hash = hash_domain(b"groove-large-branch-logical-v1", &logical);
+        self.stage_node_to(
+            ChunkNode::Branch {
+                format: FORMAT_VERSION,
+                children,
+            },
+            metrics,
+            structural_hash,
+        )
+    }
+
+    fn finish(mut self) -> Result<(LargeValueRef, StreamingPrepareStats), Error> {
+        if !self.leaf.is_empty() || self.levels.is_empty() {
+            let leaf = std::mem::take(&mut self.leaf);
+            self.emit_leaf(leaf)?;
+        }
+        let mut level = 0;
+        loop {
+            if level >= self.levels.len() {
+                return Err(Error::MalformedNode);
+            }
+            if self.levels[level].total == 1 {
+                let root = self.levels[level]
+                    .pending
+                    .pop()
+                    .ok_or(Error::MalformedNode)?;
+                if self.kind == LargeValueKind::Json {
+                    // JSON is validated on writes. Streaming JSON validation is
+                    // supplied below by the reader-facing facade; this builder
+                    // never marks an unvalidated descriptor publishable there.
+                }
+                return Ok((
+                    LargeValueRef {
+                        kind: self.kind,
+                        format_version: FORMAT_VERSION,
+                        logical_hash: root.structural_hash,
+                        root: root.node_ref,
+                        byte_length: root.metrics.byte_length,
+                        utf16_length: root.metrics.utf16_length,
+                        edit_tail: Vec::new(),
+                    },
+                    self.stats,
+                ));
+            }
+            if !self.levels[level].pending.is_empty() {
+                let node = self.flush_group(level)?;
+                self.add_node(level + 1, node)?;
+            }
+            level += 1;
+        }
+    }
+}
+
+/// Bounded private state for replaying a tail into successive localized tree
+/// splices. Completed splices remain resident across request suspension.
+#[derive(Clone, Debug)]
+pub(crate) struct ConsolidationContinuation {
+    source: LargeValueRef,
+    current: Option<LargeValueRef>,
+    next_edit: usize,
+    staged_chunks: Vec<StagedChunk>,
+}
+
+impl ConsolidationContinuation {
+    pub(crate) fn new(source: LargeValueRef) -> Result<Self, Error> {
+        validate_descriptor_shape(&source)?;
+        Ok(Self {
+            source,
+            current: None,
+            next_edit: 0,
+            staged_chunks: Vec::new(),
+        })
+    }
+
+    pub(crate) fn step(
+        &mut self,
+        inputs: &mut EvaluationInputs,
+        mut fresh_locator: impl FnMut(ContentHash) -> Locator,
+    ) -> Result<Option<PreparedLargeValue>, IvmRuntimeError> {
+        if self.current.is_none() {
+            let node = load_authenticated_node_attempt(
+                self.source.kind,
+                &self.source.root,
+                self.source.logical_hash,
+                inputs,
+            )?;
+            let metrics = node_metrics(self.source.kind, &node)?;
+            self.current = Some(LargeValueRef {
+                kind: self.source.kind,
+                format_version: self.source.format_version,
+                logical_hash: self.source.logical_hash,
+                root: self.source.root.clone(),
+                byte_length: metrics.byte_length,
+                utf16_length: metrics.utf16_length,
+                edit_tail: Vec::new(),
+            });
+        }
+        while self.next_edit < self.source.edit_tail.len() {
+            let edit = self.source.edit_tail[self.next_edit].clone();
+            let current = self.current.as_ref().expect("initialized current base");
+            let TailEditOutcome::Updated(with_tail) = replace_tail_with_bounds_attempt(
+                current,
+                edit.offset,
+                edit.delete_length,
+                edit.insert_bytes,
+                inputs,
+                false,
+            )?
+            else {
+                return Err(Error::MalformedScalar.into());
+            };
+            let prepared = consolidate_single_edit_attempt(&with_tail, inputs, &mut fresh_locator)?;
+            for chunk in &prepared.staged_chunks {
+                inputs.install_chunk(
+                    ChunkRequest {
+                        object_hash: chunk.node_ref.object_hash.0,
+                        locator: chunk.node_ref.locator.0.clone(),
+                    },
+                    bytes::Bytes::copy_from_slice(&chunk.encoded),
+                );
+            }
+            self.staged_chunks.extend(prepared.staged_chunks);
+            self.current = Some(prepared.value_ref);
+            self.next_edit += 1;
+        }
+        let current = self.current.clone().ok_or(Error::MalformedScalar)?;
+        if current.byte_length != self.source.byte_length
+            || current.utf16_length != self.source.utf16_length
+        {
+            return Err(Error::DescriptorMismatch.into());
+        }
+        Ok(Some(PreparedLargeValue {
+            value_ref: current,
+            staged_chunks: std::mem::take(&mut self.staged_chunks),
+        }))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TailAppendOutcome {
+    Updated(LargeValueRef),
+    ConsolidationRequired(LargeValueRef),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TailEditOutcome {
+    Updated(LargeValueRef),
+    ConsolidationRequired(LargeValueRef),
+}
+
+/// Physical arm stored inside a logical bytes/string/JSON cell.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StoredScalar {
+    Inline(Vec<u8>),
+    Large(LargeValueRef),
+}
+
+/// Append bytes without reading the immutable base tree. The descriptor's
+/// logical hash identifies that base; the canonical tail is the remaining
+/// part of final logical identity until consolidation produces a new base.
+pub fn append_tail(
+    value: &LargeValueRef,
+    insert_bytes: Vec<u8>,
+) -> Result<TailAppendOutcome, Error> {
+    validate_descriptor(value)?;
+    match value.kind {
+        LargeValueKind::Bytes => {}
+        LargeValueKind::String => {
+            std::str::from_utf8(&insert_bytes).map_err(|_| Error::InvalidUtf8)?;
+        }
+        // Appending a fragment cannot validate the resulting JSON without
+        // inspecting existing source. JSON mutations use replacement
+        // preparation, which may suspend on the affected source ranges.
+        LargeValueKind::Json => return Err(Error::InvalidJson),
+    }
+    let edit = ReplaceEdit {
+        offset: value.byte_length,
+        delete_length: 0,
+        insert_bytes,
+        utf16_offset: value.utf16_length.unwrap_or(0),
+        delete_utf16_length: 0,
+        insert_utf16_length: 0,
+    };
+    let next_tail_bytes = value
+        .edit_tail
+        .iter()
+        .try_fold(0_usize, |total, edit| {
+            total
+                .checked_add(edit.insert_bytes.len())
+                .and_then(|total| total.checked_add(24))
+                .ok_or(Error::MetricOverflow)
+        })?
+        .checked_add(edit.insert_bytes.len())
+        .and_then(|total| total.checked_add(24))
+        .ok_or(Error::MetricOverflow)?;
+    let inserted_length =
+        u64::try_from(edit.insert_bytes.len()).map_err(|_| Error::MetricOverflow)?;
+    let mut updated = value.clone();
+    updated.byte_length = updated
+        .byte_length
+        .checked_add(inserted_length)
+        .ok_or(Error::MetricOverflow)?;
+    if let Some(utf16_length) = &mut updated.utf16_length {
+        let inserted_utf16 = u64::try_from(
+            std::str::from_utf8(&edit.insert_bytes)
+                .map_err(|_| Error::InvalidUtf8)?
+                .encode_utf16()
+                .count(),
+        )
+        .map_err(|_| Error::MetricOverflow)?;
+        *utf16_length = utf16_length
+            .checked_add(inserted_utf16)
+            .ok_or(Error::MetricOverflow)?;
+    }
+    let mut edit = edit;
+    edit.insert_utf16_length = updated
+        .utf16_length
+        .zip(value.utf16_length)
+        .and_then(|(next, previous)| next.checked_sub(previous))
+        .unwrap_or(0);
+    updated.edit_tail.push(edit);
+    if value.edit_tail.len() >= MAX_EDIT_COUNT || next_tail_bytes > MAX_EDIT_TAIL_BYTES {
+        Ok(TailAppendOutcome::ConsolidationRequired(updated))
+    } else {
+        Ok(TailAppendOutcome::Updated(updated))
+    }
+}
+
+/// Add one canonical replacement to the bounded tail. Bytes edits need no
+/// source reads. Text edits request the deleted logical range so UTF-16
+/// metrics remain exact; missing chunks suspend through the ordinary evaluator
+/// request set. JSON currently admits only complete validated replacement.
+pub(crate) fn replace_tail_attempt(
+    value: &LargeValueRef,
+    offset: u64,
+    delete_length: u64,
+    insert_bytes: Vec<u8>,
+    inputs: &mut EvaluationInputs,
+) -> Result<TailEditOutcome, IvmRuntimeError> {
+    replace_tail_with_bounds_attempt(value, offset, delete_length, insert_bytes, inputs, true)
+}
+
+fn replace_tail_with_bounds_attempt(
+    value: &LargeValueRef,
+    offset: u64,
+    delete_length: u64,
+    insert_bytes: Vec<u8>,
+    inputs: &mut EvaluationInputs,
+    enforce_tail_bounds: bool,
+) -> Result<TailEditOutcome, IvmRuntimeError> {
+    validate_descriptor(value)?;
+    let end = offset
+        .checked_add(delete_length)
+        .ok_or(Error::MetricOverflow)?;
+    if end > value.byte_length {
+        return Err(Error::MalformedScalar.into());
+    }
+    let inserted_length = u64::try_from(insert_bytes.len()).map_err(|_| Error::MetricOverflow)?;
+    let next_length = value
+        .byte_length
+        .checked_sub(delete_length)
+        .and_then(|length| length.checked_add(inserted_length))
+        .ok_or(Error::MetricOverflow)?;
+    let next_tail_bytes = value
+        .edit_tail
+        .iter()
+        .try_fold(0_usize, |total, edit| {
+            total
+                .checked_add(edit.insert_bytes.len())
+                .and_then(|total| total.checked_add(24))
+                .ok_or(Error::MetricOverflow)
+        })?
+        .checked_add(insert_bytes.len())
+        .and_then(|total| total.checked_add(24))
+        .ok_or(Error::MetricOverflow)?;
+    let (next_utf16, utf16_offset, delete_utf16_length, insert_utf16_length) = match value.kind {
+        LargeValueKind::Bytes => (None, 0, 0, 0),
+        LargeValueKind::String => {
+            let inserted = std::str::from_utf8(&insert_bytes).map_err(|_| Error::InvalidUtf8)?;
+            for boundary in [offset, end] {
+                if boundary < value.byte_length {
+                    let byte = byte_range_attempt(value, boundary..boundary + 1, inputs)?;
+                    if byte
+                        .first()
+                        .is_some_and(|byte| byte & 0b1100_0000 == 0b1000_0000)
+                    {
+                        return Err(Error::InvalidUtf8.into());
+                    }
+                }
+            }
+            let deleted = byte_range_attempt(value, offset..end, inputs)?;
+            let deleted = std::str::from_utf8(&deleted).map_err(|_| Error::InvalidUtf8)?;
+            let utf16_offset = utf16_length_for_byte_range_attempt(value, 0..offset, inputs)?;
+            let delete_utf16_length =
+                u64::try_from(deleted.encode_utf16().count()).map_err(|_| Error::MetricOverflow)?;
+            let insert_utf16_length = u64::try_from(inserted.encode_utf16().count())
+                .map_err(|_| Error::MetricOverflow)?;
+            let current = value.utf16_length.ok_or(Error::MalformedScalar)?;
+            (
+                Some(
+                    current
+                        .checked_sub(delete_utf16_length)
+                        .and_then(|length| length.checked_add(insert_utf16_length))
+                        .ok_or(Error::MetricOverflow)?,
+                ),
+                utf16_offset,
+                delete_utf16_length,
+                insert_utf16_length,
+            )
+        }
+        LargeValueKind::Json => {
+            if offset != 0 || delete_length != value.byte_length {
+                return Err(Error::InvalidJson.into());
+            }
+            validate_logical(LargeValueKind::Json, &insert_bytes)?;
+            let insert_utf16_length = u64::try_from(
+                std::str::from_utf8(&insert_bytes)
+                    .map_err(|_| Error::InvalidUtf8)?
+                    .encode_utf16()
+                    .count(),
+            )
+            .map_err(|_| Error::MetricOverflow)?;
+            (
+                Some(insert_utf16_length),
+                0,
+                value.utf16_length.ok_or(Error::MalformedScalar)?,
+                insert_utf16_length,
+            )
+        }
+    };
+    let mut updated = value.clone();
+    updated.byte_length = next_length;
+    updated.utf16_length = next_utf16;
+    updated.edit_tail.push(ReplaceEdit {
+        offset,
+        delete_length,
+        insert_bytes,
+        utf16_offset,
+        delete_utf16_length,
+        insert_utf16_length,
+    });
+    if enforce_tail_bounds
+        && (value.edit_tail.len() >= MAX_EDIT_COUNT || next_tail_bytes > MAX_EDIT_TAIL_BYTES)
+    {
+        Ok(TailEditOutcome::ConsolidationRequired(updated))
+    } else {
+        Ok(TailEditOutcome::Updated(updated))
+    }
+}
+
+/// Consolidate an append-only tail by walking only the old tree's right
+/// spine. At each level the final content-defined group is rebuilt; sibling
+/// subtrees outside that group retain their exact authenticated `NodeRef`.
+pub(crate) fn consolidate_appends_attempt(
+    value: &LargeValueRef,
+    inputs: &mut EvaluationInputs,
+    mut fresh_locator: impl FnMut(ContentHash) -> Locator,
+) -> Result<PreparedLargeValue, IvmRuntimeError> {
+    validate_descriptor_shape(value)?;
+    let base_byte_length = base_length(value.byte_length, &value.edit_tail)?;
+    let mut cursor = base_byte_length;
+    let mut appended = Vec::new();
+    for edit in &value.edit_tail {
+        if edit.delete_length != 0 || edit.offset != cursor {
+            return Err(Error::MalformedScalar.into());
+        }
+        cursor = cursor
+            .checked_add(u64::try_from(edit.insert_bytes.len()).map_err(|_| Error::MetricOverflow)?)
+            .ok_or(Error::MetricOverflow)?;
+        appended.extend_from_slice(&edit.insert_bytes);
+    }
+    if cursor != value.byte_length {
+        return Err(Error::DescriptorMismatch.into());
+    }
+
+    let mut existing = std::collections::BTreeMap::<ContentHash, Locator>::new();
+    let mut spine = Vec::<Vec<BranchChild>>::new();
+    let mut node_ref = value.root.clone();
+    let mut expected_logical_hash = value.logical_hash;
+    let mut depth = 0_usize;
+    let last_leaf = loop {
+        if depth > MAX_TREE_DEPTH {
+            return Err(Error::InvalidTree.into());
+        }
+        existing.insert(node_ref.object_hash, node_ref.locator.clone());
+        let node =
+            load_authenticated_node_attempt(value.kind, &node_ref, expected_logical_hash, inputs)?;
+        match node {
+            ChunkNode::Leaf { bytes, .. } => break bytes,
+            ChunkNode::Branch { children, .. } => {
+                let last = children.last().ok_or(Error::MalformedNode)?;
+                node_ref = last.node_ref.clone();
+                expected_logical_hash = last.logical_hash;
+                spine.push(children);
+                depth += 1;
+            }
+        }
+    };
+
+    let mut logical_suffix = last_leaf;
+    logical_suffix.extend_from_slice(&appended);
+    let mut staged_chunks = Vec::new();
+    let mut replacement = Vec::new();
+    for range in leaf_ranges(value.kind, &logical_suffix)? {
+        let bytes = logical_suffix[range].to_vec();
+        let node = ChunkNode::Leaf {
+            format: FORMAT_VERSION,
+            bytes,
+        };
+        replacement.push(stage_node_reusing(
+            value.kind,
+            node,
+            &existing,
+            &mut fresh_locator,
+            &mut staged_chunks,
+        )?);
+    }
+
+    for children in spine.into_iter().rev() {
+        let mut level = children;
+        level.pop();
+        let mut rebuilt = level
+            .into_iter()
+            .map(|child| BuiltNode {
+                node_ref: child.node_ref,
+                metrics: child.metrics,
+                structural_hash: child.logical_hash,
+            })
+            .collect::<Vec<_>>();
+        rebuilt.append(&mut replacement);
+        replacement = Vec::new();
+        for range in branch_ranges(&rebuilt) {
+            let children = rebuilt[range].to_vec();
+            let node = ChunkNode::Branch {
+                format: FORMAT_VERSION,
+                children: children
+                    .iter()
+                    .map(|child| BranchChild {
+                        node_ref: child.node_ref.clone(),
+                        metrics: child.metrics,
+                        logical_hash: child.structural_hash,
+                    })
+                    .collect(),
+            };
+            replacement.push(stage_node_reusing(
+                value.kind,
+                node,
+                &existing,
+                &mut fresh_locator,
+                &mut staged_chunks,
+            )?);
+        }
+    }
+
+    let mut extra_depth = depth;
+    while replacement.len() > 1 {
+        extra_depth += 1;
+        if extra_depth > MAX_TREE_DEPTH {
+            return Err(Error::InvalidTree.into());
+        }
+        let mut next = Vec::new();
+        for range in branch_ranges(&replacement) {
+            let children = replacement[range].to_vec();
+            let node = ChunkNode::Branch {
+                format: FORMAT_VERSION,
+                children: children
+                    .iter()
+                    .map(|child| BranchChild {
+                        node_ref: child.node_ref.clone(),
+                        metrics: child.metrics,
+                        logical_hash: child.structural_hash,
+                    })
+                    .collect(),
+            };
+            next.push(stage_node_reusing(
+                value.kind,
+                node,
+                &existing,
+                &mut fresh_locator,
+                &mut staged_chunks,
+            )?);
+        }
+        replacement = next;
+    }
+    let root = replacement.pop().ok_or(Error::MalformedNode)?;
+    if root.metrics.byte_length != value.byte_length
+        || root.metrics.utf16_length != value.utf16_length
+    {
+        return Err(Error::DescriptorMismatch.into());
+    }
+    Ok(PreparedLargeValue {
+        value_ref: LargeValueRef {
+            kind: value.kind,
+            format_version: FORMAT_VERSION,
+            logical_hash: root.structural_hash,
+            root: root.node_ref,
+            byte_length: root.metrics.byte_length,
+            utf16_length: root.metrics.utf16_length,
+            edit_tail: Vec::new(),
+        },
+        staged_chunks,
+    })
+}
+
+/// Consolidate one replacement against an otherwise tail-free base. The
+/// algorithm walks to the first affected leaf, advances until FastCDC
+/// boundaries resynchronize, and rebuilds only the zipper between those two
+/// leaves. This is the general middle-of-tree locality primitive; batching
+/// several tail entries applies the same splice from right to left.
+pub(crate) fn consolidate_single_edit_attempt(
+    value: &LargeValueRef,
+    inputs: &mut EvaluationInputs,
+    mut fresh_locator: impl FnMut(ContentHash) -> Locator,
+) -> Result<PreparedLargeValue, IvmRuntimeError> {
+    validate_descriptor_shape(value)?;
+    let [edit] = value.edit_tail.as_slice() else {
+        return Err(Error::MalformedScalar.into());
+    };
+    let base_len = base_length(value.byte_length, &value.edit_tail)?;
+    let edit_end = edit
+        .offset
+        .checked_add(edit.delete_length)
+        .ok_or(Error::MetricOverflow)?;
+    if edit_end > base_len {
+        return Err(Error::MalformedScalar.into());
+    }
+    if edit.offset == base_len {
+        return consolidate_appends_attempt(value, inputs, fresh_locator);
+    }
+
+    let first = locate_leaf_attempt(value, edit.offset, base_len, inputs)?;
+    let mut leaves = vec![first];
+    let mut covered_end = leaves[0]
+        .start
+        .checked_add(leaves[0].bytes.len() as u64)
+        .ok_or(Error::MetricOverflow)?;
+    while covered_end < edit_end {
+        let next = next_leaf_attempt(value.kind, leaves.last().unwrap(), inputs)?
+            .ok_or(Error::DescriptorMismatch)?;
+        covered_end = next
+            .start
+            .checked_add(next.bytes.len() as u64)
+            .ok_or(Error::MetricOverflow)?;
+        leaves.push(next);
+    }
+
+    loop {
+        let segment_start = leaves[0].start;
+        let mut segment = leaves
+            .iter()
+            .flat_map(|leaf| leaf.bytes.iter().copied())
+            .collect::<Vec<_>>();
+        let local_start =
+            usize::try_from(edit.offset - segment_start).map_err(|_| Error::MetricOverflow)?;
+        let local_end =
+            usize::try_from(edit_end - segment_start).map_err(|_| Error::MetricOverflow)?;
+        segment.splice(local_start..local_end, edit.insert_bytes.iter().copied());
+        let ranges = leaf_ranges(value.kind, &segment)?;
+        let resynchronized = ranges.last().is_some_and(|range| {
+            range.start > 0 && segment[range.clone()] == leaves.last().unwrap().bytes
+        });
+        if resynchronized || covered_end == base_len {
+            break;
+        }
+        let next = next_leaf_attempt(value.kind, leaves.last().unwrap(), inputs)?
+            .ok_or(Error::DescriptorMismatch)?;
+        covered_end = next
+            .start
+            .checked_add(next.bytes.len() as u64)
+            .ok_or(Error::MetricOverflow)?;
+        leaves.push(next);
+    }
+
+    let left_path = leaves.first().unwrap().path.clone();
+    let right_path = leaves.last().unwrap().path.clone();
+    if left_path.len() != right_path.len() {
+        return Err(Error::InvalidTree.into());
+    }
+    let mut existing = std::collections::BTreeMap::<ContentHash, Locator>::new();
+    for leaf in &leaves {
+        existing.insert(leaf.node_ref.object_hash, leaf.node_ref.locator.clone());
+        for frame in &leaf.path {
+            existing.insert(frame.node_ref.object_hash, frame.node_ref.locator.clone());
+        }
+    }
+    let segment_start = leaves[0].start;
+    let mut segment = leaves
+        .iter()
+        .flat_map(|leaf| leaf.bytes.iter().copied())
+        .collect::<Vec<_>>();
+    let local_start =
+        usize::try_from(edit.offset - segment_start).map_err(|_| Error::MetricOverflow)?;
+    let local_end = usize::try_from(edit_end - segment_start).map_err(|_| Error::MetricOverflow)?;
+    segment.splice(local_start..local_end, edit.insert_bytes.iter().copied());
+
+    let mut staged_chunks = Vec::new();
+    let mut replacement = Vec::new();
+    for range in leaf_ranges(value.kind, &segment)? {
+        replacement.push(stage_node_reusing(
+            value.kind,
+            ChunkNode::Leaf {
+                format: FORMAT_VERSION,
+                bytes: segment[range].to_vec(),
+            },
+            &existing,
+            &mut fresh_locator,
+            &mut staged_chunks,
+        )?);
+    }
+
+    for depth in (0..left_path.len()).rev() {
+        let left = &left_path[depth];
+        let right = &right_path[depth];
+        let mut level = left.children[..left.selected]
+            .iter()
+            .cloned()
+            .map(built_from_child)
+            .collect::<Vec<_>>();
+        level.append(&mut replacement);
+        level.extend(
+            right.children[right.selected + 1..]
+                .iter()
+                .cloned()
+                .map(built_from_child),
+        );
+        replacement = stage_branch_level_reusing(
+            value.kind,
+            &level,
+            &existing,
+            &mut fresh_locator,
+            &mut staged_chunks,
+        )?;
+    }
+    let mut tree_depth = left_path.len();
+    while replacement.len() > 1 {
+        tree_depth += 1;
+        if tree_depth > MAX_TREE_DEPTH {
+            return Err(Error::InvalidTree.into());
+        }
+        replacement = stage_branch_level_reusing(
+            value.kind,
+            &replacement,
+            &existing,
+            &mut fresh_locator,
+            &mut staged_chunks,
+        )?;
+    }
+    let root = replacement.pop().ok_or(Error::MalformedNode)?;
+    if root.metrics.byte_length != value.byte_length
+        || root.metrics.utf16_length != value.utf16_length
+    {
+        return Err(Error::DescriptorMismatch.into());
+    }
+    Ok(PreparedLargeValue {
+        value_ref: LargeValueRef {
+            kind: value.kind,
+            format_version: FORMAT_VERSION,
+            logical_hash: root.structural_hash,
+            root: root.node_ref,
+            byte_length: root.metrics.byte_length,
+            utf16_length: root.metrics.utf16_length,
+            edit_tail: Vec::new(),
+        },
+        staged_chunks,
+    })
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum Error {
+    #[error("large string is not valid UTF-8")]
+    InvalidUtf8,
+    #[error("large JSON is not valid JSON")]
+    InvalidJson,
+    #[error("unsupported large-value format version {0}")]
+    UnsupportedFormat(u8),
+    #[error("chunk object hash does not match its authenticated reference")]
+    ObjectHashMismatch,
+    #[error("malformed large-value node")]
+    MalformedNode,
+    #[error("large-value metric overflow")]
+    MetricOverflow,
+    #[error("large-value descriptor metrics or logical hash are dishonest")]
+    DescriptorMismatch,
+    #[error("large-value tree contains a cycle or exceeds its depth bound")]
+    InvalidTree,
+    #[error("malformed physical scalar encoding")]
+    MalformedScalar,
+    #[error("indirect scalar requires interruptible evaluation")]
+    RequiresEvaluation,
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum ReachabilityError {
+    #[error(transparent)]
+    LargeValue(#[from] Error),
+    #[error(transparent)]
+    Chunk(#[from] crate::chunks::ChunkError),
+}
+
+/// Authenticate and visit every immutable node reachable from one descriptor.
+///
+/// The traversal is depth-first and retains only a bounded branch frontier;
+/// Jazz can therefore feed each visited exact locator into its own mark set
+/// without learning or reimplementing Groove's node encoding.
+pub async fn visit_reachable_chunks(
+    value: &LargeValueRef,
+    provider: &dyn crate::chunks::ChunkProvider,
+    mut visit: impl FnMut(&ChunkRequest),
+) -> Result<u64, ReachabilityError> {
+    check_format(value.format_version)?;
+    let root_metrics = value.edit_tail.is_empty().then_some(NodeMetrics {
+        byte_length: value.byte_length,
+        utf16_length: value.utf16_length,
+    });
+    let mut pending = vec![(
+        value.root.clone(),
+        0_usize,
+        root_metrics,
+        value.logical_hash,
+    )];
+    let mut visited = 0_u64;
+    while let Some((node_ref, depth, expected_metrics, expected_logical_hash)) = pending.pop() {
+        if depth > MAX_TREE_DEPTH {
+            return Err(Error::InvalidTree.into());
+        }
+        let request = ChunkRequest {
+            object_hash: node_ref.object_hash.0,
+            locator: node_ref.locator.0.clone(),
+        };
+        let encoded = provider.get(request.clone()).await?;
+        let node = decode_node(value.kind, node_ref.object_hash, &encoded)?;
+        if node_logical_hash(&node) != expected_logical_hash {
+            return Err(Error::DescriptorMismatch.into());
+        }
+        match &node {
+            ChunkNode::Leaf { bytes, .. } => {
+                if expected_metrics
+                    .is_some_and(|expected| metrics(value.kind, bytes).ok() != Some(expected))
+                {
+                    return Err(Error::DescriptorMismatch.into());
+                }
+            }
+            ChunkNode::Branch { children, .. } => {
+                if let Some(expected) = expected_metrics {
+                    let mut child_metrics = children.iter().map(|child| child.metrics);
+                    let Some(first) = child_metrics.next() else {
+                        return Err(Error::MalformedNode.into());
+                    };
+                    if child_metrics.try_fold(first, add_metrics)? != expected {
+                        return Err(Error::DescriptorMismatch.into());
+                    }
+                }
+            }
+        }
+        visit(&request);
+        visited = visited.checked_add(1).ok_or(Error::MetricOverflow)?;
+        if let ChunkNode::Branch { children, .. } = node {
+            for child in children.into_iter().rev() {
+                pending.push((
+                    child.node_ref,
+                    depth + 1,
+                    Some(child.metrics),
+                    child.logical_hash,
+                ));
+            }
+        }
+    }
+    Ok(visited)
+}
+
+#[derive(Clone)]
+struct BuiltNode {
+    node_ref: NodeRef,
+    metrics: NodeMetrics,
+    structural_hash: ContentHash,
+}
+
+#[derive(Clone)]
+struct PathFrame {
+    node_ref: NodeRef,
+    children: Vec<BranchChild>,
+    selected: usize,
+}
+
+#[derive(Clone)]
+struct LocatedLeaf {
+    node_ref: NodeRef,
+    bytes: Vec<u8>,
+    start: u64,
+    path: Vec<PathFrame>,
+}
+
+/// Construct the canonical tree, assigning a fresh opaque locator to each new
+/// immutable node. Boundary decisions never inspect those locators.
+pub fn prepare(
+    kind: LargeValueKind,
+    logical_bytes: &[u8],
+    mut locator_for: impl FnMut(ContentHash) -> Locator,
+) -> Result<PreparedLargeValue, Error> {
+    validate_logical(kind, logical_bytes)?;
+    let mut staged_chunks = Vec::new();
+    let mut level = Vec::new();
+    for range in leaf_ranges(kind, logical_bytes)? {
+        let bytes = logical_bytes[range].to_vec();
+        let metrics = metrics(kind, &bytes)?;
+        let structural_hash = hash_domain(b"groove-large-leaf-logical-v1", &bytes);
+        let node = ChunkNode::Leaf {
+            format: FORMAT_VERSION,
+            bytes,
+        };
+        level.push(stage_node(
+            node,
+            metrics,
+            structural_hash,
+            &mut locator_for,
+            &mut staged_chunks,
+        )?);
+    }
+
+    let mut depth = 0;
+    while level.len() > 1 {
+        depth += 1;
+        if depth > MAX_TREE_DEPTH {
+            return Err(Error::MalformedNode);
+        }
+        let mut next = Vec::new();
+        for range in branch_ranges(&level) {
+            let group = &level[range];
+            let mut group_metrics = group.iter().map(|child| child.metrics);
+            let first_metrics = group_metrics.next().ok_or(Error::MalformedNode)?;
+            let metrics = group_metrics.try_fold(first_metrics, add_metrics)?;
+            let mut logical_descriptor = Vec::with_capacity(group.len() * 48);
+            for child in group {
+                logical_descriptor.extend_from_slice(&child.structural_hash.0);
+                logical_descriptor.extend_from_slice(&child.metrics.byte_length.to_le_bytes());
+                logical_descriptor.extend_from_slice(
+                    &child.metrics.utf16_length.unwrap_or(u64::MAX).to_le_bytes(),
+                );
+            }
+            let structural_hash =
+                hash_domain(b"groove-large-branch-logical-v1", &logical_descriptor);
+            let node = ChunkNode::Branch {
+                format: FORMAT_VERSION,
+                children: group
+                    .iter()
+                    .map(|child| BranchChild {
+                        node_ref: child.node_ref.clone(),
+                        metrics: child.metrics,
+                        logical_hash: child.structural_hash,
+                    })
+                    .collect(),
+            };
+            next.push(stage_node(
+                node,
+                metrics,
+                structural_hash,
+                &mut locator_for,
+                &mut staged_chunks,
+            )?);
+        }
+        level = next;
+    }
+    let root = level.pop().expect("empty values have one leaf");
+    Ok(PreparedLargeValue {
+        value_ref: LargeValueRef {
+            kind,
+            format_version: FORMAT_VERSION,
+            logical_hash: root.structural_hash,
+            root: root.node_ref,
+            byte_length: root.metrics.byte_length,
+            utf16_length: root.metrics.utf16_length,
+            edit_tail: Vec::new(),
+        },
+        staged_chunks,
+    })
+}
+
+/// Rebuild while preserving the exact retrieval identity of every byte-equal
+/// node from a previous preparation. Local consolidation uses the same reuse
+/// rule while avoiding traversal of unaffected subtrees.
+pub fn prepare_reusing(
+    kind: LargeValueKind,
+    logical_bytes: &[u8],
+    previous: &[StagedChunk],
+    mut fresh_locator: impl FnMut(ContentHash) -> Locator,
+) -> Result<PreparedLargeValue, Error> {
+    let existing = previous
+        .iter()
+        .map(|chunk| (chunk.node_ref.object_hash, chunk.node_ref.locator.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    prepare(kind, logical_bytes, |hash| {
+        existing
+            .get(&hash)
+            .cloned()
+            .unwrap_or_else(|| fresh_locator(hash))
+    })
+}
+
+pub fn encode_stored_scalar(value: &StoredScalar) -> Result<Vec<u8>, Error> {
+    match value {
+        StoredScalar::Inline(bytes) => {
+            let mut encoded = Vec::with_capacity(bytes.len() + 1);
+            encoded.push(0);
+            encoded.extend_from_slice(bytes);
+            Ok(encoded)
+        }
+        StoredScalar::Large(value) => {
+            validate_descriptor(value)?;
+            let mut encoded = vec![1];
+            encoded.extend(postcard::to_allocvec(value).map_err(|_| Error::MalformedScalar)?);
+            Ok(encoded)
+        }
+    }
+}
+
+pub fn decode_stored_scalar(encoded: &[u8]) -> Result<StoredScalar, Error> {
+    let (&tag, payload) = encoded.split_first().ok_or(Error::MalformedScalar)?;
+    match tag {
+        0 => Ok(StoredScalar::Inline(payload.to_vec())),
+        1 => {
+            let value: LargeValueRef =
+                postcard::from_bytes(payload).map_err(|_| Error::MalformedScalar)?;
+            validate_descriptor(&value)?;
+            if postcard::to_allocvec(&value).map_err(|_| Error::MalformedScalar)? != payload {
+                return Err(Error::MalformedScalar);
+            }
+            Ok(StoredScalar::Large(value))
+        }
+        _ => Err(Error::MalformedScalar),
+    }
+}
+
+pub fn inline_scalar_bytes(encoded: &[u8]) -> Result<&[u8], Error> {
+    let (&tag, payload) = encoded.split_first().ok_or(Error::MalformedScalar)?;
+    match tag {
+        0 => Ok(payload),
+        1 => Err(Error::RequiresEvaluation),
+        _ => Err(Error::MalformedScalar),
+    }
+}
+
+fn validate_descriptor(value: &LargeValueRef) -> Result<(), Error> {
+    validate_descriptor_shape(value)?;
+    if value.edit_tail.len() > MAX_EDIT_COUNT {
+        return Err(Error::MalformedScalar);
+    }
+    let mut tail_bytes = 0_usize;
+    for edit in &value.edit_tail {
+        tail_bytes = tail_bytes
+            .checked_add(edit.insert_bytes.len())
+            .and_then(|total| total.checked_add(24))
+            .ok_or(Error::MetricOverflow)?;
+        if tail_bytes > MAX_EDIT_TAIL_BYTES {
+            return Err(Error::MalformedScalar);
+        }
+    }
+    Ok(())
+}
+
+fn validate_descriptor_shape(value: &LargeValueRef) -> Result<(), Error> {
+    check_format(value.format_version)?;
+    if value.root.locator.0.len() > MAX_LOCATOR_BYTES {
+        return Err(Error::MalformedScalar);
+    }
+    let mut byte_length = value.byte_length;
+    let mut utf16_length = value.utf16_length;
+    for edit in value.edit_tail.iter().rev() {
+        let inserted = u64::try_from(edit.insert_bytes.len()).map_err(|_| Error::MetricOverflow)?;
+        if edit
+            .offset
+            .checked_add(inserted)
+            .ok_or(Error::MetricOverflow)?
+            > byte_length
+        {
+            return Err(Error::MalformedScalar);
+        }
+        byte_length = byte_length
+            .checked_sub(inserted)
+            .and_then(|n| n.checked_add(edit.delete_length))
+            .ok_or(Error::MetricOverflow)?;
+        match value.kind {
+            LargeValueKind::Bytes => {
+                if edit.utf16_offset != 0
+                    || edit.delete_utf16_length != 0
+                    || edit.insert_utf16_length != 0
+                {
+                    return Err(Error::MalformedScalar);
+                }
+            }
+            LargeValueKind::String | LargeValueKind::Json => {
+                let actual_insert = u64::try_from(
+                    std::str::from_utf8(&edit.insert_bytes)
+                        .map_err(|_| Error::InvalidUtf8)?
+                        .encode_utf16()
+                        .count(),
+                )
+                .map_err(|_| Error::MetricOverflow)?;
+                if actual_insert != edit.insert_utf16_length {
+                    return Err(Error::MalformedScalar);
+                }
+                let current = utf16_length.ok_or(Error::MalformedScalar)?;
+                if edit
+                    .utf16_offset
+                    .checked_add(edit.insert_utf16_length)
+                    .ok_or(Error::MetricOverflow)?
+                    > current
+                {
+                    return Err(Error::MalformedScalar);
+                }
+                utf16_length = Some(
+                    current
+                        .checked_sub(edit.insert_utf16_length)
+                        .and_then(|n| n.checked_add(edit.delete_utf16_length))
+                        .ok_or(Error::MetricOverflow)?,
+                );
+            }
+        }
+    }
+    match value.kind {
+        LargeValueKind::Bytes if value.utf16_length.is_some() => Err(Error::MalformedScalar),
+        LargeValueKind::String | LargeValueKind::Json if value.utf16_length.is_none() => {
+            Err(Error::MalformedScalar)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn stage_node(
+    node: ChunkNode,
+    metrics: NodeMetrics,
+    structural_hash: ContentHash,
+    locator_for: &mut impl FnMut(ContentHash) -> Locator,
+    staged_chunks: &mut Vec<StagedChunk>,
+) -> Result<BuiltNode, Error> {
+    let encoded = postcard::to_allocvec(&node).map_err(|_| Error::MalformedNode)?;
+    let object_hash = object_hash(&encoded);
+    let node_ref = NodeRef {
+        object_hash,
+        locator: locator_for(object_hash),
+    };
+    staged_chunks.push(StagedChunk {
+        node_ref: node_ref.clone(),
+        encoded,
+    });
+    Ok(BuiltNode {
+        node_ref,
+        metrics,
+        structural_hash,
+    })
+}
+
+fn stage_node_reusing(
+    kind: LargeValueKind,
+    node: ChunkNode,
+    existing: &std::collections::BTreeMap<ContentHash, Locator>,
+    fresh_locator: &mut impl FnMut(ContentHash) -> Locator,
+    staged_chunks: &mut Vec<StagedChunk>,
+) -> Result<BuiltNode, Error> {
+    let metrics = match &node {
+        ChunkNode::Leaf { bytes, .. } => metrics(kind, bytes)?,
+        ChunkNode::Branch { children, .. } => {
+            let mut metrics = children.iter().map(|child| child.metrics);
+            let first = metrics.next().ok_or(Error::MalformedNode)?;
+            metrics.try_fold(first, add_metrics)?
+        }
+    };
+    let structural_hash = node_logical_hash(&node);
+    let encoded = postcard::to_allocvec(&node).map_err(|_| Error::MalformedNode)?;
+    let object_hash = object_hash(&encoded);
+    if let Some(locator) = existing.get(&object_hash) {
+        return Ok(BuiltNode {
+            node_ref: NodeRef {
+                object_hash,
+                locator: locator.clone(),
+            },
+            metrics,
+            structural_hash,
+        });
+    }
+    let node_ref = NodeRef {
+        object_hash,
+        locator: fresh_locator(object_hash),
+    };
+    staged_chunks.push(StagedChunk {
+        node_ref: node_ref.clone(),
+        encoded,
+    });
+    Ok(BuiltNode {
+        node_ref,
+        metrics,
+        structural_hash,
+    })
+}
+
+fn built_from_child(child: BranchChild) -> BuiltNode {
+    BuiltNode {
+        node_ref: child.node_ref,
+        metrics: child.metrics,
+        structural_hash: child.logical_hash,
+    }
+}
+
+fn stage_branch_level_reusing(
+    kind: LargeValueKind,
+    level: &[BuiltNode],
+    existing: &std::collections::BTreeMap<ContentHash, Locator>,
+    fresh_locator: &mut impl FnMut(ContentHash) -> Locator,
+    staged_chunks: &mut Vec<StagedChunk>,
+) -> Result<Vec<BuiltNode>, Error> {
+    let mut next = Vec::new();
+    for range in branch_ranges(level) {
+        let children = level[range]
+            .iter()
+            .map(|child| BranchChild {
+                node_ref: child.node_ref.clone(),
+                metrics: child.metrics,
+                logical_hash: child.structural_hash,
+            })
+            .collect();
+        next.push(stage_node_reusing(
+            kind,
+            ChunkNode::Branch {
+                format: FORMAT_VERSION,
+                children,
+            },
+            existing,
+            fresh_locator,
+            staged_chunks,
+        )?);
+    }
+    Ok(next)
+}
+
+fn load_authenticated_node_attempt(
+    kind: LargeValueKind,
+    node_ref: &NodeRef,
+    expected_logical_hash: ContentHash,
+    inputs: &mut EvaluationInputs,
+) -> Result<ChunkNode, IvmRuntimeError> {
+    let request = ChunkRequest {
+        object_hash: node_ref.object_hash.0,
+        locator: node_ref.locator.0.clone(),
+    };
+    let encoded = inputs.chunk(request.clone())?;
+    let node = decode_node(kind, node_ref.object_hash, encoded)?;
+    if node_logical_hash(&node) != expected_logical_hash {
+        return Err(Error::DescriptorMismatch.into());
+    }
+    Ok(node)
+}
+
+fn locate_leaf_attempt(
+    value: &LargeValueRef,
+    offset: u64,
+    base_length: u64,
+    inputs: &mut EvaluationInputs,
+) -> Result<LocatedLeaf, IvmRuntimeError> {
+    if offset >= base_length {
+        return Err(Error::MalformedScalar.into());
+    }
+    let mut node_ref = value.root.clone();
+    let mut expected_hash = value.logical_hash;
+    let mut node_start = 0_u64;
+    let mut path = Vec::new();
+    loop {
+        if path.len() > MAX_TREE_DEPTH {
+            return Err(Error::InvalidTree.into());
+        }
+        match load_authenticated_node_attempt(value.kind, &node_ref, expected_hash, inputs)? {
+            ChunkNode::Leaf { bytes, .. } => {
+                if offset >= node_start + bytes.len() as u64 {
+                    return Err(Error::DescriptorMismatch.into());
+                }
+                return Ok(LocatedLeaf {
+                    node_ref,
+                    bytes,
+                    start: node_start,
+                    path,
+                });
+            }
+            ChunkNode::Branch { children, .. } => {
+                let mut child_start = node_start;
+                let selected = children
+                    .iter()
+                    .position(|child| {
+                        let end = child_start.saturating_add(child.metrics.byte_length);
+                        if offset < end {
+                            true
+                        } else {
+                            child_start = end;
+                            false
+                        }
+                    })
+                    .ok_or(Error::DescriptorMismatch)?;
+                let child = children[selected].clone();
+                path.push(PathFrame {
+                    node_ref,
+                    children,
+                    selected,
+                });
+                node_ref = child.node_ref;
+                expected_hash = child.logical_hash;
+                node_start = child_start;
+            }
+        }
+    }
+}
+
+fn next_leaf_attempt(
+    kind: LargeValueKind,
+    current: &LocatedLeaf,
+    inputs: &mut EvaluationInputs,
+) -> Result<Option<LocatedLeaf>, IvmRuntimeError> {
+    let mut path = current.path.clone();
+    let mut next = None;
+    while let Some(frame) = path.last_mut() {
+        if frame.selected + 1 < frame.children.len() {
+            frame.selected += 1;
+            next = Some(frame.children[frame.selected].clone());
+            break;
+        }
+        path.pop();
+    }
+    let Some(mut child) = next else {
+        return Ok(None);
+    };
+    let start = current
+        .start
+        .checked_add(current.bytes.len() as u64)
+        .ok_or(Error::MetricOverflow)?;
+    loop {
+        match load_authenticated_node_attempt(kind, &child.node_ref, child.logical_hash, inputs)? {
+            ChunkNode::Leaf { bytes, .. } => {
+                return Ok(Some(LocatedLeaf {
+                    node_ref: child.node_ref,
+                    bytes,
+                    start,
+                    path,
+                }));
+            }
+            ChunkNode::Branch { children, .. } => {
+                let first = children.first().cloned().ok_or(Error::MalformedNode)?;
+                path.push(PathFrame {
+                    node_ref: child.node_ref,
+                    children,
+                    selected: 0,
+                });
+                child = first;
+            }
+        }
+    }
+}
+
+pub fn decode_node(
+    kind: LargeValueKind,
+    expected_hash: ContentHash,
+    encoded: &[u8],
+) -> Result<ChunkNode, Error> {
+    if object_hash(encoded) != expected_hash {
+        return Err(Error::ObjectHashMismatch);
+    }
+    let node: ChunkNode = postcard::from_bytes(encoded).map_err(|_| Error::MalformedNode)?;
+    match &node {
+        ChunkNode::Leaf { format, bytes } => {
+            check_format(*format)?;
+            if bytes.len() > LEAF_MAX_BYTES {
+                return Err(Error::MalformedNode);
+            }
+            match kind {
+                LargeValueKind::Bytes => {}
+                LargeValueKind::String | LargeValueKind::Json => {
+                    std::str::from_utf8(bytes).map_err(|_| Error::InvalidUtf8)?;
+                }
+            }
+        }
+        ChunkNode::Branch { format, children } => {
+            check_format(*format)?;
+            if children.is_empty() || children.len() > BRANCH_MAX_CHILDREN {
+                return Err(Error::MalformedNode);
+            }
+            if children
+                .iter()
+                .any(|child| child.node_ref.locator.0.len() > MAX_LOCATOR_BYTES)
+            {
+                return Err(Error::MalformedNode);
+            }
+            let mut child_metrics = children.iter().map(|child| child.metrics);
+            let first_metrics = child_metrics.next().ok_or(Error::MalformedNode)?;
+            let _ = child_metrics.try_fold(first_metrics, add_metrics)?;
+            if kind == LargeValueKind::Bytes
+                && children
+                    .iter()
+                    .any(|child| child.metrics.utf16_length.is_some())
+            {
+                return Err(Error::MalformedNode);
+            }
+            if kind != LargeValueKind::Bytes
+                && children
+                    .iter()
+                    .any(|child| child.metrics.utf16_length.is_none())
+            {
+                return Err(Error::MalformedNode);
+            }
+        }
+    }
+    Ok(node)
+}
+
+pub fn object_hash(encoded: &[u8]) -> ContentHash {
+    hash_domain(b"groove-large-object-v1", encoded)
+}
+
+fn node_logical_hash(node: &ChunkNode) -> ContentHash {
+    match node {
+        ChunkNode::Leaf { bytes, .. } => hash_domain(b"groove-large-leaf-logical-v1", bytes),
+        ChunkNode::Branch { children, .. } => {
+            let mut descriptor = Vec::with_capacity(children.len() * 48);
+            for child in children {
+                descriptor.extend_from_slice(&child.logical_hash.0);
+                descriptor.extend_from_slice(&child.metrics.byte_length.to_le_bytes());
+                descriptor.extend_from_slice(
+                    &child.metrics.utf16_length.unwrap_or(u64::MAX).to_le_bytes(),
+                );
+            }
+            hash_domain(b"groove-large-branch-logical-v1", &descriptor)
+        }
+    }
+}
+
+fn node_metrics(kind: LargeValueKind, node: &ChunkNode) -> Result<NodeMetrics, Error> {
+    match node {
+        ChunkNode::Leaf { bytes, .. } => metrics(kind, bytes),
+        ChunkNode::Branch { children, .. } => {
+            let mut metrics = children.iter().map(|child| child.metrics);
+            let first = metrics.next().ok_or(Error::MalformedNode)?;
+            metrics.try_fold(first, add_metrics)
+        }
+    }
+}
+
+/// Attempt to materialize one logical value using the evaluator-owned request
+/// set. Missing chunks are registered in `inputs` and reported only as the
+/// evaluator-internal blocked outcome.
+pub(crate) fn materialize_attempt(
+    value: &LargeValueRef,
+    inputs: &mut EvaluationInputs,
+) -> Result<Vec<u8>, IvmRuntimeError> {
+    check_format(value.format_version)?;
+    let root_metrics = value.edit_tail.is_empty().then_some(NodeMetrics {
+        byte_length: value.byte_length,
+        utf16_length: value.utf16_length,
+    });
+    let mut pending = vec![(
+        value.root.clone(),
+        0_usize,
+        root_metrics,
+        value.logical_hash,
+    )];
+    let mut leaves = Vec::<(NodeRef, Vec<u8>)>::new();
+    let mut blocked = false;
+    while let Some((node_ref, depth, expected_metrics, expected_logical_hash)) = pending.pop() {
+        if depth > MAX_TREE_DEPTH {
+            return Err(Error::InvalidTree.into());
+        }
+        let node = match load_authenticated_node_attempt(
+            value.kind,
+            &node_ref,
+            expected_logical_hash,
+            inputs,
+        ) {
+            Ok(node) => node,
+            Err(IvmRuntimeError::EvaluationBlocked) => {
+                blocked = true;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        match node {
+            ChunkNode::Leaf { bytes, .. } => {
+                if expected_metrics
+                    .is_some_and(|expected| metrics(value.kind, &bytes).ok() != Some(expected))
+                {
+                    return Err(Error::DescriptorMismatch.into());
+                }
+                leaves.push((node_ref, bytes));
+            }
+            ChunkNode::Branch { children, .. } => {
+                if let Some(expected) = expected_metrics {
+                    let mut child_metrics = children.iter().map(|child| child.metrics);
+                    let Some(first) = child_metrics.next() else {
+                        return Err(Error::MalformedNode.into());
+                    };
+                    if child_metrics.try_fold(first, add_metrics)? != expected {
+                        return Err(Error::DescriptorMismatch.into());
+                    }
+                }
+                for child in children.into_iter().rev() {
+                    pending.push((
+                        child.node_ref,
+                        depth + 1,
+                        Some(child.metrics),
+                        child.logical_hash,
+                    ));
+                }
+            }
+        }
+    }
+    if blocked {
+        return Err(IvmRuntimeError::EvaluationBlocked);
+    }
+    let mut bytes =
+        Vec::with_capacity(usize::try_from(value.byte_length).map_err(|_| Error::MetricOverflow)?);
+    for (_, leaf) in leaves {
+        bytes.extend_from_slice(&leaf);
+    }
+    apply_edits(&mut bytes, &value.edit_tail)?;
+    validate_logical(value.kind, &bytes)?;
+    let actual_metrics = metrics(value.kind, &bytes)?;
+    if actual_metrics.byte_length != value.byte_length
+        || actual_metrics.utf16_length != value.utf16_length
+    {
+        return Err(Error::DescriptorMismatch.into());
+    }
+    Ok(bytes)
+}
+
+fn apply_edits(bytes: &mut Vec<u8>, edits: &[ReplaceEdit]) -> Result<(), Error> {
+    for edit in edits {
+        let start = usize::try_from(edit.offset).map_err(|_| Error::MetricOverflow)?;
+        let delete = usize::try_from(edit.delete_length).map_err(|_| Error::MetricOverflow)?;
+        let end = start.checked_add(delete).ok_or(Error::MetricOverflow)?;
+        if end > bytes.len() {
+            return Err(Error::MalformedNode);
+        }
+        bytes.splice(start..end, edit.insert_bytes.iter().copied());
+    }
+    Ok(())
+}
+
+pub(crate) fn materialize_record_attempt(
+    descriptor: &RecordDescriptor,
+    raw: &[u8],
+    inputs: &mut EvaluationInputs,
+) -> Result<Vec<u8>, IvmRuntimeError> {
+    let mut values = descriptor.bind(raw).to_values()?;
+    let mut blocked = false;
+    for value in &mut values {
+        materialize_value_attempt(value, inputs, &mut blocked)?;
+    }
+    if blocked {
+        return Err(IvmRuntimeError::EvaluationBlocked);
+    }
+    Ok(descriptor.create(&values)?)
+}
+
+/// Materialize only the logical fields an operator will inspect. Unselected
+/// indirect arms remain encoded as descriptors in the rebuilt record.
+pub(crate) fn materialize_record_fields_attempt(
+    descriptor: &RecordDescriptor,
+    raw: &[u8],
+    field_indices: &[usize],
+    inputs: &mut EvaluationInputs,
+) -> Result<Vec<u8>, IvmRuntimeError> {
+    let mut values = descriptor.bind(raw).to_values()?;
+    let mut blocked = false;
+    for index in field_indices {
+        let value = values
+            .get_mut(*index)
+            .ok_or(crate::records::Error::FieldIndexOutOfBounds {
+                index: *index,
+                len: descriptor.fields().len(),
+            })?;
+        materialize_value_attempt(value, inputs, &mut blocked)?;
+    }
+    if blocked {
+        return Err(IvmRuntimeError::EvaluationBlocked);
+    }
+    Ok(descriptor.create(&values)?)
+}
+
+fn materialize_value_attempt(
+    value: &mut Value,
+    inputs: &mut EvaluationInputs,
+    blocked: &mut bool,
+) -> Result<(), IvmRuntimeError> {
+    match value {
+        Value::Large(large) => match materialize_attempt(large, inputs) {
+            Ok(bytes) => {
+                *value = match large.kind {
+                    LargeValueKind::Bytes => Value::Bytes(bytes),
+                    // Groove currently exposes JSON source through its string
+                    // scalar type. Validation remains kind-specific at the
+                    // indirect representation boundary.
+                    LargeValueKind::String | LargeValueKind::Json => {
+                        Value::String(String::from_utf8(bytes).map_err(|_| Error::InvalidUtf8)?)
+                    }
+                };
+                Ok(())
+            }
+            Err(IvmRuntimeError::EvaluationBlocked) => {
+                *blocked = true;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        },
+        Value::Tuple(values) | Value::Array(values) => {
+            for value in values {
+                materialize_value_attempt(value, inputs, blocked)?;
+            }
+            Ok(())
+        }
+        Value::Nullable(Some(value)) => materialize_value_attempt(value, inputs, blocked),
+        Value::Record(record) => {
+            let descriptor = *record.descriptor();
+            let materialized = materialize_record_attempt(&descriptor, record.raw(), inputs);
+            match materialized {
+                Ok(raw) => {
+                    *record = crate::records::OwnedRecord::new(raw, descriptor);
+                    Ok(())
+                }
+                Err(IvmRuntimeError::EvaluationBlocked) => {
+                    *blocked = true;
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            }
+        }
+        Value::Enum(enum_value) => {
+            let tag = enum_value.tag();
+            let descriptor = *enum_value.record().descriptor();
+            match materialize_record_attempt(&descriptor, enum_value.record().raw(), inputs) {
+                Ok(raw) => {
+                    *enum_value = crate::records::EnumValue::new(
+                        tag,
+                        crate::records::OwnedRecord::new(raw, descriptor),
+                    );
+                }
+                Err(IvmRuntimeError::EvaluationBlocked) => *blocked = true,
+                Err(error) => return Err(error),
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+#[derive(Clone, Debug)]
+enum RangePiece {
+    Base(std::ops::Range<u64>),
+    Inserted(Vec<u8>),
+}
+
+#[derive(Clone, Debug)]
+enum Utf16RangePiece {
+    Base(std::ops::Range<u64>),
+    Inserted(Vec<u8>),
+}
+
+pub(crate) fn utf16_range_attempt(
+    value: &LargeValueRef,
+    range: std::ops::Range<u64>,
+    inputs: &mut EvaluationInputs,
+) -> Result<Vec<u8>, IvmRuntimeError> {
+    let length = value.utf16_length.ok_or(Error::MalformedScalar)?;
+    if range.start > range.end || range.end > length {
+        return Err(Error::MalformedScalar.into());
+    }
+    let pieces = map_final_utf16_range_to_base(range, &value.edit_tail)?;
+    let base_utf16 = value.edit_tail.iter().rev().try_fold(length, |n, edit| {
+        n.checked_sub(edit.insert_utf16_length)
+            .and_then(|n| n.checked_add(edit.delete_utf16_length))
+            .ok_or(Error::MetricOverflow)
+    })?;
+    let mut outputs = Vec::with_capacity(pieces.len());
+    let mut blocked = false;
+    for piece in pieces {
+        match piece {
+            Utf16RangePiece::Inserted(bytes) => outputs.push(bytes),
+            Utf16RangePiece::Base(range) => {
+                match base_utf16_range_attempt(value, base_utf16, range, inputs) {
+                    Ok(bytes) => outputs.push(bytes),
+                    Err(IvmRuntimeError::EvaluationBlocked) => blocked = true,
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+    }
+    if blocked {
+        Err(IvmRuntimeError::EvaluationBlocked)
+    } else {
+        Ok(outputs.into_iter().flatten().collect())
+    }
+}
+
+fn map_final_utf16_range_to_base(
+    range: std::ops::Range<u64>,
+    edits: &[ReplaceEdit],
+) -> Result<Vec<Utf16RangePiece>, Error> {
+    let mut pieces = vec![Utf16RangePiece::Base(range)];
+    for edit in edits.iter().rev() {
+        let inserted_end = edit
+            .utf16_offset
+            .checked_add(edit.insert_utf16_length)
+            .ok_or(Error::MetricOverflow)?;
+        let mut previous = Vec::new();
+        for piece in pieces {
+            let Utf16RangePiece::Base(range) = piece else {
+                previous.push(piece);
+                continue;
+            };
+            if range.start < edit.utf16_offset {
+                previous.push(Utf16RangePiece::Base(
+                    range.start..range.end.min(edit.utf16_offset),
+                ));
+            }
+            let overlap_start = range.start.max(edit.utf16_offset);
+            let overlap_end = range.end.min(inserted_end);
+            if overlap_start < overlap_end {
+                previous.push(Utf16RangePiece::Inserted(slice_utf16(
+                    &edit.insert_bytes,
+                    (overlap_start - edit.utf16_offset)..(overlap_end - edit.utf16_offset),
+                )?));
+            }
+            if range.end > inserted_end {
+                let start = range.start.max(inserted_end);
+                let map = |position: u64| {
+                    position
+                        .checked_sub(edit.insert_utf16_length)
+                        .and_then(|n| n.checked_add(edit.delete_utf16_length))
+                        .ok_or(Error::MetricOverflow)
+                };
+                previous.push(Utf16RangePiece::Base(map(start)?..map(range.end)?));
+            }
+        }
+        pieces = previous;
+    }
+    Ok(pieces)
+}
+
+fn slice_utf16(bytes: &[u8], range: std::ops::Range<u64>) -> Result<Vec<u8>, Error> {
+    let text = std::str::from_utf8(bytes).map_err(|_| Error::InvalidUtf8)?;
+    let mut units = 0_u64;
+    let mut start = None;
+    let mut end = None;
+    for (byte, ch) in text
+        .char_indices()
+        .chain(std::iter::once((text.len(), '\0')))
+    {
+        if units == range.start {
+            start = Some(byte);
+        }
+        if units == range.end {
+            end = Some(byte);
+            break;
+        }
+        if byte < text.len() {
+            units = units
+                .checked_add(ch.len_utf16() as u64)
+                .ok_or(Error::MetricOverflow)?;
+        }
+        if units > range.start && start.is_none() || units > range.end {
+            return Err(Error::MalformedScalar);
+        }
+    }
+    let start = start.ok_or(Error::MalformedScalar)?;
+    let end = end.ok_or(Error::MalformedScalar)?;
+    Ok(bytes[start..end].to_vec())
+}
+
+fn base_utf16_range_attempt(
+    value: &LargeValueRef,
+    base_utf16: u64,
+    range: std::ops::Range<u64>,
+    inputs: &mut EvaluationInputs,
+) -> Result<Vec<u8>, IvmRuntimeError> {
+    if range.end > base_utf16 {
+        return Err(Error::MalformedScalar.into());
+    }
+    if range.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut pending = vec![(
+        value.root.clone(),
+        value.logical_hash,
+        0_u64,
+        base_utf16,
+        0_usize,
+    )];
+    let mut slices = Vec::new();
+    let mut blocked = false;
+    while let Some((node_ref, hash, start, length, depth)) = pending.pop() {
+        if depth > MAX_TREE_DEPTH {
+            return Err(Error::InvalidTree.into());
+        }
+        let end = start.checked_add(length).ok_or(Error::MetricOverflow)?;
+        if range.start >= end || range.end <= start {
+            continue;
+        }
+        let node = match load_authenticated_node_attempt(value.kind, &node_ref, hash, inputs) {
+            Ok(node) => node,
+            Err(IvmRuntimeError::EvaluationBlocked) => {
+                blocked = true;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        match node {
+            ChunkNode::Leaf { bytes, .. } => {
+                let part = slice_utf16(
+                    &bytes,
+                    (range.start.max(start) - start)..(range.end.min(end) - start),
+                )?;
+                slices.push((start, part));
+            }
+            ChunkNode::Branch { children, .. } => {
+                let mut child_start = start;
+                let mut next = Vec::with_capacity(children.len());
+                for child in children {
+                    let child_length = child
+                        .metrics
+                        .utf16_length
+                        .ok_or(Error::DescriptorMismatch)?;
+                    next.push((
+                        child.node_ref,
+                        child.logical_hash,
+                        child_start,
+                        child_length,
+                        depth + 1,
+                    ));
+                    child_start = child_start
+                        .checked_add(child_length)
+                        .ok_or(Error::MetricOverflow)?;
+                }
+                if child_start != end {
+                    return Err(Error::DescriptorMismatch.into());
+                }
+                pending.extend(next.into_iter().rev());
+            }
+        }
+    }
+    if blocked {
+        return Err(IvmRuntimeError::EvaluationBlocked);
+    }
+    slices.sort_by_key(|(start, _)| *start);
+    Ok(slices.into_iter().flat_map(|(_, bytes)| bytes).collect())
+}
+
+/// Read a byte range from the final logical value. Edit-tail insertions are
+/// served directly and only intersecting base-tree paths are requested.
+pub(crate) fn byte_range_attempt(
+    value: &LargeValueRef,
+    range: std::ops::Range<u64>,
+    inputs: &mut EvaluationInputs,
+) -> Result<Vec<u8>, IvmRuntimeError> {
+    if range.start > range.end || range.end > value.byte_length {
+        return Err(Error::MalformedScalar.into());
+    }
+    let pieces = map_final_range_to_base(range, &value.edit_tail)?;
+    let base_length = base_length(value.byte_length, &value.edit_tail)?;
+    let mut outputs = Vec::with_capacity(pieces.len());
+    let mut blocked = false;
+    for piece in pieces {
+        match piece {
+            RangePiece::Inserted(bytes) => outputs.push(bytes),
+            RangePiece::Base(range) => {
+                match base_range_attempt(value, base_length, range, inputs) {
+                    Ok(bytes) => outputs.push(bytes),
+                    Err(IvmRuntimeError::EvaluationBlocked) => blocked = true,
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+    }
+    if blocked {
+        return Err(IvmRuntimeError::EvaluationBlocked);
+    }
+    Ok(outputs.into_iter().flatten().collect())
+}
+
+/// Count UTF-16 units in a byte-coordinate range without hydrating complete
+/// subtrees. Fully covered children contribute their authenticated aggregate
+/// metric; only boundary leaves are decoded.
+fn utf16_length_for_byte_range_attempt(
+    value: &LargeValueRef,
+    range: std::ops::Range<u64>,
+    inputs: &mut EvaluationInputs,
+) -> Result<u64, IvmRuntimeError> {
+    if value.kind == LargeValueKind::Bytes
+        || range.start > range.end
+        || range.end > value.byte_length
+    {
+        return Err(Error::MalformedScalar.into());
+    }
+    let pieces = map_final_range_to_base(range, &value.edit_tail)?;
+    let base_length = base_length(value.byte_length, &value.edit_tail)?;
+    let mut total = 0_u64;
+    let mut blocked = false;
+    for piece in pieces {
+        let result = match piece {
+            RangePiece::Inserted(bytes) => std::str::from_utf8(&bytes)
+                .map_err(|_| IvmRuntimeError::from(Error::InvalidUtf8))
+                .and_then(|text| {
+                    u64::try_from(text.encode_utf16().count())
+                        .map_err(|_| Error::MetricOverflow.into())
+                }),
+            RangePiece::Base(range) => {
+                base_utf16_length_for_byte_range_attempt(value, base_length, range, inputs)
+            }
+        };
+        match result {
+            Ok(length) => total = total.checked_add(length).ok_or(Error::MetricOverflow)?,
+            Err(IvmRuntimeError::EvaluationBlocked) => blocked = true,
+            Err(error) => return Err(error),
+        }
+    }
+    if blocked {
+        Err(IvmRuntimeError::EvaluationBlocked)
+    } else {
+        Ok(total)
+    }
+}
+
+fn base_utf16_length_for_byte_range_attempt(
+    value: &LargeValueRef,
+    base_length: u64,
+    range: std::ops::Range<u64>,
+    inputs: &mut EvaluationInputs,
+) -> Result<u64, IvmRuntimeError> {
+    if range.end > base_length {
+        return Err(Error::MalformedScalar.into());
+    }
+    let base_utf16 = value.edit_tail.iter().rev().try_fold(
+        value.utf16_length.ok_or(Error::MalformedScalar)?,
+        |length, edit| {
+            length
+                .checked_sub(edit.insert_utf16_length)
+                .and_then(|n| n.checked_add(edit.delete_utf16_length))
+                .ok_or(Error::MetricOverflow)
+        },
+    )?;
+    let mut pending = vec![(
+        value.root.clone(),
+        value.logical_hash,
+        0_u64,
+        base_length,
+        base_utf16,
+        0_usize,
+    )];
+    let mut total = 0_u64;
+    let mut blocked = false;
+    while let Some((node_ref, expected_hash, start, bytes_len, utf16_len, depth)) = pending.pop() {
+        if depth > MAX_TREE_DEPTH {
+            return Err(Error::InvalidTree.into());
+        }
+        let end = start.checked_add(bytes_len).ok_or(Error::MetricOverflow)?;
+        if range.start >= end || range.end <= start {
+            continue;
+        }
+        if range.start <= start && end <= range.end {
+            total = total.checked_add(utf16_len).ok_or(Error::MetricOverflow)?;
+            continue;
+        }
+        let node =
+            match load_authenticated_node_attempt(value.kind, &node_ref, expected_hash, inputs) {
+                Ok(node) => node,
+                Err(IvmRuntimeError::EvaluationBlocked) => {
+                    blocked = true;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+        match node {
+            ChunkNode::Leaf { bytes, .. } => {
+                let a = usize::try_from(range.start.max(start) - start)
+                    .map_err(|_| Error::MetricOverflow)?;
+                let b = usize::try_from(range.end.min(end) - start)
+                    .map_err(|_| Error::MetricOverflow)?;
+                let text = std::str::from_utf8(&bytes[a..b]).map_err(|_| Error::InvalidUtf8)?;
+                total = total
+                    .checked_add(
+                        u64::try_from(text.encode_utf16().count())
+                            .map_err(|_| Error::MetricOverflow)?,
+                    )
+                    .ok_or(Error::MetricOverflow)?;
+            }
+            ChunkNode::Branch { children, .. } => {
+                let mut child_start = start;
+                let mut next = Vec::with_capacity(children.len());
+                for child in children {
+                    let child_utf16 = child
+                        .metrics
+                        .utf16_length
+                        .ok_or(Error::DescriptorMismatch)?;
+                    next.push((
+                        child.node_ref,
+                        child.logical_hash,
+                        child_start,
+                        child.metrics.byte_length,
+                        child_utf16,
+                        depth + 1,
+                    ));
+                    child_start = child_start
+                        .checked_add(child.metrics.byte_length)
+                        .ok_or(Error::MetricOverflow)?;
+                }
+                pending.extend(next.into_iter().rev());
+            }
+        }
+    }
+    if blocked {
+        Err(IvmRuntimeError::EvaluationBlocked)
+    } else {
+        Ok(total)
+    }
+}
+
+/// Compare an indirect logical scalar to inline source bytes, requesting one
+/// bounded window at a time and stopping at the first decisive mismatch.
+pub(crate) fn compare_inline_attempt(
+    value: &LargeValueRef,
+    inline: &[u8],
+    inputs: &mut EvaluationInputs,
+) -> Result<std::cmp::Ordering, IvmRuntimeError> {
+    validate_descriptor(value)?;
+    if matches!(value.kind, LargeValueKind::String | LargeValueKind::Json) {
+        std::str::from_utf8(inline).map_err(|_| Error::InvalidUtf8)?;
+    }
+    let common = value
+        .byte_length
+        .min(u64::try_from(inline.len()).map_err(|_| Error::MetricOverflow)?);
+    let mut offset = 0_u64;
+    while offset < common {
+        let end = offset
+            .saturating_add(u64::try_from(LEAF_MIN_BYTES).expect("leaf minimum fits u64"))
+            .min(common);
+        let indirect = byte_range_attempt(value, offset..end, inputs)?;
+        let start = usize::try_from(offset).map_err(|_| Error::MetricOverflow)?;
+        let end_usize = usize::try_from(end).map_err(|_| Error::MetricOverflow)?;
+        match indirect.as_slice().cmp(&inline[start..end_usize]) {
+            std::cmp::Ordering::Equal => offset = end,
+            ordering => return Ok(ordering),
+        }
+    }
+    Ok(value
+        .byte_length
+        .cmp(&u64::try_from(inline.len()).map_err(|_| Error::MetricOverflow)?))
+}
+
+#[derive(Debug)]
+pub(crate) enum JsonPointerPrefix {
+    Found(Option<serde_json::Value>),
+    NeedMore,
+    RequiresFullDocument,
+}
+
+/// Resolve pointers whose first component is an array index from a source
+/// prefix. Once that complete array element has parsed, later source bytes
+/// cannot change its value. Object-root pointers deliberately use the full
+/// document path because serde_json's literal semantics retain the last
+/// duplicate key.
+pub(crate) fn json_pointer_prefix(
+    source: &[u8],
+    pointer: &str,
+) -> Result<JsonPointerPrefix, Error> {
+    if pointer.is_empty() {
+        return Ok(JsonPointerPrefix::RequiresFullDocument);
+    }
+    let mut components = pointer
+        .strip_prefix('/')
+        .ok_or(Error::InvalidJson)?
+        .split('/');
+    let first = decode_json_pointer_component(components.next().ok_or(Error::InvalidJson)?)?;
+    let Ok(target_index) = first.parse::<usize>() else {
+        return Ok(JsonPointerPrefix::RequiresFullDocument);
+    };
+    if first != target_index.to_string() {
+        return Ok(JsonPointerPrefix::RequiresFullDocument);
+    }
+    let remaining = components
+        .map(decode_json_pointer_component)
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut position = skip_json_ws(source, 0);
+    if source.get(position) != Some(&b'[') {
+        return Ok(JsonPointerPrefix::RequiresFullDocument);
+    }
+    position += 1;
+    for index in 0..=target_index {
+        position = skip_json_ws(source, position);
+        match source.get(position) {
+            None => return Ok(JsonPointerPrefix::NeedMore),
+            Some(b']') => return Ok(JsonPointerPrefix::Found(None)),
+            _ => {}
+        }
+        let mut values = serde_json::Deserializer::from_slice(&source[position..])
+            .into_iter::<serde_json::Value>();
+        let value = match values.next() {
+            Some(Ok(value)) => value,
+            Some(Err(error)) if error.is_eof() => return Ok(JsonPointerPrefix::NeedMore),
+            Some(Err(_)) | None => return Err(Error::InvalidJson),
+        };
+        position = position
+            .checked_add(values.byte_offset())
+            .ok_or(Error::MetricOverflow)?;
+        if index == target_index {
+            let mut selected = Some(&value);
+            for component in &remaining {
+                selected = selected.and_then(|value| match value {
+                    serde_json::Value::Object(map) => map.get(component),
+                    serde_json::Value::Array(array) => component
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|index| array.get(index)),
+                    _ => None,
+                });
+            }
+            return Ok(JsonPointerPrefix::Found(selected.cloned()));
+        }
+        position = skip_json_ws(source, position);
+        match source.get(position) {
+            Some(b',') => position += 1,
+            Some(b']') => return Ok(JsonPointerPrefix::Found(None)),
+            None => return Ok(JsonPointerPrefix::NeedMore),
+            _ => return Err(Error::InvalidJson),
+        }
+    }
+    Err(Error::InvalidJson)
+}
+
+fn skip_json_ws(source: &[u8], mut position: usize) -> usize {
+    while source
+        .get(position)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\n' | b'\r' | b'\t'))
+    {
+        position += 1;
+    }
+    position
+}
+
+fn decode_json_pointer_component(component: &str) -> Result<String, Error> {
+    let mut decoded = String::with_capacity(component.len());
+    let mut chars = component.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '~' {
+            decoded.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('0') => decoded.push('~'),
+            Some('1') => decoded.push('/'),
+            _ => return Err(Error::InvalidJson),
+        }
+    }
+    Ok(decoded)
+}
+
+fn base_length(final_length: u64, edits: &[ReplaceEdit]) -> Result<u64, Error> {
+    edits.iter().rev().try_fold(final_length, |length, edit| {
+        let inserted = u64::try_from(edit.insert_bytes.len()).map_err(|_| Error::MetricOverflow)?;
+        length
+            .checked_sub(inserted)
+            .and_then(|length| length.checked_add(edit.delete_length))
+            .ok_or(Error::MetricOverflow)
+    })
+}
+
+fn map_final_range_to_base(
+    range: std::ops::Range<u64>,
+    edits: &[ReplaceEdit],
+) -> Result<Vec<RangePiece>, Error> {
+    let mut pieces = vec![RangePiece::Base(range)];
+    for edit in edits.iter().rev() {
+        let inserted_length =
+            u64::try_from(edit.insert_bytes.len()).map_err(|_| Error::MetricOverflow)?;
+        let inserted_end = edit
+            .offset
+            .checked_add(inserted_length)
+            .ok_or(Error::MetricOverflow)?;
+        let shift_after = if edit.delete_length >= inserted_length {
+            (true, edit.delete_length - inserted_length)
+        } else {
+            (false, inserted_length - edit.delete_length)
+        };
+        let mut previous = Vec::new();
+        for piece in pieces {
+            let RangePiece::Base(range) = piece else {
+                previous.push(piece);
+                continue;
+            };
+            if range.start < edit.offset {
+                previous.push(RangePiece::Base(range.start..range.end.min(edit.offset)));
+            }
+            let overlap_start = range.start.max(edit.offset);
+            let overlap_end = range.end.min(inserted_end);
+            if overlap_start < overlap_end {
+                let start = usize::try_from(overlap_start - edit.offset)
+                    .map_err(|_| Error::MetricOverflow)?;
+                let end = usize::try_from(overlap_end - edit.offset)
+                    .map_err(|_| Error::MetricOverflow)?;
+                previous.push(RangePiece::Inserted(edit.insert_bytes[start..end].to_vec()));
+            }
+            if range.end > inserted_end {
+                let start = range.start.max(inserted_end);
+                let map = |position: u64| -> Result<u64, Error> {
+                    if shift_after.0 {
+                        position
+                            .checked_add(shift_after.1)
+                            .ok_or(Error::MetricOverflow)
+                    } else {
+                        position
+                            .checked_sub(shift_after.1)
+                            .ok_or(Error::MetricOverflow)
+                    }
+                };
+                previous.push(RangePiece::Base(map(start)?..map(range.end)?));
+            }
+        }
+        pieces = previous;
+    }
+    Ok(pieces)
+}
+
+fn base_range_attempt(
+    value: &LargeValueRef,
+    base_length: u64,
+    range: std::ops::Range<u64>,
+    inputs: &mut EvaluationInputs,
+) -> Result<Vec<u8>, IvmRuntimeError> {
+    if range.end > base_length {
+        return Err(Error::MalformedScalar.into());
+    }
+    if range.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut pending = vec![(
+        value.root.clone(),
+        value.logical_hash,
+        0_u64,
+        base_length,
+        0_usize,
+    )];
+    let mut slices = Vec::<(u64, Vec<u8>)>::new();
+    let mut blocked = false;
+    while let Some((node_ref, expected_hash, start, length, depth)) = pending.pop() {
+        if depth > MAX_TREE_DEPTH {
+            return Err(Error::InvalidTree.into());
+        }
+        let end = start.checked_add(length).ok_or(Error::MetricOverflow)?;
+        if range.start >= end || range.end <= start {
+            continue;
+        }
+        let node =
+            match load_authenticated_node_attempt(value.kind, &node_ref, expected_hash, inputs) {
+                Ok(node) => node,
+                Err(IvmRuntimeError::EvaluationBlocked) => {
+                    blocked = true;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+        match node {
+            ChunkNode::Leaf { bytes, .. } => {
+                if u64::try_from(bytes.len()).map_err(|_| Error::MetricOverflow)? != length {
+                    return Err(Error::DescriptorMismatch.into());
+                }
+                let slice_start = usize::try_from(range.start.max(start) - start)
+                    .map_err(|_| Error::MetricOverflow)?;
+                let slice_end = usize::try_from(range.end.min(end) - start)
+                    .map_err(|_| Error::MetricOverflow)?;
+                slices.push((start, bytes[slice_start..slice_end].to_vec()));
+            }
+            ChunkNode::Branch { children, .. } => {
+                let total = children.iter().try_fold(0_u64, |total, child| {
+                    total
+                        .checked_add(child.metrics.byte_length)
+                        .ok_or(Error::MetricOverflow)
+                })?;
+                if total != length {
+                    return Err(Error::DescriptorMismatch.into());
+                }
+                let mut child_start = start;
+                let mut children_with_offsets = Vec::with_capacity(children.len());
+                for child in children {
+                    children_with_offsets.push((
+                        child.node_ref,
+                        child.logical_hash,
+                        child_start,
+                        child.metrics.byte_length,
+                        depth + 1,
+                    ));
+                    child_start = child_start
+                        .checked_add(child.metrics.byte_length)
+                        .ok_or(Error::MetricOverflow)?;
+                }
+                pending.extend(children_with_offsets.into_iter().rev());
+            }
+        }
+    }
+    if blocked {
+        return Err(IvmRuntimeError::EvaluationBlocked);
+    }
+    slices.sort_by_key(|(start, _)| *start);
+    Ok(slices.into_iter().flat_map(|(_, bytes)| bytes).collect())
+}
+
+fn hash_domain(domain: &[u8], bytes: &[u8]) -> ContentHash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&(domain.len() as u64).to_le_bytes());
+    hasher.update(domain);
+    hasher.update(bytes);
+    ContentHash(*hasher.finalize().as_bytes())
+}
+
+fn check_format(format: u8) -> Result<(), Error> {
+    if format == FORMAT_VERSION {
+        Ok(())
+    } else {
+        Err(Error::UnsupportedFormat(format))
+    }
+}
+
+fn validate_logical(kind: LargeValueKind, bytes: &[u8]) -> Result<(), Error> {
+    match kind {
+        LargeValueKind::Bytes => Ok(()),
+        LargeValueKind::String => std::str::from_utf8(bytes)
+            .map(|_| ())
+            .map_err(|_| Error::InvalidUtf8),
+        LargeValueKind::Json => {
+            let text = std::str::from_utf8(bytes).map_err(|_| Error::InvalidUtf8)?;
+            serde_json::from_str::<serde_json::Value>(text)
+                .map(|_| ())
+                .map_err(|_| Error::InvalidJson)
+        }
+    }
+}
+
+fn metrics(kind: LargeValueKind, bytes: &[u8]) -> Result<NodeMetrics, Error> {
+    let byte_length = u64::try_from(bytes.len()).map_err(|_| Error::MetricOverflow)?;
+    let utf16_length = match kind {
+        LargeValueKind::Bytes => None,
+        LargeValueKind::String | LargeValueKind::Json => Some(
+            u64::try_from(
+                std::str::from_utf8(bytes)
+                    .map_err(|_| Error::InvalidUtf8)?
+                    .encode_utf16()
+                    .count(),
+            )
+            .map_err(|_| Error::MetricOverflow)?,
+        ),
+    };
+    Ok(NodeMetrics {
+        byte_length,
+        utf16_length,
+    })
+}
+
+fn add_metrics(left: NodeMetrics, right: NodeMetrics) -> Result<NodeMetrics, Error> {
+    let byte_length = left
+        .byte_length
+        .checked_add(right.byte_length)
+        .ok_or(Error::MetricOverflow)?;
+    let utf16_length = match (left.utf16_length, right.utf16_length) {
+        (None, None) => None,
+        (Some(left), Some(right)) => Some(left.checked_add(right).ok_or(Error::MetricOverflow)?),
+        _ => return Err(Error::MalformedNode),
+    };
+    Ok(NodeMetrics {
+        byte_length,
+        utf16_length,
+    })
+}
+
+#[allow(clippy::single_range_in_vec_init)] // The empty value still has one canonical empty leaf.
+fn leaf_ranges(kind: LargeValueKind, bytes: &[u8]) -> Result<Vec<std::ops::Range<usize>>, Error> {
+    if bytes.is_empty() {
+        return Ok(vec![0..0]);
+    }
+    let text = match kind {
+        LargeValueKind::Bytes => None,
+        LargeValueKind::String | LargeValueKind::Json => {
+            Some(std::str::from_utf8(bytes).map_err(|_| Error::InvalidUtf8)?)
+        }
+    };
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < bytes.len() {
+        let hard_end = (start + LEAF_MAX_BYTES).min(bytes.len());
+        let mut hash = 0_u64;
+        let mut end = hard_end;
+        for (offset, byte) in bytes[start..hard_end].iter().enumerate() {
+            hash = hash.wrapping_shl(1).wrapping_add(gear(*byte));
+            let length = offset + 1;
+            let boundary = if length < LEAF_MIN_BYTES {
+                false
+            } else if length < LEAF_TARGET_BYTES {
+                hash & (LEAF_TARGET_BYTES as u64 * 2 - 1) == 0
+            } else {
+                hash & (LEAF_TARGET_BYTES as u64 / 2 - 1) == 0
+            };
+            if boundary {
+                end = start + length;
+                break;
+            }
+        }
+        if let Some(text) = text {
+            while end > start && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            if end == start {
+                return Err(Error::MalformedNode);
+            }
+        }
+        ranges.push(start..end);
+        start = end;
+    }
+    Ok(ranges)
+}
+
+fn branch_ranges(nodes: &[BuiltNode]) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < nodes.len() {
+        let hard_end = (start + BRANCH_MAX_CHILDREN).min(nodes.len());
+        let mut hash = 0_u64;
+        let mut end = hard_end;
+        for (offset, child) in nodes[start..hard_end].iter().enumerate() {
+            for byte in child.structural_hash.0 {
+                hash = hash.wrapping_shl(1).wrapping_add(gear(byte));
+            }
+            let length = offset + 1;
+            let boundary = if length < BRANCH_MIN_CHILDREN {
+                false
+            } else if length < BRANCH_TARGET_CHILDREN {
+                hash & (BRANCH_TARGET_CHILDREN as u64 * 2 - 1) == 0
+            } else {
+                hash & (BRANCH_TARGET_CHILDREN as u64 / 2 - 1) == 0
+            };
+            if boundary {
+                end = start + length;
+                break;
+            }
+        }
+        ranges.push(start..end);
+        start = end;
+    }
+    ranges
+}
+
+fn gear(byte: u8) -> u64 {
+    let mut value = u64::from(byte).wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct PreparedProvider {
+        chunks: std::collections::BTreeMap<Vec<u8>, (ContentHash, bytes::Bytes)>,
+    }
+
+    impl PreparedProvider {
+        fn new(prepared: &PreparedLargeValue) -> Self {
+            Self {
+                chunks: prepared
+                    .staged_chunks
+                    .iter()
+                    .map(|chunk| {
+                        (
+                            chunk.node_ref.locator.0.clone(),
+                            (
+                                chunk.node_ref.object_hash,
+                                bytes::Bytes::copy_from_slice(&chunk.encoded),
+                            ),
+                        )
+                    })
+                    .collect(),
+            }
+        }
+    }
+
+    impl crate::chunks::ChunkProvider for PreparedProvider {
+        fn get(
+            &self,
+            request: ChunkRequest,
+        ) -> crate::chunks::ChunkFuture<'_, Result<bytes::Bytes, crate::chunks::ChunkError>>
+        {
+            Box::pin(async move {
+                self.chunks
+                    .get(&request.locator)
+                    .filter(|(hash, _)| hash.0 == request.object_hash)
+                    .map(|(_, bytes)| bytes.clone())
+                    .ok_or(crate::chunks::ChunkError::Unavailable)
+            })
+        }
+    }
+
+    fn deterministic_locator(hash: ContentHash) -> Locator {
+        Locator(hash.0[..24].to_vec())
+    }
+
+    #[test]
+    fn reachability_traversal_authenticates_and_visits_the_complete_tree() {
+        let mut state = 0x4d59_5df4_d0f3_3173_u64;
+        let logical = (0..LEAF_TARGET_BYTES * (BRANCH_MAX_CHILDREN + 5))
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect::<Vec<_>>();
+        let prepared = prepare(LargeValueKind::Bytes, &logical, deterministic_locator).unwrap();
+        let provider = PreparedProvider::new(&prepared);
+        let mut visited = std::collections::BTreeSet::new();
+        let count = futures::executor::block_on(visit_reachable_chunks(
+            &prepared.value_ref,
+            &provider,
+            |request| {
+                visited.insert(request.clone());
+            },
+        ))
+        .unwrap();
+        assert_eq!(count as usize, prepared.staged_chunks.len());
+        assert_eq!(visited.len(), prepared.staged_chunks.len());
+    }
+
+    struct WindowReader<'a> {
+        bytes: &'a [u8],
+        offset: usize,
+        state: u64,
+    }
+
+    impl std::io::Read for WindowReader<'_> {
+        fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+            if self.offset == self.bytes.len() {
+                return Ok(0);
+            }
+            self.state ^= self.state << 13;
+            self.state ^= self.state >> 7;
+            self.state ^= self.state << 17;
+            let window = 1 + self.state as usize % (LEAF_MIN_BYTES * 2);
+            let count = window.min(output.len()).min(self.bytes.len() - self.offset);
+            output[..count].copy_from_slice(&self.bytes[self.offset..self.offset + count]);
+            self.offset += count;
+            Ok(count)
+        }
+    }
+
+    #[test]
+    fn streaming_prepare_matches_one_shot_across_random_input_windows() {
+        let cases = [
+            (
+                LargeValueKind::Bytes,
+                (0..LEAF_TARGET_BYTES * 90)
+                    .map(|i| (i.wrapping_mul(31) & 0xff) as u8)
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                LargeValueKind::String,
+                "a😀é-stream-boundary-".repeat(180_000).into_bytes(),
+            ),
+            (
+                LargeValueKind::Json,
+                format!(
+                    "[{{\"first\":true}},{}]",
+                    (0..80_000)
+                        .map(|i| format!("{{\"n\":{i}}}"))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+                .into_bytes(),
+            ),
+        ];
+        for (kind, bytes) in cases {
+            let expected = prepare(kind, &bytes, deterministic_locator).unwrap();
+            for seed in 1..=12 {
+                let mut staged = Vec::new();
+                let (actual, stats) = prepare_streaming(
+                    kind,
+                    WindowReader {
+                        bytes: &bytes,
+                        offset: 0,
+                        state: seed,
+                    },
+                    deterministic_locator,
+                    |chunk| {
+                        staged.push(chunk);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                assert_eq!(actual, expected.value_ref, "kind {kind:?}, seed {seed}");
+                let chunks = |chunks: Vec<StagedChunk>| {
+                    chunks
+                        .into_iter()
+                        .map(|chunk| (chunk.node_ref, chunk.encoded))
+                        .collect::<std::collections::BTreeMap<_, _>>()
+                };
+                assert_eq!(
+                    chunks(staged),
+                    chunks(expected.staged_chunks.clone()),
+                    "kind {kind:?}, seed {seed}"
+                );
+                assert!(stats.peak_leaf_buffer_bytes <= LEAF_MAX_BYTES + LEAF_MIN_BYTES);
+                assert!(stats.peak_frontier_nodes <= BRANCH_MAX_CHILDREN * MAX_TREE_DEPTH);
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_prepare_never_returns_a_descriptor_after_validation_or_staging_failure() {
+        let mut invalid_json = br#"["#.to_vec();
+        invalid_json.extend(std::iter::repeat_n(b' ', LEAF_MAX_BYTES + 1));
+        invalid_json.extend_from_slice(br#"{"ok":true}, invalid]"#);
+        let mut staged = 0;
+        let result = prepare_streaming(
+            LargeValueKind::Json,
+            std::io::Cursor::new(&invalid_json),
+            deterministic_locator,
+            |_| {
+                staged += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(result.unwrap_err(), Error::InvalidJson);
+        assert!(
+            staged >= 1,
+            "immutable orphan staging is allowed before validation finishes"
+        );
+
+        let mut attempts = 0;
+        let result = prepare_streaming(
+            LargeValueKind::Bytes,
+            std::io::Cursor::new(vec![7; LEAF_MAX_BYTES * 3]),
+            deterministic_locator,
+            |_| {
+                attempts += 1;
+                if attempts == 2 {
+                    Err(Error::MalformedScalar)
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert_eq!(result.unwrap_err(), Error::MalformedScalar);
+        assert_eq!(attempts, 2);
+    }
+
+    // Internal format tests are appropriate here: tree shape, authenticated
+    // metrics and boundary locality are not observable through public queries
+    // until the physical scalar arm is wired into records.
+    #[test]
+    fn construction_is_deterministic_and_text_metrics_are_exact() {
+        let text = "a😀é".repeat(100_000);
+        let first = prepare(
+            LargeValueKind::String,
+            text.as_bytes(),
+            deterministic_locator,
+        )
+        .unwrap();
+        let second = prepare(
+            LargeValueKind::String,
+            text.as_bytes(),
+            deterministic_locator,
+        )
+        .unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(first.value_ref.byte_length, text.len() as u64);
+        assert_eq!(
+            first.value_ref.utf16_length,
+            Some(text.encode_utf16().count() as u64)
+        );
+        for chunk in &first.staged_chunks {
+            decode_node(
+                LargeValueKind::String,
+                chunk.node_ref.object_hash,
+                &chunk.encoded,
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn append_tail_updates_metrics_without_changing_base_identity_or_reading_chunks() {
+        let base = "base 😀 ".repeat(20_000);
+        let prepared = prepare(
+            LargeValueKind::String,
+            base.as_bytes(),
+            deterministic_locator,
+        )
+        .unwrap();
+        let base_hash = prepared.value_ref.logical_hash;
+        let suffix = "suffix 🪩";
+
+        let TailAppendOutcome::Updated(updated) =
+            append_tail(&prepared.value_ref, suffix.as_bytes().to_vec()).unwrap()
+        else {
+            panic!("one small append must fit in the tail");
+        };
+
+        assert_eq!(updated.logical_hash, base_hash);
+        assert_eq!(updated.edit_tail.len(), 1);
+        assert_eq!(updated.byte_length, (base.len() + suffix.len()) as u64);
+        assert_eq!(
+            updated.utf16_length,
+            Some(base.encode_utf16().count() as u64 + suffix.encode_utf16().count() as u64)
+        );
+    }
+
+    #[test]
+    fn append_tail_reports_consolidation_before_exceeding_its_hard_bound() {
+        let prepared = prepare(LargeValueKind::Bytes, b"base", deterministic_locator).unwrap();
+        let mut value = prepared.value_ref;
+        for _ in 0..MAX_EDIT_COUNT {
+            let TailAppendOutcome::Updated(updated) = append_tail(&value, vec![1]).unwrap() else {
+                panic!("the configured edit-count bound should be admissible");
+            };
+            value = updated;
+        }
+        assert!(matches!(
+            append_tail(&value, vec![2]).unwrap(),
+            TailAppendOutcome::ConsolidationRequired(_)
+        ));
+    }
+
+    #[test]
+    fn byte_replacement_enters_tail_without_fetching_the_base_tree() {
+        let prepared = prepare(
+            LargeValueKind::Bytes,
+            &vec![3; LEAF_TARGET_BYTES * 4],
+            deterministic_locator,
+        )
+        .unwrap();
+        let mut inputs = EvaluationInputs::default();
+        let TailEditOutcome::Updated(updated) = replace_tail_attempt(
+            &prepared.value_ref,
+            100,
+            20,
+            b"replacement".to_vec(),
+            &mut inputs,
+        )
+        .unwrap() else {
+            panic!("small replacement must fit in the edit tail");
+        };
+
+        assert!(inputs.take_missing_chunks().is_empty());
+        assert_eq!(updated.edit_tail.len(), 1);
+        assert_eq!(
+            updated.byte_length,
+            prepared.value_ref.byte_length - 20 + b"replacement".len() as u64
+        );
+    }
+
+    #[test]
+    fn text_replacement_reads_only_its_range_and_preserves_exact_utf16_metrics() {
+        let base = "zero 😀 one é two ".repeat(30_000);
+        let prepared = prepare(
+            LargeValueKind::String,
+            base.as_bytes(),
+            deterministic_locator,
+        )
+        .unwrap();
+        let start = base.find("😀").unwrap() as u64;
+        let end = start + "😀".len() as u64;
+        let available = prepared
+            .staged_chunks
+            .iter()
+            .map(|chunk| {
+                (
+                    ChunkRequest {
+                        object_hash: chunk.node_ref.object_hash.0,
+                        locator: chunk.node_ref.locator.0.clone(),
+                    },
+                    bytes::Bytes::copy_from_slice(&chunk.encoded),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut inputs = EvaluationInputs::default();
+        let updated = loop {
+            match replace_tail_attempt(
+                &prepared.value_ref,
+                start,
+                end - start,
+                "🪩".as_bytes().to_vec(),
+                &mut inputs,
+            ) {
+                Ok(TailEditOutcome::Updated(value)) => break value,
+                Ok(TailEditOutcome::ConsolidationRequired(_)) => panic!("small edit must fit"),
+                Err(IvmRuntimeError::EvaluationBlocked) => {
+                    for request in inputs.take_missing_chunks() {
+                        inputs.install_chunk(request.clone(), available[&request].clone());
+                    }
+                }
+                Err(error) => panic!("unexpected text edit failure: {error}"),
+            }
+        };
+        let mut expected = base;
+        expected.replace_range(start as usize..end as usize, "🪩");
+        assert_eq!(updated.byte_length, expected.len() as u64);
+        assert_eq!(
+            updated.utf16_length,
+            Some(expected.encode_utf16().count() as u64)
+        );
+    }
+
+    #[test]
+    fn append_consolidation_reads_only_right_spine_and_reuses_untouched_locators() {
+        let mut state = 0xa11c_e5ed_1234_5678_u64;
+        let base = (0..LEAF_TARGET_BYTES * 96)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect::<Vec<_>>();
+        let prepared = prepare(LargeValueKind::Bytes, &base, |hash| {
+            let mut locator = b"old/".to_vec();
+            locator.extend_from_slice(&hash.0[..20]);
+            Locator(locator)
+        })
+        .unwrap();
+        let suffix = vec![0x5a; LEAF_TARGET_BYTES * 3];
+        let TailAppendOutcome::Updated(with_tail) =
+            append_tail(&prepared.value_ref, suffix.clone()).unwrap()
+        else {
+            panic!("test append must fit");
+        };
+        let available = prepared
+            .staged_chunks
+            .iter()
+            .map(|chunk| {
+                (
+                    ChunkRequest {
+                        object_hash: chunk.node_ref.object_hash.0,
+                        locator: chunk.node_ref.locator.0.clone(),
+                    },
+                    bytes::Bytes::copy_from_slice(&chunk.encoded),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut inputs = EvaluationInputs::default();
+        let mut requested = std::collections::BTreeSet::new();
+        let consolidated = loop {
+            match consolidate_appends_attempt(&with_tail, &mut inputs, |hash| {
+                let mut locator = b"new/".to_vec();
+                locator.extend_from_slice(&hash.0[..20]);
+                Locator(locator)
+            }) {
+                Ok(value) => break value,
+                Err(IvmRuntimeError::EvaluationBlocked) => {
+                    let missing = inputs.take_missing_chunks();
+                    assert_eq!(missing.len(), 1, "right-spine discovery is sequential");
+                    for request in missing {
+                        requested.insert(request.clone());
+                        inputs.install_chunk(request.clone(), available[&request].clone());
+                    }
+                }
+                Err(error) => panic!("unexpected consolidation failure: {error}"),
+            }
+        };
+        let mut final_bytes = base;
+        final_bytes.extend_from_slice(&suffix);
+        let fresh = prepare(LargeValueKind::Bytes, &final_bytes, |hash| {
+            let mut locator = b"fresh/".to_vec();
+            locator.extend_from_slice(&hash.0[..20]);
+            Locator(locator)
+        })
+        .unwrap();
+
+        assert!(consolidated.value_ref.edit_tail.is_empty());
+        assert_eq!(
+            consolidated.value_ref.logical_hash, fresh.value_ref.logical_hash,
+            "localized consolidation must produce the canonical fresh tree"
+        );
+        assert!(
+            requested.len() * 8 < prepared.staged_chunks.len(),
+            "consolidation requested {} of {} old nodes",
+            requested.len(),
+            prepared.staged_chunks.len()
+        );
+        let old_refs = prepared
+            .staged_chunks
+            .iter()
+            .map(|chunk| chunk.node_ref.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let newly_staged_refs = consolidated
+            .staged_chunks
+            .iter()
+            .map(|chunk| chunk.node_ref.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let encoded_by_hash = prepared
+            .staged_chunks
+            .iter()
+            .chain(consolidated.staged_chunks.iter())
+            .map(|chunk| (chunk.node_ref.object_hash, chunk.encoded.as_slice()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut reachable = std::collections::BTreeSet::new();
+        let mut pending = vec![consolidated.value_ref.root.clone()];
+        while let Some(node_ref) = pending.pop() {
+            if !reachable.insert(node_ref.clone()) {
+                continue;
+            }
+            let node = decode_node(
+                LargeValueKind::Bytes,
+                node_ref.object_hash,
+                encoded_by_hash[&node_ref.object_hash],
+            )
+            .unwrap();
+            if let ChunkNode::Branch { children, .. } = node {
+                pending.extend(children.into_iter().map(|child| child.node_ref));
+            }
+        }
+        let reused = reachable.intersection(&old_refs).count();
+        assert!(
+            reused * 4 > old_refs.len() * 3,
+            "only {reused} of {} exact old NodeRefs remained reachable",
+            old_refs.len()
+        );
+        assert!(
+            old_refs.len() > newly_staged_refs.len() * 4,
+            "localized append staged too many replacement nodes"
+        );
+    }
+
+    #[test]
+    fn middle_edit_consolidation_resynchronizes_and_splices_only_local_tree_groups() {
+        let mut state = 0x55aa_1234_dead_beef_u64;
+        let base = (0..LEAF_TARGET_BYTES * 128)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect::<Vec<_>>();
+        let prepared = prepare(LargeValueKind::Bytes, &base, |hash| {
+            let mut locator = b"old/".to_vec();
+            locator.extend_from_slice(&hash.0[..20]);
+            Locator(locator)
+        })
+        .unwrap();
+        let offset = (base.len() / 2 + 137) as u64;
+        let delete_length = 31_u64;
+        let insert = b"localized replacement payload".to_vec();
+        let mut no_reads = EvaluationInputs::default();
+        let TailEditOutcome::Updated(with_tail) = replace_tail_attempt(
+            &prepared.value_ref,
+            offset,
+            delete_length,
+            insert.clone(),
+            &mut no_reads,
+        )
+        .unwrap() else {
+            panic!("small edit must fit");
+        };
+        assert!(no_reads.take_missing_chunks().is_empty());
+        let available = prepared
+            .staged_chunks
+            .iter()
+            .map(|chunk| {
+                (
+                    ChunkRequest {
+                        object_hash: chunk.node_ref.object_hash.0,
+                        locator: chunk.node_ref.locator.0.clone(),
+                    },
+                    bytes::Bytes::copy_from_slice(&chunk.encoded),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut inputs = EvaluationInputs::default();
+        let mut requested = std::collections::BTreeSet::new();
+        let consolidated = loop {
+            match consolidate_single_edit_attempt(&with_tail, &mut inputs, |hash| {
+                let mut locator = b"new/".to_vec();
+                locator.extend_from_slice(&hash.0[..20]);
+                Locator(locator)
+            }) {
+                Ok(value) => break value,
+                Err(IvmRuntimeError::EvaluationBlocked) => {
+                    for request in inputs.take_missing_chunks() {
+                        requested.insert(request.clone());
+                        inputs.install_chunk(request.clone(), available[&request].clone());
+                    }
+                }
+                Err(error) => panic!("unexpected middle consolidation failure: {error}"),
+            }
+        };
+        let mut expected = base;
+        expected.splice(offset as usize..(offset + delete_length) as usize, insert);
+        let fresh = prepare(LargeValueKind::Bytes, &expected, |hash| {
+            let mut locator = b"fresh/".to_vec();
+            locator.extend_from_slice(&hash.0[..20]);
+            Locator(locator)
+        })
+        .unwrap();
+
+        assert_eq!(
+            consolidated.value_ref.logical_hash,
+            fresh.value_ref.logical_hash
+        );
+        assert!(consolidated.value_ref.edit_tail.is_empty());
+        assert!(
+            requested.len() * 6 < prepared.staged_chunks.len(),
+            "middle splice fetched {} of {} old nodes",
+            requested.len(),
+            prepared.staged_chunks.len()
+        );
+        assert!(
+            consolidated.staged_chunks.len() * 5 < prepared.staged_chunks.len(),
+            "middle splice staged {} nodes against {} old nodes",
+            consolidated.staged_chunks.len(),
+            prepared.staged_chunks.len()
+        );
+        let old_refs = prepared
+            .staged_chunks
+            .iter()
+            .map(|chunk| chunk.node_ref.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let encoded_by_hash = prepared
+            .staged_chunks
+            .iter()
+            .chain(consolidated.staged_chunks.iter())
+            .map(|chunk| (chunk.node_ref.object_hash, chunk.encoded.as_slice()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut reachable = std::collections::BTreeSet::new();
+        let mut pending = vec![consolidated.value_ref.root.clone()];
+        while let Some(node_ref) = pending.pop() {
+            if !reachable.insert(node_ref.clone()) {
+                continue;
+            }
+            if let ChunkNode::Branch { children, .. } = decode_node(
+                LargeValueKind::Bytes,
+                node_ref.object_hash,
+                encoded_by_hash[&node_ref.object_hash],
+            )
+            .unwrap()
+            {
+                pending.extend(children.into_iter().map(|child| child.node_ref));
+            }
+        }
+        let reused = reachable.intersection(&old_refs).count();
+        assert!(
+            reused * 4 > old_refs.len() * 3,
+            "only {reused} of {} exact locator-bearing old nodes survived",
+            old_refs.len()
+        );
+    }
+
+    #[test]
+    fn localized_single_edit_matches_fresh_tree_across_seeded_ranges() {
+        let mut state = 0x9e37_79b9_cafe_f00d_u64;
+        let base = (0..LEAF_TARGET_BYTES * 24)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect::<Vec<_>>();
+        let prepared = prepare(LargeValueKind::Bytes, &base, deterministic_locator).unwrap();
+        let available = prepared
+            .staged_chunks
+            .iter()
+            .map(|chunk| {
+                (
+                    ChunkRequest {
+                        object_hash: chunk.node_ref.object_hash.0,
+                        locator: chunk.node_ref.locator.0.clone(),
+                    },
+                    bytes::Bytes::copy_from_slice(&chunk.encoded),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for case in 0..24_u64 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let offset = state as usize % base.len();
+            let delete = ((state >> 17) as usize % 257).min(base.len() - offset);
+            let insert_len = (state >> 31) as usize % 257;
+            let insert = (0..insert_len)
+                .map(|index| state.wrapping_add(index as u64) as u8)
+                .collect::<Vec<_>>();
+            let mut edit_inputs = EvaluationInputs::default();
+            let TailEditOutcome::Updated(with_tail) = replace_tail_attempt(
+                &prepared.value_ref,
+                offset as u64,
+                delete as u64,
+                insert.clone(),
+                &mut edit_inputs,
+            )
+            .unwrap() else {
+                panic!("seeded small edit must fit");
+            };
+            let mut inputs = EvaluationInputs::default();
+            let consolidated = loop {
+                match consolidate_single_edit_attempt(
+                    &with_tail,
+                    &mut inputs,
+                    deterministic_locator,
+                ) {
+                    Ok(value) => break value,
+                    Err(IvmRuntimeError::EvaluationBlocked) => {
+                        for request in inputs.take_missing_chunks() {
+                            inputs.install_chunk(request.clone(), available[&request].clone());
+                        }
+                    }
+                    Err(error) => panic!("case {case} failed: {error}"),
+                }
+            };
+            let mut expected = base.clone();
+            expected.splice(offset..offset + delete, insert);
+            let fresh = prepare(LargeValueKind::Bytes, &expected, deterministic_locator).unwrap();
+            assert_eq!(
+                consolidated.value_ref.logical_hash, fresh.value_ref.logical_hash,
+                "case {case}: offset={offset} delete={delete} insert={insert_len}"
+            );
+        }
+    }
+
+    #[test]
+    fn multi_edit_continuation_keeps_completed_local_splices_across_suspension() {
+        let mut state = 0x1234_abcd_9876_fedc_u64;
+        let base = (0..LEAF_TARGET_BYTES * 40)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect::<Vec<_>>();
+        let prepared = prepare(LargeValueKind::Bytes, &base, deterministic_locator).unwrap();
+        let available = prepared
+            .staged_chunks
+            .iter()
+            .map(|chunk| {
+                (
+                    ChunkRequest {
+                        object_hash: chunk.node_ref.object_hash.0,
+                        locator: chunk.node_ref.locator.0.clone(),
+                    },
+                    bytes::Bytes::copy_from_slice(&chunk.encoded),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut logical = base;
+        let mut with_tail = prepared.value_ref;
+        let mut no_reads = EvaluationInputs::default();
+        for case in 0..8_usize {
+            let offset = (logical.len() * (case + 1) / 10).min(logical.len() - 1);
+            let delete = (case * 7 + 3).min(logical.len() - offset);
+            let insert = vec![case as u8 + 10; case * 11 + 5];
+            let TailEditOutcome::Updated(updated) = replace_tail_attempt(
+                &with_tail,
+                offset as u64,
+                delete as u64,
+                insert.clone(),
+                &mut no_reads,
+            )
+            .unwrap() else {
+                panic!("bounded seeded edit must fit");
+            };
+            with_tail = updated;
+            logical.splice(offset..offset + delete, insert);
+        }
+        let mut continuation = ConsolidationContinuation::new(with_tail).unwrap();
+        let mut inputs = EvaluationInputs::default();
+        let mut max_completed_before_block = 0_usize;
+        let consolidated = loop {
+            match continuation.step(&mut inputs, deterministic_locator) {
+                Ok(Some(value)) => break value,
+                Ok(None) => unreachable!(),
+                Err(IvmRuntimeError::EvaluationBlocked) => {
+                    max_completed_before_block =
+                        max_completed_before_block.max(continuation.next_edit);
+                    for request in inputs.take_missing_chunks() {
+                        inputs.install_chunk(request.clone(), available[&request].clone());
+                    }
+                }
+                Err(error) => panic!("unexpected continuation failure: {error}"),
+            }
+        };
+        let fresh = prepare(LargeValueKind::Bytes, &logical, deterministic_locator).unwrap();
+
+        assert_eq!(
+            consolidated.value_ref.logical_hash,
+            fresh.value_ref.logical_hash
+        );
+        assert!(consolidated.value_ref.edit_tail.is_empty());
+        assert!(
+            max_completed_before_block > 0,
+            "at least one completed splice should survive a later chunk suspension"
+        );
+    }
+
+    #[test]
+    fn locator_changes_do_not_change_logical_identity_or_tree_shape() {
+        let bytes = vec![42; LEAF_MAX_BYTES * 3];
+        let first = prepare(LargeValueKind::Bytes, &bytes, deterministic_locator).unwrap();
+        let second = prepare(LargeValueKind::Bytes, &bytes, |hash| {
+            let mut locator = hash.0[..24].to_vec();
+            locator[0] ^= 0xff;
+            Locator(locator)
+        })
+        .unwrap();
+
+        assert_eq!(first.value_ref.logical_hash, second.value_ref.logical_hash);
+        assert_eq!(first.value_ref.byte_length, second.value_ref.byte_length);
+        assert_eq!(first.staged_chunks.len(), second.staged_chunks.len());
+        assert_ne!(first.value_ref.root, second.value_ref.root);
+        let first_shapes = first
+            .staged_chunks
+            .iter()
+            .map(|chunk| {
+                match decode_node(
+                    LargeValueKind::Bytes,
+                    chunk.node_ref.object_hash,
+                    &chunk.encoded,
+                )
+                .unwrap()
+                {
+                    ChunkNode::Leaf { bytes, .. } => (0, bytes.len()),
+                    ChunkNode::Branch { children, .. } => (1, children.len()),
+                }
+            })
+            .collect::<Vec<_>>();
+        let second_shapes = second
+            .staged_chunks
+            .iter()
+            .map(|chunk| {
+                match decode_node(
+                    LargeValueKind::Bytes,
+                    chunk.node_ref.object_hash,
+                    &chunk.encoded,
+                )
+                .unwrap()
+                {
+                    ChunkNode::Leaf { bytes, .. } => (0, bytes.len()),
+                    ChunkNode::Branch { children, .. } => (1, children.len()),
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(first_shapes, second_shapes);
+    }
+
+    #[test]
+    fn object_hash_authenticates_locator_bearing_branch_bytes() {
+        let bytes = vec![9; LEAF_MAX_BYTES * 2];
+        let prepared = prepare(LargeValueKind::Bytes, &bytes, deterministic_locator).unwrap();
+        let root = prepared.staged_chunks.last().unwrap();
+        let mut corrupted = root.encoded.clone();
+        *corrupted.last_mut().unwrap() ^= 1;
+        assert_eq!(
+            decode_node(LargeValueKind::Bytes, root.node_ref.object_hash, &corrupted,),
+            Err(Error::ObjectHashMismatch)
+        );
+    }
+
+    #[test]
+    fn json_preserves_literal_source_and_rejects_invalid_input() {
+        let source = br#"{ "b": 2, "a": [1, true, null] }"#;
+        let prepared = prepare(LargeValueKind::Json, source, deterministic_locator).unwrap();
+        assert_ne!(prepared.value_ref.logical_hash, ContentHash([0; 32]));
+        assert_eq!(
+            prepare(LargeValueKind::Json, b"{broken", deterministic_locator),
+            Err(Error::InvalidJson)
+        );
+    }
+
+    #[test]
+    fn materialization_discovers_authenticated_tree_in_request_rounds() {
+        let logical = (0..(LEAF_MAX_BYTES * 3))
+            .map(|index| (index.wrapping_mul(31) & 0xff) as u8)
+            .collect::<Vec<_>>();
+        let prepared = prepare(LargeValueKind::Bytes, &logical, deterministic_locator).unwrap();
+        let available = prepared
+            .staged_chunks
+            .iter()
+            .map(|chunk| {
+                (
+                    ChunkRequest {
+                        object_hash: chunk.node_ref.object_hash.0,
+                        locator: chunk.node_ref.locator.0.clone(),
+                    },
+                    bytes::Bytes::copy_from_slice(&chunk.encoded),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut inputs = EvaluationInputs::default();
+        let mut rounds = 0;
+        loop {
+            match materialize_attempt(&prepared.value_ref, &mut inputs) {
+                Ok(materialized) => {
+                    assert_eq!(materialized, logical);
+                    break;
+                }
+                Err(IvmRuntimeError::EvaluationBlocked) => {
+                    let requests = inputs.take_missing_chunks();
+                    assert!(!requests.is_empty());
+                    if rounds == 0 {
+                        assert_eq!(requests.len(), 1, "only the root is initially known");
+                    }
+                    for request in requests {
+                        inputs.install_chunk(request.clone(), available[&request].clone());
+                    }
+                    rounds += 1;
+                }
+                Err(error) => panic!("unexpected materialization failure: {error}"),
+            }
+        }
+        assert!(rounds >= 2, "branches reveal descendants in later rounds");
+    }
+
+    #[test]
+    fn reconstruction_reuses_exact_locators_for_unchanged_nodes() {
+        let original = (0..(LEAF_MAX_BYTES * 12))
+            .map(|index| (index.wrapping_mul(17) & 0xff) as u8)
+            .collect::<Vec<_>>();
+        let first = prepare(LargeValueKind::Bytes, &original, |hash| {
+            let mut locator = hash.0[..24].to_vec();
+            locator[0] ^= 0x55;
+            Locator(locator)
+        })
+        .unwrap();
+        let mut edited = original;
+        edited.splice(LEAF_MAX_BYTES * 6..LEAF_MAX_BYTES * 6, [1, 2, 3, 4]);
+        let second = prepare_reusing(
+            LargeValueKind::Bytes,
+            &edited,
+            &first.staged_chunks,
+            |hash| {
+                let mut locator = hash.0[..24].to_vec();
+                locator[0] ^= 0xaa;
+                Locator(locator)
+            },
+        )
+        .unwrap();
+
+        let old = first
+            .staged_chunks
+            .iter()
+            .map(|chunk| (&chunk.node_ref.object_hash, &chunk.node_ref.locator))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let reused = second
+            .staged_chunks
+            .iter()
+            .filter(|chunk| {
+                old.get(&chunk.node_ref.object_hash)
+                    .is_some_and(|locator| **locator == chunk.node_ref.locator)
+            })
+            .count();
+        assert!(reused > 0, "the edit must preserve unaffected nodes");
+        for chunk in &second.staged_chunks {
+            if let Some(locator) = old.get(&chunk.node_ref.object_hash) {
+                assert_eq!(
+                    **locator, chunk.node_ref.locator,
+                    "a byte-identical node must retain its exact locator"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn physical_scalar_tag_is_unambiguous_for_every_inline_prefix() {
+        for prefix in 0..=u8::MAX {
+            let logical = vec![prefix, 1, 2, 3];
+            let encoded = encode_stored_scalar(&StoredScalar::Inline(logical.clone())).unwrap();
+            assert_eq!(
+                decode_stored_scalar(&encoded),
+                Ok(StoredScalar::Inline(logical))
+            );
+        }
+        assert_eq!(decode_stored_scalar(&[]), Err(Error::MalformedScalar));
+        assert_eq!(decode_stored_scalar(&[2, 0]), Err(Error::MalformedScalar));
+    }
+
+    #[test]
+    fn small_insertion_preserves_most_content_defined_nodes() {
+        let mut state = 0x9e37_79b9_u64;
+        let original = (0..(LEAF_TARGET_BYTES * 128))
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect::<Vec<_>>();
+        let first = prepare(LargeValueKind::Bytes, &original, deterministic_locator).unwrap();
+        let mut edited = original;
+        edited.splice(
+            edited.len() / 2..edited.len() / 2,
+            b"localized edit".iter().copied(),
+        );
+        let second = prepare(LargeValueKind::Bytes, &edited, deterministic_locator).unwrap();
+        let old_hashes = first
+            .staged_chunks
+            .iter()
+            .map(|chunk| chunk.node_ref.object_hash)
+            .collect::<std::collections::BTreeSet<_>>();
+        let reused = second
+            .staged_chunks
+            .iter()
+            .filter(|chunk| old_hashes.contains(&chunk.node_ref.object_hash))
+            .count();
+        let rewritten = second.staged_chunks.len() - reused;
+        assert!(
+            rewritten < second.staged_chunks.len() / 3,
+            "a local insertion rewrote {rewritten} of {} nodes",
+            second.staged_chunks.len()
+        );
+    }
+
+    #[test]
+    fn narrow_ranges_map_back_through_edit_tail_without_full_hydration() {
+        let mut state = 0x1234_5678_9abc_def0_u64;
+        let base = (0..(LEAF_TARGET_BYTES * 48))
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect::<Vec<_>>();
+        let prepared = prepare(LargeValueKind::Bytes, &base, deterministic_locator).unwrap();
+        let available = prepared
+            .staged_chunks
+            .iter()
+            .map(|chunk| {
+                (
+                    ChunkRequest {
+                        object_hash: chunk.node_ref.object_hash.0,
+                        locator: chunk.node_ref.locator.0.clone(),
+                    },
+                    bytes::Bytes::copy_from_slice(&chunk.encoded),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let edits = vec![
+            ReplaceEdit {
+                offset: 100,
+                delete_length: 3,
+                insert_bytes: b"early insertion".to_vec(),
+                utf16_offset: 0,
+                delete_utf16_length: 0,
+                insert_utf16_length: 0,
+            },
+            ReplaceEdit {
+                offset: (LEAF_TARGET_BYTES * 24) as u64,
+                delete_length: 19,
+                insert_bytes: b"middle replacement".to_vec(),
+                utf16_offset: 0,
+                delete_utf16_length: 0,
+                insert_utf16_length: 0,
+            },
+        ];
+        let mut logical = base;
+        apply_edits(&mut logical, &edits).unwrap();
+        let mut value = prepared.value_ref;
+        value.edit_tail = edits;
+        value.byte_length = logical.len() as u64;
+        let requested = (LEAF_TARGET_BYTES * 24 - 20)..(LEAF_TARGET_BYTES * 24 + 80);
+        let mut inputs = EvaluationInputs::default();
+        let mut requested_chunks = std::collections::BTreeSet::new();
+        loop {
+            match byte_range_attempt(
+                &value,
+                requested.start as u64..requested.end as u64,
+                &mut inputs,
+            ) {
+                Ok(bytes) => {
+                    assert_eq!(bytes, logical[requested.clone()]);
+                    break;
+                }
+                Err(IvmRuntimeError::EvaluationBlocked) => {
+                    let requests = inputs.take_missing_chunks();
+                    assert!(!requests.is_empty());
+                    for request in requests {
+                        requested_chunks.insert(request.clone());
+                        inputs.install_chunk(request.clone(), available[&request].clone());
+                    }
+                }
+                Err(error) => panic!("unexpected range failure: {error}"),
+            }
+        }
+        assert!(
+            requested_chunks.len() * 4 < available.len(),
+            "narrow range fetched {} of {} chunks",
+            requested_chunks.len(),
+            available.len()
+        );
+    }
+
+    #[test]
+    fn reverse_edit_range_mapping_matches_materialized_oracle() {
+        let base = (0..512)
+            .map(|index| (index & 0xff) as u8)
+            .collect::<Vec<_>>();
+        let mut state = 0xfeed_face_cafe_beef_u64;
+        for _case in 0..200 {
+            let mut logical = base.clone();
+            let mut edits = Vec::new();
+            for _ in 0..8 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let offset = (state as usize) % (logical.len() + 1);
+                let available = logical.len() - offset;
+                let delete = ((state >> 11) as usize % 12).min(available);
+                let insert_len = (state >> 23) as usize % 12;
+                let insert = (0..insert_len)
+                    .map(|index| state.wrapping_add(index as u64) as u8)
+                    .collect::<Vec<_>>();
+                let edit = ReplaceEdit {
+                    offset: offset as u64,
+                    delete_length: delete as u64,
+                    insert_bytes: insert,
+                    utf16_offset: 0,
+                    delete_utf16_length: 0,
+                    insert_utf16_length: 0,
+                };
+                apply_edits(&mut logical, std::slice::from_ref(&edit)).unwrap();
+                edits.push(edit);
+            }
+            for _ in 0..8 {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let left = state as usize % (logical.len() + 1);
+                let right = (state >> 19) as usize % (logical.len() + 1);
+                let range = left.min(right)..left.max(right);
+                let pieces =
+                    map_final_range_to_base(range.start as u64..range.end as u64, &edits).unwrap();
+                let mapped = pieces
+                    .into_iter()
+                    .flat_map(|piece| match piece {
+                        RangePiece::Base(range) => {
+                            base[range.start as usize..range.end as usize].to_vec()
+                        }
+                        RangePiece::Inserted(bytes) => bytes,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(mapped, logical[range]);
+            }
+        }
+    }
+}

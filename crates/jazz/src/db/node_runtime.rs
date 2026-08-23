@@ -45,6 +45,8 @@ where
     pub(super) edge_cache_budget: Cell<Option<EdgeCacheBudget>>,
     pub(super) upstream_durability_floor: Cell<DurabilityTier>,
     pub(super) defer_local_persistence: Cell<bool>,
+    pub(super) chunk_resolver: PeerChunkResolver,
+    pub(super) local_chunk_reader: groove::chunks::LocalChunkReader,
 }
 
 impl<S> Node<S>
@@ -52,11 +54,14 @@ where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     /// Wrap a node for serving subscriber links.
-    pub fn new(node: NodeState<S>) -> Self {
+    pub fn new(mut node: NodeState<S>) -> Self {
         // History completeness is a structural property of the opened node,
         // not evaluator state. Cache it so connection attachment never needs
         // to synchronously borrow storage-owning state during evaluation.
         let receives_commits_as_local = !node.is_history_complete();
+        let chunk_resolver = PeerChunkResolver::default();
+        let local_chunk_reader = node.local_chunk_reader_handle();
+        node.set_missing_chunk_resolver(Rc::new(chunk_resolver.clone()));
         let pending_mutation_errors = node
             .rejected_transactions()
             .into_iter()
@@ -100,6 +105,8 @@ where
             edge_cache_budget: Cell::new(None),
             upstream_durability_floor: Cell::new(DurabilityTier::Global),
             defer_local_persistence: Cell::new(false),
+            chunk_resolver,
+            local_chunk_reader,
         }
     }
 
@@ -846,6 +853,12 @@ where
                 scope_lease_manager: AuthorizationScopeLeaseManager::default(),
             }),
             last_resume_bytes: None,
+            auxiliary_pump: PeerIoPump::new(
+                self.chunk_resolver.clone(),
+                self.local_chunk_reader.clone(),
+                connection_epoch,
+                PeerIoPumpRole::Upstream,
+            ),
         }));
         self.connections.borrow_mut().push(Rc::clone(&connection));
         self.schedule_tick(TickUrgency::Immediate);
@@ -1066,6 +1079,12 @@ where
                 serve_dirty: true,
             }),
             last_resume_bytes: None,
+            auxiliary_pump: PeerIoPump::new(
+                self.chunk_resolver.clone(),
+                self.local_chunk_reader.clone(),
+                connection_epoch,
+                PeerIoPumpRole::Subscriber,
+            ),
         }));
         self.connections.borrow_mut().push(Rc::clone(&connection));
         self.schedule_tick(TickUrgency::Immediate);

@@ -278,6 +278,7 @@ where
     pub(super) startup_error: Option<Error>,
     pub(super) link: ConnectionLink,
     pub(super) last_resume_bytes: Option<usize>,
+    pub(super) auxiliary_pump: PeerIoPump,
 }
 
 pub(super) enum ConnectionLink {
@@ -348,6 +349,10 @@ impl<S> PeerConnection<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Clone the binding-driven auxiliary I/O endpoint for this peer link.
+    pub fn io_pump(&self) -> PeerIoPump {
+        self.auxiliary_pump.clone()
+    }
     /// Replace the claims authenticated by the host for this subscriber link.
     /// Wire peers cannot invoke this path; bindings use it only after their
     /// trusted authentication layer has accepted a refreshed session.
@@ -1003,6 +1008,16 @@ where
                             summarize_sync_message(&message)
                         ));
                         match message {
+                            SyncMessage::ChunkResponseBatch(batch) => {
+                                for response in batch.responses {
+                                    self.auxiliary_pump.resolver.complete(response);
+                                }
+                                continue;
+                            }
+                            SyncMessage::ChunkRequestBatch(_) => {
+                                drop_peer_request(&self.node);
+                                continue;
+                            }
                             SyncMessage::CatalogueSnapshot(snapshot) => {
                                 if !pending_view_updates.is_empty() {
                                     apply_pending_authority_view_updates(
@@ -1663,6 +1678,9 @@ where
                 for fate in std::mem::take(&mut *self.downstream_fates.borrow_mut()) {
                     send_with_sync_context(&self.node, peer, self.transport.as_mut(), fate)?;
                 }
+                if let Some(message) = self.auxiliary_pump.take_outbound(64) {
+                    self.transport.send(message).map_err(transport_error)?;
+                }
                 while let Some(message) = self.transport.try_recv() {
                     // Authorization support is authority-owned in Phase 3.
                     // A subscriber must never be able to smuggle a support
@@ -1680,6 +1698,46 @@ where
                         summarize_sync_message(&message)
                     ));
                     match message {
+                        SyncMessage::ChunkRequestBatch(batch) => {
+                            let mut responses = Vec::new();
+                            for request in batch.requests {
+                                let local = self
+                                    .node
+                                    .lock()
+                                    .await
+                                    .local_chunk(
+                                        request.locator.clone(),
+                                        groove::large_values::ContentHash(request.expected_hash),
+                                    )
+                                    .await;
+                                match local {
+                                    Ok(bytes) => responses.push(ChunkResponseEntry {
+                                        request_id: request.request_id,
+                                        result: ChunkResponse::Found(bytes.to_vec()),
+                                    }),
+                                    Err(groove::chunks::ChunkStorageError::Unavailable) => self
+                                        .auxiliary_pump
+                                        .resolver
+                                        .enqueue_relay(self.connection_epoch, request),
+                                    Err(_) => responses.push(ChunkResponseEntry {
+                                        request_id: request.request_id,
+                                        result: ChunkResponse::Unavailable,
+                                    }),
+                                }
+                            }
+                            if !responses.is_empty() {
+                                self.transport
+                                    .send(SyncMessage::ChunkResponseBatch(ChunkResponseBatch {
+                                        responses,
+                                    }))
+                                    .map_err(transport_error)?;
+                            }
+                            continue;
+                        }
+                        SyncMessage::ChunkResponseBatch(_) => {
+                            drop_peer_request(&self.node);
+                            continue;
+                        }
                         SyncMessage::AuthorizationScopeIntent { request_id, action } => {
                             let admitted = self.transport.connection_session_context().is_some_and(
                                 |context| {

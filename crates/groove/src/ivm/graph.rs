@@ -195,6 +195,13 @@ pub enum GraphBuilder {
         input: Box<GraphBuilder>,
         fields: Vec<ProjectField>,
     },
+    StreamingChecksum {
+        input: Box<GraphBuilder>,
+        field: FieldRef,
+        output_field: String,
+        window_bytes: usize,
+        max_bytes_per_turn: usize,
+    },
     Union {
         inputs: Vec<GraphBuilder>,
     },
@@ -854,6 +861,27 @@ impl GraphBuilder {
         Self::Project {
             input: Box::new(self),
             fields: fields.into_iter().collect(),
+        }
+    }
+
+    /// Internal conformance operator for exercising bounded streaming-node
+    /// scheduling and scaling invariants. It is public so black-box integration
+    /// and benchmark harnesses can build a graph through the ordinary API; it
+    /// is not intended as an endorsed application-level checksum facility.
+    #[doc(hidden)]
+    pub fn streaming_checksum(
+        self,
+        field: impl Into<String>,
+        output_field: impl Into<String>,
+        window_bytes: usize,
+        max_bytes_per_turn: usize,
+    ) -> Self {
+        Self::StreamingChecksum {
+            input: Box::new(self),
+            field: FieldRef::name(field),
+            output_field: output_field.into(),
+            window_bytes,
+            max_bytes_per_turn,
         }
     }
 }
@@ -1823,6 +1851,19 @@ impl NodeDescriptor {
                 }
                 Ok(())
             }
+            OpType::StreamingChecksum(checksum) => {
+                expect_arity(&self.inputs, 1)?;
+                if checksum.field_idx >= input_outputs[0].fields().len() {
+                    return Err(GraphValidationError::FieldIndexOutOfBounds {
+                        index: checksum.field_idx,
+                        len: input_outputs[0].fields().len(),
+                    });
+                }
+                if checksum.window_bytes == 0 || checksum.max_bytes_per_turn == 0 {
+                    return Err(GraphValidationError::OutputDescriptorMismatch);
+                }
+                Ok(())
+            }
             OpType::IndexBy(index) => {
                 expect_arity(&self.inputs, 1)?;
                 for &field_idx in index.key_fields.iter().chain(&index.value_fields) {
@@ -1989,6 +2030,7 @@ pub enum OpType {
     Persist(PersistOp),
     Filter(FilterOp),
     MapProject(MapProjectOp),
+    StreamingChecksum(StreamingChecksumOp),
     UnwrapNullable(UnwrapNullableOp),
     Unnest(UnnestOp),
     VariantProject(VariantProjectOp),

@@ -49,8 +49,8 @@ LargeValueRef {
 
 `logical_hash` is deterministic content identity. `object_hash` authenticates
 the exact encoded node, including the child locators that it reveals, and
-`locator` is the opaque retrieval capability interpreted by the host-supplied
-chunk provider. Groove treats object hashes and locators as non-semantic:
+`locator` is an opaque random storage key interpreted only by
+Groove's chunk subsystem. Groove treats object hashes and locators as non-semantic:
 changing only the retrieval graph cannot change logical equality, ordering,
 grouping, an IVM node id, an index key, or query output.
 
@@ -65,6 +65,28 @@ user string or JSON value. Every admitted cell has exactly one unambiguous arm.
 aggregation, indices, projections, subscriptions, and application results MUST
 observe the logical value. They MUST NOT compare or expose descriptors, hashes,
 locators, tree nodes, chunk boundaries, or edit-tail encoding.
+
+### Groove-owned async storage
+
+Groove owns both the storage dependency and every operation over it. The byte
+plane may be implemented by a small policy-blind async KV interface with exact
+`get`, immutable `put_if_absent`, and hash-guarded `delete`; Groove allocates
+random locators and performs integrity checks. Implementations may be memory,
+filesystem, OPFS, RocksDB, or a remote blob adapter.
+
+Child edges, durable refcounts, staging generations and reclamation work require
+atomic metadata updates with physical row mutations. The default composition
+stores that metadata in Groove's transactional ordered storage and uses the
+async KV only for immutable bytes. A backend claiming a unified implementation
+may provide the same guarantees internally. Jazz/other callers never coordinate
+the two planes.
+
+Authorization is orthogonal to storage. Jazz's ordinary row/view authorization
+controls descriptor and locator discovery; Groove maintains no mutable root
+grant registry. Once disclosed, an opaque locator plus its authenticated hash
+is sufficient for exact retrieval. Groove discovers descendants only by
+authenticating a parent node. The KV backend receives no policy identity or
+authorization context.
 
 ## 9.2 Tree and chunk format
 
@@ -145,11 +167,11 @@ enum EvaluationRequestOutput {
 }
 ```
 
-The exact Rust representation may differ, but it has one lifecycle. Equal keys
-within a compatible access context share one in-flight future and result. A
-chunk request key contains the expected object hash and opaque locator; the
-access context is fixed by the Groove database/operation capability and MUST
-participate in request-sharing identity wherever authorizations can differ.
+The exact Rust representation may differ, but it has one lifecycle. Equal exact
+keys within one Groove database share one in-flight future and result. A chunk
+request key contains the expected object hash and opaque locator. Jazz performs
+authorization before descriptor disclosure, so Groove does not add a second
+mutable access-context identity to request sharing.
 
 Any IVM node may return one of these conceptual outcomes:
 
@@ -219,6 +241,14 @@ Operators request only evidence needed to decide their own output:
 An operator may discover additional requests after earlier chunks arrive. This
 is progress, not a retry of a visible operation.
 
+JSON validity is enforced when a JSON value is prepared for publication. Reads
+assume that write-admission invariant rather than revalidating every unread
+suffix. A pointer read fails if the demanded source is malformed, but it may
+finish without fetching unrelated later bytes once the selected value is
+complete. This is the same trust boundary as every other schema/type invariant:
+storage and sync do not admit host-fabricated physical descriptors as ordinary
+writes.
+
 `INV-LARGE-5`: an operator MUST NOT require full materialization merely because
 its input is indirect. Its demand is the minimum conservative evidence needed
 to produce exactly the same result as the inline oracle.
@@ -240,28 +270,34 @@ The cursor is over the final logical value, not raw tree leaves; it accounts for
 edit-tail insertions, deletions and replacements. Cursor state contains the
 exact `LargeValueRef`, logical offset and bounded tree traversal stack. A source
 version replacement invalidates the cursor before any result is published.
+The execution work budget is independent of storage suspension: after consuming
+the configured logical-byte allowance, a node MUST yield even if every required
+chunk is resident. A failed or cancelled window does not advance its published
+cursor, and a partial accumulator is never exposed as an operator result.
 
-Examples include tokenization, term-frequency extraction, checksums, streaming
-validation, and vector embedding. TF/IDF should normally lower into a streaming
-per-document tokenizer that prepares `(document, term, count)` deltas followed
-by ordinary arrangements, joins and aggregates for corpus-wide IDF. Embedding
-state is keyed by model/tokenizer version and configuration.
+The reference operator is a streaming checksum. It has a fixed-size accumulator,
+is easy to compare with a one-shot oracle, and exercises cursor resumption,
+chunk suspension, work-budget yielding, cancellation, source invalidation and
+atomic result publication without introducing text semantics or unbounded
+operator state. As a graph transformation it preserves the input row and
+replaces one String/Bytes field with a named 32-byte BLAKE3 field. Completion
+creates one prepared derived row; the ordinary non-suspending publication
+boundary applies it atomically. Updates retract the checksum of the exact old
+logical value and insert the checksum of the exact replacement value.
 
-If an accumulator itself is unbounded, it uses evaluation-private spill storage
-rather than retaining unbounded memory. Spill data is unpublished, namespaced
-by evaluation identity, and deleted on cancellation/failure. Completion creates
-one prepared delta or derived value; the ordinary non-suspending publication
-boundary applies it atomically.
+This checksum exists primarily as a conformance and scaling probe for streaming
+nodes. Its builder surface is available to black-box tests and benchmarks, but
+it is not an application-facing checksum API or a product feature commitment.
 
 `INV-LARGE-6`: sequential processing of a large value MUST be possible with
-resident input memory bounded by the configured chunk/window size plus explicit
-operator accumulator and spill budgets, independent of the value's total size.
+resident input memory bounded by the configured chunk/window size plus its
+declared bounded accumulator, independent of the value's total size.
 
 ## 9.7 Chunk residency and result ownership
 
 Four quantities are separately accounted:
 
-1. durable bytes in the host's chunk backend;
+1. durable bytes in Groove's chunk storage;
 2. cache-owned verified bytes;
 3. leases held by active evaluations;
 4. buffers retained by returned or externally owned results.
@@ -277,15 +313,16 @@ Durable IVM records and arrangements retain `LargeValueRef`, not loaded chunks.
 Derived state retains its declared output, never incidental input leases.
 
 A terminal requesting an idiomatic full primitive owns a materialized string,
-byte value, or parsed JSON value and releases input chunks after conversion. A
-chunk-backed bytes/blob result may instead own immutable chunk leases; that
-ownership transfers across a binding and is released by the host object's
-normal destructor/finalizer. Groove does not retain old emitted results merely
-because application code might retain them.
+byte value, or parsed JSON value and releases input chunks after conversion.
+For this design, NAPI and WASM preserve their existing encoded-row boundary and
+copy the completed encoded result into host-owned memory. No chunk lease crosses
+either binding, no Rust finalizer participates in host-buffer lifetime, and
+Groove does not retain old emitted results merely because application code
+might retain its copy.
 
 Cache eviction cannot reclaim application-owned output. Implementations expose
 separate metrics and backpressure for cache bytes, evaluation leases, external
-result buffers, operator state, and spill storage.
+result buffers, and operator state.
 
 `INV-LARGE-7`: removing a chunk from the shared cache MUST remain safe while an
 evaluation or returned result owns it. Conversely, durable IVM state MUST NOT
@@ -304,9 +341,42 @@ PreparedLargeValue {
 ```
 
 Preparation may suspend while reading an old tree, may stream through it, and
-has no visible database mutation. The host stages immutable chunks. Publication
-of the owning row and the resulting descriptor follows the host database's
-ordinary authorization and atomic row-publication boundary.
+has no visible database mutation. Groove allocates locators and stages immutable
+chunks through its async storage. Publication of the owning row and descriptor
+follows the caller's ordinary authorization and Groove's atomic physical-record
+boundary.
+
+Durable ownership follows Groove's physical record lifecycle, not a host-side
+root registry. Inserting a physical record increments every large-value root
+named in that record; deleting it decrements those roots in the same persisted
+batch. Replacement applies the descriptor multiset delta. Cache or arrangement
+eviction is not physical-record deletion and never changes durable counts.
+
+When an immutable node mapping is first installed, Groove records its child
+edges exactly once. A node's transition from inactive to active contributes one
+persisted inbound reference to each child; additional root/parent references to
+an already-active immutable node do not duplicate its child edges. The inverse
+zero transition recursively removes those contributions and queues the node for
+bounded, restartable reclamation. Idempotently restaging identical content is
+edge-neutral. Locator mappings independently retain any deduplicated physical
+blob.
+
+Prepared chunks not yet present in a physical record use a separate persisted,
+expiring staging generation. Active reads use temporary leases. Neither is a
+durable record reference.
+
+The initial metadata layout reserves Groove's `__groove_large_values` logical
+storage family. Staging returns an opaque persisted `StagedLargeValueId` plus an
+accounting receipt. A `DatabaseBatch` consumes that id only when the same batch
+contains its descriptor; the row delta adds durable ownership while consuming
+the staging generation removes staging ownership. Root zero-crossings update
+recursive node counts and append exact `(locator, hash)` work to a persisted
+reclamation queue. The reclaimer removes metadata only after hash-guarded byte
+deletion succeeds, so crashes retry without walking row history.
+
+`INV-LARGE-9`: physical-record mutation and descriptor-reference deltas MUST be
+crash-consistent and idempotent. A node/blob MUST NOT be reclaimed while its
+durable inbound count, staging protection, or active lease is nonzero.
 
 Derived indices and expensive operator outputs identify their inputs with:
 
@@ -314,7 +384,7 @@ Derived indices and expensive operator outputs identify their inputs with:
 logical value identity (root hash + canonical tail)
 operator identity and version
 operator configuration
-model/tokenizer/schema version where applicable
+schema version where applicable
 ```
 
 Changing only retrieval locators does not invalidate derived state. Changing
@@ -365,8 +435,13 @@ Chunk failure is scoped like chapter 8's node-evaluation failure:
   require benchmark receipts across text, files, JSON and append workloads.
 - Which full-value persistent index forms should be supported initially rather
   than rejected in favor of explicit hash/path/metric indices.
-- Whether application-facing chunk-backed byte/blob results belong in the first
-  API or remain an internal/binding optimization.
+- Whether a future NAPI/WASM protocol should carry chunk-backed byte/blob
+  handles or multipart buffers for zero-copy results. This is an optimization
+  outside the current design; it would require explicit host finalizers,
+  external-memory accounting and lease-aware backpressure.
 - Exact JSON formatting policy after semantic merges.
-- Long-term collection policy for unreachable immutable chunks is host-owned and
-  specified by Jazz chapter 19 for the Jazz integration.
+- Exact persisted staging-expiry policy and reclamation-worker cadence for each
+  storage backend.
+- Any future history truncation/thinning implementation MUST delete physical
+  versions through Groove's refcount-aware record mutation path. Direct storage
+  deletion would leak or prematurely reclaim large-value trees.

@@ -14,7 +14,8 @@ The desired result is one semantic path:
 ordinary Groove scalar semantics
   + indirect physical representation
   + per-node interruptible chunk requests
-  + Jazz-provided opaque-locator capability
+  + Groove-owned async chunk storage
+  + Jazz-gated locator discovery and peer miss fulfillment
 ```
 
 This is not a compatibility migration. There is no released large-value format
@@ -25,15 +26,18 @@ to preserve.
 ```text
 Jazz Db / Node
   |-- ordinary row/version, policy, branch, history and sync state
-  |-- authorized root-locator capability
-  |-- chunk proxy and retention coordinator
+  |-- high-level access/write APIs
+  |-- authorization-gated locator disclosure
+  |-- peer chunk-demand transport/forwarding
   `-- Groove Database
         |-- logical scalar and physical descriptor codecs
         |-- FastCDC/prolly tree and edit tails
+        |-- locator allocation, staging and chunk KV
+        |-- durable refs and reclamation queue
         |-- shared bounded verified-chunk cache
         |-- evaluation request registry
         |     |-- ordered-storage requests
-        |     `-- chunk requests through Jazz capability
+        |     `-- exact authenticated chunk-storage requests
         `-- arbitrary IVM nodes with private resumable state
 ```
 
@@ -87,7 +91,8 @@ the async branch cannot distinguish private evaluation from publication.
 ### Proofs
 
 - Two unrelated nodes blocked on different chunks progress independently.
-- Equal chunk requests share one future within a compatible capability.
+- Equal exact chunk requests share one future; Jazz gates discovery of those
+  requests rather than Groove maintaining a second authorization context.
 - One node can await storage and chunks over successive rounds.
 - Cancellation drops private state and publishes nothing.
 - A stale completion cannot target a replacement input/publication.
@@ -138,8 +143,14 @@ of #1661's existing evaluator, independently useful and fully green.
 3. Implement bounded ordered byte-edit tails for every content kind.
 4. Map requested final ranges backwards through the tail into insertion bytes
    and base-tree ranges.
-5. Implement consolidation by streaming the current logical value through the
-   proposed edit and locally rechunking.
+5. Implement consolidation by seeking to the edit's affected tree region,
+   streaming only the necessary logical neighborhood through the proposed edit,
+   and rechunking/regrouping upward until content-defined boundaries
+   resynchronize. Consolidation MUST NOT scan or rechunk the whole logical value
+   merely because the edit tail is being folded into the base tree. It must
+   produce the same deterministic tree shape and logical hashes as fresh
+   construction while reusing the exact `NodeRef`, including locator, for every
+   unchanged leaf and branch.
 6. Implement byte, UTF-8 and UTF-16 splice/append surfaces.
 7. Implement deterministic complete JSON replacement lowering to byte edits.
 8. Implement streaming JSON parsing for full validation and JSON pointer demand.
@@ -152,7 +163,13 @@ of #1661's existing evaluator, independently useful and fully green.
 - A narrow range reads only its tree paths and intersecting leaves.
 - Equality and ordering stop requesting after a decisive mismatch.
 - Length reads no chunks.
-- Consolidation produces the same bytes and deterministic tree as fresh create.
+- Consolidation produces the same bytes, tree shape and logical hashes as fresh
+  construction while work and rewritten nodes remain bounded to the
+  content-defined affected neighborhood (with the expected probabilistic prolly
+  bound rather than total value size).
+- Every unchanged leaf and branch retains its exact object hash and locator
+  across consolidation; planted tests fail if an implementation needlessly
+  re-addresses an unchanged subtree.
 - JSON pointer projection matches a full parse oracle under randomized edits.
 
 ## Phase 4 — make all scalar consumers interruptible
@@ -194,34 +211,29 @@ For every operator, compare inline and indirect results and maintained deltas.
 Plant descriptor-byte order/equality values that differ from logical order to
 prove no physical comparison survives. Repeat with eviction between operations.
 
-## Phase 5 — streaming node execution and derived indices
+## Phase 5 — streaming node execution
 
 ### Groove changes
 
 1. Expose a sequential logical cursor to any node step.
-2. Let node-private state retain cursor, bounded parser/model state and explicit
+2. Let node-private state retain cursor, bounded operator state and explicit
    accumulator state across yields and chunk requests.
-3. Add evaluation-private spill storage for unbounded accumulators, with cleanup
-   on cancel/failure and atomic conversion to prepared output.
-4. Implement a reference streaming tokenizer producing prepared
-   `(document, term, count)` deltas.
-5. Build TF/IDF from ordinary downstream arrangements/aggregates/joins.
-6. Add a reference bounded embedding operator or deterministic stand-in whose
-   identity includes model/tokenizer/configuration version.
-7. Key persisted derived outputs by logical root+tail and exact operator identity,
+3. Implement a reference streaming checksum with a fixed-size accumulator and
+   atomic conversion to one prepared output. Treat it as a black-box
+   conformance/scaling probe, not a public product feature; its graph builder is
+   exposed only so integration tests and benchmarks exercise the ordinary API.
+4. Key persisted derived outputs by logical root+tail and exact operator identity,
    excluding locators.
 
 ### Proofs
 
-- Peak resident input memory is independent of document size.
+- Peak resident input memory is independent of logical value size.
 - Successive chunks are released after consumption.
-- Cancellation mid-document leaves no derived rows or scratch leaks.
+- Cancellation mid-value leaves no derived row or retained input leases.
 - A source replacement invalidates old work and installs only the new result.
 - Repeated consumers share hash-equal computation.
-- Single-document edits produce bounded affected-key work downstream rather than
-  rebuilding corpus-wide state.
 
-## Phase 6 — bounded cache and ownership transfer
+## Phase 6 — bounded cache and binding copies
 
 ### Groove changes
 
@@ -232,67 +244,83 @@ prove no physical comparison survives. Repeat with eviction between operations.
    leases remain externally alive.
 4. Ensure durable IVM records retain descriptors/derived outputs, not incidental
    input leases.
-5. Expose metrics for cache-owned, evaluation-leased, external-result, operator
-   state and spill bytes.
-6. Define host backpressure when non-cache ownership exceeds configured safety
-   limits.
+5. Expose metrics for cache-owned, evaluation-leased, materialized-result, and
+   operator-state bytes while those bytes remain Rust-owned.
 
 ### Binding changes
 
-1. Full strings and parsed JSON become ordinary host-owned primitives.
-2. Bytes may copy or transfer zero-copy immutable buffers/Blob parts.
-3. NAPI/WASM external memory accounting includes transferred leases.
-4. Host finalizers release leases; Groove subscriptions retain no historical
-   emitted values solely for the application.
+This design covers NAPI and WASM bindings only. React Native integration is out
+of scope.
+
+1. Preserve the existing encoded-row boundary.
+2. NAPI and WASM copy each completed encoded result into host-owned memory.
+3. Release every Groove input lease before returning across the binding.
+4. Require no Rust finalizer or external-memory adjustment for the host-owned
+   copy; Groove subscriptions retain no historical emitted values solely for
+   the application.
 
 ### Proofs
 
 - A tiny cache repeatedly evicts while queries remain correct.
 - Eviction with active leases is safe and eventually frees bytes.
 - Streaming processing stays within window bounds.
-- A deliberately retained JS/Rust result is charged as external memory, not
-  hidden as cache memory.
-- Dropping results and subscriptions releases every lease.
+- A deliberately retained JavaScript result owns only its host-side copy and
+  pins no Groove cache entry or evaluation lease.
+- Dropping results and subscriptions leaves no Rust-side binding lease.
 
-## Phase 7 — Jazz locator capability and proxy
+## Phase 7 — Groove storage, locator discovery, and Jazz chunk transport
 
-### Jazz changes
+### Groove/Jazz changes
 
-1. Add the Groove chunk capability to the existing database ownership graph; do
-   not introduce another Jazz database/query owner.
-2. Generate cryptographically random opaque locators client-side or through the
-   proxy. Never derive authorization from content hashes.
-3. Implement a private proxy with exact `get` and staged `put`; prohibit list,
-   prefix and hash lookup.
-4. Bind the capability to the exact Jazz read view, subject/authority context and
-   authorized root-locator set.
-5. Allow an authorized root to reveal and retrieve only descendant locators
-   learned through Groove-verified parent nodes.
-6. Redact locators from diagnostics and normalize public unknown/denied failures.
-7. Implement memory and persistent/blob-like test backends with private
-   content-hash deduplication behind locator mappings.
+1. Move chunk storage, locator allocation and backend errors into Groove.
+2. Add Groove's policy-blind async immutable byte-KV interface and memory plus
+   persistent/blob-like implementations; prohibit list/hash lookup publicly.
+3. Keep refcount/edge/staging metadata transactionally colocated with Groove
+   physical records even when bytes use a remote KV.
+4. Existing Jazz row/view authorization gates locator discovery; add no stateful
+   root-grant registry or node-global authorization set.
+5. Groove requests descendants only after authenticating the parent that
+   disclosed them and redacts locators from diagnostics.
+6. Install a Jazz `MissingChunkResolver` that fulfills Groove's still-pending
+   future over auxiliary peer messages without an evaluation retry loop.
+7. Forward local misses strictly upstream with hop-local ids, coalescing,
+   cancellation, bounded hops and per-link byte/request backpressure.
+8. Drive auxiliary traffic through a cloneable executor-neutral peer I/O pump,
+   independent of `Node::tick` and the Jazz node lock. Bindings route decoded
+   auxiliary frames, drain bounded output, and await readiness using browser
+   microtasks, NAPI async notifications, or native async tasks.
+9. Give that pump only Groove's cloneable exact-local-read service; Jazz never
+   retains a callable byte-KV backend or gains staging/deletion primitives.
 
 ### Proofs
 
 - A guessed content hash cannot retrieve a chunk.
-- A locator from another read capability is rejected even if bytes are cached.
+- Possession of a disclosed opaque locator plus its authenticated hash is the
+  read capability; Jazz maintains no second stateful authorization registry.
 - A readable row enables root traversal; an unreadable row reveals no locator.
 - Corrupt proxy/blob responses fail Groove integrity checks.
 - Equal content under different locators deduplicates internally without an
   externally observable equality oracle.
 
-## Phase 8 — Jazz writes and publication
+## Phase 8 — high-level Jazz writes and Groove publication storage
 
 ### Jazz/Groove integration
 
 1. Route every complete-value and edit mutation through Groove preparation.
-2. Stage chunks before visible mutation under quotas and expiry.
+2. Groove stages chunks before visible mutation and returns persisted accounting
+   receipts; Jazz applies product quotas and expiry policy to those receipts.
 3. Evaluate ordinary Jazz Insert/Update policy against the owning row mutation.
 4. Require the exact staged root to be complete and Groove-valid before row
    publication.
 5. Publish the descriptor as the ordinary atomic Jazz cell/version.
-6. Mark its locator root reachable only after successful publication.
-7. Cover insert, update, transaction, merge, authority ingress, repair, Rust
+6. Include Groove's opaque staged id in the authorized physical-record batch so
+   staging ownership becomes durable root ownership atomically with publication.
+7. Let Jazz enforce staging quotas/expiry by querying accounting receipts and
+   invoking Groove's idempotent accept/evict APIs; Groove owns mechanics only.
+8. Persist root and recursive node counts in Groove's reserved metadata plane;
+   zero-crossings append exact orphan work and Groove reclaims it without
+   walking Jazz history.
+9. Cover insert, update, transaction, merge, authority ingress, repair, Rust
    `Db`, NAPI, WASM and TypeScript through one lowering/admission seam.
 
 ### Proofs
@@ -332,26 +360,33 @@ prove no physical comparison survives. Repeat with eviction between operations.
 - Settlement never reports while required Groove work is blocked.
 - Cache eviction after settlement causes reload, not logical retraction/reset.
 
-## Phase 10 — retention and collection
+## Phase 10 — Groove-owned retention and collection
 
-### Jazz/backend changes
+### Groove/backend changes
 
-1. Define durable roots from current rows, retained history, branches/snapshots,
-   pending/staged mutations and recovery state.
-2. Add ephemeral leases for active requests, publications, sync sessions and
-   zero-copy externally owned results where the deployment requires backend
-   retention beyond locator durability.
-3. Trace or conservatively account locator reachability with bounded memory.
-4. Keep internal deduplicated blobs while any locator mapping remains live.
-5. Rebuild conservative reachability on recovery before enabling collection.
-6. Expire never-published staging independently.
+1. Persist descriptor root-reference deltas with every physical-record
+   insert/delete/move; Jazz owns no parallel root ledger.
+2. On first immutable-node installation, persist child edges and increment child
+   inbound counts exactly once; idempotent restaging is count-neutral.
+3. Protect unpublished preparations with persisted expiring staging generations
+   and active reads with temporary leases.
+4. Drain zero-count nodes through a bounded, durable, restartable cascade that
+   decrements children before deleting locator mappings.
+5. Keep deduplicated blobs while any locator mapping remains live.
+6. Retain authenticated traversal as an audit/rebuild oracle, not the ordinary
+   collector.
+
+Jazz edge eviction, rejected-version moves, and any future history thinning use
+the same Groove physical-record mutation mechanism; none performs separate
+large-value accounting.
 
 ### Proofs
 
 - Historical and snapshot reads survive current-root replacement.
 - Collection racing active evaluation/result leases is safe.
-- Crash/reopen cannot collect conservatively live data.
+- Crash/reopen cannot collect a referenced or staged value.
 - Eventually unreachable staged locators and deduplicated blobs are reclaimed.
+- Refcounts match authenticated tracing in differential audit tests.
 
 ## Phase 11 — public API and docs
 
@@ -398,8 +433,9 @@ fails when its guarded property is deliberately broken.
 - JSON pointer reads and semantic merges.
 - Lazy equality/order early-exit request counts.
 - Concurrent request deduplication across shared graph nodes.
-- TF/IDF/embedding streaming peak memory and cancellation.
-- Cache budget, active leases, external result ownership and spill accounting.
+- Streaming-checksum peak memory, cooperative yielding and cancellation.
+- Cache budget, active leases, copied binding-result memory and operator-state
+  accounting.
 - Memory and RocksDB ordered storage crossed with memory and blob-like chunk
   providers.
 - Slow proxy, retryable failure and unavailable backend behavior.
@@ -413,7 +449,7 @@ Prefer a reviewable stack rather than one implementation PR:
 3. Groove tree/descriptor format;
 4. lazy reader and edit tails;
 5. relational operator integration;
-6. streaming/derived operators;
+6. streaming checksum operator;
 7. cache and result ownership;
 8. Jazz locator proxy/capability;
 9. Jazz write publication;

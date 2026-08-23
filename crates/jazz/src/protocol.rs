@@ -25,6 +25,12 @@ use crate::tx::{DeletionEvent, DurabilityTier, Fate, Snapshot, Transaction, TxId
 /// Messages exchanged between Jazz nodes.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum SyncMessage {
+    /// Auxiliary, non-canonical requests for immutable Groove chunks that are
+    /// absent from the receiver's local chunk storage.
+    ChunkRequestBatch(ChunkRequestBatch),
+    /// Auxiliary responses to a chunk request batch. These carry storage
+    /// objects, never row facts or authorization grants.
+    ChunkResponseBatch(ChunkResponseBatch),
     /// Trusted backend assertion of process-local auth claims for a write subject.
     SessionClaims {
         /// Identity these claims describe.
@@ -246,6 +252,56 @@ pub enum SyncMessage {
         request_id: PermissionAdviceRequestId,
         /// Final authority result for the zero-support action.
         advice: PermissionAdvice,
+    },
+}
+
+/// Bounded batch of exact immutable-chunk requests on one peer link.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ChunkRequestBatch {
+    /// Exact requests coalesced for one transport frame.
+    pub requests: Vec<ChunkRequestEntry>,
+}
+
+/// One hop-local request. `remaining_hops` is decremented before forwarding.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ChunkRequestEntry {
+    /// Identifier meaningful only on this peer hop.
+    pub request_id: u64,
+    /// Opaque Groove storage locator.
+    pub locator: Vec<u8>,
+    /// Hash Groove must verify before accepting returned bytes.
+    pub expected_hash: [u8; 32],
+    /// Maximum remaining forwarding edges.
+    pub remaining_hops: u8,
+}
+
+/// Bounded batch of replies addressed by the request id allocated on this hop.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ChunkResponseBatch {
+    /// Replies coalesced for one transport frame.
+    pub responses: Vec<ChunkResponseEntry>,
+}
+
+/// One hop-local immutable-chunk reply.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ChunkResponseEntry {
+    /// Request identifier allocated by the receiver of this response.
+    pub request_id: u64,
+    /// Storage result for the exact requested locator and hash.
+    pub result: ChunkResponse,
+}
+
+/// Result of one auxiliary immutable-chunk request.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum ChunkResponse {
+    /// Exact stored bytes; Groove still verifies the expected hash.
+    Found(Vec<u8>),
+    /// This route cannot supply the requested object.
+    Unavailable,
+    /// The route may become available after the suggested delay.
+    Retryable {
+        /// Minimum suggested retry delay.
+        retry_after_ms: u32,
     },
 }
 
@@ -2840,6 +2896,14 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             panic!(
                 "union-valued values are an internal Groove representation, not a Jazz protocol value"
             )
+        }
+        Value::Large(value) => {
+            bytes.push(15);
+            let encoded = groove::large_values::encode_stored_scalar(
+                &groove::large_values::StoredScalar::Large(value.clone()),
+            )
+            .expect("admitted large descriptor has canonical encoding");
+            put_bytes(bytes, &encoded);
         }
     }
 }

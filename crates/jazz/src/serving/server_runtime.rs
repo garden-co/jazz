@@ -647,6 +647,8 @@ fn sync_message_name(message: &SyncMessage) -> &'static str {
     // message itself here: claims and row payloads must not escape through a
     // transport diagnostic.
     match message {
+        SyncMessage::ChunkRequestBatch(_) => "ChunkRequestBatch",
+        SyncMessage::ChunkResponseBatch(_) => "ChunkResponseBatch",
         SyncMessage::SessionClaims { .. } => "SessionClaims",
         SyncMessage::CommitUnit { .. } => "CommitUnit",
         SyncMessage::FateUpdate { .. } => "FateUpdate",

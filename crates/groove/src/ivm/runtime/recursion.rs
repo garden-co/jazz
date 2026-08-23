@@ -1117,9 +1117,10 @@ impl HydrationEvaluator<'_> {
                             .collect(),
                     })
                 }
-                OpType::Persist(_) | OpType::Distinct | OpType::Negate => {
-                    Err(IvmRuntimeError::UnsupportedOperator)
-                }
+                OpType::Persist(_)
+                | OpType::StreamingChecksum(_)
+                | OpType::Distinct
+                | OpType::Negate => Err(IvmRuntimeError::UnsupportedOperator),
                 OpType::SemiJoin(_) | OpType::Aggregate(_) => {
                     Err(IvmRuntimeError::UnsupportedOperator)
                 }

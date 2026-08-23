@@ -251,10 +251,11 @@ where
 
     pub(super) async fn commit_mergeable_many_at_with_schema_versions_and_provenance(
         &mut self,
-        commits: Vec<(SchemaVersionId, MergeableCommit)>,
+        mut commits: Vec<(SchemaVersionId, MergeableCommit)>,
         made_at: TxTime,
         contribution_merge: Option<ContributionMergeProvenance>,
     ) -> Result<PublishedTransaction, Error> {
+        self.prepare_and_stage_large_commit_values(&mut commits).await?;
         let tx_id = TxId::new(made_at, self.node_uuid);
         let made_by = commits[0].1.made_by;
         let permission_subject = commits[0].1.effective_permission_subject();
@@ -276,6 +277,11 @@ where
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node).await?;
         let mut batch = self.database.open_batch();
+        for (_, commit) in &commits {
+            for staged_id in &commit.staged_large_values {
+                batch.accept_large_value(*staged_id);
+            }
+        }
         batch.insert(
             "jazz_transactions",
             transaction_values(
@@ -467,6 +473,39 @@ where
         }
         self.pending_persistence.insert(tx_id);
         Ok(PublishedTransaction { tx_id, persistence })
+    }
+
+    /// Lower oversized ordinary scalar cells through Groove and atomically
+    /// stage their immutable nodes before row publication begins.
+    async fn prepare_and_stage_large_commit_values(
+        &self,
+        commits: &mut [(SchemaVersionId, MergeableCommit)],
+    ) -> Result<(), Error> {
+        use groove::large_values::{INLINE_VALUE_MAX_BYTES, LargeValueKind};
+
+        for (_, commit) in commits.iter_mut() {
+            for value in commit.cells.values_mut() {
+                let candidate = match value {
+                    Value::String(text) if text.len() > INLINE_VALUE_MAX_BYTES => {
+                        Some((LargeValueKind::String, text.as_bytes().to_vec()))
+                    }
+                    Value::Bytes(bytes) if bytes.len() > INLINE_VALUE_MAX_BYTES => {
+                        Some((LargeValueKind::Bytes, bytes.clone()))
+                    }
+                    _ => None,
+                };
+                let Some((kind, bytes)) = candidate else {
+                    continue;
+                };
+                let staged = self
+                    .database
+                    .prepare_and_stage_large_value(kind, &bytes)
+                    .await?;
+                *value = Value::Large(staged.value_ref);
+                commit.staged_large_values.push(staged.id);
+            }
+        }
+        Ok(())
     }
 
     /// Commit a local mergeable write and return its sync commit unit.

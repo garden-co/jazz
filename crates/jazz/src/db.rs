@@ -49,7 +49,8 @@ pub use crate::protocol::PermissionAdvice;
 #[cfg(feature = "sync-autopsy")]
 use crate::protocol::expand_version_carriers;
 use crate::protocol::{
-    AuthorizationScopeReceipt, BindingViewKey, BranchSelector, BranchViewBase, CoverageKey,
+    AuthorizationScopeReceipt, BindingViewKey, BranchSelector, BranchViewBase, ChunkRequestBatch,
+    ChunkRequestEntry, ChunkResponse, ChunkResponseBatch, ChunkResponseEntry, CoverageKey,
     CurrentWriteSchema, LensOp, MigrationLens, PermissionAdviceAction, PermissionAdviceRequestId,
     ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, SchemaLineagePublication,
     SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode,
@@ -88,6 +89,511 @@ pub use wire_transport::WireTransportAdapter;
 /// async facade. A future operation scheduler may replace it with finer-grained
 /// owned sessions once the async lifecycle has settled.
 pub(crate) type SharedNodeState<S> = Rc<LocalMutex<NodeState<S>>>;
+
+const DEFAULT_CHUNK_FORWARD_HOPS: u8 = 8;
+const MAX_PENDING_CHUNK_DEMANDS: usize = 4096;
+
+enum ChunkDemandWaiter {
+    Local {
+        waiter_id: u64,
+        sender: oneshot::Sender<Result<bytes::Bytes, groove::chunks::ChunkError>>,
+    },
+    Relay {
+        connection: u64,
+        request_id: u64,
+    },
+}
+
+struct PendingChunkDemand {
+    upstream_id: u64,
+    remaining_hops: u8,
+    waiters: Vec<ChunkDemandWaiter>,
+}
+
+#[derive(Default)]
+struct ChunkDemandState {
+    next_request_id: u64,
+    next_waiter_id: u64,
+    pending_by_chunk: BTreeMap<groove::chunks::ChunkRequest, PendingChunkDemand>,
+    chunk_by_upstream_id: BTreeMap<u64, groove::chunks::ChunkRequest>,
+    outbound: VecDeque<ChunkRequestEntry>,
+    relay_responses: BTreeMap<u64, Vec<ChunkResponseEntry>>,
+    outbound_wakers: BTreeMap<u64, Waker>,
+    upstream_connection: Option<u64>,
+    upstream_connections: BTreeSet<u64>,
+}
+
+#[derive(Clone, Default)]
+struct PeerChunkResolver {
+    state: Rc<RefCell<ChunkDemandState>>,
+}
+
+impl PeerChunkResolver {
+    fn register_connection(&self, connection: u64, upstream: bool) {
+        if upstream {
+            let mut state = self.state.borrow_mut();
+            state.upstream_connections.insert(connection);
+            state.upstream_connection.get_or_insert(connection);
+        }
+    }
+
+    fn wake_connection(state: &mut ChunkDemandState, connection: u64) {
+        if let Some(waker) = state.outbound_wakers.remove(&connection) {
+            waker.wake();
+        }
+    }
+
+    fn enqueue(
+        &self,
+        request: groove::chunks::ChunkRequest,
+        remaining_hops: u8,
+        waiter: ChunkDemandWaiter,
+    ) -> Result<(), ChunkDemandWaiter> {
+        let mut state = self.state.borrow_mut();
+        if let Some(pending) = state.pending_by_chunk.get_mut(&request) {
+            pending.waiters.push(waiter);
+            return Ok(());
+        }
+        if state.pending_by_chunk.len() >= MAX_PENDING_CHUNK_DEMANDS {
+            return Err(waiter);
+        }
+        state.next_request_id = state.next_request_id.wrapping_add(1).max(1);
+        let upstream_id = state.next_request_id;
+        state.outbound.push_back(ChunkRequestEntry {
+            request_id: upstream_id,
+            locator: request.locator.clone(),
+            expected_hash: request.object_hash,
+            remaining_hops,
+        });
+        state
+            .chunk_by_upstream_id
+            .insert(upstream_id, request.clone());
+        state.pending_by_chunk.insert(
+            request,
+            PendingChunkDemand {
+                upstream_id,
+                remaining_hops,
+                waiters: vec![waiter],
+            },
+        );
+        if let Some(connection) = state.upstream_connection {
+            Self::wake_connection(&mut state, connection);
+        }
+        Ok(())
+    }
+
+    fn enqueue_relay(&self, connection: u64, request: ChunkRequestEntry) {
+        if request.remaining_hops == 0 {
+            let mut state = self.state.borrow_mut();
+            state
+                .relay_responses
+                .entry(connection)
+                .or_default()
+                .push(ChunkResponseEntry {
+                    request_id: request.request_id,
+                    result: ChunkResponse::Unavailable,
+                });
+            Self::wake_connection(&mut state, connection);
+            return;
+        }
+        if let Err(ChunkDemandWaiter::Relay {
+            connection,
+            request_id,
+        }) = self.enqueue(
+            groove::chunks::ChunkRequest {
+                object_hash: request.expected_hash,
+                locator: request.locator,
+            },
+            request.remaining_hops - 1,
+            ChunkDemandWaiter::Relay {
+                connection,
+                request_id: request.request_id,
+            },
+        ) {
+            let mut state = self.state.borrow_mut();
+            state
+                .relay_responses
+                .entry(connection)
+                .or_default()
+                .push(ChunkResponseEntry {
+                    request_id,
+                    result: ChunkResponse::Retryable { retry_after_ms: 25 },
+                });
+            Self::wake_connection(&mut state, connection);
+        }
+    }
+
+    fn take_outbound(&self, limit: usize) -> Vec<ChunkRequestEntry> {
+        let mut state = self.state.borrow_mut();
+        let count = limit.min(state.outbound.len());
+        state.outbound.drain(..count).collect()
+    }
+
+    fn take_relay_responses(&self, connection: u64) -> Vec<ChunkResponseEntry> {
+        self.state
+            .borrow_mut()
+            .relay_responses
+            .remove(&connection)
+            .unwrap_or_default()
+    }
+
+    fn is_active_upstream(&self, connection: u64) -> bool {
+        self.state.borrow().upstream_connection == Some(connection)
+    }
+
+    fn complete(&self, response: ChunkResponseEntry) {
+        let mut state = self.state.borrow_mut();
+        let Some(request) = state.chunk_by_upstream_id.remove(&response.request_id) else {
+            return;
+        };
+        let Some(pending) = state.pending_by_chunk.remove(&request) else {
+            return;
+        };
+        debug_assert_eq!(pending.upstream_id, response.request_id);
+        for waiter in pending.waiters {
+            match waiter {
+                ChunkDemandWaiter::Local { sender, .. } => {
+                    let result = match &response.result {
+                        ChunkResponse::Found(bytes) => Ok(bytes::Bytes::copy_from_slice(bytes)),
+                        ChunkResponse::Unavailable => Err(groove::chunks::ChunkError::Unavailable),
+                        ChunkResponse::Retryable { .. } => {
+                            Err(groove::chunks::ChunkError::Unavailable)
+                        }
+                    };
+                    let _ = sender.send(result);
+                }
+                ChunkDemandWaiter::Relay {
+                    connection,
+                    request_id,
+                } => {
+                    state
+                        .relay_responses
+                        .entry(connection)
+                        .or_default()
+                        .push(ChunkResponseEntry {
+                            request_id,
+                            result: response.result.clone(),
+                        });
+                    Self::wake_connection(&mut state, connection);
+                }
+            }
+        }
+    }
+
+    fn cancel_local(&self, request: &groove::chunks::ChunkRequest, waiter_id: u64) {
+        let mut state = self.state.borrow_mut();
+        let Some(pending) = state.pending_by_chunk.get_mut(request) else {
+            return;
+        };
+        pending.waiters.retain(|waiter| {
+            !matches!(waiter, ChunkDemandWaiter::Local { waiter_id: id, .. } if *id == waiter_id)
+        });
+        if pending.waiters.is_empty() {
+            let upstream_id = pending.upstream_id;
+            state.pending_by_chunk.remove(request);
+            state.chunk_by_upstream_id.remove(&upstream_id);
+            state
+                .outbound
+                .retain(|outbound| outbound.request_id != upstream_id);
+        }
+    }
+
+    fn disconnect(&self, connection: u64, upstream: bool) {
+        let mut state = self.state.borrow_mut();
+        state.outbound_wakers.remove(&connection);
+        state.relay_responses.remove(&connection);
+        if upstream {
+            state.upstream_connections.remove(&connection);
+            if state.upstream_connection == Some(connection) {
+                state.upstream_connection = state.upstream_connections.iter().next().copied();
+                if let Some(successor) = state.upstream_connection {
+                    let queued = state
+                        .outbound
+                        .iter()
+                        .map(|entry| entry.request_id)
+                        .collect::<BTreeSet<_>>();
+                    let retries = state
+                        .pending_by_chunk
+                        .iter()
+                        .filter(|(_, pending)| !queued.contains(&pending.upstream_id))
+                        .map(|(request, pending)| ChunkRequestEntry {
+                            request_id: pending.upstream_id,
+                            locator: request.locator.clone(),
+                            expected_hash: request.object_hash,
+                            remaining_hops: pending.remaining_hops,
+                        })
+                        .collect::<Vec<_>>();
+                    state.outbound.extend(retries);
+                    Self::wake_connection(&mut state, successor);
+                }
+            }
+            return;
+        }
+        let requests = state.pending_by_chunk.keys().cloned().collect::<Vec<_>>();
+        for request in requests {
+            let Some(pending) = state.pending_by_chunk.get_mut(&request) else {
+                continue;
+            };
+            pending.waiters.retain(|waiter| {
+                !matches!(waiter, ChunkDemandWaiter::Relay { connection: relay, .. } if *relay == connection)
+            });
+            if pending.waiters.is_empty() {
+                let upstream_id = pending.upstream_id;
+                state.pending_by_chunk.remove(&request);
+                state.chunk_by_upstream_id.remove(&upstream_id);
+                state
+                    .outbound
+                    .retain(|entry| entry.request_id != upstream_id);
+            }
+        }
+    }
+}
+
+struct ChunkResolutionFuture {
+    resolver: PeerChunkResolver,
+    request: groove::chunks::ChunkRequest,
+    waiter_id: u64,
+    receiver: oneshot::Receiver<Result<bytes::Bytes, groove::chunks::ChunkError>>,
+    completed: bool,
+}
+
+impl Future for ChunkResolutionFuture {
+    type Output = Result<bytes::Bytes, groove::chunks::ChunkError>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        match Pin::new(&mut self.receiver).poll(context) {
+            Poll::Ready(result) => {
+                self.completed = true;
+                Poll::Ready(result.unwrap_or(Err(groove::chunks::ChunkError::Unavailable)))
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for ChunkResolutionFuture {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.resolver.cancel_local(&self.request, self.waiter_id);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PeerIoPumpRole {
+    Upstream,
+    Subscriber,
+}
+
+/// Executor-neutral auxiliary peer-I/O endpoint.
+///
+/// Bindings retain this clone beside their socket. It never acquires Jazz's
+/// semantic node lock, so chunk traffic can progress while a Groove evaluation
+/// is suspended inside `Node::tick`.
+#[derive(Clone)]
+pub struct PeerIoPump {
+    resolver: PeerChunkResolver,
+    local_chunks: groove::chunks::LocalChunkReader,
+    connection: u64,
+    role: PeerIoPumpRole,
+}
+
+impl PeerIoPump {
+    fn new(
+        resolver: PeerChunkResolver,
+        local_chunks: groove::chunks::LocalChunkReader,
+        connection: u64,
+        role: PeerIoPumpRole,
+    ) -> Self {
+        resolver.register_connection(connection, matches!(role, PeerIoPumpRole::Upstream));
+        Self {
+            resolver,
+            local_chunks,
+            connection,
+            role,
+        }
+    }
+
+    /// Route an auxiliary message received by the binding. Returns `false` for
+    /// canonical Jazz messages, which the binding must enqueue on its ordinary
+    /// transport before scheduling a semantic tick.
+    pub async fn route_incoming(&self, message: SyncMessage) -> Result<(), SyncMessage> {
+        match (self.role, message) {
+            (PeerIoPumpRole::Upstream, SyncMessage::ChunkResponseBatch(batch)) => {
+                // A disconnected or superseded upstream can still have a late
+                // frame in its binding's receive queue. Demand has already
+                // moved to the successor, so only that link may complete it.
+                if !self.resolver.is_active_upstream(self.connection) {
+                    return Ok(());
+                }
+                for response in batch.responses {
+                    self.resolver.complete(response);
+                }
+                Ok(())
+            }
+            (PeerIoPumpRole::Subscriber, SyncMessage::ChunkRequestBatch(batch)) => {
+                let mut responses = Vec::new();
+                for request in batch.requests {
+                    match self
+                        .local_chunks
+                        .get(
+                            request.locator.clone(),
+                            groove::large_values::ContentHash(request.expected_hash),
+                        )
+                        .await
+                    {
+                        Ok(bytes) => responses.push(ChunkResponseEntry {
+                            request_id: request.request_id,
+                            result: ChunkResponse::Found(bytes.to_vec()),
+                        }),
+                        Err(groove::chunks::ChunkStorageError::Unavailable) => {
+                            self.resolver.enqueue_relay(self.connection, request)
+                        }
+                        Err(_) => responses.push(ChunkResponseEntry {
+                            request_id: request.request_id,
+                            result: ChunkResponse::Unavailable,
+                        }),
+                    }
+                }
+                if !responses.is_empty() {
+                    let mut state = self.resolver.state.borrow_mut();
+                    state
+                        .relay_responses
+                        .entry(self.connection)
+                        .or_default()
+                        .extend(responses);
+                    PeerChunkResolver::wake_connection(&mut state, self.connection);
+                }
+                Ok(())
+            }
+            (_, SyncMessage::ChunkRequestBatch(_) | SyncMessage::ChunkResponseBatch(_)) => Ok(()),
+            (_, message) => Err(message),
+        }
+    }
+
+    /// Decode and route one payload from the dedicated auxiliary protocol
+    /// channel. Canonical payloads are returned unchanged for the ordinary wire
+    /// adapter, allowing bindings to demultiplex without taking a peer lock.
+    pub async fn route_incoming_payload(
+        &self,
+        payload: Vec<u8>,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let message = crate::wire::decode_sync_message(&payload)
+            .map_err(|error| format!("malformed auxiliary chunk payload: {error}"))?;
+        match self.route_incoming(message).await {
+            Ok(()) => Ok(None),
+            Err(_) => Ok(Some(payload)),
+        }
+    }
+
+    /// Drain one bounded auxiliary batch for immediate transmission.
+    pub fn take_outbound(&self, limit: usize) -> Option<SyncMessage> {
+        match self.role {
+            PeerIoPumpRole::Upstream => {
+                let requests = self.resolver.take_outbound(limit);
+                (!requests.is_empty()).then_some(SyncMessage::ChunkRequestBatch(
+                    ChunkRequestBatch { requests },
+                ))
+            }
+            PeerIoPumpRole::Subscriber => {
+                let responses = self.resolver.take_relay_responses(self.connection);
+                (!responses.is_empty()).then_some(SyncMessage::ChunkResponseBatch(
+                    ChunkResponseBatch { responses },
+                ))
+            }
+        }
+    }
+
+    /// Encode one bounded auxiliary payload for a binding-owned socket channel.
+    pub fn take_outbound_payload(&self, limit: usize) -> Result<Option<Vec<u8>>, String> {
+        self.take_outbound(limit)
+            .map(|message| {
+                crate::wire::encode_sync_message(&message)
+                    .map_err(|error| format!("cannot encode auxiliary chunk payload: {error}"))
+            })
+            .transpose()
+    }
+
+    /// Wait until auxiliary output is ready without polling or driving a Jazz
+    /// semantic tick. Browser microtasks, NAPI async notifications, and native
+    /// socket tasks can all await this same executor-independent future.
+    pub fn outbound_ready(&self) -> PeerIoOutboundReady {
+        PeerIoOutboundReady { pump: self.clone() }
+    }
+
+    /// Detach this link's hop-local routing state. Bindings call this when the
+    /// socket closes; another registered upstream inherits unsent demand.
+    pub fn disconnect(&self) {
+        self.resolver.disconnect(
+            self.connection,
+            matches!(self.role, PeerIoPumpRole::Upstream),
+        );
+    }
+
+    fn has_outbound(&self) -> bool {
+        let state = self.resolver.state.borrow();
+        match self.role {
+            PeerIoPumpRole::Upstream => !state.outbound.is_empty(),
+            PeerIoPumpRole::Subscriber => state
+                .relay_responses
+                .get(&self.connection)
+                .is_some_and(|responses| !responses.is_empty()),
+        }
+    }
+}
+
+/// Future completed when a [`PeerIoPump`] has outbound auxiliary traffic.
+pub struct PeerIoOutboundReady {
+    pump: PeerIoPump,
+}
+
+impl Future for PeerIoOutboundReady {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.pump.has_outbound() {
+            Poll::Ready(())
+        } else {
+            self.pump
+                .resolver
+                .state
+                .borrow_mut()
+                .outbound_wakers
+                .insert(self.pump.connection, context.waker().clone());
+            Poll::Pending
+        }
+    }
+}
+
+impl groove::chunks::MissingChunkResolver for PeerChunkResolver {
+    fn resolve(
+        &self,
+        request: groove::chunks::ChunkRequest,
+    ) -> groove::chunks::ChunkFuture<'_, Result<bytes::Bytes, groove::chunks::ChunkError>> {
+        let (sender, receiver) = oneshot::channel();
+        let waiter_id = {
+            let mut state = self.state.borrow_mut();
+            state.next_waiter_id = state.next_waiter_id.wrapping_add(1).max(1);
+            state.next_waiter_id
+        };
+        if let Err(ChunkDemandWaiter::Local { sender, .. }) = self.enqueue(
+            request.clone(),
+            DEFAULT_CHUNK_FORWARD_HOPS,
+            ChunkDemandWaiter::Local { waiter_id, sender },
+        ) {
+            let _ = sender.send(Err(groove::chunks::ChunkError::Backend(
+                "chunk request backpressure".to_owned(),
+            )));
+        }
+        Box::pin(ChunkResolutionFuture {
+            resolver: self.clone(),
+            request,
+            waiter_id,
+            receiver,
+            completed: false,
+        })
+    }
+}
 pub(crate) type WeakNodeState<S> = Weak<LocalMutex<NodeState<S>>>;
 
 /// Temporary source-compatibility for node operations that are still wholly
