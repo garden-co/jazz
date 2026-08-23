@@ -7,6 +7,14 @@ import "./app.css";
 
 const appId = import.meta.env.VITE_JAZZ_APP_ID;
 const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
+const MAX_ATTACHMENT_BYTES = 256 * 1024;
+const ALLOWED_ATTACHMENT_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "text/plain",
+  "application/pdf",
+]);
 function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbConfig {
   return { appId, env: "dev", serverUrl, secret, ...overrides };
 }
@@ -37,6 +45,7 @@ function BandChat() {
   );
   const [text, setText] = useState("");
   const [file, setFile] = useState<File | null>(null);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
 
   const startDemo = async () => {
     if (!userId) return;
@@ -55,6 +64,8 @@ function BandChat() {
   const send = async (event: FormEvent) => {
     event.preventDefault();
     if (!selectedRoom || !profiles[0] || (!text.trim() && !file)) return;
+    if (file && (!ALLOWED_ATTACHMENT_TYPES.has(file.type) || file.size > MAX_ATTACHMENT_BYTES))
+      return;
     const attachment = file ? new Uint8Array(await file.arrayBuffer()) : undefined;
     db.insert(app.messages, {
       roomId: selectedRoom.id,
@@ -66,6 +77,25 @@ function BandChat() {
     });
     setText("");
     setFile(null);
+  };
+  const chooseAttachment = (candidate: File | null) => {
+    if (!candidate) {
+      setFile(null);
+      setAttachmentError(null);
+      return;
+    }
+    if (!ALLOWED_ATTACHMENT_TYPES.has(candidate.type)) {
+      setFile(null);
+      setAttachmentError("Use PNG, JPEG, WebP, text, or PDF attachments.");
+      return;
+    }
+    if (candidate.size > MAX_ATTACHMENT_BYTES) {
+      setFile(null);
+      setAttachmentError("Attachments are limited to 256 KB in this inline-bytes demo.");
+      return;
+    }
+    setAttachmentError(null);
+    setFile(candidate);
   };
 
   return (
@@ -128,11 +158,12 @@ function BandChat() {
                 <input
                   aria-label="Attachment"
                   type="file"
-                  onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+                  onChange={(event) => chooseAttachment(event.target.files?.[0] ?? null)}
                 />
               </label>
               <button type="submit">Send locally</button>
             </form>
+            {attachmentError && <p role="alert">{attachmentError}</p>}
           </div>
         </section>
       )}
