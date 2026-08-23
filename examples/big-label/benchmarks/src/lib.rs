@@ -10,7 +10,7 @@ use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
-use jazz::schema::JazzSchema;
+use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
@@ -24,6 +24,7 @@ type BenchDb = Db<MemoryStorage>;
 /// outside the measured closure.
 pub struct Fixture {
     db: BenchDb,
+    release_table: TableSchema,
     label_load: PreparedQuery,
     artist_load: PreparedQuery,
     catalog_load: PreparedQuery,
@@ -32,7 +33,7 @@ pub struct Fixture {
 impl Fixture {
     pub fn new(release_count: usize) -> Self {
         assert!(release_count > 0, "fixture requires at least one release");
-        let db = open_db();
+        let (db, release_table) = open_db();
 
         for label in 0..LABELS {
             insert(
@@ -100,6 +101,7 @@ impl Fixture {
         let catalog_load = prepare_release_load(&db, "catalog", row_id(3, 0));
         Self {
             db,
+            release_table,
             label_load,
             artist_load,
             catalog_load,
@@ -118,11 +120,27 @@ impl Fixture {
         self.read_count(&self.catalog_load)
     }
 
+    pub fn label_release_order(&self) -> Vec<u64> {
+        self.release_order(&self.label_load)
+    }
+
     fn read_count(&self, query: &PreparedQuery) -> usize {
         self.db
             .read(query)
             .expect("BigLabel benchmark read succeeds")
             .len()
+    }
+
+    fn release_order(&self, query: &PreparedQuery) -> Vec<u64> {
+        self.db
+            .read(query)
+            .expect("BigLabel benchmark read succeeds")
+            .into_iter()
+            .map(|row| match row.cell(&self.release_table, "released_at") {
+                Some(Value::U64(released_at)) => released_at,
+                other => panic!("release has unexpected released_at value: {other:?}"),
+            })
+            .collect()
     }
 }
 
@@ -162,8 +180,14 @@ fn schema() -> JazzSchema {
     JazzSchema::new(&source).expect("BigLabel benchmark schema compiles")
 }
 
-fn open_db() -> BenchDb {
+fn open_db() -> (BenchDb, TableSchema) {
     let schema = schema();
+    let release_table = schema
+        .tables()
+        .iter()
+        .find(|table| table.name == "releases")
+        .expect("BigLabel schema has releases")
+        .clone();
     let families = schema.column_families();
     let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let db = block_on(Db::open(DbConfig::new(
@@ -187,7 +211,7 @@ fn open_db() -> BenchDb {
             )]),
         );
     }
-    db
+    (db, release_table)
 }
 
 fn insert(db: &BenchDb, table: &str, id: RowUuid, cells: BTreeMap<String, Value>) {
