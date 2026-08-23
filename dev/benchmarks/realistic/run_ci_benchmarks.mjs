@@ -88,7 +88,11 @@ function parseArgs(argv) {
   if (!["native", "browser", "jazz-sim"].includes(out.suite)) {
     fail("--suite must be one of: native, browser, jazz-sim");
   }
-  if (out.suite === "browser" && out.storageEngine && out.storageEngine !== "idb-tree-indexeddb-page-store") {
+  if (
+    out.suite === "browser" &&
+    out.storageEngine &&
+    out.storageEngine !== "idb-tree-indexeddb-page-store"
+  ) {
     fail("--storage-engine is only supported for native suites");
   }
   if (out.suite === "jazz-sim" && out.storageEngine) {

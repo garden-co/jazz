@@ -470,11 +470,7 @@ test("Turbo invalidates each native artifact only for its Cargo closure", () => 
         "$TURBO_ROOT$/crates/jazz-napi/build.rs",
         "$TURBO_ROOT$/crates/jazz-napi/scripts/**",
         "$TURBO_ROOT$/crates/jazz-napi/src/**/*.rs",
-      ].concat(
-        ["jazz-otel", "jazz", "groove"].map(
-          (crate) => `$TURBO_ROOT$/crates/${crate}/**`,
-        ),
-      ),
+      ].concat(["jazz-otel", "jazz", "groove"].map((crate) => `$TURBO_ROOT$/crates/${crate}/**`)),
     ],
     [
       wasm,
