@@ -1618,6 +1618,14 @@ fn core_identity(
         .unwrap_or_else(Uuid::now_v7);
     let author = match default_session {
         Some(session) => core_author_from_session(session)?,
+        // A backend/admin credential is an internal authority context, not an
+        // unauthenticated end-user session.  Its connection identity must use
+        // the canonical system subject so trusted writes can receive their
+        // fate even when a per-write session supplies a distinct permission
+        // subject.
+        None if context.backend_secret.is_some() || context.admin_secret.is_some() => {
+            CoreAuthorSubject::SYSTEM
+        }
         None => CoreAuthorSubject::reserved(
             CoreAuthorSubject::ANONYMOUS_ISSUER,
             &node_uuid.to_string(),
@@ -2109,12 +2117,28 @@ fn transaction_rejected_before_tier_message(
 
 impl JazzClient {
     fn write_identity(&self) -> Result<Option<CoreAuthorSubject>> {
-        self.write_context
+        let session = self
+            .write_context
             .as_ref()
             .and_then(|context| context.session())
-            .or(self.default_session.as_ref())
-            .map(core_author_from_session)
-            .transpose()
+            .or(self.default_session.as_ref());
+        let Some(session) = session else {
+            return Ok(None);
+        };
+        let identity = core_author_from_session(session)?;
+        // Explicit backend session scopes supply the policy subject at write
+        // time, after the shared client has already opened. Register their
+        // raw session claims under that canonical subject before evaluating
+        // local policy. In particular, `user_id` remains the JWT subject so a
+        // UUID policy column can coerce it; `sub` is restored to the canonical
+        // subject at the policy boundary.
+        let claims = session_claims_to_core_claims(session)?;
+        self.db
+            .inner
+            .borrow()
+            .db
+            .set_identity_claims(identity, claims);
+        Ok(Some(identity))
     }
 
     fn check_core_write_not_rejected(db: &Backend, tx_id: CoreTxId) -> Result<()> {
@@ -3388,6 +3412,21 @@ mod tests {
             default_session_from_context(&context).is_none(),
             "backend/admin clients should keep using explicit session scopes"
         );
+    }
+
+    #[test]
+    fn backend_context_uses_system_connection_author_for_explicit_session_writes() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let mut context = make_offline_context(
+            AppId::from_name("backend-system-connection-author"),
+            temp_dir.path().to_path_buf(),
+            declared_todo_schema(),
+        );
+        context.backend_secret = Some("backend-secret".to_owned());
+
+        let identity = core_identity(&context, default_session_from_context(&context).as_ref())
+            .expect("derive backend identity");
+        assert_eq!(identity.author, CoreAuthorSubject::SYSTEM);
     }
 
     #[tokio::test(flavor = "current_thread")]
