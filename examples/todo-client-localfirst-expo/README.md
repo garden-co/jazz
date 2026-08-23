@@ -10,7 +10,7 @@ Expo example scaffolding for local-first todos using `jazz-tools/react` + `jazz-
 
 - This app uses native code (`jazz-rn`), so use a development build (`expo run:ios` / `expo run:android`).
 - It does **not** run in Expo Go.
-- Keep `jazz-rn` as a **direct app dependency** so React Native codegen discovers `JazzRnSpec` during prebuild.
+- Keep `jazz-rn` as a **direct app dependency** so React Native codegen discovers `JazzRelaySpec` during prebuild.
 - Add `"plugins": ["jazz-rn"]` to your Expo config. The plugin enables the New Architecture required by the TurboModule; run `expo prebuild` and create a development build after adding it.
 - RN storage is not wired up yet; do not rely on persistence or a `dataPath`
   option until the native relay binding is implemented.

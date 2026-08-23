@@ -13,7 +13,7 @@ export const NATIVE_RELAY_ABI: NativeRelayAbiRange = {
 function requireNativeRelay() {
   if (nativeRelay == null) {
     throw new Error(
-      'Jazz native relay is unavailable: install a matching native development or release build. Expo Go and the legacy jazz-rn artifact do not include it.',
+      'Jazz native relay is unavailable: install a matching native development or release build containing the Jazz relay artifact. Expo Go never includes it.'
     );
   }
   return nativeRelay;
@@ -29,12 +29,17 @@ function requireNativeRelay() {
  * in advance—one version probe plus encoded-binary commands—not a row-object
  * API.
  */
-export async function executeNativeRelayCommand(commandBase64: string): Promise<string> {
+export async function executeNativeRelayCommand(
+  commandBase64: string
+): Promise<string> {
   const relay = requireNativeRelay();
   const nativeAbi = relay.getAbiVersion();
-  if (nativeAbi < NATIVE_RELAY_ABI.minimum || nativeAbi > NATIVE_RELAY_ABI.maximum) {
+  if (
+    nativeAbi < NATIVE_RELAY_ABI.minimum ||
+    nativeAbi > NATIVE_RELAY_ABI.maximum
+  ) {
     throw new Error(
-      `Jazz native relay ABI ${nativeAbi} is incompatible with JavaScript ABI ${NATIVE_RELAY_ABI.minimum}..=${NATIVE_RELAY_ABI.maximum}; install a matching native development or release build.`,
+      `Jazz native relay ABI ${nativeAbi} is incompatible with JavaScript ABI ${NATIVE_RELAY_ABI.minimum}..=${NATIVE_RELAY_ABI.maximum}; install a matching native development or release build.`
     );
   }
   return relay.execute(commandBase64);

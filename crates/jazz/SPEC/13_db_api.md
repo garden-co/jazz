@@ -699,12 +699,12 @@ These are designed but not landed:
   slice supports memory storage only. Browser, RocksDB, and host-provided storage
   need explicit config payloads, migration reporting, corruption behavior, and
   durability tests before `OpenStorage` may advertise them as supported features.
-- 🔶 **React Native storage driver.** The TypeScript RN/Expo binding scaffold
-  exposes the future storage hook as a typed SQLite driver placeholder only.
-  Decide whether RN persistence is owned by `op-sqlite`, `expo-sqlite`, or the
-  `crates/jazz-rn` native-module/JSI route, and define how that choice maps onto
-  the portable storage contract before the binding advertises persistent runtime
-  support.
+- 🔶 **React Native relay artifact.** RN persistence is owned by the
+  `jazz-native-relay` SQLite host, exposed through the thin `crates/jazz-rn`
+  command transport rather than a JavaScript storage driver or a second JSI
+  runtime. Define Android/iOS artifact packaging, migration reporting,
+  corruption behavior, teardown, and durability tests before the binding
+  advertises persistent runtime support.
 - 🔶 **Postcard binding payload evolution.** Row-shaped outputs and target
   write-input variants should be descriptor/raw `Record` payloads carried inside
   postcard envelopes, but the concrete Rust structs should be introduced by the

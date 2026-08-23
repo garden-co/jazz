@@ -1,7 +1,7 @@
 {
   "name": "jazz-rn",
   "version": "2.0.0-alpha.53",
-  "description": "Legacy React Native binding scaffold; not yet a supported Jazz client",
+  "description": "React Native native-relay bridge for Jazz (development builds only)",
   "keywords": [
     "android",
     "ios",
@@ -23,8 +23,6 @@
     "lib",
     "android",
     "ios",
-    "cpp",
-    "JazzRnFramework.xcframework",
     "app.plugin.js",
     "*.podspec",
     "react-native.config.js",
@@ -61,24 +59,14 @@
     "tag": "alpha"
   },
   "scripts": {
-    "ubrn:ios": "ubrn build ios --and-generate --release",
-    "ubrn:android": "ubrn build android --and-generate --release",
-    "ubrn:checkout": "ubrn checkout",
-    "ubrn:clean": "rm -rfv cpp/ android/CMakeLists.txt android/src/main/java android/*.cpp ios/ src/Native* src/index.*ts* src/generated/",
-    "build:rn": "pnpm ubrn:ios && pnpm ubrn:android",
-    "build": "pnpm build:rn",
-    "build:rn:android": "pnpm ubrn:android",
-    "build:rn:ios": "pnpm ubrn:ios",
-    "verify:native-artifacts": "node scripts/verify-native-artifacts.mjs",
+    "build": "bob build",
     "test:codegen": "bash scripts/test-codegen.sh",
     "test": "jest",
     "typecheck": "tsc",
     "lint": "eslint \"**/*.{js,ts,tsx}\"",
     "prepare": "bob build"
   },
-  "dependencies": {
-    "uniffi-bindgen-react-native": "0.30.0-1"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@commitlint/config-conventional": "^19.8.1",
     "@eslint/compat": "^1.3.2",
@@ -136,7 +124,7 @@
   },
   "packageManager": "pnpm@10.16.1",
   "codegenConfig": {
-    "name": "JazzRnSpec",
+    "name": "JazzRelaySpec",
     "type": "modules",
     "jsSrcsDir": "src",
     "android": {

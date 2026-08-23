@@ -104,9 +104,6 @@ importers:
       expo:
         specifier: '>=54'
         version: 57.0.7(@babel/core@7.29.0)(@expo/dom-webview@57.0.1)(react-dom@19.2.4(react@19.2.4))(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)(typescript@6.0.2)
-      uniffi-bindgen-react-native:
-        specifier: 0.30.0-1
-        version: 0.30.0-1
     devDependencies:
       '@commitlint/config-conventional':
         specifier: ^19.8.1
@@ -12044,10 +12041,6 @@ packages:
   unicorn-magic@0.3.0:
     resolution: {integrity: sha512-+QBBXBCvifc56fsbuxZQ6Sic3wqqc3WWaqxs58gvJrcOuN83HGTCwz3oS5phzU9LthRNE9VrJCFCLUgHeeFnfA==}
     engines: {node: '>=18'}
-
-  uniffi-bindgen-react-native@0.30.0-1:
-    resolution: {integrity: sha512-rffyNPTQ2qFx7deaLXYVBhXcy4pDrjtEc28Pc1Rwt532IGEQquT7eNvvLKIgX6G5xODi6Yfni1zFs5u+O2QL1A==}
-    hasBin: true
 
   unified@11.0.5:
     resolution: {integrity: sha512-xKvGhPWw3k84Qjh8bI3ZeJjqnyadK+GEFtazSfZv/rKeTkTjOJho6mFqh2SM96iIcZokxiOpg78GazTSg8+KHA==}
@@ -24461,8 +24454,6 @@ snapshots:
   unicorn-magic@0.1.0: {}
 
   unicorn-magic@0.3.0: {}
-
-  uniffi-bindgen-react-native@0.30.0-1: {}
 
   unified@11.0.5:
     dependencies:
