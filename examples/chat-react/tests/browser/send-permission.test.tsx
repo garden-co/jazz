@@ -275,7 +275,7 @@ describe("Send permission — private chat INSERT policy", () => {
     // unmount Alice BEFORE setting the invite hash. Both apps share
     // window.location; if Alice is still mounted when the hash changes to the
     // invite URL, her InviteHandler mounts, sees the chat immediately (via
-    // ownerId policy), and navigates back to the chat — interrupting Bob's
+    // membership policy), and navigates back to the chat — interrupting Bob's
     // join flow before Bob's chatMember is inserted.
     await new Promise((r) => setTimeout(r, 2000));
     await unmountApp(aliceContainer);

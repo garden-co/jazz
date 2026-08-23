@@ -20,14 +20,17 @@ const schema = {
   fuel_deposits: s.table({
     fuelType: s.string(),
     positionX: s.int(),
-    occurredAt: s.int(),
+    // Simulation event time, in seconds; unlike Jazz's row-creation `$createdAt`,
+    // this survives the delete/reinsert flow used to release a deposit.
+    spawnedAtSeconds: s.int(),
     collected: s.boolean(),
     collectedBy: s.string(),
   }),
   chat_messages: s.table({
     playerId: s.string(),
     message: s.string(),
-    occurredAt: s.int(),
+    // Sender device event time drives bubble expiry, independently of sync arrival.
+    sentAtSeconds: s.int(),
   }),
 };
 

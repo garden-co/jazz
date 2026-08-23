@@ -54,7 +54,7 @@ export const ChatMessage = ({ message, sender, isMe, onDelete }: ChatMessageProp
           isMe ? "self-end items-end" : "self-start items-start"
         }`}
       >
-        <ChatMetadata date={new Date(message.occurredAt)} senderName={resolvedSender?.name} />
+        <ChatMetadata date={message.$createdAt} senderName={resolvedSender?.name} />
 
         <DropdownMenu open={isMenuOpen} onOpenChange={setIsMenuOpen}>
           <DropdownMenuTrigger asChild>

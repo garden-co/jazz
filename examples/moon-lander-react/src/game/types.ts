@@ -58,7 +58,7 @@ export interface EngineProps {
     id: string;
     playerId: string;
     message: string;
-    occurredAt: number;
+    sentAtSeconds: number;
   }>;
   localPlayerId: string;
   localPlayerName: string;
@@ -141,7 +141,7 @@ export interface SceneContext {
     id: string;
     playerId: string;
     message: string;
-    occurredAt: number;
+    sentAtSeconds: number;
   }>;
   localPlayerId: string;
   particles: import("./particles").Particle[];

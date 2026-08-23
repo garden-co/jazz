@@ -83,14 +83,14 @@ const schema = {
   fuel_deposits: s.table({
     fuelType: s.string(),
     positionX: s.int(),
-    occurredAt: s.int(),
+    spawnedAtSeconds: s.int(),
     collected: s.boolean(),
     collectedBy: s.string(),
   }),
   chat_messages: s.table({
     playerId: s.string(),
     message: s.string(),
-    occurredAt: s.int(),
+    sentAtSeconds: s.int(),
   }),
 };
 ```
@@ -165,7 +165,7 @@ export function useSync(playerId: string): SyncResult {
 
   // Chat messages, newest-last
   const { data: chatMessages = [] } = useAll(
-    app.chat_messages.orderBy("occurredAt", "asc"),
+    app.chat_messages.orderBy("sentAtSeconds", "asc"),
   );
   ...
 }
@@ -350,7 +350,7 @@ this.db.delete(app.fuel_deposits, depId);
 this.db.insert(app.fuel_deposits, {
   fuelType,
   positionX,
-  occurredAt: Math.floor(Date.now() / 1000),
+  sentAtSeconds: Math.floor(Date.now() / 1000),
   collected: false,
   collectedBy: "",
 });

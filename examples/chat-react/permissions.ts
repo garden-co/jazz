@@ -11,13 +11,12 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
   policy.chats.allowRead.where((chat) =>
     anyOf([{ isPublic: true }, userIsChatMember(chat), { joinCode: session["claims.join_code"] }]),
   );
-  policy.chats.allowInsert.where({ ownerId: session.user_id });
+  policy.chats.allowInsert.where({ $createdBy: session.user_id });
   policy.chats.allowUpdate.whereOld(userIsChatMember).whereNew((chat) =>
     allOf([
       userIsChatMember(chat),
-      // Users may update only non-protected fields. `ownerId` and `isPublic` cannot be updated.
+      // Users may update only non-protected fields. `isPublic` cannot be updated.
       policy.chats.exists.where({
-        ownerId: chat.ownerId,
         id: chat.id,
         isPublic: chat.isPublic,
       }),
@@ -57,5 +56,5 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
 
   policy.strokes.allowRead.where(allowedTo.read("canvasId"));
   policy.strokes.allowInsert.where(allowedTo.read("canvasId"));
-  policy.strokes.allowDelete.where({ ownerId: session.user_id });
+  policy.strokes.allowDelete.where({ $createdBy: session.user_id });
 });

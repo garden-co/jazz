@@ -552,11 +552,11 @@ describe("Chat App E2E", () => {
   // -------------------------------------------------------------------------
 
   it("shows messages in reverse-chronological order (newest first in DOM)", async () => {
-    // occurredAt is second-granularity (Math.floor(Date.now() / 1000)), so we
+    // `$createdAt` is ordered by Jazz's stamped row creation time, so we
     // wait >1 s between sends to guarantee distinct timestamps.
     //
     // The ChatView renders with flex-col-reverse, so DOM order is newest-first:
-    //   DOM[0] = msg2  (sent last, highest occurredAt)
+    //   DOM[0] = msg2  (sent last, highest `$createdAt`)
     //   DOM[1] = msg1
     //   DOM[2] = Hello world  (seed, oldest)
     const el = await mountApp();
@@ -572,7 +572,7 @@ describe("Chat App E2E", () => {
     for (const text of ["msg1", "msg2"]) {
       await sendMessage(el, editor, text, 10000);
       await waitFor(() => hasRenderedMessage(el, text), 5000, `Message "${text}" should appear`);
-      // Ensure the next message gets a strictly greater occurredAt second.
+      // Ensure the next message gets a later Jazz creation timestamp.
       await new Promise((r) => setTimeout(r, 1100));
     }
 

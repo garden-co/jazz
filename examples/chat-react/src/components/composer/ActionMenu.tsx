@@ -32,7 +32,6 @@ export function ActionMenu({ chatId, disabled = false }: ActionMenuProps) {
       const canvas = await waitForWrite(
         db.insert(app.canvases, {
           chatId,
-          occurredAt: new Date(),
         }),
         sharedWriteOptions,
       );
@@ -41,7 +40,6 @@ export function ActionMenu({ chatId, disabled = false }: ActionMenuProps) {
           chatId,
           text: `[Canvas: ${canvas.id}]`,
           senderId: myProfile.id,
-          occurredAt: new Date(),
         }),
         sharedWriteOptions,
       );

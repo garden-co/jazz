@@ -19,7 +19,6 @@ describe("chat permissions", () => {
       db.insert(app.chats, {
         name: "Private room",
         isPublic: false,
-        ownerId: "alice",
         joinCode: "invite-123",
       }),
     );
@@ -55,7 +54,6 @@ describe("chat permissions", () => {
       db.insert(app.chats, {
         name: "Members only",
         isPublic: false,
-        ownerId: "alice",
         joinCode: "invite-456",
       }),
     );
@@ -76,7 +74,7 @@ describe("chat permissions", () => {
     );
   });
 
-  it("does not allow chat creator and isPublic updates", async () => {
+  it("does not allow isPublic updates", async () => {
     await testApp.seed((db) =>
       db.insert(app.profiles, {
         userId: "alice",
@@ -87,7 +85,6 @@ describe("chat permissions", () => {
       db.insert(app.chats, {
         name: "Members only",
         isPublic: false,
-        ownerId: "alice",
         joinCode: "invite-456",
       }),
     );
@@ -100,12 +97,6 @@ describe("chat permissions", () => {
     );
 
     const aliceDb = testApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
-
-    await aliceDb.expectDenied((db) =>
-      db.update(app.chats, privateChat.id, {
-        ownerId: "bob",
-      }),
-    );
 
     await aliceDb.expectDenied((db) =>
       db.update(app.chats, privateChat.id, {
@@ -131,7 +122,6 @@ describe("chat permissions", () => {
       db.insert(app.chats, {
         name: "Members only",
         isPublic: false,
-        ownerId: "alice",
         joinCode: "invite-456",
       }),
     );
@@ -151,7 +141,6 @@ describe("chat permissions", () => {
         chatId: privateChat.id,
         text: "hello from alice",
         senderId: aliceProfile.id,
-        occurredAt: new Date("2026-01-01T00:00:00.000Z"),
       }),
     );
 
@@ -160,7 +149,6 @@ describe("chat permissions", () => {
         chatId: privateChat.id,
         text: "hello from bob",
         senderId: bobProfile.id,
-        occurredAt: new Date("2026-01-01T00:00:01.000Z"),
       }),
     );
 
@@ -177,7 +165,6 @@ describe("chat permissions", () => {
         chatId: privateChat.id,
         text: "hello from bob after joining",
         senderId: bobProfile.id,
-        occurredAt: new Date("2026-01-01T00:00:02.000Z"),
       }),
     );
   });
@@ -193,7 +180,6 @@ describe("chat permissions", () => {
       db.insert(app.chats, {
         name: "Uploads",
         isPublic: false,
-        ownerId: "alice",
         joinCode: "invite-789",
       }),
     );
@@ -216,7 +202,6 @@ describe("chat permissions", () => {
         chatId: privateChat.id,
         text: "see attachment",
         senderId: aliceProfile.id,
-        occurredAt: new Date("2026-01-01T00:00:03.000Z"),
       }),
     );
     const reaction = await testApp.seed((db) =>

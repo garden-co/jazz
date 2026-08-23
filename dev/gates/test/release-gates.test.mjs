@@ -86,7 +86,7 @@ test("release starter gate reuses its pnpm store across the prepare and matrix j
 
 test("official examples do not duplicate Jazz provenance without an explicit external marker", () => {
   const duplicate =
-    /^[ \t]*(createdAt|createdBy|updatedAt|updatedBy):(?![ \t]*s\.allowExternalProvenanceName\()/m;
+    /^[ \t]*(?:(createdAt|createdBy|updatedAt|updatedBy):(?![ \t]*s\.allowExternalProvenanceName\()|(createdOn|creationTime|occurredAt):)/m;
   const offenders = [];
 
   function visit(directory) {
