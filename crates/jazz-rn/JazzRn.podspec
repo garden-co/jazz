@@ -20,7 +20,7 @@ Pod::Spec.new do |s|
   if respond_to?(:install_modules_dependencies, true)
     install_modules_dependencies(s)
   else
-    s.dependency "React-Core"
+  s.dependency "React-Core"
 
     # Don't install the dependencies when we run `pod install` in the old architecture.
     if ENV['RCT_NEW_ARCH_ENABLED'] == '1' then
@@ -37,4 +37,8 @@ Pod::Spec.new do |s|
       s.dependency "ReactCommon/turbomodule/core"
     end
   end
+end
+
+if ENV['RCT_NEW_ARCH_ENABLED'] != '1' then
+  raise Pod::Informative, "jazz-rn requires the React Native New Architecture. Enable it before pod install (Expo: add the jazz-rn config plugin, then run expo prebuild)."
 end

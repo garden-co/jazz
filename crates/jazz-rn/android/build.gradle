@@ -23,6 +23,11 @@ apply plugin: "kotlin-android"
 
 if (isNewArchitectureEnabled()) {
   apply plugin: "com.facebook.react"
+} else {
+  throw new GradleException(
+    "jazz-rn requires the React Native New Architecture. Enable newArchEnabled=true " +
+      "(Expo: add the jazz-rn config plugin, then run expo prebuild)."
+  )
 }
 
 def getExtOrDefault(name) {

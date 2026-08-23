@@ -22,6 +22,12 @@ commands until a development or release build embeds the shared Rust relay
 artifact. `expo prebuild` and bare React Native integration can therefore
 succeed without a stale native framework, but they do **not** make Jazz usable
 on a device yet.
+
+`jazz-rn` requires the React Native **New Architecture**. Android Gradle and
+iOS CocoaPods fail early with an install/configuration instruction otherwise.
+For Expo, add `"plugins": ["jazz-rn"]` and run `expo prebuild`; the plugin
+sets `newArchEnabled`. Bare React Native apps must enable the New Architecture
+themselves. This requirement does not make Expo Go capable of loading Jazz.
 The shared host codec now stages `Open`, `Attach`, `CloseClient`, `CloseRelay`,
 and bounded `Pump`; no platform artifact calls it yet. This is a thin platform
 checkpoint, not device support: there is still no linked JNI artifact,

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import test from "node:test";
 import { createRequire } from "node:module";
 import { readFile } from "node:fs/promises";
@@ -22,26 +23,20 @@ test("jazz-rn publishes an Expo config plugin for a New Architecture development
   assert.equal(packageJson.peerDependencies.expo, ">=54");
 });
 
-test("the Expo scaffold retains a relay-only prebuild receipt", async () => {
-  const [expoPackage, expoReadme] = await Promise.all([
-    readFile(
-      new URL("../../../examples/todo-client-localfirst-expo/package.json", import.meta.url),
-      "utf8",
-    ),
-    readFile(
-      new URL("../../../examples/todo-client-localfirst-expo/README.md", import.meta.url),
-      "utf8",
-    ),
-  ]);
-
-  assert.match(expoPackage, /"verify:expo:android": "CI=1 expo prebuild/);
-  assert.match(expoPackage, /"verify:expo:ios": "CI=1 expo prebuild/);
-  assert.match(expoReadme, /JazzRelaySpec/);
-  assert.match(expoReadme, /not a runnable persistent Jazz client/);
+test("the canonical Expo scaffold really prebuilds both relay-only platforms", () => {
+  const root = new URL("../../../", import.meta.url);
+  for (const script of ["verify:expo:android", "verify:expo:ios"]) {
+    execFileSync("pnpm", ["--filter", "todo-client-localfirst-expo", "run", script], {
+      cwd: root,
+      env: { ...process.env, CI: "1" },
+      stdio: "inherit",
+    });
+  }
 });
 
-test("jazz-rn autolinks a relay host without requiring obsolete UniFFI artifacts", async () => {
-  const [podspec, androidPackage, androidBuild, iosRelay, packageRoot] = await Promise.all([
+test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts", async () => {
+  const [podspec, androidPackage, androidBuild, iosRelay, packageRoot, rootCargo, legacyConfig] =
+    await Promise.all([
     readFile(new URL("../../../crates/jazz-rn/JazzRn.podspec", import.meta.url), "utf8"),
     readFile(
       new URL(
@@ -53,16 +48,24 @@ test("jazz-rn autolinks a relay host without requiring obsolete UniFFI artifacts
     readFile(new URL("../../../crates/jazz-rn/android/build.gradle", import.meta.url), "utf8"),
     readFile(new URL("../../../crates/jazz-rn/ios/JazzRelay.mm", import.meta.url), "utf8"),
     readFile(new URL("../../../crates/jazz-rn/src/index.tsx", import.meta.url), "utf8"),
-  ]);
+      readFile(new URL("../../../Cargo.toml", import.meta.url), "utf8"),
+      readFile(new URL("../../../crates/jazz-rn/ubrn.config.yaml", import.meta.url), "utf8").catch(
+        () => null,
+      ),
+    ]);
 
   assert.doesNotMatch(podspec, /vendored_frameworks|uniffi-bindgen-react-native/);
+  assert.match(podspec, /requires the React Native New Architecture/);
   assert.doesNotMatch(androidBuild, /externalNativeBuild|jniLibs|CMakeLists/);
+  assert.match(androidBuild, /requires the React Native New Architecture/);
   assert.match(androidPackage, /class JazzRelayPackage/);
   assert.doesNotMatch(androidPackage, /JazzRnModule/);
   assert.match(iosRelay, /RCT_EXPORT_MODULE\(JazzRelay\)/);
   assert.match(iosRelay, /E_JAZZ_RELAY_UNAVAILABLE/);
   assert.match(iosRelay, /NativeJazzRelaySpecJSI/);
   assert.doesNotMatch(packageRoot, /NativeJazzRn|uniffi/);
+  assert.doesNotMatch(rootCargo, /jazz-rn\/rust/);
+  assert.equal(legacyConfig, null);
 });
 
 test("jazz-rn reserves a thin binary relay TurboModule boundary for matching native builds", async () => {

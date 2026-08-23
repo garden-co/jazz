@@ -88,18 +88,31 @@ claim native file/WAL behavior.
 
 ### 19.4 Package and platform contract
 
-The published `jazz-react-native` package is a standard current React Native
-New Architecture TurboModule package:
+`jazz-rn` requires the React Native New Architecture. That is an intentional
+current boundary: the generated relay spec is a TurboModule, and old
+architecture builds fail during Android Gradle evaluation or iOS pod install
+with an actionable instruction to enable it (Expo: add the `jazz-rn` config
+plugin, then run `expo prebuild`).
+
+**Current checkpoint (not device support).** The package autolinks an Android
+and iOS `JazzRelay` TurboModule stub. Both report ABI `0` and reject commands
+until a matching `jazz-native-relay` artifact is embedded. It contains no
+XCFramework, AAR, or Rust relay artifact, so a prebuilt Expo development build
+or bare RN app can prove package integration but must not be presented as a
+usable Jazz client. Stock Expo Go cannot load arbitrary native code and is
+unsupported.
+
+**Target shipping contract.** A published `jazz-rn` package is a standard
+current React Native New Architecture TurboModule package:
 
 - its iOS podspec vendors prebuilt XCFramework device and simulator slices;
 - its Android Gradle module vendors AAR/shared-library ABI slices;
 - React Native autolinking supports bare RN without Expo as a dependency;
 - Expo prebuild/CNG/EAS discover that same native module through autolinking,
-  without manual Podfile, Gradle, AppDelegate, or MainApplication changes;
-- no config plugin is required unless a future optional feature truly needs
-  application configuration.
+  without manual Podfile, Gradle, AppDelegate, or MainApplication changes. The
+  current config plugin remains only to require New Architecture for Expo apps,
+  not to locate the native code.
 
-Stock Expo Go cannot load Jazz's arbitrary native code and is unsupported.
 Expo development builds retain Metro, QR loading, and Fast Refresh once the
 matching native build is installed. JS-only changes do not rebuild Rust; a
 native relay ABI or native package change does.
@@ -126,12 +139,12 @@ independently from JS-only scenario changes.
 
 ## Implementation ledger
 
-| Layer                     | Status                 | Verification                                                                                        | Remaining work                                                                             |
-| ------------------------- | ---------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| SQLite ordered-KV         | implemented            | crate conformance: order/prefix/range, atomic unknown-CF rejection, reopen, format rejection, close | add injected crash/durability and full differential receipt                                |
-| Native owner-thread relay | implemented foundation | compile contract; normal `Db` peer links for persistent relay ↔ in-memory clients                   | expose codec command surface and add black-box two-client/upstream tests                   |
-| RN TurboModule/package    | planned                | n/a                                                                                                 | replace stale excluded UniFFI scaffold with generated-codegen package + prebuilt artifacts |
-| Expo/bare RN app          | planned                | n/a                                                                                                 | first-party app, Android/iOS runners, cache actions                                        |
+| Layer                     | Status                 | Verification                                                                                        | Remaining work                                                           |
+| ------------------------- | ---------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| SQLite ordered-KV         | implemented            | crate conformance: order/prefix/range, atomic unknown-CF rejection, reopen, format rejection, close | add injected crash/durability and full differential receipt              |
+| Native owner-thread relay | implemented foundation | compile contract; normal `Db` peer links for persistent relay ↔ in-memory clients                   | expose codec command surface and add black-box two-client/upstream tests |
+| RN TurboModule/package    | checkpoint implemented | generated Android+iOS `JazzRelay` contract, unavailable ABI/error receipts                          | embed and package prebuilt artifacts                                     |
+| Expo/bare RN app          | prebuild scaffold      | New-Architecture config plugin plus Android/iOS prebuild commands                                   | first-party device app, Android/iOS runners, cache actions               |
 
 ## Open questions
 
