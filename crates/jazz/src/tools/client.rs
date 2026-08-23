@@ -1719,6 +1719,11 @@ fn session_claims_to_core_claims(session: &Session) -> Result<HashMap<String, Co
         core_claims.insert(name, json_claim_to_core_value(value)?);
     }
     core_claims.insert("sub".to_owned(), CoreValue::String(session.user_id.clone()));
+    core_claims.insert("iss".to_owned(), CoreValue::String(session.issuer.clone()));
+    core_claims.insert(
+        "issuer".to_owned(),
+        CoreValue::String(session.issuer.clone()),
+    );
     core_claims.insert(
         "user_id".to_owned(),
         CoreValue::String(session.user_id.clone()),
@@ -1726,6 +1731,10 @@ fn session_claims_to_core_claims(session: &Session) -> Result<HashMap<String, Co
     core_claims.insert(
         "authMode".to_owned(),
         CoreValue::String(auth_mode_claim_value(session.auth_mode).to_owned()),
+    );
+    core_claims.insert(
+        "author".to_owned(),
+        CoreValue::String(session.author_subject()?.canonical().to_owned()),
     );
     Ok(core_claims)
 }
@@ -2130,8 +2139,8 @@ impl JazzClient {
         // time, after the shared client has already opened. Register their
         // raw session claims under that canonical subject before evaluating
         // local policy. In particular, `user_id` remains the JWT subject so a
-        // UUID policy column can coerce it; `sub` is restored to the canonical
-        // subject at the policy boundary.
+        // UUID policy columns can coerce it; the separate reserved `author`
+        // claim carries canonical provenance identity.
         let claims = session_claims_to_core_claims(session)?;
         self.db
             .inner
@@ -3307,7 +3316,7 @@ mod tests {
     }
 
     #[test]
-    fn client_session_reserved_claims_override_application_claims() {
+    fn client_session_preserves_provider_subject_and_adds_logical_author() {
         let session = Session::new(CoreAuthorSubject::LOCAL_FIRST_ISSUER, "trusted-user")
             .with_auth_mode(crate::tools::public_api::session::AuthMode::LocalFirst)
             .with_claims(json!({
@@ -3328,6 +3337,15 @@ mod tests {
         assert_eq!(
             claims.get("authMode"),
             Some(&CoreValue::String("local-first".to_owned()))
+        );
+        assert_eq!(
+            claims.get("author"),
+            Some(&CoreValue::String(
+                CoreAuthorSubject::reserved(CoreAuthorSubject::LOCAL_FIRST_ISSUER, "trusted-user")
+                    .unwrap()
+                    .canonical()
+                    .to_owned()
+            ))
         );
     }
 

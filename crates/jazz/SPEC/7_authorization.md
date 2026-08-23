@@ -45,6 +45,13 @@ Invariant digest:
   MUST resolve its stable physical table lineage back to the logical
   table/schema at the relevant frontier; shared deletion storage MUST NOT widen
   authority across tables.
+- `INV-RLS-23`: Jazz derives the reserved logical `session.author` and user
+  authorship from the exact trusted JWT subject pair `(iss, sub)`, represented
+  portably as canonical JSON `[iss,sub]`. Admitted provider claims including
+  `session.iss`, `session.sub`, and `session.user_id` retain their raw values.
+  Jazz MUST NOT normalize either component, hash the pair into a UUID, or admit
+  the reserved system issuer. Local intern handles MUST never become wire,
+  storage, query, equality, or ordering values.
 
 ## Details
 
@@ -70,8 +77,9 @@ lens projection (`INV-RLS-15`).
 An owner-only policy is the canonical single-subject policy: it selects rows
 whose ownership column equals the authenticated subject
 (`Policy::owner_only(table, column)` is exactly
-`Query::from(table).filter(eq(col(column), claim("sub")))`). The `claim("sub")`
-operand is the authenticated `AuthorSubject`, not a caller-supplied parameter
+`Query::from(table).filter(eq(col(column), claim("author")))`). The
+`claim("author")` operand is the canonical authenticated `AuthorSubject`, not
+the provider's raw `sub` alone and not a caller-supplied parameter
 (`INV-RLS-3`). A policy must validate as a shape rooted at the table that carries
 it (`INV-RLS-4`), and `AuthorSubject::SYSTEM` bypasses both read and write checks
 (`INV-RLS-2`).
