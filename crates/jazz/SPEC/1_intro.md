@@ -130,12 +130,13 @@ implementation-specific case breakdowns and test coverage belong. The
 out-of-band `SPEC/INVARIANTS.md` registry mirrors invariant text and links it to
 implementation anchors and tests; it does not determine the contract.
 
-**Open questions are localized.** Each chapter ends with an `## Open Questions`
-section holding only that chapter's unresolved design decisions, each tagged
-`🔶`. There is no central TODO: a missing test or an implementation gap belongs
-in a Details status note, while an unsettled intended contract belongs beside the
-thing it qualifies as an open question. A reference to an invariant owned by the
-other spec is written with its spec name, for example
+**Open questions are localized and issue-backed.** Each chapter ends with an
+`## Open Questions` section holding only that chapter's unresolved design
+decisions, each tagged `🔶` and linked to its GitHub issue. There is no central
+TODO: a missing test or an implementation gap belongs in a Details status note,
+while an unsettled intended contract belongs beside the thing it qualifies as an
+open question and in its issue discussion. A reference to an invariant owned by
+the other spec is written with its spec name, for example
 `groove/SPEC/INVARIANTS.md::INV-SHAPE-16`.
 
 ### 1.4 Terminology

@@ -109,9 +109,10 @@ identities internally.
 
 ### 8. Clarify terminology and ownership
 
-Continue `JARGON_BURNDOWN.md` for terms such as route, terminal, carrier, fact,
-witness, maintained, settled, and authoritative. Prefer better concepts and
-abstractions over merely adding definitions.
+Track terminology work in [the GitHub issue backlog](https://github.com/garden-co/jazz/issues)
+for terms such as route, terminal, carrier, fact, witness, maintained, settled,
+and authoritative. Prefer better concepts and abstractions over merely adding
+definitions.
 
 Add and maintain the short [representation-ownership map](crates/jazz/SPEC/18_representation_ownership.md):
 

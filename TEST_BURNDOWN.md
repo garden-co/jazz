@@ -1,4 +1,4 @@
-# TEST BURNDOWN — QUARANTINED KNOWN REDS
+# TEST QUARANTINE MANIFEST
 
 Measured on `e707640a6` by CI-equivalent cargo-nextest: **34 failures, 10 timeouts, 7 pre-existing ignores**.
 
@@ -26,7 +26,65 @@ Focused browser receipts are produced with `pnpm --filter jazz-tools test:browse
 
 ## Exit rule
 
-A future fix must remove both the matching visible skip marker and this entry, then include a focused green receipt. Never delete or weaken the test. New known reds require both a source annotation and one row. Executable gates enforce the active annotation/entry bijection.
+A future fix must remove both the matching visible skip marker and this entry,
+then include a focused green receipt. Never delete or weaken the test. New known
+reds require both a source annotation and one row. Every ignored test belongs to
+exactly one issue prefix in the offline issue map below; the gate validates that
+mapping without contacting GitHub.
+
+## Offline issue map
+
+The prefixes are deliberately narrow enough to identify the owning discussion.
+They are a compact manifest encoding, not a second copy of issue prose.
+
+| Issue                                                  | Test identity prefix                                                                                                                          |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| [#1758](https://github.com/garden-co/jazz/issues/1758) | `jazz-testkit::policies_integration::authorship_policies::`                                                                                   |
+| [#1758](https://github.com/garden-co/jazz/issues/1758) | `jazz-testkit::policies_integration::magic_provenance::`                                                                                      |
+| [#1759](https://github.com/garden-co/jazz/issues/1759) | `jazz-testkit::policies_integration::exists_policies::`                                                                                       |
+| [#1759](https://github.com/garden-co/jazz/issues/1759) | `jazz-testkit::policies_integration::exists_rel_policies::`                                                                                   |
+| [#1759](https://github.com/garden-co/jazz/issues/1759) | `jazz-testkit::policies_integration::simple_policies::select_policy_dependency_data_is_retrieved_as_part_of_query`                            |
+| [#1759](https://github.com/garden-co/jazz/issues/1759) | `jazz-testkit::policies_integration::mutations::synced_soft_delete_should_use_delete_policy`                                                  |
+| [#1759](https://github.com/garden-co/jazz/issues/1759) | `jazz-testkit::policies_integration::complex_policies::update_with_check_exists_allows_chat_name_updates_and_rejects_protected_field_changes` |
+| [#1760](https://github.com/garden-co/jazz/issues/1760) | `jazz-testkit::policies_integration::claims_policies::`                                                                                       |
+| [#1760](https://github.com/garden-co/jazz/issues/1760) | `jazz-testkit::policies_integration::session_cases::in_session_array_policy_gates_visibility_by_membership`                                   |
+| [#1760](https://github.com/garden-co/jazz/issues/1760) | `jazz::prepared_claim_routing::`                                                                                                              |
+| [#1761](https://github.com/garden-co/jazz/issues/1761) | `jazz-testkit::policies_integration::complex_policies::`                                                                                      |
+| [#1761](https://github.com/garden-co/jazz/issues/1761) | `jazz-testkit::policies_integration::recursive_policies::recursive_exists_rel_`                                                               |
+| [#1761](https://github.com/garden-co/jazz/issues/1761) | `jazz-testkit::policies_integration::recursive_policies::recursive_query_step_magic_columns_use_reader_session`                               |
+| [#1761](https://github.com/garden-co/jazz/issues/1761) | `jazz-testkit::policies_integration::session_cases::select_policy_excludes_rows_from_join_results`                                            |
+| [#1762](https://github.com/garden-co/jazz/issues/1762) | `jazz-testkit::policies_integration::declared_fk_inheritance::rebac_declared_fk_inheritance_grants_update_access`                             |
+| [#1762](https://github.com/garden-co/jazz/issues/1762) | `jazz-testkit::policies_integration::declared_fk_inheritance::rebac_declared_fk_inheritance_reacts_to_fk_updates`                             |
+| [#1762](https://github.com/garden-co/jazz/issues/1762) | `jazz-testkit::policies_integration::inherited_policies::inherited_folder_insert_requires_folder_owner_when_fk_present`                       |
+| [#1762](https://github.com/garden-co/jazz/issues/1762) | `jazz-testkit::policies_integration::inherited_policies::inherited_folder_update_allows_folder_owner_and_blocks_other_users`                  |
+| [#1762](https://github.com/garden-co/jazz/issues/1762) | `jazz-testkit::policies_integration::inherited_policies::local_`                                                                              |
+| [#1762](https://github.com/garden-co/jazz/issues/1762) | `jazz-testkit::policies_integration::mutations::rebac_update_denied_by_using_policy`                                                          |
+| [#1762](https://github.com/garden-co/jazz/issues/1762) | `jazz-testkit::policies_integration::simple_policies::read_and_write_policies_remain_independent`                                             |
+| [#1762](https://github.com/garden-co/jazz/issues/1762) | `jazz-testkit::policies_integration::simple_policies::authorized_mutations_emit_visibility_scoped_subscription_deltas`                        |
+| [#1762](https://github.com/garden-co/jazz/issues/1762) | `jazz-testkit::policies_integration::recursive_inheritance::`                                                                                 |
+| [#1763](https://github.com/garden-co/jazz/issues/1763) | `jazz-testkit::policies_integration::inheritance_validation::`                                                                                |
+| [#1763](https://github.com/garden-co/jazz/issues/1763) | `jazz-testkit::policies_integration::declared_fk_inheritance::rebac_declared_fk_inheritance_cycle_fails_closed`                               |
+| [#1763](https://github.com/garden-co/jazz/issues/1763) | `jazz-testkit::policies_integration::recursive_policies::recursive_inherits_cycles_`                                                          |
+| [#1763](https://github.com/garden-co/jazz/issues/1763) | `jazz-testkit::policies_integration::session_cases::single_client_operations_reach_server_in_causal_order`                                    |
+| [#1764](https://github.com/garden-co/jazz/issues/1764) | `jazz-testkit::policies_integration::inherited_policies::inherited_folder_delete_`                                                            |
+| [#1764](https://github.com/garden-co/jazz/issues/1764) | `jazz-testkit::policies_integration::inherited_policies::inherited_referencing_`                                                              |
+| [#1761](https://github.com/garden-co/jazz/issues/1761) | `jazz-testkit::policies_integration::inherited_policies::inherits_select_denies_when_parent_operation_policy_is_missing`                      |
+| [#1765](https://github.com/garden-co/jazz/issues/1765) | `jazz-testkit::query::subqueries::`                                                                                                           |
+| [#1766](https://github.com/garden-co/jazz/issues/1766) | `jazz-testkit::replica_settlement::`                                                                                                          |
+| [#1766](https://github.com/garden-co/jazz/issues/1766) | `jazz-testkit::reconnect_write_durability::`                                                                                                  |
+| [#1767](https://github.com/garden-co/jazz/issues/1767) | `jazz-testkit::query::recursive_queries::`                                                                                                    |
+| [#1768](https://github.com/garden-co/jazz/issues/1768) | `jazz::shared_coverage_differential::`                                                                                                        |
+| [#1779](https://github.com/garden-co/jazz/issues/1779) | `jazz-testkit::schema_migration_policies::`                                                                                                   |
+| [#1794](https://github.com/garden-co/jazz/issues/1794) | `jazz-testkit::policies_integration::insert_policies::`                                                                                       |
+| [#1787](https://github.com/garden-co/jazz/issues/1787) | `jazz-storage-rocksdb::plain_row_receipt::`                                                                                                   |
+| [#1787](https://github.com/garden-co/jazz/issues/1787) | `groove::storage::tests::staged_overlay_narrow_scan_scaling_receipt`                                                                          |
+| [#1787](https://github.com/garden-co/jazz/issues/1787) | `groove::variant_ab_benchmark::`                                                                                                              |
+| [#1787](https://github.com/garden-co/jazz/issues/1787) | `groove::variant_tables::`                                                                                                                    |
+| [#1787](https://github.com/garden-co/jazz/issues/1787) | `jazz-testkit::edge_server_mode::`                                                                                                            |
+| [#1787](https://github.com/garden-co/jazz/issues/1787) | `jazz::node::tests::harness::m3_maintained_one_shot_differential_oracle`                                                                      |
+| [#1787](https://github.com/garden-co/jazz/issues/1787) | `jazz-otel::sync_telemetry_otel::`                                                                                                            |
+| [#1787](https://github.com/garden-co/jazz/issues/1787) | `groove::db::tests::queries::indexed_batch_commit_timing_receipt_20k_and_single_row`                                                          |
+| [#1787](https://github.com/garden-co/jazz/issues/1787) | `jazz::node::tests::harness::policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt`                                                    |
 
 ## Active Rust quarantine (66)
 
