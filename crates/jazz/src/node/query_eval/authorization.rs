@@ -738,14 +738,6 @@ where
             .iter()
             .find(|candidate| candidate.name == table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.to_owned()))?;
-        if table.read_policy.is_none()
-            && access_edge_parent_reference(table).is_none()
-            && table.has_any_policy()
-        {
-            return Err(Error::QueryCapability(
-                "table has a closed policy set but no read policy".to_owned(),
-            ));
-        }
         let query = authorization_query_from_read_policy(table);
         if !query.includes.is_empty() {
             return Err(Error::InvalidStoredValue(
@@ -893,14 +885,6 @@ where
             .iter()
             .find(|candidate| candidate.name == table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.to_owned()))?;
-        if table.read_policy.is_none()
-            && access_edge_parent_reference(table).is_none()
-            && table.has_any_policy()
-        {
-            return Err(Error::QueryCapability(
-                "table has a closed policy set but no read policy".to_owned(),
-            ));
-        }
         let policy = match self.query_program_policy_context(identity) {
             PolicyContext::Identity {
                 mode,

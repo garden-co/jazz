@@ -544,3 +544,51 @@ fn partial_policy_set_allows_its_declared_read_and_denies_omitted_writes_at_auth
         );
     }
 }
+
+/// DELETE policy evaluation deliberately uses raw old-row evidence.  A
+/// write-only table must not need ordinary SELECT permission merely to prove
+/// its declared delete predicate at the serving authority.
+#[test]
+fn delete_only_policy_uses_raw_current_row_evidence_without_read_access() {
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .policies(PublicTablePolicies::new().with_delete(PublicPolicyExpr::True)),
+    ));
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
+    let target = row(0x92);
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", target, 10).cells(title_cells("hidden but deletable")),
+    );
+    let author = user(0xa1);
+    assert!(
+        !core
+            .dry_run_read_current_allows("todos", target, author)
+            .unwrap(),
+        "the author has no ordinary read authority"
+    );
+    assert!(
+        core.dry_run_delete_current_allows("todos", target, author)
+            .unwrap(),
+        "the declared DELETE policy may inspect raw old-row evidence"
+    );
+
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0xa1), schema);
+    let (tx_id, unit) = writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", target, 20)
+                .made_by(author)
+                .deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+    assert!(matches!(
+        fate,
+        SyncMessage::FateUpdate {
+            tx_id: received,
+            fate: Fate::Accepted,
+            ..
+        } if received == tx_id
+    ));
+}
