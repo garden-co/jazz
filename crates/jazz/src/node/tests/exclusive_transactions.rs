@@ -86,6 +86,32 @@ fn open_batch_identity_is_unique_and_terminal() {
     ));
 }
 
+/// Low-level exclusive transactions retain commit-time author selection, while
+/// explicitly identity-bound transactions reject a different commit author.
+#[test]
+fn exclusive_identity_binding_applies_only_to_explicitly_bound_node_transactions() {
+    let (_temp_dir, mut node) = open_node();
+    let alice = user(0xa1);
+    let bob = user(0xb2);
+
+    let unbound = OpenTransactionId::new();
+    node.open_exclusive(unbound).unwrap();
+    node.tx_write(unbound, "todos", row(1), title_cells("unbound"), None)
+        .unwrap();
+    node.commit_exclusive_settled(unbound, alice, 10).unwrap();
+
+    let bound = OpenTransactionId::new();
+    node.open_exclusive_for_identity(bound, alice).unwrap();
+    node.tx_write(bound, "todos", row(2), title_cells("bound"), None)
+        .unwrap();
+    assert!(matches!(
+        node.commit_exclusive_settled(bound, bob, 11),
+        Err(Error::OpenTransactionIdentityMismatch)
+    ));
+    // Planted positive: rejecting Bob does not consume Alice's capability.
+    node.commit_exclusive_settled(bound, alice, 11).unwrap();
+}
+
 #[test]
 fn exclusive_tx_snapshot_read_ignores_newer_commits_after_open() {
     let (_temp_dir, mut node) = open_node();
