@@ -900,9 +900,16 @@ test("realistic timing retains every retired legacy smoke suite", () => {
     assert.match(realisticWorkflow, new RegExp(`--bench ${bench}(?: |\\n|$)`));
   }
   assert.match(realisticWorkflow, /Run legacy Jazz timing suites/);
+  assert.match(realisticWorkflow, /status_file=bench-out\/native\/legacy-jazz\/status\.tsv/);
+  assert.match(realisticWorkflow, /status: statuses\.get\(name\) \?\? "failed"/);
+  assert.match(realisticWorkflow, /exit "\$failed"/);
   assert.throws(
     () => assert.match(realisticWorkflow.replaceAll("--bench route_subscription_curve", ""), /--bench route_subscription_curve/),
     /route_subscription_curve/,
+  );
+  assert.throws(
+    () => assert.match(realisticWorkflow.replace('status: statuses.get(name) ?? "failed"', 'status: "passed"'), /statuses\.get\(name\)/),
+    /statuses/,
   );
 });
 
