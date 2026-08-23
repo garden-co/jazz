@@ -1269,6 +1269,28 @@ where
         policy: &PolicyContext,
         prepared_claim_binding_mode: PreparedClaimBindingMode,
     ) -> Result<ProgramBinding, Error> {
+        // System authority bypasses row policy entirely.  It consequently has
+        // no identity context from which a policy claim could be bound. Some
+        // authorization builders receive claim slots from an enclosing
+        // prepared plan, so enforce the descriptor invariant at the shared
+        // binding boundary as well as in the current-query path.
+        //
+        // The binding-source key includes every claim slot.  Retaining the
+        // caller's key after dropping the slots would let a System program
+        // reuse an identity-scoped descriptor, so derive a replacement key
+        // from its ordinary query/user parameters only.
+        let (source_shape, claim_params) = if matches!(policy, PolicyContext::System) {
+            let mut param_types = shape.params().clone();
+            param_types.extend(extra_user_params.clone());
+            (
+                source_shape.and_then(|_| {
+                    query_binding_source_shape_for_parts_if_needed(&param_types, &BTreeMap::new())
+                }),
+                BTreeMap::new(),
+            )
+        } else {
+            (source_shape, claim_params)
+        };
         let mut program_binding = self.program_binding_for_shape(
             shape,
             binding,

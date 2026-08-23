@@ -396,6 +396,64 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         system_program.request.input.binding.claim_params.is_empty(),
         "System/asBackend prepared descriptors cannot retain session claim slots"
     );
+    // The ordinary current-query path above strips System claim slots before
+    // it constructs the binding. Exercise the nested authorization builders
+    // too: a policy claim route must not leave an identity-scoped descriptor
+    // behind when the served identity is System.
+    let system_members_policy = node
+        .table_read_policy_authorization_request(
+            shape.schema_version(),
+            "chatMembers",
+            AuthorId::SYSTEM,
+            ParamBindingMode::RetainAllParams,
+            DurabilityTier::Edge,
+            program.request.input.binding.source_shape.clone(),
+            program.request.input.binding.extra_user_params.clone(),
+            program.request.input.binding.claim_params.clone(),
+        )
+        .expect("System nested policy compilation must not retain session claim slots");
+    assert!(
+        system_members_policy.input.binding.claim_params.is_empty(),
+        "System nested policy descriptors must not retain outer session claim slots"
+    );
+    assert_eq!(
+        system_members_policy.input.binding.source_shape,
+        query_binding_source_shape_for_parts_if_needed(
+            &system_members_policy.input.binding.param_types,
+            &BTreeMap::new(),
+        ),
+        "System nested policy descriptors must be keyed without session claim slots"
+    );
+    node.policy_authorization_row_id_graph(system_members_policy)
+        .expect("System nested policy graph must bind against its claim-free descriptor");
+    let system_members_policy_at = node
+        .table_read_policy_authorization_request_at(
+            shape.schema_version(),
+            "chatMembers",
+            AuthorId::SYSTEM,
+            ParamBindingMode::RetainAllParams,
+            GlobalTime(0),
+            program.request.input.binding.source_shape.clone(),
+            program.request.input.binding.extra_user_params.clone(),
+            program.request.input.binding.claim_params.clone(),
+        )
+        .expect("System historical nested policy compilation must not retain session claim slots");
+    assert!(
+        system_members_policy_at
+            .input
+            .binding
+            .claim_params
+            .is_empty(),
+        "System historical policy descriptors must not retain outer session claim slots"
+    );
+    assert!(
+        binding_claim_params_for_shape(
+            &system_members_policy_at.input.shape,
+            &system_members_policy_at.input.binding.param_types,
+        )
+        .is_empty(),
+        "System historical policy inputs must not retain policy claim operands"
+    );
     for terminal in &program.lowered.terminals {
         let expected_routes = match &terminal.output {
             OutputTerminalSchema::Fact(fact) => output_routing_fields_for_query_eval(fact),
