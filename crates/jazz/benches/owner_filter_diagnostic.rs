@@ -1,6 +1,8 @@
 mod schema_fixture;
 mod support;
 
+use support::BenchFutureExt as _;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Instant;
