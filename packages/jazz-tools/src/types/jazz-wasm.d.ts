@@ -35,7 +35,7 @@ declare module "jazz-wasm" {
   export class StreamingMutation {
     push(chunk: Uint8Array): Promise<void>;
     finish(): Promise<WasmWrite>;
-    abort(): boolean;
+    abort(): Promise<boolean>;
   }
 
   export class WasmTransport {

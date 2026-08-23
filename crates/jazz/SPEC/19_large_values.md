@@ -412,7 +412,9 @@ subdivides arbitrarily large host chunks into bounded windows; each awaited
 `push` advances content-defined chunking, incrementally validates UTF-8/JSON
 syntax, and asks Jazz to charge the finalized encoded-node batch against the
 ingress window before Groove persists it under the pending upload. Rejection
-evicts and closes that upload before the over-limit batch is written. `finish`
+evicts and closes that upload before the over-limit batch is written. Explicit
+abort and terminal validation failure also evict the persisted pending claim
+immediately, releasing its chunk retainers without waiting for TTL. `finish`
 registers the validated root without charging its already-metered nodes twice
 and performs the same ordinary Jazz mutation lifecycle. Neither binding
 collects or spools the whole logical value or holds a Jazz transaction open

@@ -180,3 +180,27 @@ fn push_streaming_stops_at_the_ingress_limit_and_closes_the_upload() {
     let query = db.prepare_query(&db.table("todos")).expect("prepare query");
     assert!(db.read(&query).expect("read rows").is_empty());
 }
+
+#[test]
+fn explicit_streaming_abort_releases_the_pending_upload_immediately() {
+    let db = open_db();
+    let cells = BTreeMap::from([("done".to_owned(), Value::Bool(false))]);
+    let mut upload = db
+        .begin_streaming_value_upload("todos", &cells, "title", LargeValueKind::String)
+        .expect("begin upload");
+    jazz::block_on(db.push_streaming_value_upload(&mut upload, &vec![b'x'; LEAF_MAX_BYTES + 1]))
+        .expect("persist a pending upload");
+
+    jazz::block_on(db.abort_streaming_value_upload(upload)).expect("abort upload");
+    db.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: u64::MAX,
+        window_ms: 60_000,
+        max_age_ms: Some(0),
+    });
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert_eq!(
+        jazz::block_on(db.evict_expired_staged_large_values()).expect("expiry pass"),
+        0,
+        "abort already removed the persisted pending claim"
+    );
+}

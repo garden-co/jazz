@@ -305,8 +305,21 @@ impl WasmStreamingMutation {
         })
     }
 
-    pub fn abort(&self) -> bool {
-        self.state.borrow_mut().take().is_some()
+    pub fn abort(&self) -> js_sys::Promise {
+        let state_cell = Rc::clone(&self.state);
+        future_to_promise(async move {
+            let Some(state) = state_cell.borrow_mut().take() else {
+                return Ok(JsValue::FALSE);
+            };
+            match &state.db {
+                WasmDbInner::Memory(db) => db.abort_streaming_value_upload(state.upload).await,
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => db.abort_streaming_value_upload(state.upload).await,
+                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+            }
+            .map_err(to_js_error)?;
+            Ok(JsValue::TRUE)
+        })
     }
 }
 

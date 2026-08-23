@@ -587,24 +587,52 @@ where
         upload: &mut StreamingValueUpload,
         bytes: &[u8],
     ) -> Result<(), Error> {
-        upload
+        let push_result = upload
             .preparation
             .as_mut()
             .ok_or_else(|| Error::new(ErrorCode::Schema, "streaming upload is closed"))?
-            .push(bytes)
-            .map_err(crate::node::Error::from)?;
+            .push(bytes);
+        if let Err(error) = push_result {
+            upload.preparation.take();
+            self.node
+                .node
+                .lock()
+                .await
+                .evict_pending_large_value_upload(upload.id)
+                .await?;
+            return Err(crate::node::Error::from(error).into());
+        }
         let chunks = std::mem::take(&mut *upload.emitted.borrow_mut());
-        if let Err(error) = self
-            .node
+        let stage_result = {
+            let node = self.node.node.lock().await;
+            node.stage_large_value_chunk_batch(upload.id, chunks).await
+        };
+        if let Err(error) = stage_result {
+            upload.preparation.take();
+            let _ = self
+                .node
+                .node
+                .lock()
+                .await
+                .evict_pending_large_value_upload(upload.id)
+                .await;
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
+    /// Abort a resumable upload and release its persisted pending retainers.
+    pub async fn abort_streaming_value_upload(
+        &self,
+        mut upload: StreamingValueUpload,
+    ) -> Result<(), Error> {
+        upload.preparation.take();
+        self.node
             .node
             .lock()
             .await
-            .stage_large_value_chunk_batch(upload.id, chunks)
-            .await
-        {
-            upload.preparation.take();
-            return Err(error.into());
-        }
+            .evict_pending_large_value_upload(upload.id)
+            .await?;
         Ok(())
     }
 
@@ -627,17 +655,56 @@ where
             .preparation
             .take()
             .ok_or_else(|| Error::new(ErrorCode::Schema, "streaming upload is closed"))?;
-        let (value_ref, _) = preparation.finish().map_err(crate::node::Error::from)?;
+        let (value_ref, _) = match preparation.finish() {
+            Ok(finished) => finished,
+            Err(error) => {
+                let _ = self
+                    .node
+                    .node
+                    .lock()
+                    .await
+                    .evict_pending_large_value_upload(upload.id)
+                    .await;
+                return Err(crate::node::Error::from(error).into());
+            }
+        };
         let chunks = std::mem::take(&mut *upload.emitted.borrow_mut());
-        let staged = {
+        let staged_result = {
             let node = self.node.node.lock().await;
-            node.stage_large_value_chunk_batch(upload.id, chunks)
-                .await?;
-            node.finalize_large_value_upload(upload.id, value_ref)
-                .await?
+            match node.stage_large_value_chunk_batch(upload.id, chunks).await {
+                Ok(()) => node.finalize_large_value_upload(upload.id, value_ref).await,
+                Err(error) => Err(error),
+            }
+        };
+        let staged = match staged_result {
+            Ok(staged) => staged,
+            Err(error) => {
+                // Cleanup is best-effort here so the terminal operation reports
+                // its original staging/finalization failure.
+                let _ = self
+                    .node
+                    .node
+                    .lock()
+                    .await
+                    .evict_pending_large_value_upload(upload.id)
+                    .await;
+                return Err(error.into());
+            }
         };
         let nullable =
-            self.validate_streaming_column(table, &cells, column, staged.value_ref.kind)?;
+            match self.validate_streaming_column(table, &cells, column, staged.value_ref.kind) {
+                Ok(nullable) => nullable,
+                Err(error) => {
+                    let _ = self
+                        .node
+                        .node
+                        .lock()
+                        .await
+                        .evict_staged_large_value(staged.id)
+                        .await;
+                    return Err(error);
+                }
+            };
         self.publish_streaming_value_with_id(
             mutation, table, row, cells, column, staged, nullable, identity, now_ms, head, base,
         )

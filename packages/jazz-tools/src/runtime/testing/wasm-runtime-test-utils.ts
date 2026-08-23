@@ -14,6 +14,7 @@ export type TestRuntime = Runtime & {
     windowMs: number,
     maxAgeMs?: number | null,
   ): void;
+  evictExpiredStagedLargeValues?(): Promise<number>;
 };
 
 let wasmModulePromise: Promise<any> | null = null;

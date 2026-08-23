@@ -1054,6 +1054,16 @@ where
         Ok(self.database.stage_large_value_chunk_batch(upload_id, chunks).await?)
     }
 
+    pub(crate) async fn evict_pending_large_value_upload(
+        &self,
+        upload_id: groove::large_values::StagedLargeValueId,
+    ) -> Result<(), Error> {
+        self.database
+            .evict_pending_large_value_upload(upload_id)
+            .await?;
+        Ok(())
+    }
+
     pub(crate) async fn finalize_large_value_upload(
         &self,
         upload_id: groove::large_values::StagedLargeValueId,

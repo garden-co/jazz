@@ -137,4 +137,29 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
     ).rejects.toThrow(/safe integer/i);
     expect(consumed).toBe(false);
   });
+
+  it("releases persisted pending chunks when the producer aborts", async () => {
+    const runtime = await createWasmRuntime(app.wasmSchema, {
+      appId: "wasm-streaming-explicit-abort",
+    });
+
+    await expect(
+      runtime.streamingMutation!(
+        "insert",
+        "todos",
+        { done: { type: "Boolean", value: false } },
+        "title",
+        (async function* () {
+          yield "x".repeat(512 * 1024);
+          throw new Error("producer aborted");
+        })(),
+        null,
+        "00000000-0000-4000-8000-000000000127",
+      ),
+    ).rejects.toThrow("producer aborted");
+
+    runtime.setLargeValueStagingPolicy!(Number.MAX_SAFE_INTEGER, 60_000, 0);
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    await expect(runtime.evictExpiredStagedLargeValues!()).resolves.toBe(0);
+  });
 });

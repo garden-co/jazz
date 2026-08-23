@@ -1026,9 +1026,25 @@ impl StreamingMutation {
     }
 
     #[napi]
-    pub fn abort(&mut self) -> bool {
+    pub fn abort(&mut self) -> napi::Result<bool> {
         self.cells.take();
-        self.upload.take().is_some()
+        let Some(upload) = self.upload.take() else {
+            return Ok(false);
+        };
+        let db = self.db.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => {
+                core_block_on(db.abort_streaming_value_upload(upload))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.abort_streaming_value_upload(upload))
+            }
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        Ok(true)
     }
 }
 
