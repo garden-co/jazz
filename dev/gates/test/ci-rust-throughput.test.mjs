@@ -23,6 +23,7 @@ const packageBuild = fs.readFileSync(
   path.join(root, ".github/workflows/build-jazz-packages.yml"),
   "utf8",
 );
+const codspeedWorkflow = fs.readFileSync(path.join(root, ".github/workflows/codspeed.yml"), "utf8");
 const otherWorkflows = fs
   .readdirSync(path.join(root, ".github/workflows"))
   .filter((name) => name.endsWith(".yml") && name !== "ci.yml")
@@ -521,6 +522,22 @@ test("CI runs the workflow contract test through its package script", () => {
     "node --test dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/ci-tool-bundle.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs && node dev/gates/test-burndown-ts.mjs",
   );
   assert.match(lint, /run: pnpm test:ci-workflow/);
+});
+
+test("CodSpeed caches the root-workspace Cargo target", () => {
+  const rootTarget = /workspaces: \. -> target/;
+  assert.match(codspeedWorkflow, rootTarget);
+  assert.throws(
+    () =>
+      assert.match(
+        codspeedWorkflow.replace(
+          "workspaces: . -> target",
+          "workspaces: examples/benchmarks/smoke -> target",
+        ),
+        rootTarget,
+      ),
+    /workspaces/,
+  );
 });
 
 test("Windows NAPI release builds provision libclang for RocksDB bindgen", () => {

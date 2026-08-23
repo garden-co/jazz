@@ -27,14 +27,14 @@ jobs:
         with:
           toolchain: 1.93.1
 
-      # Cache both Cargo's compiled benchmark graph and the cargo-codspeed
-      # binary. The smoke target is deliberately isolated so unrelated crates
-      # do not invalidate this hosted benchmark path.
+      # Cache Cargo's root-workspace target directory and the cargo-codspeed
+      # binary. Package selection below limits compilation to the smoke crate's
+      # dependency graph, while Cargo still writes artifacts to the root target.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           cache-bin: true
           shared-key: codspeed-example-benches-v1
-          workspaces: examples/benchmarks/smoke -> target
+          workspaces: . -> target
 
       - name: Install cargo-codspeed
         run: cargo install cargo-codspeed --version 5.0.1 --locked
