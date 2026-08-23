@@ -1630,25 +1630,7 @@ fn core_identity(
 }
 
 fn core_author_from_session(session: &Session) -> Result<CoreAuthorSubject> {
-    use crate::tools::public_api::session::AuthMode;
-
-    let author = match session.auth_mode {
-        AuthMode::External => {
-            CoreAuthorSubject::authenticated(&session.issuer, session.get_user_id())?
-        }
-        AuthMode::LocalFirst if session.issuer == CoreAuthorSubject::LOCAL_FIRST_ISSUER => {
-            CoreAuthorSubject::reserved(&session.issuer, session.get_user_id())?
-        }
-        AuthMode::Anonymous if session.issuer == CoreAuthorSubject::ANONYMOUS_ISSUER => {
-            CoreAuthorSubject::reserved(&session.issuer, session.get_user_id())?
-        }
-        _ => {
-            return Err(
-                crate::ids::AuthorSubjectError::ReservedIssuer(session.issuer.clone()).into(),
-            );
-        }
-    };
-    Ok(author)
+    Ok(session.author_subject()?)
 }
 
 fn core_storage(schema: &crate::schema::JazzSchema, context: &AppContext) -> Result<StorageBundle> {
@@ -3302,7 +3284,7 @@ mod tests {
 
     #[test]
     fn client_session_reserved_claims_override_application_claims() {
-        let session = Session::new("urn:jazz:test", "trusted-user")
+        let session = Session::new(CoreAuthorSubject::LOCAL_FIRST_ISSUER, "trusted-user")
             .with_auth_mode(crate::tools::public_api::session::AuthMode::LocalFirst)
             .with_claims(json!({
                 "sub": "spoofed-subject",

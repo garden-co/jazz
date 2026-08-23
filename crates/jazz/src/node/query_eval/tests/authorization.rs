@@ -1,6 +1,20 @@
 //! authorization query-evaluation tests.
 
 use super::*;
+use crate::node::query_eval::authorization::permission_scope_claim_values;
+
+#[test]
+fn permission_advice_scope_restores_canonical_issuer_scoped_sub_claim() {
+    let author = AuthorSubject::authenticated("https://issuer.example", "opaque-subject").unwrap();
+    let claims = BTreeMap::from([("sub".to_owned(), Value::String("spoofed".to_owned()))]);
+
+    let values = permission_scope_claim_values(author, Some(&claims));
+
+    assert_eq!(
+        values.get("sub"),
+        Some(&Value::String(author.canonical().to_owned()))
+    );
+}
 
 #[test]
 fn nested_read_policy_claim_slots_do_not_cross_validated_types() {
@@ -404,7 +418,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         .table_read_policy_authorization_request(
             shape.schema_version(),
             "chatMembers",
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             ParamBindingMode::RetainAllParams,
             DurabilityTier::Edge,
             program.request.input.binding.source_shape.clone(),
@@ -430,7 +444,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         .table_read_policy_authorization_request_at(
             shape.schema_version(),
             "chatMembers",
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             ParamBindingMode::RetainAllParams,
             GlobalTime(0),
             program.request.input.binding.source_shape.clone(),

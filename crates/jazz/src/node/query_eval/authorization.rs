@@ -747,7 +747,7 @@ where
         // table query rather than merely dropping prepared claim descriptors:
         // retaining policy claim operands in the shape would still require an
         // identity context when the historical graph is lowered.
-        let query = if identity == AuthorId::SYSTEM {
+        let query = if identity == AuthorSubject::SYSTEM {
             JazzQuery::from(table.name.as_str())
         } else {
             authorization_query_from_read_policy(table)
@@ -919,7 +919,7 @@ where
         // subplan must therefore describe all rows, not the policy's claim
         // predicates: those operands are invalid without an identity context
         // even if the prepared binding descriptor itself has no claim slots.
-        let mut query = if identity == AuthorId::SYSTEM {
+        let mut query = if identity == AuthorSubject::SYSTEM {
             JazzQuery::from(table.name.as_str())
         } else {
             authorization_query_from_read_policy(table)
@@ -1164,10 +1164,7 @@ where
             operation,
         );
         let claims = self.session_claims.get(&writer);
-        let mut claim_values = default_permission_scope_claim_values(writer);
-        if let Some(claims) = claims {
-            claim_values.extend(claims.clone());
-        }
+        let claim_values = permission_scope_claim_values(writer, claims);
         // Authorization support is authority-current: historic/branch views
         // and weaker durability tiers cannot vouch for the authoritative edge.
         let options = RegisterShapeOptions::default();
@@ -1212,6 +1209,17 @@ where
             subscriptions,
         })
     }
+}
+
+pub(super) fn permission_scope_claim_values(
+    writer: AuthorSubject,
+    claims: Option<&BTreeMap<String, Value>>,
+) -> BTreeMap<String, Value> {
+    let mut claim_values = claims.cloned().unwrap_or_default();
+    // Canonical identity claims are reserved: app-provided claims may not
+    // replace the issuer-scoped author subject used by policy support.
+    claim_values.extend(default_permission_scope_claim_values(writer));
+    claim_values
 }
 
 #[cfg(test)]

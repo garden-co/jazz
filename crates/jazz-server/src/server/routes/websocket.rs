@@ -321,7 +321,8 @@ fn ws_validate_session_identity(
     session: &Session,
     peer_identity: AuthorSubject,
 ) -> Result<(), String> {
-    let session_identity = AuthorSubject::authenticated(&session.issuer, &session.user_id)
+    let session_identity = session
+        .author_subject()
         .map_err(|error| error.to_string())?;
     if session_identity != peer_identity {
         return Err("websocket peer_identity must match authenticated session user_id".to_owned());
@@ -1061,6 +1062,11 @@ mod tests {
         assert!(ws_validate_session_identity(&mismatching, peer).is_err());
         assert!(ws_validate_session_identity(&external_session, external_peer).is_ok());
         assert!(ws_validate_session_identity(&external_session, peer).is_err());
+        let local_first = Session::new(AuthorSubject::LOCAL_FIRST_ISSUER, "local-user")
+            .with_auth_mode(AuthMode::LocalFirst);
+        let local_first_peer =
+            AuthorSubject::from_canonical(r#"["urn:jazz:local-first","local-user"]"#).unwrap();
+        assert!(ws_validate_session_identity(&local_first, local_first_peer).is_ok());
     }
 
     #[test]
