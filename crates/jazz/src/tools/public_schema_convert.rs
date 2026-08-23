@@ -26,6 +26,11 @@ use crate::tools::public_schema::{
 };
 
 const DIRECT_USER_ID_CLAIM: &str = "user_id";
+/// The authenticated core author identity, injected by the node after session
+/// claims. This is deliberately not a public `session` field: public
+/// `session.user_id` retains the auth provider's opaque principal spelling,
+/// whereas provenance columns store its stable core `AuthorId` representation.
+pub(crate) const INTERNAL_AUTHOR_ID_CLAIM: &str = "__jazz_author_id";
 const PUBLIC_USER_ID_SESSION_PATHS: &[&str] = &["user_id", "userId"];
 const DIRECT_AUTH_MODE_CLAIM: &str = "authMode";
 const PUBLIC_AUTH_MODE_SESSION_PATHS: &[&str] = &["authMode", "auth_mode"];
@@ -2324,7 +2329,10 @@ fn convert_policy_predicate(
                     CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge => {}
                 }
             }
-            let right = convert_policy_operand(table, path, value)?;
+            let right = match provenance_author_session_operand(column, value) {
+                Some(operand) => operand,
+                None => convert_policy_operand(table, path, value)?,
+            };
             Ok(match op {
                 CmpOp::Eq => Predicate::Eq(left, right),
                 CmpOp::Ne => Predicate::Ne(left, right),
@@ -2395,6 +2403,21 @@ fn convert_policy_predicate(
             format!("core schema policies do not support {other:?} yet"),
         )),
     }
+}
+
+/// Lower a public provenance-owner comparison through the node-owned author
+/// binding rather than the raw external subject. The conversion is intentionally
+/// limited to the two author magic columns: a normal `string` column compared
+/// with `session.user_id` must continue to compare the provider's exact
+/// principal spelling.
+fn provenance_author_session_operand(column: &str, value: &PolicyValue) -> Option<Operand> {
+    let PolicyValue::SessionRef(path) = value else {
+        return None;
+    };
+    (matches!(column, "$createdBy" | "$updatedBy")
+        && path.len() == 1
+        && PUBLIC_USER_ID_SESSION_PATHS.contains(&path[0].as_str()))
+    .then(|| Operand::Claim(INTERNAL_AUTHOR_ID_CLAIM.to_owned()))
 }
 
 fn convert_policy_operand(
@@ -3207,6 +3230,101 @@ mod tests {
             vec![Predicate::Eq(
                 Operand::Column("token_id".to_owned()),
                 Operand::Literal(GrooveValue::Uuid(Uuid::nil())),
+            )]
+        );
+    }
+
+    #[test]
+    fn lowers_public_provenance_ownership_to_the_authenticated_author_binding() {
+        let creator = |column: &str| PolicyExpr::Cmp {
+            column: column.to_owned(),
+            op: CmpOp::Eq,
+            value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+        };
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("title", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new()
+                            .with_select(creator("$createdBy"))
+                            .with_insert(creator("$createdBy"))
+                            .with_update(Some(creator("$createdBy")), creator("$updatedBy"))
+                            .with_delete(creator("$updatedBy")),
+                    ),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).expect("provenance policies should compile");
+        let notes = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "notes")
+            .expect("notes table should exist");
+        let author = Operand::Claim(INTERNAL_AUTHOR_ID_CLAIM.to_owned());
+
+        assert_eq!(
+            notes.read_policy.as_ref().unwrap().filters,
+            vec![Predicate::Eq(
+                Operand::Column("$createdBy".to_owned()),
+                author.clone()
+            )]
+        );
+        assert_eq!(
+            notes.write_policies.insert_check.as_ref().unwrap().filters,
+            vec![Predicate::Eq(
+                Operand::Column("$createdBy".to_owned()),
+                author.clone()
+            )]
+        );
+        assert_eq!(
+            notes.write_policies.update_using.as_ref().unwrap().filters,
+            vec![Predicate::Eq(
+                Operand::Column("$createdBy".to_owned()),
+                author.clone()
+            )]
+        );
+        assert_eq!(
+            notes.write_policies.update_check.as_ref().unwrap().filters,
+            vec![Predicate::Eq(
+                Operand::Column("$updatedBy".to_owned()),
+                author.clone()
+            )]
+        );
+        assert_eq!(
+            notes.write_policies.delete_using.as_ref().unwrap().filters,
+            vec![Predicate::Eq(
+                Operand::Column("$updatedBy".to_owned()),
+                author
+            )]
+        );
+    }
+
+    #[test]
+    fn keeps_ordinary_string_ownership_on_the_raw_session_principal() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("notes")
+                    .column("owner_id", ColumnType::Text)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::Cmp {
+                        column: "owner_id".to_owned(),
+                        op: CmpOp::Eq,
+                        value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+                    })),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).expect("string owner policy should compile");
+        let notes = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "notes")
+            .expect("notes table should exist");
+        assert_eq!(
+            notes.read_policy.as_ref().unwrap().filters,
+            vec![Predicate::Eq(
+                Operand::Column("owner_id".to_owned()),
+                Operand::Claim(DIRECT_USER_ID_CLAIM.to_owned()),
             )]
         );
     }

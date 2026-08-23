@@ -168,6 +168,10 @@ pub(super) fn default_policy_claim_values(writer: AuthorId) -> BTreeMap<String, 
             };
             ((*name).to_owned(), value)
         })
+        .chain(std::iter::once((
+            crate::tools::public_schema_convert::INTERNAL_AUTHOR_ID_CLAIM.to_owned(),
+            Value::Uuid(writer.0),
+        )))
         .collect()
 }
 

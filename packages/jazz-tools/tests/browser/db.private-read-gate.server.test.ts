@@ -207,10 +207,27 @@ const createdByApp = schema.defineApp({
 
 const createdByPermissions = schema.definePermissions(createdByApp, ({ policy, session }) => {
   policy.todos.allowRead.where({ $createdBy: session.user_id });
-  policy.todos.allowInsert.always();
-  policy.todos.allowUpdate.where({ $createdBy: session.user_id });
-  policy.todos.allowDelete.where({ $createdBy: session.user_id });
+  policy.todos.allowInsert.where({ $createdBy: session.user_id });
+  policy.todos.allowUpdate
+    .whereOld({ $createdBy: session.user_id })
+    .whereNew({ $updatedBy: session.user_id });
+  policy.todos.allowDelete.where({ $updatedBy: session.user_id });
 });
+
+const createdByMutationPermissions = schema.definePermissions(
+  createdByApp,
+  ({ policy, session }) => {
+    // The hostile writer must be able to hydrate the row so its attempted
+    // mutation reaches the serving authority; ownership remains enforced for
+    // every mutation through Jazz provenance rather than an app column.
+    policy.todos.allowRead.always();
+    policy.todos.allowInsert.where({ $createdBy: session.user_id });
+    policy.todos.allowUpdate
+      .whereOld({ $createdBy: session.user_id })
+      .whereNew({ $updatedBy: session.user_id });
+    policy.todos.allowDelete.where({ $updatedBy: session.user_id });
+  },
+);
 
 type Chat = RowOf<typeof app.chats>;
 type Message = RowOf<typeof app.messages>;
@@ -288,6 +305,68 @@ describe("raw websocket private read gate", () => {
       async () => snapshots.some((rows) => rows.some((row) => row.id === inserted.id)),
       15_000,
       "$createdBy async-channel subscription should emit the inserted row",
+    );
+  }, 60_000);
+
+  it("enforces provenance ownership for opaque JWT subjects at the deployed authority", async () => {
+    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
+      uniqueDbName("created-by-opaque-principal"),
+    );
+    await publishSchemaAndPermissions(
+      appId,
+      serverUrl,
+      adminSecret,
+      createdByMutationPermissions,
+      createdByApp,
+    );
+    const alice = await openJwtUserDb(
+      appId,
+      serverUrl,
+      "created-by-opaque-alice",
+      await getJazzServerJwtForUser("provider|alice", undefined, appId),
+    );
+    const bob = await openJwtUserDb(
+      appId,
+      serverUrl,
+      "created-by-opaque-bob",
+      await getJazzServerJwtForUser("provider|bob", undefined, appId),
+    );
+
+    const note = await withTimeout(
+      alice
+        .insert(createdByApp.todos, { title: "opaque principal note", done: false })
+        .wait({ tier: "edge" }),
+      15_000,
+      "$createdBy opaque-principal insert edge wait",
+    );
+    await withTimeout(
+      alice
+        .update(createdByApp.todos, note.id, { title: "opaque principal revision" })
+        .wait({ tier: "edge" }),
+      15_000,
+      "$updatedBy opaque-principal update edge wait",
+    );
+    await expect(
+      waitForQuery(
+        alice,
+        createdByApp.todos.where({ id: note.id }),
+        (rows) =>
+          rows.some((row) => row.id === note.id && row.title === "opaque principal revision"),
+        "creator should read a provenance-owned row",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
+    await expect(
+      bob.all(createdByApp.todos.where({ id: note.id }), { tier: "edge" }),
+    ).resolves.toEqual([expect.objectContaining({ id: note.id })]);
+    await expect(
+      bob.update(createdByApp.todos, note.id, { title: "forged revision" }).wait({ tier: "edge" }),
+    ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
+    await withTimeout(
+      alice.delete(createdByApp.todos, note.id).wait({ tier: "edge" }),
+      15_000,
+      "$updatedBy opaque-principal delete edge wait",
     );
   }, 60_000);
 

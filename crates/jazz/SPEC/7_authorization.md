@@ -331,6 +331,13 @@ updates and history truncation. Public policy helpers such as `$createdBy`,
 after they can be lowered and validated through the same fail-closed policy
 machinery as ordinary columns.
 
+For public ownership predicates, `$createdBy == session.user_id` and
+`$updatedBy == session.user_id` compare the row's core `AuthorId` with the
+authenticated author derived from that exact session principal. This conversion
+is specific to provenance: an application `string` column compared with
+`session.user_id` continues to compare the raw provider principal, with no
+implicit UUID coercion.
+
 Auth-mode gating belongs in permissions rather than process-global flags. A
 policy should be able to distinguish anonymous/local/authenticated/backend/system
 admission modes through trusted session claims or first-class admission facts;

@@ -246,6 +246,13 @@ where
                 claims.extend(session_claims.clone());
             }
             claims.insert("sub".to_owned(), Value::Uuid(identity.0));
+            // This binding is not caller-controlled: provenance rows store the
+            // core AuthorId, while session.user_id remains the opaque provider
+            // principal for ordinary application columns.
+            claims.insert(
+                crate::tools::public_schema_convert::INTERNAL_AUTHOR_ID_CLAIM.to_owned(),
+                Value::Uuid(identity.0),
+            );
             PolicyContext::Identity {
                 mode: PolicyEnforcementMode::Enforcing,
                 permission_subject: identity,
@@ -389,6 +396,40 @@ where
         identity: AuthorId,
         insert_candidate: bool,
     ) -> Result<bool, Error> {
+        self.write_policy_query_allows_candidate_with_provenance_for_schema(
+            policy_schema_version,
+            table,
+            policy,
+            row_uuid,
+            cells,
+            identity,
+            insert_candidate,
+            RowProvenance {
+                created_by: identity,
+                created_at: TxTime(0),
+                updated_by: identity,
+                updated_at: TxTime(0),
+            },
+        )
+        .await
+    }
+
+    /// Authorize an inline candidate with the provenance the pending version
+    /// will expose if accepted. Public provenance policies must evaluate this
+    /// metadata exactly like an ordinary current-row source; synthesizing it
+    /// from the permission subject would let an updater appear to be the
+    /// original creator.
+    pub(in crate::node) async fn write_policy_query_allows_candidate_with_provenance_for_schema(
+        &mut self,
+        policy_schema_version: SchemaVersionId,
+        table: &TableSchema,
+        policy: &crate::query::Query,
+        row_uuid: RowUuid,
+        cells: &BTreeMap<String, Value>,
+        identity: AuthorId,
+        insert_candidate: bool,
+        provenance: RowProvenance,
+    ) -> Result<bool, Error> {
         let mut policy = policy.clone();
         if insert_candidate {
             for inherits in &mut policy.inherits {
@@ -473,7 +514,9 @@ where
                 policy_shape.query(),
             ),
         };
-        let candidate = current_row_from_cells(table, row_uuid, cells)?;
+        let candidate = current_row_from_cells_with_explicit_provenance(
+            table, row_uuid, cells, provenance, None,
+        )?;
         let inline_sources = BTreeMap::from([(root_source, vec![candidate])]);
         let access_paths = self.current_query_primary_key_access_paths(&policy_shape, &binding)?;
         let program = Box::pin(
@@ -1145,6 +1188,20 @@ where
         if let Some(claims) = claims {
             claim_values.extend(claims.clone());
         }
+        // A session claim must never be able to replace the identity binding
+        // used by public $createdBy/$updatedBy ownership policies.
+        claim_values.insert(
+            crate::tools::public_schema_convert::INTERNAL_AUTHOR_ID_CLAIM.to_owned(),
+            Value::Uuid(writer.0),
+        );
+        // Keep ordinary session claims fail-closed when the authority did not
+        // admit them. The provenance binding is the sole identity-derived
+        // claim available to the support compiler without a session claim.
+        let mut bound_claims = claims.cloned().unwrap_or_default();
+        bound_claims.insert(
+            crate::tools::public_schema_convert::INTERNAL_AUTHOR_ID_CLAIM.to_owned(),
+            Value::Uuid(writer.0),
+        );
         // Authorization support is authority-current: historic/branch views
         // and weaker durability tiers cannot vouch for the authoritative edge.
         let options = RegisterShapeOptions::default();
@@ -1153,7 +1210,7 @@ where
             .map(|policy| {
                 compile_permission_scope_policy(
                     policy.clone(),
-                    claims,
+                    Some(&bound_claims),
                     &claim_values,
                     &policy_schema.schema,
                 )

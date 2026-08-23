@@ -222,14 +222,27 @@ where
         };
         if let Some(rows) = self.inline_sources.get(&request.source) {
             if request.visibility != RowVisibility::Visible
-                || !request.requirements.metadata.is_empty()
                 || !matches!(authorization, SourceAuthorizationRequest::System)
             {
                 return Err(source_resolution_error(request, SourceGap::Coverage));
             }
-            let graph = inline_current_graph(&table, rows.clone())
+            // Write authorization can inline the current/candidate row while
+            // its ownership policy asks for provenance. Treat that row like
+            // every other source: attach the requested metadata rather than
+            // rejecting an otherwise complete authority proof.
+            let schema_version_alias = self
+                .node
+                .ensure_schema_version_alias(self.read_view.read_schema)
+                .await
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-            let descriptor = current_row_descriptor(&table);
+            let (graph, descriptor, metadata) = inline_current_graph_with_source_metadata(
+                &table,
+                rows.clone(),
+                schema_version_alias,
+                "inline-current",
+                &request.requirements,
+            )
+            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
             return Ok(ResolvedSource {
                 table_schema: table,
                 graph,
@@ -237,7 +250,7 @@ where
                     source: request.source.clone(),
                     descriptor,
                     row_uuid_field: "row_uuid".to_owned(),
-                    metadata: BTreeMap::new(),
+                    metadata,
                 },
                 routing_fields: BTreeSet::new(),
                 requires_result_payload: false,

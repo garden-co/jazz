@@ -31,6 +31,22 @@ const testPermissions = definePermissions(testApp, ({ policy, session }) => {
   policy.todos.allowInsert.where({ ownerId: session.user_id });
 });
 
+const provenanceSchema = {
+  notes: s.table({
+    title: s.string(),
+  }),
+};
+type ProvenanceSchema = s.Schema<typeof provenanceSchema>;
+const provenanceApp: s.App<ProvenanceSchema> = s.defineApp(provenanceSchema);
+const provenancePermissions = definePermissions(provenanceApp, ({ policy, session }) => {
+  policy.notes.allowRead.where({ $createdBy: session.user_id });
+  policy.notes.allowInsert.where({ $createdBy: session.user_id });
+  policy.notes.allowUpdate
+    .whereOld({ $createdBy: session.user_id })
+    .whereNew({ $updatedBy: session.user_id });
+  policy.notes.allowDelete.where({ $updatedBy: session.user_id });
+});
+
 afterEach(async () => {
   await Promise.all(
     Array.from(localServers, async (server) => {
@@ -393,4 +409,28 @@ describe("createPolicyTestApp", () => {
       await policyTestApp.shutdown();
     }
   }, 10_000);
+
+  it("accepts a provenance-scoped insert through the deployed authority", async () => {
+    const policyTestApp = await createPolicyTestApp(provenanceApp, provenancePermissions, expect);
+
+    try {
+      // These are deliberately not UUID strings. Jazz must compare provenance
+      // with the authenticated AuthorId derived from the exact principal, not
+      // try to compare the raw provider subject to a UUID storage column.
+      const alice = policyTestApp.as({
+        user_id: "provider|alice",
+        claims: {},
+        authMode: "local-first",
+      });
+      const note = await alice
+        .insert(provenanceApp.notes, { title: "Alice's note" })
+        .wait({ tier: "edge" });
+
+      await expect(alice.all(provenanceApp.notes.where({ id: note.id }))).resolves.toEqual([
+        expect.objectContaining({ id: note.id, title: "Alice's note" }),
+      ]);
+    } finally {
+      await policyTestApp.shutdown();
+    }
+  }, 20_000);
 });
