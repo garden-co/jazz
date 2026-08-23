@@ -235,6 +235,7 @@ fn propagated_subscriptions_refcount_upstream_coverage_by_shape() {
     );
 
     drop(first);
+    doctest_support::block_on(db.tick()).unwrap();
     assert_eq!(
         db.runtime_stats_for_test().active_subscriptions,
         baseline + 1,
@@ -247,6 +248,7 @@ fn propagated_subscriptions_refcount_upstream_coverage_by_shape() {
     );
 
     drop(second);
+    doctest_support::block_on(db.tick()).unwrap();
     assert_eq!(db.runtime_stats_for_test().active_subscriptions, baseline);
     assert_eq!(pending_upstream_unsubscribe_count(&db), 1);
 }
