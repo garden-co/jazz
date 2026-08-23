@@ -1,10 +1,18 @@
-import { afterEach, describe, expect, inject, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
 import { createSmokeScenario } from "../../src/scenario.js";
 import type { DbConfig } from "jazz-tools";
-import { APP_ID } from "./test-constants.js";
+import { deploy } from "../../../../packages/jazz-tools/src/dev/catalogue.js";
+import permissions from "../../permissions.js";
+import { app } from "../../schema.js";
+import {
+  blockJazzServerNetwork,
+  getJazzServerInfo,
+  getJazzServerJwtForUser,
+  unblockJazzServerNetwork,
+} from "../../../../packages/jazz-tools/tests/browser/testing-server.js";
 
 // A valid local-first identity seed; fixed so the persistence receipt reopens
 // as the same member identity.
@@ -21,13 +29,21 @@ async function waitFor(check: () => boolean, message: string, timeoutMs = 5000) 
   }
   throw new Error(message);
 }
-async function mount(driver: DbConfig["driver"], serverUrl?: string) {
+async function mount(driver: DbConfig["driver"], config: Partial<DbConfig> = {}) {
   const element = document.createElement("div");
   document.body.append(element);
   const root = createRoot(element);
   mounts.push({ root, element });
   await act(async () => {
-    root.render(<App config={{ appId: APP_ID, secret, driver, serverUrl }} />);
+    root.render(
+      <App
+        config={
+          config.jwtToken
+            ? { appId: "band-chat-local", driver, ...config }
+            : { appId: "band-chat-local", secret, driver, ...config }
+        }
+      />,
+    );
   });
   await waitFor(
     () => element.querySelector(".empty") !== null,
@@ -116,10 +132,24 @@ describe("BandChat browser smoke", () => {
     );
   });
 
-  it("retains an offline local write while reconnecting to the deployed server", async () => {
-    const serverUrl = inject("bandChatServerUrl");
+  it("delivers offline writes after reconnect to a fresh server-backed store", async () => {
+    const server = await getJazzServerInfo(
+      `019d4a17-4591-7c0a-a320-${crypto.randomUUID().slice(0, 12)}`,
+    );
+    await deploy({
+      appId: server.appId,
+      serverUrl: server.serverUrl,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions,
+    });
+    const jwtToken = await getJazzServerJwtForUser("band-chat-owner", undefined, server.appId);
     const dbName = `band-chat-offline-${crypto.randomUUID()}`;
-    const offline = await mount({ type: "persistent", dbName }, "http://127.0.0.1:1");
+    await blockJazzServerNetwork(server.serverUrl);
+    const offline = await mount(
+      { type: "persistent", dbName },
+      { appId: server.appId, jwtToken, serverUrl: server.serverUrl },
+    );
     await act(async () => clickDemo(offline));
     await waitFor(
       () => offline.textContent?.includes("Soundcheck at 19:00") ?? false,
@@ -128,10 +158,23 @@ describe("BandChat browser smoke", () => {
     const prior = mounts.pop()!;
     await act(async () => prior.root.unmount());
     prior.element.remove();
-    const reconnected = await mount({ type: "persistent", dbName }, serverUrl);
+    await unblockJazzServerNetwork(server.serverUrl);
+    const reconnected = await mount(
+      { type: "persistent", dbName },
+      { appId: server.appId, jwtToken, serverUrl: server.serverUrl },
+    );
     await waitFor(
       () => reconnected.textContent?.includes("Soundcheck at 19:00") ?? false,
       "reconnect should retain local room",
+    );
+    const freshStore = await mount(
+      { type: "persistent", dbName: `band-chat-fresh-${crypto.randomUUID()}` },
+      { appId: server.appId, jwtToken, serverUrl: server.serverUrl },
+    );
+    await waitFor(
+      () => freshStore.textContent?.includes("Soundcheck at 19:00") ?? false,
+      "fresh server-backed store should receive reconnected room",
+      10000,
     );
   });
 });

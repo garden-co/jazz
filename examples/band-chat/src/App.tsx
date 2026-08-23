@@ -21,6 +21,16 @@ function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbCon
 
 export function App({ config }: { config?: Partial<DbConfig> } = {}) {
   const auth = useLocalFirstAuth();
+  if (config?.jwtToken) {
+    return (
+      <JazzProvider
+        config={{ appId, env: "dev", serverUrl, ...config }}
+        fallback={<p>Opening local stage…</p>}
+      >
+        <BandChat />
+      </JazzProvider>
+    );
+  }
   const secret = config?.secret ?? auth.secret;
   if ((config?.secret === undefined && auth.isLoading) || !secret) return <p>Joining BandChat…</p>;
   return (

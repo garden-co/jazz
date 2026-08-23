@@ -17,7 +17,7 @@ Open the demo room, send a message (or attach a small file), then briefly discon
 
 `s.bytes()` is used for the initial attachment path, which is supported by the current stable public schema API. Attachments are allow-listed (PNG/JPEG/WebP/text/PDF) and capped at 256 KB before bytes are read. They are inline bytes, not large-value/file streaming; larger uploads and image transforms remain a follow-up.
 
-The browser receipt proves only local IndexedDB retention across a reopen. Its test-server global setup is reachable by the browser but does not yet provide a reliable fresh-store delivery assertion for this room-bootstrap shape; that topology-harness issue is recorded separately and is intentionally not claimed as sync coverage. SharedWorker/two-context, worker restart, and native persistence remain follow-up topology coverage rather than simulated support.
+The browser receipt uses Jazz's canonical browser test-server RPC harness: it blocks HTTP and WebSocket traffic, creates the room/message offline, restores connectivity, then proves a fresh IndexedDB store receives the server-delivered result. Keep app browser tests on that harness rather than starting a server in app-local `globalSetup`; the latter is not controlled by the browser context and cannot inject deterministic network faults. SharedWorker/two-context, worker restart, and native persistence remain follow-up topology coverage rather than simulated support.
 
 `roomMembers` and `messages` intentionally have no update policy: Jazz's enforcing runtime defaults those operations to deny. This app treats membership changes as owner-controlled insert/delete operations and messages as immutable.
 
