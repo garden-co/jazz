@@ -743,7 +743,15 @@ where
             .iter()
             .find(|candidate| candidate.name == table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.to_owned()))?;
-        let query = authorization_query_from_read_policy(table);
+        // System authority bypasses the table policy.  Use the unfiltered
+        // table query rather than merely dropping prepared claim descriptors:
+        // retaining policy claim operands in the shape would still require an
+        // identity context when the historical graph is lowered.
+        let query = if identity == AuthorId::SYSTEM {
+            JazzQuery::from(table.name.as_str())
+        } else {
+            authorization_query_from_read_policy(table)
+        };
         if !query.includes.is_empty() {
             return Err(Error::InvalidStoredValue(
                 "historical policy source filters do not support include policies",
@@ -907,7 +915,15 @@ where
             },
             other => other,
         };
-        let mut query = authorization_query_from_read_policy(table);
+        // System authority bypasses the table policy.  Its authorization
+        // subplan must therefore describe all rows, not the policy's claim
+        // predicates: those operands are invalid without an identity context
+        // even if the prepared binding descriptor itself has no claim slots.
+        let mut query = if identity == AuthorId::SYSTEM {
+            JazzQuery::from(table.name.as_str())
+        } else {
+            authorization_query_from_read_policy(table)
+        };
         let mut policy_binding_values = BTreeMap::new();
         if matches!(param_binding_mode, ParamBindingMode::RetainAllParams)
             && let PolicyContext::AuthorizationSubplan { claims, .. } = &policy
