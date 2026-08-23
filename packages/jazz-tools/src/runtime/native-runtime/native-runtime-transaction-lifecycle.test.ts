@@ -387,6 +387,55 @@ it("commits empty exclusive transactions, rejects empty mergeable transactions, 
   );
 });
 
+it("preserves the trusted-serving identity across exclusive transaction begin and commit", () => {
+  const alice = "00000000-0000-0000-0000-0000000000a1";
+  const observed: Array<{ phase: "begin" | "commit"; author?: string }> = [];
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          beginTransaction: (
+            _openBatchId: string,
+            _kind: "mergeable" | "exclusive",
+            author?: Uint8Array,
+          ) => observed.push({ phase: "begin", author: author && formatUuidForTest(author) }),
+          attachExclusiveTx: () => fakeTx(),
+          commitTransaction: (
+            _openBatchId: string,
+            _kind?: "mergeable" | "exclusive",
+            author?: Uint8Array,
+          ) => {
+            observed.push({ phase: "commit", author: author && formatUuidForTest(author) });
+            return fakeWrite();
+          },
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    new Uint8Array(16),
+    1,
+    true,
+    { readAuthorizationHost: "trusted-serving" },
+  );
+
+  const openBatchId = createOpenBatchId();
+  runtime.beginTransaction("exclusive", openBatchId, JSON.stringify({ user_id: alice }));
+  runtime.insert(
+    "todos",
+    { title: { type: "Text", value: "exclusive" } },
+    JSON.stringify({ batch_id: openBatchId, session: { user_id: alice } }),
+  );
+  runtime.commitTransaction(openBatchId);
+
+  expect(observed).toEqual([
+    { phase: "begin", author: alice },
+    { phase: "commit", author: alice },
+  ]);
+});
+
 it("emits an onMutationError event for an unawaited rejected write", async () => {
   const batchId = "00000000000070008000000000000042" as BatchId;
   let mutationErrorCallback: ((event: MutationErrorEvent) => void) | undefined;

@@ -7,6 +7,39 @@ import { deploy as deployProject } from "../dev/catalogue-project.js";
 import { wasmSchema as wasmSchemaExample } from "./fixtures/schema.js";
 import { jazzAdapter } from "./index.js";
 
+const atomicAdapterOptions = {
+  user: {
+    additionalFields: {
+      loginCount: {
+        type: "number",
+        required: false,
+        fieldName: "login_count",
+      },
+      remainingUses: {
+        type: "number",
+        required: false,
+        fieldName: "remaining_uses",
+      },
+      transitionStatus: {
+        type: "string",
+        required: false,
+        fieldName: "transition_status",
+      },
+    },
+  },
+} satisfies BetterAuthOptions;
+
+type AtomicUser = {
+  id: string;
+  name: string;
+  email: string;
+  emailVerified: boolean;
+  image: string | null;
+  loginCount: number;
+  remainingUses: number;
+  transitionStatus: string;
+};
+
 describe("jazzAdapter", () => {
   describe("adapter methods", () => {
     let adapter: DBAdapter<BetterAuthOptions>;
@@ -214,6 +247,105 @@ describe("jazzAdapter", () => {
       expect(remaining.map((row) => row.id)).toEqual([beta.id]);
     });
 
+    it("consumes at most one matching row and returns the deleted row", async () => {
+      const first = await adapter.create<{ id: string; identifier: string }>({
+        model: "verification",
+        data: {
+          identifier: "shared-credential",
+          value: "first",
+          expiresAt: new Date(Date.now() + 60_000),
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      });
+      const second = await adapter.create<{ id: string }>({
+        model: "verification",
+        data: {
+          identifier: "shared-credential",
+          value: "second",
+          expiresAt: new Date(Date.now() + 60_000),
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      });
+
+      const consumed = await adapter.consumeOne<{ id: string; identifier: string }>({
+        model: "verification",
+        where: [
+          {
+            field: "identifier",
+            operator: "eq",
+            value: "shared-credential",
+            connector: "AND",
+          },
+        ],
+      });
+
+      expect(consumed).toMatchObject({ identifier: "shared-credential" });
+      expect([first.id, second.id]).toContain(consumed?.id);
+
+      await expect(
+        adapter.findMany({
+          model: "verification",
+          where: [
+            {
+              field: "identifier",
+              operator: "eq",
+              value: "shared-credential",
+              connector: "AND",
+            },
+          ],
+          limit: 10,
+        }),
+      ).resolves.toHaveLength(1);
+    });
+
+    it("applies mapped signed increments and set values while honoring the where guard", async () => {
+      const atomicAdapter = jazzAdapter({
+        db: () => context.asBackend(wasmSchemaExample),
+        schema: wasmSchemaExample,
+      })(atomicAdapterOptions);
+      const user = await atomicAdapter.create<AtomicUser>({
+        model: "user",
+        data: {
+          name: "Counter",
+          email: "counter@example.com",
+          emailVerified: false,
+          image: null,
+          loginCount: 2,
+          remainingUses: 1,
+          transitionStatus: "open",
+        },
+      });
+
+      const updated = await atomicAdapter.incrementOne<AtomicUser>({
+        model: "user",
+        where: [
+          { field: "id", operator: "eq", value: user.id, connector: "AND" },
+          { field: "remainingUses", operator: "gt", value: 0, connector: "AND" },
+        ],
+        increment: { loginCount: 3, remainingUses: -1 },
+        set: { transitionStatus: "closed" },
+      });
+
+      expect(updated).toMatchObject({
+        id: user.id,
+        loginCount: 5,
+        remainingUses: 0,
+        transitionStatus: "closed",
+      });
+      await expect(
+        atomicAdapter.incrementOne({
+          model: "user",
+          where: [
+            { field: "id", operator: "eq", value: user.id, connector: "AND" },
+            { field: "remainingUses", operator: "gt", value: 0, connector: "AND" },
+          ],
+          increment: { remainingUses: -1 },
+        }),
+      ).resolves.toBeNull();
+    });
+
     it("supports client-side-only where operators", async () => {
       const prefixUser = await adapter.create<any>({
         model: "user",
@@ -267,6 +399,7 @@ describe("jazzAdapter", () => {
       const account = await adapter.create<any>({
         model: "account",
         data: {
+          issuer: "github",
           accountId: "github-account",
           providerId: "github",
           userId: user.id,
@@ -530,6 +663,7 @@ describe("jazzAdapter", () => {
       const account = await adapter.create({
         model: "account",
         data: {
+          issuer: "credential",
           userId: user.id,
           providerId: "credential",
           accountId: user.id,
@@ -754,6 +888,7 @@ describe("jazzAdapter", () => {
       const account = await adapter.create({
         model: "account",
         data: {
+          issuer: "github",
           userId: user.id,
           providerId: "github",
           accountId: "account000",
@@ -1059,6 +1194,194 @@ describe("jazzAdapter", () => {
         await ctx2.shutdown();
       }
     });
+
+    test(
+      "allows exactly one consumeOne winner across concurrent clients",
+      { timeout: 30_000 },
+      async () => {
+        const ctx1 = createJazzContext({
+          appId: server.appId,
+          driver: { type: "memory" },
+          serverUrl: server.url,
+          backendSecret: server.backendSecret,
+        });
+        const ctx2 = createJazzContext({
+          appId: server.appId,
+          driver: { type: "memory" },
+          serverUrl: server.url,
+          backendSecret: server.backendSecret,
+        });
+
+        try {
+          const adapter1 = jazzAdapter({
+            db: () => ctx1.asBackend(wasmSchemaExample),
+            schema: wasmSchemaExample,
+          })({});
+          const adapter2 = jazzAdapter({
+            db: () => ctx2.asBackend(wasmSchemaExample),
+            schema: wasmSchemaExample,
+          })({});
+          const verification = await adapter1.create<{ id: string }>({
+            model: "verification",
+            data: {
+              identifier: "consume-race",
+              value: "single-use",
+              expiresAt: new Date(Date.now() + 60_000),
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            },
+          });
+
+          await vi.waitFor(
+            async () => {
+              await expect(
+                adapter2.findOne({
+                  model: "verification",
+                  where: [
+                    {
+                      field: "id",
+                      operator: "eq",
+                      value: verification.id,
+                      connector: "AND",
+                    },
+                  ],
+                }),
+              ).resolves.toMatchObject({ id: verification.id });
+            },
+            { timeout: 15_000 },
+          );
+
+          const results = await Promise.all(
+            Array.from({ length: 8 }, (_, index) =>
+              (index % 2 === 0 ? adapter1 : adapter2).consumeOne<{ id: string }>({
+                model: "verification",
+                where: [
+                  {
+                    field: "id",
+                    operator: "eq",
+                    value: verification.id,
+                    connector: "AND",
+                  },
+                ],
+              }),
+            ),
+          );
+
+          expect(results.filter((result) => result !== null)).toEqual([verification]);
+          await expect(
+            adapter1.findOne({
+              model: "verification",
+              where: [
+                {
+                  field: "id",
+                  operator: "eq",
+                  value: verification.id,
+                  connector: "AND",
+                },
+              ],
+            }),
+          ).resolves.toBeNull();
+        } finally {
+          await ctx1.shutdown();
+          await ctx2.shutdown();
+        }
+      },
+    );
+
+    test(
+      "retries concurrent increments and preserves a guarded one-winner transition",
+      { timeout: 30_000 },
+      async () => {
+        const ctx1 = createJazzContext({
+          appId: server.appId,
+          driver: { type: "memory" },
+          serverUrl: server.url,
+          backendSecret: server.backendSecret,
+        });
+        const ctx2 = createJazzContext({
+          appId: server.appId,
+          driver: { type: "memory" },
+          serverUrl: server.url,
+          backendSecret: server.backendSecret,
+        });
+
+        try {
+          const adapter1 = jazzAdapter({
+            db: () => ctx1.asBackend(wasmSchemaExample),
+            schema: wasmSchemaExample,
+          })(atomicAdapterOptions);
+          const adapter2 = jazzAdapter({
+            db: () => ctx2.asBackend(wasmSchemaExample),
+            schema: wasmSchemaExample,
+          })(atomicAdapterOptions);
+          const user = await adapter1.create<AtomicUser>({
+            model: "user",
+            data: {
+              name: "Concurrent counter",
+              email: "concurrent-counter@example.com",
+              emailVerified: false,
+              image: null,
+              loginCount: 0,
+              remainingUses: 1,
+              transitionStatus: "open",
+            },
+          });
+
+          await vi.waitFor(
+            async () => {
+              await expect(
+                adapter2.findOne({
+                  model: "user",
+                  where: [{ field: "id", operator: "eq", value: user.id, connector: "AND" }],
+                }),
+              ).resolves.toMatchObject({ id: user.id, loginCount: 0 });
+            },
+            { timeout: 15_000 },
+          );
+
+          const increments = await Promise.all(
+            Array.from({ length: 8 }, (_, index) =>
+              (index % 2 === 0 ? adapter1 : adapter2).incrementOne<AtomicUser>({
+                model: "user",
+                where: [{ field: "id", operator: "eq", value: user.id, connector: "AND" }],
+                increment: { loginCount: 1 },
+              }),
+            ),
+          );
+          expect(increments).not.toContain(null);
+
+          const guarded = await Promise.all(
+            Array.from({ length: 8 }, (_, index) =>
+              (index % 2 === 0 ? adapter1 : adapter2).incrementOne<AtomicUser>({
+                model: "user",
+                where: [
+                  { field: "id", operator: "eq", value: user.id, connector: "AND" },
+                  { field: "remainingUses", operator: "gt", value: 0, connector: "AND" },
+                ],
+                increment: { remainingUses: -1 },
+                set: { transitionStatus: "claimed" },
+              }),
+            ),
+          );
+          expect(guarded.filter((result) => result !== null)).toHaveLength(1);
+
+          await expect(
+            adapter1.findOne<AtomicUser>({
+              model: "user",
+              where: [{ field: "id", operator: "eq", value: user.id, connector: "AND" }],
+            }),
+          ).resolves.toMatchObject({
+            id: user.id,
+            loginCount: 8,
+            remainingUses: 0,
+            transitionStatus: "claimed",
+          });
+        } finally {
+          await ctx1.shutdown();
+          await ctx2.shutdown();
+        }
+      },
+    );
 
     test("supports email/password sign up and sign in", { timeout: 10_000 }, async () => {
       const signUpResponse = await auth.api.signUpEmail({

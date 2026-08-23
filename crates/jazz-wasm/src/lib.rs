@@ -512,8 +512,15 @@ impl WasmDbInner {
         ))
     }
 
-    fn begin_exclusive(&self, id: OpenTransactionId) -> Result<(), jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(db.begin_exclusive(id)))
+    fn begin_exclusive(
+        &self,
+        id: OpenTransactionId,
+        author: Option<AuthorId>,
+    ) -> Result<(), jazz::db::Error> {
+        with_wasm_db!(self, |db| match author {
+            Some(author) => block_on(db.begin_exclusive_for_identity(id, author)),
+            None => block_on(db.begin_exclusive(id)),
+        })
     }
 
     fn begin_mergeable(
@@ -756,8 +763,15 @@ impl WasmDbInner {
         ))
     }
 
-    fn commit_exclusive(&self, tx_id: OpenTransactionId) -> Result<TxId, jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(db.commit_exclusive_handle(tx_id)))
+    fn commit_exclusive(
+        &self,
+        tx_id: OpenTransactionId,
+        author: Option<AuthorId>,
+    ) -> Result<TxId, jazz::db::Error> {
+        with_wasm_db!(self, |db| match author {
+            Some(author) => block_on(db.commit_exclusive_handle_for_identity(tx_id, author)),
+            None => block_on(db.commit_exclusive_handle(tx_id)),
+        })
     }
 
     fn commit_mergeable(&self, tx_id: OpenTransactionId) -> Result<TxId, jazz::db::Error> {
@@ -1641,13 +1655,10 @@ impl WasmDb {
                 .inner
                 .begin_mergeable(open_batch_id, author)
                 .map_err(to_js_error),
-            "exclusive" if author.is_none() => self
+            "exclusive" => self
                 .inner
-                .begin_exclusive(open_batch_id)
+                .begin_exclusive(open_batch_id, author)
                 .map_err(to_js_error),
-            "exclusive" => Err(JsValue::from_str(
-                "exclusive transactions do not accept an identity override",
-            )),
             _ => Err(JsValue::from_str(&unknown_transaction_kind_message(&kind))),
         }
     }
@@ -1658,13 +1669,15 @@ impl WasmDb {
         &self,
         open_batch_id: String,
         kind: Option<String>,
+        author: Option<Vec<u8>>,
     ) -> Result<WasmWrite, JsValue> {
         let open_batch_id = open_batch_id
             .parse::<OpenTransactionId>()
             .map_err(|error| JsValue::from_str(&error))?;
+        let author = author.as_deref().map(author_id_from_bytes).transpose()?;
         let tx_id = match kind.as_deref().unwrap_or("mergeable") {
             "mergeable" => self.inner.commit_mergeable(open_batch_id),
-            "exclusive" => self.inner.commit_exclusive(open_batch_id),
+            "exclusive" => self.inner.commit_exclusive(open_batch_id, author),
             kind => return Err(JsValue::from_str(&unknown_transaction_kind_message(kind))),
         }
         .map_err(to_js_error)?;
@@ -2700,7 +2713,7 @@ impl WasmDb {
             .parse::<OpenTransactionId>()
             .map_err(|error| JsValue::from_str(&error))?;
         self.inner
-            .begin_exclusive(open_batch_id)
+            .begin_exclusive(open_batch_id, None)
             .map_err(to_js_error)?;
         Ok(WasmTx {
             db: self.inner.clone(),
@@ -3034,7 +3047,10 @@ impl WasmTx {
                 )
             }
             (WasmDbInner::Memory(db), WasmTxKind::Exclusive) => {
-                let tx_id = self.db.commit_exclusive(open_tx).map_err(to_js_error)?;
+                let tx_id = self
+                    .db
+                    .commit_exclusive(open_tx, None)
+                    .map_err(to_js_error)?;
                 wasm_tx_write(
                     tx_id,
                     Some(WasmWriteInner::MemoryTx {
@@ -3056,7 +3072,10 @@ impl WasmTx {
             }
             #[cfg(target_arch = "wasm32")]
             (WasmDbInner::Browser(db), WasmTxKind::Exclusive) => {
-                let tx_id = self.db.commit_exclusive(open_tx).map_err(to_js_error)?;
+                let tx_id = self
+                    .db
+                    .commit_exclusive(open_tx, None)
+                    .map_err(to_js_error)?;
                 wasm_tx_write(
                     tx_id,
                     Some(WasmWriteInner::BrowserTx {

@@ -87,7 +87,7 @@ type NativeDb = {
   close?(): void | boolean | Promise<void | boolean>;
   registerSchema(schema: Uint8Array): NativeDb;
   beginTransaction(openBatchId: string, kind: TransactionKind, author?: Uint8Array): void;
-  commitTransaction(openBatchId: string, kind?: TransactionKind): Write;
+  commitTransaction(openBatchId: string, kind?: TransactionKind, author?: Uint8Array): Write;
   rollbackTransaction(openBatchId: string): void;
   attachMergeableTx(openBatchId: string): Tx;
   attachExclusiveTx?(openBatchId: string): Tx;
@@ -1130,7 +1130,7 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     const session = sessionFromWriteContext(sessionJson);
     this.applySessionClaims(session);
-    const identity = kind === "mergeable" ? this.trustedWriteIdentity(session) : undefined;
+    const identity = this.trustedWriteIdentity(session);
     this.db.beginTransaction(id, kind, identity);
     this.pendingTxs.set(id, { id, kind, identity, writes: [], txByView: new Map() });
     return id;
@@ -1148,7 +1148,7 @@ export class NativeRuntimeAdapter implements Runtime {
       );
     }
     let write: Write;
-    write = this.db.commitTransaction(openBatchId, pending.kind);
+    write = this.db.commitTransaction(openBatchId, pending.kind, pending.identity);
     this.pendingTxs.delete(openBatchId);
     this.completedTxs.set(openBatchId, { kind: pending.kind, state: "committed" });
     this.pumpSubscriptions();
@@ -1900,11 +1900,8 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private txForWrite(pending: PendingTx, identity: Uint8Array | undefined): Tx {
     if (pending.kind === "exclusive") {
-      if (identity && schemaHasPolicies(this.schema)) {
-        throw new Error(
-          "Native runtime cannot perform session-scoped exclusive transaction writes: " +
-            "the native runtime exclusive transaction API has no identity-aware staging methods.",
-        );
+      if (pending.identity && (!identity || !sameBytes(pending.identity, identity))) {
+        throw new Error("Native runtime exclusive transaction cannot mix write identities");
       }
       return this.txForRead(pending);
     }
@@ -3191,10 +3188,6 @@ function errorMessage(error: unknown): string {
 function contextualError(context: string, error: unknown): Error {
   const cause = error instanceof Error ? error : new Error(errorMessage(error));
   return new Error(`${context}: ${cause.message}`, { cause });
-}
-
-function schemaHasPolicies(schema: WasmSchema): boolean {
-  return Object.values(schema).some((table) => table.policies !== undefined);
 }
 
 function rejectionCode(message: string): string {

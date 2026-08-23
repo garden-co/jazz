@@ -26,13 +26,15 @@ export declare class NapiDb {
   /** Begin one owner-wide transaction without creating an owning per-schema Tx. */
   beginTransaction(openBatchId: string, kind: string, author?: Uint8Array | undefined | null): void
   /** Commit an owner-wide transaction by id and optional kind. */
-  commitTransaction(openBatchId: string, kind?: string | undefined | null): Write
+  commitTransaction(openBatchId: string, kind?: string | undefined | null, author?: Uint8Array | undefined | null): Write
   /** Roll back an owner-wide open transaction by id. */
   rollbackTransaction(openBatchId: string): void
   setTickScheduler(callback: ((err: Error | null, arg: string) => void)): void
   onMutationError(callback: (event: any) => void): void
   prepareQuery(query: Uint8Array): PreparedQuery
   all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
+  allInTransaction(query: PreparedQuery, tx: Tx, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
+  allInTransactionForIdentity(query: PreparedQuery, tx: Tx, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
   allRelationSnapshot(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array

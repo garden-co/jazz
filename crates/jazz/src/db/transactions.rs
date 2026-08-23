@@ -466,6 +466,23 @@ where
         self.open_exclusive_handle(id).await
     }
 
+    /// Open an exclusive transaction authored and permission-checked as `author`.
+    ///
+    /// See [`Db::begin_exclusive`] for ownership and operation-handle guidance.
+    pub async fn begin_exclusive_for_identity(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorId,
+    ) -> Result<(), Error> {
+        self.node
+            .node
+            .lock()
+            .await
+            .open_exclusive_for_identity(id, author)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Return a non-owning operations handle for an already-open exclusive transaction.
     ///
     /// This handle never closes the transaction when dropped, so it is suitable
@@ -649,12 +666,22 @@ where
         &self,
         open_tx_id: OpenTransactionId,
     ) -> Result<TxId, Error> {
+        self.commit_exclusive_handle_for_identity(open_tx_id, self.identity.author)
+            .await
+    }
+
+    /// Commit an owned exclusive transaction handle as `author`.
+    pub async fn commit_exclusive_handle_for_identity(
+        &self,
+        open_tx_id: OpenTransactionId,
+        author: AuthorId,
+    ) -> Result<TxId, Error> {
         let (published, unit) = self
             .node
             .node
             .lock()
             .await
-            .commit_exclusive(open_tx_id, self.identity.author, self.next_now_ms())
+            .commit_exclusive(open_tx_id, author, self.next_now_ms())
             .await?;
         let tx_id = published.tx_id;
         if self.node.defer_local_persistence.get() {

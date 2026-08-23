@@ -994,11 +994,6 @@ impl NapiDb {
                 &kind,
             )));
         }
-        if kind == "exclusive" && author.is_some() {
-            return Err(napi::Error::from_reason(
-                "exclusive transactions do not accept an identity override",
-            ));
-        }
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1015,7 +1010,13 @@ impl NapiDb {
                             None => $db.begin_mergeable(open_batch_id).await,
                         }
                     } else {
-                        $db.begin_exclusive(open_batch_id).await
+                        match author {
+                            Some(author) => {
+                                $db.begin_exclusive_for_identity(open_batch_id, author)
+                                    .await
+                            }
+                            None => $db.begin_exclusive(open_batch_id).await,
+                        }
                     }
                 })
             };
@@ -1033,6 +1034,7 @@ impl NapiDb {
         &self,
         open_batch_id: String,
         kind: Option<String>,
+        author: Option<Uint8Array>,
     ) -> napi::Result<Write> {
         let open_batch_id = open_batch_id
             .parse::<CoreOpenBatchId>()
@@ -1041,20 +1043,24 @@ impl NapiDb {
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match (db, kind.as_deref().unwrap_or("mergeable")) {
-            (NapiDbInnerStorage::Memory(db), "mergeable") => {
+        let author = author
+            .as_deref()
+            .map(core_author_id_from_bytes)
+            .transpose()?;
+        match (db, kind.as_deref().unwrap_or("mergeable"), author) {
+            (NapiDbInnerStorage::Memory(db), "mergeable", _) => {
                 core_commit_tx_memory(db, open_batch_id)
             }
-            (NapiDbInnerStorage::Persistent(db), "mergeable") => {
+            (NapiDbInnerStorage::Persistent(db), "mergeable", _) => {
                 core_commit_tx_persistent(db, open_batch_id)
             }
-            (NapiDbInnerStorage::Memory(db), "exclusive") => {
-                core_commit_exclusive_tx_memory(db, open_batch_id)
+            (NapiDbInnerStorage::Memory(db), "exclusive", author) => {
+                core_commit_exclusive_tx_memory(db, open_batch_id, author)
             }
-            (NapiDbInnerStorage::Persistent(db), "exclusive") => {
-                core_commit_exclusive_tx_persistent(db, open_batch_id)
+            (NapiDbInnerStorage::Persistent(db), "exclusive", author) => {
+                core_commit_exclusive_tx_persistent(db, open_batch_id, author)
             }
-            (_, kind) => Err(napi::Error::from_reason(unknown_transaction_kind_message(
+            (_, kind, _) => Err(napi::Error::from_reason(unknown_transaction_kind_message(
                 kind,
             ))),
         }
@@ -1149,6 +1155,88 @@ impl NapiDb {
         let rows = match db {
             NapiDbInnerStorage::Memory(db) => core_block_on(db.all(&query.inner, opts)),
             NapiDbInnerStorage::Persistent(db) => core_block_on(db.all(&query.inner, opts)),
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        encode_core_rows(&rows)
+            .map(Uint8Array::new)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    #[napi(js_name = "allInTransaction")]
+    pub fn all_in_transaction(
+        &self,
+        query: &PreparedQuery,
+        tx: &Tx,
+        #[napi(
+            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
+        )]
+        opts: Option<JsonValue>,
+    ) -> napi::Result<Uint8Array> {
+        let opts = core_read_opts_from_json(opts)?;
+        let open_tx = tx.open_tx()?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let rows = match (db, tx.kind) {
+            (NapiDbInnerStorage::Memory(db), NapiTxKind::Mergeable) => core_block_on(
+                db.mergeable_tx_ref(open_tx)
+                    .all_prepared_with_opts(&query.inner, opts),
+            ),
+            (NapiDbInnerStorage::Persistent(db), NapiTxKind::Mergeable) => core_block_on(
+                db.mergeable_tx_ref(open_tx)
+                    .all_prepared_with_opts(&query.inner, opts),
+            ),
+            (NapiDbInnerStorage::Memory(db), NapiTxKind::Exclusive) => core_block_on(
+                db.exclusive_tx_ref(open_tx)
+                    .all_prepared_with_opts(&query.inner, opts),
+            ),
+            (NapiDbInnerStorage::Persistent(db), NapiTxKind::Exclusive) => core_block_on(
+                db.exclusive_tx_ref(open_tx)
+                    .all_prepared_with_opts(&query.inner, opts),
+            ),
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        encode_core_rows(&rows)
+            .map(Uint8Array::new)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    #[napi(js_name = "allInTransactionForIdentity")]
+    pub fn all_in_transaction_for_identity(
+        &self,
+        query: &PreparedQuery,
+        tx: &Tx,
+        author: Uint8Array,
+        #[napi(
+            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
+        )]
+        opts: Option<JsonValue>,
+    ) -> napi::Result<Uint8Array> {
+        let author = core_author_id_from_bytes(&author)?;
+        let opts = core_read_opts_from_json(opts)?;
+        let open_tx = tx.open_tx()?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let rows = match (db, tx.kind) {
+            (NapiDbInnerStorage::Memory(db), NapiTxKind::Mergeable) => core_block_on(
+                db.mergeable_tx_ref(open_tx)
+                    .all_prepared_for_identity_with_opts(&query.inner, author, opts),
+            ),
+            (NapiDbInnerStorage::Persistent(db), NapiTxKind::Mergeable) => core_block_on(
+                db.mergeable_tx_ref(open_tx)
+                    .all_prepared_for_identity_with_opts(&query.inner, author, opts),
+            ),
+            (NapiDbInnerStorage::Memory(db), NapiTxKind::Exclusive) => core_block_on(
+                db.exclusive_tx_ref(open_tx)
+                    .all_prepared_for_identity_with_opts(&query.inner, author, opts),
+            ),
+            (NapiDbInnerStorage::Persistent(db), NapiTxKind::Exclusive) => core_block_on(
+                db.exclusive_tx_ref(open_tx)
+                    .all_prepared_for_identity_with_opts(&query.inner, author, opts),
+            ),
         }
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         encode_core_rows(&rows)
@@ -2803,9 +2891,18 @@ fn core_commit_tx_persistent(
 fn core_commit_exclusive_tx_memory(
     db: &Rc<CoreDb<CoreMemoryStorage>>,
     open_tx: CoreOpenBatchId,
+    author: Option<CoreAuthorId>,
 ) -> napi::Result<Write> {
-    let tx_id = core_block_on(db.commit_exclusive_handle(open_tx))
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    let tx_id = core_block_on(async {
+        match author {
+            Some(author) => {
+                db.commit_exclusive_handle_for_identity(open_tx, author)
+                    .await
+            }
+            None => db.commit_exclusive_handle(open_tx).await,
+        }
+    })
+    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
     core_tx_write(
         tx_id,
         Some(NapiWrite::Memory {
@@ -2818,9 +2915,18 @@ fn core_commit_exclusive_tx_memory(
 fn core_commit_exclusive_tx_persistent(
     db: &Rc<CoreDb<CoreRocksDbStorage>>,
     open_tx: CoreOpenBatchId,
+    author: Option<CoreAuthorId>,
 ) -> napi::Result<Write> {
-    let tx_id = core_block_on(db.commit_exclusive_handle(open_tx))
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    let tx_id = core_block_on(async {
+        match author {
+            Some(author) => {
+                db.commit_exclusive_handle_for_identity(open_tx, author)
+                    .await
+            }
+            None => db.commit_exclusive_handle(open_tx).await,
+        }
+    })
+    .map_err(|error| napi::Error::from_reason(error.to_string()))?;
     core_tx_write(
         tx_id,
         Some(NapiWrite::Persistent {
