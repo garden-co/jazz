@@ -1,5 +1,60 @@
 // Unsupported operands and missing claims fail closed.
 
+/// A write-only table has an explicit empty read authority.  Keep all public
+/// read surfaces on that single lowering path: a missing SELECT clause must
+/// settle as an empty result, rather than leaking a QueryCapability error (or
+/// leaving permission advice indeterminate).
+#[test]
+fn write_only_table_denies_current_maintained_historical_and_advice_reads() {
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .policies(PublicTablePolicies::new().with_delete(PublicPolicyExpr::True)),
+    ));
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let hidden = row(0x91);
+    let tx = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", hidden, 10).cells(title_cells("write-only")),
+        )
+        .unwrap();
+    core.apply_fate_update(
+        tx,
+        Fate::Accepted,
+        Some(GlobalTime(1)),
+        Some(DurabilityTier::Global),
+    )
+    .unwrap();
+    let identity = user(0xa1);
+    let shape = Query::from("todos").validate(&core.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+
+    assert!(
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Global, identity)
+            .unwrap()
+            .is_empty(),
+        "ordinary read must lower to an explicit empty authority"
+    );
+    assert!(
+        core.query_rows_at_for_link(&shape, &binding, GlobalTime(1), identity)
+            .unwrap()
+            .is_empty(),
+        "historical read must lower to the same empty authority"
+    );
+    assert!(
+        !core
+            .dry_run_read_current_allows("todos", hidden, identity)
+            .unwrap(),
+        "permission advice must be a determinate denial"
+    );
+
+    let mut edge = PeerState::edge_client(identity);
+    assert_view_update_only_references_rows(
+        &edge.current_rows_update(&mut core, "todos").unwrap(),
+        BTreeSet::new(),
+    );
+}
+
 #[test]
 fn unsupported_policy_predicates_deny_instead_of_allowing() {
     let schema = build_public_test_schema(PublicSchemaBuilder::new().table(

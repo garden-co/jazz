@@ -342,6 +342,10 @@ fn current_join_provenance_permission_schema() -> jazz::tools::Schema {
                 .policies(
                     TablePolicies::new()
                         .with_insert(PolicyExpr::True)
+                        // This scenario moves an existing post between
+                        // reader scopes; its write is not testing omitted
+                        // operation semantics.
+                        .with_update(Some(PolicyExpr::True), PolicyExpr::True)
                         .with_select(PolicyExpr::eq_session(
                             "viewer_name",
                             vec!["user_id".into()],

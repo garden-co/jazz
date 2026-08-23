@@ -97,15 +97,24 @@ fn row(idx: u8) -> RowUuid {
 }
 
 fn schema() -> JazzSchema {
+    // The concurrent topology itself is under test, not write authorization.
+    // Make every fixture mutation explicit now that one declared policy closes
+    // omitted operations.
+    let policies = TablePolicies::new()
+        .with_select(session_eq("owner", &["claims", "sub"]))
+        .with_insert(jazz::tools::PolicyExpr::True)
+        .with_update(
+            Some(jazz::tools::PolicyExpr::True),
+            jazz::tools::PolicyExpr::True,
+        )
+        .with_delete(jazz::tools::PolicyExpr::True);
     compile_schema(
         &SchemaBuilder::new()
             .table(
                 TableSchemaBuilder::new(TABLE)
                     .column("title", ColumnType::Text)
                     .column("owner", ColumnType::Uuid)
-                    .policies(
-                        TablePolicies::new().with_select(session_eq("owner", &["claims", "sub"])),
-                    ),
+                    .policies(policies),
             )
             .build(),
     )

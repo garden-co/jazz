@@ -17,7 +17,7 @@ use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::schema::JazzSchema;
 use jazz::serving::{InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerSession};
-use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 use jazz::wire::{TransportError, WireTransport};
 
@@ -47,6 +47,19 @@ fn schema() -> JazzSchema {
                 TableSchemaBuilder::new("todos")
                     .column("title", ColumnType::Text)
                     .column("completed", ColumnType::Boolean),
+            )
+            .build(),
+    )
+}
+
+fn read_only_schema() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("title", ColumnType::Text)
+                    .column("completed", ColumnType::Boolean)
+                    .policies(TablePolicies::new().with_select(PolicyExpr::True)),
             )
             .build(),
     )
@@ -289,6 +302,35 @@ fn core_shell_client_upload_still_reports_global_immediately() {
         visible_titles(&bob, DurabilityTier::Global),
         ["core global"]
     );
+}
+
+/// The client may optimistically stage this write locally, but the served
+/// authority must reject it after a read-only policy closes the table's
+/// omitted write operations.  This is intentionally a real client -> core
+/// session receipt, rather than an in-memory fixture filter.
+#[test]
+fn core_authority_rejects_omitted_insert_after_read_policy_closes_table() {
+    let schema = read_only_schema();
+    let mut core = InMemoryServerShell::start(
+        InMemoryServerShellConfig::new(schema.clone(), identity(0xc2, AuthorId::SYSTEM))
+            .with_role(NodeRole::Core),
+    )
+    .unwrap();
+    let alice = open_db(0xa3, author(0xa3), &schema);
+    let wire = QueuedWireTransport::default();
+    let session = connect_client_to_edge(&mut core, &alice, &wire, author(0xa3));
+
+    let write = block_on(alice.insert(
+        "todos",
+        BTreeMap::from([
+            ("title".to_owned(), Value::String("forged write".to_owned())),
+            ("completed".to_owned(), Value::Bool(false)),
+        ]),
+    ))
+    .unwrap();
+    pump_client_edge(&alice, &wire, &mut core, session);
+
+    assert!(block_on(write.wait(DurabilityTier::Global)).is_err());
 }
 
 /// Black-box regression for authored-column carriage across the public Db and

@@ -1159,6 +1159,7 @@ fn client_delete_advice_is_unknown_without_mutating() {
     let write = owner_db
         .insert_with_id("todos", row, cells("owned", false, owner))
         .unwrap();
+    block_on(write.wait(DurabilityTier::Local)).unwrap();
     other_db
         .node
         .node

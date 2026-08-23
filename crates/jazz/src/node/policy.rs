@@ -102,9 +102,15 @@ where
         } else {
             self.policy_projection_for_version_record(version)?
         };
+        // A table stays open until it declares its first policy clause. From
+        // that point on the policy set is closed: a missing operation clause
+        // is a denial, rather than an accidental public grant.
+        if !table.has_any_policy() {
+            return Ok(true);
+        }
         if version.deletion() == Some(DeletionEvent::Deleted) {
             let Some(policy) = table.write_policies.delete_using.clone() else {
-                return Ok(true);
+                return Ok(false);
             };
             let current = match self
                 .policy_delete_subject_row(policy_schema_version, &table, version)
@@ -170,6 +176,11 @@ where
                     return Ok(false);
                 }
             }
+            if table.write_policies.update_using.is_none()
+                && table.write_policies.update_check.is_none()
+            {
+                return Ok(false);
+            }
             let Some(policy) = table.write_policies.update_check.clone() else {
                 return Ok(true);
             };
@@ -188,7 +199,7 @@ where
                 .await;
         }
         let Some(policy) = table.write_policies.insert_check.clone() else {
-            return Ok(true);
+            return Ok(false);
         };
         self.write_policy_query_allows_candidate_for_schema(
             policy_schema_version,
@@ -323,6 +334,9 @@ where
             return Ok(true);
         }
         let table = self.table(table_name)?.clone();
+        if !table.has_any_policy() {
+            return Ok(true);
+        }
         let Some(row) = self
             .policy_local_current_subject_row(&table, row_uuid)
             .await?
@@ -330,7 +344,10 @@ where
             return Ok(false);
         };
         let Some(policy) = table.write_policies.update_using.clone() else {
-            return Ok(false);
+            // An update that only has a WITH CHECK clause is still an
+            // explicitly declared update operation. The caller asking about
+            // the old-row clause has nothing further to prove here.
+            return Ok(table.write_policies.update_check.is_some());
         };
         self.write_policy_query_allows_current_row(&policy, row.row_uuid(), author)
             .await
@@ -346,6 +363,9 @@ where
             return Ok(true);
         }
         let table = self.table(table_name)?.clone();
+        if !table.has_any_policy() {
+            return Ok(true);
+        }
         let Some(row) = self
             .policy_local_current_subject_row(&table, row_uuid)
             .await?
@@ -353,7 +373,7 @@ where
             return Ok(false);
         };
         let Some(policy) = table.write_policies.delete_using.clone() else {
-            return Ok(true);
+            return Ok(false);
         };
         self.write_policy_query_allows_current_row(&policy, row.row_uuid(), author)
             .await
@@ -464,7 +484,7 @@ where
         let write_schema = self.catalogue.current_write_schema.schema;
         if self
             .table_in_schema(table, write_schema)
-            .is_ok_and(|table| table.write_policies.any().is_some())
+            .is_ok_and(|table| table.has_any_policy())
         {
             write_schema
         } else {
@@ -482,7 +502,7 @@ where
         let current_schema = self.catalogue.current_schema_version_id;
         if self
             .table_in_schema(table, write_schema)
-            .is_ok_and(|table| table.read_policy.is_some() || table.write_policies.any().is_some())
+            .is_ok_and(|table| table.has_any_policy())
             && self.policy_schema_resolves_query_sources(write_schema, shape)
         {
             write_schema
@@ -542,7 +562,7 @@ where
         if source == target {
             return Ok(self
                 .table_in_schema(table, target)
-                .is_ok_and(|table| table.write_policies.any().is_some()));
+                .is_ok_and(|table| table.has_any_policy()));
         }
 
         if let Some(path) =
@@ -552,7 +572,7 @@ where
             let target_table = apply_compiled_lens_path(&path, &mut cells);
             return Ok(self
                 .table_in_schema(&target_table, target)
-                .is_ok_and(|table| table.write_policies.any().is_some()));
+                .is_ok_and(|table| table.has_any_policy()));
         }
 
         if let Some(path) =
@@ -562,12 +582,12 @@ where
             let target_table = apply_compiled_lens_path(&path, &mut cells);
             return Ok(self
                 .table_in_schema(&target_table, target)
-                .is_ok_and(|table| table.write_policies.any().is_some()));
+                .is_ok_and(|table| table.has_any_policy()));
         }
 
         Ok(self
             .table_in_schema(table, target)
-            .is_ok_and(|table| table.write_policies.any().is_some()))
+            .is_ok_and(|table| table.has_any_policy()))
     }
 
     async fn policy_delete_subject_row(
