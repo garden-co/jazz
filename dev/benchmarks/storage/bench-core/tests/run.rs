@@ -1,8 +1,8 @@
 //! Black-box integration test of the shared benchmark runner through its public
-//! API. A trivial in-memory engine stands in for the real OPFS-backed stores so
+//! API. A trivial in-memory engine stands in for durable stores so
 //! the whole run loop (every phase, timing, checksum, retry, cold reopen) is
 //! exercised on native without a browser. The real cross-engine checksum parity
-//! between opfs-btree and SQLite is verified by the in-browser harness.
+//! through the browser persistence suite is verified separately.
 
 use std::cell::Cell;
 use std::collections::BTreeMap;

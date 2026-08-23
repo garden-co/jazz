@@ -1176,7 +1176,7 @@ async fn establish_offline_reconnect_baseline(
 /// alice (online): create → alice-v1
 /// bob   (online):           syncs to alice-v1
 /// bob.shutdown()
-/// bob   (offline reopen):   queries local Fjall/OPFS and still sees alice-v1
+/// bob   (offline reopen):   queries local Fjall/IndexedDB and still sees alice-v1
 /// ```
 #[tokio::test]
 async fn persistent_peer_reloads_synced_state_before_offline_editing() {

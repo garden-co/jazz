@@ -415,12 +415,11 @@ function buildHtml() {
       "native-criterion": "Native CR",
       "jazz-sim": "Jazz-sim",
     };
-    const STORAGE_ENGINE_ORDER = ["rocksdb", "sqlite", "indexeddb-btree", "opfs-btree"];
+    const STORAGE_ENGINE_ORDER = ["rocksdb", "sqlite", "indexeddb-btree"];
     const STORAGE_ENGINE_LABELS = {
       rocksdb: "RocksDB",
       sqlite: "SQLite",
       "indexeddb-btree": "IndexedDB B-tree",
-      "opfs-btree": "OPFS-btree",
     };
     const CORE_METRICS = ["wall_time_ms", "throughput_ops_per_sec"];
     const OP_METRIC_ORDER = ["avg_ms", "p95_ms"];

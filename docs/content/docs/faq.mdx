@@ -29,7 +29,7 @@ If you're working directly with a `Db` handle instead of the window helper, `awa
 - If exactly one live namespace exists, `clearStorage()` uses it automatically.
 - If multiple live namespaces exist, Jazz throws and lists the available namespaces until you choose one.
 - Can be initiated from either leader or follower tabs; Jazz coordinates the reset across tabs for that namespace.
-- Deletes OPFS storage only. It does not clear `localStorage` local-first auth data.
+- Deletes IndexedDB storage only. It does not clear `localStorage` local-first auth data.
 - Reopens a clean worker/runtime so the same live client remains usable after the wipe.
 
 This is useful when iterating on your schema during development.

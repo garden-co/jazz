@@ -252,7 +252,7 @@ covered reads are immediately ready until explicit eviction. Writes keep the
 retained view coherent. Its independent controller can pause cold operations;
 tests release explicit permits rather than depending on wall-clock delays. The
 persistent B-tree backend used by storage-fidelity tests is named
-`TestBtreeStorage` so the two roles are not conflated.
+`TestRocksDbStorage` so the two roles are not conflated.
 
 ## Open questions
 

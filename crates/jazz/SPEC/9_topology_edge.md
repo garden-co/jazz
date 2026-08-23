@@ -92,7 +92,7 @@ The canonical alpha-replacement conformance and benchmark topology is:
 
 ```text
 client main thread (in-memory)
-  ↔ client worker relay (OPFS)
+  ↔ client worker relay (IndexedDB)
   ↔ edge (RocksDB)
   ↔ core (RocksDB)
 ```
@@ -102,7 +102,7 @@ main-thread client owns immediate UI-local state, the worker relay owns durable
 browser persistence and tab sharing, the edge terminates client identities and
 hydrates permission scopes, and core remains history-complete. Scenario smoke
 benches may collapse this into in-process nodes while preserving the same role
-boundaries; browser OPFS and worker ownership are integrability concerns, not
+boundaries; browser IndexedDB and worker ownership are integrability concerns, not
 alternate semantics.
 
 The main-thread client is deliberately non-durable: its authored transactions

@@ -37,7 +37,7 @@ lane_busy() {
 # source state between lanes.
 #
 # The workspace crates ARE cleaned. Reusing their artifacts across branches
-# produced `error[E0460]: found possibly newer version of crate opfs_btree`,
+# produced `error[E0460]: found possibly newer version of crate removed storage backend`,
 # which fails an entire test binary at once and reads like 32 test failures
 # rather than a build-cache problem. Third-party dependencies — the bulk of the
 # build and the whole point of keeping target/ — are untouched.
@@ -48,7 +48,7 @@ lane_reset() {
   git -C "$path" clean -qfdx -e target -e node_modules
   git -C "$path" checkout -q -B "$branch" "$base"
   if [ -d "$path/target" ]; then
-    (cd "$path" && cargo clean -q -p jazz -p groove -p opfs-btree \
+    (cd "$path" && cargo clean -q -p jazz -p groove \
         -p jazz-sim -p jazz-napi -p jazz-wasm 2>/dev/null || true)
   fi
   lane_install_node_modules "$path"

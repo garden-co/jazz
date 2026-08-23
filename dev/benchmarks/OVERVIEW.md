@@ -16,13 +16,13 @@ Do not block useful performance work on a repository-wide receipt rewrite.
 Every new high-value lane should emit an attributable, correctness-checked
 receipt and state where that receipt is retained.
 
-| harness                        | output and retention                                                                                                                                                |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dev/benchmarks/smoke.sh`      | JSONL receipts plus committed previous/delta history in `SMOKE_LEDGER.md`                                                                                           |
-| realistic native/browser       | per-scenario JSON; selected CI results are retained in `realistic/history/bench_history.json`, while local exploratory runs remain local unless explicitly imported |
-| Groove scenario/micro          | JSON on stdout; `receipt-adapters.sh` can retain results and append smoke-shaped summaries                                                                          |
-| Criterion                      | native reports under `target/criterion`; benchmark-specific JSON receipts may survive separately, but Criterion output itself is machine-local                      |
-| storage, OPFS, and WASM probes | harness-native output; retain deliberately when a result is used to justify a decision                                                                              |
+| harness                             | output and retention                                                                                                                                                |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `dev/benchmarks/smoke.sh`           | JSONL receipts plus committed previous/delta history in `SMOKE_LEDGER.md`                                                                                           |
+| realistic native/browser            | per-scenario JSON; selected CI results are retained in `realistic/history/bench_history.json`, while local exploratory runs remain local unless explicitly imported |
+| Groove scenario/micro               | JSON on stdout; `receipt-adapters.sh` can retain results and append smoke-shaped summaries                                                                          |
+| Criterion                           | native reports under `target/criterion`; benchmark-specific JSON receipts may survive separately, but Criterion output itself is machine-local                      |
+| storage, IndexedDB, and WASM probes | harness-native output; retain deliberately when a result is used to justify a decision                                                                              |
 
 Timing medians are directional unless the harness controls the relevant cache,
 fixture, and host conditions. Prefer deterministic structural counters for hard
@@ -79,11 +79,10 @@ Browser realistic scenarios cover writes, reads, fan-out, permissions, and
 history. CI-scale runs are shape/correctness checks rather than representative
 latency numbers. #1224 adds B7 for public relation-result hydration coverage.
 
-### Storage, OPFS, and WASM
+### Storage, IndexedDB, and WASM
 
 - Native storage benchmarks compare raw SQLite, RocksDB, and redb KV behavior.
-- `opfs-btree/hot_paths` uses an in-memory file; the WASM worker harness is the
-  actual OPFS path.
+  actual IndexedDB path.
 - Jazz WASM probes primarily measure runtime characteristics such as
   arithmetic, indirect calls, `RefCell`, and allocation—not full Jazz data
   paths.

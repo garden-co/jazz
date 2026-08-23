@@ -6,8 +6,8 @@
 
 ### Patch Changes
 
-- ec543e3: Improve browser OPFS B-tree persistence performance with append-only WAL flushes, raw-page tree descents, pinned-aware cache eviction, and deferred page checksums.
-- 6c17100: Route persistent browser runtimes through a SharedWorker broker so tabs for the same Jazz app share one OPFS-backed leader runtime instead of each opening independent storage handles. The broker coordinates leader promotion, follower message ports, schema compatibility, visibility hints, storage resets, and failover after tab or worker crashes, preserving pending local writes while the durable path reconnects.
+- ec543e3: Improve browser IndexedDB B-tree persistence performance with append-only WAL flushes, raw-page tree descents, pinned-aware cache eviction, and deferred page checksums.
+- 6c17100: Route persistent browser runtimes through a SharedWorker broker so tabs for the same Jazz app share one IndexedDB-backed leader runtime instead of each opening independent storage handles. The broker coordinates leader promotion, follower message ports, schema compatibility, visibility hints, storage resets, and failover after tab or worker crashes, preserving pending local writes while the durable path reconnects.
 
   **Breaking change — browser support:** persistent browser mode now requires `SharedWorker`, `MessageChannel`, and Web Locks support. Browsers or embedded webviews missing those capabilities will reject `createDb()`/`createJazzClient()` startup for persistent storage instead of using the previous BroadcastChannel tab-election path. Use a supported browser runtime for persistent local storage, or switch to the memory driver with a `serverUrl` in unsupported environments.
 
@@ -201,9 +201,7 @@
 
   Oversized indexed inserts and updates now return a normal mutation error to JS callers, and local updates can recover rows that were previously left in a partial index state by older panic-driven failures.
 
-- 83f4f5d: Use xxHash-based checksums for `opfs-btree` pages and superblocks to reduce checksum overhead in persistent browser storage.
-
-  Existing OPFS stores created by older builds are not checksum-compatible with this change and will need to be recreated after upgrading.
+  Existing IndexedDB stores created by older builds are not checksum-compatible with this change and will need to be recreated after upgrading.
 
 ## 2.0.0-alpha.17
 

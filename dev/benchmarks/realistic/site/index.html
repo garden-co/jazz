@@ -368,11 +368,11 @@
       browser: "Browser",
       "native-criterion": "Native CR",
     };
-    const STORAGE_ENGINE_ORDER = ["rocksdb", "sqlite", "opfs-btree"];
+    const STORAGE_ENGINE_ORDER = ["rocksdb", "sqlite", "indexeddb-btree"];
     const STORAGE_ENGINE_LABELS = {
       rocksdb: "RocksDB",
       sqlite: "SQLite",
-      "opfs-btree": "OPFS-btree",
+      "indexeddb-btree": "IndexedDB B-tree",
     };
     const CORE_METRICS = ["wall_time_ms", "throughput_ops_per_sec"];
     const OP_METRIC_ORDER = ["avg_ms", "p95_ms"];

@@ -194,25 +194,6 @@ fn open_policy_graph_memory_node(node_uuid: NodeUuid, schema: JazzSchema) -> Nod
     NodeState::new(node_uuid, schema, MemoryStorage::new(&refs)).unwrap()
 }
 
-fn open_policy_graph_native_btree_node(
-    node_uuid: NodeUuid,
-    schema: JazzSchema,
-) -> (tempfile::TempDir, NodeState<NativeBtreeStorage>) {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let cfs = schema.column_families();
-    let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
-    let storage = NativeBtreeStorage::open_with_sync_policy(
-        temp_dir.path().join("btree.db"),
-        &refs,
-        BtreeSyncPolicy::OnClose,
-    )
-    .unwrap();
-    (
-        temp_dir,
-        NodeState::new(node_uuid, schema, storage).unwrap(),
-    )
-}
-
 fn apply_policy_graph_reset_receipt<S>(
     storage_label: &str,
     reader: &mut NodeState<S>,
@@ -385,21 +366,11 @@ fn policy_graph_perf_dropdown_entry_reset_ingest_timing_receipt() {
         update.clone(),
         entry_count,
     );
-    let (_btree_dir, mut btree_reader) = open_policy_graph_native_btree_node(node(0x25), schema.clone());
-    let btree_elapsed = apply_policy_graph_reset_receipt(
-        "native_btree_on_close",
-        &mut btree_reader,
-        &shape,
-        &binding,
-        update,
-        entry_count,
-    );
     println!(
-        "policy_graph_perf_dropdown_entry_reset_ingest_timing child_rows={entry_count} result_members={result_member_count} version_bundles={version_bundle_count} parents={dropdown_count} seed_ms={:.3} serve_ms={:.3} memory_apply_ms={:.3} rocksdb_apply_ms={:.3} native_btree_on_close_apply_ms={:.3}",
+        "policy_graph_perf_dropdown_entry_reset_ingest_timing child_rows={entry_count} result_members={result_member_count} version_bundles={version_bundle_count} parents={dropdown_count} seed_ms={:.3} serve_ms={:.3} memory_apply_ms={:.3} rocksdb_apply_ms={:.3}",
         seed_elapsed.as_secs_f64() * 1000.0,
         serve_elapsed.as_secs_f64() * 1000.0,
         memory_elapsed.as_secs_f64() * 1000.0,
-        rocks_elapsed.as_secs_f64() * 1000.0,
-        btree_elapsed.as_secs_f64() * 1000.0
+        rocks_elapsed.as_secs_f64() * 1000.0
     );
 }

@@ -25,7 +25,7 @@ impl std::error::Error for EngineError {}
 
 /// A key/value store driven by the shared benchmark runner.
 ///
-/// Operations are synchronous (both real engines use synchronous OPFS access
+/// Operations are synchronous (both legacy engines used synchronous file access
 /// handles); only [`reopen`](BenchEngine::reopen) is async because it reopens
 /// the underlying file.
 #[allow(async_fn_in_trait)]

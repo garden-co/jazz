@@ -28,8 +28,7 @@ use crate::tools::public_schema::{
 use crate::tx::MergeAspect;
 use groove::schema::{ColumnSchema, ColumnType};
 use groove::storage::{
-    BtreeSyncPolicy, MemoryStorage, NativeBtreeStorage, OrderedKvStorage, ReopenableStorage,
-    Value as StorageValue, YieldingStorage,
+    MemoryStorage, OrderedKvStorage, ReopenableStorage, Value as StorageValue, YieldingStorage,
 };
 use jazz_storage_rocksdb::RocksDbStorage as ImmediateRocksDbStorage;
 use std::path::Path;

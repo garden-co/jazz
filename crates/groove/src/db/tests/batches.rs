@@ -68,9 +68,7 @@ async fn failed_persistence_releases_later_publications_with_an_error() {
 
 #[futures_test::test]
 async fn commits_insert_update_and_delete_batches() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -590,7 +588,6 @@ async fn staged_batch_commit_matches_one_shot_wrapper() {
 
 #[futures_test::test]
 async fn direct_record_store_stores_ordered_records_independent_of_tables() {
-    let temp_dir = tempfile::tempdir().unwrap();
     let schema = albums_schema().with_direct_record_store(DirectRecordStoreSchema::new(
         "streams",
         RecordDescriptor::new([
@@ -600,9 +597,7 @@ async fn direct_record_store_stores_ordered_records_independent_of_tables() {
         RecordDescriptor::new([("bytes", ColumnType::Bytes.clone())]),
     ));
     let column_families = schema.column_families();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &column_families)
-            .unwrap();
+    let storage = MemoryStorage::new(&column_families);
     let mut database = Database::new(schema.clone(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
@@ -789,11 +784,7 @@ async fn direct_record_store_stores_ordered_records_independent_of_tables() {
         None
     );
 
-    drop(database);
-    let column_families = schema.column_families();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &column_families)
-            .unwrap();
+    let storage = database.into_storage();
     let reopened = Database::new(schema, storage).await.unwrap();
     let store = reopened.direct_record_store("streams").unwrap();
     assert_eq!(
@@ -955,9 +946,7 @@ async fn direct_record_store_rejects_record_containing_durable_keys_at_schema_ad
 
 #[futures_test::test]
 async fn commit_metrics_split_storage_and_tick_work() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     database.set_tick_runtime_stats_enabled(true);
     let subscription = database
@@ -1129,9 +1118,7 @@ async fn commit_metrics_split_storage_writes_by_jazz_destination() {
 
 #[futures_test::test]
 async fn same_key_writes_in_one_batch_emit_deltas_against_earlier_batch_writes() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_one_sink(GraphBuilder::table("albums"))
@@ -1175,12 +1162,7 @@ async fn same_key_writes_in_one_batch_emit_deltas_against_earlier_batch_writes()
 
 #[futures_test::test]
 async fn inserts_over_existing_primary_keys_are_rejected() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["albums", "indices"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["albums", "indices"]);
     let mut database = Database::new(indexed_albums_schema(), storage)
         .await
         .unwrap();
@@ -1228,12 +1210,7 @@ async fn inserts_over_existing_primary_keys_are_rejected() {
 
 #[futures_test::test]
 async fn inserts_over_primary_keys_created_earlier_in_the_same_batch_are_rejected() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["albums", "indices"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["albums", "indices"]);
     let mut database = Database::new(indexed_albums_schema(), storage)
         .await
         .unwrap();
@@ -1262,9 +1239,7 @@ async fn inserts_over_primary_keys_created_earlier_in_the_same_batch_are_rejecte
 
 #[futures_test::test]
 async fn same_batch_same_key_operations_emit_only_the_consolidated_final_delta() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(GraphBuilder::table("albums"))

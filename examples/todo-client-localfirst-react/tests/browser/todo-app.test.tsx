@@ -94,7 +94,7 @@ describe("React Todo App E2E", () => {
     await act(async () => root.unmount());
     el.remove();
     mounts.splice(idx, 1);
-    // Give OPFS handles time to release
+    // Give IndexedDB handles time to release
     await act(async () => {
       await new Promise((r) => setTimeout(r, 200));
     });
@@ -246,10 +246,10 @@ describe("React Todo App E2E", () => {
   });
 
   // -------------------------------------------------------------------------
-  // 6. OPFS persistence across reload
+  // 6. IndexedDB persistence across reload
   // -------------------------------------------------------------------------
 
-  it("persists todos across app unmount and remount (OPFS)", async () => {
+  it("persists todos across app unmount and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
 
     // First session: mount app, add a todo via the form
@@ -268,16 +268,16 @@ describe("React Todo App E2E", () => {
       "Todo should appear in first session",
     );
 
-    // Unmount (triggers db.shutdown, flushes OPFS)
+    // Unmount (triggers db.shutdown, flushes IndexedDB)
     await unmountApp(el1);
 
-    // Second session: remount with same dbName — OPFS data should load
+    // Second session: remount with same dbName — IndexedDB data should load
     const el2 = await mountApp({ driver: { type: "persistent", dbName } });
 
     await waitFor(
       () => el2.querySelectorAll("#todo-list li").length === 1,
       5000,
-      "Todo should survive remount from OPFS",
+      "Todo should survive remount from IndexedDB",
     );
 
     expect(el2.querySelector("#todo-list li span")!.textContent).toBe("Survive reload");

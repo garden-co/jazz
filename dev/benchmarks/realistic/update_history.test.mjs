@@ -143,17 +143,17 @@ test("update_history ingests engine-specific native and browser manifests from a
     ref: "refs/heads/main",
     branch: "main",
     profile: "s",
-    storage_engine: "opfs-btree",
+    storage_engine: "indexeddb-btree",
   });
   writeJson(path.join(browserRoot, "manifest.json"), {
     kind: "realistic-bench-browser",
     generated_at: "2026-04-08T10:00:00Z",
-    storage_engine: "opfs-btree",
+    storage_engine: "indexeddb-btree",
   });
   writeJson(path.join(browserRoot, "realistic.json"), {
     generated_at: "2026-04-08T10:00:00Z",
     profile: "s",
-    storage_engine: "opfs-btree",
+    storage_engine: "indexeddb-btree",
     scenarios: [
       {
         scenario_id: "W4",
@@ -193,7 +193,7 @@ test("update_history ingests engine-specific native and browser manifests from a
     ["native-criterion", "rocksdb"],
     ["native", "sqlite"],
     ["native-criterion", "sqlite"],
-    ["browser", "opfs-btree"],
+    ["browser", "indexeddb-btree"],
   ]);
 
   const nativeRocksdbRun = history.runs.find(
@@ -203,7 +203,7 @@ test("update_history ingests engine-specific native and browser manifests from a
     (run) => run.suite === "native-criterion" && run.storage_engine === "sqlite",
   );
   const browserRun = history.runs.find(
-    (run) => run.suite === "browser" && run.storage_engine === "opfs-btree",
+    (run) => run.suite === "browser" && run.storage_engine === "indexeddb-btree",
   );
 
   assert.ok(nativeRocksdbRun, "expected native RocksDB run");
@@ -213,8 +213,8 @@ test("update_history ingests engine-specific native and browser manifests from a
   assert.equal(nativeSqliteCriterionRun.id, "native-criterion:sqlite:100:1:abc123:s");
   assert.equal(nativeSqliteCriterionRun.scenarios[0].topology, "realistic_phase1/r1_crud");
 
-  assert.ok(browserRun, "expected browser OPFS-btree run");
-  assert.equal(browserRun.id, "browser:opfs-btree:100:1:abc123:s");
+  assert.ok(browserRun, "expected browser indexeddb-btree run");
+  assert.equal(browserRun.id, "browser:indexeddb-btree:100:1:abc123:s");
 });
 
 test("update_history ingests jazz-sim JSONL metrics from manifest files", () => {

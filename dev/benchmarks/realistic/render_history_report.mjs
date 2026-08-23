@@ -98,7 +98,6 @@ function storageEngineLabel(storageEngine) {
   if (storageEngine === "rocksdb") return "RocksDB";
   if (storageEngine === "sqlite") return "SQLite";
   if (storageEngine === "indexeddb-btree") return "IndexedDB B-tree";
-  if (storageEngine === "opfs-btree") return "OPFS-btree";
   return storageEngine || "default";
 }
 
