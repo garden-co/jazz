@@ -2189,6 +2189,21 @@ where
                             &snapshot,
                             &current_root_occurrences,
                         )?;
+                        let public_output_changed = match &event {
+                            SubscriptionEvent::Delta {
+                                added,
+                                updated,
+                                removed,
+                                terminal_operations,
+                                ..
+                            } => {
+                                !added.is_empty()
+                                    || !updated.is_empty()
+                                    || !removed.is_empty()
+                                    || !terminal_operations.is_empty()
+                            }
+                            SubscriptionEvent::Rejected { .. } | SubscriptionEvent::Closed => true,
+                        };
                         state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
                         state_ref.snapshot_index = relation_snapshot_index_with_root_occurrences(
                             &state_ref.snapshot,
@@ -2197,7 +2212,14 @@ where
                         state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
                         state_ref.settled = settled;
                         retained.push(Rc::downgrade(&state));
-                        if state_ref.sender.unbounded_send(event).is_ok() {
+                        // Structured relation facts can change without changing
+                        // the collector-owned public root. Keep those facts in
+                        // the maintained state, but do not turn them into an
+                        // empty ordered-suffix edit. A settlement transition is
+                        // still observable even when the public rows are stable.
+                        if (public_output_changed || settled != previous_settled)
+                            && state_ref.sender.unbounded_send(event).is_ok()
+                        {
                             changed += 1;
                         }
                         continue;
