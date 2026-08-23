@@ -356,7 +356,8 @@ where
         let tier = effective_read_tier(&opts);
         self.node
             .node
-            .borrow_mut()
+            .lock()
+            .await
             .query_relation_snapshot_for_client(
                 &prepared.shape,
                 &prepared.binding,
@@ -385,7 +386,8 @@ where
         let tier = effective_read_tier(&opts);
         self.node
             .node
-            .borrow_mut()
+            .lock()
+            .await
             .query_relation_snapshot_for_serving_in_read_view(
                 &prepared.shape,
                 &prepared.binding,

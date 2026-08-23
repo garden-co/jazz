@@ -1312,6 +1312,9 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
     assert_eq!(db.active_groove_subscriptions_for_test(), 2);
 
     drop(stream_a);
+    // Stream Drop is deliberately non-blocking. The successor runtime handle
+    // must be retired by the next node owner turn, without touching Bob's.
+    block_on(db.tick()).expect("drain A finalization after runtime rebuild");
     assert_eq!(db.active_groove_subscriptions_for_test(), 1);
     block_on(db.insert_with_id(
         DOCUMENTS,

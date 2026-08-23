@@ -86,10 +86,14 @@ fn dropping_local_stream_releases_groove_subscription_without_a_write() {
     );
 
     drop(subscription);
+    // Drop is deliberately non-blocking now that the node may be suspended
+    // on storage. Its terminal cleanup runs on the next ordinary owner turn,
+    // without requiring a data write or a Groove notification.
+    block_on(db.tick()).unwrap();
     assert_eq!(
         db.runtime_stats_for_test().active_subscriptions,
         baseline,
-        "dropping a local stream must not wait for a later Groove notification"
+        "the next owner turn must retire a dropped local stream without a write"
     );
 }
 
@@ -118,6 +122,7 @@ fn dropping_one_local_stream_preserves_a_sibling_on_the_same_binding() {
     );
 
     drop(first);
+    block_on(db.tick()).unwrap();
     assert_eq!(
         db.runtime_stats_for_test().active_subscriptions,
         baseline + 1

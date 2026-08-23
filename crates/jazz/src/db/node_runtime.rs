@@ -21,6 +21,8 @@ where
     pub(super) pending_local_publications: PendingLocalPublications,
     pub(super) local_publication_settler: Rc<futures::lock::Mutex<()>>,
     pub(super) upstream_subscriptions: PendingUpstreamCommands,
+    pub(super) pending_subscription_finalizations: PendingSubscriptionFinalizations,
+    subscription_finalizations_closed: Cell<bool>,
     pub(super) latest_coverage_subscriptions: LatestCoverageSubscriptions,
     pub(super) upstream_coverage_refcounts: UpstreamCoverageRefCounts,
     pub(super) awaiting_initial_authority_coverage: AwaitingInitialAuthorityCoverage,
@@ -71,6 +73,8 @@ where
             pending_local_publications: Rc::new(RefCell::new(VecDeque::new())),
             local_publication_settler: Rc::new(futures::lock::Mutex::new(())),
             upstream_subscriptions: Rc::new(RefCell::new(Vec::new())),
+            pending_subscription_finalizations: Rc::new(RefCell::new(VecDeque::new())),
+            subscription_finalizations_closed: Cell::new(false),
             latest_coverage_subscriptions: Rc::new(RefCell::new(BTreeMap::new())),
             upstream_coverage_refcounts: Rc::new(RefCell::new(BTreeMap::new())),
             awaiting_initial_authority_coverage: Rc::new(RefCell::new(BTreeSet::new())),
@@ -323,6 +327,140 @@ where
 
     pub(super) fn schedule_tick(&self, urgency: TickUrgency) {
         schedule_tick_in(&self.scheduler, urgency);
+    }
+
+    /// Enqueue a stream-finalization command without touching the async node
+    /// mutex. This is the only operation a stream's `Drop` implementation may
+    /// perform. A closed node has already retired its runtime, so later
+    /// commands are safely invalidated and acknowledged immediately.
+    pub(super) fn enqueue_subscription_finalization(
+        &self,
+        mut command: PendingSubscriptionFinalization,
+    ) {
+        if self.subscription_finalizations_closed.get() {
+            // Db::close has synchronously retired every maintained view and
+            // connection before setting this gate. A late finalizer therefore
+            // owns no resident Groove or upstream state to clean up.
+            if let Some(acknowledgement) = command.acknowledgement.take() {
+                let _ = acknowledgement.send(());
+            }
+            return;
+        }
+        self.pending_subscription_finalizations
+            .borrow_mut()
+            .push_back(command);
+        self.schedule_tick(TickUrgency::Immediate);
+    }
+
+    /// Drain queued stream cleanup under the ordinary async node owner. There
+    /// is no await after the queue is taken, so cancellation while waiting for
+    /// the mutex leaves the command queued for a later owner turn.
+    pub(super) async fn drain_subscription_finalizations(&self) -> Result<usize, Error> {
+        let mut node = self.node.lock().await;
+        let commands = std::mem::take(&mut *self.pending_subscription_finalizations.borrow_mut());
+        let mut drained = 0;
+        let mut changed_upstream = false;
+        for mut command in commands {
+            let (local, upstream, owner) = if let Some(state) = command.state.take() {
+                let owner = Rc::downgrade(&state);
+                let mut state = state.borrow_mut();
+                (
+                    state.local_subscription_cleanup.take(),
+                    std::mem::take(&mut state.upstream_subscription_handles),
+                    owner,
+                )
+            } else {
+                (command.opening_local.take(), Vec::new(), Weak::new())
+            };
+            if let Some((runtime_token, subscription_id)) = local
+                && node.groove_runtime_token() == runtime_token
+            {
+                node.unsubscribe_groove_subscription(subscription_id);
+            }
+            for handle in upstream {
+                unregister_upstream_subscription_owner(
+                    &self.upstream_subscription_owners,
+                    handle.subscription,
+                    &owner,
+                );
+                let mut refcounts = self.upstream_coverage_refcounts.borrow_mut();
+                let Some(count) = refcounts.get_mut(&handle.coverage) else {
+                    continue;
+                };
+                *count = count.saturating_sub(1);
+                if *count > 0 {
+                    continue;
+                }
+                refcounts.remove(&handle.coverage);
+                self.awaiting_initial_authority_coverage
+                    .borrow_mut()
+                    .remove(&handle.coverage);
+                drop(refcounts);
+                node.apply_unsubscribe(handle.subscription);
+                self.latest_coverage_subscriptions
+                    .borrow_mut()
+                    .retain(|coverage, subscription| {
+                        coverage != &handle.coverage && *subscription != handle.subscription
+                    });
+                self.upstream_subscriptions
+                    .borrow_mut()
+                    .push(PendingUpstreamCommand::Unsubscribe(handle.subscription));
+                changed_upstream = true;
+            }
+            if let Some(acknowledgement) = command.acknowledgement.take() {
+                let _ = acknowledgement.send(());
+            }
+            drained += 1;
+        }
+        drop(node);
+        if changed_upstream {
+            self.schedule_tick(TickUrgency::Immediate);
+        }
+        Ok(drained)
+    }
+
+    /// Atomically close the admission gate and enqueue every live stream for
+    /// retirement.  `Db::close` calls this before its first await, so a drop
+    /// racing storage shutdown cannot land between a drain and the durable
+    /// close. Late finalizers may be acknowledged only after this method has
+    /// made their state part of the terminal retirement set.
+    pub(super) fn begin_subscription_finalization_shutdown(&self) {
+        if self.subscription_finalizations_closed.replace(true) {
+            return;
+        }
+        let live = self
+            .subscriptions
+            .borrow()
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect::<Vec<_>>();
+        let mut pending = self.pending_subscription_finalizations.borrow_mut();
+        for state in live {
+            state.borrow().closed.set(true);
+            pending.push_back(PendingSubscriptionFinalization {
+                state: Some(state),
+                opening_local: None,
+                acknowledgement: None,
+            });
+        }
+    }
+
+    /// Release all connection and subscription bookkeeping after its backing
+    /// storage has closed.  No later finalizer can leave a live local Groove
+    /// view or upstream ownership behind: the retirement pass drained them
+    /// before close, and this removes the now-unusable runtime shell.
+    pub(super) fn retire_subscription_runtime_after_close(&self) {
+        self.subscriptions.borrow_mut().clear();
+        self.connections.borrow_mut().clear();
+        self.upstream_subscriptions.borrow_mut().clear();
+        self.pending_subscription_finalizations.borrow_mut().clear();
+        self.latest_coverage_subscriptions.borrow_mut().clear();
+        self.upstream_coverage_refcounts.borrow_mut().clear();
+        self.awaiting_initial_authority_coverage
+            .borrow_mut()
+            .clear();
+        self.query_coverage_registrations.borrow_mut().clear();
+        self.upstream_subscription_owners.borrow_mut().clear();
     }
 
     pub(super) fn set_mutation_error_callback(&self, callback: Option<MutationErrorCallback>) {
@@ -1072,6 +1210,7 @@ where
 
     /// Service every accepted subscriber connection once.
     pub async fn tick(&self) -> Result<DbTickStats, Error> {
+        self.drain_subscription_finalizations().await?;
         self.deliver_pending_mutation_errors();
         let mut stats = DbTickStats::default();
         let mut remote_sync_applied = false;
@@ -1243,6 +1382,12 @@ where
         let Some(state) = weak.upgrade() else {
             continue;
         };
+        // Finalization flips this synchronously, before awaiting the node
+        // mutex. Never rehydrate a stream whose cleanup is merely waiting for
+        // this tick to acquire that mutex.
+        if state.borrow().closed.get() {
+            continue;
+        }
         let (
             read_tier,
             remote_read_tier,
@@ -1327,6 +1472,12 @@ where
                     authorization_mode,
                 )
                 .await?;
+            if state.borrow().closed.get() {
+                node.lock()
+                    .await
+                    .unsubscribe_groove_subscription(maintained.subscription_id());
+                continue;
+            }
             let delivered_binding_view = BindingViewKey {
                 shape_id: shape.shape_id(),
                 binding_id: binding.binding_id(),

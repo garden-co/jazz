@@ -985,6 +985,7 @@ fn sibling_branch_view_subscriptions_isolate_first_writes() {
     assert!(right_stream.try_next_event().is_none());
 
     drop(left_stream);
+    block_on(db.tick()).unwrap();
     #[cfg(feature = "testing")]
     assert_eq!(
         db.runtime_stats_for_test().active_subscriptions,
@@ -992,6 +993,7 @@ fn sibling_branch_view_subscriptions_isolate_first_writes() {
         "dropping one branch view must preserve its sibling subscription"
     );
     drop(right_stream);
+    block_on(db.tick()).unwrap();
     #[cfg(feature = "testing")]
     assert_eq!(
         db.runtime_stats_for_test().active_subscriptions,

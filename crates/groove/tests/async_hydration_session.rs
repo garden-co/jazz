@@ -183,6 +183,17 @@ fn cancelled_hydration_publishes_no_subscription_or_partial_session() {
     assert!(database.unsubscribe(subscription.id()));
     drop(subscription);
 
+    // This is necessarily an internal async-storage test: the contract is
+    // that cancelling a subscription also drops its private suspended work,
+    // so a runtime owner must not remain blocked on a cold scan with no
+    // externally observable subscriber.
+    let mut cancellation_progress = Box::pin(database.drive_progress());
+    assert!(matches!(
+        Pin::new(&mut cancellation_progress).poll(&mut context),
+        Poll::Ready(Ok(()))
+    ));
+    drop(cancellation_progress);
+
     let after = database.runtime_stats();
     assert_eq!(after.graph_nodes, before.graph_nodes);
     assert_eq!(after.active_subscriptions, before.active_subscriptions);
@@ -191,6 +202,46 @@ fn cancelled_hydration_publishes_no_subscription_or_partial_session() {
         block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
     assert_eq!(
         block_on(database.next_subscription(&subscription))
+            .unwrap()
+            .deltas
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn cancelling_cold_hydration_releases_a_later_shared_subscription() {
+    // This is necessarily an internal async-storage test: it exercises the
+    // runtime's temporal handoff between two private hydration sessions that
+    // share graph nodes. Public delivery alone cannot prove that cancellation
+    // released the successor rather than merely leaving the old session alive.
+    let (storage, control) = TestStorage::controlled(&["albums"]);
+    let mut database = block_on(Database::new(schema(), storage)).unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Kind of Blue".into())],
+    );
+    block_on(database.commit_batch(batch)).unwrap();
+
+    control.pause();
+    let first = block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
+    let second = block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
+    let mut progress = Box::pin(database.drive_progress());
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(
+        Pin::new(&mut progress).poll(&mut context),
+        Poll::Pending
+    ));
+    drop(progress);
+
+    assert!(database.unsubscribe(first.id()));
+    drop(first);
+    control.resume();
+    block_on(database.drive_progress()).unwrap();
+    assert_eq!(
+        block_on(database.next_subscription(&second))
             .unwrap()
             .deltas
             .len(),
