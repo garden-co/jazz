@@ -111,7 +111,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use jazz::groove::records::Value;
-    use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+    use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
     use jazz::protocol::{
         AuthorizationSupportScopeKey, PeerPayloadInventory, PermissionAdviceRequestId, ReadViewKey,
         SubscriptionKey,
@@ -138,9 +138,9 @@ mod tests {
             schema.version_id(),
             RowUuid(uuid::Uuid::nil()),
             Vec::new(),
-            AuthorId(uuid::Uuid::nil()),
+            AuthorSubject::for_test_bytes([0; 16]),
             tx_id.time,
-            AuthorId(uuid::Uuid::nil()),
+            AuthorSubject::for_test_bytes([0; 16]),
             tx_id.time,
             &BTreeMap::<String, Value>::from([("name".to_owned(), Value::String("value".into()))]),
             None,
@@ -160,7 +160,7 @@ mod tests {
                     tx_id,
                     kind: TxKind::Mergeable,
                     n_total_writes: 1,
-                    made_by: AuthorId(uuid::Uuid::nil()),
+                    made_by: AuthorSubject::for_test_bytes([0; 16]),
                     permission_subject: None,
                     base_snapshot: None,
                     row_read_set: None,
@@ -191,7 +191,7 @@ mod tests {
             request_id: PermissionAdviceRequestId([0; 16]),
             key: AuthorizationSupportScopeKey {
                 support_shape_digest: [0; 32],
-                subject: AuthorId(uuid::Uuid::nil()),
+                subject: AuthorSubject::for_test_bytes([0; 16]),
                 claims_digest: [0; 32],
                 policy_digest: [0; 32],
             },

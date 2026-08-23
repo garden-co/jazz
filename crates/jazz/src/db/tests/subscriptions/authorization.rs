@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn maintained_subscription_emits_created_by_scoped_insert_after_empty_seed() {
     let schema = created_by_read_schema();
-    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     let db = open_db(0xa1, alice, &schema);
     let query = Query::from("todos");
     let prepared = prepared(&db, &query);
@@ -140,7 +140,7 @@ fn dropping_one_local_stream_preserves_a_sibling_on_the_same_binding() {
 #[test]
 fn maintained_subscription_emits_created_by_scoped_insert_for_explicit_identity() {
     let schema = created_by_read_schema();
-    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     let db = open_db(0xa1, alice, &schema);
     let query = Query::from("todos");
     let prepared = prepared(&db, &query);
@@ -175,8 +175,8 @@ fn maintained_subscription_emits_created_by_scoped_insert_for_explicit_identity(
 #[test]
 fn local_propagating_subscription_emits_created_by_scoped_insert_after_empty_seed() {
     let schema = created_by_read_schema();
-    let alice = AuthorId::from_bytes([0xa1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xa1, alice, &schema);
     let (client_transport, server_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
@@ -223,10 +223,13 @@ fn local_propagating_subscription_emits_created_by_scoped_insert_after_empty_see
 #[test]
 fn local_propagating_subscription_coerces_user_id_claim_for_created_by() {
     let schema = created_by_read_schema_for_claim("user_id");
-    let alice = AuthorId::from_bytes([0xa1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xa1, alice, &schema);
-    let claims = BTreeMap::from([("user_id".to_owned(), Value::String(alice.0.to_string()))]);
+    let claims = BTreeMap::from([(
+        "user_id".to_owned(),
+        Value::String(alice.test_uuid().to_string()),
+    )]);
     client.set_identity_claims(alice, claims.clone());
     let (client_transport, server_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
@@ -289,10 +292,10 @@ fn resource_access_test_cells(resource: RowUuid, team: RowUuid, administrator: b
     ])
 }
 
-fn group_access_test_cells(group: RowUuid, user: AuthorId) -> RowCells {
+fn group_access_test_cells(group: RowUuid, user: AuthorSubject) -> RowCells {
     BTreeMap::from([
         ("group_id".to_owned(), Value::Uuid(group.0)),
-        ("user_id".to_owned(), Value::Uuid(user.0)),
+        ("user_id".to_owned(), Value::Uuid(user.test_uuid())),
         ("role".to_owned(), Value::String("viewer".to_owned())),
     ])
 }
@@ -364,8 +367,8 @@ fn uuid_string_grant_role_schema(role: uuid::Uuid) -> JazzSchema {
 fn string_grant_role_access_filter_matches_uuid_literal_in_list() {
     let role = uuid::Uuid::parse_str("0cae56e7-0f54-421c-ba8b-54fcbfec8dd2").unwrap();
     let schema = uuid_string_grant_role_schema(role);
-    let server = open_core(0x6d, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x6e; 16]);
+    let server = open_core(0x6d, AuthorSubject::SYSTEM, &schema);
+    let member = AuthorSubject::for_test_bytes([0x6e; 16]);
     let member_team = row(0x61);
     let resource_team = row(0x62);
     let doc = row(0x63);
@@ -376,7 +379,7 @@ fn string_grant_role_access_filter_matches_uuid_literal_in_list() {
             member_team,
             BTreeMap::from([
                 ("name".to_owned(), Value::String("member".to_owned())),
-                ("identity_key".to_owned(), Value::Uuid(member.0)),
+                ("identity_key".to_owned(), Value::Uuid(member.test_uuid())),
             ]),
         )
         .unwrap();
@@ -429,7 +432,7 @@ fn string_grant_role_access_filter_matches_uuid_literal_in_list() {
         storage: rocks_storage(&schema),
         identity: DbIdentity {
             node: NodeUuid::from_bytes([0x6f; 16]),
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0x6f))),
     }))
@@ -440,7 +443,7 @@ fn string_grant_role_access_filter_matches_uuid_literal_in_list() {
             member_team,
             BTreeMap::from([
                 ("name".to_owned(), Value::String("member".to_owned())),
-                ("identity_key".to_owned(), Value::Uuid(member.0)),
+                ("identity_key".to_owned(), Value::Uuid(member.test_uuid())),
             ]),
         ),
         (
@@ -474,7 +477,7 @@ fn string_grant_role_access_filter_matches_uuid_literal_in_list() {
             ]),
         ),
     ] {
-        db.seed_settled_mergeable_for_bootstrap(table, row_id, AuthorId::SYSTEM, cells)
+        db.seed_settled_mergeable_for_bootstrap(table, row_id, AuthorSubject::SYSTEM, cells)
             .unwrap();
     }
     let prepared = db.prepare_query(&Query::from("docs")).unwrap();
@@ -505,8 +508,8 @@ fn string_grant_role_access_filter_matches_uuid_literal_in_list() {
 #[test]
 fn customer_resource_access_edge_policy_requires_group_access_seed() {
     let schema = customer_resource_policy_minimal_schema();
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x11; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let member = AuthorSubject::for_test_bytes([0x11; 16]);
     let group = row(0x22);
     let resource = row(0xd1);
 
@@ -546,9 +549,9 @@ fn customer_resource_access_edge_policy_requires_group_access_seed() {
 #[test]
 fn seeded_membership_resource_policy_allows_direct_and_transitive_groups() {
     let schema = customer_resource_policy_minimal_schema();
-    let server = open_core(0x5f, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x12; 16]);
-    let other = AuthorId::from_bytes([0x13; 16]);
+    let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
+    let member = AuthorSubject::for_test_bytes([0x12; 16]);
+    let other = AuthorSubject::for_test_bytes([0x13; 16]);
     let (direct, transitive, hidden) =
         seed_seeded_membership_resource_fixture(&server, member, other);
 
@@ -564,7 +567,7 @@ fn seeded_membership_resource_policy_allows_direct_and_transitive_groups() {
         served_subscription_rows_for_author(
             &schema,
             &server,
-            AuthorId::from_bytes([0x99; 16]),
+            AuthorSubject::for_test_bytes([0x99; 16]),
             "res_i"
         )
         .is_empty()
@@ -574,10 +577,10 @@ fn seeded_membership_resource_policy_allows_direct_and_transitive_groups() {
 #[test]
 fn direct_multi_identity_subscribe_reuses_shared_seeded_fragments_without_leaking() {
     let schema = customer_resource_policy_minimal_schema();
-    let db = open_db(0x69, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x12; 16]);
-    let other = AuthorId::from_bytes([0x13; 16]);
-    let spy = AuthorId::from_bytes([0x99; 16]);
+    let db = open_db(0x69, AuthorSubject::SYSTEM, &schema);
+    let member = AuthorSubject::for_test_bytes([0x12; 16]);
+    let other = AuthorSubject::for_test_bytes([0x13; 16]);
+    let spy = AuthorSubject::for_test_bytes([0x99; 16]);
     db.insert_with_id(
         "org",
         row(0x01),
@@ -686,8 +689,8 @@ fn direct_multi_identity_subscribe_reuses_shared_seeded_fragments_without_leakin
 #[test]
 fn direct_same_identity_subscribe_reuses_shared_seeded_fragments_across_shapes() {
     let schema = customer_two_resource_policy_minimal_schema();
-    let db = open_db(0x6a, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x12; 16]);
+    let db = open_db(0x6a, AuthorSubject::SYSTEM, &schema);
+    let member = AuthorSubject::for_test_bytes([0x12; 16]);
     db.insert_with_id(
         "org",
         row(0x01),
@@ -780,8 +783,8 @@ fn direct_same_identity_subscribe_reuses_shared_seeded_fragments_across_shapes()
 #[test]
 fn seeded_membership_grant_and_revoke_propagate_incrementally() {
     let schema = customer_resource_policy_minimal_schema();
-    let server = open_core(0x60, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x14; 16]);
+    let server = open_core(0x60, AuthorSubject::SYSTEM, &schema);
+    let member = AuthorSubject::for_test_bytes([0x14; 16]);
     let group = row(0x41);
     let resource = row(0xd4);
     let access = row(0xb4);
@@ -866,9 +869,9 @@ fn seeded_membership_grant_and_revoke_propagate_incrementally() {
 #[test]
 fn same_table_seeded_membership_allows_direct_and_transitive_groups() {
     let schema = same_table_seeded_resource_policy_schema();
-    let server = open_core(0x66, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x21; 16]);
-    let other = AuthorId::from_bytes([0x22; 16]);
+    let server = open_core(0x66, AuthorSubject::SYSTEM, &schema);
+    let member = AuthorSubject::for_test_bytes([0x21; 16]);
+    let other = AuthorSubject::for_test_bytes([0x22; 16]);
     let (direct, transitive, hidden) =
         seed_same_table_seeded_resource_fixture(&server, member, other);
 
@@ -884,7 +887,7 @@ fn same_table_seeded_membership_allows_direct_and_transitive_groups() {
         served_subscription_rows_for_author(
             &schema,
             &server,
-            AuthorId::from_bytes([0x99; 16]),
+            AuthorSubject::for_test_bytes([0x99; 16]),
             "resources"
         )
         .is_empty()
@@ -894,9 +897,9 @@ fn same_table_seeded_membership_allows_direct_and_transitive_groups() {
 #[test]
 fn same_table_string_seeded_membership_allows_direct_and_transitive_groups() {
     let schema = same_table_string_seeded_resource_policy_schema();
-    let server = open_core(0x86, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x21; 16]);
-    let other = AuthorId::from_bytes([0x22; 16]);
+    let server = open_core(0x86, AuthorSubject::SYSTEM, &schema);
+    let member = AuthorSubject::for_test_bytes([0x21; 16]);
+    let other = AuthorSubject::for_test_bytes([0x22; 16]);
     let (direct, transitive, hidden) =
         seed_same_table_string_seeded_resource_fixture(&server, member, other);
 
@@ -912,7 +915,7 @@ fn same_table_string_seeded_membership_allows_direct_and_transitive_groups() {
         served_subscription_rows_for_author(
             &schema,
             &server,
-            AuthorId::from_bytes([0x99; 16]),
+            AuthorSubject::for_test_bytes([0x99; 16]),
             "resources"
         )
         .is_empty()
@@ -922,9 +925,9 @@ fn same_table_string_seeded_membership_allows_direct_and_transitive_groups() {
 #[test]
 fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
     let schema = same_table_seeded_resource_policy_schema();
-    let server = open_core(0x67, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x23; 16]);
-    let other = AuthorId::from_bytes([0x24; 16]);
+    let server = open_core(0x67, AuthorSubject::SYSTEM, &schema);
+    let member = AuthorSubject::for_test_bytes([0x23; 16]);
+    let other = AuthorSubject::for_test_bytes([0x24; 16]);
     let direct_group = row(0x71);
     let transitive_group = row(0x72);
     let resource = row(0xe7);
@@ -988,7 +991,7 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
         .update(
             "teams",
             direct_group,
-            BTreeMap::from([("identity_key".to_owned(), Value::Uuid(member.0))]),
+            BTreeMap::from([("identity_key".to_owned(), Value::Uuid(member.test_uuid()))]),
         )
         .unwrap();
     client.tick().unwrap();
@@ -1018,7 +1021,7 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
         .update(
             "teams",
             direct_group,
-            BTreeMap::from([("identity_key".to_owned(), Value::Uuid(other.0))]),
+            BTreeMap::from([("identity_key".to_owned(), Value::Uuid(other.test_uuid()))]),
         )
         .unwrap();
     client.tick().unwrap();
@@ -1057,9 +1060,9 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
 #[test]
 fn inherited_child_policy_allows_two_and_three_level_chains_per_identity() {
     let schema = customer_inherited_child_policy_schema();
-    let server = open_core(0x62, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x15; 16]);
-    let other = AuthorId::from_bytes([0x16; 16]);
+    let server = open_core(0x62, AuthorSubject::SYSTEM, &schema);
+    let member = AuthorSubject::for_test_bytes([0x15; 16]);
+    let other = AuthorSubject::for_test_bytes([0x16; 16]);
     let (member_child, member_grandchild, other_child, other_grandchild) =
         seed_inherited_child_fixture(&server, member, other);
 
@@ -1079,7 +1082,7 @@ fn inherited_child_policy_allows_two_and_three_level_chains_per_identity() {
         served_subscription_rows_for_author(&schema, &server, other, "res_i_grandchild"),
         vec![other_grandchild]
     );
-    let spy = AuthorId::from_bytes([0x99; 16]);
+    let spy = AuthorSubject::for_test_bytes([0x99; 16]);
     assert!(served_subscription_rows_for_author(&schema, &server, spy, "res_i_child").is_empty());
     assert!(
         served_subscription_rows_for_author(&schema, &server, spy, "res_i_grandchild").is_empty()
@@ -1089,9 +1092,9 @@ fn inherited_child_policy_allows_two_and_three_level_chains_per_identity() {
 #[test]
 fn inherited_child_policy_parent_revocation_propagates_incrementally() {
     let schema = customer_inherited_child_policy_schema();
-    let server = open_core(0x63, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x17; 16]);
-    let other = AuthorId::from_bytes([0x18; 16]);
+    let server = open_core(0x63, AuthorSubject::SYSTEM, &schema);
+    let member = AuthorSubject::for_test_bytes([0x17; 16]);
+    let other = AuthorSubject::for_test_bytes([0x18; 16]);
     let (child, _grandchild, _other_child, _other_grandchild) =
         seed_inherited_child_fixture(&server, member, other);
 
@@ -1136,9 +1139,9 @@ fn inherited_child_policy_parent_revocation_propagates_incrementally() {
 #[test]
 fn inherited_child_policy_composes_with_local_predicates() {
     let schema = customer_inherited_child_policy_schema();
-    let server = open_core(0x65, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x19; 16]);
-    let other = AuthorId::from_bytes([0x1a; 16]);
+    let server = open_core(0x65, AuthorSubject::SYSTEM, &schema);
+    let member = AuthorSubject::for_test_bytes([0x19; 16]);
+    let other = AuthorSubject::for_test_bytes([0x1a; 16]);
     let (open_child, _grandchild, _other_child, _other_grandchild) =
         seed_inherited_child_fixture(&server, member, other);
     let closed_child = row(0xee);
@@ -1159,9 +1162,9 @@ fn inherited_child_policy_composes_with_local_predicates() {
 #[test]
 fn inherited_child_insert_uses_parent_update_where_old_only() {
     let schema = inherited_insert_policy_schema();
-    let member = AuthorId::from_bytes([0x21; 16]);
-    let other = AuthorId::from_bytes([0x22; 16]);
-    let server = open_core(0x65, AuthorId::SYSTEM, &schema);
+    let member = AuthorSubject::for_test_bytes([0x21; 16]);
+    let other = AuthorSubject::for_test_bytes([0x22; 16]);
+    let server = open_core(0x65, AuthorSubject::SYSTEM, &schema);
     let member_db = open_db(0x66, member, &schema);
     let parent = row(0xf1);
     server
@@ -1169,7 +1172,7 @@ fn inherited_child_insert_uses_parent_update_where_old_only() {
             "parents",
             parent,
             BTreeMap::from([
-                ("owner".to_owned(), Value::Uuid(member.0)),
+                ("owner".to_owned(), Value::Uuid(member.test_uuid())),
                 ("locked".to_owned(), Value::Bool(true)),
             ]),
         )
@@ -1223,8 +1226,8 @@ fn seed_customer_resource_base(server: &CoreDb) {
 
 fn seed_seeded_membership_resource_fixture(
     server: &CoreDb,
-    member: AuthorId,
-    other: AuthorId,
+    member: AuthorSubject,
+    other: AuthorSubject,
 ) -> (RowUuid, RowUuid, RowUuid) {
     seed_customer_resource_base(server);
     let direct_group = row(0x31);
@@ -1291,8 +1294,8 @@ fn seed_seeded_membership_resource_fixture(
 
 fn seed_same_table_seeded_resource_fixture(
     server: &CoreDb,
-    member: AuthorId,
-    other: AuthorId,
+    member: AuthorSubject,
+    other: AuthorSubject,
 ) -> (RowUuid, RowUuid, RowUuid) {
     let direct_group = row(0x61);
     let transitive_group = row(0x62);
@@ -1305,7 +1308,7 @@ fn seed_same_table_seeded_resource_fixture(
         (direct_group, member, "direct"),
         (
             transitive_group,
-            AuthorId::from_bytes([0x88; 16]),
+            AuthorSubject::for_test_bytes([0x88; 16]),
             "transitive",
         ),
         (hidden_group, other, "hidden"),
@@ -1348,8 +1351,8 @@ fn seed_same_table_seeded_resource_fixture(
 
 fn seed_same_table_string_seeded_resource_fixture(
     server: &CoreDb,
-    member: AuthorId,
-    other: AuthorId,
+    member: AuthorSubject,
+    other: AuthorSubject,
 ) -> (RowUuid, RowUuid, RowUuid) {
     let direct_group = row(0x61);
     let transitive_group = row(0x62);
@@ -1359,9 +1362,9 @@ fn seed_same_table_string_seeded_resource_fixture(
     let hidden = row(0xf3);
 
     for (group, identity, label) in [
-        (direct_group, member.0.to_string(), "direct"),
+        (direct_group, member.test_uuid().to_string(), "direct"),
         (transitive_group, "not-the-member".to_owned(), "transitive"),
-        (hidden_group, other.0.to_string(), "hidden"),
+        (hidden_group, other.test_uuid().to_string(), "hidden"),
     ] {
         server
             .insert_with_id(
@@ -1405,8 +1408,8 @@ fn seed_same_table_string_seeded_resource_fixture(
 
 fn seed_inherited_child_fixture(
     server: &CoreDb,
-    member: AuthorId,
-    other: AuthorId,
+    member: AuthorSubject,
+    other: AuthorSubject,
 ) -> (RowUuid, RowUuid, RowUuid, RowUuid) {
     seed_customer_resource_base(server);
     let member_group = row(0xd1);
@@ -1503,10 +1506,10 @@ fn team_cells(name: &str) -> RowCells {
     BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))])
 }
 
-fn same_table_team_cells(name: &str, identity: AuthorId) -> RowCells {
+fn same_table_team_cells(name: &str, identity: AuthorSubject) -> RowCells {
     BTreeMap::from([
         ("name".to_owned(), Value::String(name.to_owned())),
-        ("identity_key".to_owned(), Value::Uuid(identity.0)),
+        ("identity_key".to_owned(), Value::Uuid(identity.test_uuid())),
     ])
 }
 
@@ -1575,11 +1578,14 @@ fn child_insert_cells(parent: RowUuid, label: &str) -> RowCells {
     ])
 }
 
-fn seed_recursive_reachable_read_fixture(server: &CoreDb, member: AuthorId) -> (RowUuid, RowUuid) {
+fn seed_recursive_reachable_read_fixture(
+    server: &CoreDb,
+    member: AuthorSubject,
+) -> (RowUuid, RowUuid) {
     let direct_doc = row(0xd1);
     let inherited_doc = row(0xd2);
     let hidden_doc = row(0xd3);
-    let member_team = RowUuid(member.0);
+    let member_team = RowUuid(member.test_uuid());
     let parent_team = row(0xa1);
     let hidden_team = row(0xa2);
 
@@ -1649,10 +1655,10 @@ fn seed_recursive_reachable_read_fixture(server: &CoreDb, member: AuthorId) -> (
 fn served_subscription_rows_for_author(
     schema: &JazzSchema,
     server: &CoreDb,
-    author: AuthorId,
+    author: AuthorSubject,
     table: &str,
 ) -> Vec<RowUuid> {
-    let client = open_db(author.0.as_bytes()[0], author, schema);
+    let client = open_db(author.test_uuid().as_bytes()[0], author, schema);
     let (client_transport, server_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
@@ -1692,10 +1698,14 @@ fn served_subscription_rows_for_author(
 fn served_many_subscription_rows_for_author(
     schema: &JazzSchema,
     server: &CoreDb,
-    author: AuthorId,
+    author: AuthorSubject,
     tables: &[&str],
 ) -> BTreeMap<String, Vec<RowUuid>> {
-    let client = open_db(author.0.as_bytes()[0].wrapping_add(0x40), author, schema);
+    let client = open_db(
+        author.test_uuid().as_bytes()[0].wrapping_add(0x40),
+        author,
+        schema,
+    );
     let (client_transport, server_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
@@ -1725,13 +1735,13 @@ fn served_many_subscription_rows_for_author(
 fn served_group_entry_rows_via_relay(
     schema: &JazzSchema,
     server: &CoreDb,
-    author: AuthorId,
+    author: AuthorSubject,
 ) -> (Vec<RowUuid>, usize, usize) {
-    let relay = open_db(0x71, AuthorId::SYSTEM, schema);
+    let relay = open_db(0x71, AuthorSubject::SYSTEM, schema);
     let client = open_db(0x72, author, schema);
     let (relay_transport, core_transport) = duplex();
     let _relay_upstream = crate::db::block_on(relay.connect_upstream(relay_transport));
-    let _core_subscriber = server.accept_subscriber(core_transport, AuthorId::SYSTEM);
+    let _core_subscriber = server.accept_subscriber(core_transport, AuthorSubject::SYSTEM);
     let (client_transport, relay_sub_transport) = duplex();
     let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _relay_subscriber = relay.accept_subscriber(relay_sub_transport, author);
@@ -1779,10 +1789,10 @@ fn served_group_entry_rows_via_relay(
 #[test]
 fn db_surface_recursive_reachable_claim_policy_subscription_routes_per_identity() {
     let schema = benchmark_shaped_recursive_reachable_read_schema();
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let member = AuthorId::from_bytes([0x11; 16]);
-    let admin = AuthorId::SYSTEM;
-    let spy = AuthorId::from_bytes([0x33; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
+    let member = AuthorSubject::for_test_bytes([0x11; 16]);
+    let admin = AuthorSubject::SYSTEM;
+    let spy = AuthorSubject::for_test_bytes([0x33; 16]);
     let (direct_doc, inherited_doc) = seed_recursive_reachable_read_fixture(&server, member);
 
     assert_eq!(

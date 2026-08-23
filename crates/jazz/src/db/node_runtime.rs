@@ -257,7 +257,7 @@ where
 
     fn restore_local_subscriber(
         &self,
-        author: AuthorId,
+        author: AuthorSubject,
         downstream_fates: &PendingDownstreamFates,
     ) -> Result<(), Error> {
         let mut node = self.node.borrow_mut();
@@ -750,7 +750,7 @@ where
             })
             .map(|context| AuthorityContext {
                 authority: *context.remote.node.as_bytes(),
-                link: *context.link_identity.as_bytes(),
+                link: context.link_identity,
                 connection_id: connection_epoch,
                 connection_epoch: context.remote.epoch,
                 claims_revision: 0,
@@ -925,7 +925,7 @@ where
     pub fn accept_subscriber(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_trust(transport, identity, CommitUnitTrust::Session)
     }
@@ -934,7 +934,7 @@ where
     pub fn accept_subscriber_with_claims(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_claims_and_trust(
@@ -949,7 +949,7 @@ where
     pub fn accept_subscriber_with_trust(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         trust: CommitUnitTrust,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_resume_and_trust(
@@ -965,7 +965,7 @@ where
     pub fn accept_subscriber_with_claims_and_trust(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
         trust: CommitUnitTrust,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
@@ -976,7 +976,7 @@ where
     pub fn accept_edge_subscriber_with_claims(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_peer(
@@ -994,7 +994,7 @@ where
     pub fn accept_edge_authority_subscriber_with_claims(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_peer(
@@ -1012,7 +1012,7 @@ where
     pub fn accept_subscriber_with_resume(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         cursor: ResumeCursor,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
         self.accept_subscriber_with_resume_and_trust(
@@ -1027,7 +1027,7 @@ where
     fn accept_subscriber_with_resume_and_trust(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         trust: CommitUnitTrust,
         claims: BTreeMap<String, Value>,
         cursor: Option<ResumeCursor>,
@@ -1037,7 +1037,7 @@ where
         } else {
             match trust {
                 CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => {
-                    PeerState::edge_client_with_permission_identity(identity, AuthorId::SYSTEM)
+                    PeerState::edge_client_with_permission_identity(identity, AuthorSubject::SYSTEM)
                 }
                 CommitUnitTrust::Session => PeerState::client_link(identity),
             }
@@ -1048,7 +1048,7 @@ where
     fn accept_subscriber_with_peer(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         trust: CommitUnitTrust,
         claims: BTreeMap<String, Value>,
         cursor: Option<ResumeCursor>,
@@ -1406,9 +1406,9 @@ where
 
 async fn optimistic_transaction_row_keys_for_query<S>(
     node: &SharedNodeState<S>,
-    cache: &mut BTreeMap<AuthorId, BTreeSet<(String, RowUuid)>>,
+    cache: &mut BTreeMap<AuthorSubject, BTreeSet<(String, RowUuid)>>,
     shape: &ValidatedQuery,
-    author: AuthorId,
+    author: AuthorSubject,
 ) -> Result<BTreeSet<(String, RowUuid)>, Error>
 where
     S: OrderedKvStorage,
@@ -2740,7 +2740,7 @@ pub struct ConnectionSessionContext {
     /// Authenticated remote authority identity and fresh epoch.
     pub remote: WireAuthorityEndpoint,
     /// Authenticated session identity terminated by this link.
-    pub link_identity: AuthorId,
+    pub link_identity: AuthorSubject,
     /// Features accepted for this connection.
     pub negotiated_features: WireFeatures,
 }

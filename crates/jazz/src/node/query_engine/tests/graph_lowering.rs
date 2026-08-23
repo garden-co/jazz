@@ -2113,7 +2113,7 @@ fn built_in_sub_claim_lowers_to_permission_subject() {
     let program = lower_query_program(request, &mut FakeSourceResolver::default())
         .expect("built-in sub claim lowers");
     let graph = format!("{:?}", program.lowered.terminals[0].graph);
-    assert!(graph.contains(&subject.0.to_string()), "{graph}");
+    assert!(graph.contains(&subject.test_uuid().to_string()), "{graph}");
 }
 
 #[test]

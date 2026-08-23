@@ -20,7 +20,7 @@ use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 #[cfg(target_arch = "wasm32")]
 use jazz::groove::storage::IdbStorage;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::{BranchSelector, BranchViewBase, PermissionAdviceAction, ReadViewSpec};
 use jazz::query::{Query, RelationExpr, RelationQuery};
 use jazz::schema::JazzSchema;
@@ -175,7 +175,7 @@ struct WasmOpenDbConfig {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 struct WasmDbIdentity {
     node: NodeUuid,
-    author: AuthorId,
+    author: AuthorSubject,
 }
 
 impl From<WasmDbIdentity> for DbIdentity {
@@ -218,7 +218,7 @@ struct WasmStreamingMutationState {
     row_id: RowUuid,
     cells: RowCells,
     column: String,
-    identity: Option<AuthorId>,
+    identity: Option<AuthorSubject>,
     updated_at_ms: Option<u64>,
     head: Option<BranchSelector>,
     base: Option<BranchViewBase>,
@@ -424,7 +424,7 @@ pub struct WasmTransport {
     auxiliary_pump: jazz::db::PeerIoPump,
     protocol_version: u16,
     features: u64,
-    subscriber_identity: Option<AuthorId>,
+    subscriber_identity: Option<AuthorSubject>,
 }
 
 enum WasmTransportInner {
@@ -661,7 +661,7 @@ impl WasmDbInner {
         &self,
         query: &PreparedQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
         with_wasm_db!(self, |db| block_on(
             db.all_for_identity(query, opts, author)
@@ -671,7 +671,7 @@ impl WasmDbInner {
     fn begin_exclusive(
         &self,
         id: OpenTransactionId,
-        author: Option<AuthorId>,
+        author: Option<AuthorSubject>,
     ) -> Result<(), jazz::db::Error> {
         with_wasm_db!(self, |db| match author {
             Some(author) => block_on(db.begin_exclusive_for_identity(id, author)),
@@ -682,7 +682,7 @@ impl WasmDbInner {
     fn begin_mergeable(
         &self,
         id: OpenTransactionId,
-        author: Option<AuthorId>,
+        author: Option<AuthorSubject>,
     ) -> Result<(), jazz::db::Error> {
         with_wasm_db!(self, |db| match author {
             Some(author) => block_on(db.begin_mergeable_for_identity(id, author)),
@@ -694,7 +694,7 @@ impl WasmDbInner {
         &self,
         tx_id: OpenTransactionId,
         query: &PreparedQuery,
-        author: AuthorId,
+        author: AuthorSubject,
         opts: ReadOpts,
     ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
         with_wasm_db!(self, |db| block_on(
@@ -719,7 +719,7 @@ impl WasmDbInner {
         &self,
         tx_id: OpenTransactionId,
         query: &PreparedQuery,
-        author: AuthorId,
+        author: AuthorSubject,
         opts: ReadOpts,
     ) -> Result<Vec<jazz::node::CurrentRow>, jazz::db::Error> {
         with_wasm_db!(self, |db| block_on(
@@ -939,7 +939,7 @@ impl WasmDbInner {
         &self,
         query: &PreparedQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<jazz::node::RelationSnapshot, jazz::db::Error> {
         with_wasm_db!(self, |db| db
             .all_relation_snapshot_for_identity(query, opts, author)
@@ -958,14 +958,14 @@ impl WasmDbInner {
         &self,
         query: &RelationQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<jazz::node::RelationSnapshot, jazz::db::Error> {
         with_wasm_db!(self, |db| db
             .all_relation_query_for_identity(query, opts, author)
             .await)
     }
 
-    fn set_identity_claims(&self, author: AuthorId, claims: BTreeMap<String, Value>) {
+    fn set_identity_claims(&self, author: AuthorSubject, claims: BTreeMap<String, Value>) {
         with_wasm_db!(self, |db| db.set_identity_claims(author, claims))
     }
 
@@ -983,7 +983,7 @@ impl WasmDbInner {
         &self,
         query: &PreparedQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<Pin<Box<dyn Stream<Item = SubscriptionEvent> + 'static>>, jazz::db::Error> {
         with_wasm_db!(self, |db| block_on(
             db.subscribe_for_identity(query, opts, author)
@@ -1010,7 +1010,7 @@ impl WasmDbInner {
         &self,
         query: &RelationQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<Pin<Box<dyn Stream<Item = SubscriptionEvent> + 'static>>, jazz::db::Error> {
         with_wasm_db!(self, |db| block_on(
             db.subscribe_relation_query_for_identity(query, opts, author),
@@ -1032,7 +1032,7 @@ impl WasmDbInner {
         &self,
         query: &PreparedQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<QueryAttachment, jazz::db::Error> {
         with_wasm_db!(self, |db| db
             .attach_query_with_opts_for_identity(query, opts, author))
@@ -1120,7 +1120,7 @@ impl WasmDbInner {
 
     fn insert_with_id_in_branch_for_identity(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         row_id: RowUuid,
         cells: RowCells,
@@ -1154,7 +1154,7 @@ impl WasmDbInner {
 
     fn insert_with_id_for_identity(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         row_id: RowUuid,
         cells: RowCells,
@@ -1261,7 +1261,7 @@ impl WasmDbInner {
 
     fn update_in_branch_for_identity(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         row_id: RowUuid,
         patch: RowCells,
@@ -1296,7 +1296,7 @@ impl WasmDbInner {
 
     fn update_for_identity(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         row_id: RowUuid,
         patch: RowCells,
@@ -1365,7 +1365,7 @@ impl WasmDbInner {
 
     fn upsert_for_identity(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         row_id: RowUuid,
         cells: RowCells,
@@ -1466,7 +1466,7 @@ impl WasmDbInner {
 
     fn delete_in_branch_for_identity(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         row_id: RowUuid,
         head: BranchSelector,
@@ -1500,7 +1500,7 @@ impl WasmDbInner {
 
     fn delete_for_identity(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         row_id: RowUuid,
         now_ms: Option<u64>,
@@ -1588,7 +1588,7 @@ impl WasmDbInner {
 
     fn restore_with_cells_in_branch(
         &self,
-        identity: Option<AuthorId>,
+        identity: Option<AuthorSubject>,
         table: &str,
         row_id: RowUuid,
         cells: RowCells,
@@ -1636,7 +1636,7 @@ impl WasmDbInner {
 
     fn restore_for_identity(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         row_id: RowUuid,
         cells: RowCells,
@@ -3026,7 +3026,7 @@ impl WasmDb {
                 node: NodeUuid::from_bytes(remote_node),
                 epoch: remote_epoch,
             },
-            link_identity: AuthorId::from_bytes(local_node),
+            link_identity: AuthorSubject::for_test_bytes(local_node),
             negotiated_features: features as u64,
         };
         let transport = Box::new(WireTransportAdapter::new_with_session_context(
@@ -3589,7 +3589,7 @@ fn read_rows_for_transaction(
     db: &WasmDbInner,
     query: &WasmPreparedQuery,
     tx: &WasmTx,
-    author: Option<AuthorId>,
+    author: Option<AuthorSubject>,
     opts: JsValue,
 ) -> Result<Vec<jazz::node::CurrentRow>, JsValue> {
     ensure_transaction_runtime(db, tx)?;
@@ -3762,18 +3762,18 @@ fn checked_js_u64_range(start: f64, end: f64) -> Result<std::ops::Range<u64>, Js
     Ok(start..end)
 }
 
-fn author_id_from_bytes(bytes: &[u8]) -> Result<AuthorId, JsValue> {
+fn author_id_from_bytes(bytes: &[u8]) -> Result<AuthorSubject, JsValue> {
     let bytes: [u8; 16] = bytes
         .try_into()
         .map_err(|_| JsValue::from_str("author id must be 16 bytes"))?;
-    Ok(AuthorId::from_bytes(bytes))
+    Ok(AuthorSubject::for_test_bytes(bytes))
 }
 
-fn set_identity_claims<S>(db: &Db<S>, author: AuthorId)
+fn set_identity_claims<S>(db: &Db<S>, author: AuthorSubject)
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    let subject = author.0.to_string();
+    let subject = author.canonical().to_owned();
     db.set_identity_claims(
         author,
         BTreeMap::from([
@@ -3784,7 +3784,10 @@ where
     );
 }
 
-fn claims_from_js(author: AuthorId, claims: JsValue) -> Result<BTreeMap<String, Value>, JsValue> {
+fn claims_from_js(
+    author: AuthorSubject,
+    claims: JsValue,
+) -> Result<BTreeMap<String, Value>, JsValue> {
     let raw: serde_json::Value = serde_wasm_bindgen::from_value(claims).map_err(to_js_error)?;
     let mut claims = match raw {
         serde_json::Value::Null => BTreeMap::new(),
@@ -3794,7 +3797,7 @@ fn claims_from_js(author: AuthorId, claims: JsValue) -> Result<BTreeMap<String, 
             .collect::<Result<BTreeMap<_, _>, JsValue>>()?,
         _ => return Err(JsValue::from_str("identity claims must be an object")),
     };
-    let subject = author.0.to_string();
+    let subject = author.canonical().to_owned();
     claims
         .entry("subject".to_owned())
         .or_insert_with(|| Value::String(subject.clone()));
@@ -4339,7 +4342,7 @@ mod dynamic_schema_view_tests {
                 MemoryStorage::new(&refs),
                 DbIdentity {
                     node: jazz::ids::NodeUuid::from_bytes([0x45; 16]),
-                    author: AuthorId::from_bytes([0xa5; 16]),
+                    author: AuthorSubject::for_test_bytes([0xa5; 16]),
                 },
             )))
             .unwrap(),
@@ -4394,8 +4397,8 @@ mod dynamic_schema_view_tests {
                 inner: WasmDbInner::Memory(Rc::clone(&owner)),
                 owns_runtime: false,
             };
-            let alice = AuthorId::from_bytes([0xa7; 16]);
-            let bob = AuthorId::from_bytes([0xb7; 16]);
+            let alice = AuthorSubject::for_test_bytes([0xa7; 16]);
+            let bob = AuthorSubject::for_test_bytes([0xb7; 16]);
             let bound = OpenTransactionId::new();
             binding
                 .begin_transaction(

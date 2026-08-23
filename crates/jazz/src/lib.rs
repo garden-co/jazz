@@ -25,7 +25,7 @@
 //! ```no_run
 //! use std::collections::BTreeMap;
 //!
-//! use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+//! use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 //! use jazz::protocol::SyncMessage;
 //! use jazz::schema::JazzSchema;
 //! use jazz::node::{MergeableCommit, NodeState};
@@ -44,7 +44,7 @@
 //!     block_on(NodeState::new(node, schema, MemoryStorage::new(&refs))).unwrap()
 //! }
 //!
-//! let owner = AuthorId::from_bytes([0xa1; 16]);
+//! let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
 //! let owner_policy = PolicyExpr::Cmp {
 //!     column: "owner".to_owned(),
 //!     op: CmpOp::Eq,
@@ -115,7 +115,7 @@
 pub(crate) mod legacy_test_future {
     use std::future::Future;
 
-    use crate::ids::{AuthorId, SchemaVersionId};
+    use crate::ids::{AuthorSubject, SchemaVersionId};
     use crate::node::{ContributionMergeRequest, Error, MergeableCommit, NodeState};
     use crate::protocol::{CatalogueSnapshot, SyncMessage, VersionRecord};
     use crate::time::{GlobalTime, TxTime};
@@ -257,7 +257,7 @@ pub(crate) mod legacy_test_future {
         fn commit_exclusive_settled(
             &mut self,
             tx_id: OpenTransactionId,
-            author: AuthorId,
+            author: AuthorSubject,
             now_ms: u64,
         ) -> Result<(TxId, SyncMessage), Error>;
         fn apply_sync_message_settled(
@@ -376,7 +376,7 @@ pub(crate) mod legacy_test_future {
         fn commit_exclusive_settled(
             &mut self,
             tx_id: OpenTransactionId,
-            author: AuthorId,
+            author: AuthorSubject,
             now_ms: u64,
         ) -> Result<(TxId, SyncMessage), Error> {
             crate::db::block_on(async {

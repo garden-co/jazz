@@ -42,7 +42,7 @@ where
     /// Build a mergeable transaction authored and permission-checked as `author`.
     pub async fn mergeable_tx_for_identity(
         &self,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<MergeableTx<'_, S>, Error> {
         let tx_id = OpenTransactionId::new();
         self.begin_mergeable_for_identity(tx_id, author).await?;
@@ -58,7 +58,7 @@ where
     /// If `callback` returns an error, the transaction is dropped without committing.
     pub async fn transaction_for_identity<T>(
         &self,
-        author: AuthorId,
+        author: AuthorSubject,
         callback: impl AsyncFnOnce(&mut MergeableTx<'_, S>) -> Result<T, Error>,
     ) -> Result<(T, TxId), Error> {
         let mut tx = self.mergeable_tx_for_identity(author).await?;
@@ -91,7 +91,7 @@ where
     pub async fn begin_mergeable_for_identity(
         &self,
         id: OpenTransactionId,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<(), Error> {
         self.node
             .node
@@ -538,7 +538,7 @@ where
         &self,
         tx_id: OpenTransactionId,
         prepared: &PreparedQuery,
-        author: AuthorId,
+        author: AuthorSubject,
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.transaction_all_in_authorization_mode(
@@ -555,7 +555,7 @@ where
         &self,
         tx_id: OpenTransactionId,
         prepared: &PreparedQuery,
-        author: AuthorId,
+        author: AuthorSubject,
         opts: ReadOpts,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {

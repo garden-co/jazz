@@ -150,19 +150,21 @@ pub(super) fn rewrite_claim_predicate_for_binding(
     }
 }
 
-pub(super) fn default_permission_scope_claim_values(writer: AuthorId) -> BTreeMap<String, Value> {
+pub(super) fn default_permission_scope_claim_values(
+    writer: AuthorSubject,
+) -> BTreeMap<String, Value> {
     default_policy_claim_values(writer)
 }
 
-pub(super) fn default_policy_claim_values(writer: AuthorId) -> BTreeMap<String, Value> {
+pub(super) fn default_policy_claim_values(writer: AuthorSubject) -> BTreeMap<String, Value> {
     // Alpha-compat built-ins live at the node admission/query boundary, not in
     // the compiler: lowering receives ordinary claim values plus spec `sub`.
     BUILTIN_POLICY_CLAIMS
         .iter()
         .map(|name| {
             let value = match *name {
-                "sub" => Value::Uuid(writer.0),
-                "user_id" => Value::String(writer.0.to_string()),
+                "sub" => Value::String(writer.canonical().to_owned()),
+                "user_id" => Value::String(writer.canonical().to_owned()),
                 "isAdmin" => Value::Bool(false),
                 _ => unreachable!("unknown built-in policy claim"),
             };

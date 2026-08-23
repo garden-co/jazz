@@ -5,10 +5,10 @@ use crate::node::SKEW_TOLERANCE_MS;
 
 #[test]
 fn authenticated_client_upload_uses_authority_clock_for_forward_skew() {
-    let identity = AuthorId::from_bytes([0xc1; 16]);
+    let identity = AuthorSubject::for_test_bytes([0xc1; 16]);
     let schema = schema();
     let client = open_core(0xc1, identity, &schema);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let authority_now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -66,17 +66,19 @@ fn catalogue_fingerprint_change_is_eager_only_on_trusted_backend_link() {
     // transport boundary; exposing it through a public client fixture would
     // test the HTTP/WebSocket bootstrap race rather than this hop contract.
     let base = schema();
-    let core = open_core(0x5e, AuthorId::SYSTEM, &base);
+    let core = open_core(0x5e, AuthorSubject::SYSTEM, &base);
 
     let (mut edge_transport, core_edge_transport) = duplex();
     let edge_link = core.accept_subscriber_with_trust(
         core_edge_transport,
-        AuthorId::from_bytes([0xe1; 16]),
+        AuthorSubject::for_test_bytes([0xe1; 16]),
         CommitUnitTrust::TrustedBackend,
     );
     let (mut client_transport, core_client_transport) = duplex();
-    let client_link =
-        core.accept_subscriber(core_client_transport, AuthorId::from_bytes([0xc1; 16]));
+    let client_link = core.accept_subscriber(
+        core_client_transport,
+        AuthorSubject::for_test_bytes([0xc1; 16]),
+    );
 
     edge_link.borrow_mut().tick().unwrap();
     assert!(matches!(
@@ -120,7 +122,7 @@ fn catalogue_fingerprint_change_is_eager_only_on_trusted_backend_link() {
         .node()
         .borrow_mut()
         .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(SchemaLineagePublication::new(
                 evolved.clone(),
@@ -153,10 +155,10 @@ fn catalogue_fingerprint_change_is_eager_only_on_trusted_backend_link() {
 
 #[test]
 fn admitted_duplex_context_binds_peer_epochs_and_rejects_cross_wiring() {
-    let identity = AuthorId::from_bytes([0x71; 16]);
+    let identity = AuthorSubject::for_test_bytes([0x71; 16]);
     let schema = schema();
     let client = open_db(0x72, identity, &schema);
-    let server = open_core(0x73, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x73, AuthorSubject::SYSTEM, &schema);
     let client_node = NodeUuid::from_bytes([0x72; 16]);
     let server_node = NodeUuid::from_bytes([0x73; 16]);
     let (client_transport, server_transport) =
@@ -168,7 +170,7 @@ fn admitted_duplex_context_binds_peer_epochs_and_rejects_cross_wiring() {
 
     let expected = AuthorityContext {
         authority: *server_node.as_bytes(),
-        link: *identity.as_bytes(),
+        link: identity,
         connection_id: 41,
         connection_epoch: 97,
         claims_revision: 0,
@@ -226,9 +228,9 @@ fn admitted_duplex_context_binds_peer_epochs_and_rejects_cross_wiring() {
 #[test]
 fn permission_advice_uses_authenticated_link_identity_without_mutating() {
     let schema = owner_read_schema();
-    let alice = AuthorId::from_bytes([0xa1; 16]);
-    let mallory = AuthorId::from_bytes([0xb2; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let mallory = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let owned = server
         .insert("todos", cells("secret", false, alice))
         .unwrap()
@@ -278,8 +280,8 @@ fn permission_advice_uses_authenticated_link_identity_without_mutating() {
 #[test]
 fn distinct_advice_actions_with_one_compiled_scope_hydrate_once() {
     let schema = owner_read_schema();
-    let alice = AuthorId::from_bytes([0xa1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let allowed = server
         .insert("todos", cells("owned", false, alice))
         .unwrap()
@@ -287,7 +289,7 @@ fn distinct_advice_actions_with_one_compiled_scope_hydrate_once() {
     let denied = server
         .insert(
             "todos",
-            cells("other", false, AuthorId::from_bytes([0xb2; 16])),
+            cells("other", false, AuthorSubject::for_test_bytes([0xb2; 16])),
         )
         .unwrap()
         .row_uuid();
@@ -336,8 +338,8 @@ fn distinct_advice_actions_with_one_compiled_scope_hydrate_once() {
 #[test]
 fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
     let schema = owner_read_schema();
-    let alice = AuthorId::from_bytes([0xa1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let target = server
         .insert("todos", cells("owned", false, alice))
         .unwrap()
@@ -409,9 +411,9 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
 #[test]
 fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
     let schema = owner_write_schema();
-    let alice = AuthorId::from_bytes([0xa1; 16]);
-    let bob = AuthorId::from_bytes([0xb2; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     // A Core may also maintain an upstream relay; that topology fact must not
     // turn its client ingress into Edge routing or bypass local proof.
     let (core_upstream, _upstream_peer) = duplex_with_admitted_session_context(
@@ -446,7 +448,7 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
         .update(
             "todos",
             inserted.row_uuid(),
-            BTreeMap::from([("owner".to_owned(), Value::Uuid(bob.0))]),
+            BTreeMap::from([("owner".to_owned(), Value::Uuid(bob.test_uuid()))]),
         )
         .unwrap();
     client.tick().unwrap();
@@ -481,8 +483,8 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
 #[test]
 fn concurrent_upstreams_keep_selected_owner_until_detach_handoff() {
     let schema = schema();
-    let identity = AuthorId::from_bytes([0xa1; 16]);
-    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
+    let identity = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let edge = open_core(0xe0, AuthorSubject::SYSTEM, &schema);
     let edge_node = NodeUuid::from_bytes([0xe0; 16]);
     let (a_transport, _a_peer) = duplex_with_admitted_session_context(
         identity,
@@ -539,8 +541,8 @@ fn concurrent_upstreams_keep_selected_owner_until_detach_handoff() {
 #[test]
 fn edge_route_capacity_rejects_instead_of_reporting_edge_acceptance() {
     let schema = schema();
-    let identity = AuthorId::from_bytes([0xa1; 16]);
-    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
+    let identity = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let edge = open_core(0xe0, AuthorSubject::SYSTEM, &schema);
     let (upstream, _authority) = duplex_with_admitted_session_context(
         identity,
         NodeUuid::from_bytes([0xe0; 16]),
@@ -609,19 +611,19 @@ fn edge_route_capacity_rejects_instead_of_reporting_edge_acceptance() {
 #[test]
 fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
     let schema = schema();
-    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     let edge_node = NodeUuid::from_bytes([0xe0; 16]);
     let core_node = NodeUuid::from_bytes([0xc0; 16]);
-    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
+    let edge = open_core(0xe0, AuthorSubject::SYSTEM, &schema);
 
     // The upstream endpoint is the authority that is allowed to discharge a
     // downstream Edge-accepted write. The client endpoint is deliberately a
     // different admitted session, so it cannot supply that authority context.
     let (edge_upstream_transport, core_transport) =
-        duplex_with_admitted_session_context(AuthorId::SYSTEM, edge_node, 41, core_node, 97);
+        duplex_with_admitted_session_context(AuthorSubject::SYSTEM, edge_node, 41, core_node, 97);
     let edge_upstream = crate::db::block_on(edge.server.connect_upstream(edge_upstream_transport));
-    let core = open_core(0xc0, AuthorId::SYSTEM, &schema);
-    let core_session = core.accept_subscriber(core_transport, AuthorId::SYSTEM);
+    let core = open_core(0xc0, AuthorSubject::SYSTEM, &schema);
+    let core_session = core.accept_subscriber(core_transport, AuthorSubject::SYSTEM);
 
     let client = open_db(0xa1, alice, &schema);
     let (client_transport, edge_transport) = duplex_with_admitted_session_context(
@@ -650,7 +652,7 @@ fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
 
     let expected_authority = AuthorityContext {
         authority: *core_node.as_bytes(),
-        link: *AuthorId::SYSTEM.as_bytes(),
+        link: AuthorSubject::SYSTEM,
         connection_id: 41,
         connection_epoch: 97,
         claims_revision: 0,
@@ -721,7 +723,7 @@ fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
             ..advanced_context
         },
         AuthorityContext {
-            link: *AuthorId::from_bytes([0xb2; 16]).as_bytes(),
+            link: AuthorSubject::for_test_bytes([0xb2; 16]),
             ..advanced_context
         },
     ] {
@@ -804,8 +806,8 @@ fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
 #[test]
 fn stale_upstream_epoch_cannot_settle_routed_local_fate_before_selected_epoch() {
     let schema = schema();
-    let identity = AuthorId::from_bytes([0xa1; 16]);
-    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
+    let identity = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let edge = open_core(0xe0, AuthorSubject::SYSTEM, &schema);
     let (a_transport, mut a_peer) = duplex_with_admitted_session_context(
         identity,
         NodeUuid::from_bytes([0xe0; 16]),
@@ -879,10 +881,10 @@ fn stale_upstream_epoch_cannot_settle_routed_local_fate_before_selected_epoch() 
 #[test]
 fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() {
     let schema = schema();
-    let identity = AuthorId::from_bytes([0xa1; 16]);
-    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
-    let authority_a = open_core(0xa2, AuthorId::SYSTEM, &schema);
-    let authority_b = open_core(0xb2, AuthorId::SYSTEM, &schema);
+    let identity = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let edge = open_core(0xe0, AuthorSubject::SYSTEM, &schema);
+    let authority_a = open_core(0xa2, AuthorSubject::SYSTEM, &schema);
+    let authority_b = open_core(0xb2, AuthorSubject::SYSTEM, &schema);
     let edge_node = NodeUuid::from_bytes([0xe0; 16]);
 
     let (edge_a_transport, a_transport) = duplex_with_admitted_session_context(
@@ -1036,9 +1038,9 @@ fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() 
 #[test]
 fn edge_parks_downstream_fate_until_a_later_authority_connects() {
     let schema = schema();
-    let identity = AuthorId::from_bytes([0xa1; 16]);
-    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
-    let authority_a = open_core(0xa2, AuthorId::SYSTEM, &schema);
+    let identity = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let edge = open_core(0xe0, AuthorSubject::SYSTEM, &schema);
+    let authority_a = open_core(0xa2, AuthorSubject::SYSTEM, &schema);
     let edge_node = NodeUuid::from_bytes([0xe0; 16]);
     let (edge_a_transport, a_transport) = duplex_with_admitted_session_context(
         identity,
@@ -1086,7 +1088,7 @@ fn edge_parks_downstream_fate_until_a_later_authority_connects() {
         "a route whose authority disconnected remains parked without stale authority claims"
     );
 
-    let authority_c = open_core(0xc2, AuthorId::SYSTEM, &schema);
+    let authority_c = open_core(0xc2, AuthorSubject::SYSTEM, &schema);
     let (edge_c_transport, c_transport) = duplex_with_admitted_session_context(
         identity,
         edge_node,
@@ -1122,10 +1124,10 @@ fn edge_parks_downstream_fate_until_a_later_authority_connects() {
 #[test]
 fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
     let schema = schema();
-    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     let edge_node = NodeUuid::from_bytes([0xe0; 16]);
     let core_node = NodeUuid::from_bytes([0xc0; 16]);
-    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
+    let edge = open_core(0xe0, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xa1, alice, &schema);
     let (client_transport, edge_transport) = duplex_with_admitted_session_context(
         alice,
@@ -1177,7 +1179,7 @@ fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
     );
 
     let (edge_upstream_transport, core_transport) =
-        duplex_with_admitted_session_context(AuthorId::SYSTEM, edge_node, 41, core_node, 97);
+        duplex_with_admitted_session_context(AuthorSubject::SYSTEM, edge_node, 41, core_node, 97);
     let _edge_upstream = crate::db::block_on(edge.server.connect_upstream(edge_upstream_transport));
     assert!(
         edge.server.edge_fate_routes.borrow()[&tx_id][0]
@@ -1185,8 +1187,8 @@ fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
             .is_some(),
         "the first authenticated authority binds the parked route"
     );
-    let core = open_core(0xc0, AuthorId::SYSTEM, &schema);
-    let core_session = core.accept_subscriber(core_transport, AuthorId::SYSTEM);
+    let core = open_core(0xc0, AuthorSubject::SYSTEM, &schema);
+    let core_session = core.accept_subscriber(core_transport, AuthorSubject::SYSTEM);
     edge.tick().unwrap();
     let uploaded = std::iter::from_fn(|| core_session.borrow_mut().transport.try_recv())
         .any(|message| matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id));
@@ -1219,12 +1221,12 @@ fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
 #[test]
 fn stale_same_authority_session_cannot_settle_or_forward_a_routed_fate() {
     let schema = schema();
-    let identity = AuthorId::from_bytes([0xa1; 16]);
-    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
+    let identity = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let edge = open_core(0xe0, AuthorSubject::SYSTEM, &schema);
     let edge_node = NodeUuid::from_bytes([0xe0; 16]);
     let authority_node = NodeUuid::from_bytes([0xa2; 16]);
-    let old_authority = open_core(0xa2, AuthorId::SYSTEM, &schema);
-    let current_authority = open_core(0xa2, AuthorId::SYSTEM, &schema);
+    let old_authority = open_core(0xa2, AuthorSubject::SYSTEM, &schema);
+    let current_authority = open_core(0xa2, AuthorSubject::SYSTEM, &schema);
 
     let (edge_old_transport, old_transport) =
         duplex_with_admitted_session_context(identity, edge_node, 10, authority_node, 20);
@@ -1314,8 +1316,8 @@ fn stale_same_authority_session_cannot_settle_or_forward_a_routed_fate() {
 #[test]
 fn public_permission_advice_accepts_an_explicit_zero_clause_receipt() {
     let schema = schema();
-    let identity = AuthorId::from_bytes([0xa3; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let identity = AuthorSubject::for_test_bytes([0xa3; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let target = server
         .insert("todos", cells("public", false, identity))
         .unwrap()
@@ -1345,8 +1347,8 @@ fn public_permission_advice_accepts_an_explicit_zero_clause_receipt() {
 #[test]
 fn permission_advice_is_unknown_until_authority_permissions_are_ready() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xa1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let author = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     server.server.set_permissions_ready(false).unwrap();
     let client = open_db(0xa1, author, &schema);
     let (client_transport, server_transport) = duplex_with_admitted_session_context(
@@ -1374,8 +1376,8 @@ fn permission_advice_is_unknown_until_authority_permissions_are_ready() {
 #[test]
 fn partial_replica_cannot_act_as_permission_advice_authority() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xa1; 16]);
-    let partial = open_db(0x5e, AuthorId::SYSTEM, &schema);
+    let author = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let partial = open_db(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xa1, author, &schema);
     let (client_transport, partial_transport) = duplex_with_admitted_session_context(
         author,
@@ -1410,8 +1412,8 @@ fn permission_advice_update_evaluates_post_patch_update_check() {
                 .policies(PublicTablePolicies::new().with_update(None, policy)),
         ),
     );
-    let author = AuthorId::from_bytes([0xa1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let author = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let target = server
         .insert("todos", cells("target", false, author))
         .unwrap()
@@ -1468,7 +1470,7 @@ fn permission_advice_response_wire_cannot_carry_policy_rows_or_reasons() {
 #[test]
 fn cancelled_permission_advice_ignores_late_or_replayed_response_ids() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xa1; 16]);
+    let author = AuthorSubject::for_test_bytes([0xa1; 16]);
     let client = open_db(0xa1, author, &schema);
     let (client_transport, mut authority_transport) = duplex_with_admitted_session_context(
         author,
@@ -1519,7 +1521,7 @@ fn cancelled_permission_advice_ignores_late_or_replayed_response_ids() {
 #[test]
 fn identical_permission_advice_requests_share_one_authority_intent() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xa4; 16]);
+    let author = AuthorSubject::for_test_bytes([0xa4; 16]);
     let client = open_db(0xa4, author, &schema);
     let (client_transport, mut authority_transport) = duplex_with_admitted_session_context(
         author,
@@ -1556,7 +1558,7 @@ fn identical_permission_advice_requests_share_one_authority_intent() {
 #[test]
 fn dropped_permission_advice_is_not_sent_and_reopened_nodes_use_fresh_ids() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xa1; 16]);
+    let author = AuthorSubject::for_test_bytes([0xa1; 16]);
 
     let first = open_db(0xa1, author, &schema);
     let (first_transport, mut first_authority) = duplex_with_admitted_session_context(

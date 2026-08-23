@@ -13,7 +13,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::schema::JazzSchema;
 use jazz::serving::{InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerSession};
@@ -29,11 +29,11 @@ fn node(byte: u8) -> NodeUuid {
     NodeUuid::from_bytes([byte; 16])
 }
 
-fn author(byte: u8) -> AuthorId {
-    AuthorId::from_bytes([byte; 16])
+fn author(byte: u8) -> AuthorSubject {
+    AuthorSubject::for_test_bytes([byte; 16])
 }
 
-fn identity(node_byte: u8, author: AuthorId) -> DbIdentity {
+fn identity(node_byte: u8, author: AuthorSubject) -> DbIdentity {
     DbIdentity {
         node: node(node_byte),
         author,
@@ -65,7 +65,7 @@ fn read_only_schema() -> JazzSchema {
     )
 }
 
-fn open_db(node_byte: u8, author: AuthorId, schema: &JazzSchema) -> Db<TestStorage> {
+fn open_db(node_byte: u8, author: AuthorSubject, schema: &JazzSchema) -> Db<TestStorage> {
     let refs = schema.column_families();
     let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
     block_on(Db::open(DbConfig::new(
@@ -82,7 +82,7 @@ fn open_core(node_byte: u8, schema: &JazzSchema) -> Db<TestStorage> {
     block_on(Db::open_history_complete(DbConfig::new(
         schema.clone(),
         TestStorage::new(&refs),
-        identity(node_byte, AuthorId::SYSTEM),
+        identity(node_byte, AuthorSubject::SYSTEM),
     )))
     .unwrap()
 }
@@ -123,7 +123,7 @@ fn connect_client_to_edge(
     edge: &mut InMemoryServerShell,
     client: &Db<TestStorage>,
     client_wire: &QueuedWireTransport,
-    identity: AuthorId,
+    identity: AuthorSubject,
 ) -> ServerSession {
     jazz::db::block_on(
         client.connect_upstream(Box::new(WireTransportAdapter::current(client_wire.clone()))),
@@ -173,14 +173,14 @@ fn visible_titles(db: &Db<TestStorage>, tier: DurabilityTier) -> Vec<String> {
 fn edge_shell_does_not_report_global_or_serve_global_before_core_ack() {
     let schema = schema();
     let mut edge = InMemoryServerShell::start(
-        InMemoryServerShellConfig::new(schema.clone(), identity(0xe0, AuthorId::SYSTEM))
+        InMemoryServerShellConfig::new(schema.clone(), identity(0xe0, AuthorSubject::SYSTEM))
             .with_role(NodeRole::Edge),
     )
     .unwrap();
     let core = open_core(0xc0, &schema);
     let (edge_to_core, core_to_edge) = duplex();
     edge.connect_upstream(edge_to_core).unwrap();
-    core.accept_subscriber(core_to_edge, AuthorId::SYSTEM);
+    core.accept_subscriber(core_to_edge, AuthorSubject::SYSTEM);
 
     let alice = open_db(0xa1, author(0xa1), &schema);
     let bob = open_db(0xb0, author(0xb0), &schema);
@@ -223,7 +223,7 @@ fn edge_shell_does_not_report_global_or_serve_global_before_core_ack() {
 fn core_shell_client_upload_still_reports_global_immediately() {
     let schema = schema();
     let mut core = InMemoryServerShell::start(
-        InMemoryServerShellConfig::new(schema.clone(), identity(0xc0, AuthorId::SYSTEM))
+        InMemoryServerShellConfig::new(schema.clone(), identity(0xc0, AuthorSubject::SYSTEM))
             .with_role(NodeRole::Core),
     )
     .unwrap();
@@ -312,7 +312,7 @@ fn core_shell_client_upload_still_reports_global_immediately() {
 fn core_authority_rejects_omitted_insert_after_read_policy_closes_table() {
     let schema = read_only_schema();
     let mut core = InMemoryServerShell::start(
-        InMemoryServerShellConfig::new(schema.clone(), identity(0xc2, AuthorId::SYSTEM))
+        InMemoryServerShellConfig::new(schema.clone(), identity(0xc2, AuthorSubject::SYSTEM))
             .with_role(NodeRole::Core),
     )
     .unwrap();
@@ -346,7 +346,7 @@ fn core_authority_rejects_omitted_insert_after_read_policy_closes_table() {
 fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
     let schema = schema();
     let mut core = InMemoryServerShell::start(
-        InMemoryServerShellConfig::new(schema.clone(), identity(0xc1, AuthorId::SYSTEM))
+        InMemoryServerShellConfig::new(schema.clone(), identity(0xc1, AuthorSubject::SYSTEM))
             .with_role(NodeRole::Core),
     )
     .unwrap();

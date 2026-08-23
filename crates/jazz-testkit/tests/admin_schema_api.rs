@@ -2,7 +2,7 @@ use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 
 use jazz::db::DbIdentity;
-use jazz::ids::{AuthorId, NodeUuid};
+use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::serving::InMemoryServerShellConfig;
 use jazz::tools::SchemaBuilder;
 use jazz_server::loopback::http::LoopbackHttpServer;
@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 fn identity() -> DbIdentity {
     DbIdentity {
         node: NodeUuid::from_bytes([0x5e; 16]),
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
     }
 }
 

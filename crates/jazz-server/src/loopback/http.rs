@@ -23,7 +23,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jazz::db::DbIdentity;
-use jazz::ids::{AuthorId, NodeUuid};
+use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::Schema;
 use serde::{Deserialize, Serialize};
@@ -295,7 +295,7 @@ fn default_config() -> InMemoryServerShellConfig {
         schema,
         DbIdentity {
             node: NodeUuid::from_bytes([0x5e; 16]),
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
         },
     )
 }
@@ -422,7 +422,7 @@ fn handle_request(request: HttpRequest, state: &mut LoopbackState) -> Vec<u8> {
         ("POST", "/sessions") => {
             let session = match state
                 .shell
-                .accept_subscriber_session(AuthorId::from_bytes([0xc1; 16]))
+                .accept_subscriber_session(AuthorSubject::for_test_bytes([0xc1; 16]))
             {
                 Ok(session) => session,
                 Err(error) => return shell_error_response(error),
@@ -939,7 +939,7 @@ mod tests {
             active_schema,
             DbIdentity {
                 node: NodeUuid::from_bytes([0x5f; 16]),
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
             },
         )
         .with_runtime_schema_bootstrap();

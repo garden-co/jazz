@@ -706,7 +706,7 @@ where
     /// Attach process-local auth claims to an accepted subscriber identity.
     pub(crate) fn set_session_claims(
         &mut self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) {
         if self.session_claims.get(&identity) == Some(&claims) {
@@ -722,7 +722,7 @@ where
     }
 
     /// Return the revision of process-local claims for `identity`.
-    pub(crate) fn session_claim_revision(&self, identity: AuthorId) -> u64 {
+    pub(crate) fn session_claim_revision(&self, identity: AuthorSubject) -> u64 {
         self.session_claim_revisions
             .get(&identity)
             .copied()
@@ -735,7 +735,7 @@ where
     /// reached that particular connection.
     pub(crate) fn session_claims_with_revisions(
         &self,
-    ) -> Vec<(AuthorId, BTreeMap<String, Value>, u64)> {
+    ) -> Vec<(AuthorSubject, BTreeMap<String, Value>, u64)> {
         self.session_claims
             .iter()
             .map(|(identity, claims)| {

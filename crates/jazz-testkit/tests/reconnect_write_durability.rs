@@ -132,7 +132,7 @@ fn detaching_the_upstream_resolves_pending_global_wait() {
     use jazz::db::{Db, DbConfig, DbIdentity, block_on};
     use jazz::groove::records::Value;
     use jazz::groove::storage::MemoryStorage;
-    use jazz::ids::{AuthorId, NodeUuid};
+    use jazz::ids::{AuthorSubject, NodeUuid};
     use jazz::schema::JazzSchema;
     use jazz::tools::{ColumnType, SchemaBuilder, TableSchema};
     use jazz::tx::DurabilityTier;
@@ -152,7 +152,7 @@ fn detaching_the_upstream_resolves_pending_global_wait() {
         MemoryStorage::new(&refs),
         DbIdentity {
             node: NodeUuid::from_bytes([0x51; 16]),
-            author: AuthorId::from_bytes([0xa9; 16]),
+            author: AuthorSubject::for_test_bytes([0xa9; 16]),
         },
     )))
     .expect("open database");

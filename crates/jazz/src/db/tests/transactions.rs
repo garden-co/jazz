@@ -98,7 +98,7 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
         storage: doctest_support::MemoryStorage::new(&refs),
         identity: DbIdentity {
             node: NodeUuid::from_bytes([0x91; 16]),
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(91))),
     }))
@@ -431,7 +431,7 @@ fn exclusive_tx_overlay_scopes_same_row_uuid_by_table() {
             .table(table_schema("table_a"))
             .table(table_schema("table_b")),
     );
-    let db = open_db(0x5e, AuthorId::SYSTEM, &schema);
+    let db = open_db(0x5e, AuthorSubject::SYSTEM, &schema);
     let table_a = schema
         .tables
         .iter()
@@ -1044,8 +1044,8 @@ fn mergeable_transaction_identity_reads_are_not_forced_to_begin_author() {
 #[test]
 fn exclusive_tx_rejects_conflicting_concurrent_update() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let core = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let core = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let table = &schema.tables[0];
     let row = row(1);
 
@@ -1090,8 +1090,8 @@ fn exclusive_tx_blind_writes_are_first_committer_wins() {
     // (INV-TX-20) can catch the conflict — this is the exact case the earlier
     // broken validator let through (it short-circuited to "ok" on empty reads).
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let core = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let core = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let table = &schema.tables[0];
     let row = row(1);
 

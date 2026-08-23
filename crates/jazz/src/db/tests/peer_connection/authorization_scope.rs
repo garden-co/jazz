@@ -19,9 +19,9 @@ fn schema_with_explicit_public_read() -> JazzSchema {
 // Final convergence is still asserted through the receiver's public read.
 fn assert_delayed_duplicate_usage_reset(replacement_row: bool) {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
     let stale = row(0x61);
     server
@@ -178,8 +178,8 @@ fn delayed_duplicate_usage_resets_stale_authorization_with_replacement_row() {
 #[test]
 fn legacy_authorization_scope_subscribe_is_rejected_before_shape_admission() {
     let schema = schema_with_explicit_public_read();
-    let identity = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let identity = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let shape = Query::from("todos").validate(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let subscription = SubscriptionKey {
@@ -232,7 +232,7 @@ fn legacy_authorization_scope_subscribe_is_rejected_before_shape_admission() {
             } => {
                 assert!(received_view, "receipt must follow its support view");
                 assert_eq!(received, subscription);
-                assert_eq!(receipt.link, *identity.as_bytes());
+                assert_eq!(receipt.link, identity);
                 assert_eq!(receipt.key.subject, identity);
                 received_receipt = true;
             }
@@ -274,8 +274,8 @@ fn legacy_authorization_scope_subscribe_refreshes_claims() {
 #[test]
 fn authorization_scope_rejects_unrelated_caller_intent() {
     let schema = schema_with_explicit_public_read();
-    let identity = AuthorId::from_bytes([0xc2; 16]);
-    let server = open_core(0x5f, AuthorId::SYSTEM, &schema);
+    let identity = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
     let shape = Query::from("todos").validate(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let subscription = SubscriptionKey {
@@ -329,8 +329,8 @@ fn legacy_authorization_scope_subscribe_never_assembles_multiple_clauses() {
             .table(PublicTableSchemaBuilder::new("support_using"))
             .table(PublicTableSchemaBuilder::new("support_check")),
     );
-    let identity = AuthorId::from_bytes([0xc3; 16]);
-    let server = open_core(0x60, AuthorId::SYSTEM, &schema);
+    let identity = AuthorSubject::for_test_bytes([0xc3; 16]);
+    let server = open_core(0x60, AuthorSubject::SYSTEM, &schema);
     server
         .node()
         .borrow_mut()
@@ -458,7 +458,7 @@ fn authorization_scope_claims_or_policy_away_and_back_requires_fresh_every_claus
     ]);
     let key = AuthorizationSupportScopeKey {
         support_shape_digest: [0x41; 32],
-        subject: AuthorId::from_bytes([0x42; 16]),
+        subject: AuthorSubject::for_test_bytes([0x42; 16]),
         claims_digest: [0x43; 32],
         policy_digest: [0x44; 32],
     };
@@ -520,7 +520,7 @@ fn authorization_scope_claims_or_policy_away_and_back_requires_fresh_every_claus
 
 #[test]
 fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
-    let link = [0x8b; 16];
+    let link = AuthorSubject::for_test_bytes([0x8b; 16]);
     let context = AuthorityContext {
         authority: [0x8a; 16],
         link,
@@ -533,7 +533,7 @@ fn authorization_scope_transport_rejects_stale_component_after_applied_view() {
     };
     let key = AuthorizationSupportScopeKey {
         support_shape_digest: [1; 32],
-        subject: AuthorId::from_bytes(link),
+        subject: link,
         claims_digest: [2; 32],
         policy_digest: [3; 32],
     };
@@ -625,7 +625,7 @@ fn authorization_scope_requires_canonical_current_global_support_options() {
 #[test]
 fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
     let schema = schema_with_explicit_public_read();
-    let identity = AuthorId::from_bytes([0xc4; 16]);
+    let identity = AuthorSubject::for_test_bytes([0xc4; 16]);
     let shape = Query::from("todos").validate(&schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let historical = RegisterShapeOptions {
@@ -660,7 +660,7 @@ fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
         binding_id: binding.binding_id(),
         read_view: canonical_opts.read_view_key(),
     };
-    let canonical_server = open_core(0x64, AuthorId::SYSTEM, &schema);
+    let canonical_server = open_core(0x64, AuthorSubject::SYSTEM, &schema);
     let (mut canonical_client, canonical_transport) = duplex();
     let canonical_subscriber = canonical_server.accept_subscriber(canonical_transport, identity);
     canonical_client
@@ -706,7 +706,7 @@ fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
     );
 
     for opts in variants {
-        let server = open_core(0x63, AuthorId::SYSTEM, &schema);
+        let server = open_core(0x63, AuthorSubject::SYSTEM, &schema);
         let subscription = SubscriptionKey {
             shape_id: shape.shape_id(),
             binding_id: binding.binding_id(),
@@ -750,7 +750,7 @@ fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
 #[test]
 fn subscriber_cannot_spoof_authority_view_updates() {
     let schema = schema();
-    let edge = open_db(0x7a, AuthorId::SYSTEM, &schema);
+    let edge = open_db(0x7a, AuthorSubject::SYSTEM, &schema);
     let (edge_transport, mut authority_transport) = duplex();
     let _upstream = crate::db::block_on(edge.connect_upstream(edge_transport));
     let query = Query::from("todos");
@@ -809,7 +809,8 @@ fn subscriber_cannot_spoof_authority_view_updates() {
         .sync_metrics()
         .dropped_peer_request_messages;
     let (mut client_transport, server_transport) = duplex();
-    let subscriber = edge.accept_subscriber(server_transport, AuthorId::from_bytes([0x7b; 16]));
+    let subscriber =
+        edge.accept_subscriber(server_transport, AuthorSubject::for_test_bytes([0x7b; 16]));
 
     client_transport.send(view_update(false, 100)).unwrap();
     subscriber.borrow_mut().tick().unwrap();
@@ -848,7 +849,7 @@ fn subscriber_cannot_spoof_authority_view_updates() {
 #[test]
 fn oversized_register_shape_is_rejected_at_admission() {
     let schema = schema();
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let huge_table = "t".repeat(MAX_SHAPE_AST_BYTES + 1);
     let ast = ShapeAst::new(Query::from(huge_table), schema.version_id());
     let error = server
@@ -869,16 +870,19 @@ fn oversized_register_shape_is_rejected_at_admission() {
 #[test]
 fn resume_cursor_restores_connection_claims_before_serving_same_identity_siblings() {
     let schema = membership_scoped_relation_schema();
-    let reader = AuthorId::from_bytes([0xb3; 16]);
+    let reader = AuthorSubject::for_test_bytes([0xb3; 16]);
     let normal_claims = BTreeMap::new();
     let invite_claims = BTreeMap::from([
-        ("user_id".to_owned(), Value::String(reader.0.to_string())),
+        (
+            "user_id".to_owned(),
+            Value::String(reader.test_uuid().to_string()),
+        ),
         (
             "join_code".to_owned(),
             Value::String("resume-only-invite".to_owned()),
         ),
     ]);
-    let server = open_core(0x5f, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc6, reader, &schema);
     let sibling = open_db(0xc7, reader, &schema);
     let chat = row(0xc3);
@@ -941,17 +945,22 @@ fn resume_cursor_restores_connection_claims_before_serving_same_identity_sibling
 #[test]
 fn subscriber_wire_claims_cannot_escalate_host_admission() {
     let schema = membership_scoped_relation_schema();
-    let reader = AuthorId::from_bytes([0xb4; 16]);
-    let normal_claims =
-        BTreeMap::from([("user_id".to_owned(), Value::String(reader.0.to_string()))]);
+    let reader = AuthorSubject::for_test_bytes([0xb4; 16]);
+    let normal_claims = BTreeMap::from([(
+        "user_id".to_owned(),
+        Value::String(reader.test_uuid().to_string()),
+    )]);
     let self_asserted_invite = BTreeMap::from([
-        ("user_id".to_owned(), Value::String(reader.0.to_string())),
+        (
+            "user_id".to_owned(),
+            Value::String(reader.test_uuid().to_string()),
+        ),
         (
             "join_code".to_owned(),
             Value::String("self-asserted-invite".to_owned()),
         ),
     ]);
-    let server = open_core(0x60, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x60, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc8, reader, &schema);
     let chat = row(0xc4);
     server

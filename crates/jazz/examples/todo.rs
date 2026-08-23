@@ -4,7 +4,7 @@ use jazz::block_on;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, RowCells, SeededRowIdSource};
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid};
+use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::node::CurrentRow;
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -55,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         storage,
         identity: DbIdentity {
             node: NodeUuid::from_bytes([0x11; 16]),
-            author: AuthorId::from_bytes([0xa1; 16]),
+            author: AuthorSubject::for_test_bytes([0xa1; 16]),
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0x1111))),
     }))?;

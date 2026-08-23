@@ -564,10 +564,10 @@ fn reconnect_with_different_authenticated_link_never_replays_upload_frontier() {
 #[test]
 fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
     let schema = schema();
-    let alice = AuthorId::from_bytes([0xa1; 16]);
-    let bob_author = AuthorId::from_bytes([0xb1; 16]);
-    let core = open_core(0xd1, AuthorId::SYSTEM, &schema);
-    let peer_edge = open_db(0xd2, AuthorId::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob_author = AuthorSubject::for_test_bytes([0xb1; 16]);
+    let core = open_core(0xd1, AuthorSubject::SYSTEM, &schema);
+    let peer_edge = open_db(0xd2, AuthorSubject::SYSTEM, &schema);
     let bob = open_db(0xd3, bob_author, &schema);
 
     // Keep the Core-to-peer queue observable, and accept this peer before
@@ -576,7 +576,7 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
     let _peer_upstream = crate::db::block_on(peer_edge.connect_upstream(peer_transport));
     let _core_peer = core.accept_subscriber_with_trust(
         core_transport,
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         CommitUnitTrust::TrustedBackend,
     );
     let (bob_transport, peer_client_transport) = duplex();
@@ -670,8 +670,8 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
 #[test]
 fn edge_later_client_upload_flushes_earlier_upstream_in_same_tick() {
     let schema = schema();
-    let alice = AuthorId::from_bytes([0xa1; 16]);
-    let edge = open_db(0xd1, AuthorId::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let edge = open_db(0xd1, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xd2, alice, &schema);
 
     let (edge_transport, _core_transport, edge_to_core) = duplex_with_client_outbound_tap();
@@ -722,10 +722,10 @@ fn edge_later_client_upload_flushes_earlier_upstream_in_same_tick() {
 #[test]
 fn write_state_waiter_resolves_on_remote_fate_update() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
 
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
 
     let (client_transport, server_transport) = duplex();
@@ -755,9 +755,9 @@ fn write_state_waiter_resolves_on_remote_fate_update() {
 #[test]
 fn db_sync_surface_preserves_creator_provenance_across_peer_update() {
     let schema = schema();
-    let alice = AuthorId::from_bytes([0xa1; 16]);
-    let bob = AuthorId::from_bytes([0xb2; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let receiver = open_db(0xc1, alice, &schema);
 
     let write = server
@@ -858,9 +858,9 @@ fn db_sync_surface_preserves_creator_provenance_across_peer_update() {
 #[test]
 fn db_sync_surface_edge_session_read_policy_filters_private_table_query() {
     let schema = owner_id_read_schema();
-    let alice = AuthorId::from_bytes([0xa1; 16]);
-    let bob = AuthorId::from_bytes([0xb2; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let writer = open_db(0xa1, alice, &schema);
     let reader = open_db(0xb2, bob, &schema);
 
@@ -869,14 +869,20 @@ fn db_sync_surface_edge_session_read_policy_filters_private_table_query() {
     let _writer_subscriber = server.accept_subscriber_with_claims(
         server_writer_transport,
         alice,
-        BTreeMap::from([("user_id".to_owned(), Value::String(alice.0.to_string()))]),
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(alice.test_uuid().to_string()),
+        )]),
     );
     writer
         .insert(
             "messages",
             BTreeMap::from([
                 ("body".to_owned(), Value::String("alice private".to_owned())),
-                ("owner_id".to_owned(), Value::String(alice.0.to_string())),
+                (
+                    "owner_id".to_owned(),
+                    Value::String(alice.test_uuid().to_string()),
+                ),
             ]),
         )
         .unwrap();
@@ -888,7 +894,10 @@ fn db_sync_surface_edge_session_read_policy_filters_private_table_query() {
     let _reader_subscriber = server.accept_subscriber_with_claims(
         server_reader_transport,
         bob,
-        BTreeMap::from([("user_id".to_owned(), Value::String(bob.0.to_string()))]),
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(bob.test_uuid().to_string()),
+        )]),
     );
     let query = Query::from("messages");
     let mut subscription = prepared_subscribe(&reader, &query, edge_subscribe_opts()).unwrap();
@@ -926,9 +935,9 @@ fn prepared_server_read_binds_text_session_user_id_per_session() {
                 .policies(PublicTablePolicies::new().with_select(read_policy)),
         ),
     );
-    let server = open_db(0x5e, AuthorId::SYSTEM, &schema);
-    let alice = AuthorId::from_bytes([0xa1; 16]);
-    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let server = open_db(0x5e, AuthorSubject::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
     let alice_subject = "alice-session-subject";
     let bob_subject = "bob-session-subject";
     server.set_identity_claims(
@@ -974,9 +983,9 @@ fn prepared_server_read_binds_text_session_user_id_per_session() {
 fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish() {
     let public_schema = owner_id_public_schema();
     let permission_schema = owner_id_read_schema();
-    let alice = AuthorId::from_bytes([0xa1; 16]);
-    let bob = AuthorId::from_bytes([0xb2; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &public_schema);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &public_schema);
     let writer = open_db(0xa1, alice, &permission_schema);
     let alice_reader = open_db(0xa2, alice, &permission_schema);
     let reader = open_db(0xb2, bob, &permission_schema);
@@ -997,7 +1006,7 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
         .node()
         .borrow_mut()
         .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
                 schema: schema_id,
@@ -1018,14 +1027,20 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
     let _writer_subscriber = server.accept_subscriber_with_claims(
         server_writer_transport,
         alice,
-        BTreeMap::from([("user_id".to_owned(), Value::String(alice.0.to_string()))]),
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(alice.test_uuid().to_string()),
+        )]),
     );
     writer
         .insert(
             "messages",
             BTreeMap::from([
                 ("body".to_owned(), Value::String("alice private".to_owned())),
-                ("owner_id".to_owned(), Value::String(alice.0.to_string())),
+                (
+                    "owner_id".to_owned(),
+                    Value::String(alice.test_uuid().to_string()),
+                ),
             ]),
         )
         .unwrap();
@@ -1037,7 +1052,10 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
     let _alice_subscriber = server.accept_subscriber_with_claims(
         server_alice_transport,
         alice,
-        BTreeMap::from([("user_id".to_owned(), Value::String(alice.0.to_string()))]),
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(alice.test_uuid().to_string()),
+        )]),
     );
     let query = Query::from("messages");
     let mut alice_subscription =
@@ -1064,7 +1082,10 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
     let _reader_subscriber = server.accept_subscriber_with_claims(
         server_reader_transport,
         bob,
-        BTreeMap::from([("user_id".to_owned(), Value::String(bob.0.to_string()))]),
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(bob.test_uuid().to_string()),
+        )]),
     );
     let mut subscription = prepared_subscribe(&reader, &query, edge_subscribe_opts()).unwrap();
     assert!(opened_rows(block_on(subscription.next_raw()).unwrap()).is_empty());
@@ -1075,10 +1096,10 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
 #[test]
 fn detached_subscriber_is_not_served_on_server_tick() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
 
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
 
     seed(&server, "todos", cells("from server", false, owner));
@@ -1102,10 +1123,10 @@ fn detached_subscriber_is_not_served_on_server_tick() {
 #[test]
 fn byte_wire_round_trips_subscription_to_client() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
 
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
 
     seed(&server, "todos", cells("from server", false, owner));
@@ -1171,10 +1192,10 @@ fn byte_wire_round_trips_subscription_to_client() {
 #[test]
 fn single_upstream_tick_applies_multiple_subscription_updates() {
     let schema = issue_schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
 
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
 
     let project = row(1);
@@ -1228,10 +1249,10 @@ fn single_upstream_tick_applies_multiple_subscription_updates() {
 #[test]
 fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
 
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
 
     seed(&server, "todos", cells("first", false, owner));
@@ -1294,10 +1315,10 @@ fn subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
 #[test]
 fn byte_wire_subscriber_connection_serves_current_rows_and_resumes_from_cursor() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
 
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
 
     seed(&server, "todos", cells("first", false, owner));
@@ -1358,7 +1379,7 @@ fn byte_wire_subscriber_connection_serves_current_rows_and_resumes_from_cursor()
 #[test]
 fn connect_upstream_announces_existing_subscriptions_on_first_tick() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let (client_transport, mut upstream_transport) = duplex();
 
@@ -1391,7 +1412,7 @@ fn connect_upstream_waits_for_active_node_state_borrow() {
     use std::task::{Context, Poll, Waker};
 
     let schema = schema();
-    let client = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let client = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
     let node = client.node.node();
     let held_node = crate::db::block_on(node.lock());
     let (client_transport, _server_transport) = duplex();
@@ -1411,7 +1432,7 @@ fn connect_upstream_waits_for_active_node_state_borrow() {
 #[test]
 fn repeated_identical_session_claims_emit_once_on_a_live_connection() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let (client_transport, mut upstream_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
@@ -1437,7 +1458,7 @@ fn repeated_identical_session_claims_emit_once_on_a_live_connection() {
 #[test]
 fn current_session_claims_reach_late_and_reconnected_upstreams() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let claims = BTreeMap::from([("role".to_owned(), Value::String("reader".to_owned()))]);
 
@@ -1469,7 +1490,7 @@ fn current_session_claims_reach_late_and_reconnected_upstreams() {
 #[test]
 fn changed_session_claims_advance_delivery_after_an_identical_call() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let (client_transport, mut upstream_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
@@ -1500,7 +1521,7 @@ fn changed_session_claims_advance_delivery_after_an_identical_call() {
 #[test]
 fn global_subscription_registers_array_subquery_upstream_coverage() {
     let schema = relation_schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let (client_transport, mut upstream_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
@@ -1525,7 +1546,7 @@ fn global_subscription_registers_array_subquery_upstream_coverage() {
 #[test]
 fn array_subquery_attachment_registers_upstream_coverage() {
     let schema = relation_schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let (client_transport, mut upstream_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
@@ -1554,7 +1575,7 @@ fn array_subquery_attachment_registers_upstream_coverage() {
 #[test]
 fn upload_is_not_marked_sent_after_one_shot_backpressure_and_retries() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let outbound = Rc::new(RefCell::new(std::collections::VecDeque::new()));
     let transport = BackpressureOnceTransport {
@@ -1604,7 +1625,7 @@ fn upload_is_not_marked_sent_after_one_shot_backpressure_and_retries() {
 #[test]
 fn local_missing_upload_body_still_kills_sync_driver() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let (client_transport, _server_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
@@ -1629,7 +1650,7 @@ fn local_missing_upload_body_still_kills_sync_driver() {
 #[test]
 fn detach_connection_removes_connection_from_db_ticks() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let (client_transport, mut upstream_transport) = duplex();
 
@@ -1647,10 +1668,10 @@ fn detach_connection_removes_connection_from_db_ticks() {
 #[test]
 fn accepted_subscriber_is_served_under_subscriber_author_identity() {
     let schema = owner_read_schema();
-    let subscriber_author = AuthorId::from_bytes([0xc1; 16]);
-    let server_author = AuthorId::from_bytes([0x5e; 16]);
-    let other_author = AuthorId::from_bytes([0xd1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let subscriber_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server_author = AuthorSubject::for_test_bytes([0x5e; 16]);
+    let other_author = AuthorSubject::for_test_bytes([0xd1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, subscriber_author, &schema);
 
     let visible = seed(
@@ -1689,7 +1710,7 @@ fn accepted_subscriber_is_served_under_subscriber_author_identity() {
 #[test]
 fn client_initial_sync_flush_cadence_preserves_public_snapshot_delivery() {
     let schema = schema();
-    let server = open_core(0xd4, AuthorId::SYSTEM, &schema);
+    let server = open_core(0xd4, AuthorSubject::SYSTEM, &schema);
     for ordinal in 0..3_u8 {
         server
             .insert_with_id(
@@ -1706,7 +1727,7 @@ fn client_initial_sync_flush_cadence_preserves_public_snapshot_delivery() {
             .unwrap();
     }
 
-    let client_author = AuthorId::from_bytes([0xd5; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xd5; 16]);
     let client = open_db(0xd5, client_author, &schema);
     client
         .set_initial_sync_flush_cadence(InitialSyncFlushCadence::every(

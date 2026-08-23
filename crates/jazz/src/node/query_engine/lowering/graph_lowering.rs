@@ -3299,7 +3299,7 @@ pub(super) fn claim_value(
         return Ok(value.clone());
     }
     match name.as_str() {
-        "sub" => Ok(Value::Uuid(permission_subject.0)),
+        "sub" => Ok(Value::String(permission_subject.canonical().to_owned())),
         _ => Err(UnsupportedReason::UnboundClaim(path.clone())),
     }
 }

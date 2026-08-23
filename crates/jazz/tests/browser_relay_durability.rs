@@ -12,7 +12,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
-use jazz::ids::{AuthorId, NodeUuid};
+use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -73,7 +73,7 @@ fn included_relation_schema() -> JazzSchema {
     )
 }
 
-fn open_db(node: u8, author: AuthorId, schema: &JazzSchema) -> Db<TestStorage> {
+fn open_db(node: u8, author: AuthorSubject, schema: &JazzSchema) -> Db<TestStorage> {
     let column_families = schema.column_families();
     let refs = column_families
         .iter()
@@ -92,7 +92,7 @@ fn open_db(node: u8, author: AuthorId, schema: &JazzSchema) -> Db<TestStorage> {
 
 fn open_db_with_storage(
     node: u8,
-    author: AuthorId,
+    author: AuthorSubject,
     schema: &JazzSchema,
     storage: TestStorage,
 ) -> Db<TestStorage> {
@@ -118,7 +118,7 @@ fn open_core(node: u8, schema: &JazzSchema) -> Db<TestStorage> {
         TestStorage::new(&refs),
         DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
         },
     )))
     .expect("open core database")
@@ -159,7 +159,7 @@ fn open_persistent_worker(
         storage,
         DbIdentity {
             node: NodeUuid::from_bytes([node; 16]),
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
         },
     )))
     .expect("open persistent worker")
@@ -179,9 +179,9 @@ fn open_persistent_worker(
 #[test]
 fn non_durable_browser_client_waits_for_worker_local_ack() {
     let schema = schema();
-    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
     let main_thread = open_db(0x11, alice, &schema);
-    let worker = open_db(0x22, AuthorId::SYSTEM, &schema);
+    let worker = open_db(0x22, AuthorSubject::SYSTEM, &schema);
     main_thread.set_non_durable_client();
 
     let (main_transport, worker_transport) = duplex();
@@ -256,7 +256,7 @@ fn non_durable_browser_client_waits_for_worker_local_ack() {
 #[test]
 fn browser_worker_initial_view_preserves_newer_optimistic_membership() {
     let schema = schema();
-    let alice = AuthorId::from_bytes([0xaa; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xaa; 16]);
     let main_thread = open_db(0x1c, alice, &schema);
     let worker = open_db(0x2c, alice, &schema);
     main_thread.set_non_durable_client();
@@ -360,9 +360,9 @@ fn browser_worker_initial_view_preserves_newer_optimistic_membership() {
 #[test]
 fn worker_relay_forwards_authority_fate_to_browser_client() {
     let schema = schema();
-    let alice = AuthorId::from_bytes([0xa2; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xa2; 16]);
     let main_thread = open_db(0x12, alice, &schema);
-    let worker = open_db(0x23, AuthorId::SYSTEM, &schema);
+    let worker = open_db(0x23, AuthorSubject::SYSTEM, &schema);
     let core = open_core(0x34, &schema);
     main_thread.set_non_durable_client();
 
@@ -489,8 +489,8 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
 #[test]
 fn browser_client_hydrates_local_subscription_from_worker_relay() {
     let schema = schema();
-    let alice = AuthorId::from_bytes([0xa3; 16]);
-    let worker = open_db(0x24, AuthorId::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa3; 16]);
+    let worker = open_db(0x24, AuthorSubject::SYSTEM, &schema);
     worker
         .insert(
             "todos",
@@ -543,7 +543,7 @@ fn browser_client_hydrates_local_subscription_from_worker_relay() {
 #[test]
 fn reopened_browser_worker_hydrates_local_subscription_without_query_warmup() {
     let schema = schema();
-    let alice = AuthorId::from_bytes([0xaa; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xaa; 16]);
     let storage = tempfile::tempdir().expect("worker temp dir");
 
     let first_worker = open_persistent_worker(storage.path(), 0x2b, &schema);
@@ -601,7 +601,7 @@ fn reopened_browser_worker_hydrates_local_subscription_without_query_warmup() {
 #[test]
 fn worker_baseline_arriving_during_cold_main_hydration_is_delivered_exactly_once() {
     let schema = schema();
-    let alice = AuthorId::from_bytes([0xab; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xab; 16]);
     let durable = tempfile::tempdir().expect("worker temp dir");
     let first_worker = open_persistent_worker(durable.path(), 0x2c, &schema);
     for title in ["third", "first", "second"] {
@@ -671,7 +671,7 @@ fn worker_baseline_arriving_during_cold_main_hydration_is_delivered_exactly_once
 #[test]
 fn browser_client_local_only_subscription_stops_at_worker() {
     let schema = schema();
-    let alice = AuthorId::from_bytes([0xa9; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xa9; 16]);
     let worker = open_db(0x2a, alice, &schema);
     let core = open_core(0x3a, &schema);
     worker
@@ -738,7 +738,7 @@ fn browser_client_local_only_subscription_stops_at_worker() {
 #[test]
 fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
     let schema = schema();
-    let alice = AuthorId::from_bytes([0xa6; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xa6; 16]);
     let main_thread = open_db(0x17, alice, &schema);
     let worker = open_db(0x27, alice, &schema);
     let core = open_core(0x37, &schema);
@@ -840,7 +840,7 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
 #[test]
 fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
     let schema = included_relation_schema();
-    let alice = AuthorId::from_bytes([0xb2; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xb2; 16]);
     let main_thread = open_db(0x1f, alice, &schema);
     let worker = open_db(0x2f, alice, &schema);
     let core = open_core(0x3f, &schema);
@@ -928,7 +928,7 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
 #[test]
 fn browser_relay_publishes_an_explicit_settled_empty_handoff() {
     let schema = schema();
-    let alice = AuthorId::from_bytes([0xa8; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xa8; 16]);
     let main_thread = open_db(0x1a, alice, &schema);
     let worker = open_db(0x29, alice, &schema);
     let core = open_core(0x39, &schema);
@@ -997,7 +997,7 @@ fn browser_relay_publishes_an_explicit_settled_empty_handoff() {
 #[test]
 fn browser_relay_replays_causal_ancestors_before_pending_write_fates() {
     let schema = schema();
-    let alice = AuthorId::from_bytes([0xa7; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xa7; 16]);
     let worker = open_db(0x28, alice, &schema);
     let core = open_core(0x38, &schema);
 
@@ -1102,10 +1102,10 @@ fn browser_relay_replays_causal_ancestors_before_pending_write_fates() {
 #[test]
 fn worker_relay_forwards_authority_rejection_to_browser_client() {
     let schema = schema();
-    let alice = AuthorId::from_bytes([0xa4; 16]);
-    let bob = AuthorId::from_bytes([0xb4; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xa4; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb4; 16]);
     let main_thread = open_db(0x14, alice, &schema);
-    let worker = open_db(0x25, AuthorId::SYSTEM, &schema);
+    let worker = open_db(0x25, AuthorSubject::SYSTEM, &schema);
     let core = open_core(0x35, &schema);
     main_thread.set_non_durable_client();
 
@@ -1154,7 +1154,7 @@ fn worker_relay_forwards_authority_rejection_to_browser_client() {
 #[test]
 fn reopened_worker_replays_pending_commit_before_later_fate() {
     let schema = schema();
-    let alice = AuthorId::from_bytes([0xa5; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xa5; 16]);
     let storage = tempfile::tempdir().expect("worker temp dir");
     let first_main = open_db(0x15, alice, &schema);
     first_main.set_non_durable_client();
@@ -1217,8 +1217,8 @@ fn reopened_worker_replays_pending_commit_before_later_fate() {
 #[test]
 fn reopened_worker_routes_later_rejection_to_same_main_thread_identity() {
     let schema = schema();
-    let alice = AuthorId::from_bytes([0xa9; 16]);
-    let bob = AuthorId::from_bytes([0xb9; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xa9; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb9; 16]);
     let storage = tempfile::tempdir().expect("worker temp dir");
 
     let first_main = open_db(0x1b, alice, &schema);

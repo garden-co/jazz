@@ -150,7 +150,7 @@ fn client_fast_cursor_requires_retained_matching_authorization_progress() {
     let previous = BTreeSet::from([settled_member(row(1), 7)]);
     let revoked = BTreeSet::new();
 
-    let mut fresh_client = PeerState::client_link(AuthorId::from_bytes([0x11; 16]));
+    let mut fresh_client = PeerState::client_link(AuthorSubject::for_test_bytes([0x11; 16]));
     fresh_client.declare_known_state(subscription, known_state.clone());
     assert!(!fresh_client.fast_cursor_authorization_matches(subscription, &known_state));
     assert!(fast_cursor_requires_authoritative_reset(
@@ -195,7 +195,7 @@ fn client_fast_cursor_authorization_proof_controls_rehydrate_reset() {
         })
     };
 
-    let identity = AuthorId::from_bytes([0x11; 16]);
+    let identity = AuthorSubject::for_test_bytes([0x11; 16]);
     let mut fresh = PeerState::client_link(identity);
     fresh.declare_known_state(subscription, known(1, 0));
     let fresh_update = fresh.rehydrate_query(&mut core, &shape, &binding).unwrap();
@@ -300,7 +300,7 @@ fn duplicate_structured_query_authorization_mismatch_forces_reset() {
         binding_id: crate::query::BindingId(uuid::Uuid::from_u128(0x47)),
         ..canonical
     };
-    let mut peer = PeerState::client_link(AuthorId::from_bytes([0x11; 16]));
+    let mut peer = PeerState::client_link(AuthorSubject::for_test_bytes([0x11; 16]));
     peer.rehydrate_query_for_subscription_with_opts(
         &mut core,
         canonical,
@@ -648,10 +648,10 @@ fn doc_cells(title: impl Into<String>, project: RowUuid) -> BTreeMap<String, Val
     ])
 }
 
-fn access_cells(doc: RowUuid, user: AuthorId) -> BTreeMap<String, Value> {
+fn access_cells(doc: RowUuid, user: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("doc".to_owned(), Value::Uuid(doc.0)),
-        ("userID".to_owned(), Value::Uuid(user.0)),
+        ("userID".to_owned(), Value::Uuid(user.test_uuid())),
     ])
 }
 
@@ -737,7 +737,7 @@ fn session_seed_write_policy_schema() -> JazzSchema {
 
 fn resource_commit_unit(
     writer: &mut NodeState<RocksDbStorage>,
-    author: AuthorId,
+    author: AuthorSubject,
     row_uuid: RowUuid,
 ) -> (Transaction, Vec<VersionRecord>) {
     let (_, unit) = writer
@@ -746,7 +746,7 @@ fn resource_commit_unit(
                 .made_by(author)
                 .cells(BTreeMap::from([(
                     "owner".to_owned(),
-                    Value::Uuid(author.0),
+                    Value::Uuid(author.test_uuid()),
                 )])),
         )
         .expect("writer creates policy-protected resource commit");
@@ -759,8 +759,8 @@ fn resource_commit_unit(
 #[test]
 fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
     let schema = session_claim_read_policy_schema();
-    let writer = AuthorId::from_bytes([0xa1; 16]);
-    let transport_identity = AuthorId::from_bytes([0xa2; 16]);
+    let writer = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let transport_identity = AuthorSubject::for_test_bytes([0xa2; 16]);
     let resource = row(0xa3);
     let (_writer_dir, mut writer_node) = open_node_with_schema(node(0xa4), schema.clone());
     let (tx, versions) = resource_commit_unit(&mut writer_node, writer, resource);
@@ -785,15 +785,15 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
     let (_bound_dir, mut bound_edge) = open_node_with_schema(node(0xa6), schema.clone());
     bound_edge.set_session_claims(
         writer,
-        BTreeMap::from([("session_id".to_owned(), Value::Uuid(writer.0))]),
+        BTreeMap::from([("session_id".to_owned(), Value::Uuid(writer.test_uuid()))]),
     );
     let prior = bound_edge
         .commit_mergeable_settled(
             MergeableCommit::new("resources", row(0xa8), 1)
-                .made_by(AuthorId::SYSTEM)
+                .made_by(AuthorSubject::SYSTEM)
                 .cells(BTreeMap::from([(
                     "owner".to_owned(),
-                    Value::Uuid(writer.0),
+                    Value::Uuid(writer.test_uuid()),
                 )])),
         )
         .expect("seed readable resource at the edge");
@@ -846,7 +846,7 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
 #[test]
 fn edge_ingest_turns_missing_prepared_seed_claim_into_deferred_empty_support() {
     let schema = session_seed_write_policy_schema();
-    let writer = AuthorId::from_bytes([0xb1; 16]);
+    let writer = AuthorSubject::for_test_bytes([0xb1; 16]);
     let resource = row(0xb2);
     let (_writer_dir, mut writer_node) = open_node_with_schema(node(0xb3), schema.clone());
     let (tx, versions) = resource_commit_unit(&mut writer_node, writer, resource);
@@ -2565,9 +2565,9 @@ fn maintained_subscription_view_aggregate_updates_incrementally() {
 
 #[test]
 fn aggregate_policy_oracle_matches_visible_rows_per_identity() {
-    let admin = AuthorId::from_bytes([0xa1; 16]);
-    let member = AuthorId::from_bytes([0xb2; 16]);
-    let spy = AuthorId::from_bytes([0xc3; 16]);
+    let admin = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let member = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let spy = AuthorSubject::for_test_bytes([0xc3; 16]);
     let (_dir, mut core) = open_node_with_schema(node(0x90), aggregate_access_policy_schema());
     let docs = [
         (row(0x10), "alpha", 10, vec![admin, member]),
@@ -2624,7 +2624,7 @@ fn aggregate_policy_oracle_matches_visible_rows_per_identity() {
 
 #[test]
 fn peer_runtime_handles_do_not_cross_node_runtime_instances() {
-    let user = AuthorId::from_bytes([0xa1; 16]);
+    let user = AuthorSubject::for_test_bytes([0xa1; 16]);
     let (_first_dir, mut first_core) = open_node_with_schema(node(0x90), access_policy_schema());
     let mut peer = PeerState::edge_client(user);
 
@@ -3157,7 +3157,7 @@ fn maintained_subscription_view_exclusive_delta_stays_maintained() {
     core.open_exclusive(tx).unwrap();
     core.tx_write(tx, "todos", row(0x61), title_cells("match"), None)
         .unwrap();
-    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorId::SYSTEM, 1_000).unwrap();
+    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_000).unwrap();
     accept_global(&mut core, tx_id, 1);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
@@ -3194,7 +3194,7 @@ fn maintained_subscription_view_exclusive_delta_ships_view_scoped_partial_bundle
         .unwrap();
     core.tx_write(tx, "todos", row(0x72), title_cells("other"), None)
         .unwrap();
-    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorId::SYSTEM, 1_000).unwrap();
+    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_000).unwrap();
     accept_global(&mut core, tx_id, 1);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
@@ -3246,7 +3246,7 @@ fn maintained_subscription_view_can_ship_complete_exclusive_payload_for_writer_p
         .unwrap();
     core.tx_write(tx, "todos", row(0x72), title_cells("other"), None)
         .unwrap();
-    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorId::SYSTEM, 1_000).unwrap();
+    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 1_000).unwrap();
     accept_global(&mut core, tx_id, 1);
 
     let update = peer.query_update(&mut core, &shape, &binding).unwrap();
@@ -3369,8 +3369,8 @@ fn maintained_subscription_view_tags_terminal_columns_by_table() {
 fn maintained_subscription_view_policy_view_exclusive_delta_ships_identity_scoped_partial_bundle() {
     let schema = access_policy_schema();
     let (_dir, mut core) = open_node_with_schema(node(0x98), schema);
-    let user_a = AuthorId::from_bytes([0xa1; 16]);
-    let user_b = AuthorId::from_bytes([0xb2; 16]);
+    let user_a = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let user_b = AuthorSubject::for_test_bytes([0xb2; 16]);
     let doc_a = row(0x81);
     let doc_b = row(0x82);
     let project = row(0x83);
@@ -3381,7 +3381,7 @@ fn maintained_subscription_view_policy_view_exclusive_delta_ships_identity_scope
         .unwrap();
     core.tx_write(tx, "docs", doc_b, doc_cells("b", project), None)
         .unwrap();
-    let (docs_tx, _unit) = core.commit_exclusive_settled(tx, AuthorId::SYSTEM, 10).unwrap();
+    let (docs_tx, _unit) = core.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10).unwrap();
     accept_global(&mut core, docs_tx, 1);
     let grant_a = core
         .commit_mergeable_settled(
@@ -3600,8 +3600,8 @@ fn peer_state_dedups_version_payloads_across_subscription_views() {
 fn current_rows_update_installs_maintained_subscription_for_relay_and_edge_client() {
     let schema = access_policy_schema();
     let (_dir, mut core) = open_node_with_schema(node(9), schema);
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let other = AuthorId::from_bytes([0xb2; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let other = AuthorSubject::for_test_bytes([0xb2; 16]);
     let project = row(0x40);
     let doc = row(0x41);
     let grant = row(0x42);
@@ -3650,7 +3650,7 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
     let (_reader_dir, mut reader) = open_node_with_schema(node(3), schema);
-    let user = AuthorId::from_bytes([0xa1; 16]);
+    let user = AuthorSubject::for_test_bytes([0xa1; 16]);
     let doc_one = row(1);
     let doc_two = row(2);
     let project = row(9);
@@ -3663,7 +3663,7 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
     writer
         .tx_write(tx, "docs", doc_two, doc_cells("two", project), None)
         .unwrap();
-    let (docs_tx, unit) = writer.commit_exclusive_settled(tx, AuthorId::SYSTEM, 10).unwrap();
+    let (docs_tx, unit) = writer.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10).unwrap();
     let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
     assert!(matches!(
         fate,
@@ -3790,7 +3790,7 @@ fn all_exclusive_never_gated_stays_incremental() {
         .unwrap();
     core.tx_write(tx, "todos", row_two, title_cells("two"), None)
         .unwrap();
-    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorId::SYSTEM, 10).unwrap();
+    let (tx_id, _unit) = core.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10).unwrap();
     accept_global(&mut core, tx_id, 1);
 
     let update = peer.current_rows_update(&mut core, "todos").unwrap();

@@ -65,7 +65,9 @@ use jazz::groove::storage::{
     MemoryStorage as CoreMemoryStorage, OrderedKvStorage as CoreOrderedKvStorage,
     ReopenableStorage as CoreReopenableStorage,
 };
-use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
+use jazz::ids::{
+    AuthorSubject as CoreAuthorSubject, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid,
+};
 use jazz::protocol::{
     BranchSelector as CoreBranchSelector, BranchViewBase as CoreBranchViewBase,
     ReadViewSpec as CoreReadViewSpec,
@@ -100,7 +102,7 @@ struct CoreOpenDbConfig {
 #[derive(Clone, Copy, Debug, Deserialize)]
 struct CoreOpenDbIdentity {
     node: CoreNodeUuid,
-    author: CoreAuthorId,
+    author: CoreAuthorSubject,
 }
 
 impl From<CoreOpenDbIdentity> for CoreDbIdentity {
@@ -962,7 +964,7 @@ pub struct StreamingMutation {
     cells: Option<CoreRowCells>,
     column: String,
     mutation: CoreStreamingMutationKind,
-    identity: Option<CoreAuthorId>,
+    identity: Option<CoreAuthorSubject>,
     updated_at_ms: Option<u64>,
     head: Option<CoreBranchSelector>,
     base: Option<CoreBranchViewBase>,
@@ -2895,7 +2897,7 @@ impl NapiDb {
                 node: CoreNodeUuid::from_bytes(remote_node),
                 epoch: remote_epoch,
             },
-            link_identity: CoreAuthorId::from_bytes(local_node),
+            link_identity: CoreAuthorSubject::for_test_bytes(local_node),
             negotiated_features: features as u64,
         };
         let transport = Box::new(CoreWireTransportAdapter::new_with_session_context(
@@ -3143,11 +3145,11 @@ fn checked_u64_range(start: f64, end: f64) -> napi::Result<std::ops::Range<u64>>
     Ok(start..end)
 }
 
-fn core_author_id_from_bytes(bytes: &[u8]) -> napi::Result<CoreAuthorId> {
+fn core_author_id_from_bytes(bytes: &[u8]) -> napi::Result<CoreAuthorSubject> {
     let bytes: [u8; 16] = bytes
         .try_into()
         .map_err(|_| napi::Error::from_reason("author id must be 16 bytes"))?;
-    Ok(CoreAuthorId::from_bytes(bytes))
+    Ok(CoreAuthorSubject::for_test_bytes(bytes))
 }
 
 fn core_write_memory(
@@ -3185,7 +3187,7 @@ fn core_write_persistent(
 }
 
 fn core_claims_from_json(
-    author: CoreAuthorId,
+    author: CoreAuthorSubject,
     claims: Option<JsonValue>,
 ) -> napi::Result<BTreeMap<String, CoreValue>> {
     let mut claims = match claims {
@@ -3200,7 +3202,7 @@ fn core_claims_from_json(
             ));
         }
     };
-    let subject = author.0.to_string();
+    let subject = author.canonical().to_owned();
     claims
         .entry("subject".to_owned())
         .or_insert_with(|| CoreValue::String(subject.clone()));
@@ -4149,7 +4151,9 @@ mod tests {
     use jazz::groove::records::Value as CoreValue;
     use jazz::groove::records::{RecordDescriptor, ValueType};
     use jazz::groove::storage::MemoryStorage as CoreMemoryStorage;
-    use jazz::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
+    use jazz::ids::{
+        AuthorSubject as CoreAuthorSubject, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid,
+    };
     use jazz::protocol::ReadViewSpec as CoreReadViewSpec;
     use jazz::tools::OpenTransactionId as CoreOpenBatchId;
     use jazz::tools::{
@@ -4640,7 +4644,7 @@ mod tests {
                 CoreMemoryStorage::new(&refs),
                 CoreDbIdentity {
                     node: CoreNodeUuid::from_bytes([0x44; 16]),
-                    author: CoreAuthorId::from_bytes([0xa4; 16]),
+                    author: CoreAuthorSubject::for_test_bytes([0xa4; 16]),
                 },
             )))
             .unwrap(),
@@ -4689,7 +4693,7 @@ mod tests {
             ))))),
             owns_runtime: false,
         };
-        let alice = CoreAuthorId::from_bytes([0xa6; 16]);
+        let alice = CoreAuthorSubject::for_test_bytes([0xa6; 16]);
         let bound = CoreOpenBatchId::new();
         binding
             .begin_transaction(
@@ -4728,7 +4732,7 @@ mod tests {
                 CoreMemoryStorage::new(&refs),
                 CoreDbIdentity {
                     node: CoreNodeUuid::from_bytes([0x46; 16]),
-                    author: CoreAuthorId::from_bytes([0xa6; 16]),
+                    author: CoreAuthorSubject::for_test_bytes([0xa6; 16]),
                 },
             )))
             .unwrap(),

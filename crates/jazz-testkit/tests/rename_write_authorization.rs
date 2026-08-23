@@ -7,7 +7,7 @@ use std::time::Duration;
 use jazz::db::block_on;
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::protocol::{
     CurrentWriteSchema, LensOp, MigrationLens, SchemaLineagePublication, SchemaVersion,
@@ -22,8 +22,8 @@ use jazz::tx::{DurabilityTier, Fate, RejectionReason};
 use jazz_server::JazzServer;
 use support::{publish_allow_all_permissions, push_catalogue_in_memory, wait_for_edge_query_ready};
 
-fn author(byte: u8) -> AuthorId {
-    AuthorId::from_bytes([byte; 16])
+fn author(byte: u8) -> AuthorSubject {
+    AuthorSubject::for_test_bytes([byte; 16])
 }
 
 fn node(byte: u8) -> NodeUuid {
@@ -104,11 +104,14 @@ fn rename_lens(v1: &SchemaVersion, v2: &SchemaVersion) -> MigrationLens {
     )
 }
 
-fn cells(id: RowUuid, email: &str, owner: AuthorId) -> BTreeMap<String, Value> {
+fn cells(id: RowUuid, email: &str, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("id".to_string(), Value::Uuid(id.0)),
         ("email".to_string(), Value::String(email.to_string())),
-        ("owner".to_string(), Value::Uuid(owner.0)),
+        (
+            "owner".to_string(),
+            Value::String(owner.canonical().to_owned()),
+        ),
     ])
 }
 
@@ -213,7 +216,7 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
     block_on(async {
         let outcome = authority
             .apply_trusted_catalogue_message(SyncMessage::PublishSchemaWithLens {
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
                 catalogue_seq,
                 publication: Box::new(SchemaLineagePublication::new(
                     v2.clone(),
@@ -229,7 +232,7 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
     block_on(async {
         let outcome = authority
             .apply_trusted_catalogue_message(SyncMessage::SetCurrentWriteSchema {
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
                 pointer: CurrentWriteSchema {
                     revision: 1,
                     schema: v2.id,

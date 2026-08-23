@@ -66,7 +66,7 @@ publication and write-pointer changes under administrative authority. Catalogue
 mutations travel as admin-gated
 `SyncMessage::{PublishSchemaWithLens, PublishLens, SetCurrentWriteSchema}`
 messages with `CatalogueAck` replies; a non-admin author is rejected
-(`INV-LENS-3`). `AuthorId::SYSTEM` is the catalogue admin.
+(`INV-LENS-3`). `AuthorSubject::SYSTEM` is the catalogue admin.
 
 Exactly one database-wide catalogue sequencer assigns a dense monotone
 `CatalogueSeq`. An arbitrary core or replica never assigns catalogue sequence;

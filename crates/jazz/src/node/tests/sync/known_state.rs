@@ -890,7 +890,7 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
             &binding,
             subscription,
             &values,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
         )
         .unwrap()
         .expect("reader should derive exact slow known-state");
@@ -1056,7 +1056,7 @@ fn fast_known_state_fact_survives_reopen_and_eviction_clears_it() {
             &binding,
             subscription,
             &[],
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
         )
         .unwrap();
     assert_eq!(
@@ -1075,7 +1075,7 @@ fn fast_known_state_fact_survives_reopen_and_eviction_clears_it() {
             &binding,
             subscription,
             &[],
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
         )
         .unwrap();
     assert!(matches!(
@@ -1118,7 +1118,7 @@ fn fast_known_state_fact_survives_storage_reopen() {
             &binding,
             subscription,
             &[],
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
         )
         .unwrap();
     assert_eq!(

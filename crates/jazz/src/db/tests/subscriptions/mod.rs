@@ -25,7 +25,7 @@ fn dropping_subscription_while_node_mutex_is_held_queues_finalization() {
         storage: TestStorage::new(&refs),
         identity: DbIdentity {
             node: NodeUuid::from_bytes([0x42; 16]),
-            author: AuthorId::from_bytes([0x43; 16]),
+            author: AuthorSubject::for_test_bytes([0x43; 16]),
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0x4243))),
     }))

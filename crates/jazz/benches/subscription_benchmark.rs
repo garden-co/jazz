@@ -21,7 +21,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{Query, all_of, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -29,8 +29,10 @@ use jazz::tx::DurabilityTier;
 
 type CoreDb = Db<MemoryStorage>;
 
-const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
-const OTHER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
+const AUTHOR: AuthorSubject =
+    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
+const OTHER_AUTHOR: AuthorSubject =
+    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
 const FANOUT_SUBSCRIPTIONS: usize = 100;
 
 fn schema() -> JazzSchema {

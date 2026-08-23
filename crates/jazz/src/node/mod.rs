@@ -31,8 +31,8 @@ use thiserror::Error;
 
 use self::query_engine::{QueryAuthorizationMode, user_column_field};
 use crate::ids::{
-    AuthorId, MigrationLensId, NodeAlias, NodeUuid, PhysicalColumnId, PhysicalTableId, RowUuid,
-    SchemaFamilyId, SchemaLineagePublicationId, SchemaVersionAlias, SchemaVersionId,
+    AuthorSubject, MigrationLensId, NodeAlias, NodeUuid, PhysicalColumnId, PhysicalTableId,
+    RowUuid, SchemaFamilyId, SchemaLineagePublicationId, SchemaVersionAlias, SchemaVersionId,
 };
 use crate::protocol::{
     BindingViewKey, BranchKey, BranchSelector, CurrentWriteSchema, LensOp, MigrationLens,
@@ -574,9 +574,9 @@ pub struct NodeState<S> {
     /// Runtime counters for query-engine read authorization paths.
     query_engine_read_metrics: QueryEngineReadMetrics,
     /// Process-local claims attached to authenticated subscriber sessions.
-    session_claims: BTreeMap<AuthorId, BTreeMap<String, Value>>,
+    session_claims: BTreeMap<AuthorSubject, BTreeMap<String, Value>>,
     /// Monotone revision for each identity's process-local session claims.
-    session_claim_revisions: BTreeMap<AuthorId, u64>,
+    session_claim_revisions: BTreeMap<AuthorSubject, u64>,
     /// Whether this authority has installed the permissions head that governs
     /// session-scoped reads and writes.
     permissions_ready: bool,
@@ -823,7 +823,7 @@ enum ParamBindingModeCacheKey {
 struct ReadPolicyAuthorizationRequestCacheKey {
     policy_schema_version: SchemaVersionId,
     table_name: String,
-    identity: AuthorId,
+    identity: AuthorSubject,
     param_binding_mode: ParamBindingModeCacheKey,
     tier: DurabilityTier,
     binding_source_shape: Option<String>,
@@ -847,7 +847,7 @@ struct OpenTxState {
     /// Identities consumed by commit or rollback; never reusable in this runtime.
     closed_batches: BTreeSet<OpenTransactionId>,
     /// Local-only permission subjects for transactions whose `made_by` keeps provenance.
-    local_permission_subjects: BTreeMap<TxId, AuthorId>,
+    local_permission_subjects: BTreeMap<TxId, AuthorSubject>,
 }
 
 /// Rejection records and derived indexes used for pending-cascade handling.
@@ -863,7 +863,7 @@ struct RejectionTracking {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CommitUnitIngestContext {
     /// Identity authenticated by the connection carrying the upload.
-    pub identity: AuthorId,
+    pub identity: AuthorSubject,
     /// Whether the connection may attribute writes to a different `made_by`.
     pub trust: CommitUnitTrust,
     /// Whether this subscriber link is hosted by an edge authority.
@@ -1042,11 +1042,11 @@ struct PendingTransactionScan {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RowProvenance {
     /// Principal that created the row.
-    pub created_by: AuthorId,
+    pub created_by: AuthorSubject,
     /// Commit time of the row's first retained content version.
     pub created_at: TxTime,
     /// Principal that authored the visible row version.
-    pub updated_by: AuthorId,
+    pub updated_by: AuthorSubject,
     /// Commit time of the visible row version.
     pub updated_at: TxTime,
 }
@@ -1180,9 +1180,11 @@ impl CurrentRow {
             return Ok(None);
         };
         Ok(Some(RowProvenance {
-            created_by: AuthorId(borrowed.get_uuid(created_by_idx)?),
+            created_by: AuthorSubject::from_canonical(borrowed.get_str(created_by_idx)?)
+                .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
             created_at: TxTime(borrowed.get_u64(created_at_idx)?),
-            updated_by: AuthorId(borrowed.get_uuid(updated_by_idx)?),
+            updated_by: AuthorSubject::from_canonical(borrowed.get_str(updated_by_idx)?)
+                .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
             updated_at: TxTime(borrowed.get_u64(updated_at_idx)?),
         }))
     }
@@ -1203,9 +1205,9 @@ impl CurrentRow {
                     )
                 }))
                 .chain([
-                    ("$createdBy".to_owned(), records::ValueType::Uuid),
+                    ("$createdBy".to_owned(), records::ValueType::String),
                     ("$createdAt".to_owned(), records::ValueType::U64),
-                    ("$updatedBy".to_owned(), records::ValueType::Uuid),
+                    ("$updatedBy".to_owned(), records::ValueType::String),
                     ("$updatedAt".to_owned(), records::ValueType::U64),
                     ("tx_time".to_owned(), records::ValueType::U64),
                     ("tx_node_id".to_owned(), records::ValueType::U64),
@@ -1228,14 +1230,14 @@ impl CurrentRow {
             values.push(projected);
         }
         if let Some(provenance) = self.provenance()? {
-            values.push(Value::Uuid(provenance.created_by.0));
+            values.push(Value::String(provenance.created_by.canonical().to_owned()));
             values.push(Value::U64(provenance.created_at.0));
-            values.push(Value::Uuid(provenance.updated_by.0));
+            values.push(Value::String(provenance.updated_by.canonical().to_owned()));
             values.push(Value::U64(provenance.updated_at.0));
         } else {
-            values.push(Value::Uuid(AuthorId::SYSTEM.0));
+            values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
             values.push(Value::U64(0));
-            values.push(Value::Uuid(AuthorId::SYSTEM.0));
+            values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
             values.push(Value::U64(0));
         }
         if let Some((time, node)) = self.projected_tx_alias() {
@@ -1438,9 +1440,9 @@ pub struct ContributionMergeRequest {
     /// Rows calculated and committed atomically.
     pub rows: Vec<ContributionMergeRow>,
     /// Author of the ordinary output transaction.
-    pub made_by: AuthorId,
+    pub made_by: AuthorSubject,
     /// Identity used by ordinary target write policy.
-    pub permission_subject: Option<AuthorId>,
+    pub permission_subject: Option<AuthorSubject>,
     /// Abstract wall clock at the calculating node.
     pub now_ms: u64,
 }
@@ -1455,9 +1457,9 @@ pub struct MergeableCommit {
     /// Exact named branch coordinate for this row branch-local row.
     pub branch: BranchSelector,
     /// Author making the commit.
-    pub made_by: AuthorId,
+    pub made_by: AuthorSubject,
     /// Identity used for write-policy evaluation.
-    pub permission_subject: Option<AuthorId>,
+    pub permission_subject: Option<AuthorSubject>,
     /// Abstract wall clock at the committing node.
     pub now_ms: u64,
     /// User cells for content versions.
@@ -1483,7 +1485,7 @@ impl MergeableCommit {
             table: table.into(),
             row_uuid,
             branch: BranchSelector::default(),
-            made_by: AuthorId::SYSTEM,
+            made_by: AuthorSubject::SYSTEM,
             permission_subject: None,
             now_ms,
             cells: BTreeMap::new(),
@@ -1503,18 +1505,18 @@ impl MergeableCommit {
     }
 
     /// Set the commit author.
-    pub fn made_by(mut self, made_by: AuthorId) -> Self {
+    pub fn made_by(mut self, made_by: AuthorSubject) -> Self {
         self.made_by = made_by;
         self
     }
 
     /// Set the authenticated identity used for write policy.
-    pub fn permission_subject(mut self, permission_subject: AuthorId) -> Self {
+    pub fn permission_subject(mut self, permission_subject: AuthorSubject) -> Self {
         self.permission_subject = Some(permission_subject);
         self
     }
 
-    pub(crate) fn effective_permission_subject(&self) -> AuthorId {
+    pub(crate) fn effective_permission_subject(&self) -> AuthorSubject {
         self.permission_subject.unwrap_or(self.made_by)
     }
 

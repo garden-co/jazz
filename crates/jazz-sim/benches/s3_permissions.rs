@@ -15,7 +15,7 @@ use jazz::groove::db::{
     StorageReadBucket, StorageReadMetrics, StorageWriteBucket, StorageWriteMetrics,
 };
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::peer::PeerState;
 use jazz::protocol::{
@@ -482,32 +482,37 @@ fn run(ctx: &mut dyn DriverContext, config: &Config) -> Summary {
         "simple",
         node(20),
         schema.clone(),
-        AuthorId(fixture.simple_team.0),
+        AuthorSubject::for_test_uuid(fixture.simple_team.0),
     );
     let mut simple_edge = open_edge(
         "simple_edge",
         node(120),
         schema.clone(),
-        AuthorId(fixture.simple_team.0),
+        AuthorSubject::for_test_uuid(fixture.simple_team.0),
     );
     let mut admin = open_client(
         "admin",
         node(21),
         schema.clone(),
-        AuthorId(fixture.admin_team.0),
+        AuthorSubject::for_test_uuid(fixture.admin_team.0),
     );
     let mut admin_edge = open_edge(
         "admin_edge",
         node(121),
         schema.clone(),
-        AuthorId(fixture.admin_team.0),
+        AuthorSubject::for_test_uuid(fixture.admin_team.0),
     );
-    let mut spy = open_client("spy", node(22), schema.clone(), AuthorId(row(9_900).0));
+    let mut spy = open_client(
+        "spy",
+        node(22),
+        schema.clone(),
+        AuthorSubject::for_test_uuid(row(9_900).0),
+    );
     let mut spy_edge = open_edge(
         "spy_edge",
         node(122),
         schema.clone(),
-        AuthorId(row(9_900).0),
+        AuthorSubject::for_test_uuid(row(9_900).0),
     );
 
     let simple_cold = hydrate(
@@ -658,21 +663,21 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
         "simple",
         node(20),
         schema.clone(),
-        AuthorId(fixture.simple_team.0),
+        AuthorSubject::for_test_uuid(fixture.simple_team.0),
         &core,
     );
     let mut admin = open_db_client(
         "admin",
         node(21),
         schema.clone(),
-        AuthorId(fixture.admin_team.0),
+        AuthorSubject::for_test_uuid(fixture.admin_team.0),
         &core,
     );
     let mut spy = open_db_client(
         "spy",
         node(22),
         schema.clone(),
-        AuthorId(row(9_900).0),
+        AuthorSubject::for_test_uuid(row(9_900).0),
         &core,
     );
 
@@ -766,7 +771,7 @@ fn grant_phase(
         core,
         RESOURCES,
         resource,
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         resource_cells(777),
         700_000,
     );
@@ -778,7 +783,7 @@ fn grant_phase(
         core,
         ACCESS,
         access_edge,
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         access_cells(resource, fixture.visible_group, false),
         700_001,
     );
@@ -795,7 +800,7 @@ fn grant_phase(
         core,
         RESOURCES,
         resource2,
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         resource_cells(778),
         700_002,
     );
@@ -807,7 +812,7 @@ fn grant_phase(
         core,
         ACCESS,
         edge2,
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         access_cells(resource2, fixture.grant_group, false),
         700_003,
     );
@@ -822,7 +827,7 @@ fn grant_phase(
         core,
         MEMBERSHIPS,
         membership,
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         membership_cells(fixture.simple_team, fixture.grant_group, false),
         700_004,
     );
@@ -1051,7 +1056,7 @@ fn forbidden_write_phase(
         core,
         RESOURCES,
         resource,
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         resource_cells(9_000),
         900_000,
     );
@@ -1073,7 +1078,7 @@ fn forbidden_write_phase(
             core,
             RESOURCES,
             row(900_010 + tick),
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             resource_cells(config.resources() + tick),
             900_010 + tick as u64,
         );
@@ -1121,7 +1126,7 @@ fn run_block_tree_variant(config: &Config, profile: PeerProfile) -> BlockTreeSum
     let mut ctx = ThreadedDriver::new(topology, config.seed ^ 0x53b1_0c00);
     let (_core_dir, mut core) = open_node(node(250), schema.clone());
     let (_writer_dir, mut writer) = open_node(node(1), schema.clone());
-    let mut simple = open_client("simple", node(30), schema.clone(), AuthorId::SYSTEM);
+    let mut simple = open_client("simple", node(30), schema.clone(), AuthorSubject::SYSTEM);
     let fixture = seed_block_tree_fixture(
         &mut ctx,
         config.block_pages,
@@ -1264,7 +1269,7 @@ fn run_block_tree_cold_headline(config: &Config, profile: PeerProfile) -> BlockT
         .link("core", "cold", profile);
     let mut ctx = ThreadedDriver::new(topology, config.seed ^ 0x53c0_1d00);
     let (_core_dir, mut core) = open_node(node(250), schema.clone());
-    let mut cold = open_client("cold", node(31), schema.clone(), AuthorId::SYSTEM);
+    let mut cold = open_client("cold", node(31), schema.clone(), AuthorSubject::SYSTEM);
 
     let populate_start = Instant::now();
     let fixture = seed_block_tree_fixture_bulk(
@@ -1406,7 +1411,7 @@ fn seed_block_tree_fixture(
             core,
             PAGES,
             page,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             BTreeMap::from([(
                 "title".to_owned(),
                 Value::String(format!("page-{page_idx}")),
@@ -1442,7 +1447,7 @@ fn seed_block_tree_fixture(
                 core,
                 BLOCKS,
                 row,
-                AuthorId::SYSTEM,
+                AuthorSubject::SYSTEM,
                 block_cells(
                     page,
                     parent,
@@ -1504,9 +1509,9 @@ fn seed_block_tree_fixture_bulk(
                 schema.version_id(),
                 page,
                 Vec::new(),
-                AuthorId::SYSTEM,
+                AuthorSubject::SYSTEM,
                 jazz::time::TxTime(0),
-                AuthorId::SYSTEM,
+                AuthorSubject::SYSTEM,
                 jazz::time::TxTime(0),
                 &page_cells,
                 None,
@@ -1555,9 +1560,9 @@ fn seed_block_tree_fixture_bulk(
                     schema.version_id(),
                     row,
                     Vec::new(),
-                    AuthorId::SYSTEM,
+                    AuthorSubject::SYSTEM,
                     jazz::time::TxTime(0),
-                    AuthorId::SYSTEM,
+                    AuthorSubject::SYSTEM,
                     jazz::time::TxTime(0),
                     &cells,
                     None,
@@ -1602,12 +1607,12 @@ fn flush_headline_versions(
             .len()
             .try_into()
             .expect("headline fixture fits u32"),
-        made_by: AuthorId::SYSTEM,
+        made_by: AuthorSubject::SYSTEM,
         base_snapshot: None,
         row_read_set: None,
         absent_read_set: None,
         predicate_read_set: None,
-        permission_subject: Some(AuthorId::SYSTEM),
+        permission_subject: Some(AuthorSubject::SYSTEM),
         user_metadata_json: Some("s3_block_tree_headline_fixture".to_owned()),
         contribution_merge: None,
     };
@@ -1702,7 +1707,7 @@ fn rewrite_block_visibility(
         core,
         BLOCKS,
         row_uuid,
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         block_cells(
             block.page,
             block.parent,
@@ -2054,7 +2059,7 @@ fn seed_fixture(
             core,
             ORGS,
             row(1_000 + org),
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             BTreeMap::from([("name".to_owned(), Value::String(format!("org-{org}")))]),
             1_000 + org as u64,
         );
@@ -2072,7 +2077,7 @@ fn seed_fixture(
             core,
             TEAMS,
             team,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             BTreeMap::from([
                 ("name".to_owned(), Value::String(format!("team-{idx}"))),
                 ("isAdmin".to_owned(), Value::Bool(team == admin_team)),
@@ -2104,7 +2109,7 @@ fn seed_fixture(
             core,
             MEMBERSHIPS,
             row(10_000 + membership_seq as usize),
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             membership_cells(simple_team, parent, false),
             10_000 + membership_seq,
         );
@@ -2121,7 +2126,7 @@ fn seed_fixture(
             core,
             RESOURCES,
             resource,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             resource_cells(idx),
             20_000 + idx as u64,
         );
@@ -2138,7 +2143,7 @@ fn seed_fixture(
                 core,
                 ACCESS,
                 row(30_000 + access_idx),
-                AuthorId::SYSTEM,
+                AuthorSubject::SYSTEM,
                 access_cells(resource, visible_group, false),
                 30_000 + access_idx as u64,
             );
@@ -2159,7 +2164,7 @@ fn seed_fixture(
                     core,
                     ACCESS,
                     row(30_000 + access_idx),
-                    AuthorId::SYSTEM,
+                    AuthorSubject::SYSTEM,
                     access_cells(resource, group, false),
                     30_000 + access_idx as u64,
                 );
@@ -2173,7 +2178,7 @@ fn seed_fixture(
             core,
             ACCESS,
             row(50_000 + idx),
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             access_cells(resource, admin_team, false),
             50_000 + idx as u64,
         );
@@ -2186,7 +2191,7 @@ fn seed_fixture(
                 core,
                 ACCESS,
                 row(60_000 + idx * config.access_edges_per_resource + extra),
-                AuthorId::SYSTEM,
+                AuthorSubject::SYSTEM,
                 access_cells(resource, team, true),
                 60_000 + (idx * config.access_edges_per_resource + extra) as u64,
             );
@@ -2413,7 +2418,7 @@ fn commit_global(
     core: &mut NodeState<RocksDbStorage>,
     table: &str,
     row_uuid: RowUuid,
-    made_by: AuthorId,
+    made_by: AuthorSubject,
     cells: BTreeMap<String, Value>,
     now_ms: u64,
 ) {
@@ -2442,7 +2447,7 @@ fn delete_global(
     let (_tx_id, unit) = commit_mergeable_unit_settled(
         writer,
         MergeableCommit::new(table, row_uuid, now_ms)
-            .made_by(AuthorId::SYSTEM)
+            .made_by(AuthorSubject::SYSTEM)
             .deletion(DeletionEvent::Deleted),
     )
     .unwrap();
@@ -2466,7 +2471,7 @@ fn edge_acceptance_phase(
     let (_tx_id, unit) = commit_mergeable_unit_settled(
         &mut client.node,
         MergeableCommit::new(RESOURCES, resource, 950_000)
-            .made_by(AuthorId(writer.0))
+            .made_by(AuthorSubject::for_test_uuid(writer.0))
             .cells(resource_cells(950_000)),
     )
     .unwrap();
@@ -2499,7 +2504,7 @@ fn edge_acceptance_phase(
     );
 
     let (scope_shape, scope_binding) = resource_subscription(&schema());
-    let mut core_to_edge_scope = PeerState::edge_client(AuthorId(writer.0));
+    let mut core_to_edge_scope = PeerState::edge_client(AuthorSubject::for_test_uuid(writer.0));
     let scope_update =
         block_on(core_to_edge_scope.rehydrate_query(core, &scope_shape, &scope_binding)).unwrap();
     let hydration_bytes = view_update_bytes(&scope_update);
@@ -2550,7 +2555,12 @@ fn edge_acceptance_phase(
     }
 }
 
-fn open_client(name: &str, node_uuid: NodeUuid, schema: JazzSchema, author: AuthorId) -> Client {
+fn open_client(
+    name: &str,
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+    author: AuthorSubject,
+) -> Client {
     let (dir, node) = open_node(node_uuid, schema);
     Client {
         name: name.to_owned(),
@@ -2562,7 +2572,12 @@ fn open_client(name: &str, node_uuid: NodeUuid, schema: JazzSchema, author: Auth
     }
 }
 
-fn open_edge(name: &str, node_uuid: NodeUuid, schema: JazzSchema, author: AuthorId) -> EdgeRoute {
+fn open_edge(
+    name: &str,
+    node_uuid: NodeUuid,
+    schema: JazzSchema,
+    author: AuthorSubject,
+) -> EdgeRoute {
     let (dir, node) = open_node(node_uuid, schema);
     EdgeRoute {
         name: name.to_owned(),
@@ -2590,7 +2605,7 @@ fn open_db_client(
     _name: &str,
     node_uuid: NodeUuid,
     schema: JazzSchema,
-    author: AuthorId,
+    author: AuthorSubject,
     core: &CoreDb,
 ) -> DbClient {
     let (dir, db) = open_db(node_uuid, schema, author, node_seed(node_uuid));
@@ -2647,7 +2662,7 @@ impl CoreDb {
 fn open_db(
     node_uuid: NodeUuid,
     schema: JazzSchema,
-    author: AuthorId,
+    author: AuthorSubject,
     seed: u64,
 ) -> (tempfile::TempDir, Db<RocksDbStorage>) {
     let dir = tempfile::tempdir().unwrap();
@@ -2687,7 +2702,7 @@ fn seed_db(core: &CoreDb, table: &str, row: RowUuid, cells: BTreeMap<String, Val
     let tx_id = block_on(
         node.commit_mergeable(
             MergeableCommit::new(table, row, core.next_now_ms())
-                .made_by(AuthorId::SYSTEM)
+                .made_by(AuthorSubject::SYSTEM)
                 .cells(cells),
         ),
     )
@@ -2705,7 +2720,7 @@ fn delete_db(core: &CoreDb, table: &str, row: RowUuid) {
     let tx_id = block_on(
         node.commit_mergeable(
             MergeableCommit::new(table, row, core.next_now_ms())
-                .made_by(AuthorId::SYSTEM)
+                .made_by(AuthorSubject::SYSTEM)
                 .deletion(DeletionEvent::Deleted),
         ),
     )
