@@ -330,6 +330,7 @@ impl SchemaViewId {
 /// through the same path a local write does.
 type SubscriptionList = Rc<RefCell<Vec<Weak<RefCell<SubscriptionState>>>>>;
 type PendingUpstreamCommands = Rc<RefCell<Vec<PendingUpstreamCommand>>>;
+type PendingSubscriptionFinalizations = Rc<RefCell<VecDeque<PendingSubscriptionFinalization>>>;
 type LatestCoverageSubscriptions = Rc<RefCell<BTreeMap<CoverageKey, SubscriptionKey>>>;
 type UpstreamCoverageRefCounts = Rc<RefCell<BTreeMap<CoverageKey, usize>>>;
 type AwaitingInitialAuthorityCoverage = Rc<RefCell<BTreeSet<CoverageKey>>>;
@@ -723,6 +724,16 @@ struct UpstreamCoverageHandle {
     subscription: SubscriptionKey,
 }
 
+/// A drop-safe request to retire one public subscription. It carries only
+/// stable local/runtime identities and outer ownership bookkeeping; the node
+/// runtime drains it under its ordinary async mutex before touching Groove.
+struct PendingSubscriptionFinalization {
+    local: Option<(u64, groove::ivm::SubscriptionId)>,
+    upstream: Vec<UpstreamCoverageHandle>,
+    owner: Weak<RefCell<SubscriptionState>>,
+    acknowledgement: Option<oneshot::Sender<()>>,
+}
+
 struct OpenedUpstreamCoverage {
     handles: Vec<UpstreamCoverageHandle>,
     awaits_initial_authority_response: bool,
@@ -947,8 +958,8 @@ pub struct DbTickStats {
 }
 
 mod node_runtime;
+use node_runtime::register_upstream_subscription_owner;
 pub use node_runtime::{ConnectionSessionContext, Node, Transport};
-use node_runtime::{register_upstream_subscription_owner, unregister_upstream_subscription_owner};
 mod peer_connection;
 use peer_connection::{ConnectionLink, schedule_tick_in};
 pub use peer_connection::{PeerConnection, ResumeCursor};
@@ -2406,7 +2417,7 @@ pub enum SubscriptionEvent {
 pub struct SubscriptionStream {
     receiver: UnboundedReceiver<SubscriptionEvent>,
     _state: Rc<RefCell<SubscriptionState>>,
-    cleanup: Option<Box<dyn FnOnce()>>,
+    cleanup: Option<Box<dyn FnOnce(Option<oneshot::Sender<()>>)>>,
 }
 
 struct CleanupGuard {
@@ -2436,6 +2447,23 @@ impl Drop for CleanupGuard {
 }
 
 impl SubscriptionStream {
+    /// Queue cancellation and wait until the node runtime has retired the
+    /// local maintained subscription and any upstream coverage ownership.
+    /// Dropping this future is safe: the command is queued before it awaits.
+    pub async fn close(&mut self) -> Result<(), Error> {
+        let Some(cleanup) = self.cleanup.take() else {
+            return Ok(());
+        };
+        let (sender, receiver) = oneshot::channel();
+        cleanup(Some(sender));
+        receiver.await.map_err(|_| {
+            Error::new(
+                ErrorCode::Protocol,
+                "subscription finalization acknowledgement was dropped",
+            )
+        })
+    }
+
     #[cfg(test)]
     async fn next_raw(&mut self) -> Option<SubscriptionEvent> {
         std::future::poll_fn(|cx| Pin::new(&mut self.receiver).poll_next(cx)).await
@@ -2506,7 +2534,7 @@ impl Stream for SubscriptionStream {
 impl Drop for SubscriptionStream {
     fn drop(&mut self) {
         if let Some(cleanup) = self.cleanup.take() {
-            cleanup();
+            cleanup(None);
         }
     }
 }

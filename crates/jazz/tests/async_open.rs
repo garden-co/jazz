@@ -132,3 +132,57 @@ fn concurrent_cold_reads_and_subscription_wait_for_the_async_node_owner() {
     assert!(reset);
     assert_eq!(added.len(), 1);
 }
+
+/// Alice explicitly closes a subscription. Closing queues the same command as
+/// Drop, waits for its tick acknowledgement, and remains harmless when called
+/// again or after the database has begun shutdown.
+#[test]
+fn explicit_subscription_close_waits_for_tick_and_is_idempotent_through_shutdown() {
+    let schema = schema();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, _control) = TestStorage::controlled(&refs);
+    let db = block_on(Db::open(config(storage))).expect("open test db");
+    let prepared = db
+        .prepare_query(&db.table("todos"))
+        .expect("prepare todos query");
+    let opts = ReadOpts {
+        tier: DurabilityTier::Local,
+        local_updates: LocalUpdates::Immediate,
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    };
+    let mut subscription =
+        block_on(db.subscribe(&prepared, opts.clone())).expect("open subscription");
+    let mut close = Box::pin(subscription.close());
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(
+        Pin::new(&mut close).poll(&mut context),
+        Poll::Pending
+    ));
+    block_on(db.tick()).expect("drain explicit close command");
+    assert!(matches!(
+        Pin::new(&mut close).poll(&mut context),
+        Poll::Ready(Ok(()))
+    ));
+    drop(close);
+    assert_eq!(db.active_groove_subscriptions_for_test(), 0);
+
+    block_on(subscription.close()).expect("repeated close is a no-op");
+    let mut cancelled_close =
+        block_on(db.subscribe(&prepared, opts.clone())).expect("open cancellation-safe close");
+    let mut close_future = Box::pin(cancelled_close.close());
+    assert!(matches!(
+        Pin::new(&mut close_future).poll(&mut context),
+        Poll::Pending
+    ));
+    drop(close_future);
+    block_on(db.tick()).expect("dropped close future leaves its command queued");
+    assert_eq!(db.active_groove_subscriptions_for_test(), 0);
+    block_on(cancelled_close.close()).expect("queued close remains idempotent");
+
+    let mut post_shutdown = block_on(db.subscribe(&prepared, opts)).expect("open shutdown stream");
+    block_on(db.close()).expect("close db after finalization");
+    block_on(post_shutdown.close()).expect("post-shutdown close is safely invalidated");
+}

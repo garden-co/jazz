@@ -461,13 +461,14 @@ where
             local_subscription_id,
         ))));
         let local_cleanup_handle = Rc::clone(&local_subscription_cleanup);
+        let local_cleanup_node = Rc::clone(&self.node);
         let mut local_cleanup = CleanupGuard::new(Box::new(move || {
-            let mut node = local_node.borrow_mut();
-            if let Some((runtime_token, subscription_id)) = local_cleanup_handle.get()
-                && node.groove_runtime_token() == runtime_token
-            {
-                node.unsubscribe_groove_subscription(subscription_id);
-            }
+            local_cleanup_node.enqueue_subscription_finalization(PendingSubscriptionFinalization {
+                local: local_cleanup_handle.take(),
+                upstream: Vec::new(),
+                owner: Weak::new(),
+                acknowledgement: None,
+            });
         }));
         let mut maintained_subscription = Some(subscription);
         // A projected ordered root needs terminal patches even without nested
@@ -600,7 +601,7 @@ where
                 maintained_subscription,
             },
             groove_runtime_token: self.node.node.lock().await.groove_runtime_token(),
-            local_subscription_cleanup,
+            local_subscription_cleanup: Rc::clone(&local_subscription_cleanup),
             propagates_upstream,
             author,
             authorization_mode,
@@ -635,21 +636,26 @@ where
             .subscriptions
             .borrow_mut()
             .push(Rc::downgrade(&state));
-        let cleanup = if upstream_subscription_handles.is_empty() {
-            local_cleanup.take()
-        } else {
+        // The guard covers fallible opening after the local maintained view
+        // exists. On success, replace it with one command carrying local and
+        // upstream cleanup so Drop never touches the async node mutex.
+        drop(local_cleanup.take());
+        let cleanup: Box<dyn FnOnce(Option<oneshot::Sender<()>>)> = {
             let owner = Rc::downgrade(&state);
             register_upstream_subscription_owner(
                 &self.node.upstream_subscription_owners,
                 &upstream_subscription_handles,
                 &state,
             );
-            let upstream_cleanup =
-                self.upstream_subscription_cleanup(upstream_subscription_handles, owner);
-            let local_cleanup = local_cleanup.take();
-            Box::new(move || {
-                local_cleanup();
-                upstream_cleanup();
+            let node = Rc::clone(&self.node);
+            let local = Rc::clone(&local_subscription_cleanup);
+            Box::new(move |acknowledgement| {
+                node.enqueue_subscription_finalization(PendingSubscriptionFinalization {
+                    local: local.take(),
+                    upstream: upstream_subscription_handles,
+                    owner,
+                    acknowledgement,
+                });
             })
         };
         Ok(SubscriptionStream {
@@ -766,54 +772,6 @@ where
                 subscription,
             }],
             awaits_initial_authority_response: has_live_upstream,
-        })
-    }
-
-    fn upstream_subscription_cleanup(
-        &self,
-        upstream_subscriptions: Vec<UpstreamCoverageHandle>,
-        owner: Weak<RefCell<SubscriptionState>>,
-    ) -> Box<dyn FnOnce()> {
-        let node = Rc::clone(&self.node.node);
-        let latest_coverage_subscriptions = Rc::clone(&self.node.latest_coverage_subscriptions);
-        let upstream_coverage_refcounts = Rc::clone(&self.node.upstream_coverage_refcounts);
-        let awaiting_initial_authority_coverage =
-            Rc::clone(&self.node.awaiting_initial_authority_coverage);
-        let upstream_subscription_owners = Rc::clone(&self.node.upstream_subscription_owners);
-        let pending_upstream_subscriptions = Rc::clone(&self.node.upstream_subscriptions);
-        let scheduler = Rc::clone(&self.node.scheduler);
-        Box::new(move || {
-            for handle in upstream_subscriptions {
-                unregister_upstream_subscription_owner(
-                    &upstream_subscription_owners,
-                    handle.subscription,
-                    &owner,
-                );
-                let mut refcounts = upstream_coverage_refcounts.borrow_mut();
-                let Some(count) = refcounts.get_mut(&handle.coverage) else {
-                    continue;
-                };
-                *count = count.saturating_sub(1);
-                if *count > 0 {
-                    continue;
-                }
-                refcounts.remove(&handle.coverage);
-                awaiting_initial_authority_coverage
-                    .borrow_mut()
-                    .remove(&handle.coverage);
-                drop(refcounts);
-                let upstream_subscription = handle.subscription;
-                node.borrow_mut().apply_unsubscribe(upstream_subscription);
-                latest_coverage_subscriptions
-                    .borrow_mut()
-                    .retain(|coverage, subscription| {
-                        coverage != &handle.coverage && *subscription != upstream_subscription
-                    });
-                pending_upstream_subscriptions
-                    .borrow_mut()
-                    .push(PendingUpstreamCommand::Unsubscribe(upstream_subscription));
-            }
-            schedule_tick_in(&scheduler, TickUrgency::Immediate);
         })
     }
 }

@@ -211,6 +211,16 @@ bridge over the core subscription surface: it carries opened, reset, and delta
 events, rather than facade-side diffs of full result sets (`INV-API-7`, and
 `groove/SPEC/INVARIANTS.md::INV-INC-1` for the mechanism law it serves).
 
+Subscription finalization is also asynchronous ownership work. Dropping a
+stream MUST synchronously enqueue one idempotent finalization command without
+borrowing the storage-owning node; the next node tick drains it under ordinary
+async node ownership, retiring both the local maintained-view subscription and
+any upstream coverage ownership/unsubscribe. `SubscriptionStream::close()`
+enqueues that same command and awaits its drain acknowledgement; dropping the
+`close()` future cannot lose cleanup because the command was queued first.
+Database shutdown drains already queued commands before retiring the node, then
+safely invalidates late stream finalizers because no maintained runtime remains.
+
 **Implementation status (2026-07-27).** Local live reads currently use a named
 local materialized-row bridge while maintained-view integration continues;
 `db_facade_subscription_accepts_local_tier_for_alpha_style_live_reads`

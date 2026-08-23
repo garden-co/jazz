@@ -354,7 +354,10 @@ where
         if self.schema_view_is_fixed {
             return Ok(());
         }
-        Ok(self.node.node.lock().await.close().await?)
+        self.node.drain_subscription_finalizations().await?;
+        self.node.node.lock().await.close().await?;
+        self.node.close_subscription_finalizations();
+        Ok(())
     }
 
     /// Configure this database as the optimistic, non-durable side of a
@@ -638,12 +641,14 @@ where
     /// Service every connection once (a convenience over
     /// [`PeerConnection::tick`] for the common single-upstream client).
     pub async fn tick(&self) -> Result<(), Error> {
+        self.node.drain_subscription_finalizations().await?;
         self.node.settle_local_publications().await?;
         self.node.tick().await.map(|_| ())
     }
 
     /// Service every connection once and return binding-observable wake counts.
     pub async fn tick_stats(&self) -> Result<DbTickStats, Error> {
+        self.node.drain_subscription_finalizations().await?;
         self.node.settle_local_publications().await?;
         self.node.tick().await
     }
