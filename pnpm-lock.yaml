@@ -101,6 +101,9 @@ importers:
 
   crates/jazz-rn:
     dependencies:
+      expo:
+        specifier: '>=54'
+        version: 57.0.7(@babel/core@7.29.0)(@expo/dom-webview@57.0.1)(react-dom@19.2.4(react@19.2.4))(react-native@0.81.5(@babel/core@7.29.0)(@react-native-community/cli@20.0.1(typescript@6.0.2))(@types/react@19.2.14)(react@19.2.4))(react@19.2.4)(typescript@6.0.2)
       uniffi-bindgen-react-native:
         specifier: 0.30.0-1
         version: 0.30.0-1
