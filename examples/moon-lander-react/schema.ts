@@ -20,14 +20,14 @@ const schema = {
   fuel_deposits: s.table({
     fuelType: s.string(),
     positionX: s.int(),
-    createdAt: s.allowExternalProvenanceName(s.int()),
+    occurredAt: s.int(),
     collected: s.boolean(),
     collectedBy: s.string(),
   }),
   chat_messages: s.table({
     playerId: s.string(),
     message: s.string(),
-    createdAt: s.allowExternalProvenanceName(s.int()),
+    occurredAt: s.int(),
   }),
 };
 

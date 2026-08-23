@@ -28,7 +28,7 @@ export const ChatList = () => {
     const chat = await waitForWrite(
       db.insert(app.chats, {
         isPublic: true,
-        createdBy: userId,
+        ownerId: userId,
       }),
       sharedWriteOptions,
     );
@@ -38,7 +38,7 @@ export const ChatList = () => {
         chatId: chat.id,
         text: "Hello world",
         senderId: myProfile.id,
-        createdAt: new Date(),
+        occurredAt: new Date(),
       }),
       sharedWriteOptions,
     );
@@ -54,7 +54,7 @@ export const ChatList = () => {
     const chat = await waitForWrite(
       db.insert(app.chats, {
         isPublic: false,
-        createdBy: userId,
+        ownerId: userId,
         joinCode: shareCode,
       }),
       sharedWriteOptions,
@@ -72,7 +72,7 @@ export const ChatList = () => {
         chatId: chat.id,
         text: "This is a private chat.",
         senderId: myProfile.id,
-        createdAt: new Date(),
+        occurredAt: new Date(),
       }),
       sharedWriteOptions,
     );

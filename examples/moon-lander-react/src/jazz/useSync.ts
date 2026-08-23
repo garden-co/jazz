@@ -76,7 +76,7 @@ export function useSync(playerId: string): SyncResult {
   );
 
   // Chat messages (ordered oldest-first for rendering)
-  const { data: allChatMessages = [] } = useAll(app.chat_messages.orderBy("createdAt", "asc"));
+  const { data: allChatMessages = [] } = useAll(app.chat_messages.orderBy("occurredAt", "asc"));
 
   // Local player row — used to detect first join (no row yet) vs reconnect
   const localPlayerRowsResult = useAll(app.players.where({ playerId }));
@@ -174,7 +174,7 @@ export function useSync(playerId: string): SyncResult {
 
   const chatMessages = useMemo(() => {
     const nowS = Math.floor(Date.now() / 1000);
-    return allChatMessages.filter((m) => nowS - m.createdAt < 60);
+    return allChatMessages.filter((m) => nowS - m.occurredAt < 60);
   }, [allChatMessages]);
 
   // ---------------------------------------------------------------------------

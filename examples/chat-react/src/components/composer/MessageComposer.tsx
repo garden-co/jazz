@@ -42,7 +42,7 @@ export function MessageComposer({ chatId, disabled = false }: MessageComposerPro
           chatId,
           text: html.trim(),
           senderId: myProfile.id,
-          createdAt: new Date(),
+          occurredAt: new Date(),
         }),
         sharedWriteOptions,
       )

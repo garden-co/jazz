@@ -68,7 +68,7 @@ export function CollaborativeCanvas({
       points,
       color: s.color,
       width: s.width,
-      createdAt: new Date(s.createdAt),
+      occurredAt: new Date(s.occurredAt),
     });
   }
 
@@ -120,7 +120,7 @@ export function CollaborativeCanvas({
       points: [point],
       color: mode === "draw" ? myColor : "#ffffff",
       width: mode === "draw" ? STROKE_WIDTH : ERASER_WIDTH,
-      createdAt: new Date(),
+      occurredAt: new Date(),
     };
 
     currentStrokeRef.current = newStroke;
@@ -166,7 +166,7 @@ export function CollaborativeCanvas({
           color: stroke.color,
           width: stroke.width,
           pointsJson: JSON.stringify(stroke.points),
-          createdAt: stroke.createdAt,
+          occurredAt: stroke.occurredAt,
         }),
         "failed to save stroke",
       );

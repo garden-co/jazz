@@ -33,9 +33,9 @@ pnpm build              # Optional schema validation + production build
 Defined in `schema.ts` using the Jazz typed schema DSL. Running `pnpm build` validates `schema.ts` before the production build; the app imports the typed `app` export directly from that file.
 
 - **profiles** — userId, name, avatar
-- **chats** — isPublic, createdBy, joinCode (nullable — set for private chats)
+- **chats** — isPublic, ownerId, joinCode (nullable — set for private chats)
 - **chatMembers** — chat (ref), userId, joinCode
-- **messages** — chat (ref), text, sender (ref), senderId, createdAt
+- **messages** — chat (ref), text, sender (ref), senderId, occurredAt
 - **reactions** — message (ref), userId, emoji
-- **canvases** — chat (ref), createdAt
-- **strokes** — canvas (ref), ownerId, color, width, pointsJson, createdAt
+- **canvases** — chat (ref), occurredAt
+- **strokes** — canvas (ref), ownerId, color, width, pointsJson, occurredAt

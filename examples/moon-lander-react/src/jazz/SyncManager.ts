@@ -136,7 +136,7 @@ export class SyncManager {
       .insert(app.chat_messages, {
         playerId: this.playerId,
         message: text,
-        createdAt: Math.floor(Date.now() / 1000),
+        occurredAt: Math.floor(Date.now() / 1000),
       })
       .wait({ tier: "edge" })
       .catch(console.error);
@@ -270,7 +270,7 @@ export class SyncManager {
       this.db.insert(app.fuel_deposits, {
         fuelType,
         positionX,
-        createdAt: Math.floor(Date.now() / 1000),
+        occurredAt: Math.floor(Date.now() / 1000),
         collected: false,
         collectedBy: "",
       });
@@ -324,7 +324,7 @@ export async function reconcileDeposits(
             .insert(app.fuel_deposits, {
               fuelType: ft,
               positionX: Math.floor(seededRand(slotSeed) * MOON_SURFACE_WIDTH),
-              createdAt: nowS,
+              occurredAt: nowS,
               collected: false,
               collectedBy: "",
             })
@@ -332,8 +332,8 @@ export async function reconcileDeposits(
         );
       }
     } else if (diff < 0) {
-      // Trim excess: remove the newest deposits first (highest createdAt)
-      const sorted = [...deposits].sort((a, b) => b.createdAt - a.createdAt);
+      // Trim excess: remove the newest deposits first (highest occurredAt)
+      const sorted = [...deposits].sort((a, b) => b.occurredAt - a.occurredAt);
       for (let j = 0; j < -diff; j++) {
         ops.push(
           db

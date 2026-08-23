@@ -354,7 +354,7 @@ export function useGameEngine(
       id: string;
       playerId: string;
       message: string;
-      createdAt: number;
+      occurredAt: number;
     }>;
     localPlayerId?: string;
     localPlayerName?: string;

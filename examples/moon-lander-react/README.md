@@ -94,8 +94,8 @@ Three tables, all synced through Jazz:
 | Table           | Key columns                                                                                        |
 | --------------- | -------------------------------------------------------------------------------------------------- |
 | `players`       | playerId, name, color, mode, positionX/Y, velocityX/Y, requiredFuelType, landerFuelLevel, lastSeen |
-| `fuel_deposits` | fuelType, positionX, collected, collectedBy, createdAt                                             |
-| `chat_messages` | playerId, message, createdAt                                                                       |
+| `fuel_deposits` | fuelType, positionX, collected, collectedBy, occurredAt                                            |
+| `chat_messages` | playerId, message, occurredAt                                                                      |
 
 Players older than 180 seconds (based on `lastSeen`) are filtered out as stale.
 

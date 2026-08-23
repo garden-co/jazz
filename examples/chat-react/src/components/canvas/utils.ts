@@ -8,7 +8,7 @@ export interface StrokeData {
   points: Point[];
   color: string;
   width: number;
-  createdAt: Date;
+  occurredAt: Date;
 }
 
 export const INTERNAL_WIDTH = 1000;
