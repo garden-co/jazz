@@ -10,6 +10,17 @@ fn access_path_schema() -> JazzSchema {
     ))
 }
 
+fn policy_indexed_access_path_schema(policy: PublicPolicyExpr) -> JazzSchema {
+    build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("docs")
+            .column("owner", PublicColumnType::Uuid)
+            .column("status", PublicColumnType::Text)
+            .column("body", PublicColumnType::Text)
+            .policies(public_all_policies().with_select(policy))
+            .index_only(["owner"]),
+    ))
+}
+
 fn access_path_doc_cells(owner: AuthorId, status: &str, body: &str) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("owner".to_owned(), Value::Uuid(owner.0)),
@@ -56,6 +67,336 @@ fn query_rows_by_uuid(
         .map(|row| row.row_uuid())
         .collect::<Vec<_>>();
     (rows, node.query_engine_read_metrics().clone())
+}
+
+fn query_rows_by_uuid_for_identity(
+    node: &mut NodeState<RocksDbStorage>,
+    query: Query,
+    tier: DurabilityTier,
+    identity: AuthorId,
+) -> (Vec<RowUuid>, QueryEngineReadMetrics) {
+    let shape = query.validate(&node.catalogue.schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    node.reset_query_engine_read_metrics();
+    let rows = node
+        .query_rows_for_link(&shape, &binding, tier, identity)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<Vec<_>>();
+    (rows, node.query_engine_read_metrics().clone())
+}
+
+/// This is intentionally an internal receipt for the physical access-path
+/// counter. Row visibility itself is asserted through the normal query API;
+/// no public surface exposes whether the source was an index or full scan.
+#[test]
+fn indexed_read_policy_matches_local_scan_for_allowed_and_denied_identities() {
+    let schema = policy_indexed_access_path_schema(public_claim_eq("owner", "sub"));
+    let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let (first, _second, owner) = seed_access_path_docs(&mut writer, &mut core);
+    let denied = user(0xc3);
+    let query = Query::from("docs");
+
+    let (global_allowed, global_allowed_metrics) = query_rows_by_uuid_for_identity(
+        &mut core,
+        query.clone(),
+        DurabilityTier::Global,
+        owner,
+    );
+    let (local_allowed, local_allowed_metrics) = query_rows_by_uuid_for_identity(
+        &mut core,
+        query.clone(),
+        DurabilityTier::Local,
+        owner,
+    );
+    let (edge_allowed, edge_allowed_metrics) = query_rows_by_uuid_for_identity(
+        &mut core,
+        query.clone(),
+        DurabilityTier::Edge,
+        owner,
+    );
+    let (global_denied, global_denied_metrics) = query_rows_by_uuid_for_identity(
+        &mut core,
+        query.clone(),
+        DurabilityTier::Global,
+        denied,
+    );
+    let (local_denied, _) = query_rows_by_uuid_for_identity(
+        &mut core,
+        query,
+        DurabilityTier::Local,
+        denied,
+    );
+
+    assert_eq!(global_allowed, local_allowed);
+    assert_eq!(global_allowed, edge_allowed);
+    assert_eq!(global_allowed, vec![first]);
+    assert_eq!(global_denied, local_denied);
+    assert!(global_denied.is_empty());
+    assert!(
+        global_allowed_metrics.source_index_probes >= 1,
+        "the eligible global policy must use its declared owner index"
+    );
+    assert_eq!(global_allowed_metrics.source_full_scans, 0);
+    assert!(local_allowed_metrics.source_full_scans >= 1);
+    assert_eq!(edge_allowed_metrics.source_index_probes, 0);
+    assert!(edge_allowed_metrics.source_full_scans >= 1);
+    assert!(global_denied_metrics.source_index_probes >= 1);
+}
+
+#[test]
+fn indexed_conjunctive_read_policy_retains_the_final_policy_predicate() {
+    let policy = PublicPolicyExpr::And(vec![
+        public_claim_eq("owner", "sub"),
+        public_literal_eq("status", PublicValue::Text("open".to_owned())),
+    ]);
+    let schema = policy_indexed_access_path_schema(policy);
+    let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let owner = user(0xa1);
+    let other = user(0xb2);
+    let owned_open = row(0x11);
+    let owned_closed = row(0x12);
+    let foreign_open = row(0x13);
+    for (row_uuid, tx_time, row_owner, status) in [
+        (owned_open, 10, owner, "open"),
+        (owned_closed, 11, owner, "closed"),
+        (foreign_open, 12, other, "open"),
+    ] {
+        commit_mergeable_global(
+            &mut writer,
+            &mut core,
+            MergeableCommit::new("docs", row_uuid, tx_time)
+                .cells(access_path_doc_cells(row_owner, status, status)),
+        );
+    }
+
+    let query = Query::from("docs");
+    let (global, global_metrics) = query_rows_by_uuid_for_identity(
+        &mut core,
+        query.clone(),
+        DurabilityTier::Global,
+        owner,
+    );
+    let (local, _) =
+        query_rows_by_uuid_for_identity(&mut core, query, DurabilityTier::Local, owner);
+
+    assert_eq!(global, local);
+    assert_eq!(global, vec![owned_open]);
+    assert!(!global.contains(&owned_closed));
+    assert!(!global.contains(&foreign_open));
+    assert!(
+        global_metrics.source_index_probes >= 1,
+        "the conjunctive policy must narrow its Global source through owner"
+    );
+}
+
+#[test]
+fn policy_access_path_receipt_is_not_reused_across_claim_bindings() {
+    let schema = policy_indexed_access_path_schema(public_claim_eq("owner", "tenant"));
+    let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let reader = user(0xc3);
+    let first_owner = user(0xa1);
+    let second_owner = user(0xb2);
+    let first = row(0x11);
+    let second = row(0x22);
+    for (row_uuid, tx_time, owner) in [(first, 10, first_owner), (second, 11, second_owner)] {
+        commit_mergeable_global(
+            &mut writer,
+            &mut core,
+            MergeableCommit::new("docs", row_uuid, tx_time)
+                .cells(access_path_doc_cells(owner, "open", "document")),
+        );
+    }
+    let query = Query::from("docs");
+
+    core.set_session_claims(
+        reader,
+        BTreeMap::from([("tenant".to_owned(), Value::Uuid(first_owner.0))]),
+    );
+    let (first_rows, first_metrics) = query_rows_by_uuid_for_identity(
+        &mut core,
+        query.clone(),
+        DurabilityTier::Global,
+        reader,
+    );
+    core.set_session_claims(
+        reader,
+        BTreeMap::from([("tenant".to_owned(), Value::Uuid(second_owner.0))]),
+    );
+    let (second_rows, second_metrics) =
+        query_rows_by_uuid_for_identity(&mut core, query, DurabilityTier::Global, reader);
+
+    assert_eq!(first_rows, vec![first]);
+    assert_eq!(second_rows, vec![second]);
+    assert!(first_metrics.source_index_probes >= 1);
+    assert!(second_metrics.source_index_probes >= 1);
+}
+
+#[test]
+fn policy_access_path_planner_falls_back_for_or_and_non_equality() {
+    let or_policy = PublicPolicyExpr::Or(vec![
+        public_claim_eq("owner", "sub"),
+        public_literal_eq("status", PublicValue::Text("public".to_owned())),
+    ]);
+    let schema = policy_indexed_access_path_schema(or_policy);
+    let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let (first, _second, owner) = seed_access_path_docs(&mut writer, &mut core);
+    let query = Query::from("docs");
+    let (global, global_metrics) = query_rows_by_uuid_for_identity(
+        &mut core,
+        query.clone(),
+        DurabilityTier::Global,
+        owner,
+    );
+    let (local, _) = query_rows_by_uuid_for_identity(&mut core, query, DurabilityTier::Local, owner);
+    assert_eq!(global, local);
+    assert_eq!(global, vec![first]);
+    assert_eq!(global_metrics.source_index_probes, 0, "OR must retain the full-scan path");
+
+    let non_equality = PublicPolicyExpr::Cmp {
+        column: "owner".to_owned(),
+        op: PublicCmpOp::Ne,
+        value: PublicPolicyValue::SessionRef(vec!["claims".to_owned(), "sub".to_owned()]),
+    };
+    let schema = policy_indexed_access_path_schema(non_equality);
+    let (_writer_dir, mut writer) = open_node_with_schema(node(10), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(11), schema);
+    let (_first, second, owner) = seed_access_path_docs(&mut writer, &mut core);
+    let query = Query::from("docs");
+    let (global, global_metrics) = query_rows_by_uuid_for_identity(
+        &mut core,
+        query.clone(),
+        DurabilityTier::Global,
+        owner,
+    );
+    let (local, _) = query_rows_by_uuid_for_identity(&mut core, query, DurabilityTier::Local, owner);
+    assert_eq!(global, local);
+    assert_eq!(global, vec![second]);
+    assert_eq!(global_metrics.source_index_probes, 0, "non-equality must retain the full-scan path");
+}
+
+#[test]
+fn policy_access_path_planner_falls_back_for_missing_or_nullable_claims_and_joins() {
+    let schema = policy_indexed_access_path_schema(public_claim_eq("owner", "tenant"));
+    let (_writer_dir, mut writer) = open_node_with_schema(node(8), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    seed_access_path_docs(&mut writer, &mut core);
+    let reader = user(0xc3);
+    let query = Query::from("docs");
+    let (global_missing, global_missing_metrics) = query_rows_by_uuid_for_identity(
+        &mut core,
+        query.clone(),
+        DurabilityTier::Global,
+        reader,
+    );
+    let (local_missing, _) = query_rows_by_uuid_for_identity(
+        &mut core,
+        query.clone(),
+        DurabilityTier::Local,
+        reader,
+    );
+    assert_eq!(global_missing, local_missing);
+    assert!(global_missing.is_empty());
+    assert_eq!(global_missing_metrics.source_index_probes, 0);
+
+    let nullable_schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("docs")
+            .nullable_column("owner", PublicColumnType::Uuid)
+            .column("status", PublicColumnType::Text)
+            .policies(public_all_policies().with_select(public_claim_eq("owner", "tenant")))
+            .index_only(["owner"]),
+    ));
+    let (_writer_dir, mut writer) = open_node_with_schema(node(10), nullable_schema.clone());
+    let (_core_dir, mut nullable_core) = open_node_with_schema(node(11), nullable_schema);
+    commit_mergeable_global(
+        &mut writer,
+        &mut nullable_core,
+        MergeableCommit::new("docs", row(0x41), 10).cells(BTreeMap::from([
+            (
+                "owner".to_owned(),
+                Value::Nullable(Some(Box::new(Value::Uuid(user(0xa1).0)))),
+            ),
+            ("status".to_owned(), Value::String("open".to_owned())),
+        ])),
+    );
+    nullable_core.set_session_claims(
+        reader,
+        BTreeMap::from([("tenant".to_owned(), Value::Nullable(None))]),
+    );
+    let (global_nullable, global_nullable_metrics) = query_rows_by_uuid_for_identity(
+        &mut nullable_core,
+        query.clone(),
+        DurabilityTier::Global,
+        reader,
+    );
+    let (local_nullable, _) = query_rows_by_uuid_for_identity(
+        &mut nullable_core,
+        query,
+        DurabilityTier::Local,
+        reader,
+    );
+    assert_eq!(global_nullable, local_nullable);
+    assert!(global_nullable.is_empty());
+    assert_eq!(global_nullable_metrics.source_index_probes, 0);
+
+    let membership = PublicPolicyExpr::Exists {
+        table: "memberships".to_owned(),
+        condition: Box::new(PublicPolicyExpr::And(vec![
+            PublicPolicyExpr::Cmp {
+                column: "document".to_owned(),
+                op: PublicCmpOp::Eq,
+                value: PublicPolicyValue::SessionRef(vec![
+                    "__jazz_outer_row".to_owned(),
+                    "id".to_owned(),
+                ]),
+            },
+            public_claim_eq("reader", "sub"),
+        ])),
+    };
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("docs")
+                    .column("owner", PublicColumnType::Uuid)
+                    .column("status", PublicColumnType::Text)
+                    .column("body", PublicColumnType::Text)
+                    .policies(public_all_policies().with_select(membership))
+                    .index_only(["owner"]),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("memberships")
+                    .fk_column("document", "docs")
+                    .column("reader", PublicColumnType::Uuid),
+            ),
+    );
+    let (_writer_dir, mut writer) = open_node_with_schema(node(10), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(11), schema);
+    let (first, _second, _owner) = seed_access_path_docs(&mut writer, &mut core);
+    let reader = user(0xd4);
+    commit_mergeable_global(
+        &mut writer,
+        &mut core,
+        MergeableCommit::new("memberships", row(0x44), 12).cells(BTreeMap::from([
+            ("document".to_owned(), Value::Uuid(first.0)),
+            ("reader".to_owned(), Value::Uuid(reader.0)),
+        ])),
+    );
+    let query = Query::from("docs");
+    let (global, metrics) = query_rows_by_uuid_for_identity(
+        &mut core,
+        query.clone(),
+        DurabilityTier::Global,
+        reader,
+    );
+    let (local, _) = query_rows_by_uuid_for_identity(&mut core, query, DurabilityTier::Local, reader);
+    assert_eq!(global, local);
+    assert_eq!(global, vec![first]);
+    assert_eq!(metrics.source_index_probes, 0, "join policies must retain the full-scan path");
 }
 
 #[test]

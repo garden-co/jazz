@@ -38,7 +38,7 @@ Invariant digest:
 - `INV-LOWER-19`: Lowered record wrapper field indexes MUST match the groove schema record descriptors used at node open.
 - `INV-LOWER-20`: RLS policy declarations MUST be valid Jazz query shapes; read policy MUST lower through the query engine as part of the policy-composed read graph, while write-time acceptance MAY continue to evaluate policy predicates directly in `node/policy.rs` until write-policy prepared-shape lowering lands.
 - `INV-LOWER-21`: One-shot reads, live subscriptions, sync views, and transaction-validation reads MUST consume the same lowered semantic query program; callback/reset/retry/propagation behavior MUST NOT select a second evaluator or become part of query shape identity. Runtime consumers request compiler evidence as app rows plus named terminal facts.
-- `INV-LOWER-22`: One-shot filtered current reads MUST select deterministic static access paths when sound: primary-key equality uses a primary-key scan, declared indexed-column equality uses an index probe, residual filters remain applied, and unindexed filters fall back to a loudly counted full scan.
+- `INV-LOWER-22`: Global current reads and read-policy authorization programs MUST use one normalized-program access-path derivation when sound: primary-key equality uses a primary-key scan, declared indexed-column equality uses an index probe, residual predicates remain applied, and unsupported shapes fall back to a loudly counted full scan.
 - `INV-LOWER-23`: Position-bounded historical cuts and frozen branch-view base reads MUST use the
   `by_table_global_time` bounded range path when sound, returning the same rows as the
   full-scan currentness oracle while touching only the requested global-time range.
@@ -383,8 +383,12 @@ role, or hole state in opaque revisions.
 
 ### 14.6 Access-path selection
 
-The source resolver selects access paths by deterministic rule, never by cost
-model or statistics:
+The normalized-program planner selects access paths by deterministic rule,
+never by cost model or statistics. Ordinary reads and read-policy
+authorization programs pass through this same planner; source resolution may
+reuse a policy program's recorded path only to narrow the protected source
+before joining the already-compiled policy proof. It never reinterprets policy
+syntax, and the proof graph remains the sole authorization decision.
 
 1. equality on a primary-key prefix → point/prefix scan spec;
 2. equality on a declared/derived boundary-arrangement key → arrangement probe;
@@ -393,16 +397,19 @@ model or statistics:
 4. otherwise → full scan, loudly counted (full-scan counters are part of the
    operational surface, ch. 17).
 
-v1 consumers are implemented and tested: one-shot filtered reads;
+v1 consumers are implemented and tested: one-shot filtered reads and simple
+global read-policy programs;
 position-bounded historical and frozen-base reads, which take the
 `by_table_global_time` bounded range path and must agree row-for-row with the
 full-scan currentness oracle while touching only the requested global-time
 range (`INV-LOWER-23`; this is what makes snapshot-qualified bases and historical reads
 bounded rather than gated); dry-run policy
 probes; and recursion seed hydration (`INV-LOWER-22`–`INV-LOWER-24`). The
-source resolver still fails loudly when a requested source cannot be represented
-by a sound static path; the fallback is a counted full scan, not a different
-semantic evaluator. Prepared-shape steady-state probing is the later
+source resolver records a loud full-scan counter when a requested source cannot
+be represented by a sound static path. Alternative branches, predicates without
+an eligible equality, joins, missing/nullable claims, and non-Global reads use
+that fallback, not a different semantic evaluator. Prepared-shape steady-state
+probing is the later
 overlay-probe phase (groove ch. 4 §4.6).
 
 ### 14.7 Existence lowering for inherited-parent policy joins

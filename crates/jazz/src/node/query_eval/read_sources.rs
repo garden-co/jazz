@@ -904,13 +904,34 @@ where
                 )
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?
             } else {
-                let source = self
-                    .projected_visible_current_source_graph(
+                let tier = graph_tier.expect("visible current source has a tier");
+                let selected_policy_base = if self.access_paths.contains_key(&request.source) {
+                    None
+                } else if let Some(access_path) =
+                    self.cached_policy_authorization_access_path(request)?
+                {
+                    self.selected_global_current_source_graph_for_access_path(
                         request,
                         &table,
-                        graph_tier.expect("visible current source has a tier"),
+                        tier,
+                        access_path,
                     )
-                    .await?;
+                    .await?
+                } else {
+                    None
+                };
+                let source = if let Some(graph) = selected_policy_base {
+                    CurrentSourceGraph {
+                        graph: graph.project_fields(storage_to_canonical_current_source_fields(
+                            &table, true, false,
+                        )),
+                        descriptor: current_row_descriptor(&table),
+                        metadata: BTreeMap::new(),
+                    }
+                } else {
+                    self.projected_visible_current_source_graph(request, &table, tier)
+                        .await?
+                };
                 let graph = match &authorization {
                     SourceAuthorizationRequest::System => source.graph,
                     SourceAuthorizationRequest::PolicyFiltered {
@@ -1064,20 +1085,32 @@ where
                 BTreeSet::new(),
             )
         } else {
+            let tier = graph_tier.expect("visible current source has a tier");
             let selected_base = self
-                .selected_global_current_source_graph(
-                    request,
-                    &table,
-                    graph_tier.expect("visible current source has a tier"),
-                )
+                .selected_global_current_source_graph(request, &table, tier)
                 .await?;
+            let selected_base = match selected_base {
+                Some(selected_base) => Some(selected_base),
+                None => match self.cached_policy_authorization_access_path(request)? {
+                    Some(access_path) => {
+                        self.selected_global_current_source_graph_for_access_path(
+                            request,
+                            &table,
+                            tier,
+                            access_path,
+                        )
+                        .await?
+                    }
+                    None => None,
+                },
+            };
             if selected_base.is_none() {
                 self.node.query_engine_read_metrics.source_full_scans += 1;
             }
             resolved_current_source_graph(
                 self.node,
                 &table,
-                graph_tier.expect("visible current source has a tier"),
+                tier,
                 &request.requirements,
                 &authorization,
                 self.read_view.policy_schema,
@@ -1277,6 +1310,44 @@ where
         let Some(access_path) = self.access_paths.get(&request.source).cloned() else {
             return Ok(None);
         };
+        self.selected_global_current_source_graph_for_access_path(request, table, tier, access_path)
+            .await
+    }
+
+    /// Reuse the access paths chosen while compiling the already-prepared
+    /// policy dependency. Source resolution does not inspect policy syntax or
+    /// select a policy-specific path; it only consumes this generic planner
+    /// receipt to narrow the protected source before the same proof graph is
+    /// joined back in below.
+    fn cached_policy_authorization_access_path(
+        &mut self,
+        request: &SourceRequest,
+    ) -> Result<Option<CurrentAccessPath>, SourceResolutionError> {
+        let Some(policy_request) = self
+            .policy_dependency_request(request)
+            .map_err(|error| source_resolution_error_from_policy_proof(request, error))?
+        else {
+            return Ok(None);
+        };
+        let cache_key = policy_authorization_graph_cache_key(&policy_request);
+        let Some(authorization) = self
+            .node
+            .query
+            .policy_authorization_graph_cache
+            .get(&cache_key)
+        else {
+            return Err(source_resolution_error(request, SourceGap::Coverage));
+        };
+        Ok(authorization.access_paths.get(&request.source).cloned())
+    }
+
+    async fn selected_global_current_source_graph_for_access_path(
+        &mut self,
+        request: &SourceRequest,
+        table: &TableSchema,
+        tier: DurabilityTier,
+        access_path: CurrentAccessPath,
+    ) -> Result<Option<GraphBuilder>, SourceResolutionError> {
         match access_path {
             CurrentAccessPath::PrimaryKey(prefix) => {
                 self.node.query_engine_read_metrics.source_primary_key_scans += 1;
@@ -2688,16 +2759,72 @@ impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
 {
-    pub(super) fn one_shot_access_paths(
+    /// Select physical current-source access paths from the normalized program
+    /// itself. `Access path` is standard query-planner terminology, but this
+    /// deliberately trivial, rule-based planner only recognizes supported
+    /// indexed equality constraints and otherwise falls back to a full scan;
+    /// it makes no cardinality/selectivity estimates or cost comparisons.
+    /// This intentionally has no policy branch: an authorization proof is just
+    /// another normalized program with a different policy context. Every
+    /// selected path merely narrows candidate rows; the lowered predicate graph
+    /// still decides membership.
+    pub(super) fn query_program_access_paths(
         &self,
-        shape: &ValidatedQuery,
-        binding: &Binding,
-        tier: DurabilityTier,
+        request: &QueryProgramRequest,
     ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
-        self.current_query_access_paths(shape, binding, tier)
+        self.normalized_program_access_paths(
+            &request.input,
+            &request.reads.primary,
+            &request.policy,
+        )
     }
 
-    fn current_query_access_paths(
+    fn normalized_program_access_paths(
+        &self,
+        input: &RowSetProgramInput,
+        read_view: &ReadView<RequestedSourceStage>,
+        policy: &PolicyContext,
+    ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
+        let mut equalities_by_source = BTreeMap::new();
+        // This deliberately small access-path selector only recognizes a
+        // source's own Filter -> Source pipeline.  Inspecting every normalized
+        // node lets independent recursive seed/step pipelines participate,
+        // while still refusing to infer restrictions through joins, unions,
+        // or other relational operators.
+        for node_id in input.shape.nodes.keys() {
+            let Some(equalities) =
+                normalized_program_equalities(&input.shape, node_id, &input.binding, policy)?
+            else {
+                continue;
+            };
+            for (source, equalities) in equalities {
+                equalities_by_source
+                    .entry(source)
+                    .or_insert_with(BTreeMap::new)
+                    .extend(equalities);
+            }
+        }
+
+        let mut paths = BTreeMap::new();
+        for (source, equalities) in equalities_by_source {
+            let Some(tier) = read_view.source_current_tier(&source) else {
+                continue;
+            };
+            let table = self.table_in_schema(&source.table, read_view.read_schema)?;
+            let Some(path) = select_current_access_path(&table, &equalities) else {
+                continue;
+            };
+            // All automatically derived paths are Global-only. Local and Edge
+            // reads include ahead rows, so retaining their ordinary source
+            // preserves complete tier semantics.
+            if tier == DurabilityTier::Global {
+                paths.insert(source, path);
+            }
+        }
+        Ok(paths)
+    }
+
+    pub(super) fn one_shot_access_paths(
         &self,
         shape: &ValidatedQuery,
         binding: &Binding,
@@ -2706,23 +2833,26 @@ where
         if tier != DurabilityTier::Global {
             return Ok(BTreeMap::new());
         }
-        let query = shape.query();
-        if !query.joins.is_empty()
-            || !query.policy_branches.is_empty()
-            || !query.array_subqueries.is_empty()
-            || query.aggregate.is_some()
-        {
-            return Ok(BTreeMap::new());
-        }
-        let mut access_paths = self.current_query_primary_key_access_paths(shape, binding)?;
-        let table = self.table_in_schema(&query.table, shape.schema_version())?;
-        let equalities = root_literal_equalities(query, binding)?;
-        let Some(access_path) = select_current_access_path(&table, &equalities) else {
-            return Ok(access_paths);
+        let normalized = self.normalized_row_set_shape(shape, binding)?;
+        let input = RowSetProgramInput {
+            binding: self.program_binding_for_shape(
+                shape,
+                binding,
+                None,
+                BTreeMap::new(),
+                BTreeMap::new(),
+            ),
+            shape: normalized,
         };
-        access_paths.insert(root_source_id(&query.table), access_path);
-        self.add_reachable_access_paths(query, shape.schema_version(), binding, &mut access_paths)?;
-        Ok(access_paths)
+        let reads = current_query_read_set(
+            &input.shape,
+            shape.schema_version(),
+            shape.schema_version(),
+            tier,
+            None,
+            false,
+        );
+        self.normalized_program_access_paths(&input, &reads.primary, &PolicyContext::System)
     }
 
     pub(super) fn current_query_primary_key_access_paths(
@@ -2855,6 +2985,153 @@ where
             projection_target,
             StaticScanSpec::Prefix(prefix.iter().cloned().map(LiteralValue::from).collect()),
         ))
+    }
+}
+
+/// Return only restrictions that are plainly safe to push into a physical
+/// source.  The result is intentionally conservative: this planner does not
+/// reason through relational operators or alternative predicate branches. It
+/// may retain equality restrictions from an enclosing conjunction. A full
+/// normalized program still runs after the scan, so this is a physical
+/// candidate-selection optimization, never a second evaluator.
+fn normalized_program_equalities(
+    shape: &NormalizedRowSetShape,
+    node_id: &RowSetNodeId,
+    binding: &ProgramBinding,
+    policy: &PolicyContext,
+) -> Result<Option<BTreeMap<SourceId, BTreeMap<String, Value>>>, Error> {
+    let node = shape.nodes.get(node_id).ok_or(Error::InvalidStoredValue(
+        "normalized access-path node missing",
+    ))?;
+    match node {
+        RowSetExpr::Filter { input, predicate } => {
+            let Some(mut equalities) =
+                normalized_program_equalities(shape, input, binding, policy)?
+            else {
+                return Ok(None);
+            };
+            collect_normalized_program_equalities(predicate, binding, policy, &mut equalities)?;
+            Ok(Some(equalities))
+        }
+        RowSetExpr::Distinct { input, .. }
+        | RowSetExpr::OrderBy { input, .. }
+        | RowSetExpr::Project { input, .. }
+        | RowSetExpr::Slice { input, .. } => {
+            normalized_program_equalities(shape, input, binding, policy)
+        }
+        RowSetExpr::Source { source, .. } => {
+            Ok(Some(BTreeMap::from([(source.clone(), BTreeMap::new())])))
+        }
+        RowSetExpr::Aggregate { .. }
+        | RowSetExpr::CorrelatedPathProjection { .. }
+        | RowSetExpr::FrontierSource { .. }
+        | RowSetExpr::Join { .. }
+        | RowSetExpr::RecursiveRelation { .. }
+        | RowSetExpr::Union { .. }
+        | RowSetExpr::ValueSource { .. } => Ok(None),
+    }
+}
+
+fn collect_normalized_program_equalities(
+    predicate: &NormalizedPredicateExpr,
+    binding: &ProgramBinding,
+    policy: &PolicyContext,
+    equalities: &mut BTreeMap<SourceId, BTreeMap<String, Value>>,
+) -> Result<(), Error> {
+    match predicate {
+        NormalizedPredicateExpr::And(predicates) => {
+            for predicate in predicates {
+                collect_normalized_program_equalities(predicate, binding, policy, equalities)?;
+            }
+        }
+        NormalizedPredicateExpr::Compare {
+            left,
+            op: NormalizedComparisonOp::Eq,
+            right,
+        } => {
+            if let Some((source, field, value)) =
+                normalized_program_equality(left, right, binding, policy)?
+            {
+                equalities
+                    .entry(source)
+                    .or_default()
+                    .entry(field)
+                    .or_insert(value);
+            } else if let Some((source, field, value)) =
+                normalized_program_equality(right, left, binding, policy)?
+            {
+                equalities
+                    .entry(source)
+                    .or_default()
+                    .entry(field)
+                    .or_insert(value);
+            }
+        }
+        NormalizedPredicateExpr::ArrayContains { .. }
+        | NormalizedPredicateExpr::Compare { .. }
+        | NormalizedPredicateExpr::EnumMatch { .. }
+        | NormalizedPredicateExpr::False
+        | NormalizedPredicateExpr::In { .. }
+        | NormalizedPredicateExpr::IsNotNull(_)
+        | NormalizedPredicateExpr::IsNull(_)
+        | NormalizedPredicateExpr::Not(_)
+        | NormalizedPredicateExpr::TextContains { .. } => {}
+        // Do not descend into a disjunction: an equality within only one
+        // branch is not a restriction on the other branch. An enclosing AND
+        // may still contribute an independent safe equality.
+        NormalizedPredicateExpr::Or(_) => {}
+        NormalizedPredicateExpr::True => {}
+    }
+    Ok(())
+}
+
+fn normalized_program_equality(
+    field: &NormalizedValueRef,
+    value: &NormalizedValueRef,
+    binding: &ProgramBinding,
+    policy: &PolicyContext,
+) -> Result<Option<(SourceId, String, Value)>, Error> {
+    let Some((source, field)) = normalized_program_source_field(field) else {
+        return Ok(None);
+    };
+    let Some(value) = normalized_bound_value(value, binding, policy)? else {
+        return Ok(None);
+    };
+    if matches!(value, Value::Nullable(_)) {
+        // The physical current index stores its own nullable envelope.  Do
+        // not manufacture a nested nullable prefix for a nullable/missing
+        // claim; retain the ordinary scan and predicate instead.
+        return Ok(None);
+    }
+    Ok(Some((source, field, value)))
+}
+
+fn normalized_program_source_field(value: &NormalizedValueRef) -> Option<(SourceId, String)> {
+    match value {
+        NormalizedValueRef::SourceField { source, field } => Some((source.clone(), field.clone())),
+        NormalizedValueRef::RowId(RowIdRef::Source(source)) => {
+            Some((source.clone(), "id".to_owned()))
+        }
+        _ => None,
+    }
+}
+
+fn normalized_bound_value(
+    value: &NormalizedValueRef,
+    binding: &ProgramBinding,
+    policy: &PolicyContext,
+) -> Result<Option<Value>, Error> {
+    match value {
+        NormalizedValueRef::Param(name) => Ok(binding.values.get(name).cloned()),
+        NormalizedValueRef::Literal(bytes) => postcard::from_bytes::<Value>(bytes)
+            .map(Some)
+            .map_err(|err| Error::QueryLowering(format!("literal decoding failed: {err}"))),
+        // Access-path selection is optional.  System reads have no identity
+        // from which to bind a claim, so they retain the ordinary scan rather
+        // than failing while considering this candidate optimization.
+        NormalizedValueRef::Claim(_) if matches!(policy, PolicyContext::System) => Ok(None),
+        NormalizedValueRef::Claim(path) => prepared_claim_value(path, policy),
+        _ => Ok(None),
     }
 }
 
@@ -3568,5 +3845,31 @@ mod tests {
             select_current_access_path(&table, &equalities),
             Some(CurrentAccessPath::PrimaryKey(values)) if values == vec![Value::Uuid(row_id)]
         ));
+    }
+
+    /// This is an internal planner assertion because the fallback is only
+    /// observable as the absence of an optional physical access path. A
+    /// system query has no identity claims, so considering a claim predicate
+    /// must retain its ordinary scan rather than fail the query.
+    #[test]
+    fn system_context_claim_declines_an_access_path_without_failing() {
+        let binding = ProgramBinding {
+            id: BindingId(uuid::Uuid::nil()),
+            source_shape: None,
+            extra_user_params: BTreeMap::new(),
+            param_types: BTreeMap::new(),
+            claim_params: BTreeMap::new(),
+            values: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            normalized_bound_value(
+                &NormalizedValueRef::Claim(ClaimPath(vec!["sub".to_owned()])),
+                &binding,
+                &PolicyContext::System,
+            )
+            .unwrap(),
+            None,
+        );
     }
 }
