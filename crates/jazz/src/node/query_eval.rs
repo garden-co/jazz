@@ -394,9 +394,11 @@ where
             prepared_claim_binding_mode,
             false,
         )?;
-        let access_paths = self.query_program_access_paths(&request)?;
-        self.compile_query_program_request_with_access_paths(request, access_paths)
-            .await
+        // Maintained/prepared programs must retain their established source
+        // graph. Physical source bounds are a one-shot-only optimization: even
+        // an otherwise unbounded optimized index source can settle against a
+        // different persisted frontier than the maintained full source.
+        self.compile_query_program_request(request).await
     }
 
     async fn compile_current_query_program_for_one_shot_read(
