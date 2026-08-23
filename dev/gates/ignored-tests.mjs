@@ -80,17 +80,27 @@ function verifyRust(source, compiled) {
   if (used.size !== source.length) fail("a source ignore annotation is not compiled into the inventory");
 }
 
+function typeScriptIgnoresInSource(source, file) {
+  const markers = [
+    ...source.matchAll(
+      /^\s*\/\/ @jazz-ignore #([0-9]+):\s*(\S.*?)\s*\n\s*(?:it|test|describe)\.skip\(/gm,
+    ),
+  ];
+  const directSkips = [...source.matchAll(/^\s*(?:it|test|describe)\.skip\(/gm)];
+  if (directSkips.length !== markers.length)
+    fail(`${file} has ${directSkips.length} direct skip calls but ${markers.length} issue annotations`);
+  if ([...source.matchAll(/@jazz-ignore/g)].length !== markers.length)
+    fail(`${file} has a malformed @jazz-ignore marker`);
+  return markers.map((match) => ({ file, issue: match[1], reason: match[2] }));
+}
+
 function sourceTypeScriptIgnores() {
   const roots = [path.join(root, "packages"), path.join(root, "examples")].filter(fs.existsSync);
   const found = [];
   for (const directory of roots)
     for (const file of walk(directory, (candidate) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(candidate))) {
       const source = fs.readFileSync(file, "utf8");
-      const markers = [...source.matchAll(/^\s*\/\/ @jazz-ignore #([0-9]+):\s*(\S.*?)\s*\n\s*it\.skip\(\s*["']([^"']+)/gm)];
-      if ([...source.matchAll(/@jazz-ignore/g)].length !== markers.length)
-        fail(`${path.relative(root, file)} has a malformed @jazz-ignore marker`);
-      for (const match of markers)
-        found.push({ file: path.relative(root, file), issue: match[1], reason: match[2], title: match[3] });
+      found.push(...typeScriptIgnoresInSource(source, path.relative(root, file)));
     }
   return found;
 }
@@ -111,6 +121,16 @@ function selfTest() {
     }
     if (!rejected) fail(`self-test did not reject ${label}`);
   }
+  const ts = '// @jazz-ignore #34: manual browser soak\nit.skip("soak", () => {});';
+  if (typeScriptIgnoresInSource(ts, "good.test.ts").length !== 1)
+    fail("self-test valid TypeScript marker");
+  let bareSkipRejected = false;
+  try {
+    typeScriptIgnoresInSource('test.skip("bare", () => {});', "bare.test.ts");
+  } catch {
+    bareSkipRejected = true;
+  }
+  if (!bareSkipRejected) fail("self-test did not reject bare TypeScript skip");
   console.log("ignored-tests: self-test passed");
 }
 
