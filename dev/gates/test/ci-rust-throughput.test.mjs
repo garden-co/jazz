@@ -940,6 +940,46 @@ test("benchmark correctness stays on ordinary CI while API compilation uses real
   );
 });
 
+test("realistic benchmark compilation has an explicit guarded trigger matrix", () => {
+  const document = parse(realisticWorkflow);
+  assert.deepEqual(document.on.pull_request, {
+    branches: ["main"],
+    types: ["opened", "reopened", "synchronize", "labeled"],
+  });
+  assert.deepEqual(document.on.push, { branches: ["main"] });
+  assert.deepEqual(document.on.schedule, [{ cron: "0 5 * * *" }]);
+  assert.equal(document.on.workflow_dispatch.inputs.profile.default, "s");
+  assert.equal(document.on.workflow_dispatch.inputs.include_browser.type, "boolean");
+  assert.deepEqual(document.permissions, { contents: "read", issues: "write" });
+
+  const native = document.jobs.native;
+  assert.deepEqual(native["runs-on"], ["self-hosted", "linux", "x64", "jazz-bench"]);
+  assert.equal(native["timeout-minutes"], 180);
+  assert.match(native.if, /github\.actor != 'github-actions\[bot\]'/);
+  assert.match(native.if, /contains\(github\.event\.pull_request\.labels\.\*\.name, 'benchmark'\)/);
+  assert.match(
+    native.if,
+    /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
+  );
+
+  assert.throws(() => {
+    const unsafe = parse(realisticWorkflow.replace('  schedule:\n    - cron: "0 5 * * *"\n', ""));
+    assert.ok(unsafe.on.schedule, "nightly schedule must remain");
+  }, /nightly schedule/);
+  assert.throws(() => {
+    const unsafe = parse(
+      realisticWorkflow.replace(
+        "github.event.pull_request.head.repo.full_name == github.repository",
+        "true",
+      ),
+    );
+    assert.match(
+      unsafe.jobs.native.if,
+      /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
+    );
+  }, /repo/);
+});
+
 test("realistic timing retains every retired legacy smoke suite", () => {
   for (const bench of [
     "cold_subscription",

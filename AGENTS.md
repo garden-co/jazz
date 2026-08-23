@@ -55,8 +55,9 @@ For ordinary Rust/core work, the full gate set is:
   `sync_telemetry_otel` target is a manual receipt because it does not
   programmatically assert collector delivery.
 - `cargo check -p jazz-sim --benches` on the realistic benchmark workflow
-  (benchmark-labeled PRs, default-branch pushes, and nightly); it catches
-  bench API rot without extending every ordinary PR's critical path.
+  (same-repository PRs bearing `benchmark`, non-bot default-branch pushes,
+  manual runs, and nightly); it catches bench API rot without extending every
+  ordinary PR's critical path.
 - `dev/gates/ts-wire-codec.sh` for TypeScript/native-runtime wire-codec coverage
   (Anselm-approved 2026-07-07)
 - `dev/gates/invariant-registry.sh` parses both invariant registries and fails on
@@ -96,8 +97,9 @@ Benchmark work has three deliberately separate gates:
 - Ordinary PR CI runs `dev/gates/benchmark-smoke.sh --ci`: deterministic core
   and jazz-sim scenario assertions. The realistic benchmark workflow runs
   `dev/gates/benchmark-smoke.sh --compile-ci` to compile every maintained
-  benchmark API on labeled PRs, default-branch pushes, and nightly. Keep
-  correctness assertions in tests, not in a timing receipt.
+  benchmark API on same-repository benchmark-labeled PRs, non-bot
+  default-branch pushes, manual runs, and nightly. Keep correctness assertions
+  in tests, not in a timing receipt.
 - CodSpeed currently compares the example benchmark crates only. Apply the
   `benchmark` label when that coverage is relevant; it refreshes nightly on the
   default branch. Native `jazz` and `jazz-sim` timing remains in the

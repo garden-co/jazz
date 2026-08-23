@@ -43,12 +43,12 @@ For a benchmark edit, locally run
 compile check. Ordinary PR CI runs `dev/gates/benchmark-smoke.sh --ci`, which
 executes deterministic core and jazz-sim scenario assertions. The realistic
 benchmark workflow runs `dev/gates/benchmark-smoke.sh --compile-ci` to check
-all maintained benchmark APIs on labeled PRs, default-branch pushes, and
-nightly. CodSpeed evaluates the example benchmark crates on benchmark-labeled
-PRs and nightly; native `jazz` and `jazz-sim` timing remains in the realistic
-benchmark workflow until it is ported. No local omnibus benchmark script is a
-push gate. A change to a public `jazz` type additionally gates the full
-workspace, including examples.
+all maintained benchmark APIs on same-repository benchmark-labeled PRs,
+non-bot default-branch pushes, manual runs, and nightly. CodSpeed evaluates the
+example benchmark crates on benchmark-labeled PRs and nightly; native `jazz`
+and `jazz-sim` timing remains in the realistic benchmark workflow until it is
+ported. No local omnibus benchmark script is a push gate. A change to a public
+`jazz` type additionally gates the full workspace, including examples.
 
 Use a `-j` appropriate for the box; see PR #1157 for the rationale behind
 replacing the former fixed `-j 2` guidance.
@@ -57,9 +57,9 @@ replacing the former fixed `-j 2` guidance.
 
 - **Crate tests** — integration and crate tests for `jazz` and `groove`.
 - **Bench API compilation** — `cargo check -p jazz-sim --benches` runs on the
-  realistic benchmark workflow (benchmark-labeled PRs, default-branch pushes,
-  and nightly), where it catches benchmark API rot without extending every
-  ordinary PR's critical path.
+  realistic benchmark workflow (same-repository benchmark-labeled PRs,
+  non-bot default-branch pushes, manual runs, and nightly), where it catches
+  benchmark API rot without extending every ordinary PR's critical path.
 - **TS/native wire codec** — `dev/gates/ts-wire-codec.sh` is the current
   TypeScript/native-runtime wire-codec gate. `dev/gates/` currently contains
   this gate and no legacy JS ABI decoder or WASM binding script.
