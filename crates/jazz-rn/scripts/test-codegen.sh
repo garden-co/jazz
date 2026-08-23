@@ -23,4 +23,8 @@ for platform in android ios; do
     echo "React Native Codegen did not generate the JazzRelay module for $platform" >&2
     exit 1
   fi
+  if [[ "$platform" == android ]] && ! rg -q 'getAbiVersion|execute' "$output_dir/$platform"; then
+    echo "React Native Codegen did not generate the JazzRelay command methods for Android" >&2
+    exit 1
+  fi
 done

@@ -17,6 +17,12 @@ package yet. The code under `rust/`, `src/generated/`, `ios/`, `android/`, and
 not the planned command/codec ABI; in particular it must not be treated as an
 implementation of the relay.
 
+The package now reserves a generated `JazzRelay` TurboModule boundary. Android
+registers its ABI probe and explicitly rejects commands until an Android build
+embeds the shared Rust relay artifact. This is a thin platform checkpoint, not
+device support: there is still no executable relay command codec, XCFramework,
+AAR, or Expo development-build receipt.
+
 ## What remains before React Native is supported
 
 1. Define and implement the relay command/event codecs, then generate a small

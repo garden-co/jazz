@@ -10,10 +10,10 @@ import java.util.HashMap
 
 class JazzRnPackage : TurboReactPackage() {
   override fun getModule(name: String, reactContext: ReactApplicationContext): NativeModule? {
-    return if (name == JazzRnModule.NAME) {
-      JazzRnModule(reactContext)
-    } else {
-      null
+    return when (name) {
+      JazzRnModule.NAME -> JazzRnModule(reactContext)
+      JazzRelayModule.NAME -> JazzRelayModule(reactContext)
+      else -> null
     }
   }
 
@@ -23,6 +23,14 @@ class JazzRnPackage : TurboReactPackage() {
       moduleInfos[JazzRnModule.NAME] = ReactModuleInfo(
         JazzRnModule.NAME,
         JazzRnModule.NAME,
+        false,  // canOverrideExistingModule
+        false,  // needsEagerInit
+        false,  // isCxxModule
+        true // isTurboModule
+      )
+      moduleInfos[JazzRelayModule.NAME] = ReactModuleInfo(
+        JazzRelayModule.NAME,
+        JazzRelayModule.NAME,
         false,  // canOverrideExistingModule
         false,  // needsEagerInit
         false,  // isCxxModule
