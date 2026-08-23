@@ -58,6 +58,71 @@ async fn create_note_without_session(client: &JazzClient, title: &str) -> Object
         .0
 }
 
+/// A backend connection normally has system authority. Its explicit
+/// `for_session` context must survive `begin_transaction`, so the staged write
+/// uses both the provider UUID claim for the policy and the canonical logical
+/// author for provenance.
+#[tokio::test]
+async fn backend_session_transaction_preserves_raw_claims_and_logical_author() {
+    tokio::task::LocalSet::new()
+        .run_until(backend_session_transaction_preserves_raw_claims_and_logical_author_inner())
+        .await;
+}
+
+async fn backend_session_transaction_preserves_raw_claims_and_logical_author_inner() {
+    let session_policy = pe::all_of([
+        pe::eq("owner", pe::session("user_id")),
+        pe::eq("$createdBy", pe::session("author")),
+    ]);
+    let schema = SchemaBuilder::new()
+        .table(
+            TableSchema::builder("notes")
+                .column("title", ColumnType::Text)
+                .column("owner", ColumnType::Uuid)
+                .policies(permissions(|p| {
+                    p.allow_read().always();
+                    p.allow_insert().where_(session_policy);
+                })),
+        )
+        .build();
+    let server = JazzServer::builder()
+        .with_schema(schema.clone())
+        .start()
+        .await;
+    let backend = connect_ready_client(&server, &schema, "backend", "notes", READY_TIMEOUT).await;
+    let session = Session::new("urn:jazz:test", super::ALICE_ID);
+    let transaction = backend
+        .for_session(session.clone())
+        .begin_transaction()
+        .expect("begin backend session transaction");
+    let owner = ObjectId::from_uuid(uuid::Uuid::parse_str(super::ALICE_ID).unwrap());
+    let (note_id, _, staged) = transaction
+        .insert(
+            "notes",
+            jazz::row_input!("title" => "session transaction", "owner" => Value::Uuid(owner)),
+        )
+        .expect("raw UUID user_id and logical author policy allow staged insert");
+    assert_eq!(staged, None);
+    let transaction_id = transaction.commit().expect("commit session transaction");
+    wait_for_edge_txs(&backend, &[transaction_id]).await;
+
+    let rows = wait_for_rows(
+        &backend,
+        Query::from("notes").select(["title", "$createdBy", "$updatedBy"]),
+        "backend observes canonical session provenance",
+        |rows| (rows.len() == 1 && rows[0].0 == note_id).then_some(rows),
+    )
+    .await;
+    assert_eq!(
+        rows[0].1,
+        provenance_values("session transaction", super::ALICE_ID, super::ALICE_ID),
+        "backend SYSTEM identity must not replace the explicit session author"
+    );
+
+    backend.shutdown().await.expect("shutdown backend");
+    server.shutdown().await;
+}
+
 async fn create_note_with_backend_attribution(
     backend: &JazzClient,
     attributed_user_id: &str,

@@ -488,9 +488,18 @@ impl Backend {
     ) -> std::result::Result<CoreTxId, CoreDbError> {
         crate::db::block_on(self.0.commit_exclusive_handle(tx_id))
     }
+
+    fn commit_exclusive_handle_for_identity(
+        &self,
+        tx_id: OpenTransactionId,
+        author: CoreAuthorSubject,
+    ) -> std::result::Result<CoreTxId, CoreDbError> {
+        crate::db::block_on(self.0.commit_exclusive_handle_for_identity(tx_id, author))
+    }
 }
 
 struct ExclusiveTransactionState {
+    author: Option<CoreAuthorSubject>,
     writes: Vec<ExclusiveTransactionWrite>,
 }
 
@@ -864,7 +873,7 @@ impl ClientDb {
         Ok(())
     }
 
-    fn begin_transaction(&self) -> Result<OpenTransactionId> {
+    fn begin_transaction(&self, author: Option<CoreAuthorSubject>) -> Result<OpenTransactionId> {
         let mut inner = self.inner.borrow_mut();
         let mut transaction_id = OpenTransactionId::new();
         while inner.transactions.contains_key(&transaction_id)
@@ -878,7 +887,10 @@ impl ClientDb {
             .map_err(|error| JazzError::Write(error.to_string()))?;
         inner.transactions.insert(
             transaction_id,
-            ExclusiveTransactionState { writes: Vec::new() },
+            ExclusiveTransactionState {
+                author,
+                writes: Vec::new(),
+            },
         );
         Ok(transaction_id)
     }
@@ -901,10 +913,13 @@ impl ClientDb {
             .transactions
             .remove(&transaction_id)
             .expect("transaction open checked above");
-        let tx_id = inner
-            .db
-            .commit_exclusive_handle(transaction_id)
-            .map_err(|error| JazzError::Write(error.to_string()))?;
+        let tx_id = match state.author {
+            Some(author) => inner
+                .db
+                .commit_exclusive_handle_for_identity(transaction_id, author),
+            None => inner.db.commit_exclusive_handle(transaction_id),
+        }
+        .map_err(|error| JazzError::Write(error.to_string()))?;
         let committed_id = core_batch_id(tx_id);
         inner.write_map.insert(committed_id, tx_id);
         for write in state.writes {
@@ -3090,15 +3105,22 @@ impl JazzClient {
     /// not visible to ordinary reads until the transaction is committed and
     /// accepted by the authority.
     pub fn begin_transaction(&self) -> Result<JazzTransaction> {
-        {
-            let transaction_id = self.db.begin_transaction()?;
-            let client = self
-                .with_write_context(WriteContext::default().with_transaction_id(transaction_id));
-            Ok(JazzTransaction {
-                transaction_id,
-                client,
-            })
-        }
+        let author = self.write_identity()?;
+        let transaction_id = self.db.begin_transaction(author)?;
+        // Keep an explicit session/attribution context when adding the
+        // transaction id. In particular, a backend connection is SYSTEM by
+        // default, but `for_session(..).begin_transaction()` must continue to
+        // evaluate and author as that session throughout staging and commit.
+        let write_context = self
+            .write_context
+            .clone()
+            .unwrap_or_default()
+            .with_transaction_id(transaction_id);
+        let client = self.with_write_context(write_context);
+        Ok(JazzTransaction {
+            transaction_id,
+            client,
+        })
     }
 
     /// Commit an open transaction by transaction id.
