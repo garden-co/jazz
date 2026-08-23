@@ -218,8 +218,6 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-    env:
-      TURBO_REMOTE_CACHE_SIGNATURE_KEY: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Authenticate read-only PR sccache
@@ -234,6 +232,11 @@ jobs:
         with:
           role-to-assume: ${{ vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN }}
           aws-region: ${{ vars.SCCACHE_REGION }}
+      - name: Export trusted Turbo cache signing key
+        if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/jazz-core-engine-swap')) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+        env:
+          CACHE_SIGNATURE_KEY: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}
+        run: echo "TURBO_REMOTE_CACHE_SIGNATURE_KEY=${CACHE_SIGNATURE_KEY}" >> "${GITHUB_ENV}"
       - name: Set up signed Turbo Remote Cache
         if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/codex/jazz-core-engine-swap')) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
         uses: vercel/setup-turborepo-remote-cache-action@135046f5efcadb17337d9b29b8d5b4035ae64b10 # v1.0.0

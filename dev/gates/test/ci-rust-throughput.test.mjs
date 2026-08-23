@@ -112,6 +112,35 @@ const cacheAccessFor = ({ eventName, ref, sameRepositoryPr = false }) => ({
       ["refs/heads/main", "refs/heads/codex/jazz-core-engine-swap"].includes(ref)) ||
     (eventName === "pull_request" && sameRepositoryPr),
 });
+const assertTurboSigningKeyTrustBoundary = (typescriptJob) => {
+  assert.doesNotMatch(
+    typescriptJob,
+    /^      TURBO_REMOTE_CACHE_SIGNATURE_KEY:/m,
+    "the job environment must not expose the signing key to manual feature runs",
+  );
+  const start = typescriptJob.indexOf("name: Export trusted Turbo cache signing key");
+  assert.notEqual(start, -1, "missing conditional Turbo signing-key export");
+  const end = typescriptJob.indexOf("\n      - ", start);
+  const exportStep = typescriptJob.slice(start, end === -1 ? typescriptJob.length : end);
+  assert.match(exportStep, regex(`if: ${turboCache}`));
+  assert.match(
+    exportStep,
+    /CACHE_SIGNATURE_KEY: \$\{\{ secrets\.TURBO_REMOTE_CACHE_SIGNATURE_KEY \}\}/,
+  );
+  assert.match(
+    exportStep,
+    /echo "TURBO_REMOTE_CACHE_SIGNATURE_KEY=\$\{CACHE_SIGNATURE_KEY\}" >> "\$\{GITHUB_ENV\}"/,
+  );
+};
+const assertTurboCredentialConditions = (typescriptJob) => {
+  assertTurboSigningKeyTrustBoundary(typescriptJob);
+  const trustedConditions = typescriptJob.match(new RegExp(regex(`if: ${turboCache}`).source, "g"));
+  assert.equal(
+    trustedConditions?.length,
+    2,
+    "the signing-key export and Turbo OIDC setup must share the exact trusted condition",
+  );
+};
 
 test("Rust CI uses pinned prebuilt tools without charging Rust-only jobs for wasm-pack", () => {
   const lint = job("lint");
@@ -463,13 +492,14 @@ test("every CI job uses an independently sized Blacksmith runner", () => {
 
 test("Turbo cache uses pinned OIDC policy only for trusted pushes and same-repository PRs", () => {
   const typescript = job("test-ts");
-  assert.match(typescript, regex(`if: ${turboCache}`));
+  assertTurboCredentialConditions(typescript);
   assert.match(typescript, /policy: pol_0b019736-e95d-4f60-a5dd-e9415148834c/);
   assert.match(typescript, /audience: https:\/\/github\.com\/garden-co/);
   assert.match(typescript, /team: garden-co/);
-  assert.match(
-    typescript,
-    /TURBO_REMOTE_CACHE_SIGNATURE_KEY: \$\{\{ secrets\.TURBO_REMOTE_CACHE_SIGNATURE_KEY \}\}/,
+  assert.ok(
+    typescript.indexOf("name: Export trusted Turbo cache signing key") <
+      typescript.indexOf("name: Set up signed Turbo Remote Cache"),
+    "export the signing key before the trusted Turbo setup step",
   );
   assert.match(fs.readFileSync(path.join(root, "turbo.json"), "utf8"), /"signature": true/);
   for (const releaseWorkflow of otherWorkflows)
@@ -565,14 +595,23 @@ test("Blacksmith and cache trust contracts reject planted unsafe changes", () =>
   );
   assert.throws(
     () =>
-      assert.match(
+      assertTurboCredentialConditions(
         typescript.replace(
           turboCache,
           "github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository",
         ),
-        regex(`if: ${turboCache}`),
       ),
     /if:/,
+  );
+  assert.throws(
+    () =>
+      assertTurboSigningKeyTrustBoundary(
+        typescript.replace(
+          "    steps:\n",
+          "    env:\n      TURBO_REMOTE_CACHE_SIGNATURE_KEY: ${{ secrets.TURBO_REMOTE_CACHE_SIGNATURE_KEY }}\n    steps:\n",
+        ),
+      ),
+    /job environment must not expose the signing key/,
   );
 });
 
