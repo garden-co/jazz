@@ -410,6 +410,16 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         system_program.request.input.binding.claim_params.is_empty(),
         "System/asBackend prepared descriptors cannot retain session claim slots"
     );
+    assert!(
+        system_program
+            .request
+            .input
+            .shape
+            .nodes
+            .keys()
+            .all(|node| !node.0.starts_with("policy_branch:")),
+        "System/asBackend reads must remove linked policy branches before normalization, not merely clear their claim bindings"
+    );
     // The ordinary current-query path above strips System claim slots before
     // it constructs the binding. Exercise the nested authorization builders
     // too: a policy claim route must not leave an identity-scoped descriptor
