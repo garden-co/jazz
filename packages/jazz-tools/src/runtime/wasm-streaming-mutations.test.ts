@@ -92,4 +92,49 @@ describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
     ).rejects.toThrow();
     await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([]);
   });
+
+  it("stops push uploads at the ingress limit before accepting the row", async () => {
+    const runtime = await createWasmRuntime(app.wasmSchema, {
+      appId: "wasm-streaming-rate-limit",
+    });
+    runtime.setLargeValueStagingPolicy!(1, 60_000, null);
+
+    await expect(
+      runtime.streamingMutation!(
+        "insert",
+        "todos",
+        { done: { type: "Boolean", value: false } },
+        "title",
+        (async function* () {
+          yield "x".repeat(512 * 1024);
+        })(),
+        null,
+        "00000000-0000-4000-8000-000000000125",
+      ),
+    ).rejects.toThrow(/rate limit/i);
+    await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([]);
+  });
+
+  it("rejects unsafe custom timestamps before consuming the stream", async () => {
+    const runtime = await createWasmRuntime(app.wasmSchema, {
+      appId: "wasm-streaming-unsafe-timestamp",
+    });
+    let consumed = false;
+
+    await expect(
+      runtime.streamingMutation!(
+        "insert",
+        "todos",
+        { done: { type: "Boolean", value: false } },
+        "title",
+        (async function* () {
+          consumed = true;
+          yield "never consumed";
+        })(),
+        JSON.stringify({ updated_at: Number.MAX_SAFE_INTEGER + 1 }),
+        "00000000-0000-4000-8000-000000000126",
+      ),
+    ).rejects.toThrow(/safe integer/i);
+    expect(consumed).toBe(false);
+  });
 });

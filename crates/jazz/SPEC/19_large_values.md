@@ -407,16 +407,16 @@ parents and authorization only after the producer finishes, so a slow upload
 cannot commit against stale pre-upload row state. Publication accepts the staged
 root in the same ordinary row-version commit.
 
-The NAPI adapter implements that async contract with an unlink-on-drop temporary
-file. Each host chunk is copied once into the spool before the producer is
-allowed to advance; `finish` passes a native reader plus the ordinary mutation
-context to Jazz and `abort` drops the spool without staging a root. Browser/WASM
-uses Groove's resumable push constructor instead: each awaited `push` advances
-content-defined chunking, incrementally validates UTF-8/JSON syntax, persists
-finalized nodes under a pending upload, and releases the producer only after
-that persistence completes. `finish` registers the validated root and performs
-the same ordinary Jazz mutation lifecycle. Neither binding collects the whole
-logical value or holds a Jazz transaction open while JavaScript produces data.
+NAPI and Browser/WASM both use Groove's resumable push constructor. The adapter
+subdivides arbitrarily large host chunks into bounded windows; each awaited
+`push` advances content-defined chunking, incrementally validates UTF-8/JSON
+syntax, and asks Jazz to charge the finalized encoded-node batch against the
+ingress window before Groove persists it under the pending upload. Rejection
+evicts and closes that upload before the over-limit batch is written. `finish`
+registers the validated root without charging its already-metered nodes twice
+and performs the same ordinary Jazz mutation lifecycle. Neither binding
+collects or spools the whole logical value or holds a Jazz transaction open
+while JavaScript produces data.
 
 NAPI and WASM preserve the existing encoded-row boundary and copy completed
 results into host-owned buffers. No chunk lease crosses either binding. Complete

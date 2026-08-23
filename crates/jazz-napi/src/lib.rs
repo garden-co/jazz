@@ -36,7 +36,6 @@ use serde_json::Value as JsonValue;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::future::Future;
-use std::io::Write as IoWrite;
 use std::rc::Rc;
 use std::sync::Mutex;
 use std::task::{Context, Poll};
@@ -54,8 +53,8 @@ use jazz::db::{
     PeerConnection as CorePeerConnection, PreparedQuery as PreparedQueryInner,
     Propagation as CorePropagation, QueryAttachment as CoreQueryAttachment,
     ReadOpts as CoreReadOpts, RowCells as CoreRowCells, SeededRowIdSource as CoreSeededRowIdSource,
-    SubscriptionEvent as CoreSubscriptionEvent, SubscriptionStream,
-    TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
+    StreamingValueUpload as CoreStreamingValueUpload, SubscriptionEvent as CoreSubscriptionEvent,
+    SubscriptionStream, TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
     WireTransportAdapter as CoreWireTransportAdapter, WriteHandle, block_on as core_block_on,
 };
 use jazz::groove::large_values::LargeValueKind as CoreLargeValueKind;
@@ -936,9 +935,8 @@ pub struct NapiDb {
 }
 
 /// Native bounded-memory sink used by the TypeScript async streaming-mutation
-/// adapter. Host chunks are spooled to an unlink-on-drop file; `finish` then
-/// hands its reader to Jazz's Groove-backed streaming constructor. Dropping or
-/// aborting before finish publishes and stages nothing.
+/// adapter. Each push incrementally prepares and stages bounded Groove nodes,
+/// using the same ingress policy and resumable construction as WASM.
 #[napi(js_name = "StreamingMutation")]
 pub struct StreamingMutation {
     db: NapiDbInner,
@@ -946,38 +944,43 @@ pub struct StreamingMutation {
     row_id: CoreRowUuid,
     cells: Option<CoreRowCells>,
     column: String,
-    kind: CoreLargeValueKind,
     mutation: CoreStreamingMutationKind,
     identity: Option<CoreAuthorId>,
     updated_at_ms: Option<u64>,
     head: Option<CoreBranchSelector>,
     base: Option<CoreBranchViewBase>,
-    file: Option<tempfile::NamedTempFile>,
+    upload: Option<CoreStreamingValueUpload>,
 }
 
 #[napi]
 impl StreamingMutation {
     #[napi]
     pub fn push(&mut self, chunk: Uint8Array) -> napi::Result<()> {
-        let file = self
-            .file
+        let upload = self
+            .upload
             .as_mut()
             .ok_or_else(|| napi::Error::from_reason("streaming insert is closed"))?;
-        file.write_all(chunk.as_ref())
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
+        let db = self.db.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let result = match db {
+            NapiDbInnerStorage::Memory(db) => {
+                core_block_on(db.push_streaming_value_upload(upload, chunk.as_ref()))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.push_streaming_value_upload(upload, chunk.as_ref()))
+            }
+        };
+        result.map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     #[napi]
     pub fn finish(&mut self) -> napi::Result<Write> {
-        let mut file = self
-            .file
+        let upload = self
+            .upload
             .take()
             .ok_or_else(|| napi::Error::from_reason("streaming insert is closed"))?;
-        file.flush()
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        let reader = file
-            .reopen()
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         let cells = self
             .cells
             .take()
@@ -989,14 +992,13 @@ impl StreamingMutation {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                core_block_on(db.write_streaming_value_with_id(
+                core_block_on(db.finish_streaming_value_upload(
+                    upload,
                     self.mutation,
                     &self.table,
                     self.row_id,
                     cells,
                     &self.column,
-                    self.kind,
-                    reader,
                     self.identity,
                     self.updated_at_ms,
                     self.head.clone(),
@@ -1006,14 +1008,13 @@ impl StreamingMutation {
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                core_block_on(db.write_streaming_value_with_id(
+                core_block_on(db.finish_streaming_value_upload(
+                    upload,
                     self.mutation,
                     &self.table,
                     self.row_id,
                     cells,
                     &self.column,
-                    self.kind,
-                    reader,
                     self.identity,
                     self.updated_at_ms,
                     self.head.clone(),
@@ -1027,7 +1028,7 @@ impl StreamingMutation {
     #[napi]
     pub fn abort(&mut self) -> bool {
         self.cells.take();
-        self.file.take().is_some()
+        self.upload.take().is_some()
     }
 }
 
@@ -1082,22 +1083,37 @@ impl NapiDb {
                 "a streaming mutation branch base requires a branch head",
             ));
         }
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        let upload = {
+            let db = self.inner.borrow();
+            let db = db
+                .as_ref()
+                .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+            match db {
+                NapiDbInnerStorage::Memory(db) => {
+                    db.begin_streaming_value_upload(&table, &cells, &column, kind)
+                }
+                NapiDbInnerStorage::Persistent(db) => {
+                    db.begin_streaming_value_upload(&table, &cells, &column, kind)
+                }
+            }
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?
+        };
         Ok(StreamingMutation {
             db: Rc::clone(&self.inner),
             table,
-            row_id: core_row_uuid_from_bytes(&row_id)?,
-            cells: Some(decode_core_cells(&cells)?),
+            row_id,
+            cells: Some(cells),
             column,
-            kind,
             mutation,
             identity,
-            updated_at_ms: updated_at_ms.map(|value| value as u64),
+            updated_at_ms: updated_at_ms
+                .map(|value| checked_u64(value, "updatedAtMs"))
+                .transpose()?,
             head,
             base,
-            file: Some(
-                tempfile::NamedTempFile::new()
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
+            upload: Some(upload),
         })
     }
 
@@ -2514,20 +2530,19 @@ impl NapiDb {
         window_ms: f64,
         max_age_ms: Option<f64>,
     ) -> napi::Result<()> {
-        if !incoming_bytes_per_window.is_finite()
-            || incoming_bytes_per_window < 0.0
-            || !window_ms.is_finite()
-            || window_ms < 1.0
-            || max_age_ms.is_some_and(|value| !value.is_finite() || value < 0.0)
-        {
-            return Err(napi::Error::from_reason(
-                "large-value staging limits must be finite and nonnegative; windowMs must be at least 1",
-            ));
+        let incoming_bytes_per_window =
+            checked_u64(incoming_bytes_per_window, "incomingBytesPerWindow")?;
+        let window_ms = checked_u64(window_ms, "windowMs")?;
+        if window_ms < 1 {
+            return Err(napi::Error::from_reason("windowMs must be at least 1"));
         }
+        let max_age_ms = max_age_ms
+            .map(|value| checked_u64(value, "maxAgeMs"))
+            .transpose()?;
         let policy = jazz::node::LargeValueStagingPolicy {
-            incoming_bytes_per_window: incoming_bytes_per_window as u64,
-            window_ms: window_ms as u64,
-            max_age_ms: max_age_ms.map(|value| value as u64),
+            incoming_bytes_per_window,
+            window_ms,
+            max_age_ms,
         };
         let db = self.inner.borrow();
         let db = db
@@ -3026,9 +3041,13 @@ fn core_row_uuid_from_bytes(bytes: &[u8]) -> napi::Result<CoreRowUuid> {
 }
 
 fn checked_u64(value: f64, name: &str) -> napi::Result<u64> {
-    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > u64::MAX as f64 {
+    if !value.is_finite()
+        || value < 0.0
+        || value.fract() != 0.0
+        || value > jazz::tools::policy_claims::MAX_SAFE_JS_INTEGER as f64
+    {
         return Err(napi::Error::from_reason(format!(
-            "{name} must be a nonnegative integer"
+            "{name} must be a nonnegative safe integer"
         )));
     }
     Ok(value as u64)
@@ -4090,6 +4109,20 @@ mod tests {
             core_claim_value_from_json(json!(-9_007_199_254_740_992_i64)).unwrap(),
             CoreValue::F64(-9_007_199_254_740_992.0)
         );
+    }
+
+    #[test]
+    fn javascript_u64_boundaries_reject_lossy_or_invalid_numbers() {
+        assert_eq!(super::checked_u64(42.0, "value").unwrap(), 42);
+        for value in [
+            -1.0,
+            f64::NAN,
+            f64::INFINITY,
+            1.5,
+            (jazz::tools::policy_claims::MAX_SAFE_JS_INTEGER + 1) as f64,
+        ] {
+            assert!(super::checked_u64(value, "value").is_err(), "{value:?}");
+        }
     }
 
     #[test]

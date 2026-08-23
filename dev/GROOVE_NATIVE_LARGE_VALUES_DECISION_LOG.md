@@ -134,12 +134,12 @@ metadata, replacing exactly one Text, JSON, or Bytea field with the source while
 retaining every other ordinary insert constraint. This avoids treating UUIDs as
 streamable merely because both UUID and Text map to TypeScript `string`. The
 runtime schema infers the physical kind rather than trusting a caller tag.
-Node/NAPI accepts a `ReadableStream` or `AsyncIterable`, spools each awaited
-chunk to an unlink-on-drop temporary file, then finishes through the native
-reader API. Producer failure aborts before any root is staged. We still do not
-expose pre-collected arrays or synchronous JS callbacks. Browser/WASM uses the
-same explicit async producer, cancellation, and backpressure contract through
-the resumable push preparation described below.
+Node/NAPI accepts a `ReadableStream` or `AsyncIterable` and now drives the same
+resumable Groove push preparation as Browser/WASM. The adapter subdivides large
+host chunks into bounded windows; Jazz meters each finalized encoded-node batch
+before Groove persists it, and rejection evicts and closes the pending upload.
+Producer failure aborts before any root is accepted. We still do not expose
+pre-collected arrays or synchronous JS callbacks.
 
 ## 2026-08-23 — Streaming mutation parity
 

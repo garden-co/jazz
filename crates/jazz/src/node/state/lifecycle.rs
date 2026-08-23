@@ -824,6 +824,13 @@ where
             self.database.evict_staged_large_value(newest.id).await?;
             return Err(Error::LargeValueIngressRateLimited);
         }
+        self.evict_expired_large_value_stages_except(newest.id).await
+    }
+
+    async fn evict_expired_large_value_stages_except(
+        &self,
+        retained_id: groove::large_values::StagedLargeValueId,
+    ) -> Result<(), Error> {
         let now_ms: u64 = web_time::SystemTime::now()
             .duration_since(web_time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -835,7 +842,7 @@ where
                 .large_value_staging_policy
                 .max_age_ms
                 .is_some_and(|max_age| now_ms.saturating_sub(staged.created_at_ms) > max_age);
-            if expired && staged.id != newest.id {
+            if expired && staged.id != retained_id {
                 self.database.evict_staged_large_value(staged.id).await?;
             }
         }
@@ -1032,10 +1039,19 @@ where
         upload_id: groove::large_values::StagedLargeValueId,
         chunks: Vec<groove::large_values::StagedChunk>,
     ) -> Result<(), Error> {
-        Ok(self
-            .database
-            .stage_large_value_chunk_batch(upload_id, chunks)
-            .await?)
+        let encoded_bytes = chunks.iter().try_fold(0_u64, |total, chunk| {
+            total.checked_add(u64::try_from(chunk.encoded.len()).map_err(|_| {
+                Error::InvalidStoredValue("large-value chunk size exceeds u64")
+            })?)
+            .ok_or(Error::InvalidStoredValue(
+                "large-value chunk batch accounting overflow",
+            ))
+        })?;
+        if !self.admit_large_value_ingress(encoded_bytes) {
+            self.database.evict_staged_large_value(upload_id).await?;
+            return Err(Error::LargeValueIngressRateLimited);
+        }
+        Ok(self.database.stage_large_value_chunk_batch(upload_id, chunks).await?)
     }
 
     pub(crate) async fn finalize_large_value_upload(
@@ -1047,7 +1063,10 @@ where
             .database
             .finalize_large_value_upload(upload_id, value_ref)
             .await?;
-        self.enforce_large_value_staging_policy(&staged).await?;
+        // Push uploads were charged batch-by-batch before persistence. Do not
+        // charge the completed tree a second time at root registration.
+        self.evict_expired_large_value_stages_except(staged.id)
+            .await?;
         Ok(staged)
     }
 

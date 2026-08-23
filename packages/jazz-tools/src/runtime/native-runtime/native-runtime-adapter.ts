@@ -1044,6 +1044,12 @@ export class NativeRuntimeAdapter implements Runtime {
       branchView?.base,
     );
     const encoder = new TextEncoder();
+    const pushBounded = async (bytes: Uint8Array): Promise<void> => {
+      const hostWindowBytes = 64 * 1024;
+      for (let offset = 0; offset < bytes.byteLength; offset += hostWindowBytes) {
+        await upload.push(bytes.subarray(offset, offset + hostWindowBytes));
+      }
+    };
     let pendingHighSurrogate = "";
     try {
       for await (const chunk of streamingChunks(source)) {
@@ -1056,18 +1062,18 @@ export class NativeRuntimeAdapter implements Runtime {
             pendingHighSurrogate = text.slice(-1);
             text = text.slice(0, -1);
           }
-          if (text.length > 0) await upload.push(encoder.encode(text));
+          if (text.length > 0) await pushBounded(encoder.encode(text));
         } else if (chunk instanceof Uint8Array) {
           if (pendingHighSurrogate) {
-            await upload.push(encoder.encode(pendingHighSurrogate));
+            await pushBounded(encoder.encode(pendingHighSurrogate));
             pendingHighSurrogate = "";
           }
-          await upload.push(chunk);
+          await pushBounded(chunk);
         } else {
           throw new Error("Streaming insert chunks must be strings or Uint8Array values");
         }
       }
-      if (pendingHighSurrogate) await upload.push(encoder.encode(pendingHighSurrogate));
+      if (pendingHighSurrogate) await pushBounded(encoder.encode(pendingHighSurrogate));
       const receipt = this.finishMutation(await upload.finish());
       return { id: formatUuid(rowId), ...receipt };
     } catch (error) {
@@ -3027,13 +3033,17 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
 
 function updatedAtMsFromWriteContext(writeContext?: string | null): number | undefined {
   if (!writeContext) return undefined;
+  let parsed: { updated_at?: unknown };
   try {
-    const parsed = JSON.parse(writeContext) as { updated_at?: unknown };
-    if (typeof parsed.updated_at !== "number") return undefined;
-    return Math.trunc(parsed.updated_at / 1_000);
+    parsed = JSON.parse(writeContext) as { updated_at?: unknown };
   } catch {
     return undefined;
   }
+  if (typeof parsed.updated_at !== "number") return undefined;
+  if (!Number.isSafeInteger(parsed.updated_at) || parsed.updated_at < 0) {
+    throw new Error("updatedAt must be a nonnegative safe integer");
+  }
+  return Math.trunc(parsed.updated_at / 1_000);
 }
 
 function effectiveUpdatedAtMs(writeContext?: string | null): number | null {

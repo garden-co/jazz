@@ -5,10 +5,11 @@ mod common;
 
 use common::{allow_all_policies, compile_schema};
 use jazz::db::{Db, DbConfig, DbIdentity, StreamingMutationKind};
-use jazz::groove::large_values::{INLINE_VALUE_MAX_BYTES, LargeValueKind};
+use jazz::groove::large_values::{INLINE_VALUE_MAX_BYTES, LEAF_MAX_BYTES, LargeValueKind};
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
 use jazz::ids::{AuthorId, NodeUuid};
+use jazz::node::LargeValueStagingPolicy;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnDescriptor, ColumnType, RowDescriptor, Schema, TableName, TableSchema};
 use jazz::tx::DurabilityTier;
@@ -151,4 +152,31 @@ fn streaming_update_and_upsert_publish_ordinary_logical_rows() {
         Some(Value::String("upserted".to_owned()))
     );
     assert_eq!(rows[0].cell(&table, "done"), Some(Value::Bool(true)));
+}
+
+#[test]
+fn push_streaming_stops_at_the_ingress_limit_and_closes_the_upload() {
+    let db = open_db();
+    db.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: 1,
+        window_ms: 60_000,
+        max_age_ms: None,
+    });
+    let cells = BTreeMap::from([("done".to_owned(), Value::Bool(false))]);
+    let mut upload = db
+        .begin_streaming_value_upload("todos", &cells, "title", LargeValueKind::String)
+        .expect("begin upload");
+
+    let error = jazz::block_on(
+        db.push_streaming_value_upload(&mut upload, &vec![b'x'; LEAF_MAX_BYTES + 1]),
+    )
+    .expect_err("the first finalized leaf exceeds the one-byte ingress budget");
+    assert!(error.to_string().contains("rate limit"));
+
+    let closed = jazz::block_on(db.push_streaming_value_upload(&mut upload, b"retry"))
+        .expect_err("a rejected upload cannot resume after its emitted batch was discarded");
+    assert!(closed.to_string().contains("closed"));
+
+    let query = db.prepare_query(&db.table("todos")).expect("prepare query");
+    assert!(db.read(&query).expect("read rows").is_empty());
 }

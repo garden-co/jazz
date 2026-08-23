@@ -98,9 +98,8 @@ export declare class QueryAttachment {
 
 /**
  * Native bounded-memory sink used by the TypeScript async streaming-mutation
- * adapter. Host chunks are spooled to an unlink-on-drop file; `finish` then
- * hands its reader to Jazz's Groove-backed streaming constructor. Dropping or
- * aborting before finish publishes and stages nothing.
+ * adapter. Each push incrementally prepares and stages bounded Groove nodes,
+ * using the same ingress policy and resumable construction as WASM.
  */
 export declare class StreamingMutation {
   push(chunk: Uint8Array): void

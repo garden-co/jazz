@@ -2633,20 +2633,19 @@ impl WasmDb {
         window_ms: f64,
         max_age_ms: Option<f64>,
     ) -> Result<(), JsValue> {
-        if !incoming_bytes_per_window.is_finite()
-            || incoming_bytes_per_window < 0.0
-            || !window_ms.is_finite()
-            || window_ms < 1.0
-            || max_age_ms.is_some_and(|value| !value.is_finite() || value < 0.0)
-        {
-            return Err(JsValue::from_str(
-                "large-value staging limits must be finite and nonnegative; windowMs must be at least 1",
-            ));
+        let incoming_bytes_per_window =
+            checked_js_u64(incoming_bytes_per_window, "incomingBytesPerWindow")?;
+        let window_ms = checked_js_u64(window_ms, "windowMs")?;
+        if window_ms < 1 {
+            return Err(JsValue::from_str("windowMs must be at least 1"));
         }
+        let max_age_ms = max_age_ms
+            .map(|value| checked_js_u64(value, "maxAgeMs"))
+            .transpose()?;
         let policy = jazz::node::LargeValueStagingPolicy {
-            incoming_bytes_per_window: incoming_bytes_per_window as u64,
-            window_ms: window_ms as u64,
-            max_age_ms: max_age_ms.map(|value| value as u64),
+            incoming_bytes_per_window,
+            window_ms,
+            max_age_ms,
         };
         match &self.inner {
             WasmDbInner::Memory(db) => db.set_large_value_staging_policy(policy),
@@ -3693,9 +3692,13 @@ fn row_uuid_from_bytes(bytes: &[u8]) -> Result<RowUuid, JsValue> {
 }
 
 fn checked_js_u64(value: f64, name: &str) -> Result<u64, JsValue> {
-    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > u64::MAX as f64 {
+    if !value.is_finite()
+        || value < 0.0
+        || value.fract() != 0.0
+        || value > jazz::tools::policy_claims::MAX_SAFE_JS_INTEGER as f64
+    {
         return Err(JsValue::from_str(&format!(
-            "{name} must be a nonnegative integer"
+            "{name} must be a nonnegative safe integer"
         )));
     }
     Ok(value as u64)

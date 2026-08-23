@@ -594,12 +594,17 @@ where
             .push(bytes)
             .map_err(crate::node::Error::from)?;
         let chunks = std::mem::take(&mut *upload.emitted.borrow_mut());
-        self.node
+        if let Err(error) = self
+            .node
             .node
             .lock()
             .await
             .stage_large_value_chunk_batch(upload.id, chunks)
-            .await?;
+            .await
+        {
+            upload.preparation.take();
+            return Err(error.into());
+        }
         Ok(())
     }
 
