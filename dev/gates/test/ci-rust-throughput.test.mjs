@@ -843,6 +843,39 @@ test("CodSpeed caches the root-workspace Cargo target", () => {
   );
 });
 
+test("CodSpeed runs nightly on main and only for benchmark-labeled PRs", () => {
+  const document = parse(codspeedWorkflow);
+  assert.equal(document.on.push, undefined, "ordinary main pushes must not run CodSpeed");
+  assert.deepEqual(document.on.pull_request, {
+    types: ["labeled", "synchronize", "reopened"],
+  });
+  assert.deepEqual(document.on.schedule, [{ cron: "17 3 * * *" }]);
+  assert.equal(document.on.workflow_dispatch, null);
+  assert.equal(
+    document.jobs.examples.if,
+    "github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')",
+  );
+
+  assert.throws(() => {
+    const unsafe = parse(
+      codspeedWorkflow.replace("  schedule:\n", "  push:\n    branches: [main]\n  schedule:\n"),
+    );
+    assert.equal(unsafe.on.push, undefined, "ordinary main pushes must not run CodSpeed");
+  }, /ordinary main pushes/);
+  assert.throws(() => {
+    const unsafe = parse(
+      codspeedWorkflow.replace(
+        "github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')",
+        "true",
+      ),
+    );
+    assert.equal(
+      unsafe.jobs.examples.if,
+      "github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')",
+    );
+  }, /strictly equal/);
+});
+
 test("CodSpeed builds and runs the BigLabel benchmark variant", () => {
   for (const command of ["build", "run"]) {
     assert.match(
