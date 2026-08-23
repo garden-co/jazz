@@ -1,5 +1,7 @@
 # TS dedup phase 1
 
+Tracking issue: [#1770](https://github.com/garden-co/jazz/issues/1770).
+
 ## Scope
 
 Phase 1 replaces the TypeScript transaction read overlay with native reads against an open core transaction. The public TypeScript `Db.transaction()` path uses mergeable transactions: `Db.transaction()` calls `beginTransaction()` with no explicit kind, and `beginTransaction()` constructs `Transaction<"mergeable">` in `packages/jazz-tools/src/runtime/db.ts`. The adapter then opens `mergeableTx` / `mergeableTxForIdentity` in `packages/jazz-tools/src/runtime/native-runtime/native-runtime-adapter.ts`.

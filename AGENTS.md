@@ -48,6 +48,8 @@ For ordinary Rust/core work, the full gate set is:
   but does not fail — that is documented debt the registry deliberately keeps
   visible. Both registries escape literal `|` inside table cells as `\|`; an
   unescaped pipe silently shreds a row.
+- `node dev/gates/spec-open-questions.mjs` keeps every unresolved SPEC open
+  question linked to a GitHub Issue while remaining fully offline.
 - `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
   for maintained-vs-one-shot equivalence coverage (Anselm-approved 2026-07-08)
 - `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact`

@@ -214,17 +214,5 @@ and sync machinery.
 
 ## Open Questions
 
-### Open questions
-
-- 🔶 **`jazz_nodes.uuid` uniqueness.** The README states the interned node UUID
-  is unique, but `schema.rs::nodes_table` declares only the `id` primary key with
-  no uniqueness constraint. Decide whether UUID uniqueness is a normative
-  invariant with storage-level enforcement, or the README prose is stale.
-- 🔶 **Mixed-version row descriptors.** What compatibility guarantees, if any,
-  must sync provide when sender and receiver row descriptors differ? Ch. 8 /
-  ch. 10 own the answer.
-- 🔶 **Visible-row common-case encoding.** The old visible-row notes and later
-  storage TODO both called out duplication between current visible entries and
-  retained history. Decide the compact encoding for singleton frontiers, empty
-  metadata, and deletion/register metadata without changing the row/version
-  identity model.
+- 🔶 [#1758](https://github.com/garden-co/jazz/issues/1758) — Canonical authorship and node identity.
+- 🔶 [#1777](https://github.com/garden-co/jazz/issues/1777) — Mixed-version descriptors and visible-row encoding.

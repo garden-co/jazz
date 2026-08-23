@@ -338,97 +338,11 @@ client-supplied values must not widen those facts.
 
 ## Open Questions
 
-### Open questions
-
-- 🔶 **Session/auth model for bindings.** `AuthorId` is currently the runtime
-  permission subject and `claim("sub")` value, but the product boundary needs
-  explicit account/user/session/default identity terminology. Define how
-  anonymous/local sessions, authenticated users, trusted backends, system links,
-  and attribution-only writes map to `AuthorId`, claims, and link roles.
-- 🔶 **Admission API.** Server and edge shells need an admission hook that turns
-  connection credentials into a link identity, claims, role, expiry, and optional
-  backend trust. This hook must be the only source for policy claim bindings;
-  client-supplied query bindings must never widen claims (ch. 8, ch. 13).
-- 🔶 **Admission-controlled claim vocabulary.** `claim("sub")` is normative, and
-  arbitrary runtime session claims are supported, but the product boundary still
-  needs to define which claims are minted by first-party auth integrations,
-  custom admission hooks, trusted backend assertions, and local-only sessions.
-- 🔶 **Direct-evaluation predicate expansion.** Direct policy evaluation now
-  supports `In` and `Contains` in addition to equality/inequality and boolean
-  composition. Range/null predicates remain fail-closed. Decide whether to add
-  direct support for the remaining query predicates or reject them earlier in
-  policy-specific validation.
-- 🔶 **Policy replacement across schema evolution.** The current implementation
-  selects the active policy-owning schema independently for each operation: a
-  newer schema replaces a read, insert, update, or delete policy only when it
-  declares the applicable clause; otherwise that operation can continue using
-  the preceding active policy definition. Decide whether this is the intended
-  migration model, or whether every newly activated schema must instead provide
-  a complete replacement policy bundle for every surviving table. A
-  policy-complete model must define whether an omitted clause means public,
-  inherited, or invalid, and catalogue validation must reject ambiguous partial
-  replacements. It must also define what replacement means when a table is
-  renamed, split, copied, or dropped: whether the old table's policy disappears,
-  remains available only for historical/old-schema operations, or must be
-  explicitly mapped or tombstoned by the lineage publication. The decision must
-  preserve deterministic authorization for old authored versions, live clients
-  on older schemas, historical reads, and operation-specific permission advice.
-- 🔶 **History visibility rule.** Decide whether current-row readability should
-  imply visibility for all historical versions of that row, or whether history
-  sync/read must evaluate read policy per historical cut.
-- 🔶 **Permission subscriptions and TTL.** Edge mergeable authorization uses
-  upstream permission-scope subscriptions (ch. 9). The current contract is
-  sync-level deduplication and fanout of those scopes; TTL/expiry behavior is a
-  future policy for cache lifetime, not a source of permission truth here.
-- 🔶 **Write-denial surfacing to clients.** A permission-denied write currently
-  never reaches edge durability and `AsyncWriteHandle.wait({ tier })` hangs
-  instead of rejecting. Clients need a deterministic rejection signal (analogous
-  to `SubscribeRejected` on the read path) so denied writes fail fast. Exposed
-  by the auth example denial tests (both auth examples excluded from CI until
-  this lands; see `dev/CI_NOTES.md` 2026-07-19).
-- 🔶 **Non-claims session references (`session.authMode`).** Policy conversion
-  supports only `session.user_id` and `session.claims.*`; the betterauth
-  example references `session.authMode`. Decide: promote to a first-class
-  session attribute, or migrate such policies to claims.
-- 🔶 **String claim validation.** String claim type mismatches in seeded lookups
-  should become loud validation errors instead of depending on runtime
-  empty-result behavior.
-- 🔶 **Uncorrelated policy `EXISTS`.** Server-shell policy conversion currently
-  rejects `policy.<table>.exists.where({ userId: session.user_id })` when the
-  predicate is used from another table and has no equality against the outer row
-  (`__jazz_outer_row`). Decide whether intentionally uncorrelated membership
-  checks are valid policy atoms, how to bound them, and how to lower them
-  without creating accidental whole-table authority scans. Exposed by
-  `world-tour`'s band-member policy.
-- ✅ **Permission introspection is an authority dry-run API, not magic
-  columns.** `$can*` columns cannot express _can-insert_ or richer probes. The
-  facade methods (`can_insert`, `can_read`, `can_update`, `can_delete`, ch. 13)
-  produce `Allowed`, `Denied`, or `Unknown`; only the serving authority may
-  issue a definitive result. A local, offline, incomplete, not-ready, or timed
-  out client receives `Unknown`, never a local policy decision. Requests are
-  evaluated under the authenticated link identity and return only an opaque
-  correlation id plus the advice value, never supporting rows, policy reasons,
-  or hidden dependency facts. Advice is non-mutating and does not reserve or
-  authorize the ordinary optimistic write that may follow (`INV-API-28`).
-- 🔶 **Safe local permission fail-fast.** A future client-local `Denied` may be
-  added only when it is mechanically proven that every fact required for that
-  rejection is locally complete (for example, proposed-row or structural facts).
-  Missing policy support is never denial proof. Local `Allowed` remains
-  forbidden without the serving authority.
-- 🔶 **Principal authorship migration.** Decide the stable `AuthorId`/principal
-  representation for commit authorship, how old self-authored commit encodings
-  are rejected or migrated, and where backend attribution helpers are permitted.
-- 🔶 **Created/updated provenance magic columns.** `$createdBy`, `$createdAt`,
-  `$updatedBy`, and `$updatedAt` need validation, join/filter/order behavior,
-  and fail-closed semantics before policy authors rely on them.
-- 🔶 **Policy denial reasons.** Policy clauses should be able to return
-  structured denial reasons suitable for client errors without exposing data
-  from rows the caller cannot read.
-- 🔶 **Partial schema visibility.** Decide whether schema/catalogue visibility is
-  all-or-nothing per app, scoped by policy, or split into public shape metadata
-  plus protected implementation details.
-- 🔶 **`NOT(INHERITS)` semantics.** Negative inheritance-style predicates need a
-  precise fail-closed meaning before the DSL exposes them.
-- 🔶 **Per-column encryption and authorization.** If encrypted columns are added,
-  policy evaluation must define what can be evaluated server-side, what requires
-  client-side keys, and how key loss/revocation interacts with read policy.
+- 🔶 [#1758](https://github.com/garden-co/jazz/issues/1758) — Canonical session subject/authorship and provenance.
+- 🔶 [#1778](https://github.com/garden-co/jazz/issues/1778) — Admission and binding capability surface.
+- 🔶 [#1759](https://github.com/garden-co/jazz/issues/1759) — EXISTS and policy conversion.
+- 🔶 [#1760](https://github.com/garden-co/jazz/issues/1760) — Session-claim policy conversion.
+- 🔶 [#1761](https://github.com/garden-co/jazz/issues/1761) — Relational read-policy grants.
+- 🔶 [#1762](https://github.com/garden-co/jazz/issues/1762) — Write authorization for read-hidden and inherited rows.
+- 🔶 [#1763](https://github.com/garden-co/jazz/issues/1763) — Bounded, cycle-safe policy graphs.
+- 🔶 [#1779](https://github.com/garden-co/jazz/issues/1779) — Policy replacement across schema evolution.

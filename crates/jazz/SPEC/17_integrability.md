@@ -189,44 +189,5 @@ unsuitable there; this is a tooling decision rather than a semantic contract.
 
 ## Open Questions
 
-- 🔶 **Server catalogue ownership debt.** The browser and ordinary Jazz
-  runtimes persist catalogue state in the runtime-owned `jazz_catalogue` and
-  `jazz_catalogue_pointer` Groove tables. `jazz-server` additionally maintains a
-  synchronous, separately persisted `StoredCatalogue` for administrative HTTP
-  routes and offline bootstrap. That duplicates catalogue persistence and makes
-  the adapter appear to require cross-thread storage solely because it is held
-  directly in shared request state. The pragmatic implementation may retain
-  this facade, but the intended cleanup is to make the server shell an async
-  facade over one authoritative runtime catalogue, retaining only independently
-  durable bootstrap state that is proven necessary while the runtime is
-  unavailable. Do not generalize this implementation debt into a requirement
-  that Jazz nodes or Groove storage be concurrently polled from multiple
-  threads.
-
-- 🔶 What is the alpha replacement packaging line for the server shell: a
-  dedicated crate/package with stable config types, a reference executable over
-  unstable internals, or both?
-
-- 🔶 Which auth/session admission inputs are mandatory for the first shell:
-  bearer claims, signed `Hello` claims, injected test identity, or a pluggable
-  verifier owned by ch. 7 and ch. 8?
-
-- 🔶 Which operational endpoints are required for alpha replacement: liveness,
-  readiness, storage migration state, sync lag, active session count, protocol
-  version mismatch counters, and graceful-drain status?
-
-- 🔶 How much listener policy belongs in config versus code: WebSocket paths,
-  TLS termination assumptions, max frame/connection limits, backpressure
-  thresholds, and allowed role/profile combinations?
-
-- 🔶 Which TypeScript framework adapter, if any, should be the first blessed
-  adapter after the core cross-binding capability gate passes?
-- 🔶 Which native binding comes next after the first direct WASM/NAPI proof:
-  React Native packaging, Go, Swift, or Kotlin, and what fixture parity is the
-  entry criterion?
-- 🔶 How should serverless KV storage hosts integrate with the portable storage
-  contract without losing ordered range scans, atomic batches, or reopen/migration
-  diagnostics?
-- 🔶 Which framework/tooling plugin issues belong in the core repo's
-  integrability matrix versus package-specific backlog once top-level specs are
-  gone?
+- 🔶 [#1778](https://github.com/garden-co/jazz/issues/1778) — Server, binding, framework, and operational integration contract.
+- 🔶 [#1774](https://github.com/garden-co/jazz/issues/1774) — Serverless KV storage contract.

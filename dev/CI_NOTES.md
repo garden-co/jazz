@@ -57,15 +57,11 @@ different slicing than the canonical per-crate gates. Both catch the 8
 failures; keep both (workspace slicing in CI catches feature-unification
 differences the per-crate gates can miss).
 
-## PENDING: realistic-benchmarks workflow verdict on this branch (run 29659318921)
+## Historical workflow receipt
 
-## PENDING: decide whether the incremental-delivery canaries + differential
-
-harness + oracle (currently local-convention gates) should be explicit named CI
-steps so PR reviewers see them green rather than trusting the ledger.
-Recommendation: yes — they are the correctness story of this PR; a dedicated
-`differential-gates` job makes them first-class. To be discussed with Anselm
-before altering ci.yml.
+The decision whether incremental-delivery canaries and the differential oracle
+should become explicit named CI steps is tracked in
+[#1787](https://github.com/garden-co/jazz/issues/1787).
 
 ## RESOLVED: `auth-simple-chat#test` CI exclusion removed
 

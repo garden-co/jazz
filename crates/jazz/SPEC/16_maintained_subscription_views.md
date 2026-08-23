@@ -496,15 +496,6 @@ result changes back to the correct parent output.
 
 ## Open Questions
 
-- 🔶 **Granular patch surface.** Define the exact patch/event payloads exposed to
-  TypeScript and framework bindings, including row identity, include path,
-  ordering/window movement, and deletion/restore transitions.
-- 🔶 **Streaming first result opt-out.** Decide whether callers can subscribe to
-  live deltas before initial settle, and how to mark unsettle/partial coverage
-  without confusing "not loaded" with "empty".
-- 🔶 **Correlated subquery maintenance.** Replace one-graph-per-outer-row array
-  subqueries with shared prepared/correlation maintenance that remains bounded
-  by affected parent and child keys.
-- 🔶 **Partition-aware deletion witnesses.** Overlay views need
-  branch-key-qualified deletion-register terminal facts so head/base views can
-  publish delete/restore changes without full refresh.
+- 🔶 [#1783](https://github.com/garden-co/jazz/issues/1783) — Subscription patch and first-result API.
+- 🔶 [#1765](https://github.com/garden-co/jazz/issues/1765) — Correlated subquery maintenance.
+- 🔶 [#1784](https://github.com/garden-co/jazz/issues/1784) — Partition-aware deletion witnesses.

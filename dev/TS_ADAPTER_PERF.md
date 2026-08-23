@@ -1,5 +1,7 @@
 ## TS adapter attribution
 
+Tracking issue: [#1770](https://github.com/garden-co/jazz/issues/1770).
+
 Context: worker-side subscription delivery in `packages/jazz-tools/src/runtime/native-runtime/native-runtime-adapter.ts`.
 
 Micro-harness: `JAZZ_TS_ADAPTER_PERF=1 pnpm --dir packages/jazz-tools exec vitest run --config vitest.config.ts src/runtime/native-runtime/runtime.test.ts -t "TS adapter perf canary" --reporter=verbose --silent=false`

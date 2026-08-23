@@ -1,5 +1,9 @@
 # Edge Fate Authority Findings
 
+Follow-up tracking: [#1784](https://github.com/garden-co/jazz/issues/1784)
+(sync protocol hardening) and [#1785](https://github.com/garden-co/jazz/issues/1785)
+(edge topology/cache evolution).
+
 ## Normative Spec Notes
 
 From `crates/jazz/SPEC/9_topology_edge.md`:
@@ -62,8 +66,10 @@ The first fix was over-broad: it used the peer role as the authority discriminat
 
 ## 🔶 Candidates / Ambiguities
 
-- 🔶 Core promotion propagation is still underspecified at the wire level. The spec says core finalizes edge-accepted mergeables with `GlobalTime`/`Global`, but the current wire `CommitUnit` does not carry an explicit "edge-accepted" marker. The focused regression verifies the pre-core gating bug Nico reported; a fuller follow-up should pin the exact edge-to-core finalization signal and assert Alice/Bob observe global after core ack.
-- 🔶 Remote `Edge`-tier subscription serving is still not enabled by the current DB sync contract: existing tests require edge/local live subscriptions to request global upstream coverage and require subscriber serving to reject non-global register-shape options. The "edge-tier subscriber sees pre-core data" assertion therefore remains a candidate for a later, explicit subscription-tier design change rather than part of this authority-wiring fix.
+- 🔶 [#1784](https://github.com/garden-co/jazz/issues/1784) — Specify the
+  edge-to-core finalization signal and global-after-ack receipts.
+- 🔶 [#1785](https://github.com/garden-co/jazz/issues/1785) — Decide whether
+  remote Edge-tier subscription serving is a supported topology contract.
 
 ## Gate Table
 

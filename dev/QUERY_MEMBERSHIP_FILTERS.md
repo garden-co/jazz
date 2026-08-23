@@ -1,5 +1,7 @@
 # Query Membership Filters
 
+Tracking issue: [#1776](https://github.com/garden-co/jazz/issues/1776).
+
 ## Findings
 
 Reference PR #808 (`Support broader query membership filters`) was used only as
@@ -49,8 +51,8 @@ Main implementation gap:
   CodSpeed comparison for a performance-sensitive change.
 - SPECULATIVE: none so far.
 
-## Open Questions
+## Open question
 
-- Literal-vs-column coercion remains intentionally narrow. This work does not
-  add broad numeric coercion or string-to-numeric coercion; if broader coercion
-  is desired it needs a separate spec decision.
+- 🔶 [#1776](https://github.com/garden-co/jazz/issues/1776) — Literal-vs-column
+  coercion remains intentionally narrow; broad numeric or string-to-numeric
+  coercion needs an explicit query-language decision.

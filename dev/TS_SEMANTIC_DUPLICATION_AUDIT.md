@@ -1,5 +1,7 @@
 # TS semantic duplication audit
 
+Tracking issue: [#1770](https://github.com/garden-co/jazz/issues/1770).
+
 Investigation slice: read-mostly audit of the TypeScript runtime/worker layers. No source changes made.
 
 ## Part 1: TS semantic reimplementation sites

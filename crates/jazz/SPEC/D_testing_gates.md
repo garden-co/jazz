@@ -186,17 +186,4 @@ The canonical set above is the pre-push discipline mirrored from
 
 ## Open Questions
 
-### Open questions
-
-- 🔶 **CI scope.** Decide which canonical local gates should become GitHub
-  Actions gates.
-- 🔶 **Test catalogue ownership.** The old test-catalogue inventory is folded
-  here: keep tests organized by public contract owner, not by historical module,
-  and prefer black-box integration coverage for Rust crate behavior.
-- 🔶 **Multi-server topology tests.** Add integration tests that exercise client
-  to edge to core communication, including reconnect, policy narrowing,
-  subscription deltas, and durability waits.
-- 🔶 **Browser storage fallback tests.** IndexedDB-unavailable modes need explicit
-  browser coverage for fail-loud or in-memory fallback behavior.
-- 🔶 **WASM teardown regression.** Keep navigation/teardown churn coverage for
-  multi-client WASM transports until the true shutdown fix lands.
+- 🔶 [#1787](https://github.com/garden-co/jazz/issues/1787) — Gate scope, test catalogue ownership, and topology/browser coverage.

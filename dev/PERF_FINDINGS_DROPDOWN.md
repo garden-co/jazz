@@ -1,5 +1,7 @@
 # Dropdown Child Subscription Perf Findings
 
+Tracking issue: [#1733](https://github.com/garden-co/jazz/issues/1733).
+
 ## Fixture
 
 `crates/jazz-sim/benches/customer_cold_start.rs` now includes the target shape:

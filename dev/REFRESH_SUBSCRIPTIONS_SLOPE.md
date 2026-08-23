@@ -1,5 +1,7 @@
 # Refresh Subscriptions Slope
 
+Tracking issue: [#1733](https://github.com/garden-co/jazz/issues/1733).
+
 Date: 2026-07-22
 
 ## Target

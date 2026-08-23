@@ -1,5 +1,7 @@
 # Commit Superlinearity Attribution
 
+Tracking issue: [#1787](https://github.com/garden-co/jazz/issues/1787).
+
 Date: 2026-07-21
 
 ## Native Repro

@@ -459,52 +459,6 @@ policy filtering, pagination, and live subscription maintenance.
 
 ## Open Questions
 
-### Open questions
-
-- ✅ **Policy lowering** (`INV-LOWER-20`). Read policy and write admission both
-  lower through `node/query_engine`. Write admission supplies policy-pinned
-  old/candidate rows as inline roots and evaluates them with the authenticated
-  identity over current or branch-view sources; the former direct interpreter has
-  been removed.
-- 🔶 **Bytes primary keys.** The README lists bytes PKs as a "new" groove ask, but
-  the implementation already uses `PrimaryKeyColumn::bytes` in several lowered
-  tables — treat as satisfied rather than pending.
-- 🔶 **Alias non-leakage coverage.** Alias→UUID remapping is done on decode, but
-  no focused test proves aliases never leak on the wire for nested tx-id fields
-  (`INV-LOWER-3` is `untested` until covered).
-- 🔶 **Historical implicit-include source coverage.** Historical root reads with
-  filters and ordinary joins lower through `HistoryCut` sources, but shapes whose
-  normalizer adds an implicit root-reference auxiliary source (for example an
-  include used only to filter child rows by a parent table) do not yet add an
-  aligned historical source expression for that auxiliary source. Until
-  source-aware include coverage is wired into the historical read-set builder,
-  these benchmark phases must report a visible
-  `[needs: historical-implicit-include-source-coverage]` gate rather than being
-  silently counted.
-- 🔶 **Existence lowering beyond inherits.** §14.7's derivation-collapse is
-  applied only to inherited-parent policy joins. Reachable-closure and policy
-  atom-chain joins carry the same existence semantics and plausibly the same
-  per-derivation fanout on edge-heavy schemas; extending the collapse needs the
-  same route-field and maintained-delta analysis per site, plus a receipt that
-  the fanout actually exists there. A real groove `Distinct` (today an
-  unsupported marker op) would subsume the `arg_max_by` encoding.
-- 🔶 **Policy authorization source node.** Read policy lowering currently bridges
-  policy authorization through a physical authorized-row-id graph before joining
-  it back to the base source. Decide the first-class groove/source node for
-  policy authorization facts so source authorization remains in the query engine
-  without relying on a materialized bridge.
-- 🔶 **Executable schema subset.** Reject unsupported public schema constructs at
-  every execution entry point using one validator, including dynamic defaults,
-  unsupported column types, reserved metadata, and planner-ineligible features.
-- 🔶 **Declarative indices.** Replace "index all columns" with explicit
-  developer-declared indices, plus a migration story for existing tables and
-  planner diagnostics when a query falls back.
-- 🔶 **Ordered top-k lowering.** Recognize `ORDER BY ... LIMIT/OFFSET` shapes
-  that can use ordered storage scans, preserve policy/filter composition, and
-  keep maintained subscriptions bounded.
-- 🔶 **Policy constant folding.** Fold claim/literal constants consistently
-  across read policy, write policy, and query-time authorization without hiding
-  dependency edges that can later change.
-- 🔶 **Smart automatic indices.** Automatic index recommendations may follow
-  explicit indices, but must be diagnostics or migrations rather than silent
-  planner behavior that changes storage shape unexpectedly.
+- 🔶 [#1777](https://github.com/garden-co/jazz/issues/1777) — Core-owned query output and authorization-source lowering.
+- 🔶 [#1776](https://github.com/garden-co/jazz/issues/1776) — Indices, ordered top-k lowering, and planner diagnostics.
+- 🔶 [#1779](https://github.com/garden-co/jazz/issues/1779) — Executable schema subset and lens-projected sources.
