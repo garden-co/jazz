@@ -586,6 +586,7 @@ describe("raw websocket private read gate", () => {
     );
 
     const inviteSession = {
+      issuer: "https://issuer.jazz.test",
       user_id: bobUserId,
       claims: { join_code: joinCode },
       authMode: "external" as const,
@@ -1052,7 +1053,12 @@ async function waitForSubscription<T extends { id: string }>(
   label: string,
   timeoutMs = 15_000,
   options?: { tier?: "local" | "edge" },
-  session?: { user_id: string; claims: Record<string, unknown>; authMode: "external" },
+  session?: {
+    issuer: string;
+    user_id: string;
+    claims: Record<string, unknown>;
+    authMode: "external";
+  },
 ): Promise<() => void> {
   return await new Promise<() => void>((resolve, reject) => {
     let settled = false;
