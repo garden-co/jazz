@@ -40,6 +40,7 @@ jobs:
       # cold compile leave 45 minutes for checkout, artifacts, and reporting.
       SHARD_BUDGET_SECONDS: "9000"
       PRECOMPILE_TIMEOUT_SECONDS: "900"
+      # GNU timeout's 30s kill grace makes this phase's hard ceiling 930s.
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:

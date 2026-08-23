@@ -270,21 +270,40 @@ test("Rust CI uses pinned prebuilt tools without charging Rust-only jobs for was
 });
 
 test("continuous soak precompiles outside seed watchdogs and preserves failure artifacts", () => {
-  const workflow = fs.readFileSync(
+  const source = fs.readFileSync(
     path.join(root, ".github/workflows/continuous-simulation-soak.yml"),
     "utf8",
   );
-  const compile = workflow.indexOf("name: Precompile exact Jazz soak test binary");
-  const shard = workflow.indexOf("name: Run deterministic shard 1 of 2");
-  assert.ok(compile >= 0 && compile < shard, "cold compile must precede seeded cases");
-  assert.match(
-    workflow,
-    /timeout --kill-after=30s "\$\{PRECOMPILE_TIMEOUT_SECONDS\}s"[\s\S]*cargo test -p jazz --lib --no-default-features[\s\S]*--features testing,transport-compression-zstd --no-run/,
+  const parsed = parse(source);
+  const steps = parsed.jobs.soak.steps;
+  const precompile = steps.find((step) => step.name === "Precompile exact Jazz soak test binary");
+  const assertPrecompileCommand = (run) => {
+    assert.match(run, /timeout --kill-after=30s "\$\{PRECOMPILE_TIMEOUT_SECONDS\}s"/);
+    assert.match(
+      run,
+      /cargo test -p jazz --lib --no-default-features \\\n\s+--features testing,transport-compression-zstd --no-run \\\n/,
+    );
+    assert.doesNotMatch(run, /--no-exec/);
+  };
+  assert.ok(precompile, "missing named cold precompile step");
+  assertPrecompileCommand(precompile.run);
+  assert.throws(
+    () => assertPrecompileCommand(precompile.run.replace("--no-run", "--no-exec")),
+    /does not match|match the regular expression/,
+    "contract must reject a planted precompile flag regression",
   );
-  assert.match(workflow, /if: steps\.precompile\.outcome == 'success'/);
-  assert.match(workflow, /name: Upload soak receipts\n\s+if: always\(\)/);
-  assert.match(workflow, /steps\.precompile\.outcome == 'failure'/);
-  assert.match(workflow, /phase:\s*"precompile"/);
+  for (const id of ["shard_one", "shard_two"])
+    assert.equal(
+      steps.find((step) => step.id === id)?.if,
+      "steps.precompile.outcome == 'success'",
+      `${id} must require successful precompile`,
+    );
+  assert.equal(steps.find((step) => step.name === "Upload soak receipts")?.if, "always()");
+  assert.match(
+    steps.find((step) => step.name === "Fail job when a shard failed")?.if,
+    /steps\.precompile\.outcome == 'failure'/,
+  );
+  assert.match(precompile.run, /phase:\s*"precompile"/);
 });
 
 test("build setup scopes mutable pnpm and sccache state to the agent temp directory", () => {
