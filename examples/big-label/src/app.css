@@ -11,6 +11,45 @@
   margin: auto;
   padding: 56px 28px;
 }
+.auth-shell {
+  display: grid;
+  gap: 16px;
+  max-width: 460px;
+  margin: 12vh auto;
+  padding: 32px;
+  border: 1px solid #303938;
+  background: #1b201f;
+}
+.auth-shell label {
+  display: grid;
+  gap: 6px;
+}
+.auth-shell input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid #3b4140;
+  border-radius: 4px;
+  color: inherit;
+  background: #101314;
+}
+.auth-shell div,
+header > div:last-child {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+button {
+  padding: 0.45rem 0.7rem;
+  border: 1px solid #739c79;
+  border-radius: 4px;
+  color: #b6e6bd;
+  background: transparent;
+  cursor: pointer;
+}
+button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
 header {
   display: flex;
   justify-content: space-between;

@@ -6,8 +6,10 @@ Run it locally with `pnpm --dir examples/big-label dev`. It is a small Next.js
 app with its own Better Auth route and JWKS endpoint. After sign-in,
 `POST /api/bootstrap` uses the server-only Jazz backend secret to ensure one
 personal organization and its first admin membership for the stable Better Auth
-user ID. Browser clients never receive that secret; normal membership and
-tenant mutations remain admin-policy checked at the Jazz edge.
+user ID. The browser then obtains a short-lived Better Auth JWT and mounts the
+operations UI inside `JazzProvider`; token expiry is handled by fetching a fresh
+JWT. Browser clients never receive the backend secret, and normal membership
+and tenant mutations remain admin-policy checked at the Jazz edge.
 
 ## Fixtures and headless scenarios
 
@@ -41,7 +43,5 @@ cannot insert the `admin` role directly, so a proposed membership cannot grant
 itself authority. Production deployments must keep `BACKEND_SECRET` and Better
 Auth signing keys server-side.
 
-The deployed cross-tenant assignment denial currently exposes a core graph
-lowering failure rather than `AuthorizationDenied`; this is tracked as
-`CB-012` in the repository correctness burndown. The strict policy and repro
-remain in the example until that failure is fixed.
+The deployed authority receipt also proves cross-tenant assignments are denied
+by the edge rather than hidden by a synthetic fixture.
