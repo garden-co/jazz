@@ -236,7 +236,7 @@ export class WebSocketCarrier {
           if (wireAuthFailureReason(error)) {
             this.onError?.(error);
             this.rejectNegotiation(
-              new Error("websocket authentication failed before server hello"),
+              new Error(`websocket authentication failed before server hello: ${error.message}`),
             );
             this.close();
             return;
