@@ -81,9 +81,9 @@ type NativeDbConstructor = {
 };
 
 type NativeDb = {
-  // Browser WASM databases close asynchronously, while the in-memory WASM
-  // database closes synchronously and returns whether it changed state.
-  // `await` below intentionally accepts either implementation.
+  // Native runtime adapters may close synchronously or asynchronously and may
+  // report whether they transitioned state. The adapter awaits either form and
+  // owns idempotence, so callers never observe that implementation detail.
   close?(): void | boolean | Promise<void | boolean>;
   registerSchema(schema: Uint8Array): NativeDb;
   beginTransaction(openBatchId: string, kind: TransactionKind, author?: Uint8Array): void;

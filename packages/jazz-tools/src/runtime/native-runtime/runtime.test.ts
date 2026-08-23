@@ -104,6 +104,22 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(decodeSchemaSource(encoded).tables.docs?.columns[0]?.merge_strategy).toBe("GSet");
   });
 
+  it("accepts and ignores a synchronous native database close result", async () => {
+    const close = vi.fn(() => true);
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: () => fakeDb({ close }) },
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await expect(runtime.close()).resolves.toBeUndefined();
+    await expect(runtime.close()).resolves.toBeUndefined();
+    expect(close).toHaveBeenCalledTimes(1);
+  });
+
   it("resolves connect only after the owned native transport has pumped", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
