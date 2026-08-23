@@ -3771,33 +3771,24 @@ fn checked_js_u64_range(start: f64, end: f64) -> Result<std::ops::Range<u64>, Js
 }
 
 fn author_id_from_bytes(bytes: &[u8]) -> Result<AuthorSubject, JsValue> {
-    let bytes: [u8; 16] = bytes
-        .try_into()
-        .map_err(|_| JsValue::from_str("author id must be 16 bytes"))?;
-    Ok(AuthorSubject::for_test_bytes(bytes))
+    let canonical = std::str::from_utf8(bytes)
+        .map_err(|_| JsValue::from_str("author subject must be canonical UTF-8 JSON"))?;
+    AuthorSubject::from_canonical(canonical).map_err(|error| JsValue::from_str(&error))
 }
 
 fn set_identity_claims<S>(db: &Db<S>, author: AuthorSubject)
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    let subject = author.canonical().to_owned();
-    db.set_identity_claims(
-        author,
-        BTreeMap::from([
-            ("subject".to_owned(), Value::String(subject.clone())),
-            ("sub".to_owned(), Value::String(subject.clone())),
-            ("user_id".to_owned(), Value::String(subject)),
-        ]),
-    );
+    db.set_identity_claims(author, BTreeMap::new());
 }
 
 fn claims_from_js(
-    author: AuthorSubject,
+    _author: AuthorSubject,
     claims: JsValue,
 ) -> Result<BTreeMap<String, Value>, JsValue> {
     let raw: serde_json::Value = serde_wasm_bindgen::from_value(claims).map_err(to_js_error)?;
-    let mut claims = match raw {
+    let claims = match raw {
         serde_json::Value::Null => BTreeMap::new(),
         serde_json::Value::Object(map) => map
             .into_iter()
@@ -3805,16 +3796,6 @@ fn claims_from_js(
             .collect::<Result<BTreeMap<_, _>, JsValue>>()?,
         _ => return Err(JsValue::from_str("identity claims must be an object")),
     };
-    let subject = author.canonical().to_owned();
-    claims
-        .entry("subject".to_owned())
-        .or_insert_with(|| Value::String(subject.clone()));
-    claims
-        .entry("sub".to_owned())
-        .or_insert_with(|| Value::String(subject.clone()));
-    claims
-        .entry("user_id".to_owned())
-        .or_insert_with(|| Value::String(subject));
     Ok(claims)
 }
 

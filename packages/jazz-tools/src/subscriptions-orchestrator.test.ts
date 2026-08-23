@@ -525,11 +525,13 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     const initialSession: Session = {
       user_id: "alice",
       claims: { role: "reader" },
+      issuer: "https://issuer.example",
       authMode: "external",
     };
     const nextSession: Session = {
       user_id: "alice",
       claims: { role: "writer" },
+      issuer: "https://issuer.example",
       authMode: "external",
     };
     const harness = createUnitHarness("orchestrator-unit-session", initialSession);
@@ -554,6 +556,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
     const session: Session = {
       user_id: "alice",
       claims: { role: "reader" },
+      issuer: "https://issuer.example",
       authMode: "external",
     };
     const harness = createUnitHarness("orchestrator-unit-same-session", session);
@@ -566,6 +569,7 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
       harness.manager.setSession({
         user_id: "alice",
         claims: { role: "reader" },
+        issuer: "https://issuer.example",
         authMode: "external",
       });
 
@@ -655,8 +659,18 @@ describe("SubscriptionsOrchestrator unit coverage", () => {
   });
 
   it("SO-U29 a session change clears cached rows and reloads from the new session", async () => {
-    const sessionA: Session = { user_id: "a", claims: { role: "reader" }, authMode: "external" };
-    const sessionB: Session = { user_id: "b", claims: { role: "reader" }, authMode: "external" };
+    const sessionA: Session = {
+      issuer: "https://issuer.example",
+      user_id: "a",
+      claims: { role: "reader" },
+      authMode: "external",
+    };
+    const sessionB: Session = {
+      issuer: "https://issuer.example",
+      user_id: "b",
+      claims: { role: "reader" },
+      authMode: "external",
+    };
     const harness = createUnitHarness("app-so-u29", sessionA);
 
     try {

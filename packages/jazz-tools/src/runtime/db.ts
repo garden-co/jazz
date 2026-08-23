@@ -50,6 +50,7 @@ import { toValue, toWriteRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import { resolveClientSessionSync } from "./client-session.js";
+import { canonicalAuthorSubject } from "./author-id.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { isPermissionIntrospectionColumn, magicColumnType } from "../magic-columns.js";
 import {
@@ -156,7 +157,7 @@ export function resolveDefaultPersistentDbName(config: DbConfig): string {
     return config.appId;
   }
 
-  return `${config.appId}::${encodeURIComponent(session.user_id)}`;
+  return `${config.appId}::${encodeURIComponent(canonicalAuthorSubject(session.issuer, session.user_id))}`;
 }
 
 /**

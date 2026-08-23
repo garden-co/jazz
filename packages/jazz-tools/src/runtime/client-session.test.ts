@@ -24,6 +24,7 @@ function makeJwt(payload: Record<string, unknown>): string {
 describe("client session resolution", () => {
   it("uses a mirrored cookie session when provided", () => {
     const session: Session = {
+      issuer: "https://issuer.example",
       user_id: "cookie-user",
       claims: {
         role: "writer",
@@ -45,6 +46,22 @@ describe("client session resolution", () => {
     });
   });
 
+  it("rejects malformed and externally supplied system cookie sessions", () => {
+    for (const issuer of ["", " \t", "urn:jazz:system"]) {
+      expect(
+        resolveClientSessionSync({
+          appId: "cookie-app",
+          cookieSession: {
+            issuer,
+            user_id: "alice",
+            claims: {},
+            authMode: "external",
+          },
+        }),
+      ).toBeNull();
+    }
+  });
+
   it("uses JWT sub as user_id", () => {
     const jwt = makeJwt({
       sub: "user-subject",
@@ -58,34 +75,47 @@ describe("client session resolution", () => {
     });
 
     expect(session).toEqual({
+      issuer: "https://issuer.example",
       user_id: "user-subject",
-      claims: {
-        role: "editor",
-        subject: "user-subject",
-        issuer: "https://issuer.example",
-      },
+      claims: { role: "editor" },
       authMode: "external",
     });
+  });
+
+  it("preserves the exact claims object without identity aliases", () => {
+    const claims = {
+      subject: "application-owned-subject",
+      issuer: "application-owned-issuer",
+      sub: "application-owned-sub",
+      nested: { role: "editor" },
+    };
+
+    expect(
+      resolveClientSessionSync({
+        appId: "app-exact-claims",
+        jwtToken: makeJwt({ iss: "https://issuer.example", sub: "alice", claims }),
+      }),
+    ).toMatchObject({ issuer: "https://issuer.example", user_id: "alice", claims });
   });
 
   it("preserves exact nonblank JWT subject bytes and rejects whitespace-only subjects", () => {
     const spaced = resolveClientSessionSync({
       appId: "app-jwt-spaced-subject",
-      jwtToken: makeJwt({ sub: " alice " }),
+      jwtToken: makeJwt({ iss: "issuer", sub: " alice " }),
     });
     const plain = resolveClientSessionSync({
       appId: "app-jwt-plain-subject",
-      jwtToken: makeJwt({ sub: "alice" }),
+      jwtToken: makeJwt({ iss: "issuer", sub: "alice" }),
     });
 
     expect(spaced?.user_id).toBe(" alice ");
-    expect(spaced?.claims.subject).toBe(" alice ");
+    expect(spaced?.claims.subject).toBeUndefined();
     expect(spaced?.user_id).not.toBe(plain?.user_id);
     for (const subject of [" ", "\t", "\n", "\v", "\f", "\r", " \t\n\v\f\r "]) {
       expect(
         resolveClientSessionSync({
           appId: "app-jwt-whitespace-subject",
-          jwtToken: makeJwt({ sub: subject }),
+          jwtToken: makeJwt({ iss: "issuer", sub: subject }),
         }),
       ).toBeNull();
     }
@@ -95,15 +125,15 @@ describe("client session resolution", () => {
     for (const subject of ["\u0085", "\uFEFF", "\u0085provider", "provider\uFEFF"]) {
       const session = resolveClientSessionSync({
         appId: "app-jwt-unicode-subject",
-        jwtToken: makeJwt({ sub: subject }),
+        jwtToken: makeJwt({ iss: "issuer", sub: subject }),
       });
 
       expect(session?.user_id).toBe(subject);
-      expect(session?.claims.subject).toBe(subject);
+      expect(session?.claims.subject).toBeUndefined();
     }
   });
 
-  it("accepts a JWT with only a sub claim", () => {
+  it("rejects a JWT without an iss claim", () => {
     const jwt = makeJwt({
       sub: "user-subject",
       claims: { team: "eng" },
@@ -114,14 +144,16 @@ describe("client session resolution", () => {
       jwtToken: jwt,
     });
 
-    expect(session).toEqual({
-      user_id: "user-subject",
-      claims: {
-        team: "eng",
-        subject: "user-subject",
-      },
-      authMode: "external",
-    });
+    expect(session).toBeNull();
+  });
+
+  it("rejects externally supplied system identities", () => {
+    expect(
+      resolveClientSessionSync({
+        appId: "app-system-spoof",
+        jwtToken: makeJwt({ iss: "urn:jazz:system", sub: "system" }),
+      }),
+    ).toBeNull();
   });
 
   it("returns null when no auth is configured", () => {

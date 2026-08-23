@@ -5,6 +5,7 @@ import type { Session } from "./context.js";
 const cookieSession: Session = {
   user_id: "alice",
   claims: { role: "reader" },
+  issuer: "https://issuer.example",
   authMode: "external",
 };
 
