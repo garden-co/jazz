@@ -116,6 +116,8 @@ describe("scaffold() — next-betterauth e2e via JAZZ_STARTER_PATH", () => {
     // `.env` must not be copied from the starter source tree.
     expect(fs.existsSync(path.join(tmpDir, ".env"))).toBe(false);
 
+    expect(fs.existsSync(path.join(tmpDir, ".agents", "skills", "jazz", "SKILL.md"))).toBe(true);
+
     // The initial commit was made (default behaviour).
     expect(fs.existsSync(path.join(tmpDir, ".git"))).toBe(true);
     const log = execSync("git log --oneline", { cwd: tmpDir, stdio: "pipe" }).toString().trim();

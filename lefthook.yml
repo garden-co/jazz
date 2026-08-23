@@ -47,7 +47,3 @@ pre-commit:
     docs-site-types:
       glob: "docs/**"
       run: pnpm --filter docs types:check
-    docs-index:
-      glob: "docs/**"
-      run: pnpm --filter docs exec tsx ../packages/jazz-tools/src/mcp/build-index.ts
-      stage_fixed: true

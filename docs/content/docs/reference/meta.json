@@ -6,7 +6,7 @@
     "framework-patterns",
     "examples",
     "inspector",
-    "mcp",
+    "agent-skills",
     "internals",
     "local-first-auth-internals"
   ]

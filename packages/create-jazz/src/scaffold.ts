@@ -7,6 +7,7 @@ import {
   type PackageManifest,
   type ResolveProgressCallback,
 } from "./deps.js";
+import { installJazzSkills } from "./agent-skills.js";
 
 const REPO = "garden-co/jazz";
 const BRANCH = "main";
@@ -125,6 +126,9 @@ export async function scaffold(options: ScaffoldOptions): Promise<void> {
     });
     const finalManifest = { ...resolved, name: options.appName };
     fs.writeFileSync(pkgJsonPath, JSON.stringify(finalManifest, null, 2) + "\n", "utf-8");
+
+    options.onStep?.("Installing Jazz agent skills");
+    installJazzSkills(options.targetDir);
 
     // Inherits the user's git identity from `~/.gitconfig`, GIT_AUTHOR_*, etc.
     if (options.git !== false) {

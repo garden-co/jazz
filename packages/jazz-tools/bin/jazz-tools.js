@@ -109,7 +109,6 @@ function printWrapperHelp() {
   console.log("  migrations push       Push a reviewed migration edge to the server");
   console.log("  create                Create a new resource");
   console.log("  server                Run a Jazz server");
-  console.log("  mcp                   Run the Jazz MCP server");
   console.log("  help                  Print this message");
   console.log("");
   console.log("Options:");
@@ -121,16 +120,10 @@ const here = dirname(fileURLToPath(import.meta.url));
 const { args, rustBinOverride } = parseWrapperArgs(process.argv.slice(2));
 const command = args[0];
 
-// Handle the MCP server before any Rust binary resolution.
 if (!command || command === "--help" || command === "-h") {
   printWrapperHelp();
 } else if (command === "help" && args.length === 1) {
   printWrapperHelp();
-} else if (command === "mcp") {
-  const mcpPath = join(here, "..", "dist", "mcp", "server.js");
-  const { runServer } = await import(mcpPath);
-  await runServer();
-  // runServer resolves when stdin closes; process exits naturally.
 } else if (command === "build") {
   fail("`jazz-tools build` has been renamed to `jazz-tools validate`.");
 } else if (

@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "scripts": {
-    "build": "node --import tsx ../packages/jazz-tools/src/mcp/build-index.ts && next build",
+    "build": "next build",
     "dev": "next dev",
     "prebuild": "fumadocs-mdx",
     "predev": "fumadocs-mdx",
