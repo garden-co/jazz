@@ -32,6 +32,10 @@ import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 import { encodeNativeNullValue, storageColumnValueType } from "./native-row-codec.js";
 import { type BatchId, type WriteReceipt } from "../client.js";
 
+type NativeDbForTest = ReturnType<
+  NonNullable<ConstructorParameters<typeof NativeRuntimeAdapter>[0]>["openMemory"]
+>;
+
 async function committedBatchId(receipt: WriteReceipt): Promise<BatchId> {
   if (receipt.kind !== "committed") throw new Error("expected committed write receipt");
   return await receipt.batchId;
@@ -5353,9 +5357,7 @@ function encodeArrayRows(): Uint8Array {
   return writer.finish();
 }
 
-function fakeDb<T extends object>(
-  db: T,
-): T & { setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void } {
+function fakeDb<T extends object>(db: T): T & NativeDbForTest {
   type FakeOpenBatch = {
     kind: "mergeable" | "exclusive";
     author?: Uint8Array;
@@ -5415,9 +5417,7 @@ function fakeDb<T extends object>(
       await upstream?.tick();
     };
   }
-  return result as T & {
-    setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void;
-  };
+  return result as T & NativeDbForTest;
 }
 
 function fakeTx(overrides: Partial<TxForTest> = {}): TxForTest {
