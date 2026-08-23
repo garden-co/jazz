@@ -23,8 +23,7 @@ use jazz::tx::DurabilityTier;
 
 type CoreDb = Db<MemoryStorage>;
 
-const AUTHOR: AuthorSubject =
-    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
+const AUTHOR_UUID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-0000000000a1");
 
 fn schema() -> JazzSchema {
     let author = schema_fixture::session_user_id_column("author");
@@ -57,7 +56,7 @@ fn open_core_db(seed: u64) -> CoreDb {
             MemoryStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([seed as u8; 16]),
-                author: AUTHOR,
+                author: AuthorSubject::for_test_uuid(AUTHOR_UUID),
             },
         )
         .with_id_source(SeededRowIdSource::new(seed)),
@@ -76,7 +75,7 @@ fn document_cells(index: usize, folder: RowUuid) -> BTreeMap<String, Value> {
             "content".to_owned(),
             Value::String(format!("Content body for document {index}")),
         ),
-        ("author".to_owned(), Value::Uuid(AUTHOR.0)),
+        ("author".to_owned(), Value::Uuid(AUTHOR_UUID)),
         ("created_at".to_owned(), Value::U64(index as u64)),
     ])
 }
@@ -91,7 +90,7 @@ fn update_cells(
         ("folder".to_owned(), Value::Uuid(folder.0)),
         ("title".to_owned(), Value::String(title)),
         ("content".to_owned(), Value::String(content.to_owned())),
-        ("author".to_owned(), Value::Uuid(AUTHOR.0)),
+        ("author".to_owned(), Value::Uuid(AUTHOR_UUID)),
         ("created_at".to_owned(), Value::U64(index)),
     ])
 }

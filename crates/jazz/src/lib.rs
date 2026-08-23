@@ -54,7 +54,7 @@
 //!     .table(
 //!         TableSchemaBuilder::new("todos")
 //!             .column("title", ColumnType::Text)
-//!             .column("owner", ColumnType::Uuid)
+//!             .column("owner", ColumnType::Text)
 //!             .policies(
 //!                 TablePolicies::new()
 //!                     .with_select(owner_policy.clone())
@@ -71,7 +71,7 @@
 //! let row = RowUuid::from_bytes([7; 16]);
 //! let cells = BTreeMap::from([
 //!     ("title".to_owned(), Value::String("draft".to_owned())),
-//!     ("owner".to_owned(), Value::Uuid(owner.0)),
+//!     ("owner".to_owned(), Value::String(owner.canonical().to_owned())),
 //! ]);
 //!
 //! let (tx_id, unit) = block_on(writer
@@ -99,7 +99,7 @@
 //!     row,
 //!     BTreeMap::from([
 //!         ("title".to_owned(), Value::String("done".to_owned())),
-//!         ("owner".to_owned(), Value::Uuid(owner.0)),
+//!         ("owner".to_owned(), Value::String(owner.canonical().to_owned())),
 //!     ]),
 //!     None::<DeletionEvent>,
 //! ))

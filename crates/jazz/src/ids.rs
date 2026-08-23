@@ -170,6 +170,26 @@ pub enum AuthorSubject {
     Authenticated(internment::Intern<String>),
 }
 
+/// Rejection returned when constructing or decoding an author subject.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum AuthorSubjectError {
+    /// External authentication did not provide an issuer.
+    #[error("author issuer must be non-empty")]
+    MissingIssuer,
+    /// Authentication did not provide a subject.
+    #[error("author subject must be non-empty")]
+    MissingSubject,
+    /// An external credential attempted to claim an internal Jazz issuer.
+    #[error("author issuer is reserved: {0}")]
+    ReservedIssuer(String),
+    /// The portable value was not a two-string JSON array.
+    #[error("invalid canonical author subject: {0}")]
+    InvalidCanonical(String),
+    /// The portable value used a non-canonical JSON spelling.
+    #[error("author subject is not canonically JSON encoded")]
+    NonCanonical,
+}
+
 impl AuthorSubject {
     /// Internal authority subject that bypasses policy checks.
     pub const SYSTEM: Self = Self::System;
@@ -179,23 +199,67 @@ impl AuthorSubject {
     pub const SYSTEM_SUBJECT: &'static str = "system";
     /// Portable canonical representation of the internal authority identity.
     pub const SYSTEM_CANONICAL: &'static str = r#"["urn:jazz:system","system"]"#;
+    /// Reserved issuer for self-signed local-first JWTs.
+    pub const LOCAL_FIRST_ISSUER: &'static str = "urn:jazz:local-first";
+    /// Reserved issuer for process-local static bearer sessions.
+    pub const STATIC_BEARER_ISSUER: &'static str = "urn:jazz:static-bearer";
+    /// Reserved issuer for sessions without an external credential.
+    pub const ANONYMOUS_ISSUER: &'static str = "urn:jazz:anonymous";
 
-    /// Construct a subject from already authenticated JWT components.
-    pub fn authenticated(issuer: &str, subject: &str) -> Self {
-        assert_ne!(issuer, Self::SYSTEM_ISSUER, "system issuer is reserved");
+    /// Construct a subject from externally authenticated JWT components.
+    pub fn authenticated(issuer: &str, subject: &str) -> Result<Self, AuthorSubjectError> {
+        if issuer.trim().is_empty() {
+            return Err(AuthorSubjectError::MissingIssuer);
+        }
+        if subject.trim().is_empty() {
+            return Err(AuthorSubjectError::MissingSubject);
+        }
+        if Self::is_reserved_issuer(issuer) {
+            return Err(AuthorSubjectError::ReservedIssuer(issuer.to_owned()));
+        }
+        Ok(Self::intern(issuer, subject))
+    }
+
+    /// Construct an identity in a Jazz-owned issuer namespace.
+    pub(crate) fn reserved(issuer: &str, subject: &str) -> Result<Self, AuthorSubjectError> {
+        if subject.trim().is_empty() {
+            return Err(AuthorSubjectError::MissingSubject);
+        }
+        if !matches!(
+            issuer,
+            Self::LOCAL_FIRST_ISSUER | Self::STATIC_BEARER_ISSUER | Self::ANONYMOUS_ISSUER
+        ) {
+            return Err(AuthorSubjectError::ReservedIssuer(issuer.to_owned()));
+        }
+        Ok(Self::intern(issuer, subject))
+    }
+
+    fn intern(issuer: &str, subject: &str) -> Self {
         let canonical = serde_json::to_string(&(issuer, subject))
             .expect("two strings always have a canonical JSON encoding");
         Self::Authenticated(internment::Intern::new(canonical))
     }
 
+    fn is_reserved_issuer(issuer: &str) -> bool {
+        matches!(
+            issuer,
+            Self::SYSTEM_ISSUER
+                | Self::LOCAL_FIRST_ISSUER
+                | Self::STATIC_BEARER_ISSUER
+                | Self::ANONYMOUS_ISSUER
+        )
+    }
+
     /// Deterministic identity for internal fixtures and simulations.
     pub fn for_test_bytes(bytes: [u8; 16]) -> Self {
         Self::authenticated("urn:jazz:test", &uuid::Uuid::from_bytes(bytes).to_string())
+            .expect("the test issuer is external")
     }
 
     /// Deterministic identity for fixtures that already use UUID values.
     pub fn for_test_uuid(value: uuid::Uuid) -> Self {
         Self::authenticated("urn:jazz:test", &value.to_string())
+            .expect("the test issuer is external")
     }
 
     /// Recover the UUID subject used by deterministic legacy fixtures.
@@ -211,18 +275,24 @@ impl AuthorSubject {
     }
 
     /// Parse a portable canonical subject, rejecting alternate JSON spellings.
-    pub fn from_canonical(canonical: &str) -> Result<Self, String> {
+    pub fn from_canonical(canonical: &str) -> Result<Self, AuthorSubjectError> {
         if canonical == Self::SYSTEM_CANONICAL {
             return Ok(Self::SYSTEM);
         }
-        let (issuer, subject): (String, String) =
-            serde_json::from_str(canonical).map_err(|error| error.to_string())?;
+        let (issuer, subject): (String, String) = serde_json::from_str(canonical)
+            .map_err(|error| AuthorSubjectError::InvalidCanonical(error.to_string()))?;
         if issuer == Self::SYSTEM_ISSUER {
-            return Err("system issuer is reserved".to_owned());
+            return Err(AuthorSubjectError::ReservedIssuer(issuer));
         }
-        let author = Self::authenticated(&issuer, &subject);
+        if issuer.trim().is_empty() {
+            return Err(AuthorSubjectError::MissingIssuer);
+        }
+        if subject.trim().is_empty() {
+            return Err(AuthorSubjectError::MissingSubject);
+        }
+        let author = Self::intern(&issuer, &subject);
         if author.canonical() != canonical {
-            return Err("author subject is not canonically JSON encoded".to_owned());
+            return Err(AuthorSubjectError::NonCanonical);
         }
         Ok(author)
     }
@@ -269,12 +339,14 @@ impl<'de> serde::Deserialize<'de> for AuthorSubject {
 
 #[cfg(test)]
 mod tests {
-    use super::AuthorSubject;
+    use super::{AuthorSubject, AuthorSubjectError};
 
     #[test]
     fn author_subject_is_canonical_json_and_interned() {
-        let first = AuthorSubject::authenticated("https://issuer.example", "opaque:subject");
-        let second = AuthorSubject::authenticated("https://issuer.example", "opaque:subject");
+        let first =
+            AuthorSubject::authenticated("https://issuer.example", "opaque:subject").unwrap();
+        let second =
+            AuthorSubject::authenticated("https://issuer.example", "opaque:subject").unwrap();
         assert_eq!(first, second);
         assert_eq!(
             first.canonical(),
@@ -284,5 +356,57 @@ mod tests {
             AuthorSubject::SYSTEM.canonical(),
             AuthorSubject::SYSTEM_CANONICAL
         );
+    }
+
+    #[test]
+    fn author_subject_canonical_json_escapes_components_and_scopes_subject_by_issuer() {
+        let escaped =
+            AuthorSubject::authenticated("https://issuer.example/a\"b", "line\nfeed").unwrap();
+        assert_eq!(
+            escaped.canonical(),
+            r#"["https://issuer.example/a\"b","line\nfeed"]"#
+        );
+        assert_eq!(
+            AuthorSubject::from_canonical(escaped.canonical()),
+            Ok(escaped)
+        );
+
+        let left = AuthorSubject::authenticated("https://left.example", "same").unwrap();
+        let right = AuthorSubject::authenticated("https://right.example", "same").unwrap();
+        assert_ne!(left, right);
+    }
+
+    #[test]
+    fn external_author_subject_rejects_missing_and_reserved_components() {
+        assert_eq!(
+            AuthorSubject::authenticated("", "user"),
+            Err(AuthorSubjectError::MissingIssuer)
+        );
+        assert_eq!(
+            AuthorSubject::authenticated(" \t\n", "user"),
+            Err(AuthorSubjectError::MissingIssuer)
+        );
+        assert_eq!(
+            AuthorSubject::authenticated("https://issuer.example", ""),
+            Err(AuthorSubjectError::MissingSubject)
+        );
+        for issuer in [
+            AuthorSubject::SYSTEM_ISSUER,
+            AuthorSubject::LOCAL_FIRST_ISSUER,
+            AuthorSubject::STATIC_BEARER_ISSUER,
+            AuthorSubject::ANONYMOUS_ISSUER,
+        ] {
+            assert_eq!(
+                AuthorSubject::authenticated(issuer, "user"),
+                Err(AuthorSubjectError::ReservedIssuer(issuer.to_owned()))
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_author_subject_has_no_legacy_uuid_or_noncanonical_decoder() {
+        assert!(AuthorSubject::from_canonical("00000000-0000-4000-8000-000000000001").is_err());
+        assert!(AuthorSubject::from_canonical(r#"[ "issuer", "subject" ]"#).is_err());
+        assert!(AuthorSubject::from_canonical(r#"["urn:jazz:system","user"]"#).is_err());
     }
 }

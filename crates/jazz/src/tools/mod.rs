@@ -116,6 +116,9 @@ pub enum ClientStorage {
 #[cfg(feature = "runtime")]
 #[derive(Error, Debug)]
 pub enum JazzError {
+    #[error("Identity error: {0}")]
+    Identity(#[from] crate::ids::AuthorSubjectError),
+
     #[error("Connection error: {0}")]
     Connection(String),
 

@@ -546,7 +546,7 @@ fn open_node_at(
 fn cells(title: &str) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
-        ("owner".to_owned(), Value::Uuid(AuthorSubject::SYSTEM.0)),
+        ("owner".to_owned(), Value::Uuid(uuid::Uuid::nil())),
     ])
 }
 

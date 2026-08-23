@@ -1871,6 +1871,21 @@ mod tests {
         let global_current = &current_tables[0];
         let register_global_current = &current_tables[1];
 
+        for table in [&history, &register, global_current, register_global_current] {
+            for name in ["created_by", "updated_by"] {
+                assert_eq!(
+                    table
+                        .columns
+                        .iter()
+                        .find(|column| column.name == name)
+                        .map(|column| &column.column_type),
+                    Some(&GrooveColumnType::String),
+                    "{name} must remain logical text in {}",
+                    table.name
+                );
+            }
+        }
+
         assert!(
             transactions
                 .columns

@@ -44,10 +44,13 @@ use tempfile::TempDir;
 type BenchDb = Db<MemoryStorage>;
 type RocksBenchDb = Db<RocksDbStorage>;
 
-const AUTHOR: AuthorSubject =
-    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
-const READER_AUTHOR: AuthorSubject =
-    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
+fn author() -> AuthorSubject {
+    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"))
+}
+
+fn reader_author() -> AuthorSubject {
+    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"))
+}
 const R3_REOPEN_SEED: u64 = 31;
 
 #[derive(Debug, Clone, Copy)]
@@ -198,7 +201,7 @@ fn claim_resume_schema() -> JazzSchema {
 }
 
 fn open_db(seed: u64) -> BenchDb {
-    open_db_with_author(seed, AUTHOR, false)
+    open_db_with_author(seed, author(), false)
 }
 
 fn open_core_db(seed: u64) -> BenchDb {
@@ -1354,7 +1357,7 @@ fn measure_r3_phase_sample(
         evict_path_from_linux_page_cache(path);
     }
     let (db, storage_open, jazz_open, open_breakdown) =
-        open_rocks_db_with_phases(R3_REOPEN_SEED, AUTHOR, path);
+        open_rocks_db_with_phases(R3_REOPEN_SEED, author(), path);
 
     let prepare_started = Instant::now();
     let query = project_board_query(&db, project);
@@ -1393,7 +1396,7 @@ fn measure_r3_phase_sample(
 }
 
 fn establish_r3_close_mode(path: &Path, close_mode: R3CloseMode) {
-    let db = open_rocks_db_with_author(R3_REOPEN_SEED, AUTHOR, false, path);
+    let db = open_rocks_db_with_author(R3_REOPEN_SEED, author(), false, path);
     if matches!(close_mode, R3CloseMode::Clean) {
         block_on(db.close()).expect("establish clean-close marker before R3 phase samples");
     }
@@ -1546,7 +1549,7 @@ fn r3_rocksdb_cold_load(c: &mut Criterion) {
         let tempdir = TempDir::new().expect("create tempdir for RocksDB cold-load bench");
         let db_path = tempdir.path().join("realistic_phase1.rocksdb");
         let project = {
-            let db = open_rocks_db_with_author(30, AUTHOR, false, &db_path);
+            let db = open_rocks_db_with_author(30, author(), false, &db_path);
             let fixture = seed_fixture(&db, profile);
             fixture.projects[0]
         };
@@ -1563,7 +1566,7 @@ fn r3_rocksdb_cold_load(c: &mut Criterion) {
             &profile,
             |b, &_profile| {
                 b.iter(|| {
-                    let db = open_rocks_db_with_author(31, AUTHOR, false, &db_path);
+                    let db = open_rocks_db_with_author(31, author(), false, &db_path);
                     let query = project_board_query(&db, project);
                     let rows = db.read(&query).expect("read cold project board");
                     assert_eq!(
@@ -1740,7 +1743,7 @@ fn r10_sync_fanout(c: &mut Criterion) {
             |b, &profile| {
                 let writer = open_db(10);
                 let server = open_core_db(11);
-                let reader = open_db_with_author(12, READER_AUTHOR, false);
+                let reader = open_db_with_author(12, reader_author(), false);
 
                 let fixture = seed_fixture(&writer, profile);
                 let project = fixture.projects[0];
@@ -1748,12 +1751,13 @@ fn r10_sync_fanout(c: &mut Criterion) {
 
                 let (writer_transport, server_writer_transport) = byte_duplex();
                 let _writer_upstream = block_on(writer.connect_upstream(writer_transport));
-                let _writer_subscriber = server.accept_subscriber(server_writer_transport, AUTHOR);
+                let _writer_subscriber =
+                    server.accept_subscriber(server_writer_transport, author());
 
                 let (reader_transport, server_reader_transport) = byte_duplex();
                 let _reader_upstream = block_on(reader.connect_upstream(reader_transport));
                 let _reader_subscriber =
-                    server.accept_subscriber(server_reader_transport, READER_AUTHOR);
+                    server.accept_subscriber(server_reader_transport, reader_author());
 
                 let query = project_board_query(&reader, project);
                 let mut subscription = block_on(reader.subscribe(&query, global_subscribe_opts()))
@@ -1826,7 +1830,7 @@ fn r11_byte_wire_resume(c: &mut Criterion) {
                 b.iter(|| {
                     let writer = open_db(110);
                     let server = open_core_db(111);
-                    let client = open_db_with_author(112, READER_AUTHOR, false);
+                    let client = open_db_with_author(112, reader_author(), false);
                     let fixture = seed_resume_fixture(&writer, profile);
                     let subscribed_row = fixture.tasks[0];
                     let prepared = client
@@ -1834,19 +1838,19 @@ fn r11_byte_wire_resume(c: &mut Criterion) {
                         .expect("prepare resumed tasks query");
 
                     let (writer_transport, server_writer_transport) =
-                        byte_duplex_with_session(AUTHOR, 1);
+                        byte_duplex_with_session(author(), 1);
                     let writer_upstream = block_on(writer.connect_upstream(writer_transport));
                     let writer_subscriber =
-                        server.accept_subscriber(server_writer_transport, AUTHOR);
+                        server.accept_subscriber(server_writer_transport, author());
                     writer.tick().expect("ship resume seed rows");
                     server.tick().expect("ingest resume seed rows");
                     assert!(writer.detach_connection(&writer_upstream));
                     assert!(server.detach_connection(&writer_subscriber));
 
                     let (client_transport, server_transport) =
-                        byte_duplex_with_session(READER_AUTHOR, 2);
+                        byte_duplex_with_session(reader_author(), 2);
                     let upstream = block_on(client.connect_upstream(client_transport));
-                    let subscriber = server.accept_subscriber(server_transport, READER_AUTHOR);
+                    let subscriber = server.accept_subscriber(server_transport, reader_author());
 
                     let mut subscription =
                         block_on(client.subscribe(&prepared, global_subscribe_opts()))
@@ -1896,20 +1900,20 @@ fn r11_byte_wire_resume(c: &mut Criterion) {
                             .expect("writer disconnected task update"),
                     );
                     let (writer_transport, server_writer_transport) =
-                        byte_duplex_with_session(AUTHOR, 3);
+                        byte_duplex_with_session(author(), 3);
                     let writer_upstream = block_on(writer.connect_upstream(writer_transport));
                     let writer_subscriber =
-                        server.accept_subscriber(server_writer_transport, AUTHOR);
+                        server.accept_subscriber(server_writer_transport, author());
                     writer.tick().expect("ship disconnected task update");
                     server.tick().expect("ingest disconnected task update");
                     assert!(writer.detach_connection(&writer_upstream));
                     assert!(server.detach_connection(&writer_subscriber));
 
                     let (client_transport, server_transport) =
-                        byte_duplex_with_session(READER_AUTHOR, 4);
+                        byte_duplex_with_session(reader_author(), 4);
                     let _resumed_upstream = block_on(client.connect_upstream(client_transport));
                     let resumed =
-                        server.accept_subscriber_with_resume(server_transport, READER_AUTHOR, cursor);
+                        server.accept_subscriber_with_resume(server_transport, reader_author(), cursor);
 
                     client.tick().expect("announce resumed tasks subscription");
                     server.tick().expect("serve task resume catch-up");
@@ -1957,12 +1961,12 @@ fn r12_recursive_permissions(c: &mut Criterion) {
         let read_opts = ReadOpts::default();
 
         b.iter(|| {
-            let rows = block_on(db.all_for_identity(&query, read_opts.clone(), READER_AUTHOR))
+            let rows = block_on(db.all_for_identity(&query, read_opts.clone(), reader_author()))
                 .expect("read recursive docs for reader");
             assert_recursive_docs_visible(&rows);
 
             let mut subscription =
-                block_on(db.subscribe_for_identity(&query, read_opts.clone(), READER_AUTHOR))
+                block_on(db.subscribe_for_identity(&query, read_opts.clone(), reader_author()))
                     .expect("subscribe recursive docs for reader");
             match block_on(subscription.next_event()) {
                 Some(SubscriptionEvent::Delta {
@@ -1993,7 +1997,7 @@ fn run_permission_filtered_resume(
 ) -> (Duration, usize, usize, usize, usize, usize) {
     let writer = open_recursive_permissions_db_with_author(130, AuthorSubject::SYSTEM, false);
     let server = open_recursive_permissions_db_with_author(131, AuthorSubject::SYSTEM, true);
-    let client = open_recursive_permissions_db_with_author(132, READER_AUTHOR, false);
+    let client = open_recursive_permissions_db_with_author(132, reader_author(), false);
     seed_permission_resume_fixture(&writer);
     let prepared = client
         .prepare_query(&Query::from("docs"))
@@ -2009,9 +2013,9 @@ fn run_permission_filtered_resume(
     assert!(writer.detach_connection(&writer_upstream));
     assert!(server.detach_connection(&writer_subscriber));
 
-    let (client_transport, server_transport) = byte_duplex_with_session(READER_AUTHOR, 13_002);
+    let (client_transport, server_transport) = byte_duplex_with_session(reader_author(), 13_002);
     let upstream = block_on(client.connect_upstream(client_transport));
-    let subscriber = server.accept_subscriber(server_transport, READER_AUTHOR);
+    let subscriber = server.accept_subscriber(server_transport, reader_author());
     let mut subscription = block_on(client.subscribe(&prepared, global_subscribe_opts()))
         .expect("subscribe permission-filtered docs");
     assert_eq!(
@@ -2098,7 +2102,7 @@ fn run_permission_filtered_resume(
 
     let server_query = recursive_docs_query(&server);
     let server_rows =
-        block_on(server.all_for_identity(&server_query, ReadOpts::default(), READER_AUTHOR))
+        block_on(server.all_for_identity(&server_query, ReadOpts::default(), reader_author()))
             .expect("read disconnected permission state on server");
     let mut expected_server_rows = vec![RESUME_DOC_DIRECT];
     if !churn.revokes() {
@@ -2109,9 +2113,9 @@ fn run_permission_filtered_resume(
     }
     assert_permission_resume_docs(&server_rows, &expected_server_rows);
 
-    let (client_transport, server_transport) = byte_duplex_with_session(READER_AUTHOR, 13_004);
+    let (client_transport, server_transport) = byte_duplex_with_session(reader_author(), 13_004);
     let _resumed_upstream = block_on(client.connect_upstream(client_transport));
-    let resumed = server.accept_subscriber_with_resume(server_transport, READER_AUTHOR, cursor);
+    let resumed = server.accept_subscriber_with_resume(server_transport, reader_author(), cursor);
 
     let resume_started = Instant::now();
     client
@@ -2172,7 +2176,7 @@ fn run_claim_filtered_resume(
 ) -> (Duration, usize, usize, usize, usize, usize) {
     let writer = open_claim_resume_db(133, AuthorSubject::SYSTEM, false);
     let server = open_claim_resume_db(134, AuthorSubject::SYSTEM, true);
-    let client = open_claim_resume_db(135, READER_AUTHOR, false);
+    let client = open_claim_resume_db(135, reader_author(), false);
     for (row, title) in [
         (CLAIM_RESUME_DOC_A, "claim-a"),
         (CLAIM_RESUME_DOC_B, "claim-b"),
@@ -2202,15 +2206,15 @@ fn run_claim_filtered_resume(
     assert!(server.detach_connection(&writer_subscriber));
 
     server.set_identity_claims(
-        READER_AUTHOR,
+        reader_author(),
         BTreeMap::from([(
             "access".to_owned(),
             Value::String(churn.initial_access().to_owned()),
         )]),
     );
-    let (client_transport, server_transport) = byte_duplex_with_session(READER_AUTHOR, 13_102);
+    let (client_transport, server_transport) = byte_duplex_with_session(reader_author(), 13_102);
     let upstream = block_on(client.connect_upstream(client_transport));
-    let subscriber = server.accept_subscriber(server_transport, READER_AUTHOR);
+    let subscriber = server.accept_subscriber(server_transport, reader_author());
     let mut subscription = block_on(client.subscribe(&prepared, global_subscribe_opts()))
         .expect("subscribe claim-filtered docs");
     assert_eq!(
@@ -2240,15 +2244,15 @@ fn run_claim_filtered_resume(
     assert!(server.detach_connection(&subscriber));
 
     server.set_identity_claims(
-        READER_AUTHOR,
+        reader_author(),
         BTreeMap::from([(
             "access".to_owned(),
             Value::String(churn.resumed_access().to_owned()),
         )]),
     );
-    let (client_transport, server_transport) = byte_duplex_with_session(READER_AUTHOR, 13_103);
+    let (client_transport, server_transport) = byte_duplex_with_session(reader_author(), 13_103);
     let _resumed_upstream = block_on(client.connect_upstream(client_transport));
-    let resumed = server.accept_subscriber_with_resume(server_transport, READER_AUTHOR, cursor);
+    let resumed = server.accept_subscriber_with_resume(server_transport, reader_author(), cursor);
 
     let resume_started = Instant::now();
     client.tick().expect("announce resumed claim subscription");
