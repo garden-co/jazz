@@ -1,10 +1,12 @@
 name: CodSpeed Example Benchmarks
 
 on:
-  push:
-    branches: [main]
   pull_request:
-    branches: [main]
+    types: [labeled, synchronize, reopened]
+  schedule:
+    # Nightly default-branch baseline. The non-round minute avoids the busiest
+    # part of GitHub's scheduler window.
+    - cron: "17 3 * * *"
   workflow_dispatch:
 
 permissions:
@@ -17,6 +19,9 @@ concurrency:
 
 jobs:
   examples:
+    # Scheduled/manual runs benchmark the default branch. PR runs are opt-in,
+    # but keep refreshing on new commits while the label remains present.
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')
     name: Example benchmark smoke
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
