@@ -17,6 +17,7 @@ use jazz::db::{Db, DbConfig, DbIdentity, PeerConnection, Transport, block_on};
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::protocol::SyncMessage;
+use jazz::protocol_limits::validate_logical_message_len;
 use jazz::schema::JazzSchema;
 use jazz::wire::TransportError;
 use jazz_storage_sqlite::SqliteStorage;
@@ -212,6 +213,36 @@ impl NativeRelayWire {
             .map_err(|_| RelayError::Poisoned("upstream outbound queue"))?
             .drain(..)
             .collect())
+    }
+
+    /// Admit one postcard-encoded ordinary peer message from a binding.
+    ///
+    /// This is the binary boundary for native hosts: it preserves Jazz's
+    /// shared `SyncMessage` vocabulary instead of inventing a React Native
+    /// object API. The caller supplies one complete logical message; network
+    /// framing and fragmentation remain the responsibility of its transport.
+    pub fn push_inbound_encoded(&self, bytes: &[u8]) -> Result<(), RelayError> {
+        validate_logical_message_len(bytes.len()).map_err(RelayError::PeerMessageTooLarge)?;
+        let message = postcard::from_bytes(bytes).map_err(RelayError::DecodePeerMessage)?;
+        self.push_inbound(message)
+    }
+
+    /// Drain ordinary peer messages as postcard payloads for a binding.
+    ///
+    /// The encoded payload is deliberately the same representation consumed by
+    /// the WASM and NAPI command surfaces. A future TurboModule transports
+    /// these bytes as `ArrayBuffer`/`Uint8Array`, keeping it thin and shared.
+    pub fn take_outbound_encoded(&self) -> Result<Vec<Vec<u8>>, RelayError> {
+        self.take_outbound()?
+            .into_iter()
+            .map(|message| {
+                let bytes =
+                    postcard::to_allocvec(&message).map_err(RelayError::EncodePeerMessage)?;
+                validate_logical_message_len(bytes.len())
+                    .map_err(RelayError::PeerMessageTooLarge)?;
+                Ok(bytes)
+            })
+            .collect()
     }
 }
 
@@ -523,6 +554,12 @@ pub enum RelayError {
         minimum: u16,
         maximum: u16,
     },
+    #[error("native relay peer message exceeds the logical-message limit: {0}")]
+    PeerMessageTooLarge(String),
+    #[error("failed to decode native relay peer message: {0}")]
+    DecodePeerMessage(postcard::Error),
+    #[error("failed to encode native relay peer message: {0}")]
+    EncodePeerMessage(postcard::Error),
     #[error("invalid native relay scope: {0}")]
     InvalidScope(String),
     #[error("failed to open native relay owner thread: {0}")]
@@ -672,6 +709,41 @@ mod tests {
                 maximum: u16::MAX,
             }),
             Err(RelayError::IncompatibleAbi { native, .. }) if native == NATIVE_RELAY_ABI_VERSION
+        ));
+    }
+
+    #[test]
+    fn encoded_peer_messages_use_the_shared_postcard_contract() {
+        let wire = NativeRelayWire::default();
+        let message = SyncMessage::SessionClaims {
+            identity: AuthorId::SYSTEM,
+            claims: BTreeMap::from([("role".to_owned(), Value::String("member".to_owned()))]),
+        };
+        let bytes = postcard::to_allocvec(&message).unwrap();
+
+        wire.push_inbound_encoded(&bytes).unwrap();
+        assert_eq!(
+            wire.inbound.lock().unwrap().pop_front(),
+            Some(message.clone())
+        );
+
+        wire.outbound.lock().unwrap().push_back(message);
+        let encoded = wire.take_outbound_encoded().unwrap();
+        assert_eq!(encoded.len(), 1);
+        assert_eq!(
+            postcard::from_bytes::<SyncMessage>(&encoded[0]).unwrap(),
+            SyncMessage::SessionClaims {
+                identity: AuthorId::SYSTEM,
+                claims: BTreeMap::from([("role".to_owned(), Value::String("member".to_owned()))]),
+            }
+        );
+    }
+
+    #[test]
+    fn encoded_peer_messages_reject_invalid_bytes() {
+        assert!(matches!(
+            NativeRelayWire::default().push_inbound_encoded(&[0xff]),
+            Err(RelayError::DecodePeerMessage(_))
         ));
     }
 }

@@ -2136,6 +2136,7 @@ dependencies = [
  "futures",
  "jazz",
  "jazz-storage-sqlite",
+ "postcard",
  "tempfile",
  "thiserror",
 ]
