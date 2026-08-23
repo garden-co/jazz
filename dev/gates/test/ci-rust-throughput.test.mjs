@@ -64,6 +64,14 @@ const job = (name) => {
   assert.notEqual(source, undefined, `missing ${name} job`);
   return source;
 };
+const benchmarkSmokeMode = (mode) => {
+  const start = `if [[ "\${1:-}" == "--${mode}" && $# == 1 ]]; then`;
+  const startIndex = benchmarkSmokeGate.indexOf(start);
+  assert.notEqual(startIndex, -1, `missing --${mode} benchmark smoke mode`);
+  const endIndex = benchmarkSmokeGate.indexOf("\nfi", startIndex);
+  assert.notEqual(endIndex, -1, `unterminated --${mode} benchmark smoke mode`);
+  return benchmarkSmokeGate.slice(startIndex + start.length, endIndex);
+};
 const assertUsesBlacksmithRunner = (jobName, jobSource) => {
   const cpu = jobName === "test-ts" ? 16 : 4;
   assert.match(jobSource, new RegExp(`runs-on: blacksmith-${cpu}vcpu-ubuntu-2404`));
@@ -881,21 +889,38 @@ test("CodSpeed runs nightly on main and only for benchmark-labeled PRs", () => {
   }, /strictly equal/);
 });
 
-test("benchmark correctness is CI-gated while CodSpeed scope stays explicit", () => {
+test("benchmark correctness stays on ordinary CI while API compilation uses realistic benchmarks", () => {
   const workspace = job("test-rust-workspace");
+  const scenarioMode = benchmarkSmokeMode("ci");
+  const compileMode = benchmarkSmokeMode("compile-ci");
   assert.match(
     workspace,
-    /name: Benchmark API and deterministic scenario smoke\s+run: dev\/gates\/benchmark-smoke\.sh --ci/,
+    /name: Benchmark deterministic scenario smoke\s+run: dev\/gates\/benchmark-smoke\.sh --ci/,
   );
-  assert.match(benchmarkSmokeGate, /cargo check -p jazz --benches --features testing/);
-  assert.match(benchmarkSmokeGate, /cargo check -p jazz-sim --benches/);
+  assert.match(
+    realisticWorkflow,
+    /name: Compile maintained benchmark APIs\s+run: dev\/gates\/benchmark-smoke\.sh --compile-ci/,
+  );
+  assert.match(
+    compileMode,
+    /run_phase jazz-benchmark-api cargo check -p jazz --benches --features testing/,
+  );
+  assert.match(compileMode, /run_phase jazz-sim-benchmark-api cargo check -p jazz-sim --benches/);
+  assert.doesNotMatch(scenarioMode, /cargo check -p (?:jazz|jazz-sim) --benches/);
+  assert.doesNotMatch(compileMode, /cargo test -p (?:jazz|jazz-sim)/);
   assert.match(benchmarkSmokeGate, /cargo metadata --no-deps --format-version 1/);
   assert.match(benchmarkSmokeGate, /required-features/);
-  assert.match(
-    benchmarkSmokeGate,
-    /cargo test -p jazz --features testing --test legacy_benchmark_smoke/,
+  assert.match(scenarioMode, /cargo test -p jazz --features testing --test legacy_benchmark_smoke/);
+  assert.match(scenarioMode, /cargo test -p jazz-sim --test scenario_smoke/);
+  assert.match(benchmarkSmokeGate, /benchmark-smoke phase=%s duration_seconds=%s status=%s/);
+  assert.throws(
+    () =>
+      assert.match(
+        scenarioMode.replace("cargo test -p jazz-sim --test scenario_smoke", "true"),
+        /cargo test -p jazz-sim --test scenario_smoke/,
+      ),
+    /scenario_smoke/,
   );
-  assert.match(benchmarkSmokeGate, /cargo test -p jazz-sim --test scenario_smoke/);
   assert.doesNotMatch(benchmarkSmokeGate, /^\s*cargo bench|^\s*.*--release/m);
   assert.throws(
     () =>
