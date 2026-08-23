@@ -697,24 +697,32 @@ where
             }
         }
 
-        if let Some(current_version) = self
-            .query_local_layer_winner_in_branch(
-                subject_table,
-                version.branch_key(),
-                version.row_uuid(),
-                VersionLayer::Content,
-            )
-            .await?
-        {
-            // Pending candidates are stored before policy evaluation. They
-            // are not previous-row evidence for their own insert/update
-            // classification, but another transaction's local winner is.
-            if candidate_tx_id != Some(self.version_tx_id(&current_version)?) {
-                let (_policy_schema_version, projected_table, cells) =
-                    self.policy_projection_for_version_row(&current_version)?;
-                if projected_table.name == table.name {
-                    return current_row_from_cells(table, version.row_uuid(), &cells).map(Some);
-                }
+        let local_previous = match candidate_tx_id {
+            Some(candidate_tx_id) => {
+                self.query_local_layer_winner_in_branch_excluding_tx(
+                    subject_table,
+                    version.branch_key(),
+                    version.row_uuid(),
+                    VersionLayer::Content,
+                    candidate_tx_id,
+                )
+                .await?
+            }
+            None => {
+                self.query_local_layer_winner_in_branch(
+                    subject_table,
+                    version.branch_key(),
+                    version.row_uuid(),
+                    VersionLayer::Content,
+                )
+                .await?
+            }
+        };
+        if let Some(current_version) = local_previous {
+            let (_policy_schema_version, projected_table, cells) =
+                self.policy_projection_for_version_row(&current_version)?;
+            if projected_table.name == table.name {
+                return current_row_from_cells(table, version.row_uuid(), &cells).map(Some);
             }
         }
 
