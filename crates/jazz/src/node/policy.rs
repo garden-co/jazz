@@ -22,6 +22,30 @@ fn version_provenance(version: &VersionRecord) -> RowProvenance {
     }
 }
 
+fn stored_version_provenance(version: &VersionRow) -> RowProvenance {
+    RowProvenance {
+        created_by: version.created_by(),
+        created_at: version.created_at(),
+        updated_by: version.updated_by(),
+        updated_at: version.updated_at(),
+    }
+}
+
+fn reconstructed_policy_subject_row(
+    table: &TableSchema,
+    row_uuid: RowUuid,
+    cells: &BTreeMap<String, Value>,
+    version: &VersionRow,
+) -> Result<CurrentRow, Error> {
+    current_row_from_cells_with_explicit_provenance(
+        table,
+        row_uuid,
+        cells,
+        stored_version_provenance(version),
+        Some((version.tx_time(), version.tx_node_alias())),
+    )
+}
+
 /// A reconstructed candidate without retained row metadata cannot prove a
 /// provenance ownership clause. Keep that case fail-closed instead of
 /// mistaking the incoming writer for the historic creator.
@@ -679,7 +703,13 @@ where
                 if projected_table.name != table.name {
                     continue;
                 }
-                return current_row_from_cells(table, version.row_uuid(), &cells).map(Some);
+                return reconstructed_policy_subject_row(
+                    table,
+                    version.row_uuid(),
+                    &cells,
+                    &parent_version,
+                )
+                .map(Some);
             }
         }
 
@@ -695,7 +725,13 @@ where
             let (_policy_schema_version, projected_table, cells) =
                 self.policy_projection_for_version_row(&current_version)?;
             if projected_table.name == table.name {
-                return current_row_from_cells(table, version.row_uuid(), &cells).map(Some);
+                return reconstructed_policy_subject_row(
+                    table,
+                    version.row_uuid(),
+                    &cells,
+                    &current_version,
+                )
+                .map(Some);
             }
         }
 
@@ -711,7 +747,13 @@ where
             let (_policy_schema_version, projected_table, cells) =
                 self.policy_projection_for_version_row(&current_version)?;
             if projected_table.name == table.name {
-                return current_row_from_cells(table, version.row_uuid(), &cells).map(Some);
+                return reconstructed_policy_subject_row(
+                    table,
+                    version.row_uuid(),
+                    &cells,
+                    &current_version,
+                )
+                .map(Some);
             }
         }
 

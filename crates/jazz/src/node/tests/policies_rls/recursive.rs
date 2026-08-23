@@ -592,3 +592,122 @@ fn delete_only_policy_uses_raw_current_row_evidence_without_read_access() {
         } if received == tx_id
     ));
 }
+
+/// Old-row policy predicates must receive the historic provenance carried by
+/// the version they reconstruct.  In particular, neither a local/global
+/// winner nor an explicit parent may be rebuilt as a synthetic SYSTEM row.
+#[test]
+fn provenance_write_policies_preserve_old_row_creator_and_updater() {
+    let creator = public_claim_eq("$createdBy", "sub");
+    let updater = public_claim_eq("$updatedBy", "sub");
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("notes")
+            .column("title", PublicColumnType::Text)
+            .policies(
+                PublicTablePolicies::new()
+                    .with_insert(creator.clone())
+                    .with_update(Some(creator), updater.clone())
+                    .with_delete(updater),
+            ),
+    ));
+    let creator = user(0xa1);
+    let attacker = user(0xb2);
+    let target = row(0x93);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
+    let seed = accept_global(
+        &mut core,
+        MergeableCommit::new("notes", target, 10)
+            .made_by(creator)
+            .cells(title_cells("created by Alice")),
+    );
+
+    let (_creator_dir, mut creator_writer) = open_node_with_schema(node(0xa1), schema.clone());
+    let (update_tx, update_unit) = creator_writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("notes", target, 20)
+                .made_by(creator)
+                .parents(vec![seed])
+                .cells(title_cells("updated by Alice")),
+        )
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(update_unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(matches!(
+        fate,
+        SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            ..
+        } if tx_id == update_tx
+    ));
+
+    let (_attacker_dir, mut attacker_writer) = open_node_with_schema(node(0xb2), schema.clone());
+    let (forged_update_tx, forged_update_unit) = attacker_writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("notes", target, 21)
+                .made_by(attacker)
+                .parents(vec![update_tx])
+                .cells(title_cells("forged update")),
+        )
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(forged_update_unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(matches!(
+        fate,
+        SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            ..
+        } if tx_id == forged_update_tx
+    ));
+
+    let (forged_delete_tx, forged_delete_unit) = attacker_writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("notes", target, 22)
+                .made_by(attacker)
+                .parents(vec![update_tx])
+                .deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(forged_delete_unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(matches!(
+        fate,
+        SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+            ..
+        } if tx_id == forged_delete_tx
+    ));
+
+    let (delete_tx, delete_unit) = creator_writer
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("notes", target, 23)
+                .made_by(creator)
+                .parents(vec![update_tx])
+                .deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    let [fate] = core
+        .apply_sync_message_settled(delete_unit)
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert!(matches!(
+        fate,
+        SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            ..
+        } if tx_id == delete_tx
+    ));
+}
