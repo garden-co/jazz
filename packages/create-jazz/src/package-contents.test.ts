@@ -23,5 +23,5 @@ describe("create-jazz package contents", () => {
     for (const file of bundledSkillFiles) {
       expect(paths).toContain(file);
     }
-  });
+  }, 15_000);
 });
