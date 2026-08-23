@@ -41,7 +41,8 @@
     "pkg-pr-new": "^0.0.75",
     "playwright": "^1.58.2",
     "turbo": "^2.0.0",
-    "typescript": "catalog:default"
+    "typescript": "catalog:default",
+    "yaml": "2.8.2"
   },
   "engines": {
     "node": ">=22.12"
