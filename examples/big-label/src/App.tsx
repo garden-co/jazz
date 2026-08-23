@@ -1,24 +1,9 @@
-import type { DbConfig } from "jazz-tools";
-import { JazzProvider, useAll, useDb, useSession } from "jazz-tools/react";
-import { app } from "../schema.js";
-import { tenantOperations } from "./scenarios.js";
-import "./app.css";
+"use client";
 
-const config: DbConfig = {
-  appId: import.meta.env.VITE_JAZZ_APP_ID,
-  env: "dev",
-  serverUrl: import.meta.env.VITE_JAZZ_SERVER_URL,
-  secret: import.meta.env.VITE_JAZZ_SECRET,
-};
-export function App() {
-  return (
-    <JazzProvider config={config} fallback={<main>Connecting to BigLabel…</main>}>
-      <Operations />
-    </JazzProvider>
-  );
-}
+import { useAll, useDb, useSession } from "jazz-tools/react";
+import { app } from "../schema";
 
-function Operations() {
+export function Operations({ onSignOut }: { onSignOut: () => void }) {
   const session = useSession();
   const db = useDb();
   const { data: memberships = [] } = useAll(
@@ -47,12 +32,6 @@ function Operations() {
         </p>
       </main>
     );
-  const receipt = {
-    ...tenantOperations("small"),
-    organizationId: organization.id,
-    visibleArtists: artists.length,
-    visibleReleases: releases.length,
-  };
   const addArtist = () =>
     void db.insert(app.artists, {
       organizationId: organization.id,
@@ -68,7 +47,10 @@ function Operations() {
           <h1>{organization.name}</h1>
           <p>Artists, releases, teams, and tenant-safe workflows.</p>
         </div>
-        <span className="pill">{session?.user_id ? "connected" : "connecting"}</span>
+        <div>
+          <span className="pill">{session?.user_id ? "connected" : "connecting"}</span>
+          <button onClick={onSignOut}>Sign out</button>
+        </div>
       </header>
       <section className="metrics">
         <Metric label="Artists" value={artists.length} />
@@ -103,8 +85,7 @@ function Operations() {
         </article>
       </section>
       <footer>
-        Live receipt: {receipt.visibleArtists} owned artists, {receipt.visibleReleases} related
-        releases, {receipt.foreignRows} foreign rows.
+        Live receipt: {artists.length} owned artists and {releases.length} related releases.
       </footer>
     </main>
   );

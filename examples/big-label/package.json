@@ -21,11 +21,7 @@
     "@types/node": "catalog:default",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "catalog:default",
     "typescript": "catalog:default",
-    "vite": "catalog:default",
-    "vite-plugin-top-level-await": "^1.6.0",
-    "vite-plugin-wasm": "^3.5.0",
     "vitest": "catalog:default"
   }
 }
