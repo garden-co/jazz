@@ -14,6 +14,15 @@ use thiserror::Error;
 use crate::ids::SchemaVersionId;
 use crate::schema::{ColumnSchema as JazzColumnSchema, JazzSchema, RuntimeSchema, TableSchema};
 
+/// Whether the legacy `id` spelling resolves to a table's physical row UUID.
+///
+/// An authored `id` column always wins. The physical UUID is therefore only
+/// available through the implicit spelling on older tables that have not
+/// declared such a column.
+pub(crate) fn is_implicit_row_id_alias(table: &TableSchema, column: &str) -> bool {
+    column == "id" && !table.columns.iter().any(|candidate| candidate.name == "id")
+}
+
 // Stable public syntax and relation-facade vocabulary.
 include!("query/ast.rs");
 

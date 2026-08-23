@@ -38,6 +38,7 @@ fn join_lookup_source_id(lookup: &crate::query::JoinSourceLookup, path: &str) ->
 pub(super) fn current_query_output_request(
     output: CurrentQueryProgramOutput,
     query: &JazzQuery,
+    schema: &RuntimeSchema,
 ) -> RowSetOutputRequest {
     let facts = match output {
         CurrentQueryProgramOutput::AppRows | CurrentQueryProgramOutput::PolicyPredicate => {
@@ -79,6 +80,7 @@ pub(super) fn current_query_output_request(
             public_terminal: !matches!(output, CurrentQueryProgramOutput::PolicyPredicate),
             projection: app_row_payload_projection(
                 query,
+                schema,
                 matches!(output, CurrentQueryProgramOutput::MaintainedView)
                     || !query.array_subqueries.is_empty(),
             ),
@@ -87,9 +89,18 @@ pub(super) fn current_query_output_request(
     }
 }
 
-fn app_row_payload_projection(query: &JazzQuery, collect_relations: bool) -> PayloadProjection {
+fn app_row_payload_projection(
+    query: &JazzQuery,
+    schema: &RuntimeSchema,
+    collect_relations: bool,
+) -> PayloadProjection {
     let paths = if collect_relations {
-        app_row_path_projections(&root_source_id(&query.table), &query.array_subqueries, &[])
+        app_row_path_projections(
+            schema,
+            &root_source_id(&query.table),
+            &query.array_subqueries,
+            &[],
+        )
     } else {
         Vec::new()
     };
@@ -102,7 +113,7 @@ fn app_row_payload_projection(query: &JazzQuery, collect_relations: bool) -> Pay
         .map(|select| {
             let mut fields = select
                 .iter()
-                .filter(|field| field.as_str() != "id")
+                .filter(|field| !is_implicit_row_id_alias(schema, &query.table, field))
                 .cloned()
                 .collect::<BTreeSet<_>>();
             for include in &query.includes {
@@ -117,6 +128,7 @@ fn app_row_payload_projection(query: &JazzQuery, collect_relations: bool) -> Pay
 }
 
 fn app_row_path_projections(
+    schema: &RuntimeSchema,
     owner: &SourceId,
     subqueries: &[ArraySubquery],
     path: &[usize],
@@ -135,7 +147,7 @@ fn app_row_path_projections(
                     FieldProjection::Fields(
                         select
                             .iter()
-                            .filter(|field| field.as_str() != "id")
+                            .filter(|field| !is_implicit_row_id_alias(schema, &child.table, field))
                             .cloned()
                             .collect(),
                     )
@@ -149,11 +161,29 @@ fn app_row_path_projections(
                 field: subquery.column_name.clone(),
                 cardinality: PathCardinality::Many,
                 fields,
-                children: app_row_path_projections(&child, &subquery.nested_arrays, &child_path),
+                children: app_row_path_projections(
+                    schema,
+                    &child,
+                    &subquery.nested_arrays,
+                    &child_path,
+                ),
                 hole_policy: PathHolePolicy::KeepParentWithHoles,
             }
         })
         .collect()
+}
+
+/// The legacy `id` spelling resolves to the physical row UUID only for a table
+/// that does not declare an application column by that name. Projection must
+/// use the same effective-column rule as predicate and ordering normalization:
+/// a declared application `id` remains in the payload, while the physical UUID
+/// is already carried separately by the row envelope.
+fn is_implicit_row_id_alias(schema: &RuntimeSchema, table: &str, field: &str) -> bool {
+    schema
+        .tables
+        .iter()
+        .find(|candidate| candidate.name == table)
+        .is_some_and(|table| crate::query::is_implicit_row_id_alias(table, field))
 }
 
 pub(super) fn required_field_idx(
@@ -728,8 +758,8 @@ fn source_has_declared_id(schema: &RuntimeSchema, source: &SourceId) -> bool {
     schema
         .tables
         .iter()
-        .find(|table| table.name == source.table)
-        .is_some_and(|table| table.columns.iter().any(|column| column.name == "id"))
+        .find(|candidate| candidate.name == source.table)
+        .is_some_and(|table| !crate::query::is_implicit_row_id_alias(table, "id"))
 }
 
 fn normalize_operand_for_schema(
