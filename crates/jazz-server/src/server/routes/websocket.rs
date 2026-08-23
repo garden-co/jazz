@@ -314,14 +314,15 @@ fn json_claim_to_core_value(value: serde_json::Value) -> Result<CoreValue, Strin
 }
 
 fn ws_peer_identity(identity: &str) -> Result<AuthorSubject, String> {
-    AuthorSubject::from_canonical(identity)
+    AuthorSubject::from_canonical(identity).map_err(|error| error.to_string())
 }
 
 fn ws_validate_session_identity(
     session: &Session,
     peer_identity: AuthorSubject,
 ) -> Result<(), String> {
-    let session_identity = AuthorSubject::authenticated(&session.issuer, &session.user_id);
+    let session_identity = AuthorSubject::authenticated(&session.issuer, &session.user_id)
+        .map_err(|error| error.to_string())?;
     if session_identity != peer_identity {
         return Err("websocket peer_identity must match authenticated session user_id".to_owned());
     }
@@ -1052,7 +1053,8 @@ mod tests {
         let matching = session_for(peer);
         let mismatching = session_for(AuthorSubject::for_test_bytes([2; 16]));
         let external_subject = "better-auth-user";
-        let external_peer = AuthorSubject::authenticated("https://auth.example", external_subject);
+        let external_peer =
+            AuthorSubject::authenticated("https://auth.example", external_subject).unwrap();
         let external_session = Session::new("https://auth.example", external_subject);
 
         assert!(ws_validate_session_identity(&matching, peer).is_ok());

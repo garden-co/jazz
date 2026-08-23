@@ -817,6 +817,10 @@ current query execution must reject `$can*` predicates/projections rather than
 materializing them as row fields. Dry-run policy APIs return a concrete
 allow/deny result or an explicit indeterminate result when the probe lacks
 required input, such as a row id for a row-id-sensitive insert policy.
+The author columns have logical type `String`/`Text` and support equality,
+inequality, grouping, and equality-index lookup. Ordering by `$createdBy` or
+`$updatedBy` is rejected: the portable `[iss,sub]` encoding has no public sort
+semantics.
 
 ### 6.7 Conformance test plan
 

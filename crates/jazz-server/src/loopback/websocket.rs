@@ -734,7 +734,8 @@ mod tests {
         assert_eq!(admitted.subject, sub);
         assert_eq!(
             admitted.author,
-            jazz::tools::identity::author_id_from_principal(sub)
+            AuthorSubject::from_canonical(&format!(r#"["urn:jazz:static-bearer","{sub}"]"#))
+                .unwrap()
         );
     }
 }

@@ -70,7 +70,10 @@ impl FixtureBuilder {
                 fixture.authors_by_set.insert(
                     entity.name.clone(),
                     rows.iter()
-                        .map(|row| AuthorSubject::authenticated("urn:jazz:sim", &row.0.to_string()))
+                        .map(|row| {
+                            AuthorSubject::authenticated("urn:jazz:sim", &row.0.to_string())
+                                .expect("simulation issuer is external")
+                        })
                         .collect::<Vec<_>>(),
                 );
             }
@@ -628,7 +631,10 @@ mod tests {
             .collect::<Vec<_>>();
         let authors = rows
             .iter()
-            .map(|row| AuthorSubject::authenticated("urn:jazz:sim", &row.0.to_string()))
+            .map(|row| {
+                AuthorSubject::authenticated("urn:jazz:sim", &row.0.to_string())
+                    .expect("simulation issuer is external")
+            })
             .collect::<Vec<_>>();
         let a = WriteStream::new(7, 10, 16, &rows, &authors, 1.1, 1.1);
         let b = WriteStream::new(7, 10, 16, &rows, &authors, 1.1, 1.1);
