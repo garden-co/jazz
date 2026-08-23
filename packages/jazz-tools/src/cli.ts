@@ -680,6 +680,7 @@ if (isMainModule()) {
     );
     console.log("\nValidation options:");
     console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
+    console.log("  --strict-provenance   Reject conventional duplicates of Jazz provenance");
     console.log("\nSchema hash options:");
     console.log("  --schema-dir <path>   Path to app root containing schema.ts (default: .)");
     console.log("\nSchema export options:");

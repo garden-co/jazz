@@ -83,3 +83,32 @@ test("release starter gate reuses its pnpm store across the prepare and matrix j
     );
   }
 });
+
+test("official examples do not duplicate Jazz provenance without an explicit external marker", () => {
+  const duplicate =
+    /^[ \t]*(createdAt|createdBy|updatedAt|updatedBy):(?![ \t]*s\.allowExternalProvenanceName\()/m;
+  const offenders = [];
+
+  function visit(directory) {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const file = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        visit(file);
+      } else if (
+        entry.isFile() &&
+        entry.name === "schema.ts" &&
+        duplicate.test(fs.readFileSync(file, "utf8"))
+      ) {
+        offenders.push(path.relative(root, file));
+      }
+    }
+  }
+
+  visit(path.join(root, "examples"));
+  visit(path.join(root, "starters"));
+  assert.deepEqual(
+    offenders,
+    [],
+    "Examples must use Jazz $ provenance or s.allowExternalProvenanceName(...)",
+  );
+});
