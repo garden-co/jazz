@@ -14,6 +14,10 @@ pub const INLINE_VALUE_MAX_BYTES: usize = 64 * 1024;
 pub const LEAF_MIN_BYTES: usize = 16 * 1024;
 pub const LEAF_TARGET_BYTES: usize = 64 * 1024;
 pub const LEAF_MAX_BYTES: usize = 256 * 1024;
+/// Hard allocation/CPU boundary for one encoded immutable node. Leaves dominate
+/// the format; the additional envelope allowance is comfortably larger than a
+/// maximum-fanout branch with ordinary locators.
+pub const MAX_ENCODED_NODE_BYTES: usize = LEAF_MAX_BYTES + 16 * 1024;
 pub const BRANCH_MIN_CHILDREN: usize = 4;
 pub const BRANCH_TARGET_CHILDREN: usize = 16;
 pub const BRANCH_MAX_CHILDREN: usize = 64;
@@ -1957,6 +1961,9 @@ pub fn decode_node(
     expected_hash: ContentHash,
     encoded: &[u8],
 ) -> Result<ChunkNode, Error> {
+    if encoded.len() > MAX_ENCODED_NODE_BYTES {
+        return Err(Error::MalformedNode);
+    }
     if object_hash(encoded) != expected_hash {
         return Err(Error::ObjectHashMismatch);
     }

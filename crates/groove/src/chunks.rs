@@ -83,6 +83,9 @@ impl ChunkStorage for ManagedChunkStorage {
         Box::pin(async move {
             let mut accounting = crate::large_values::StagedLargeValueAccounting::default();
             for chunk in chunks {
+                if chunk.encoded.len() > crate::large_values::MAX_ENCODED_NODE_BYTES {
+                    return Err(ChunkStorageError::Integrity);
+                }
                 if object_hash(&chunk.encoded) != chunk.node_ref.object_hash {
                     return Err(ChunkStorageError::Integrity);
                 }
@@ -295,6 +298,9 @@ impl ChunkStorage for MemoryChunkStorage {
         Box::pin(async move {
             let existing = self.chunks.borrow();
             for chunk in &chunks {
+                if chunk.encoded.len() > crate::large_values::MAX_ENCODED_NODE_BYTES {
+                    return Err(ChunkStorageError::Integrity);
+                }
                 if object_hash(&chunk.encoded) != chunk.node_ref.object_hash {
                     return Err(ChunkStorageError::Integrity);
                 }
@@ -617,6 +623,7 @@ pub struct OwnedChunkProvider {
     provider: Rc<dyn ChunkProvider>,
     cache: Rc<RefCell<VerifiedChunkCache>>,
     leases: Rc<RefCell<ChunkLeaseStats>>,
+    activity: Rc<RefCell<ChunkActivityState>>,
 }
 
 #[derive(Default, Debug)]
@@ -671,6 +678,77 @@ pub struct ChunkCacheStats {
     pub budget_bytes: usize,
     pub active_leases: usize,
     pub leased_bytes: usize,
+    /// Requests currently suspended in the backing provider. Reclamation is
+    /// deferred while this is non-zero because the requested locator may have
+    /// been discovered from an active root before its bytes were leased.
+    pub active_requests: usize,
+}
+
+#[derive(Default)]
+struct ChunkActivityState {
+    active_requests: usize,
+    reclaiming: bool,
+    waiters: Vec<Waker>,
+}
+
+struct ActiveChunkRequest {
+    activity: Rc<RefCell<ChunkActivityState>>,
+}
+
+impl ActiveChunkRequest {
+    async fn acquire(activity: Rc<RefCell<ChunkActivityState>>) -> Self {
+        std::future::poll_fn(|context| {
+            let mut state = activity.borrow_mut();
+            if state.reclaiming {
+                if !state
+                    .waiters
+                    .iter()
+                    .any(|waiter| waiter.will_wake(context.waker()))
+                {
+                    state.waiters.push(context.waker().clone());
+                }
+                return Poll::Pending;
+            }
+            state.active_requests = state.active_requests.saturating_add(1);
+            Poll::Ready(())
+        })
+        .await;
+        Self { activity }
+    }
+}
+
+impl Drop for ActiveChunkRequest {
+    fn drop(&mut self) {
+        let waiters = {
+            let mut state = self.activity.borrow_mut();
+            state.active_requests = state.active_requests.saturating_sub(1);
+            if state.active_requests == 0 {
+                std::mem::take(&mut state.waiters)
+            } else {
+                Vec::new()
+            }
+        };
+        for waiter in waiters {
+            waiter.wake();
+        }
+    }
+}
+
+pub(crate) struct ChunkReclamationGuard {
+    activity: Rc<RefCell<ChunkActivityState>>,
+}
+
+impl Drop for ChunkReclamationGuard {
+    fn drop(&mut self) {
+        let waiters = {
+            let mut state = self.activity.borrow_mut();
+            state.reclaiming = false;
+            std::mem::take(&mut state.waiters)
+        };
+        for waiter in waiters {
+            waiter.wake();
+        }
+    }
 }
 
 impl std::fmt::Debug for OwnedChunkProvider {
@@ -692,6 +770,7 @@ impl OwnedChunkProvider {
                 ..VerifiedChunkCache::default()
             })),
             leases: Rc::new(RefCell::new(ChunkLeaseStats::default())),
+            activity: Rc::new(RefCell::new(ChunkActivityState::default())),
         }
     }
 
@@ -704,7 +783,26 @@ impl OwnedChunkProvider {
             budget_bytes: cache.budget,
             active_leases: leases.active,
             leased_bytes: leases.bytes,
+            active_requests: self.activity.borrow().active_requests,
         }
+    }
+
+    /// Start an exclusive reclamation pass only when no request or verified
+    /// lease can still depend on a descendant that has not been fetched yet.
+    /// New requests wait until the guard is dropped.
+    pub(crate) fn try_begin_reclamation(&self) -> Option<ChunkReclamationGuard> {
+        if self.leases.borrow().active != 0 {
+            return None;
+        }
+        let mut state = self.activity.borrow_mut();
+        if state.reclaiming || state.active_requests != 0 {
+            return None;
+        }
+        state.reclaiming = true;
+        drop(state);
+        Some(ChunkReclamationGuard {
+            activity: Rc::clone(&self.activity),
+        })
     }
 
     pub(crate) fn get(
@@ -714,17 +812,24 @@ impl OwnedChunkProvider {
         let provider = Rc::clone(&self.provider);
         let cache = Rc::clone(&self.cache);
         let leases = Rc::clone(&self.leases);
+        let activity = Rc::clone(&self.activity);
         Box::pin(async move {
+            let request_guard = ActiveChunkRequest::acquire(activity).await;
             {
                 let mut cache = cache.borrow_mut();
                 cache.clock = cache.clock.wrapping_add(1);
                 let clock = cache.clock;
                 if let Some((bytes, last_use)) = cache.entries.get_mut(&request) {
                     *last_use = clock;
-                    return Ok(ChunkLease::new(bytes.clone(), leases));
+                    let lease = ChunkLease::new(bytes.clone(), leases);
+                    drop(request_guard);
+                    return Ok(lease);
                 }
             }
             let bytes = provider.get(request.clone()).await?;
+            if bytes.len() > crate::large_values::MAX_ENCODED_NODE_BYTES {
+                return Err(ChunkError::Integrity);
+            }
             if crate::large_values::object_hash(&bytes).0 != request.object_hash {
                 return Err(ChunkError::Integrity);
             }
@@ -749,7 +854,9 @@ impl OwnedChunkProvider {
                 cache.entries.insert(request, (bytes.clone(), clock));
                 cache.bytes = cache.bytes.saturating_add(length);
             }
-            Ok(ChunkLease::new(bytes, leases))
+            let lease = ChunkLease::new(bytes, leases);
+            drop(request_guard);
+            Ok(lease)
         })
     }
 }
@@ -950,6 +1057,22 @@ mod tests {
         );
         assert_eq!(block_on(chunks.get(request)), Err(ChunkError::Integrity));
         assert_eq!(provider.calls.get(), 2);
+    }
+
+    #[test]
+    fn oversized_encoded_nodes_are_rejected_before_staging() {
+        let storage = MemoryChunkStorage::new();
+        let encoded = vec![0; crate::large_values::MAX_ENCODED_NODE_BYTES + 1];
+        let hash = object_hash(&encoded);
+        let result = block_on(storage.stage(vec![StagedChunk {
+            node_ref: crate::large_values::NodeRef {
+                object_hash: hash,
+                locator: crate::large_values::Locator(vec![9; 16]),
+            },
+            encoded,
+        }]));
+        assert_eq!(result, Err(ChunkStorageError::Integrity));
+        assert!(storage.is_empty());
     }
 
     #[test]

@@ -162,6 +162,159 @@ async fn incomplete_push_upload_is_restart_persistent_and_reclaimable() {
 }
 
 #[futures_test::test]
+async fn orphan_reclamation_defers_for_active_chunk_requests_and_leases() {
+    use crate::chunks::ChunkStorage;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![8; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+        |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
+    )
+    .unwrap();
+    let staged = database
+        .stage_large_value_preparation(prepared.clone())
+        .await
+        .unwrap();
+    assert!(database.evict_staged_large_value(staged.id).await.unwrap());
+
+    let root_request = crate::chunks::ChunkRequest {
+        object_hash: prepared.value_ref.root.object_hash.0,
+        locator: prepared.value_ref.root.locator.0.clone(),
+    };
+    let provider_chunks = prepared.staged_chunks.iter().map(|chunk| {
+        (
+            crate::chunks::ChunkRequest {
+                object_hash: chunk.node_ref.object_hash.0,
+                locator: chunk.node_ref.locator.0.clone(),
+            },
+            bytes::Bytes::copy_from_slice(&chunk.encoded),
+        )
+    });
+    let (provider, control) = crate::chunks::TestChunkProvider::controlled(provider_chunks);
+    control.pause();
+    let owned = crate::chunks::OwnedChunkProvider::new(Rc::new(provider));
+    database.set_owned_chunk_provider(owned.clone());
+
+    let mut pending = owned.get(root_request.clone());
+    let waker = futures::task::noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(
+        Pin::new(&mut pending).poll(&mut context),
+        Poll::Pending
+    ));
+    assert_eq!(owned.cache_stats().active_requests, 1);
+    assert_eq!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap(),
+        0
+    );
+
+    control.release_one();
+    let lease = pending.await.unwrap();
+    assert_eq!(owned.cache_stats().active_leases, 1);
+    assert_eq!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap(),
+        0
+    );
+    drop(lease);
+
+    assert!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap()
+            > 0
+    );
+    assert!(
+        chunks
+            .get(root_request.locator, prepared.value_ref.root.object_hash)
+            .await
+            .is_err()
+    );
+}
+
+#[futures_test::test]
+async fn shared_durable_root_is_reclaimed_only_after_its_last_physical_record() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let staged = database
+        .prepare_and_stage_large_value(
+            crate::large_values::LargeValueKind::Bytes,
+            &vec![6; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+        )
+        .await
+        .unwrap();
+
+    let mut insert = database.open_batch();
+    insert.insert(
+        "objects",
+        vec![Value::U64(1), Value::Large(staged.value_ref.clone())],
+    );
+    insert.insert(
+        "objects",
+        vec![Value::U64(2), Value::Large(staged.value_ref.clone())],
+    );
+    insert.accept_large_value(staged.id);
+    database.commit_batch(insert).await.unwrap();
+    let live_chunks = chunks.len();
+    assert!(live_chunks > 0);
+
+    let mut delete_first = database.open_batch();
+    delete_first.delete("objects", PrimaryKeyValue::U64(1));
+    database.commit_batch(delete_first).await.unwrap();
+    assert_eq!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(chunks.len(), live_chunks);
+
+    let mut delete_last = database.open_batch();
+    delete_last.delete("objects", PrimaryKeyValue::U64(2));
+    database.commit_batch(delete_last).await.unwrap();
+    assert!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap()
+            > 0
+    );
+    assert_eq!(chunks.len(), 0);
+}
+
+#[futures_test::test]
 async fn root_first_upload_requests_only_authenticated_missing_frontier() {
     let schema = DatabaseSchema::new([TableSchema::new(
         "objects",

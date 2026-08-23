@@ -127,6 +127,10 @@ are bounded and checked. Unknown format versions, cycles, dishonest metrics,
 invalid UTF-8, invalid JSON, arithmetic overflow, trailing bytes, and malformed
 child references fail the affected evaluation closure.
 
+The encoded-node size ceiling is checked before hashing or deserialization, so
+an authenticated transport envelope cannot turn one malicious node into an
+unbounded hashing or allocation operation.
+
 `INV-LARGE-4`: identical logical base bytes under one format MUST produce the
 same logical hashes and tree shape. A reader MUST validate every fetched node's
 object hash before it can satisfy an operator or reveal authenticated descendant
@@ -373,6 +377,13 @@ any deduplicated physical blob.
 Prepared chunks not yet present in a physical record use a separate persisted,
 expiring staging generation. Active reads use temporary leases. Neither is a
 durable record reference.
+
+The first collector coordinates through a coarse database-wide ephemeral
+evaluation retainer. It starts a pass only when there are no suspended chunk
+requests or verified-byte leases, and new requests wait behind the pass. This
+protects descendants that an evaluator learned from an authenticated branch but
+has not requested yet; per-root coordination may later reduce conservative
+deferral without weakening that boundary.
 
 Remote uploads begin with the descriptor and traverse root-first. Groove
 authenticates each received node before using its child edges, derives the

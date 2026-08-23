@@ -191,6 +191,11 @@ Maintenance does not have to run for acceptance safety because every referencing
 row rechecks receipt age; periodic work only bounds retention of abandoned
 uploads while a process is otherwise idle.
 
+The initial unconfigured policy admits 256 MiB of pushed bytes per one-second
+window and expires unaccepted completed roots after ten minutes. The byte bound
+matches the maximum logical wire-message size; deployments may configure tighter
+product-specific limits through the same API.
+
 Node/leaf uploads are immutable. Reusing a locator with different bytes is a
 hard integrity failure. The backend may deduplicate equal bytes internally.
 

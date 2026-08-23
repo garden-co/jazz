@@ -609,6 +609,52 @@ async fn predicates_compare_indirect_strings_by_logical_value() {
 }
 
 #[futures_test::test]
+async fn predicates_compare_present_nullable_indirect_strings_logically() {
+    let logical = "nullable predicate text ".repeat(20_000);
+    let prepared = prepare(LargeValueKind::String, logical.as_bytes(), |hash| {
+        Locator(hash.0[..24].to_vec())
+    })
+    .unwrap();
+    let chunks = prepared.staged_chunks.iter().map(|chunk| {
+        (
+            ChunkRequest {
+                object_hash: chunk.node_ref.object_hash.0,
+                locator: chunk.node_ref.locator.0.clone(),
+            },
+            Bytes::copy_from_slice(&chunk.encoded),
+        )
+    });
+    let (provider, _) = TestChunkProvider::controlled(chunks);
+    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
+        .await
+        .unwrap();
+    database.set_chunk_provider(Rc::new(provider));
+    let descriptor =
+        RecordDescriptor::new([("body", ValueType::Nullable(Box::new(ValueType::String)))]);
+    let graph = GraphBuilder::values(
+        descriptor,
+        [vec![Value::Nullable(Some(Box::new(Value::Large(
+            prepared.value_ref,
+        ))))]],
+    )
+    .unwrap()
+    .filter(PredicateExpr::eq("body", Value::String(logical.clone())));
+
+    assert_eq!(
+        database
+            .query_graph(graph)
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        vec![(
+            vec![Value::Nullable(Some(Box::new(Value::String(logical))))],
+            1
+        )]
+    );
+}
+
+#[futures_test::test]
 async fn lexical_predicate_stops_chunk_requests_after_decisive_prefix_mismatch() {
     let logical = format!("a{}", "tail".repeat(250_000));
     let literal = format!("z{}", "tail".repeat(250_000));

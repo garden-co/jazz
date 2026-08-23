@@ -95,3 +95,26 @@ high-level API slice: the current bearer-locator read model, refcount-aware row
 mutation, streaming operators, and owned-result bindings are independently
 covered, while the broader future capabilities retain `target | untested`
 registry status until their own designs and adversarial suites land.
+
+## 2026-08-23 — Reclamation and active evaluation coordination
+
+The first collector uses a coarse database-wide ephemeral evaluation retainer,
+not per-root persisted lease counts. A reclamation pass starts only when the
+Groove chunk provider has no suspended requests or verified-byte leases, and
+new requests wait behind an active pass. This closes the critical interval in
+which an evaluator has authenticated a branch but has not requested all of its
+descendants. The coarse guard may defer unrelated orphan work, but reclamation
+is maintenance rather than foreground correctness work and the design avoids
+persisting transient executor state. Per-root lease coordination remains a
+future throughput optimization that must preserve the same safety boundary.
+
+## 2026-08-23 — Default upload admission and staging lifetime
+
+An unconfigured Jazz host admits at most 256 MiB of pushed chunk bytes per
+one-second window and expires unaccepted completed roots after ten minutes.
+The byte allowance matches the existing maximum logical wire-message size, so
+one maximum-sized operation is not rejected merely because defaults are active;
+larger sustained ingress must naturally span windows. The TTL is long enough
+for slow push-then-row synchronization but finite, so forgetting to install a
+host-specific policy no longer disables abandoned-upload collection. Hosts may
+tighten either value without changing wire or Groove storage semantics.

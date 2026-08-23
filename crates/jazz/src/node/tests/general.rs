@@ -110,6 +110,14 @@ fn jazz_incoming_data_rate_limit_evicts_the_rejected_root_and_publishes_no_row()
 }
 
 #[test]
+fn default_large_value_staging_policy_is_finite() {
+    let policy = LargeValueStagingPolicy::default();
+    assert_eq!(policy.incoming_bytes_per_window, 256 * 1024 * 1024);
+    assert_eq!(policy.window_ms, 1_000);
+    assert_eq!(policy.max_age_ms, Some(10 * 60 * 1_000));
+}
+
+#[test]
 fn expired_staged_tree_requires_reupload_before_row_publication() {
     let schema = two_column_schema();
     let (_temp_dir, mut node) = open_node_with_schema(node(0x7b), schema);

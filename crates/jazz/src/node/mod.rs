@@ -609,9 +609,15 @@ pub struct LargeValueStagingPolicy {
 impl Default for LargeValueStagingPolicy {
     fn default() -> Self {
         Self {
-            incoming_bytes_per_window: u64::MAX,
+            // Admit one maximum-size logical wire message per second by
+            // default. Deployments can tighten this without changing Groove's
+            // policy-blind storage contract.
+            incoming_bytes_per_window: 256 * 1024 * 1024,
             window_ms: 1_000,
-            max_age_ms: None,
+            // Completed uploads are deliberately short-lived claims. Ten
+            // minutes tolerates slow authority synchronization while bounding
+            // abandoned staging on an otherwise unconfigured host.
+            max_age_ms: Some(10 * 60 * 1_000),
         }
     }
 }

@@ -442,10 +442,17 @@ impl PredicateExpr {
                 _ => return Ok(None),
             };
         let actual = record.get(field)?;
+        let actual = match actual {
+            Value::Nullable(Some(value)) => *value,
+            value => value,
+        };
         let Value::Large(large) = actual else {
             return Ok(None);
         };
-        let literal = literal.to_value();
+        let literal = match literal.to_value() {
+            Value::Nullable(Some(value)) => *value,
+            value => value,
+        };
         let inline = match (&large.kind, literal) {
             (crate::large_values::LargeValueKind::Bytes, Value::Bytes(bytes)) => bytes,
             (

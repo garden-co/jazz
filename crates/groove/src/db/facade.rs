@@ -858,6 +858,16 @@ impl Database {
     /// produced by an atomic reference-count transition; deletion is exact and
     /// idempotent, so a crash leaves the queue entry available for retry.
     pub async fn reclaim_orphaned_large_value_chunks(&self, limit: usize) -> Result<usize, Error> {
+        // A request may have authenticated a branch but not yet fetched all of
+        // its descendants. Treat the whole provider request/lease population
+        // as one coarse ephemeral retainer: reclamation is maintenance work,
+        // so deferring a pass is preferable to deleting a not-yet-requested
+        // descendant beneath an active evaluation. The guard also prevents a
+        // new request from racing the hash-guarded delete awaits below.
+        let Some(_reclamation_guard) = self.ivm_runtime.chunk_provider().try_begin_reclamation()
+        else {
+            return Ok(0);
+        };
         let mut scan = self
             .storage
             .scan(crate::storage::ScanRequest::prefix(

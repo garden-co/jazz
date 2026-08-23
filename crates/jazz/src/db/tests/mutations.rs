@@ -260,6 +260,53 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
 }
 
 #[test]
+fn high_level_large_value_reads_authorize_before_descriptor_lookup() {
+    let allowed = "readable-large-value/".repeat(5_000);
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .column("body", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::eq_literal(
+                            "body",
+                            PublicValue::Text(allowed.clone()),
+                        ))
+                        .with_insert(PublicPolicyExpr::True)
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                        .with_delete(PublicPolicyExpr::True),
+                ),
+        ),
+    );
+    let reader = AuthorId::from_bytes([0x4e; 16]);
+    let db = open_db(0x4e, reader, &schema);
+    let visible = row(0x4e);
+    let hidden = row(0x4f);
+    db.insert_with_id(
+        "documents",
+        visible,
+        BTreeMap::from([("body".to_owned(), Value::String(allowed.clone()))]),
+    )
+    .unwrap();
+    db.insert_with_id(
+        "documents",
+        hidden,
+        BTreeMap::from([(
+            "body".to_owned(),
+            Value::String(format!("{}x", &allowed[..allowed.len() - 1])),
+        )]),
+    )
+    .unwrap();
+
+    assert_eq!(
+        block_on(db.read_value_range("documents", visible, "body", 0..8)).unwrap(),
+        b"readable"
+    );
+    let denied = block_on(db.read_value_range("documents", hidden, "body", 0..8)).unwrap_err();
+    assert_eq!(denied.code, ErrorCode::NotObserved);
+}
+
+#[test]
 fn nullable_large_text_uses_the_same_high_level_read_and_edit_surface() {
     let schema = build_public_db_test_schema(PublicSchemaBuilder::new().table(
         PublicTableSchemaBuilder::new("notes").nullable_column("body", PublicColumnType::Text),
