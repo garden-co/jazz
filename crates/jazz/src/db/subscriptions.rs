@@ -323,6 +323,15 @@ where
         covered
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    /// Test-only counts of live coverage groups and usage-site registrations.
+    pub fn query_coverage_attachment_counts_for_test(&self) -> (usize, usize) {
+        (
+            self.node.upstream_coverage_refcounts.borrow().len(),
+            self.node.query_coverage_registrations.borrow().len(),
+        )
+    }
+
     /// Detach a one-shot query coverage request.
     pub fn detach_query(&self, attachment: QueryAttachment) {
         let mut removed_subscriptions = Vec::new();
