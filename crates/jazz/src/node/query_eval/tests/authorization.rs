@@ -4,7 +4,7 @@ use super::*;
 use crate::node::query_eval::authorization::permission_scope_claim_values;
 
 #[test]
-fn permission_advice_scope_restores_canonical_issuer_scoped_sub_claim() {
+fn permission_advice_scope_preserves_provider_sub_and_injects_canonical_author() {
     let author = AuthorSubject::authenticated("https://issuer.example", "opaque-subject").unwrap();
     let claims = BTreeMap::from([("sub".to_owned(), Value::String("spoofed".to_owned()))]);
 
@@ -12,6 +12,10 @@ fn permission_advice_scope_restores_canonical_issuer_scoped_sub_claim() {
 
     assert_eq!(
         values.get("sub"),
+        Some(&Value::String("spoofed".to_owned()))
+    );
+    assert_eq!(
+        values.get("author"),
         Some(&Value::String(author.canonical().to_owned()))
     );
 }
@@ -1109,7 +1113,18 @@ fn missing_policy_seed_claim_denies_authorization_support_rehydration() {
     assert!(matches!(ordinary_error, Error::InvalidStoredValue(_)));
 
     let update = peer
-        .rehydrate_authorization_support_query(&mut node, &shape, &binding, options)
+        .rehydrate_authorization_support_query_for_identity(
+            &mut node,
+            writer,
+            SubscriptionKey {
+                shape_id: shape.shape_id(),
+                binding_id: binding.binding_id(),
+                read_view: options.read_view_key(),
+            },
+            &shape,
+            &binding,
+            options,
+        )
         .expect("missing policy seed claim must hydrate as an empty authorization proof");
     let SyncMessage::ViewUpdate {
         result_member_adds,

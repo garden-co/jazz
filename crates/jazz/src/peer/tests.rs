@@ -798,16 +798,16 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
         )
         .expect("seed readable resource at the edge");
     accept_global(&mut bound_edge, prior, 1);
-    let mut wrong_subject_peer =
-        PeerState::edge_client_with_permission_identity(transport_identity, transport_identity);
-    let bound_subscriptions = wrong_subject_peer
+    let mut system_serving_peer =
+        PeerState::edge_client_with_permission_identity(transport_identity, AuthorSubject::SYSTEM);
+    let bound_subscriptions = system_serving_peer
         .unsettled_authority_scope_subscriptions(&mut bound_edge, writer, &versions, None, true)
         .expect("edge support must bind the writer rather than the transport identity");
     let bound_subscription = bound_subscriptions
         .and_then(|subscriptions| subscriptions.into_iter().next())
         .expect("write support must register one policy subscription");
     assert!(
-        !wrong_subject_peer
+        !system_serving_peer
             .publication_states
             .get(&bound_subscription)
             .expect("bound support subscription state")
@@ -815,8 +815,8 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
             .is_empty(),
         "the writer's bound claim must authorize the seeded resource"
     );
-    assert_eq!(wrong_subject_peer.link_identity(), transport_identity);
-    assert_eq!(wrong_subject_peer.identity(), transport_identity);
+    assert_eq!(system_serving_peer.link_identity(), transport_identity);
+    assert_eq!(system_serving_peer.identity(), AuthorSubject::SYSTEM);
 
     // A present but ill-typed claim remains a real binding error; only an
     // absent claim receives the fail-closed empty-proof treatment.
