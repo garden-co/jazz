@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { execFile } from "node:child_process";
-import { access, readFile, rm } from "node:fs/promises";
+import { access, readFile, rm, stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -34,5 +34,6 @@ describe("broker worker packaging", () => {
     expect(source).not.toMatch(/\bimport\s*\(\s*["']\.\.?\//);
     expect(source).toMatch(/onconnect/);
     await expect(access(wasmOutfile)).resolves.toBeUndefined();
+    expect((await stat(wasmOutfile)).size).toBeGreaterThan(0);
   });
 });
