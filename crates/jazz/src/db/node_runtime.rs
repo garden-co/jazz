@@ -2189,6 +2189,21 @@ where
                             &snapshot,
                             &current_root_occurrences,
                         )?;
+                        let public_output_changed = match &event {
+                            SubscriptionEvent::Delta {
+                                added,
+                                updated,
+                                removed,
+                                terminal_operations,
+                                ..
+                            } => {
+                                !added.is_empty()
+                                    || !updated.is_empty()
+                                    || !removed.is_empty()
+                                    || !terminal_operations.is_empty()
+                            }
+                            SubscriptionEvent::Rejected { .. } | SubscriptionEvent::Closed => true,
+                        };
                         state_ref.snapshot = relation_snapshot_with_delta_slack(&snapshot);
                         state_ref.snapshot_index = relation_snapshot_index_with_root_occurrences(
                             &state_ref.snapshot,
@@ -2197,7 +2212,16 @@ where
                         state_ref.snapshot_source = SubscriptionSnapshotSource::LocalMaintained;
                         state_ref.settled = settled;
                         retained.push(Rc::downgrade(&state));
-                        if state_ref.sender.unbounded_send(event).is_ok() {
+                        // Structured relation facts can change without changing
+                        // the collector-owned public root. Keep those facts in
+                        // the maintained state, but do not turn them into an
+                        // empty ordered-suffix edit. A settlement transition is
+                        // still observable even when the public rows are stable.
+                        if should_publish_structured_refresh(
+                            public_output_changed,
+                            settled != previous_settled,
+                        ) && state_ref.sender.unbounded_send(event).is_ok()
+                        {
                             changed += 1;
                         }
                         continue;
@@ -2578,6 +2602,36 @@ pub(super) fn route_upstream_subscription_rejection(
         }
     }
     delivered
+}
+
+/// Whether a rematerialized structured subscription has a public observation
+/// to publish after its internal maintained state has already been applied.
+fn should_publish_structured_refresh(
+    public_output_changed: bool,
+    settlement_changed: bool,
+) -> bool {
+    public_output_changed || settlement_changed
+}
+
+#[cfg(test)]
+mod structured_refresh_tests {
+    use super::should_publish_structured_refresh;
+
+    #[test]
+    fn structured_refresh_publishes_only_public_or_settlement_changes() {
+        assert!(
+            !should_publish_structured_refresh(false, false),
+            "carrier-only internal changes must not publish an empty root edit"
+        );
+        assert!(
+            should_publish_structured_refresh(true, false),
+            "a changed collector-owned public output must publish"
+        );
+        assert!(
+            should_publish_structured_refresh(false, true),
+            "a settlement transition must remain observable"
+        );
+    }
 }
 
 /// Binding-supplied transport for one peer link.
