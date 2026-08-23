@@ -360,7 +360,7 @@ fn run_scenario(mode: CoverageMode) -> ScenarioReceipt {
 const TABLES: [&str; 4] = ["alpha_items", "beta_items", "gamma_items", "delta_items"];
 
 #[test]
-#[ignore = "unlanded shared-coverage grouping hook; tracked in TEST_BURNDOWN.md"]
+#[ignore = "#1768: unlanded shared-coverage grouping hook"]
 fn forced_shared_coverage_group_matches_per_subscription_observations() {
     let per_subscription = run_scenario(CoverageMode::PerSubscription);
     let forced_grouping = run_scenario(CoverageMode::ForcedGroupingHook);

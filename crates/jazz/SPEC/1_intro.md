@@ -70,8 +70,8 @@ surface an application calls. Dip back into 2–8 as the API references them. Yo
 do not need the groove spec to build an app: lowering to groove (ch. 14) is an
 implementation concern, not an app-facing one. A rough reading path: minimum
 for a local app is ch. 1, 13, §2.3, §7.1; add §3.3 / §5.1 / §8.1 / §9.2 for
-client–server sync; add §12.1–12.4 for `text`/`blob` columns. To operate a
-deployment, read ch. 3, 8, and 9.
+client–server sync. `string` and `bytes` use the ordinary-value baseline in
+§2.3.1. To operate a deployment, read ch. 3, 8, and 9.
 
 ### 1.2 Design principles
 
@@ -130,12 +130,13 @@ implementation-specific case breakdowns and test coverage belong. The
 out-of-band `SPEC/INVARIANTS.md` registry mirrors invariant text and links it to
 implementation anchors and tests; it does not determine the contract.
 
-**Open questions are localized.** Each chapter ends with an `## Open Questions`
-section holding only that chapter's unresolved design decisions, each tagged
-`🔶`. There is no central TODO: a missing test or an implementation gap belongs
-in a Details status note, while an unsettled intended contract belongs beside the
-thing it qualifies as an open question. A reference to an invariant owned by the
-other spec is written with its spec name, for example
+**Open questions are localized and issue-backed.** Each chapter ends with an
+`## Open Questions` section holding only that chapter's unresolved design
+decisions, each marked and linked to its GitHub issue. There is no central
+TODO: a missing test or an implementation gap belongs in a Details status note,
+while an unsettled intended contract belongs beside the thing it qualifies as an
+open question and in its issue discussion. A reference to an invariant owned by
+the other spec is written with its spec name, for example
 `groove/SPEC/INVARIANTS.md::INV-SHAPE-16`.
 
 ### 1.4 Terminology

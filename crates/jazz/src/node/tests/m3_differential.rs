@@ -267,7 +267,7 @@ fn m3_differential_seeds() -> Vec<u64> {
 }
 
 #[test]
-#[ignore = "manual randomized differential soak; bounded seed 11 runs in CI"]
+#[ignore = "#1787: manual randomized differential soak; bounded seed 11 runs in CI"]
 fn m3_maintained_one_shot_differential_oracle() {
     run_m3_aggregate_churn_curve();
     for seed in m3_differential_seeds() {

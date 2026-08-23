@@ -462,30 +462,6 @@ graph.
 
 ## Open Questions
 
-### Open questions
-
-- 🔶 **`ArgMaxBy` terminology.** It lives under "Aggregate" in `op_types` but is
-  source-backed and PK-constrained. Decide whether to rename it (e.g. a
-  "latest/winner" operator) so the taxonomy doesn't imply general aggregation.
-- 🔶 **Ordered top-k operator path.** Decide whether this is a new streaming
-  protocol between nodes, a specialized source/limit operator, or planner sugar
-  over existing ordered arrangements.
-- 🔶 **Cursor pagination.** Ordered top-k needs a stable cursor model that
-  resumes from the prior page without re-sorting the full result set and without
-  breaking deterministic ordering for ties.
-- 🔶 **JOIN plus ordered top-k.** Define when an ordered index on one side of a
-  join can drive the plan without losing rows that only become eligible after
-  join or policy filtering.
-- 🔶 **Weighted duplicates at the jazz boundary.** `TopBy` windows are
-  bag-semantic (`INV-QUERY-24`), so a maintained ordered subscription can
-  observe a row with multiplicity > 1 when upstream unions or projections
-  produce duplicate records. Decide whether jazz lowering must guarantee at
-  most one derivation per logical result identity or whether jazz subscription
-  delivery must define rendering for weighted window rows. Carrying `row_uuid`
-  as a tie field makes ordering deterministic but does not enforce multiplicity
-  one.
-- 🔶 **COUNT aggregation.** Add a terminal count shape with weighted-delta
-  maintenance and clear output descriptor semantics.
-- 🔶 **Projection memcpy optimization.** `Project` should avoid unnecessary row
-  copies on hot paths where descriptor layout permits borrowing or direct field
-  assembly.
+- 🔶 [#1802](https://github.com/garden-co/jazz/issues/1802) — ArgMaxBy terminology.
+- 🔶 [#1776](https://github.com/garden-co/jazz/issues/1776) — Ordered windows, cursor pagination, join planning, weighted duplicates, and COUNT.
+- 🔶 [#1770](https://github.com/garden-co/jazz/issues/1770) — Projection hot-path ownership and copies.

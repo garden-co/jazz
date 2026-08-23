@@ -77,40 +77,4 @@ They do not supersede the authority and completeness questions below.
 
 ## Open Questions
 
-### Open questions (the actual deliverable)
-
-The whole design is open, and demand should be validated before committing to
-it. A possible **S10-shaped benchmark** is a multi-shard scale-out of the S1/S4
-workloads, using per-branch-key rate caps and cross-shard percentage as the dial.
-The load-bearing unknowns are:
-
-- 🔶 **Placement model** (`INV-SHARD-7`, open) — ref-path-to-root vs explicit key
-  column; rootless/global lookup tables (replicate-everywhere vs a global
-  partition class); and what happens when a row's root changes (move /
-  cross-shard transfer / forbidden).
-- 🔶 **Cross-shard exclusives** (`INV-SHARD-8`, `INV-SHARD-9`; open) — how long they
-  stay forbidden and what replaces them (2PC, a global ordering lane,
-  deterministic pre-ordering); how a single-shard write validates a predicate
-  read-set whose shape spans shards.
-- 🔶 **Global catalogue/sequencer** (`INV-SHARD-10`, open) — retained for schema/lens/
-  policy/ownership unless explicitly replaced.
-- 🔶 **Per-shard positions** (`INV-SHARD-11`, open) — how `at(position)` and
-  `at_time(t)` resolve across shards (independent per-shard with documented skew
-  vs a cut protocol); how frozen branch-view bases spanning shards work.
-- 🔶 **Multi-shard result assembly** (`INV-SHARD-12`, `INV-SHARD-13`; open) — who
-  assembles (edge / coordinator / scatter-gather), where joins/aggregation
-  happen, and what completeness evidence composes per-shard result sets;
-  permission-closure latency/staleness across shards.
-- 🔶 **Rebalancing handoff** (`INV-SHARD-14`, open) — the protocol for open
-  subscriptions and pending fates during partition ownership transfer.
-- 🔶 **Intra-shard availability** — orthogonal but multiplied: each shard-core
-  picks consensus replication or restore-from-durable-log.
-- 🔶 The design is sharded authority; the implementation has a singleton global
-  core that is history-complete, has exclusive authority, and maintains a single
-  `GlobalTime` line.
-- 🔶 **Adaptive shard growth.** Slot-based table growth and rendezvous placement
-  need a concrete migration protocol before they can become part of the storage
-  or topology contract.
-- 🔶 **Subscription assembly during migration.** Rebalancing may require
-  dual-subscribe or handoff witnesses so live shapes remain complete while
-  ownership moves.
+- 🔶 [#1781](https://github.com/garden-co/jazz/issues/1781) — Sharding design.

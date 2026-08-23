@@ -131,27 +131,15 @@ not a fallback to one-shot sorting. Prepared graph lowering MUST preserve the
 semantics of every accepted predicate shape and explicitly reject unsupported
 predicate shapes (`INV-LOWER-11`).
 
-🔶 **Open question: how should queries name the physical row id when a schema
-declares an `id` column?** A declared `id` is user data, while every stored row
-also has an engine-owned `RowUuid`. The query language needs one consistent
-answer for addressing that physical identity. `_id` is a possible reserved
-alias, but its contract has not been chosen and its current partial use MUST NOT
-be treated as the final public design.
+The engine-owned `RowUuid` is distinct from a declared `id` user column. Its
+public query spelling is intentionally not standardized yet; see the linked
+open question below rather than treating any current partial alias as API.
 
-Before standardizing an alias, decide all of the following together:
-
-- whether it is accepted everywhere a column operand is accepted, including
-  filters, ordering, aggregates, joins, correlations, reachability, and nested
-  queries;
-- whether it can be selected and appears in returned row shapes, or exists only
-  as an input operand;
-- its exact type and nullability;
-- whether `_id` is reserved and therefore forbidden as a declared column, or
-  how a collision with a user-declared `_id` is resolved;
-- whether bare `id` continues to mean the physical `RowUuid` for legacy schemas
-  that do not declare an `id` column; and
-- whether explicit row-id join APIs remain a separate typed operation or become
-  syntax over the same alias.
+Any eventual alias must jointly define where it is accepted (filters, ordering,
+aggregates, joins, correlations, reachability, and nested queries), whether it
+can be selected, its type and nullability, collisions with declared `_id`, the
+meaning of bare `id` in legacy schemas, and its relationship to typed row-id
+join APIs.
 
 Until this is resolved, implementations MUST preserve the documented declared
 `id` semantics and existing explicit `RowId` operations, and MUST NOT infer a
@@ -220,19 +208,10 @@ into an array-valued literal only when they preserve that array shape. Any
 broader literal-vs-column coercion needs an explicit spec decision before
 implementation.
 
-🔶 **Open question: a subset/superset predicate over array columns.** Rejecting
-a scalar `in` candidate for `Array<T>` is correct, but it is worth naming why
-that shape gets written at all. `in` gives whole-value membership and `contains`
-gives single-element membership; there is currently nothing for "this array
-contains all of these" or "this array is contained by these". A user wanting
-that has no operator to reach for, and `in` with a list of elements is the
-natural wrong guess.
-
-If we add the capability it MUST be an explicit predicate with its own
-semantics — never an implicit reinterpretation of `in` that changes meaning
-depending on whether the column happens to be an array. The value of rejecting
-today is exactly that the gap stays visible, rather than being filled by a
-coercion whose meaning nobody chose (Anselm, 2026-07-29).
+`in` is whole-value membership and `contains` is single-element membership;
+neither is an array subset/superset operator. A scalar `in` candidate for an
+`Array<T>` remains invalid. Any future array-set predicate must be explicit,
+never an implicit reinterpretation of `in`.
 
 ### 6.2 Shapes: validated, content-addressed, schema-stamped
 
@@ -894,85 +873,8 @@ parallel query identities.
 
 ## Open Questions
 
-### Open questions
-
-- 🔶 **Deleted rows in maintained subscriptions and cancellable one-shots.**
-  `includeDeleted` is currently a one-shot-only widening of the root source.
-  Before admitting it on maintained subscriptions, define tombstone transitions
-  explicitly: whether deletion updates or retains a member, which pre-delete
-  values remain observable, how restoration is represented, and how ordering,
-  filtering, joins, and includes behave while the root is deleted. Separately,
-  async one-shot reads need an explicit cancellation/drop contract so callers
-  that abandon a pending read (for example after a UI or test timeout) do not
-  leave query work or waiters alive. Do not emulate cancellation by repeatedly
-  starting uncancellable one-shots, and do not force `includeDeleted` through a
-  subscription until its maintained semantics are decided.
-- 🔶 **Local one-shot reads vs. settled coverage reads.** Ordinary one-shot
-  `all`/`one` reads are local-source reads: at tier `global` they evaluate over
-  the globally durable rows known to the node, and may opportunistically reuse a
-  settled maintained result-set cache when one exists. That cache is not a proof
-  that a partial node has complete remote coverage. Any API that promises
-  remote/settled coverage must request a coverage witness explicitly (for
-  example by attaching/subscribing to the maintained view) and must error or
-  report unsettled state when that witness is absent.
-- 🔶 **Explicit offline fallback for authority-tier subscriptions.** Should an
-  `edge` or `global` subscription optionally expose a clearly marked
-  provisional local result while it awaits its authoritative first snapshot?
-  Today it does not: those tiers remain pending while offline, including after
-  an explicit disconnect. `disconnect()` changes transport availability, not
-  the requested tier semantics. Any future fallback must be an explicit API
-  and must distinguish provisional delivery from the authority-tier result.
-- 🔶 **Multi-hop output-changing relation queries.** Single-hop `hopTo` uses
-  the normalized relation-query path. Define the semantics for multi-hop
-  traversal and `gather`, including their result identity, ordering, and
-  maintained-subscription behavior. They must normalize into the unified row-set
-  program vocabulary rather than own a separate validated/cache identity before
-  TS/WASM/NAPI route `all`/`one`/`subscribeAll` through them.
-- 🔶 **Relay coarser covering shapes.** Upstream subscription collapse onto
-  coarser covering shapes is a design direction, not a current MUST (ch. 8).
-- 🔶 **Non-uuidv7 id creation-order claims.** Ascending row id is the default
-  semantic order for all row ids, but only uuidv7-generated ids carry the
-  creation-time approximation. Caller-supplied ids, deterministic test ids, and
-  any future non-uuidv7 id source must not be documented as creation ordered
-  unless that id source explicitly preserves creation-time ordering.
-- 🔶 **Cross-type id and group-key comparison.** Current row tables use `RowUuid`
-  identity, so default row ordering does not require comparing different id
-  types inside one relation. If future relation-valued outputs can mix id types
-  or grouped outputs can expose heterogeneous key domains at one key position,
-  the spec needs a stable cross-type ordering rule or must reject those shapes.
-- 🔶 **Whether `sum` should widen its result type.** `INV-QUERY-31` currently
-  keeps `sum` at its input width and requires a named overflow error, which is
-  honest but means `sum` over a `U8` column fails at 256 — early enough to be a
-  usability problem rather than a safety one. Postgres widens instead
-  (`int → bigint`, `bigint → numeric`), trading a type surprise for a much later
-  failure. Widening is the likely destination, but it changes the declared
-  descriptor type of every existing `sum`, so it should land as a deliberate
-  cut with the wire and schema consequences priced in, not as a quiet
-  relaxation. What should decide it is whether real schemas aggregate narrow
-  integer columns at all.
-- 🔶 **Aggregate result identity across a table rename.** `INV-QUERY-30`
-  requires aggregate identity to be derived structurally from the group key.
-  The implementation namespaces that derivation by the source table's _name_
-  (`jazz:aggregate-result:v1` + table + group key), so renaming a table changes
-  the identity of every aggregate row over it: a maintained subscription
-  spanning the rename observes a member removal followed by an add rather than
-  continuity. Namespacing itself is necessary — aggregates over different
-  tables must not collide — but the namespace does not have to be the mutable
-  name, and a stable table identity would preserve continuity across a rename.
-  Deferred deliberately (Anselm 2026-08-07): this is the same question
-  multi-schema support must answer for every name-keyed identity, so it should
-  be settled together with that work rather than patched here in isolation.
-- 🔶 **SQL dialect boundary.** Define the first supported SQL subset, parameter
-  syntax, error reporting, and escape-hatch rules, and prove it lowers to the
-  same `Query` contract as the builder DSL.
-- 🔶 **COUNT aggregation.** Add terminal count queries for filtered relations,
-  with reactive `COUNT(*)` as the MVP shape, without adding a separate
-  aggregation result identity outside the query AST.
-- 🔶 **Array-subquery dirty-list dedupe.** The former `array_subquery_tables`
-  backlog noted duplicate `(node, table)` entries. Consumers tolerate duplicates,
-  but deduping the tracking set would reduce mutation-time work and make the
-  maintained path easier to reason about.
-- 🔶 **Correlated subgraph sharing.** Per-outer-row recompilation is correct but
-  too expensive for large result sets. Shared hash-index or prepared-shape based
-  correlated execution should preserve parent binding semantics while avoiding
-  one graph per outer row.
+- 🔶 [#1783](https://github.com/garden-co/jazz/issues/1783) — Read settling, cancellation, offline authority-tier behavior, and relay coverage.
+- 🔶 [#1776](https://github.com/garden-co/jazz/issues/1776) — Query IDs, aggregates, SQL boundary, and ordered windows.
+- 🔶 [#1810](https://github.com/garden-co/jazz/issues/1810) — Typed membership filters and literal coercion boundaries.
+- 🔶 [#1765](https://github.com/garden-co/jazz/issues/1765) — Array subquery maintenance and sharing.
+- 🔶 [#1776](https://github.com/garden-co/jazz/issues/1776) — Public physical-row-id query spelling and array subset/superset predicates.

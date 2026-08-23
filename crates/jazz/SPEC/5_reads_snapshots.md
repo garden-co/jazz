@@ -147,6 +147,4 @@ contract.
 
 ## Open Questions
 
-### Open questions
-
-None.
+- 🔶 [#1783](https://github.com/garden-co/jazz/issues/1783) — Read/snapshot lifecycle semantics.

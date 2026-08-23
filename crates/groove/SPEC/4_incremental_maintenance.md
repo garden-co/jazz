@@ -327,10 +327,5 @@ maintained subscriptions.
 
 ## Open Questions
 
-### Open questions
-
-- 🔶 **Top-k incremental maintenance.** Decide the bounded-window maintenance
-  algorithm for ordered top-k subscriptions, including replacements when a row
-  enters or leaves the top window.
-- 🔶 **Correlated subquery maintenance.** Maintain parent-key to child-row
-  correlation sets incrementally without full child-table re-evaluation.
+- 🔶 [#1776](https://github.com/garden-co/jazz/issues/1776) — Bounded top-k incremental maintenance.
+- 🔶 [#1765](https://github.com/garden-co/jazz/issues/1765) — Correlated subquery maintenance.

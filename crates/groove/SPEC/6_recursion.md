@@ -134,9 +134,4 @@ the final rendered value is grouped (`INV-REC-16`).
 
 ## Open Questions
 
-### Open questions
-
-- 🔶 **Conservative recompute trigger.** A conforming engine MAY recompute more
-  often than strictly necessary while still emitting the same minimal diff
-  (`INV-REC-8`); the implementation recomputes on any table delta against
-  non-empty recursive state.
+- 🔶 [#1786](https://github.com/garden-co/jazz/issues/1786) — Conservative recursive recomputation policy.

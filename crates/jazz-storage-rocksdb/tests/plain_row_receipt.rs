@@ -103,7 +103,7 @@ async fn fresh_open_after_exclusive_drop_with(
 }
 
 #[futures_test::test]
-#[ignore = "manual storage receipt; noisy and host-specific"]
+#[ignore = "#1787: manual storage receipt; noisy and host-specific"]
 async fn plain_row_write_point_scan_and_reopen_receipt() -> Result<(), Box<dyn std::error::Error>> {
     jazz_benchmark_guard::refuse_contaminated_measurement();
     let dir = tempfile::tempdir()?;
