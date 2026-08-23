@@ -248,7 +248,7 @@ describe("jazzAdapter", () => {
     });
 
     it("consumes at most one matching row and returns the deleted row", async () => {
-      const first = await adapter.create<{ id: string; identifier: string }>({
+      const first = await adapter.create({
         model: "verification",
         data: {
           identifier: "shared-credential",
@@ -258,7 +258,7 @@ describe("jazzAdapter", () => {
           updatedAt: new Date(),
         },
       });
-      const second = await adapter.create<{ id: string }>({
+      const second = await adapter.create({
         model: "verification",
         data: {
           identifier: "shared-credential",
@@ -1221,7 +1221,7 @@ describe("jazzAdapter", () => {
             db: () => ctx2.asBackend(wasmSchemaExample),
             schema: wasmSchemaExample,
           })({});
-          const verification = await adapter1.create<{ id: string }>({
+          const verification = await adapter1.create({
             model: "verification",
             data: {
               identifier: "consume-race",
