@@ -515,7 +515,21 @@ function extractLegacyJazz(dir) {
     const records = readJsonl(path.join(dir, item.output_path));
     return records
       .filter((record) => record && typeof record === "object")
-      .map((record) => jazzSimScenarioSummary(record, item.id))
+      .map((record) => {
+        const fallbackScenario = item.id.replace(/^legacy-jazz:/, "");
+        const routeWallUs = Object.entries(record)
+          .filter(([key, value]) => key.endsWith("_us") && key !== "wall_us" && Number.isFinite(Number(value)))
+          .reduce((total, [, value]) => total + Number(value), 0);
+        return jazzSimScenarioSummary(
+          {
+            ...record,
+            scenario: record.scenario ?? fallbackScenario,
+            phase: record.phase ?? "legacy_timing",
+            elapsed_us: record.elapsed_us ?? record.wall_us ?? (routeWallUs || null),
+          },
+          item.id,
+        );
+      })
       .filter((record) => Number.isFinite(record.wall_time_ms));
   });
   if (!scenarios.length) return [];
