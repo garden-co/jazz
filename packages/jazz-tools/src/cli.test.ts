@@ -152,6 +152,29 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
 `;
 }
 
+function rootSchemaWithConventionalProvenance(indexImportPath: string = indexPath): string {
+  return `
+import { schema as s } from ${JSON.stringify(indexImportPath)};
+const schema = { todos: s.table({ title: s.string(), createdAt: s.timestamp() }) };
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
+`;
+}
+
+function rootSchemaWithExternalProvenance(indexImportPath: string = indexPath): string {
+  return `
+import { schema as s } from ${JSON.stringify(indexImportPath)};
+const schema = { imports: s.table({
+  sourceCreatedAt: s.timestamp(),
+  createdAt: s.allowExternalProvenanceName(s.timestamp()),
+  publishedAt: s.timestamp(),
+  assignedBy: s.string(),
+}) };
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
+`;
+}
+
 function rootSchemaWithIndexedTodo(indexImportPath: string = indexPath): string {
   return `
 import { schema as s } from ${JSON.stringify(indexImportPath)};
@@ -620,6 +643,32 @@ describe("resolveEnvVar", () => {
 });
 
 describe("cli validate", () => {
+  it("warns with an exact Jazz provenance replacement", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithConventionalProvenance());
+    const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
+    expect(logs.filter((line) => line.includes("built-in $createdAt"))).toEqual([
+      expect.stringContaining("s.allowExternalProvenanceName(...)"),
+    ]);
+  });
+
+  it("promotes conventional provenance guidance to an error in strict mode", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithConventionalProvenance());
+    await expect(validate({ schemaDir: root, strictProvenance: true })).rejects.toThrow(
+      /forbidden by --strict-provenance[\s\S]*\$createdAt/i,
+    );
+  });
+
+  it("allows explicitly marked external provenance without false positives", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rootSchemaWithExternalProvenance());
+    const { logs } = await captureConsoleLogs(() =>
+      validate({ schemaDir: root, strictProvenance: true }),
+    );
+    expect(logs.filter((line) => line.includes("built-in $"))).toEqual([]);
+  });
+
   it("validates root schema.ts without generating SQL or app artifacts", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());

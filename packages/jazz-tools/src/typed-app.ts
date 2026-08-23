@@ -7,6 +7,7 @@ import type {
   ColumnBuilderValue,
   ColumnTransform,
 } from "./dsl.js";
+import { hasExternalProvenanceNameAllowance } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import type { WasmSchema } from "./drivers/types.js";
 import {
@@ -1186,6 +1187,8 @@ export type App<TSchema extends SchemaLike> = Simplify<
       relations: readonly RelationSeedQuery<TTable>[],
     ): TypedTableQueryBuilder<any, any, any, any>;
     wasmSchema: WasmSchema;
+    /** Authoring metadata retained for local tooling; not a runtime contract. */
+    schemaAst?: SchemaAst;
   }
 >;
 
@@ -1284,7 +1287,9 @@ function definitionToColumns(
   const columns: Column[] = [];
   for (const [columnName, builder] of Object.entries(columnsDefinition)) {
     assertUserColumnNameAllowed(columnName);
-    columns.push(builder._build(columnName));
+    const column = builder._build(columnName);
+    if (hasExternalProvenanceNameAllowance(builder)) column.allowExternalProvenanceName = true;
+    columns.push(column);
   }
   return columns;
 }
@@ -1352,7 +1357,12 @@ export function defineApp(
   const normalizedDefinition = definition as unknown as SchemaDefinition;
   const schema = definitionToSchema(normalizedDefinition);
   const wasmSchema = schemaToWasm(schema);
-  return createAppForTables(Object.keys(normalizedDefinition), wasmSchema, normalizedDefinition);
+  return createAppForTables(
+    Object.keys(normalizedDefinition),
+    wasmSchema,
+    normalizedDefinition,
+    schema,
+  );
 }
 
 /**
@@ -1415,6 +1425,7 @@ function createAppForTables(
   tableNames: readonly string[],
   wasmSchema: WasmSchema,
   definition?: SchemaDefinition,
+  schemaAst?: SchemaAst,
 ): App<Schema<SchemaDefinition>> {
   registeredWasmSchema = wasmSchema;
   const tables = {} as Record<string, TypedTableQueryBuilder<any>>;
@@ -1444,6 +1455,7 @@ function createAppForTables(
       return builder;
     },
     wasmSchema,
+    schemaAst,
   } as App<Schema<SchemaDefinition>>;
 }
 

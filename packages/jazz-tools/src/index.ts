@@ -7,6 +7,7 @@ import {
   migrate,
   resetCollectedState,
   table,
+  allowExternalProvenanceName,
 } from "./dsl.js";
 import { defineMigration, renameTableFrom } from "./migrations.js";
 import { definePermissions } from "./permissions/index.js";
@@ -37,6 +38,7 @@ export {
   getCollectedSchema,
   getCollectedMigration,
   resetCollectedState,
+  allowExternalProvenanceName,
 } from "./dsl.js";
 export type {
   Schema as SchemaAst,
@@ -168,6 +170,7 @@ type RuntimeSchemaNamespace = typeof col & {
   defineMigration: typeof defineMigration;
   renameTableFrom: typeof renameTableFrom;
   definePermissions: typeof definePermissions;
+  allowExternalProvenanceName: typeof allowExternalProvenanceName;
 };
 
 export const schema: RuntimeSchemaNamespace = Object.assign({}, col, {
@@ -178,6 +181,7 @@ export const schema: RuntimeSchemaNamespace = Object.assign({}, col, {
   defineMigration,
   renameTableFrom,
   definePermissions,
+  allowExternalProvenanceName,
 } as const);
 
 export namespace schema {
