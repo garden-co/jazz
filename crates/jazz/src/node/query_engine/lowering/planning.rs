@@ -6,6 +6,11 @@
 
 use super::*;
 
+/// Bound the normalized row-set tree before recursive analysis constructs an
+/// owned plan.  This keeps malformed or adversarial query/policy programs
+/// from exhausting the server stack in analysis, traversal, or destruction.
+pub(super) const MAX_ROW_SET_NESTING_DEPTH: usize = 256;
+
 #[derive(Clone, Debug)]
 pub(super) struct LinearCurrentRoot {
     pub(super) root: LinearRoot,
@@ -204,6 +209,12 @@ pub(super) fn analyze_query_plan(
 ) -> Result<AnalyzedQueryPlan, Vec<UnsupportedReason>> {
     let mut gaps = Vec::new();
 
+    if let Err(gap) =
+        validate_row_set_nesting(&request.input.shape.root, &request.input.shape.nodes)
+    {
+        return Err(vec![gap]);
+    }
+
     if !request.reads.fact_reads.is_empty() {
         gaps.push(UnsupportedReason::Source(SourceGap::TransactionReadOverlay));
     }
@@ -233,6 +244,73 @@ pub(super) fn analyze_query_plan(
     }
 
     if gaps.is_empty() { Ok(plan) } else { Err(gaps) }
+}
+
+fn validate_row_set_nesting(
+    root: &RowSetNodeId,
+    nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
+) -> Result<(), UnsupportedReason> {
+    let mut pending = vec![(root.clone(), false)];
+    let mut active = BTreeSet::new();
+    let mut heights = BTreeMap::<RowSetNodeId, usize>::new();
+    while let Some((node_id, expanded)) = pending.pop() {
+        if heights.contains_key(&node_id) {
+            continue;
+        }
+        let node = nodes.get(&node_id).ok_or_else(|| {
+            UnsupportedReason::Operator(format!("row-set node {node_id:?} is missing"))
+        })?;
+        let children: Vec<RowSetNodeId> = match node {
+            RowSetExpr::Source { .. }
+            | RowSetExpr::ValueSource { .. }
+            | RowSetExpr::FrontierSource { .. } => Vec::new(),
+            RowSetExpr::Filter { input, .. }
+            | RowSetExpr::Distinct { input, .. }
+            | RowSetExpr::Project { input, .. }
+            | RowSetExpr::OrderBy { input, .. }
+            | RowSetExpr::Slice { input, .. }
+            | RowSetExpr::Aggregate { input, .. } => vec![input.clone()],
+            RowSetExpr::Join { left, right, .. } => vec![left.clone(), right.clone()],
+            RowSetExpr::RecursiveRelation { seed, step, .. } => vec![seed.clone(), step.clone()],
+            RowSetExpr::Union { inputs } => inputs.iter().map(|input| input.node.clone()).collect(),
+            RowSetExpr::CorrelatedPathProjection {
+                input, child_input, ..
+            } => vec![input.clone(), child_input.clone()],
+        };
+        if expanded {
+            active.remove(&node_id);
+            let height = 1 + children
+                .iter()
+                .filter_map(|child| heights.get(child))
+                .copied()
+                .max()
+                .unwrap_or(0);
+            if height > MAX_ROW_SET_NESTING_DEPTH {
+                return Err(UnsupportedReason::Operator(format!(
+                    "row-set nesting depth exceeds MAX_ROW_SET_NESTING_DEPTH ({MAX_ROW_SET_NESTING_DEPTH})"
+                )));
+            }
+            heights.insert(node_id, height);
+            continue;
+        }
+        if !active.insert(node_id.clone()) {
+            return Err(UnsupportedReason::Operator(format!(
+                "row-set nesting contains a cycle at node {node_id:?}"
+            )));
+        }
+        pending.push((node_id, true));
+        for child in children.into_iter().rev() {
+            if active.contains(&child) {
+                return Err(UnsupportedReason::Operator(format!(
+                    "row-set nesting contains a cycle at node {child:?}"
+                )));
+            }
+            if !heights.contains_key(&child) {
+                pending.push((child, false));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn validate_output_capabilities(
@@ -944,12 +1022,7 @@ fn analyze_current_node(
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
     visited: &mut BTreeSet<RowSetNodeId>,
 ) -> Result<(LinearRoot, Vec<LinearStep>), UnsupportedReason> {
-    if !visited.insert(node_id.clone()) {
-        return Err(UnsupportedReason::Operator(format!(
-            "shared row-set subgraphs are not lowered yet (node revisited): {:?}",
-            node_id
-        )));
-    }
+    visited.insert(node_id.clone());
     let Some(node) = nodes.get(node_id) else {
         return Err(UnsupportedReason::Operator(format!(
             "row-set node {:?} is missing",
@@ -1065,6 +1138,7 @@ pub(super) fn analyze_relation_input_node(
     nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
     visited: &mut BTreeSet<RowSetNodeId>,
 ) -> Result<RelationInputPlan, UnsupportedReason> {
+    validate_row_set_nesting(node_id, nodes)?;
     let Some(node) = nodes.get(node_id) else {
         return Err(UnsupportedReason::Operator(format!(
             "row-set node {:?} is missing",
@@ -1074,12 +1148,7 @@ pub(super) fn analyze_relation_input_node(
 
     match node {
         RowSetExpr::Union { inputs } => {
-            if !visited.insert(node_id.clone()) {
-                return Err(UnsupportedReason::Operator(format!(
-                    "shared row-set subgraphs are not lowered yet (node revisited): {:?}",
-                    node_id
-                )));
-            }
+            visited.insert(node_id.clone());
             analyze_union(inputs, nodes, visited).map(RelationInputPlan::Union)
         }
         RowSetExpr::RecursiveRelation {
@@ -1090,12 +1159,7 @@ pub(super) fn analyze_relation_input_node(
             dedupe_keys,
             bound,
         } => {
-            if !visited.insert(node_id.clone()) {
-                return Err(UnsupportedReason::Operator(format!(
-                    "shared row-set subgraphs are not lowered yet (node revisited): {:?}",
-                    node_id
-                )));
-            }
+            visited.insert(node_id.clone());
             let seed = analyze_linear_subplan(seed, nodes, visited)?;
             let step = analyze_linear_subplan(step, nodes, visited)?;
             Ok(RelationInputPlan::Recursive(RecursiveRelationPlan {
@@ -1269,5 +1333,134 @@ fn validate_step_order(steps: &[LinearStep], gaps: &mut Vec<UnsupportedReason>) 
                 seen_aggregate = true;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod nesting_tests {
+    use super::*;
+
+    fn nested_relation_shapes(depth: usize) -> (RowSetNodeId, BTreeMap<RowSetNodeId, RowSetExpr>) {
+        let mut nodes = BTreeMap::new();
+        let leaf = RowSetNodeId("leaf".to_owned());
+        nodes.insert(
+            leaf.clone(),
+            RowSetExpr::ValueSource {
+                shape: "test".to_owned(),
+                columns: Vec::new(),
+                mode: ValueSourceMode::Inline,
+            },
+        );
+        let mut input = leaf.clone();
+        for index in 1..depth {
+            let node = RowSetNodeId(format!("nested-{index}"));
+            let side = RowSetNodeId(format!("side-{index}"));
+            nodes.insert(
+                side.clone(),
+                RowSetExpr::ValueSource {
+                    shape: format!("side-{index}"),
+                    columns: Vec::new(),
+                    mode: ValueSourceMode::Inline,
+                },
+            );
+            let expression = match index % 3 {
+                0 => RowSetExpr::Join {
+                    left: input,
+                    right: side,
+                    mode: JoinMode::Semi,
+                    on: PredicateExpr::True,
+                },
+                1 => RowSetExpr::Union {
+                    inputs: vec![UnionInput {
+                        node: input,
+                        label: format!("arm-{index}"),
+                    }],
+                },
+                _ => {
+                    let frontier = FrontierId(format!("frontier-{index}"));
+                    RowSetExpr::RecursiveRelation {
+                        seed: input,
+                        step: side,
+                        frontier: frontier.clone(),
+                        frontier_key: NormalizedValueRef::FrontierColumn {
+                            frontier,
+                            field: "key".to_owned(),
+                        },
+                        dedupe_keys: Vec::new(),
+                        bound: RecursionBound::MaxDepth(1),
+                    }
+                }
+            };
+            nodes.insert(node.clone(), expression);
+            input = node;
+        }
+        (input, nodes)
+    }
+
+    #[test]
+    fn row_set_nesting_accepts_the_limit_and_rejects_the_next_level() {
+        let (accepted_root, accepted_nodes) = nested_relation_shapes(MAX_ROW_SET_NESTING_DEPTH);
+        validate_row_set_nesting(&accepted_root, &accepted_nodes).expect("depth limit is accepted");
+
+        let (rejected_root, rejected_nodes) = nested_relation_shapes(MAX_ROW_SET_NESTING_DEPTH + 1);
+        let error = validate_row_set_nesting(&rejected_root, &rejected_nodes)
+            .expect_err("depth beyond limit is rejected");
+        assert!(
+            matches!(error, UnsupportedReason::Operator(message) if message.contains("MAX_ROW_SET_NESTING_DEPTH (256)"))
+        );
+    }
+
+    #[test]
+    fn row_set_nesting_and_analysis_accept_a_shared_child_diamond() {
+        let leaf = RowSetNodeId("shared".to_owned());
+        let root = RowSetNodeId("root".to_owned());
+        let nodes = BTreeMap::from([
+            (
+                leaf.clone(),
+                RowSetExpr::ValueSource {
+                    shape: "test".to_owned(),
+                    columns: Vec::new(),
+                    mode: ValueSourceMode::Inline,
+                },
+            ),
+            (
+                root.clone(),
+                RowSetExpr::Join {
+                    left: leaf.clone(),
+                    right: leaf,
+                    mode: JoinMode::Semi,
+                    on: PredicateExpr::True,
+                },
+            ),
+        ]);
+        validate_row_set_nesting(&root, &nodes).expect("shared DAG is valid");
+        analyze_relation_input_node(&root, &nodes, &mut BTreeSet::new())
+            .expect("shared DAG is duplicated into the owned analysis plan");
+    }
+
+    #[test]
+    fn row_set_nesting_rejects_an_active_path_cycle() {
+        let root = RowSetNodeId("cycle".to_owned());
+        let nodes = BTreeMap::from([(
+            root.clone(),
+            RowSetExpr::Project {
+                input: root.clone(),
+                columns: Vec::new(),
+            },
+        )]);
+        let error = validate_row_set_nesting(&root, &nodes).expect_err("cycle is invalid");
+        assert!(
+            matches!(error, UnsupportedReason::Operator(message) if message.contains("row-set nesting contains a cycle"))
+        );
+    }
+
+    #[test]
+    fn direct_relation_analysis_enforces_the_nesting_limit() {
+        let (root, nodes) = nested_relation_shapes(MAX_ROW_SET_NESTING_DEPTH + 1);
+        let error = analyze_relation_input_node(&root, &nodes, &mut BTreeSet::new())
+            .expect_err("closure callers must receive the nesting diagnostic");
+        assert!(
+            matches!(error, UnsupportedReason::Operator(message) if message.contains("MAX_ROW_SET_NESTING_DEPTH (256)"))
+        );
     }
 }

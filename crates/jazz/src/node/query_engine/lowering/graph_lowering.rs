@@ -395,6 +395,69 @@ pub(super) fn lower_relation_input(
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
+    let mut lowered = BTreeMap::new();
+    for input in relation_input_postorder(plan) {
+        let output = lower_relation_input_cached(input, resolved_sources, request, &lowered)?;
+        lowered.insert(relation_input_key(input), output);
+    }
+    lowered
+        .remove(&relation_input_key(plan))
+        .ok_or_else(|| UnsupportedReason::Runtime("relation input was not lowered".to_owned()))
+}
+
+/// Relation inputs are nested by policy joins.  Lower them in postorder so a
+/// recursive policy graph is compiled iteratively rather than consuming the
+/// server shell stack through nested `lower_relation_input` calls.
+fn relation_input_postorder(root: &RelationInputPlan) -> Vec<&RelationInputPlan> {
+    let mut pending = vec![(root, false)];
+    let mut ordered = Vec::new();
+    while let Some((plan, visited)) = pending.pop() {
+        if visited {
+            ordered.push(plan);
+            continue;
+        }
+        pending.push((plan, true));
+        match plan {
+            RelationInputPlan::Linear(linear) => {
+                for step in linear.steps.iter().rev() {
+                    if let LinearStep::Join { right, .. } = step {
+                        pending.push((right, false));
+                    }
+                }
+            }
+            RelationInputPlan::Union(union) => {
+                for branch in union.branches.iter().rev() {
+                    pending.push((&branch.plan, false));
+                }
+            }
+            RelationInputPlan::Recursive(relation) => {
+                for step in relation
+                    .step
+                    .steps
+                    .iter()
+                    .rev()
+                    .chain(relation.seed.steps.iter().rev())
+                {
+                    if let LinearStep::Join { right, .. } = step {
+                        pending.push((right, false));
+                    }
+                }
+            }
+        }
+    }
+    ordered
+}
+
+fn relation_input_key(plan: &RelationInputPlan) -> usize {
+    std::ptr::from_ref(plan).addr()
+}
+
+fn lower_relation_input_cached(
+    plan: &RelationInputPlan,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+    lowered: &BTreeMap<usize, LoweredRelationInput>,
+) -> Result<LoweredRelationInput, UnsupportedReason> {
     match plan {
         RelationInputPlan::Linear(linear) => {
             let source_id = linear.root.source().ok_or_else(|| {
@@ -403,16 +466,18 @@ pub(super) fn lower_relation_input(
             let source = resolved_sources.get(source_id).cloned().ok_or_else(|| {
                 UnsupportedReason::Runtime(format!("join source {:?} was not resolved", source_id))
             })?;
-            lower_linear_plan_steps(
+            lower_linear_plan_steps_cached(
                 source.graph.clone(),
                 linear,
                 &source,
                 resolved_sources,
                 request,
+                Some(lowered),
+                Some(linear),
             )
         }
         RelationInputPlan::Union(union) => {
-            lower_union_relation_input(union, resolved_sources, request)
+            lower_union_relation_input_cached(union, resolved_sources, request, lowered)
         }
         RelationInputPlan::Recursive(relation) => {
             let source_id = relation.root_source().ok_or_else(|| {
@@ -426,7 +491,14 @@ pub(super) fn lower_relation_input(
                     source_id
                 ))
             })?;
-            lower_recursive_relation(None, relation, &source, resolved_sources, request)
+            lower_recursive_relation_cached(
+                None,
+                relation,
+                &source,
+                resolved_sources,
+                request,
+                Some(lowered),
+            )
         }
     }
 }
@@ -439,29 +511,42 @@ fn lower_union_relation_input(
     lower_union_relation_input_with_prefix(union, resolved_sources, request, None)
 }
 
+fn lower_union_relation_input_cached(
+    union: &UnionPlan,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+    lowered: &BTreeMap<usize, LoweredRelationInput>,
+) -> Result<LoweredRelationInput, UnsupportedReason> {
+    lower_union_relation_input_with_prefix_cached(
+        union,
+        resolved_sources,
+        request,
+        None,
+        Some(lowered),
+    )
+}
+
 fn lower_union_relation_input_with_prefix(
     union: &UnionPlan,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
     prefix: Option<&str>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
-    let mut lowered = Vec::new();
-    for branch in &union.branches {
-        let label = prefix.map_or_else(
-            || branch.label.clone(),
-            |prefix| format!("{prefix}\u{0}{}", branch.label),
-        );
-        let linear = match &branch.plan {
+    lower_union_relation_input_with_prefix_cached(union, resolved_sources, request, prefix, None)
+}
+
+fn lower_union_relation_input_with_prefix_cached(
+    union: &UnionPlan,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+    prefix: Option<&str>,
+    lowered: Option<&BTreeMap<usize, LoweredRelationInput>>,
+) -> Result<LoweredRelationInput, UnsupportedReason> {
+    let mut outputs = Vec::new();
+    for (plan, label) in union_branch_plans_with_labels(union, prefix) {
+        let linear = match plan {
             RelationInputPlan::Linear(linear) => linear,
-            RelationInputPlan::Union(nested) => {
-                lowered.push(lower_union_relation_input_with_prefix(
-                    nested,
-                    resolved_sources,
-                    request,
-                    Some(&label),
-                )?);
-                continue;
-            }
+            RelationInputPlan::Union(_) => unreachable!("nested unions are flattened above"),
             RelationInputPlan::Recursive(_) => {
                 return Err(UnsupportedReason::Operator(
                     "recursive UNION ALL join arms lack a stable finite occurrence carrier"
@@ -487,12 +572,14 @@ fn lower_union_relation_input_with_prefix(
                 value: NormalizedValueRef::RowId(RowIdRef::Source(source_id.clone())),
             });
         }
-        let mut output = lower_linear_plan_steps(
+        let mut output = lower_linear_plan_steps_cached(
             source.graph.clone(),
             &retained,
             source,
             resolved_sources,
             request,
+            lowered,
+            Some(linear),
         )?;
         if !output.fields.contains("__union_occurrence_row") {
             let row_field = &source.row_shape.row_uuid_field;
@@ -523,9 +610,45 @@ fn lower_union_relation_input_with_prefix(
             "__union_occurrence_arm".to_owned(),
             "__union_occurrence_row".to_owned(),
         ));
-        lowered.push(output);
+        outputs.push(output);
     }
-    lower_union_inputs(lowered, request)
+    lower_union_inputs(outputs, request)
+}
+
+/// Flatten nested UNION ALL inputs without using the call stack.  The complete
+/// path label remains the occurrence carrier for each leaf arm.
+fn union_branch_plans_with_labels<'a>(
+    union: &'a UnionPlan,
+    prefix: Option<&str>,
+) -> Vec<(&'a RelationInputPlan, String)> {
+    let mut leaves = Vec::new();
+    let mut pending = union
+        .branches
+        .iter()
+        .rev()
+        .map(|branch| {
+            let label = prefix.map_or_else(
+                || branch.label.clone(),
+                |prefix| format!("{prefix}\u{0}{}", branch.label),
+            );
+            (&branch.plan, label)
+        })
+        .collect::<Vec<_>>();
+    while let Some((plan, label)) = pending.pop() {
+        match plan {
+            RelationInputPlan::Union(nested) => pending.extend(
+                nested
+                    .branches
+                    .iter()
+                    .rev()
+                    .map(|branch| (&branch.plan, format!("{label}\u{0}{}", branch.label))),
+            ),
+            RelationInputPlan::Linear(_) | RelationInputPlan::Recursive(_) => {
+                leaves.push((plan, label))
+            }
+        }
+    }
+    leaves
 }
 
 fn lower_union_plan(
@@ -753,6 +876,24 @@ fn lower_recursive_relation(
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
+    lower_recursive_relation_cached(
+        root_graph,
+        relation,
+        root_source,
+        resolved_sources,
+        request,
+        None,
+    )
+}
+
+fn lower_recursive_relation_cached(
+    root_graph: Option<GraphBuilder>,
+    relation: &RecursiveRelationPlan,
+    root_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+    lowered: Option<&BTreeMap<usize, LoweredRelationInput>>,
+) -> Result<LoweredRelationInput, UnsupportedReason> {
     let seed_root_source = relation
         .seed_source()
         .and_then(|source| resolved_sources.get(source));
@@ -760,12 +901,14 @@ fn lower_recursive_relation(
     let seed_graph = seed_root
         .or(root_graph)
         .unwrap_or_else(|| root_source.graph.clone());
-    let seed = lower_linear_plan_steps(
+    let seed = lower_linear_plan_steps_cached(
         seed_graph,
         &relation.seed,
         seed_root_source.unwrap_or(root_source),
         resolved_sources,
         request,
+        lowered,
+        None,
     )?;
     let step_source_id = relation.step_source().ok_or_else(|| {
         UnsupportedReason::Operator("recursive step must include a table source".to_owned())
@@ -776,12 +919,14 @@ fn lower_recursive_relation(
             step_source_id
         ))
     })?;
-    let step = lower_linear_plan_steps(
+    let step = lower_linear_plan_steps_cached(
         step_source.graph.clone(),
         &relation.step,
         step_source,
         resolved_sources,
         request,
+        lowered,
+        None,
     )?;
     let max_iters = match relation.bound {
         RecursionBound::Fixpoint => FIXPOINT_MAX_ITERS,
@@ -814,6 +959,26 @@ fn lower_linear_plan_steps(
     root_source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
     request: &QueryProgramRequest,
+) -> Result<LoweredRelationInput, UnsupportedReason> {
+    lower_linear_plan_steps_cached(
+        graph,
+        plan,
+        root_source,
+        resolved_sources,
+        request,
+        None,
+        None,
+    )
+}
+
+fn lower_linear_plan_steps_cached(
+    graph: GraphBuilder,
+    plan: &LinearCurrentRoot,
+    root_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+    lowered: Option<&BTreeMap<usize, LoweredRelationInput>>,
+    cache_plan: Option<&LinearCurrentRoot>,
 ) -> Result<LoweredRelationInput, UnsupportedReason> {
     let mut graph = match &plan.root {
         LinearRoot::Source { .. } => graph,
@@ -896,7 +1061,25 @@ fn lower_linear_plan_steps(
                         "join_via only lowers inner/semi joins".to_owned(),
                     ));
                 }
-                let lowered_right = lower_relation_input(right, resolved_sources, request)?;
+                let lowered_right = match lowered {
+                    Some(lowered) => lowered
+                        .get(&relation_input_key(
+                            cache_plan
+                                .and_then(|plan| plan.steps.get(step_index))
+                                .and_then(|step| match step {
+                                    LinearStep::Join { right, .. } => Some(right.as_ref()),
+                                    _ => None,
+                                })
+                                .unwrap_or(right),
+                        ))
+                        .cloned()
+                        .ok_or_else(|| {
+                            UnsupportedReason::Runtime(
+                                "join relation input was not lowered".to_owned(),
+                            )
+                        })?,
+                    None => lower_relation_input(right, resolved_sources, request)?,
+                };
                 let (left_keys, right_keys) = lower_linear_join_key_pairs(
                     on,
                     &plan.root,
