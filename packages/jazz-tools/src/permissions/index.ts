@@ -53,7 +53,7 @@ const CREATOR_CONDITION = {
   op: "Eq",
   value: {
     type: "SessionRef",
-    path: ["user_id"],
+    path: ["author"],
   },
 } satisfies PolicyExpr;
 
@@ -658,6 +658,9 @@ export type WhereInputOrCallback<WhereInput, Row> =
   | ((row: RowContext<Row>) => WhereInput | Condition);
 
 export type SessionContext = Record<string, SessionRefValue> & {
+  /** Reserved canonical JSON `[iss,sub]` author used by provenance columns. */
+  readonly author: SessionRefValue;
+  /** Raw admitted provider subject/user id; use for application owner columns. */
   readonly user_id: SessionRefValue;
   readonly userId: SessionRefValue;
   readonly authMode: SessionRefValue;

@@ -153,6 +153,8 @@ pub struct AuthHandshake {
 /// Admitted session binding for a transport.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AdmittedSession {
+    /// Trusted issuer paired with `subject` to derive the logical author.
+    pub issuer: String,
     /// Auth subject from the accepted credential.
     pub subject: String,
     /// Deterministic Jazz author identity derived from `subject`.
@@ -241,14 +243,15 @@ pub fn admit_static_bearer_with_claims(
             "sub must be non-empty".to_owned(),
         ));
     }
+    let issuer = match source {
+        AdmissionSource::Anonymous => ANONYMOUS_ISSUER,
+        _ => STATIC_BEARER_ISSUER,
+    };
+    let author = AuthorSubject::reserved(issuer, &subject)?;
+    let claims = admitted_session_claims(issuer, &subject, author, claims);
     Ok(AdmittedSession {
-        author: AuthorSubject::reserved(
-            match source {
-                AdmissionSource::Anonymous => ANONYMOUS_ISSUER,
-                _ => STATIC_BEARER_ISSUER,
-            },
-            &subject,
-        )?,
+        issuer: issuer.to_owned(),
+        author,
         subject,
         claims,
         source,
@@ -277,10 +280,16 @@ pub fn admit_bearer_jwt(
     }
     let issuer = decoded.claims.iss;
     let subject = decoded.claims.sub;
-    let mut claims = jwt_json_claims_to_policy_claims(decoded.claims.extra)?;
-    claims.insert("sub".to_owned(), Value::String(subject.clone()));
+    let author = author_subject_from_issuer_and_subject(&issuer, &subject)?;
+    let claims = admitted_session_claims(
+        &issuer,
+        &subject,
+        author,
+        jwt_json_claims_to_policy_claims(decoded.claims.extra)?,
+    );
     Ok(AdmittedSession {
-        author: author_subject_from_issuer_and_subject(&issuer, &subject)?,
+        issuer,
+        author,
         subject,
         claims,
         source,
@@ -344,18 +353,41 @@ pub fn admit_local_first_jwt(
         }
     }
     let subject = decoded.claims.sub;
-    let mut claims = jwt_json_claims_to_policy_claims(decoded.claims.extra)?;
-    claims.insert("sub".to_owned(), Value::String(subject.clone()));
-    claims.insert(
-        "iss".to_owned(),
-        Value::String(LOCAL_FIRST_JWT_ISSUER.to_owned()),
+    let author = AuthorSubject::reserved(LOCAL_FIRST_JWT_ISSUER, &subject)?;
+    let claims = admitted_session_claims(
+        LOCAL_FIRST_JWT_ISSUER,
+        &subject,
+        author,
+        jwt_json_claims_to_policy_claims(decoded.claims.extra)?,
     );
     Ok(AdmittedSession {
-        author: AuthorSubject::reserved(LOCAL_FIRST_JWT_ISSUER, &subject)?,
+        issuer: LOCAL_FIRST_JWT_ISSUER.to_owned(),
+        author,
         subject,
         claims,
         source: AdmissionSource::LocalFirstJwt,
     })
+}
+
+/// Inject the trusted session vocabulary once after provider claims are
+/// admitted. Provider `sub` maps to the documented raw `user_id`; `author` is
+/// the distinct reserved canonical `[iss,sub]` logical identity.
+pub fn admitted_session_claims(
+    issuer: &str,
+    subject: &str,
+    author: AuthorSubject,
+    mut claims: BTreeMap<String, Value>,
+) -> BTreeMap<String, Value> {
+    claims.insert("iss".to_owned(), Value::String(issuer.to_owned()));
+    claims.insert("issuer".to_owned(), Value::String(issuer.to_owned()));
+    claims.insert("subject".to_owned(), Value::String(subject.to_owned()));
+    claims.insert("sub".to_owned(), Value::String(subject.to_owned()));
+    claims.insert("user_id".to_owned(), Value::String(subject.to_owned()));
+    claims.insert(
+        "author".to_owned(),
+        Value::String(author.canonical().to_owned()),
+    );
+    claims
 }
 
 fn jwt_decoding_key(verifier: &JwtVerifierConfig) -> Result<DecodingKey, AuthAdmissionError> {

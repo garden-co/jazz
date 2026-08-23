@@ -206,10 +206,10 @@ const createdByApp = schema.defineApp({
 });
 
 const createdByPermissions = schema.definePermissions(createdByApp, ({ policy, session }) => {
-  policy.todos.allowRead.where({ $createdBy: session.user_id });
+  policy.todos.allowRead.where({ $createdBy: session.author });
   policy.todos.allowInsert.always();
-  policy.todos.allowUpdate.where({ $createdBy: session.user_id });
-  policy.todos.allowDelete.where({ $createdBy: session.user_id });
+  policy.todos.allowUpdate.where({ $createdBy: session.author });
+  policy.todos.allowDelete.where({ $createdBy: session.author });
 });
 
 type Chat = RowOf<typeof app.chats>;
