@@ -19,7 +19,8 @@ The CLI will:
 1. Fetch the starter template into `my-app/`.
 2. Resolve any `workspace:*` dependency ranges to concrete npm versions.
 3. Initialise a git repository with an initial commit.
-4. Run `install` using your detected package manager.
+4. Install project-local Jazz guidance at `.agents/skills/jazz/` for compatible coding agents.
+5. Run `install` using your detected package manager.
 
 ## Starters
 

@@ -1,0 +1,15 @@
+---
+title: Agent skills
+description: Project-local guidance installed by create-jazz for coding agents working in a Jazz app.
+---
+
+`create-jazz` installs a concise Jazz skill bundle at `.agents/skills/jazz/` in every new app.
+Compatible coding agents discover it from the project, then load only the reference relevant to the
+current task: application data, schemas and permissions, authentication, or testing.
+
+The bundle deliberately links to the canonical public documentation instead of packaging a copied
+API reference. It tells an agent to treat the installed `jazz-tools` version and the app's existing
+types as authoritative when they differ from current docs.
+
+For an existing app, copy `.agents/skills/jazz/` from a freshly scaffolded Jazz project. Keep the
+bundle project-local so it can be reviewed and updated with the application.

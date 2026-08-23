@@ -4,8 +4,7 @@ import react from "@vitejs/plugin-react";
 /**
  * Vitest configuration for React component/hook tests in react-core.
  * Uses happy-dom and @vitejs/plugin-react.
- * Cannot share the main vitest.config.ts which uses pool:forks and ssr.noExternal:true
- * (required for node:sqlite tests, incompatible with React hooks testing).
+ * This configuration uses happy-dom because it exercises React hooks.
  */
 export default defineConfig({
   plugins: [react()],

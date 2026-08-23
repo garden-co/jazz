@@ -298,7 +298,7 @@ Post-fix full browser run:
   - `dev/gates/ts-wire-codec.sh`: pass.
   - `dev/gates/no-sensitive-data.sh`: pass.
   - `cargo test -p jazz-tools --features test -j 2`: pass.
-  - `pnpm test --filter=jazz-tools --force`: fail in non-browser surfaces under local Node 20. Primary signatures: `node:sqlite` missing, wasm init `fetch failed` / `not implemented... yet...`, and `browser WebSocket is not available`.
+  - `pnpm test --filter=jazz-tools --force`: fail in non-browser surfaces under local Node 20. Primary signatures: wasm init `fetch failed` / `not implemented... yet...`, and `browser WebSocket is not available`.
 - Environment caveat: local shell uses Node `v20.13.1`; package metadata wants `>=22.12`. The suite runs but pnpm prints engine warnings.
 
 Tooling-friction: a browser-suite failure reporter that groups by root error text and records server/transport frame counts per test would have saved most of the websocket wall-clock.
