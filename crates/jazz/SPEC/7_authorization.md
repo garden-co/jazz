@@ -16,7 +16,7 @@ Invariant digest:
 - `INV-BVIEW-18`: Read and write policy MUST use ordinary branch columns and the same effective branch view as the operation; missing reference/policy evidence fails closed, and Jazz MUST NOT impose a built-in branch-row existence or lifecycle gate.
 - `INV-RLS-1`: A non-system commit unit MUST be rejected with Fate::Rejected(RejectionReason::AuthorizationDenied) and MUST NOT ingest accepted version rows when any version in the u...
 - `INV-RLS-2`: AuthorSubject::SYSTEM MUST bypass both read and write policy checks.
-- `INV-RLS-3`: Policy::owneronly(table, column) MUST compare the named column to claim("sub"), where claim("sub") is bound from the authenticated AuthorSubject, not from caller-provided q...
+- `INV-RLS-3`: Policy::owneronly(table, column) MUST compare the named column to claim("author"), where claim("author") is bound from the authenticated AuthorSubject, not from caller-provided q...
 - `INV-RLS-4`: A table policy MUST validate as a query shape rooted at the table that carries the policy.
 - `INV-RLS-5`: Downstream view emission for a non-system peer MUST only add result members, program facts, and version bundles whose relevant content/deletion versions pass that peer...
 - `INV-RLS-6`: Read-policy revocation MUST remove rows from future settled subscription result sets and MUST NOT redact previously delivered local copies from the receiving node.
@@ -94,8 +94,9 @@ their key-derived subject. The portable `AuthorSubject` is the canonical JSON
 encoding of the two-string array `[iss,sub]`, with no whitespace or
 normalization. The same `sub` from two issuers therefore denotes two authors.
 
-That canonical string is the logical value in transactions, provenance, policy
-claims, storage, and sync. Implementations may intern it in memory, but the
+That canonical string is the logical `session.author` value in transactions,
+provenance, policy claims, storage, and sync. It does not replace the admitted
+provider `sub` or `user_id` claims. Implementations may intern it in memory, but the
 intern handle is process-local and has no observable meaning. Provenance
 supports equality, inequality, grouping, and equality-index lookup. It is not
 orderable: applications sort authors by joining the subject through their own
@@ -119,8 +120,8 @@ which refuses an unresolved claim rather than binding it as an allowance. The
 compiler currently lowers equality and inequality, membership/containment,
 boolean composition, columns, literals, and authenticated,
 admission-controlled claims: `Eq`/`Ne`/`In`/`Contains`/`All`/`Any`/`Not` over
-column / literal / `claim(...)`. `claim("sub")` resolves to the authenticated
-`AuthorSubject`. Additional claim names are session claims supplied by the trusted
+column / literal / `claim(...)`. `claim("author")` resolves to the authenticated
+`AuthorSubject`; `claim("sub")` remains the admitted provider subject. Additional claim names are session claims supplied by the trusted
 admission/session layer and must not be client-supplied query bindings. Predicate
 forms the compiler cannot authorize, such as range and null checks, deny until
 explicitly supported.
@@ -207,11 +208,11 @@ attributing a mutation to a user. That **attribution-only** case stores user
 authorship while evaluating policy against the backend identity. Four identities
 are worth keeping distinct:
 
-| identity                            | what it is                                                   | used for                                                            |
-| ----------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------- |
-| `made_by` (author)                  | who a mutation is _attributed_ to (`Transaction.made_by`)    | provenance (`$createdBy`); _not_ necessarily the permission subject |
+| identity                                 | what it is                                                   | used for                                                            |
+| ---------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------- |
+| `made_by` (author)                       | who a mutation is _attributed_ to (`Transaction.made_by`)    | provenance (`$createdBy`); _not_ necessarily the permission subject |
 | authenticated identity (`AuthorSubject`) | who a connection authenticated as                            | the subject read/write policies are evaluated against               |
-| attribution-only                    | a trusted backend authed as itself but attributing to a user | author ≠ permission identity (ch. 9, ch. 13)                        |
+| attribution-only                         | a trusted backend authed as itself but attributing to a user | author ≠ permission identity (ch. 9, ch. 13)                        |
 | `AuthorSubject::SYSTEM`                  | the system identity                                          | bypasses all policies; relay links carry it (§7.3)                  |
 
 At the facade boundary, attributed writes are core-only unless `made_by ==
@@ -369,19 +370,6 @@ policy should be able to distinguish anonymous/local/authenticated/backend/syste
 admission modes through trusted session claims or first-class admission facts;
 client-supplied values must not widen those facts.
 
-### Established permission-introspection boundary
-
-Permission introspection is an authority dry-run API, not a family of magic
-columns. `$can*` columns cannot express can-insert or richer probes. The facade
-methods (`can_insert`, `can_read`, `can_update`, and `can_delete`; ch. 13)
-return `Allowed`, `Denied`, or `Unknown`; only the serving authority may return
-a definitive answer. A local, offline, incomplete, not-ready, or timed-out
-client receives `Unknown`, never a local policy decision. Requests run under
-the authenticated link identity and reveal only an opaque correlation id plus
-the advice value—not supporting rows, policy reasons, or hidden dependency
-facts. Advice is non-mutating and neither reserves nor authorizes a following
-optimistic write (`INV-API-28`).
-
 ## Open Questions
 
 - 🔶 [#1758](https://github.com/garden-co/jazz/issues/1758) — Canonical session subject/authorship and provenance.
@@ -392,3 +380,92 @@ optimistic write (`INV-API-28`).
 - 🔶 [#1762](https://github.com/garden-co/jazz/issues/1762) — Write authorization for read-hidden and inherited rows.
 - 🔶 [#1763](https://github.com/garden-co/jazz/issues/1763) — Bounded, cycle-safe policy graphs.
 - 🔶 [#1779](https://github.com/garden-co/jazz/issues/1779) — Policy replacement across schema evolution.
+
+### Detailed issue context
+
+- **Session/auth model for bindings.** `AuthorSubject` is the runtime
+  permission subject and reserved `claim("author")` value, but the product boundary needs
+  explicit account/user/session/default identity terminology. Define how
+  anonymous/local sessions, authenticated users, trusted backends, system links,
+  and attribution-only writes map to `AuthorSubject`, claims, and link roles.
+- **Admission API.** Server and edge shells need an admission hook that turns
+  connection credentials into a link identity, claims, role, expiry, and optional
+  backend trust. This hook must be the only source for policy claim bindings;
+  client-supplied query bindings must never widen claims (ch. 8, ch. 13).
+- **Admission-controlled claim vocabulary.** `claim("author")` is reserved, and
+  arbitrary runtime session claims are supported, but the product boundary still
+  needs to define which claims are minted by first-party auth integrations,
+  custom admission hooks, trusted backend assertions, and local-only sessions.
+- **Direct-evaluation predicate expansion.** Direct policy evaluation now
+  supports `In` and `Contains` in addition to equality/inequality and boolean
+  composition. Range/null predicates remain fail-closed. Decide whether to add
+  direct support for the remaining query predicates or reject them earlier in
+  policy-specific validation.
+- **Policy replacement across schema evolution.** The current implementation
+  selects the active policy-owning schema independently for each operation: a
+  newer schema replaces a read, insert, update, or delete policy only when it
+  declares the applicable clause; otherwise that operation can continue using
+  the preceding active policy definition. Decide whether this is the intended
+  migration model, or whether every newly activated schema must instead provide
+  a complete replacement policy bundle for every surviving table. A
+  policy-complete model must define whether an omitted clause means public,
+  inherited, or invalid, and catalogue validation must reject ambiguous partial
+  replacements. It must also define what replacement means when a table is
+  renamed, split, copied, or dropped: whether the old table's policy disappears,
+  remains available only for historical/old-schema operations, or must be
+  explicitly mapped or tombstoned by the lineage publication. The decision must
+  preserve deterministic authorization for old authored versions, live clients
+  on older schemas, historical reads, and operation-specific permission advice.
+- **History visibility rule.** Decide whether current-row readability should
+  imply visibility for all historical versions of that row, or whether history
+  sync/read must evaluate read policy per historical cut.
+- **Permission subscriptions and TTL.** Edge mergeable authorization uses
+  upstream permission-scope subscriptions (ch. 9). The current contract is
+  sync-level deduplication and fanout of those scopes; TTL/expiry behavior is a
+  future policy for cache lifetime, not a source of permission truth here.
+- **Write-denial surfacing to clients.** A permission-denied write currently
+  never reaches edge durability and `AsyncWriteHandle.wait({ tier })` hangs
+  instead of rejecting. Clients need a deterministic rejection signal (analogous
+  to `SubscribeRejected` on the read path) so denied writes fail fast. Exposed
+  by the auth example denial tests (both auth examples excluded from CI until
+  this lands; see `dev/CI_NOTES.md` 2026-07-19).
+- **Non-claims session references (`session.authMode`).** Policy conversion
+  supports only `session.user_id` and `session.claims.*`; the betterauth
+  example references `session.authMode`. Decide: promote to a first-class
+  session attribute, or migrate such policies to claims.
+- **String claim validation.** String claim type mismatches in seeded lookups
+  should become loud validation errors instead of depending on runtime
+  empty-result behavior.
+- **Uncorrelated policy `EXISTS`.** Server-shell policy conversion currently
+  rejects `policy.<table>.exists.where({ userId: session.user_id })` when the
+  predicate is used from another table and has no equality against the outer row
+  (`__jazz_outer_row`). Decide whether intentionally uncorrelated membership
+  checks are valid policy atoms, how to bound them, and how to lower them
+  without creating accidental whole-table authority scans. Exposed by
+  `world-tour`'s band-member policy.
+- ✅ **Permission introspection is an authority dry-run API, not magic
+  columns.** `$can*` columns cannot express _can-insert_ or richer probes. The
+  facade methods (`can_insert`, `can_read`, `can_update`, `can_delete`, ch. 13)
+  produce `Allowed`, `Denied`, or `Unknown`; only the serving authority may
+  issue a definitive result. A local, offline, incomplete, not-ready, or timed
+  out client receives `Unknown`, never a local policy decision. Requests are
+  evaluated under the authenticated link identity and return only an opaque
+  correlation id plus the advice value, never supporting rows, policy reasons,
+  or hidden dependency facts. Advice is non-mutating and does not reserve or
+  authorize the ordinary optimistic write that may follow (`INV-API-28`).
+- **Safe local permission fail-fast.** A future client-local `Denied` may be
+  added only when it is mechanically proven that every fact required for that
+  rejection is locally complete (for example, proposed-row or structural facts).
+  Missing policy support is never denial proof. Local `Allowed` remains
+  forbidden without the serving authority.
+- **Policy denial reasons.** Policy clauses should be able to return
+  structured denial reasons suitable for client errors without exposing data
+  from rows the caller cannot read.
+- **Partial schema visibility.** Decide whether schema/catalogue visibility is
+  all-or-nothing per app, scoped by policy, or split into public shape metadata
+  plus protected implementation details.
+- **`NOT(INHERITS)` semantics.** Negative inheritance-style predicates need a
+  precise fail-closed meaning before the DSL exposes them.
+- **Per-column encryption and authorization.** If encrypted columns are added,
+  policy evaluation must define what can be evaluated server-side, what requires
+  client-side keys, and how key loss/revocation interacts with read policy.
