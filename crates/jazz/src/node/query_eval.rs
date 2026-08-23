@@ -704,7 +704,22 @@ where
         } else {
             (shape, binding)
         };
-        let input_shape = self.normalized_row_set_shape(shape, binding)?;
+        let mut input_shape = self.normalized_row_set_shape(shape, binding)?;
+        let settled_window_input = (settled_binding_view.is_some()
+            && shape.query().aggregate.is_none())
+        .then(|| match input_shape.nodes.get(&input_shape.root) {
+            Some(RowSetExpr::Slice { input, .. }) => Some(input.clone()),
+            _ => None,
+        })
+        .flatten();
+        if let Some(input) = settled_window_input {
+            // The settled binding source is the authority-selected result
+            // membership, including LIMIT/OFFSET. Keep evaluating the public
+            // row shape over those members, but do not slice that window a
+            // second time on the client.
+            input_shape.nodes.remove(&input_shape.root);
+            input_shape.root = input;
+        }
         let policy = self.query_program_policy_context(identity);
         let policy_schema_version = self.read_policy_schema_for_table_name(
             &shape.query().table,

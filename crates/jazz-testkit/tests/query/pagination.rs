@@ -32,7 +32,6 @@ local_tokio_test! {
 /// alice ──insert priorities [1, 2, 3, 4]──► server
 /// bob   ──subscribe order asc offset 2 limit 1──► stream add C
 /// ```
-#[ignore = "local query reapplies pagination to the subscription's already-windowed rows"]
 async fn subscribe_all_cold_ordered_subscription_supports_offset_and_limit() {
     let schema = subscription_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
@@ -153,7 +152,6 @@ async fn subscribe_all_cold_ordered_subscription_supports_offset_and_limit() {
 local_tokio_test! {
 /// Verifies that a subscription with `OFFSET` but no `LIMIT`
 /// returns all rows after the requested offset.
-#[ignore = "local query reapplies the offset to the subscription's already-windowed rows"]
 async fn subscribe_all_cold_ordered_subscription_supports_offset_without_limit() {
     let schema = subscription_schema();
     let server = JazzServer::start_with_schema(schema.clone()).await;
@@ -490,7 +488,6 @@ async fn subscribe_all_preserves_sorting_on_sort_key_changes() {
 local_tokio_test! {
 /// Verifies that deleting a row before an offset/limited page shifts the live
 /// window forward and emits the newly visible row.
-#[ignore = "local query reapplies pagination to the subscription's already-windowed rows"]
 async fn subscribe_all_offset_limited_subscription_shifts_window_when_deleting_row_before_window() {
     let pair = ClientPair::start().await;
     let query = jazz::query::Query::from("todos")
@@ -606,7 +603,6 @@ local_tokio_test! {
 /// The writer inserts todos with priorities 1, 2, and 3. Sorted descending that
 /// is [3, 2, 1]; offset 1 skips the highest, limit 1 takes the next. The
 /// subscriber must eventually see exactly the priority-2 row as the sole result.
-#[ignore = "local query reapplies pagination to the subscription's already-windowed rows"]
 async fn subscribe_all_supports_order_by_limit_and_offset() {
     let pair = ClientPair::start().await;
     let query = jazz::query::Query::from("todos")
