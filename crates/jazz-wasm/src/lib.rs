@@ -4385,7 +4385,7 @@ mod dynamic_schema_view_tests {
                 .begin_transaction(
                     bound.to_string(),
                     "exclusive".to_owned(),
-                    Some(alice.0.as_bytes().to_vec()),
+                    Some(alice.canonical().as_bytes().to_vec()),
                 )
                 .unwrap();
             let tx = binding.attach_exclusive_tx(bound.to_string()).unwrap();
@@ -4397,7 +4397,7 @@ mod dynamic_schema_view_tests {
                     .all_in_transaction_for_identity(
                         &query,
                         &tx,
-                        alice.0.as_bytes().to_vec(),
+                        alice.canonical().as_bytes().to_vec(),
                         JsValue::NULL
                     )
                     .is_ok(),
@@ -4417,7 +4417,7 @@ mod dynamic_schema_view_tests {
                 .all_in_transaction_for_identity(
                     &view_query,
                     &tx,
-                    alice.0.as_bytes().to_vec(),
+                    alice.canonical().as_bytes().to_vec(),
                     JsValue::NULL,
                 )
                 .is_ok());
@@ -4429,7 +4429,7 @@ mod dynamic_schema_view_tests {
                     .one_in_transaction_for_identity(
                         &view_query,
                         &tx,
-                        alice.0.as_bytes().to_vec(),
+                        alice.canonical().as_bytes().to_vec(),
                         JsValue::NULL,
                     )
                     .is_ok(),
@@ -4455,7 +4455,7 @@ mod dynamic_schema_view_tests {
                 .begin_transaction(
                     bound.to_string(),
                     "exclusive".to_owned(),
-                    Some(alice.0.as_bytes().to_vec()),
+                    Some(alice.canonical().as_bytes().to_vec()),
                 )
                 .unwrap();
             block_on(other_owner.exclusive_tx_ref(bound).insert_with_id(
@@ -4482,21 +4482,21 @@ mod dynamic_schema_view_tests {
             assert_foreign(other_binding.all_in_transaction_for_identity(
                 &other_query,
                 &tx,
-                alice.0.as_bytes().to_vec(),
+                alice.canonical().as_bytes().to_vec(),
                 JsValue::NULL,
             ));
             assert_foreign(other_binding.one_in_transaction(&other_query, &tx, JsValue::NULL));
             assert_foreign(other_binding.one_in_transaction_for_identity(
                 &other_query,
                 &tx,
-                alice.0.as_bytes().to_vec(),
+                alice.canonical().as_bytes().to_vec(),
                 JsValue::NULL,
             ));
             let error = binding
                 .all_in_transaction_for_identity(
                     &query,
                     &tx,
-                    bob.0.as_bytes().to_vec(),
+                    bob.canonical().as_bytes().to_vec(),
                     JsValue::NULL,
                 )
                 .unwrap_err();
