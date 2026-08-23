@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createFixture } from "../src/fixtures.js";
-import { assertTenantIsolation, tenantOperations } from "../src/scenarios.js";
+import { tenantOperations } from "../src/scenarios.js";
 
 describe("BigLabel public workload fixtures", () => {
   it("is deterministic and keeps an owned slice stable", () => {
@@ -13,6 +13,9 @@ describe("BigLabel public workload fixtures", () => {
   });
   it("asserts foreign-tenant isolation for every supported profile", () => {
     for (const profile of ["smoke", "small", "scaled"] as const)
-      expect(assertTenantIsolation(profile).foreignRows).toBe(0);
+      // This verifies only deterministic fixture construction. Deployed
+      // tenant isolation is covered by authority.server.test.ts, where a
+      // foreign client queries the real edge.
+      expect(tenantOperations(profile).foreignRows).toBe(0);
   });
 });

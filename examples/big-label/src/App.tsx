@@ -24,16 +24,18 @@ function Operations() {
   const { data: memberships = [] } = useAll(
     app.memberships
       .where({ userId: session?.user_id ?? "__none__" })
-      .include({ organization: true }),
+      .include({ organization: true })
+      .limit(50),
   );
   const organization = memberships[0]?.organization as { id: string; name: string } | undefined;
   const { data: artists = [] } = useAll(
-    app.artists.where({ organizationId: organization?.id ?? "__none__" }),
+    app.artists.where({ organizationId: organization?.id ?? "__none__" }).limit(100),
   );
   const { data: releases = [] } = useAll(
     app.releases
       .where({ organizationId: organization?.id ?? "__none__" })
-      .include({ artist: true }),
+      .include({ artist: true })
+      .limit(100),
   );
   if (!organization)
     return (

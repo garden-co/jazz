@@ -2,7 +2,12 @@
 
 BigLabel is a synthetic, multi-tenant record-label operations app. It gives the examples-and-benchmarks program a recognizable SaaS workload: organization membership graphs, teams and roles, indexed tenant lists, artist/release relations, cold loads, and ordinary workflow churn.
 
-Run it locally with `pnpm --dir examples/big-label dev`. The initial UI is deliberately useful without provisioning: it renders a deterministic public `small` fixture while the same `artists.where({ organizationId })` query is attached for a connected Jazz environment.
+Run it locally with `pnpm --dir examples/big-label dev`. It is a small Next.js
+app with its own Better Auth route and JWKS endpoint. After sign-in,
+`POST /api/bootstrap` uses the server-only Jazz backend secret to ensure one
+personal organization and its first admin membership for the stable Better Auth
+user ID. Browser clients never receive that secret; normal membership and
+tenant mutations remain admin-policy checked at the Jazz edge.
 
 ## Fixtures and headless scenarios
 
@@ -14,7 +19,7 @@ Run it locally with `pnpm --dir examples/big-label dev`. The initial UI is delib
 | `small`  | docs and local development                   |
 | `scaled` | larger owned-slice/read-amplification checks |
 
-`tenantOperations()` is framework-neutral. A future topology adapter should execute its declared sequence against a real client/edge/server arrangement: cold-load the membership graph, issue the indexed organization query, hydrate releases with artists, and churn release state. `assertTenantIsolation()` is the minimal receipt assertion: a tenant's visible artist and release results contain no foreign organization rows.
+`tenantOperations()` is framework-neutral. A future topology adapter should execute its declared sequence against a real client/edge/server arrangement: cold-load the membership graph, issue the indexed organization query, hydrate releases with artists, and churn release state. The authority receipt executes the tenant-isolation query against a real local edge; fixture tests do not claim to prove authorization.
 
 Run `pnpm --dir examples/big-label test` for the deterministic fixture and isolation receipt. The workload intentionally describes current public API capabilities only; it does not duplicate `jazz-sim`'s benchmark engine.
 
@@ -28,11 +33,15 @@ All identities, names, and IDs are generated public fixtures; no adopter data is
 
 ## Admission boundary
 
-The first organization is provisioned by a trusted server-side flow that issues
-the `biglabel_admin` JWT claim. The browser never creates that claim, and the
-claim is only an admission capability: after bootstrap, an existing
-organization membership with role `admin` is required for tenant mutations.
-The local-server authority regression covers both paths. Test JWT issuance is
-confined to the Jazz policy-test harness; production deployments must issue the
-claim from their own authenticated provisioning service and keep signing keys
-off the client.
+The first organization is provisioned by the app-owned, authenticated bootstrap
+route—not by a client-settable JWT claim. It retries safely by looking up the
+stable `personal-<external-user-id>` slug after a conflicted exclusive write.
+After bootstrap, ordinary membership insertion requires an existing admin and
+cannot insert the `admin` role directly, so a proposed membership cannot grant
+itself authority. Production deployments must keep `BACKEND_SECRET` and Better
+Auth signing keys server-side.
+
+The deployed cross-tenant assignment denial currently exposes a core graph
+lowering failure rather than `AuthorizationDenied`; this is tracked as
+`CB-012` in the repository correctness burndown. The strict policy and repro
+remain in the example until that failure is fixed.

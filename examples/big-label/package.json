@@ -4,17 +4,21 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "node ../../packages/jazz-tools/dist/cli.js validate && vite build",
+    "dev": "next dev",
+    "build": "node ../../packages/jazz-tools/dist/cli.js validate && next build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "better-auth": "1.6.24",
+    "jazz-napi": "workspace:*",
     "jazz-tools": "workspace:*",
+    "next": "catalog:default",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@types/node": "catalog:default",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "catalog:default",
