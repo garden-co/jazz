@@ -146,6 +146,7 @@ export async function createServer(dataPath?: string): Promise<TodoServer> {
   app.get("/todos/as/:userId", async (req: Request, res: Response, next: NextFunction) => {
     try {
       const userDb = context.forSession({
+        issuer: "https://issuer.jazz.test",
         user_id: req.params.userId,
         authMode: "external",
         claims: {},
