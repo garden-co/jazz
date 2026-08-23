@@ -30,6 +30,18 @@ describe("installJazzSkills", () => {
     ).toContain("https://jazz.tools/docs/reading/queries");
   });
 
+  it("preserves an existing project-local Jazz skill instead of overwriting it", () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "create-jazz-skills-"));
+    temporaryDirectories.push(projectDir);
+    const skillPath = path.join(projectDir, ".agents", "skills", "jazz", "SKILL.md");
+
+    fs.mkdirSync(path.dirname(skillPath), { recursive: true });
+    fs.writeFileSync(skillPath, "custom project guidance\n");
+
+    expect(() => installJazzSkills(projectDir)).toThrow(/Refusing to overwrite existing Jazz/);
+    expect(fs.readFileSync(skillPath, "utf8")).toBe("custom project guidance\n");
+  });
+
   it("links every bundled reference to a current canonical documentation page", () => {
     const referencesDir = path.join(
       repoRoot,

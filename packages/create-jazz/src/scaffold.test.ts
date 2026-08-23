@@ -72,6 +72,49 @@ describe("scaffold() — existing-dir rejection", () => {
   });
 });
 
+describe("scaffold() — agent skill installation failure", () => {
+  let tmpDir: string;
+  let starterDir: string;
+  let previousStarterPath: string | undefined;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "scaffold-agent-skills-"));
+    // resolveLocalDeps intentionally finds the workspace at ../../ from the
+    // local starter. Keep this disposable fixture under starters/ to use the
+    // same path as a real local starter without modifying a tracked fixture.
+    starterDir = fs.mkdtempSync(path.join(repoRoot, "starters", ".test-agent-skills-"));
+    previousStarterPath = process.env.JAZZ_STARTER_PATH;
+  });
+
+  afterEach(() => {
+    if (previousStarterPath === undefined) delete process.env.JAZZ_STARTER_PATH;
+    else process.env.JAZZ_STARTER_PATH = previousStarterPath;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.rmSync(starterDir, { recursive: true, force: true });
+  });
+
+  it("cleans up a partial scaffold so the user can retry after preserving a starter skill", async () => {
+    const targetDir = path.join(tmpDir, "app");
+    fs.cpSync(betterauthStarterPath, starterDir, { recursive: true });
+    const existingSkill = path.join(starterDir, ".agents", "skills", "jazz", "SKILL.md");
+    fs.mkdirSync(path.dirname(existingSkill), { recursive: true });
+    fs.writeFileSync(existingSkill, "starter-specific Jazz guidance\n");
+    process.env.JAZZ_STARTER_PATH = starterDir;
+
+    await expect(
+      scaffold({ appName: "retryable-app", targetDir, pm: null, git: false }),
+    ).rejects.toThrow(/Refusing to overwrite existing Jazz/);
+
+    expect(fs.existsSync(targetDir)).toBe(false);
+    expect(fs.readFileSync(existingSkill, "utf8")).toBe("starter-specific Jazz guidance\n");
+
+    fs.rmSync(path.join(starterDir, ".agents"), { recursive: true, force: true });
+    await scaffold({ appName: "retryable-app", targetDir, pm: null, git: false });
+
+    expect(fs.existsSync(path.join(targetDir, ".agents", "skills", "jazz", "SKILL.md"))).toBe(true);
+  });
+});
+
 describe("scaffold() — next-betterauth e2e via JAZZ_STARTER_PATH", () => {
   withLocalStarter(betterauthStarterPath);
   let tmpDir: string;
