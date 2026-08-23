@@ -655,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_shares_one_relay_per_scope_and_keeps_auth_scopes_apart() {
+    fn relay_shares_one_scope_and_forwards_two_ui_client_writes_upstream() {
         let directory = tempfile::tempdir().unwrap();
         let registry = NativeRelayRegistry::default();
         let first = registry
@@ -683,7 +683,7 @@ mod tests {
                 BTreeMap::new(),
             )
             .unwrap();
-        let second_client = first
+        let second_client = same
             .attach_client(
                 DbIdentity {
                     node: NodeUuid::from_bytes([0xc1; 16]),
@@ -706,7 +706,40 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+        second_client
+            .with_db(|db| {
+                let write = block_on(db.insert_with_id(
+                    "todos",
+                    RowUuid::from_bytes([0xd2; 16]),
+                    BTreeMap::from([("title".to_owned(), Value::String("second".to_owned()))]),
+                ))
+                .map_err(RelayError::Db)?;
+                block_on(write.wait(DurabilityTier::Local)).map_err(RelayError::Db)?;
+                Ok(())
+            })
+            .unwrap();
         first.pump().unwrap();
+        let outbound = first.wire().take_outbound().unwrap();
+        let forwarded_rows = outbound
+            .iter()
+            .filter_map(|message| match message {
+                SyncMessage::CommitUnit { versions, .. } => Some(versions),
+                _ => None,
+            })
+            .flatten()
+            .map(jazz::protocol::VersionRecord::row_uuid)
+            .collect::<Vec<_>>();
+        assert_eq!(forwarded_rows.len(), 2);
+        assert!(forwarded_rows.contains(&RowUuid::from_bytes([0xd1; 16])));
+        assert!(forwarded_rows.contains(&RowUuid::from_bytes([0xd2; 16])));
+        assert_eq!(
+            outbound
+                .iter()
+                .filter(|message| matches!(message, SyncMessage::CommitUnit { .. }))
+                .count(),
+            2,
+            "each in-memory UI client must reach the shared persistent relay and its upstream"
+        );
     }
 
     #[test]
