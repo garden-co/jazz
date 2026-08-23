@@ -26,6 +26,7 @@ const packageBuild = fs.readFileSync(
   "utf8",
 );
 const codspeedWorkflow = fs.readFileSync(path.join(root, ".github/workflows/codspeed.yml"), "utf8");
+const realisticWorkflow = fs.readFileSync(path.join(root, ".github/workflows/benchmarks.yml"), "utf8");
 const benchmarkSmokeGate = fs.readFileSync(path.join(root, "dev/gates/benchmark-smoke.sh"), "utf8");
 const otherWorkflows = fs
   .readdirSync(path.join(root, ".github/workflows"))
@@ -880,9 +881,10 @@ test("CodSpeed runs nightly on main and only for benchmark-labeled PRs", () => {
 test("benchmark correctness is CI-gated while CodSpeed scope stays explicit", () => {
   const workspace = job("test-rust-workspace");
   assert.match(workspace, /name: Benchmark API and deterministic scenario smoke\s+run: dev\/gates\/benchmark-smoke\.sh --ci/);
-  assert.match(benchmarkSmokeGate, /cargo check -p jazz --benches/);
+  assert.match(benchmarkSmokeGate, /cargo check -p jazz --benches --features testing/);
   assert.match(benchmarkSmokeGate, /cargo check -p jazz-sim --benches/);
-  assert.match(benchmarkSmokeGate, /cargo check -p jazz --features testing --bench route_subscription_curve/);
+  assert.match(benchmarkSmokeGate, /cargo metadata --no-deps --format-version 1/);
+  assert.match(benchmarkSmokeGate, /required-features/);
   assert.match(benchmarkSmokeGate, /cargo test -p jazz --features testing --test legacy_benchmark_smoke/);
   assert.match(benchmarkSmokeGate, /cargo test -p jazz-sim --test scenario_smoke/);
   assert.doesNotMatch(benchmarkSmokeGate, /^\s*cargo bench|^\s*.*--release/m);
@@ -890,8 +892,16 @@ test("benchmark correctness is CI-gated while CodSpeed scope stays explicit", ()
     () => assert.match(benchmarkSmokeGate.replace("cargo test -p jazz-sim --test scenario_smoke", "true"), /cargo test -p jazz-sim --test scenario_smoke/),
     /scenario_smoke/,
   );
+  assert.throws(() => assert.match(benchmarkSmokeGate.replace(".[\"required-features\"][]?", ""), /required-features/), /required-features/);
+});
+
+test("realistic timing retains every retired legacy smoke suite", () => {
+  for (const bench of ["cold_subscription", "sync", "validation", "relation_include_delivery", "route_subscription_curve", "micro", "s8_branch_views"]) {
+    assert.match(realisticWorkflow, new RegExp(`--bench ${bench}(?: |\\n|$)`));
+  }
+  assert.match(realisticWorkflow, /Run legacy Jazz timing suites/);
   assert.throws(
-    () => assert.match(benchmarkSmokeGate.replace("cargo check -p jazz --features testing --bench route_subscription_curve", "true"), /--features testing --bench route_subscription_curve/),
+    () => assert.match(realisticWorkflow.replaceAll("--bench route_subscription_curve", ""), /--bench route_subscription_curve/),
     /route_subscription_curve/,
   );
 });

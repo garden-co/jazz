@@ -18,9 +18,8 @@ EOF
 }
 
 if [[ "${1:-}" == "--ci" && $# == 1 ]]; then
-  cargo check -p jazz --benches
+  cargo check -p jazz --benches --features testing
   cargo check -p jazz-sim --benches
-  cargo check -p jazz --features testing --bench route_subscription_curve
   cargo test -p jazz --features testing --test legacy_benchmark_smoke
   cargo test -p jazz-sim --test scenario_smoke
   exit 0
@@ -31,4 +30,14 @@ if [[ $# != 2 || ( "$1" != "jazz" && "$1" != "jazz-sim" ) ]]; then
   exit 2
 fi
 
-cargo check -p "$1" --bench "$2"
+required_features="$(
+  cargo metadata --no-deps --format-version 1 |
+    jq -r --arg package "$1" --arg bench "$2" \
+      '.packages[] | select(.name == $package) | .targets[] | select(.name == $bench and (.kind | index("bench"))) | .["required-features"][]?'
+)"
+if [[ -n "$required_features" ]]; then
+  feature_csv="$(paste -sd, <<<"$required_features")"
+  cargo check -p "$1" --features "$feature_csv" --bench "$2"
+else
+  cargo check -p "$1" --bench "$2"
+fi

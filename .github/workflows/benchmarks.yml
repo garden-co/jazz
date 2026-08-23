@@ -125,7 +125,14 @@ jobs:
           cargo build --release -p jazz --features client,sqlite,transport-compression-zstd --example realistic_bench
           cargo bench -p jazz --features rocksdb,transport-compression-zstd --bench realistic_phase1 --no-run
           cargo bench -p jazz --features sqlite,transport-compression-zstd --bench realistic_phase1 --no-run
+          cargo bench -p jazz --features testing --bench cold_subscription --no-run
+          cargo bench -p jazz --features testing --bench sync --no-run
+          cargo bench -p jazz --features testing --bench validation --no-run
+          cargo bench -p jazz --features testing --bench relation_include_delivery --no-run
+          cargo bench -p jazz --features testing --bench route_subscription_curve --no-run
           cargo bench -p jazz-sim --bench s2_canvas --no-run
+          cargo bench -p jazz-sim --bench micro --no-run
+          cargo bench -p jazz-sim --bench s8_branch_views --no-run
 
       - name: Run native benchmark suite
         run: |
@@ -160,6 +167,17 @@ jobs:
             --skip-set dev/benchmarks/realistic/ci_skip_set.json \
             --repeat-count "${BENCH_REPEAT_COUNT}" \
             --timeout-seconds "${BENCH_TIMEOUT_SECONDS}"
+
+      - name: Run legacy Jazz timing suites
+        run: |
+          set -euo pipefail
+          mkdir -p bench-out/native/legacy-jazz/logs
+          run() { name="$1"; shift; taskset -c "${BENCH_CPUSET}" "$@" >"bench-out/native/legacy-jazz/logs/${name}.log" 2>&1; }
+          run cold_subscription env JAZZ_DEPTHS=100 JAZZ_PENDING_SIZES=0,10 cargo bench -p jazz --features testing --bench cold_subscription
+          run sync env GROOVE_COMMITS=20 GROOVE_VIEW_EVERY=5 cargo bench -p jazz --features testing --bench sync
+          run validation env GROOVE_CLIENTS=5 GROOVE_ROWS=20 GROOVE_COMMITS=25 cargo bench -p jazz --features testing --bench validation
+          run relation_include_delivery env JAZZ_INC_DELIVERY_SCALES=1000,2500,5000,10000,20000 JAZZ_INC_DELIVERY_SAMPLES=1 cargo bench -p jazz --features testing --bench relation_include_delivery
+          run route_subscription_curve env JAZZ_ROUTE_CURVE_ROUTES=10 cargo bench -p jazz --features testing --bench route_subscription_curve
 
       - name: Publish native execution summary
         run: |
