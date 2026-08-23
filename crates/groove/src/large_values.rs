@@ -302,8 +302,10 @@ impl LargeValueCursor {
 
 /// Construct the canonical tree from a reader without retaining the logical
 /// value or emitted chunks. `stage` receives immutable nodes as soon as their
-/// content boundary is final. A failed text/JSON validation may leave
-/// unreachable staged chunks, but never returns a publishable descriptor.
+/// content boundary is final. This is a pure construction adapter: if `stage`
+/// persists anything, its caller owns rollback or expiring retention. Database
+/// APIs use the persisted pending-upload lifecycle instead of this callback.
+/// A failed text/JSON validation never returns a publishable descriptor.
 pub fn prepare_streaming<R: std::io::Read>(
     kind: LargeValueKind,
     mut reader: R,

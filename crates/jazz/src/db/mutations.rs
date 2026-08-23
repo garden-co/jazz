@@ -540,18 +540,54 @@ where
     where
         R: std::io::Read + Send + 'static,
     {
-        let nullable = self.validate_streaming_column(table, &cells, column, kind)?;
-        let (staged, _) = self
-            .node
-            .node
-            .lock()
-            .await
-            .prepare_and_stage_large_value_streaming(kind, reader)
-            .await?;
-        self.publish_streaming_value_with_id(
-            mutation, table, row, cells, column, staged, nullable, identity, now_ms, head, base,
-        )
-        .await
+        use futures::{SinkExt, StreamExt};
+
+        let mut upload = self.begin_streaming_value_upload(table, &cells, column, kind)?;
+        let (mut bytes_tx, mut bytes_rx) = futures::channel::mpsc::channel::<Vec<u8>>(8);
+        let (result_tx, result_rx) = futures::channel::oneshot::channel();
+        std::thread::spawn(move || {
+            let mut reader = reader;
+            let mut buffer = vec![0_u8; 64 * 1024];
+            let result = loop {
+                match std::io::Read::read(&mut reader, &mut buffer) {
+                    Ok(0) => break Ok(()),
+                    Ok(read) => {
+                        if futures::executor::block_on(bytes_tx.send(buffer[..read].to_vec()))
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Err(_) => break Err(groove::large_values::Error::MalformedScalar),
+                }
+            };
+            drop(bytes_tx);
+            let _ = result_tx.send(result);
+        });
+
+        while let Some(bytes) = bytes_rx.next().await {
+            if let Err(error) = self.push_streaming_value_upload(&mut upload, &bytes).await {
+                drop(bytes_rx);
+                return Err(error);
+            }
+        }
+
+        match result_rx.await {
+            Ok(Ok(())) => {
+                self.finish_streaming_value_upload(
+                    upload, mutation, table, row, cells, column, identity, now_ms, head, base,
+                )
+                .await
+            }
+            Ok(Err(error)) => {
+                self.abort_streaming_value_upload(upload).await?;
+                Err(crate::node::Error::from(error).into())
+            }
+            Err(_) => {
+                self.abort_streaming_value_upload(upload).await?;
+                Err(crate::node::Error::from(groove::large_values::Error::MalformedScalar).into())
+            }
+        }
     }
 
     /// Begin a resumable push preparation without retaining the logical value.

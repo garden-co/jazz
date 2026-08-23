@@ -53,6 +53,21 @@ impl Read for NarrowReader {
     }
 }
 
+struct FailingReader {
+    cursor: Cursor<Vec<u8>>,
+}
+
+impl Read for FailingReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.cursor.read(buffer)?;
+        if read == 0 {
+            Err(std::io::Error::other("injected reader failure"))
+        } else {
+            Ok(read)
+        }
+    }
+}
+
 #[test]
 fn streaming_create_publishes_one_ordinary_logical_row() {
     let db = open_db();
@@ -83,7 +98,7 @@ fn streaming_create_publishes_one_ordinary_logical_row() {
 fn streaming_create_validation_failure_publishes_no_row() {
     let db = open_db();
     let invalid_utf8 = Cursor::new(
-        vec![b'x'; INLINE_VALUE_MAX_BYTES]
+        vec![b'x'; LEAF_MAX_BYTES + 1]
             .into_iter()
             .chain([0xff])
             .collect::<Vec<_>>(),
@@ -99,6 +114,17 @@ fn streaming_create_validation_failure_publishes_no_row() {
 
     let query = db.prepare_query(&db.table("todos")).expect("prepare query");
     assert!(db.read(&query).expect("read rows").is_empty());
+    db.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: u64::MAX,
+        window_ms: 60_000,
+        max_age_ms: Some(0),
+    });
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert_eq!(
+        jazz::block_on(db.evict_expired_staged_large_values()).expect("expiry pass"),
+        0,
+        "terminal validation failure immediately removes its pending claim"
+    );
 }
 
 #[test]
@@ -179,6 +205,65 @@ fn push_streaming_stops_at_the_ingress_limit_and_closes_the_upload() {
 
     let query = db.prepare_query(&db.table("todos")).expect("prepare query");
     assert!(db.read(&query).expect("read rows").is_empty());
+}
+
+#[test]
+fn native_reader_streaming_uses_the_managed_ingress_and_cleanup_path() {
+    let db = open_db();
+    db.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: 1,
+        window_ms: 60_000,
+        max_age_ms: Some(0),
+    });
+
+    let result = jazz::block_on(db.insert_streaming_value(
+        "todos",
+        BTreeMap::from([("done".to_owned(), Value::Bool(false))]),
+        "title",
+        LargeValueKind::String,
+        Cursor::new(vec![b'x'; LEAF_MAX_BYTES + 1]),
+    ));
+    let error = match result {
+        Ok(_) => panic!("native readers must pass through incremental upload admission"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("rate limit"));
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert_eq!(
+        jazz::block_on(db.evict_expired_staged_large_values()).expect("expiry pass"),
+        0,
+        "a rejected native upload leaves no second-path pending claim"
+    );
+    let query = db.prepare_query(&db.table("todos")).expect("prepare query");
+    assert!(db.read(&query).expect("read rows").is_empty());
+}
+
+#[test]
+fn native_reader_failure_releases_its_pending_upload() {
+    let db = open_db();
+    let result = jazz::block_on(db.insert_streaming_value(
+        "todos",
+        BTreeMap::from([("done".to_owned(), Value::Bool(false))]),
+        "title",
+        LargeValueKind::String,
+        FailingReader {
+            cursor: Cursor::new(vec![b'x'; LEAF_MAX_BYTES + 1]),
+        },
+    ));
+    assert!(result.is_err());
+
+    db.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: u64::MAX,
+        window_ms: 60_000,
+        max_age_ms: Some(0),
+    });
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert_eq!(
+        jazz::block_on(db.evict_expired_staged_large_values()).expect("expiry pass"),
+        0,
+        "reader failure immediately removes its pending claim"
+    );
 }
 
 #[test]

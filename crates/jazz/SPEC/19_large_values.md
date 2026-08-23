@@ -374,13 +374,16 @@ and UTF-16 positions splitting surrogate pairs fail rather than round.
 
 Native Rust additionally exposes `Db::insert_streaming_value`. The caller
 supplies the ordinary non-streamed row cells, the target column and scalar kind,
-and a `std::io::Read`. Groove consumes the reader on a producer thread, keeps a
-bounded chunk frontier, and stages emitted immutable nodes incrementally. Jazz
-does not publish the row until EOF, complete text/JSON validation, staging-policy
-admission, and ordinary row-write admission have succeeded. A failed stream can
-leave only an expiring unpublished staging claim. The API validates the target
-column and physical kind before consuming the reader and preserves a present
-nullable wrapper where required.
+and a `std::io::Read`. A bounded producer bridge feeds the same resumable push
+constructor and persisted pending-upload lifecycle used by NAPI and WASM; there
+is no second reader-specific staging path. Jazz charges each finalized batch
+before Groove persists it. Jazz does not publish the row until EOF, complete
+text/JSON validation, staging-policy admission, and ordinary row-write
+admission have succeeded. Terminal reader, validation, admission, and
+publication failures immediately evict the pending claim; cancellation may
+leave only that expiring claim. The API validates the target column and
+physical kind before consuming the reader and preserves a present nullable
+wrapper where required.
 
 TypeScript exposes the mutation family with ordinary payload shapes as
 `Db.insertStreaming(table, { streamedColumn: source, ...otherData })`. From the

@@ -1007,33 +1007,6 @@ where
         Ok(self.database.evict_staged_large_value(id).await?)
     }
 
-    /// Prepare and incrementally stage a native reader without retaining the
-    /// logical input or all emitted chunks. Immutable nodes may be staged
-    /// before validation completes, but the root is authorized—and therefore
-    /// publishable—only after the complete preparation succeeds.
-    #[cfg(not(target_family = "wasm"))]
-    pub async fn prepare_and_stage_large_value_streaming<R>(
-        &self,
-        kind: groove::large_values::LargeValueKind,
-        reader: R,
-    ) -> Result<
-        (
-            groove::large_values::StagedLargeValue,
-            groove::large_values::StreamingPrepareStats,
-        ),
-        Error,
-    >
-    where
-        R: std::io::Read + Send + 'static,
-    {
-        let (staged, stats) = self
-            .database
-            .prepare_and_stage_large_value_streaming(kind, reader)
-            .await?;
-        self.enforce_large_value_staging_policy(&staged).await?;
-        Ok((staged, stats))
-    }
-
     pub(crate) async fn stage_large_value_chunk_batch(
         &self,
         upload_id: groove::large_values::StagedLargeValueId,
