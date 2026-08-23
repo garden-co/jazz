@@ -1038,7 +1038,8 @@ pub(super) fn owner_id_read_schema() -> JazzSchema {
                 .column("owner_id", PublicColumnType::Text)
                 .policies(
                     PublicTablePolicies::new()
-                        .with_select(public_session_eq("owner_id", &["user_id"])),
+                        .with_select(public_session_eq("owner_id", &["user_id"]))
+                        .with_insert(public_session_eq("owner_id", &["user_id"])),
                 ),
         ),
     )
@@ -1503,7 +1504,11 @@ pub(super) fn membership_scoped_relation_schema() -> JazzSchema {
                     .fk_column("chat_id", "chats")
                     .column("user_id", PublicColumnType::Text)
                     .nullable_column("join_code", PublicColumnType::Text)
-                    .policies(PublicTablePolicies::new().with_select(members_read)),
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(members_read)
+                            .with_insert(public_session_eq("user_id", &["user_id"])),
+                    ),
             )
             .table(
                 PublicTableSchemaBuilder::new("profiles")

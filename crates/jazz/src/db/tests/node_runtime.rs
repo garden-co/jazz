@@ -1108,7 +1108,7 @@ fn accepted_subscriber_is_served_under_subscriber_author_identity() {
     let subscriber_author = AuthorId::from_bytes([0xc1; 16]);
     let server_author = AuthorId::from_bytes([0x5e; 16]);
     let other_author = AuthorId::from_bytes([0xd1; 16]);
-    let server = open_core(0x5e, server_author, &schema);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let client = open_db(0xc1, subscriber_author, &schema);
 
     let visible = seed(

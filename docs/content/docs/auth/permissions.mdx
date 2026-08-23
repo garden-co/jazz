@@ -8,10 +8,14 @@ import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
 
 Permissions control who can read, insert, update, and delete rows. Jazz enforces them server-side using row-level policies defined in `permissions.ts`. Clients that fail a policy check have their writes rejected and their reads filtered.
 
-Locally, Jazz distinguishes between two runtime states:
+Jazz decides permissions per table:
 
-- no compiled policy bundle loaded: local session-scoped reads and writes stay permissive
-- compiled policy bundle loaded: every read, insert, update, and delete needs an explicit grant, or it is denied
+- a table with no policy declarations is open for reads, inserts, updates, and deletes
+- once a table declares any policy, its policy set is closed: every omitted operation is denied
+
+This keeps a new app usable before it introduces permissions, while making a
+partial policy safe. For example, declaring `allowRead` without `allowInsert`,
+`allowUpdate`, or `allowDelete` makes that table read-only.
 
 ## Authoring workflow
 
@@ -32,11 +36,11 @@ We can define permissions in `permissions.ts`:
 <Callout type="info">
   Write your permissions policies in `permissions.ts` next to `schema.ts`. By default Jazz looks for both files at your project root — except in SvelteKit projects, where they should live in `src/lib/` (the standard location for shared app code).
 
-Run `pnpm dlx jazz-tools@alpha validate` before publishing to surface warnings about tables with no explicit permission policy. You do not need to write a schema migration to update permissions policies. Push the updated policies by running `pnpm dlx jazz-tools@alpha deploy <appId>`.
+Run `pnpm dlx jazz-tools@alpha validate` before publishing to surface whether a table remains fully open or has omitted operations that will deny. You do not need to write a schema migration to update permissions policies. Push the updated policies by running `pnpm dlx jazz-tools@alpha deploy <appId>`.
 
 </Callout>
 
-Apps that do not need user-scoped filtering should still declare explicit grants (`policy.todos.allowRead.always()` or `policy.todos.allowRead.where({})`) once a compiled bundle is loaded.
+Apps that do not need user-scoped filtering can leave a table policy-free, or declare all required explicit grants such as `policy.todos.allowRead.always()` and `policy.todos.allowInsert.always()`.
 
 ## Basic policies
 

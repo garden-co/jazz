@@ -168,7 +168,7 @@ describe("dev catalogue push behavior", () => {
     });
     expect(result.migration).toBeUndefined();
     expect(result.warnings).toContain(
-      'Warning: table "todos" has no explicit insert policy in permissions.ts; enforcing runtimes default to deny.',
+      'Warning: table "todos" has a policy set but no explicit insert policy in permissions.ts; inserts will be denied.',
     );
     expect(schemaPublishBody.schema.tables.todos.columns.map((column: any) => column.name)).toEqual(
       ["title", "ownerId"],
@@ -185,7 +185,7 @@ describe("dev catalogue push behavior", () => {
     expect(events).toContainEqual({
       type: "warning",
       message:
-        'Warning: table "todos" has no explicit insert policy in permissions.ts; enforcing runtimes default to deny.',
+        'Warning: table "todos" has a policy set but no explicit insert policy in permissions.ts; inserts will be denied.',
     });
     expect(events).toContainEqual({
       type: "permissions-loaded",
@@ -248,10 +248,7 @@ describe("dev catalogue push behavior", () => {
         status: "already-stored",
       },
       warnings: [
-        'Warning: table "todos" has no explicit read policy in permissions.ts; enforcing runtimes default to deny.',
-        'Warning: table "todos" has no explicit insert policy in permissions.ts; enforcing runtimes default to deny.',
-        'Warning: table "todos" has no explicit update policy in permissions.ts; enforcing runtimes default to deny.',
-        'Warning: table "todos" has no explicit delete policy in permissions.ts; enforcing runtimes default to deny.',
+        'Warning: table "todos" has no policy declarations in permissions.ts; it remains open for reads, inserts, updates, and deletes until its first policy is declared.',
       ],
     });
     expect(events).toContainEqual({

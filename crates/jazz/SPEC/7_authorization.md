@@ -28,7 +28,7 @@ Invariant digest:
 - `INV-RLS-12`: Exclusive transaction view shipping MUST be policy-atomic per recipient and maintained subscription view: a non-system recipient MUST NOT receive a result member or pr...
 - `INV-RLS-13`: Historical/as-of reads served for a link MUST evaluate read policy at the requested historical cut.
 - `INV-RLS-14`: Policy evaluation MUST deny when it cannot determine that a policy predicate is satisfied.
-- `INV-RLS-15`: If no read or write policy is declared for a table, the table MUST be public for that operation.
+- `INV-RLS-15`: A table with no declared policy clauses is public for every operation; once it declares any clause, every omitted operation is denied.
 - `INV-RLS-17`: A write whose Transaction.madeby differs from the authenticated permission subject MUST be accepted only via a trusted serving node (a core/edge Node accepting a Trust...
 - `INV-RLS-18`: An uploaded commit unit MUST be authorized under the authenticated link identity: a Session link's madeby MUST equal that identity or be rejected, while a TrustedBacke...
 - `INV-RLS-19`: A required include MUST be treated as resolvable for a non-system
@@ -54,10 +54,18 @@ Each table may define a read policy and operation-specific write policies. A
 policy is an optional `Query` (ch. 6) over the protected row's columns and the
 authenticated claims for the peer being evaluated. The stored core shape is
 `read_policy: Option<Query>` plus `write_policies: WritePolicies`, with
-`insert_check`, `update_using`, `update_check`, and `delete_using` clauses. If
-the relevant policy clause is absent, that operation is **public** for that table
-(`TableSchema::new` defaults the read policy and all write clauses to `None`,
-`INV-RLS-15`).
+`insert_check`, `update_using`, `update_check`, and `delete_using` clauses.
+
+`TableSchema::new` defaults every clause to `None`. Such a **policy-free table**
+is public for read, insert, update, and delete so an app can use ordinary data
+before it introduces authorization. Declaring any one clause closes that table's
+policy set: the declared operation is evaluated normally and every other
+operation with no clause is denied. For update, either `update_using` or
+`update_check` declares the update operation; when both are supplied, both must
+pass. An absent subclause within an otherwise declared update contributes no
+additional check. This rule is enforced by the fate authority and upstream read
+emission under the policy-owning schema, including after schema migration or
+lens projection (`INV-RLS-15`).
 
 An owner-only policy is the canonical single-subject policy: it selects rows
 whose ownership column equals the authenticated subject
@@ -107,8 +115,11 @@ For an insert, `insert_check` is evaluated against the inserted row. For an
 update, `update_using` is evaluated against the previous content row and
 `update_check` is evaluated against the new content row; if both clauses are
 present both must pass. For a delete, `delete_using` is evaluated against the row
-being deleted. Missing clauses preserve the operation-level public default rather
-than falling back to another operation's policy.
+being deleted. On a policy-free table, all of those operations are public. On a
+table with any declared clause, an omitted insert or delete clause denies; an
+update with neither `update_using` nor `update_check` denies; and a missing read
+policy emits no rows. Missing clauses never fall back to another operation's
+policy.
 
 #### Read-for-write authorization
 

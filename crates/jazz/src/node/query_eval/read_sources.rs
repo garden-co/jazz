@@ -2907,7 +2907,7 @@ where
         }
         let root = root_source_id(&query.table);
         let table = self.table_in_schema(&query.table, shape.schema_version())?;
-        if table.read_policy.is_some() {
+        if table.has_any_policy() {
             return Ok(paths);
         }
         if let Some(CurrentAccessPath::Index { source_limit, .. }) = paths.get_mut(&root) {

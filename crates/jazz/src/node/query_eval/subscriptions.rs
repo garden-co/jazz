@@ -346,7 +346,7 @@ where
             .registered_shapes
             .get(&subscription.shape_id)
             .and_then(|shape| self.table(shape.query().table.as_str()).ok())
-            .is_some_and(|table| table.read_policy.is_some());
+            .is_some_and(TableSchema::has_any_policy);
         let Some(settled_members) = self.query.settled_result_sets.get(&binding_view_key) else {
             return Ok(None);
         };

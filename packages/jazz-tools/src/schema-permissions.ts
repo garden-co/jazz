@@ -18,10 +18,11 @@ import type {
 
 export type CompiledPermissionsMap = Record<string, TablePolicies>;
 export type ExplicitPolicyOperation = "read" | "insert" | "update" | "delete";
+export type PolicyDiagnosticOperation = ExplicitPolicyOperation | "table";
 
 export interface MissingExplicitPolicyDiagnostic {
   tableName: string;
-  operation: ExplicitPolicyOperation;
+  operation: PolicyDiagnosticOperation;
   message: string;
 }
 
@@ -453,16 +454,21 @@ function hasExplicitPolicy(
   }
 }
 
+function hasAnyExplicitPolicy(tablePolicies: TablePolicies | undefined): boolean {
+  return (["read", "insert", "update", "delete"] as const).some((operation) =>
+    hasExplicitPolicy(tablePolicies, operation),
+  );
+}
+
 function missingExplicitPolicyMessage(
   tableName: string,
   operation: ExplicitPolicyOperation,
-  tablePolicies: TablePolicies | undefined,
 ): string {
-  if (operation === "delete" && tablePolicies?.update?.using) {
-    return `Warning: table "${tableName}" has no explicit delete policy in permissions.ts; deletes can fall back to update.using at runtime, but add delete.using to make the delete rule explicit and silence this warning.`;
-  }
+  return `Warning: table "${tableName}" has a policy set but no explicit ${operation} policy in permissions.ts; ${operation}s will be denied.`;
+}
 
-  return `Warning: table "${tableName}" has no explicit ${operation} policy in permissions.ts; enforcing runtimes default to deny.`;
+function fullyOpenTablePolicyMessage(tableName: string): string {
+  return `Warning: table "${tableName}" has no policy declarations in permissions.ts; it remains open for reads, inserts, updates, and deletes until its first policy is declared.`;
 }
 
 export function validatePermissionsAgainstSchema(
@@ -478,20 +484,29 @@ export function collectMissingExplicitPolicyDiagnostics(
 ): MissingExplicitPolicyDiagnostic[] {
   const operations: ExplicitPolicyOperation[] = ["read", "insert", "update", "delete"];
 
-  return schemaTableNames.flatMap((tableName) =>
-    operations.flatMap((operation) => {
-      const tablePolicies = compiledPermissions?.[tableName];
-      return hasExplicitPolicy(tablePolicies, operation)
+  return schemaTableNames.flatMap<MissingExplicitPolicyDiagnostic>((tableName) => {
+    const tablePolicies = compiledPermissions?.[tableName];
+    if (!hasAnyExplicitPolicy(tablePolicies)) {
+      return [
+        {
+          tableName,
+          operation: "table",
+          message: fullyOpenTablePolicyMessage(tableName),
+        },
+      ];
+    }
+    return operations.flatMap((operation) =>
+      hasExplicitPolicy(tablePolicies, operation)
         ? []
         : [
             {
               tableName,
               operation,
-              message: missingExplicitPolicyMessage(tableName, operation, tablePolicies),
+              message: missingExplicitPolicyMessage(tableName, operation),
             },
-          ];
-    }),
-  );
+          ],
+    );
+  });
 }
 
 export function normalizePermissionsForWasm(

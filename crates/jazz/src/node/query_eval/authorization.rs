@@ -270,21 +270,61 @@ where
             ParamBindingMode::InlineAllReachableSeeds,
         )?;
         let binding = policy_shape.bind(BTreeMap::new())?;
+        let input_shape = self.normalized_row_set_shape(&policy_shape, &binding)?;
+        let input = RowSetProgramInput {
+            binding: self.program_binding_for_shape(
+                &policy_shape,
+                &binding,
+                query_binding_source_shape_for_parts_if_needed(
+                    policy_shape.params(),
+                    &binding_claim_params_for_shape(&input_shape, policy_shape.params()),
+                ),
+                BTreeMap::new(),
+                binding_claim_params_for_shape(&input_shape, policy_shape.params()),
+            ),
+            shape: input_shape,
+        };
+        let policy = match self.query_program_policy_context(identity) {
+            PolicyContext::Identity {
+                mode,
+                permission_subject,
+                claims,
+                attribution,
+            } => PolicyContext::AuthorizationSubplan {
+                protected_source: root_source_id(policy_shape.query().table.as_str()),
+                role: PolicyDecisionRole::Write,
+                mode,
+                permission_subject,
+                claims,
+                attribution,
+            },
+            other => other,
+        };
+        let request = QueryProgramRequest {
+            authorization_mode: QueryAuthorizationMode::TrustedServing,
+            reads: current_query_read_set(
+                &input.shape,
+                policy_shape.schema_version(),
+                policy_shape.schema_version(),
+                DurabilityTier::Local,
+                None,
+                false,
+            ),
+            policy,
+            input,
+            output: current_query_output_request(
+                CurrentQueryProgramOutput::PolicyPredicate,
+                policy_shape.query(),
+            ),
+        };
         // A primary-key access path addresses the physical row UUID without
         // overloading public `id`, which may be a declared user column.
         let access_paths = BTreeMap::from([(
-            root_source_id(&policy.table),
+            root_source_id(policy_shape.query().table.as_str()),
             CurrentAccessPath::PrimaryKey(vec![Value::Uuid(row_uuid.0)]),
         )]);
         let program = self
-            .compile_current_query_program_with_access_paths(
-                &policy_shape,
-                &binding,
-                DurabilityTier::Local,
-                identity,
-                CurrentQueryProgramOutput::AppRows,
-                access_paths,
-            )
+            .compile_query_program_request_with_access_paths(request, access_paths)
             .await?;
         self.write_policy_query_program_allows(&program, &policy_shape, &binding)
             .await
@@ -698,6 +738,14 @@ where
             .iter()
             .find(|candidate| candidate.name == table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.to_owned()))?;
+        if table.read_policy.is_none()
+            && access_edge_parent_reference(table).is_none()
+            && table.has_any_policy()
+        {
+            return Err(Error::QueryCapability(
+                "table has a closed policy set but no read policy".to_owned(),
+            ));
+        }
         let query = authorization_query_from_read_policy(table);
         if !query.includes.is_empty() {
             return Err(Error::InvalidStoredValue(
@@ -845,6 +893,14 @@ where
             .iter()
             .find(|candidate| candidate.name == table_name)
             .ok_or_else(|| Error::TableNotFound(table_name.to_owned()))?;
+        if table.read_policy.is_none()
+            && access_edge_parent_reference(table).is_none()
+            && table.has_any_policy()
+        {
+            return Err(Error::QueryCapability(
+                "table has a closed policy set but no read policy".to_owned(),
+            ));
+        }
         let policy = match self.query_program_policy_context(identity) {
             PolicyContext::Identity {
                 mode,
@@ -1058,21 +1114,12 @@ where
     fn authorization_scope_policy_schema_for_action(
         &self,
         table: &str,
-        operation: AuthorizationScopeOperation,
+        _operation: AuthorizationScopeOperation,
     ) -> SchemaVersionId {
         let write_schema = self.catalogue.current_write_schema.schema;
         let has_operation_policy = self
             .table_in_schema(table, write_schema)
-            .is_ok_and(|table| match operation {
-                AuthorizationScopeOperation::Read => {
-                    table.read_policy.is_some() || access_edge_parent_reference(&table).is_some()
-                }
-                AuthorizationScopeOperation::Insert
-                | AuthorizationScopeOperation::Update
-                | AuthorizationScopeOperation::Delete => {
-                    !authorization_policy_queries(&table, operation).is_empty()
-                }
-            });
+            .is_ok_and(|table| table.has_any_policy());
         if has_operation_policy {
             write_schema
         } else {
@@ -1420,13 +1467,13 @@ mod authorization_scope_compiler_tests {
         assert_ne!(update.key, delete.key);
     }
 
-    /// A newer read-only policy produces support for Alice's read while Bob's
-    /// insert retains the older schema's restrictive write-policy support.
+    /// A newer read-only policy closes inserts for both the current schema and
+    /// projected versions authored under its predecessor.
     #[test]
     fn authorization_scope_uses_newer_read_only_policy_schema() {
         // A structural v2 schema gains a restrictive read policy without any
-        // write policy. Read advice must compile v2's support query rather
-        // than treating the base v1 table as public.
+        // write policy. Read advice must compile v2's support query and an
+        // older v1 insert must not bypass v2's now-closed policy set.
         let owner_policy = PublicPolicyExpr::eq_session("owner", vec!["user_id".to_owned()]);
         let base = public_schema(
             PublicSchemaBuilder::new().table(
@@ -1513,10 +1560,25 @@ mod authorization_scope_compiler_tests {
                 },
             )
             .unwrap();
-        assert_eq!(
-            insert.subscriptions.len(),
-            1,
-            "insert must retain v1's write-policy support after v2 adds only a read policy"
+        assert!(
+            insert.subscriptions.is_empty(),
+            "v2's read-only policy closes insert support instead of retaining v1's grant"
+        );
+        let writer = AuthorId::from_bytes([0x32; 16]);
+        assert!(
+            !node
+                .dry_run_mergeable_write_allows_in_schema(
+                    base.version_id(),
+                    MergeableCommit::new("notes", RowUuid::from_bytes([0x34; 16]), 1)
+                        .made_by(writer)
+                        .permission_subject(writer)
+                        .cells(BTreeMap::from([(
+                            "owner".to_owned(),
+                            Value::Uuid(uuid::Uuid::from_bytes([0x32; 16])),
+                        )])),
+                )
+                .unwrap(),
+            "a v1 version must be projected into the v2 closed policy set"
         );
     }
 

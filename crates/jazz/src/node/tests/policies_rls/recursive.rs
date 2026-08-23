@@ -1,4 +1,4 @@
-// Recursive, reverse-reference, and public-default policy behavior.
+// Recursive, reverse-reference, and closed-policy-set behavior.
 
 fn recursive_doc_access_policy() -> PublicPolicyExpr {
     crate::test_public_schema::seeded_recursive_access_policy(
@@ -176,7 +176,7 @@ fn recursive_reachable_insert_policy_allows_direct_and_closure_docs() {
     // matching recursive write-policy fixture.
     let schema = recursive_doc_write_policy_schema();
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
-    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
     let reader = user(0xb2);
     let direct_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000011"));
     let closure_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000012"));
@@ -432,7 +432,7 @@ fn unbound_is_admin_claim_in_read_policy_denies_as_false() {
 }
 
 #[test]
-fn missing_read_or_write_policy_is_public_for_that_operation() {
+fn policy_free_table_is_open_for_reads_and_writes() {
     let schema = build_public_test_schema(
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("todos")
@@ -441,7 +441,7 @@ fn missing_read_or_write_policy_is_public_for_that_operation() {
         ),
     );
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
-    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
     let (_tx_id, unit) = writer
         .commit_mergeable_unit_settled(
             MergeableCommit::new("todos", row(0x85), 10)
@@ -463,4 +463,84 @@ fn missing_read_or_write_policy_is_public_for_that_operation() {
         &edge.current_rows_update(&mut core, "todos").unwrap(),
         BTreeSet::from([row(0x85)]),
     );
+
+    for (index, commit) in [
+        MergeableCommit::new("todos", row(0x85), 11)
+            .made_by(user(0xa1))
+            .cells(owner_cells(user(0xa1), "public update")),
+        MergeableCommit::new("todos", row(0x85), 12)
+            .made_by(user(0xa1))
+            .deletion(DeletionEvent::Deleted),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (_writer_dir, mut writer) = open_node_with_schema(node(2 + index as u8), schema.clone());
+        let (_tx_id, unit) = writer.commit_mergeable_unit_settled(commit).unwrap();
+        let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+        assert!(matches!(
+            fate,
+            SyncMessage::FateUpdate {
+                fate: Fate::Accepted,
+                ..
+            }
+        ));
+    }
+}
+
+/// A table starts open, but the first policy clause closes every other action.
+/// This deliberately sends each forged action through a distinct untrusted
+/// writer and the fate authority: changing a missing-clause branch back to
+/// `Ok(true)` makes one of these receipts Accepted.
+#[test]
+fn partial_policy_set_allows_its_declared_read_and_denies_omitted_writes_at_authority() {
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(PublicTablePolicies::new().with_select(PublicPolicyExpr::True)),
+        ),
+    );
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
+    let seed = row(0x86);
+    accept_global(
+        &mut core,
+        MergeableCommit::new("todos", seed, 10).cells(owner_cells(user(0xa1), "seed")),
+    );
+
+    let mut edge = PeerState::edge_client(user(0xcc));
+    assert_view_update_only_references_rows(
+        &edge.current_rows_update(&mut core, "todos").unwrap(),
+        BTreeSet::from([seed]),
+    );
+
+    let writer = user(0xa1);
+    let attempts = [
+        MergeableCommit::new("todos", row(0x87), 11)
+            .made_by(writer)
+            .cells(owner_cells(writer, "forged insert")),
+        MergeableCommit::new("todos", seed, 12)
+            .made_by(writer)
+            .cells(owner_cells(writer, "forged update")),
+        MergeableCommit::new("todos", seed, 13)
+            .made_by(writer)
+            .deletion(DeletionEvent::Deleted),
+    ];
+    for (index, commit) in attempts.into_iter().enumerate() {
+        let (_writer_dir, mut untrusted_writer) = open_node_with_schema(node(0xa1 + index as u8), schema.clone());
+        let (tx_id, unit) = untrusted_writer.commit_mergeable_unit_settled(commit).unwrap();
+        let [fate] = core.apply_sync_message_settled(unit).unwrap().try_into().unwrap();
+        assert_eq!(
+            fate,
+            SyncMessage::FateUpdate {
+                tx_id,
+                fate: Fate::Rejected(RejectionReason::AuthorizationDenied),
+                global_time: None,
+                durability: None,
+            },
+            "omitted {} policy must deny at the authority",
+            ["insert", "update", "delete"][index],
+        );
+    }
 }

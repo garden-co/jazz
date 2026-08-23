@@ -732,6 +732,14 @@ impl WritePolicies {
             .or_else(|| self.update_using.clone())
             .or_else(|| self.delete_using.clone())
     }
+
+    /// Whether this table declares any write authorization clause.
+    pub fn has_any(&self) -> bool {
+        self.insert_check.is_some()
+            || self.update_using.is_some()
+            || self.update_check.is_some()
+            || self.delete_using.is_some()
+    }
 }
 
 /// Application table whose rows are stored as immutable history versions.
@@ -776,6 +784,16 @@ impl TableSchema {
             indexed_columns: BTreeSet::new(),
             merge_strategies: BTreeMap::new(),
         }
+    }
+
+    /// Whether this table has opted into authorization.
+    ///
+    /// A completely policy-free table is intentionally open so a new app can
+    /// use its data before it has introduced permissions. Once a table
+    /// declares any read or write clause, its policy set is closed: an
+    /// omitted operation has no grant and therefore denies at the authority.
+    pub fn has_any_policy(&self) -> bool {
+        self.read_policy.is_some() || self.write_policies.has_any()
     }
 
     /// Add an ordinary application column to this table's branch key.

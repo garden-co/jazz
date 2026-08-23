@@ -675,19 +675,19 @@ describe("cli validate", () => {
     await validate({ schemaDir: root });
   });
 
-  it("warns once per table and operation when permissions.ts is missing", async () => {
+  it("reports each fully open table when permissions.ts is missing", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
 
     const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
 
-    const warnings = logs.filter((line) => line.includes("has no explicit"));
-    expect(warnings).toHaveLength(8);
+    const warnings = logs.filter((line) => line.includes("no policy declarations"));
+    expect(warnings).toHaveLength(2);
     expect(warnings).toContain(
-      'Warning: table "projects" has no explicit read policy in permissions.ts; enforcing runtimes default to deny.',
+      'Warning: table "projects" has no policy declarations in permissions.ts; it remains open for reads, inserts, updates, and deletes until its first policy is declared.',
     );
     expect(warnings).toContain(
-      'Warning: table "todos" has no explicit delete policy in permissions.ts; enforcing runtimes default to deny.',
+      'Warning: table "todos" has no policy declarations in permissions.ts; it remains open for reads, inserts, updates, and deletes until its first policy is declared.',
     );
   });
 
@@ -700,9 +700,9 @@ describe("cli validate", () => {
 
     const warnings = logs.filter((line) => line.includes('table "todos"'));
     expect(warnings).toEqual([
-      'Warning: table "todos" has no explicit insert policy in permissions.ts; enforcing runtimes default to deny.',
-      'Warning: table "todos" has no explicit update policy in permissions.ts; enforcing runtimes default to deny.',
-      'Warning: table "todos" has no explicit delete policy in permissions.ts; enforcing runtimes default to deny.',
+      'Warning: table "todos" has a policy set but no explicit insert policy in permissions.ts; inserts will be denied.',
+      'Warning: table "todos" has a policy set but no explicit update policy in permissions.ts; updates will be denied.',
+      'Warning: table "todos" has a policy set but no explicit delete policy in permissions.ts; deletes will be denied.',
     ]);
   });
 
@@ -723,9 +723,9 @@ describe("cli validate", () => {
 
     const { logs } = await captureConsoleLogs(() => validate({ schemaDir: root }));
 
-    const warnings = logs.filter((line) => line.includes("has no explicit"));
+    const warnings = logs.filter((line) => line.includes("policy set but no explicit"));
     expect(warnings).toEqual([
-      'Warning: table "todos" has no explicit delete policy in permissions.ts; deletes can fall back to update.using at runtime, but add delete.using to make the delete rule explicit and silence this warning.',
+      'Warning: table "todos" has a policy set but no explicit delete policy in permissions.ts; deletes will be denied.',
     ]);
   });
 
@@ -2951,7 +2951,7 @@ export default s.defineMigration({
       }),
     );
 
-    const warnings = logs.filter((line) => line.includes("has no explicit"));
+    const warnings = logs.filter((line) => line.includes("Warning: table"));
     expect(warnings.length).toBeGreaterThan(0);
   });
 });
