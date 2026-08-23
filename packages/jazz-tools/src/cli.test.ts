@@ -175,6 +175,15 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
 `;
 }
 
+function rawRootSchemaWithExternalProvenance(indexImportPath: string = indexPath): string {
+  return `
+import { schema as s } from ${JSON.stringify(indexImportPath)};
+export const schema = { imports: s.table({
+  createdAt: s.allowExternalProvenanceName(s.timestamp()),
+}) };
+`;
+}
+
 function rootSchemaWithIndexedTodo(indexImportPath: string = indexPath): string {
   return `
 import { schema as s } from ${JSON.stringify(indexImportPath)};
@@ -663,6 +672,15 @@ describe("cli validate", () => {
   it("allows explicitly marked external provenance without false positives", async () => {
     const { root } = await createWorkspace();
     await writeFile(join(root, "schema.ts"), rootSchemaWithExternalProvenance());
+    const { logs } = await captureConsoleLogs(() =>
+      validate({ schemaDir: root, strictProvenance: true }),
+    );
+    expect(logs.filter((line) => line.includes("built-in $"))).toEqual([]);
+  });
+
+  it("preserves external provenance allowances from raw schema exports", async () => {
+    const { root } = await createWorkspace();
+    await writeFile(join(root, "schema.ts"), rawRootSchemaWithExternalProvenance());
     const { logs } = await captureConsoleLogs(() =>
       validate({ schemaDir: root, strictProvenance: true }),
     );

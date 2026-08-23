@@ -24,6 +24,8 @@ function listedStarters(source) {
 
 const expectedReleaseCondition =
   "github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/main'";
+const unmarkedConventionalProvenance =
+  /^[ \t]*(createdAt|createdBy|updatedAt|updatedBy):(?![ \t]*s\.allowExternalProvenanceName\()/m;
 
 function releaseCondition(jobSource) {
   return jobSource.match(/^    if: \$\{\{ (.*) \}\}$/m)?.[1];
@@ -84,9 +86,18 @@ test("release starter gate reuses its pnpm store across the prepare and matrix j
   }
 });
 
+test("provenance gate targets only unmarked Jazz provenance aliases", () => {
+  assert.equal(unmarkedConventionalProvenance.test("createdAt: s.timestamp(),"), true);
+  assert.equal(
+    unmarkedConventionalProvenance.test("createdAt: s.allowExternalProvenanceName(s.timestamp()),"),
+    false,
+  );
+  for (const domainEventTime of ["createdOn", "creationTime", "occurredAt"]) {
+    assert.equal(unmarkedConventionalProvenance.test(`${domainEventTime}: s.timestamp(),`), false);
+  }
+});
+
 test("official examples do not duplicate Jazz provenance without an explicit external marker", () => {
-  const duplicate =
-    /^[ \t]*(?:(createdAt|createdBy|updatedAt|updatedBy):(?![ \t]*s\.allowExternalProvenanceName\()|(createdOn|creationTime|occurredAt):)/m;
   const offenders = [];
 
   function visit(directory) {
@@ -97,7 +108,7 @@ test("official examples do not duplicate Jazz provenance without an explicit ext
       } else if (
         entry.isFile() &&
         entry.name === "schema.ts" &&
-        duplicate.test(fs.readFileSync(file, "utf8"))
+        unmarkedConventionalProvenance.test(fs.readFileSync(file, "utf8"))
       ) {
         offenders.push(path.relative(root, file));
       }

@@ -350,7 +350,7 @@ this.db.delete(app.fuel_deposits, depId);
 this.db.insert(app.fuel_deposits, {
   fuelType,
   positionX,
-  sentAtSeconds: Math.floor(Date.now() / 1000),
+  spawnedAtSeconds: Math.floor(Date.now() / 1000),
   collected: false,
   collectedBy: "",
 });
