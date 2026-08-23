@@ -32,6 +32,49 @@ use thiserror::Error;
 /// incompatible.
 pub const NATIVE_RELAY_ABI_VERSION: u16 = 1;
 
+/// Codec-owned commands accepted by the native relay C ABI.
+///
+/// `Probe` is intentionally the only command until the shared relay command
+/// taxonomy is specified. JNI/Swift wrappers must carry these postcard bytes
+/// unchanged; they must not recreate database, query, or mutation semantics.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum RelayCommandRequest {
+    Probe,
+}
+
+/// Codec-owned response for [`RelayCommandRequest`].
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum RelayCommandResponse {
+    Probe { abi_version: u16 },
+}
+
+/// ABI-owned response buffer. On successful execution, `data` is allocated by
+/// Rust and must be released exactly once through
+/// [`jazz_native_relay_bytes_free`]. Do not copy this struct before freeing it.
+#[repr(C)]
+pub struct JazzNativeRelayBytes {
+    pub data: *mut u8,
+    pub len: usize,
+}
+
+impl JazzNativeRelayBytes {
+    const EMPTY: Self = Self {
+        data: std::ptr::null_mut(),
+        len: 0,
+    };
+}
+
+/// Status returned by the native C ABI. Diagnostic strings and Rust error
+/// types intentionally remain inside the host binding; callers branch only on
+/// these stable classes.
+#[repr(i32)]
+pub enum JazzNativeRelayStatus {
+    Ok = 0,
+    InvalidArgument = 1,
+    InvalidCommand = 2,
+    EncodeFailure = 3,
+}
+
 /// C ABI seam for Android/JNI, Swift, and other platform artifact wrappers.
 ///
 /// The platform layer may use this probe before it decodes any relay command.
@@ -40,6 +83,89 @@ pub const NATIVE_RELAY_ABI_VERSION: u16 = 1;
 #[unsafe(no_mangle)]
 pub extern "C" fn jazz_native_relay_abi_version() -> u16 {
     NATIVE_RELAY_ABI_VERSION
+}
+
+/// Execute one codec-owned native relay command.
+///
+/// `request` is a complete postcard [`RelayCommandRequest`]. On `Ok`, `out`
+/// receives Rust-owned postcard [`RelayCommandResponse`] bytes. On any error,
+/// `out` is reset to an empty buffer. This function has no storage side effects
+/// until a future command explicitly defines them.
+///
+/// # Safety
+///
+/// When `request_len` is nonzero, `request` must point to that many readable
+/// bytes. `out` must be a valid, writable `JazzNativeRelayBytes` for this call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_native_relay_execute(
+    request: *const u8,
+    request_len: usize,
+    out: *mut JazzNativeRelayBytes,
+) -> JazzNativeRelayStatus {
+    if out.is_null() || (request.is_null() && request_len != 0) {
+        return JazzNativeRelayStatus::InvalidArgument;
+    }
+    // SAFETY: `out` is non-null and exclusively owned by the caller for this
+    // call. Reset it before decoding so every error has one unambiguous state.
+    unsafe { *out = JazzNativeRelayBytes::EMPTY };
+    let request = if request_len == 0 {
+        &[]
+    } else {
+        // SAFETY: non-null was checked above; the caller supplies exactly this
+        // many immutable request bytes for the duration of this call.
+        unsafe { std::slice::from_raw_parts(request, request_len) }
+    };
+    let command = match postcard::from_bytes::<RelayCommandRequest>(request) {
+        Ok(command) => command,
+        Err(_) => return JazzNativeRelayStatus::InvalidCommand,
+    };
+    let response = match command {
+        RelayCommandRequest::Probe => RelayCommandResponse::Probe {
+            abi_version: NATIVE_RELAY_ABI_VERSION,
+        },
+    };
+    let bytes = match postcard::to_allocvec(&response) {
+        Ok(bytes) => bytes,
+        Err(_) => return JazzNativeRelayStatus::EncodeFailure,
+    };
+    let boxed = bytes.into_boxed_slice();
+    // SAFETY: `out` was validated above; the returned allocation remains owned
+    // by Rust until the matching free call below.
+    unsafe {
+        *out = JazzNativeRelayBytes {
+            len: boxed.len(),
+            data: Box::into_raw(boxed).cast(),
+        };
+    }
+    JazzNativeRelayStatus::Ok
+}
+
+/// Release a response buffer returned by [`jazz_native_relay_execute`].
+///
+/// The struct is reset before returning, making repeated frees of the *same
+/// struct* a no-op. Copying the struct and freeing both copies is invalid.
+///
+/// # Safety
+///
+/// `bytes` must be null or point to a writable `JazzNativeRelayBytes` returned
+/// by this ABI (or its reset empty value); callers must not free copied values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_native_relay_bytes_free(bytes: *mut JazzNativeRelayBytes) {
+    if bytes.is_null() {
+        return;
+    }
+    // SAFETY: a non-null caller-owned output struct was supplied.
+    let bytes = unsafe { &mut *bytes };
+    if bytes.data.is_null() {
+        bytes.len = 0;
+        return;
+    }
+    // SAFETY: only `jazz_native_relay_execute` creates this allocation, with
+    // exactly the recorded length and capacity. Reset before dropping so a
+    // second call on this struct cannot free it again.
+    let allocation = unsafe { Vec::from_raw_parts(bytes.data, bytes.len, bytes.len) };
+    *bytes = JazzNativeRelayBytes::EMPTY;
+    drop(allocation);
 }
 
 /// Inclusive ABI-version range understood by a native host wrapper.

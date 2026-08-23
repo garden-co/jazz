@@ -2,6 +2,7 @@
 #define JAZZ_NATIVE_RELAY_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 /*
  * Return the shared native relay ABI version embedded in this artifact.
@@ -10,5 +11,31 @@
  * a command. This header intentionally exposes no database/query handles.
  */
 uint16_t jazz_native_relay_abi_version(void);
+
+typedef struct jazz_native_relay_bytes {
+  uint8_t *data;
+  size_t len;
+} jazz_native_relay_bytes;
+
+typedef enum jazz_native_relay_status {
+  JAZZ_NATIVE_RELAY_OK = 0,
+  JAZZ_NATIVE_RELAY_INVALID_ARGUMENT = 1,
+  JAZZ_NATIVE_RELAY_INVALID_COMMAND = 2,
+  JAZZ_NATIVE_RELAY_ENCODE_FAILURE = 3,
+} jazz_native_relay_status;
+
+/*
+ * Execute one complete postcard RelayCommandRequest. On success, response
+ * bytes are Rust-owned and must be released with jazz_native_relay_bytes_free.
+ * On error, out is reset to {NULL, 0}. Passing NULL for out is invalid.
+ */
+jazz_native_relay_status jazz_native_relay_execute(
+    const uint8_t *request,
+    size_t request_len,
+    jazz_native_relay_bytes *out);
+
+/* Free one returned response and reset it to {NULL, 0}. Repeating this call on
+ * the same struct is safe; copying the struct before freeing is not. */
+void jazz_native_relay_bytes_free(jazz_native_relay_bytes *bytes);
 
 #endif
