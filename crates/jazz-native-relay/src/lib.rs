@@ -12,6 +12,9 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use futures::lock::Mutex as LocalMutex;
 use jazz::db::{Db, DbConfig, DbIdentity, PeerConnection, Transport, block_on};
 use jazz::groove::records::Value;
@@ -31,10 +34,10 @@ pub const NATIVE_RELAY_ABI_VERSION: u16 = 1;
 
 /// Inclusive ABI-version range understood by a native host wrapper.
 ///
-/// This is deliberately independent of any particular binding generator. The
-/// TurboModule, Swift, and Kotlin wrappers all perform the same check before
-/// they open a relay scope, so an OTA JavaScript update cannot accidentally
-/// issue commands to an incompatible embedded native library.
+/// This is deliberately independent of any particular binding generator.
+/// Future TurboModule, Swift, and Kotlin wrappers carry this range in their
+/// open request, so an OTA JavaScript update cannot accidentally issue commands
+/// to an incompatible embedded native library.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NativeRelayAbiRange {
     pub minimum: u16,
@@ -116,6 +119,8 @@ pub struct RelayOpenConfig {
     pub sqlite_path: PathBuf,
     pub schema: JazzSchema,
     pub identity: DbIdentity,
+    #[cfg(test)]
+    thread_start_counter: Option<Arc<AtomicUsize>>,
 }
 
 impl RelayOpenConfig {
@@ -233,6 +238,7 @@ impl NativeRelayWire {
     /// object API. The caller supplies one complete logical message; network
     /// framing and fragmentation remain the responsibility of its transport.
     pub fn push_inbound_encoded(&self, bytes: &[u8]) -> Result<(), RelayError> {
+        validate_encoded_peer_message_len(bytes.len())?;
         let message = decode_sync_message(bytes).map_err(RelayError::DecodePeerMessage)?;
         self.push_inbound(message)
     }
@@ -249,18 +255,25 @@ impl NativeRelayWire {
             .map_err(|_| RelayError::Poisoned("upstream outbound queue"))?;
         // Encode while the batch remains queued. A failed codec/size check
         // leaves every message intact for retry and diagnostics.
-        let encoded = outbound
-            .iter()
-            .map(|message| {
-                let bytes = encode_sync_message(message).map_err(RelayError::EncodePeerMessage)?;
-                validate_logical_message_len(bytes.len())
-                    .map_err(RelayError::PeerMessageTooLarge)?;
-                Ok(bytes)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let encoded = encode_queued_peer_messages(&outbound, |message| {
+            let bytes = encode_sync_message(message).map_err(RelayError::EncodePeerMessage)?;
+            validate_logical_message_len(bytes.len()).map_err(RelayError::PeerMessageTooLarge)?;
+            Ok(bytes)
+        })?;
         outbound.clear();
         Ok(encoded)
     }
+}
+
+fn encode_queued_peer_messages(
+    messages: &VecDeque<SyncMessage>,
+    encode: impl FnMut(&SyncMessage) -> Result<Vec<u8>, RelayError>,
+) -> Result<Vec<Vec<u8>>, RelayError> {
+    messages.iter().map(encode).collect()
+}
+
+fn validate_encoded_peer_message_len(len: usize) -> Result<(), RelayError> {
+    validate_logical_message_len(len).map_err(RelayError::PeerMessageTooLarge)
 }
 
 struct QueueTransport {
@@ -431,6 +444,10 @@ impl NativeRelay {
         let (commands, receiver) = mpsc::channel::<RelayCommand>();
         let (started_tx, started_rx) = mpsc::channel();
         let owner_wire = wire.clone();
+        #[cfg(test)]
+        if let Some(counter) = &config.thread_start_counter {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
         let join = thread::Builder::new()
             .name("jazz-native-relay".to_owned())
             .spawn(move || {
@@ -606,6 +623,7 @@ mod tests {
     // store per UI runtime or share it across explicit auth scopes.
     use super::*;
     use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+    use jazz::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES;
     use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
     use jazz::tx::DurabilityTier;
 
@@ -635,6 +653,7 @@ mod tests {
                 node: NodeUuid::from_bytes([0xa1; 16]),
                 author: AuthorId::from_bytes([0xa2; 16]),
             },
+            thread_start_counter: None,
         }
     }
 
@@ -760,6 +779,29 @@ mod tests {
     }
 
     #[test]
+    fn direct_incompatible_spawn_creates_no_owner_thread_or_sqlite_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let sqlite_path = directory.path().join("must-not-exist-direct.sqlite");
+        let mut open = config(sqlite_path.clone(), Some("alice"));
+        open.supported_abi = NativeRelayAbiRange {
+            minimum: NATIVE_RELAY_ABI_VERSION.saturating_add(1),
+            maximum: u16::MAX,
+        };
+        let threads_started = Arc::new(AtomicUsize::new(0));
+        open.thread_start_counter = Some(Arc::clone(&threads_started));
+
+        assert!(matches!(
+            NativeRelay::spawn(open),
+            Err(RelayError::IncompatibleAbi { native, .. }) if native == NATIVE_RELAY_ABI_VERSION
+        ));
+        assert_eq!(threads_started.load(Ordering::Relaxed), 0);
+        assert!(
+            !sqlite_path.exists(),
+            "ABI rejection must happen before SQLite creates a database"
+        );
+    }
+
+    #[test]
     fn encoded_peer_messages_use_the_shared_postcard_contract() {
         let wire = NativeRelayWire::default();
         let message = SyncMessage::SessionClaims {
@@ -777,6 +819,7 @@ mod tests {
         wire.outbound.lock().unwrap().push_back(message);
         let encoded = wire.take_outbound_encoded().unwrap();
         assert_eq!(encoded.len(), 1);
+        assert!(wire.outbound.lock().unwrap().is_empty());
         assert_eq!(
             decode_sync_message(&encoded[0]).unwrap(),
             SyncMessage::SessionClaims {
@@ -792,5 +835,32 @@ mod tests {
             NativeRelayWire::default().push_inbound_encoded(&[0xff]),
             Err(RelayError::DecodePeerMessage(_))
         ));
+    }
+
+    #[test]
+    fn encoded_peer_messages_reject_the_exact_logical_message_limit_boundary() {
+        assert!(matches!(
+            validate_encoded_peer_message_len(MAX_LOGICAL_MESSAGE_BYTES + 1),
+            Err(RelayError::PeerMessageTooLarge(message))
+                if message.contains(&(MAX_LOGICAL_MESSAGE_BYTES + 1).to_string())
+        ));
+    }
+
+    #[test]
+    fn outbound_queue_keeps_messages_when_an_oversized_batch_is_rejected() {
+        let message = SyncMessage::SessionClaims {
+            identity: AuthorId::SYSTEM,
+            claims: BTreeMap::new(),
+        };
+        let queue = VecDeque::from([message.clone()]);
+
+        assert!(matches!(
+            encode_queued_peer_messages(&queue, |_| {
+                validate_encoded_peer_message_len(MAX_LOGICAL_MESSAGE_BYTES + 1)?;
+                unreachable!("oversized payload validation must fail")
+            }),
+            Err(RelayError::PeerMessageTooLarge(_))
+        ));
+        assert_eq!(queue, VecDeque::from([message]));
     }
 }
