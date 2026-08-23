@@ -728,9 +728,15 @@ struct UpstreamCoverageHandle {
 /// stable local/runtime identities and outer ownership bookkeeping; the node
 /// runtime drains it under its ordinary async mutex before touching Groove.
 struct PendingSubscriptionFinalization {
-    local: Option<(u64, groove::ivm::SubscriptionId)>,
-    upstream: Vec<UpstreamCoverageHandle>,
-    owner: Weak<RefCell<SubscriptionState>>,
+    /// Keep the state alive until the node has retired the *current* runtime
+    /// handles.  Capturing an ID at drop time is racy with catalogue/runtime
+    /// replacement: refresh can install a successor before the queued command
+    /// reaches the node.
+    state: Option<Rc<RefCell<SubscriptionState>>>,
+    /// The fallible opening guard can run before a public stream state exists.
+    /// It is never subject to runtime replacement, so this narrowly scoped
+    /// fallback may carry its just-created Groove handle directly.
+    opening_local: Option<(u64, groove::ivm::SubscriptionId)>,
     acknowledgement: Option<oneshot::Sender<()>>,
 }
 
@@ -2225,12 +2231,19 @@ fn materialize_result_tree(query: &Query, snapshot: RelationSnapshot) -> Result<
 }
 
 struct SubscriptionState {
+    /// Set synchronously by stream finalization, before its async cleanup is
+    /// drained. Refresh observes this independently owned cell before it can
+    /// install a replacement maintained subscription.
+    closed: Rc<Cell<bool>>,
     terminal_rows: bool,
     kind: SubscriptionKind,
     groove_runtime_token: u64,
     /// The maintained subscription currently owned by this public stream.
     /// Rehydration replaces the Groove ID, and drop must clean up that new ID.
     local_subscription_cleanup: Rc<Cell<Option<(u64, groove::ivm::SubscriptionId)>>>,
+    /// Coverage ownership belongs to the stream state rather than its initial
+    /// closure, so finalization always retires the currently live state.
+    upstream_subscription_handles: Vec<UpstreamCoverageHandle>,
     propagates_upstream: bool,
     author: AuthorId,
     authorization_mode: QueryAuthorizationMode,
@@ -2418,6 +2431,7 @@ pub struct SubscriptionStream {
     receiver: UnboundedReceiver<SubscriptionEvent>,
     _state: Rc<RefCell<SubscriptionState>>,
     cleanup: Option<Box<dyn FnOnce(Option<oneshot::Sender<()>>)>>,
+    terminated: bool,
 }
 
 struct CleanupGuard {
@@ -2454,6 +2468,11 @@ impl SubscriptionStream {
         let Some(cleanup) = self.cleanup.take() else {
             return Ok(());
         };
+        // `close` is a terminal stream operation. Do this before awaiting so
+        // callers cannot observe an old buffered delta while finalization is
+        // suspended behind storage or the node mutex.
+        self.terminated = true;
+        self.receiver.close();
         let (sender, receiver) = oneshot::channel();
         cleanup(Some(sender));
         receiver.await.map_err(|_| {
@@ -2518,6 +2537,9 @@ impl Stream for SubscriptionStream {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        if this.terminated {
+            return Poll::Ready(None);
+        }
         loop {
             match Pin::new(&mut this.receiver).poll_next(cx) {
                 Poll::Ready(Some(event)) if subscription_event_is_publishable(&event) => {

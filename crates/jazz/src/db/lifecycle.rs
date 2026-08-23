@@ -354,9 +354,14 @@ where
         if self.schema_view_is_fixed {
             return Ok(());
         }
+        // Close finalization admission before the first await. This makes the
+        // queued retirement set and durable close one lifecycle transition:
+        // a stream dropped while storage is shutting down is either in this
+        // drain or already part of the retired terminal runtime.
+        self.node.begin_subscription_finalization_shutdown();
         self.node.drain_subscription_finalizations().await?;
         self.node.node.lock().await.close().await?;
-        self.node.close_subscription_finalizations();
+        self.node.retire_subscription_runtime_after_close();
         Ok(())
     }
 

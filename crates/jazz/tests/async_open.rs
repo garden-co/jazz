@@ -2,6 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use futures::StreamExt;
 use futures::executor::block_on;
 use futures::task::noop_waker;
 use jazz::db::{Db, DbConfig, DbIdentity, LocalUpdates, Propagation, ReadOpts};
@@ -169,6 +170,11 @@ fn explicit_subscription_close_waits_for_tick_and_is_idempotent_through_shutdown
     drop(close);
     assert_eq!(db.active_groove_subscriptions_for_test(), 0);
 
+    assert!(
+        block_on(subscription.next()).is_none(),
+        "explicit close must make the public Stream terminal, not merely stop its producer"
+    );
+
     block_on(subscription.close()).expect("repeated close is a no-op");
     let mut cancelled_close =
         block_on(db.subscribe(&prepared, opts.clone())).expect("open cancellation-safe close");
@@ -184,5 +190,45 @@ fn explicit_subscription_close_waits_for_tick_and_is_idempotent_through_shutdown
 
     let mut post_shutdown = block_on(db.subscribe(&prepared, opts)).expect("open shutdown stream");
     block_on(db.close()).expect("close db after finalization");
+    assert_eq!(
+        db.active_groove_subscriptions_for_test(),
+        0,
+        "Db::close retires live maintained views before storage shutdown"
+    );
     block_on(post_shutdown.close()).expect("post-shutdown close is safely invalidated");
+}
+
+/// Closing the database closes finalization admission before its storage close
+/// can suspend. A stream dropped during that suspension is already included
+/// in the terminal retirement set, so its non-blocking Drop cannot strand a
+/// local maintained view or an explicit close acknowledgement.
+#[test]
+fn db_close_and_late_stream_drop_share_one_terminal_retirement_boundary() {
+    let schema = schema();
+    let families = schema.column_families();
+    let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+    let (storage, control) = TestStorage::controlled(&refs);
+    let db = block_on(Db::open(config(storage))).expect("open test db");
+    let prepared = db
+        .prepare_query(&db.table("todos"))
+        .expect("prepare todos query");
+    let stream = block_on(db.subscribe(&prepared, ReadOpts::default())).expect("open stream");
+    assert_eq!(db.active_groove_subscriptions_for_test(), 1);
+
+    control.pause();
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    let mut shutdown = Box::pin(db.close());
+    assert!(matches!(
+        shutdown.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    drop(stream);
+    control.resume();
+    block_on(shutdown).expect("finish close after late stream drop");
+    assert_eq!(
+        db.active_groove_subscriptions_for_test(),
+        0,
+        "terminal retirement must remove the live Groove subscription"
+    );
 }

@@ -463,10 +463,11 @@ where
         let local_cleanup_handle = Rc::clone(&local_subscription_cleanup);
         let local_cleanup_node = Rc::clone(&self.node);
         let mut local_cleanup = CleanupGuard::new(Box::new(move || {
+            // Opening failed before a public state existed; this is the one
+            // intentionally ID-based cleanup path.
             local_cleanup_node.enqueue_subscription_finalization(PendingSubscriptionFinalization {
-                local: local_cleanup_handle.take(),
-                upstream: Vec::new(),
-                owner: Weak::new(),
+                state: None,
+                opening_local: local_cleanup_handle.take(),
                 acknowledgement: None,
             });
         }));
@@ -593,7 +594,9 @@ where
             .enumerate()
             .map(|(index, occurrence)| (occurrence, index))
             .collect();
+        let closed = Rc::new(Cell::new(false));
         let state = Rc::new(RefCell::new(SubscriptionState {
+            closed: Rc::clone(&closed),
             terminal_rows,
             kind: SubscriptionKind::Prepared {
                 shape: state_shape,
@@ -602,6 +605,7 @@ where
             },
             groove_runtime_token: self.node.node.lock().await.groove_runtime_token(),
             local_subscription_cleanup: Rc::clone(&local_subscription_cleanup),
+            upstream_subscription_handles,
             propagates_upstream,
             author,
             authorization_mode,
@@ -641,19 +645,18 @@ where
         // upstream cleanup so Drop never touches the async node mutex.
         drop(local_cleanup.take());
         let cleanup: Box<dyn FnOnce(Option<oneshot::Sender<()>>)> = {
-            let owner = Rc::downgrade(&state);
             register_upstream_subscription_owner(
                 &self.node.upstream_subscription_owners,
-                &upstream_subscription_handles,
+                &state.borrow().upstream_subscription_handles,
                 &state,
             );
             let node = Rc::clone(&self.node);
-            let local = Rc::clone(&local_subscription_cleanup);
+            let state = Rc::clone(&state);
             Box::new(move |acknowledgement| {
+                closed.set(true);
                 node.enqueue_subscription_finalization(PendingSubscriptionFinalization {
-                    local: local.take(),
-                    upstream: upstream_subscription_handles,
-                    owner,
+                    state: Some(state),
+                    opening_local: None,
                     acknowledgement,
                 });
             })
@@ -662,6 +665,7 @@ where
             receiver,
             _state: state,
             cleanup: Some(cleanup),
+            terminated: false,
         })
     }
 
