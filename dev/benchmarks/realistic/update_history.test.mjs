@@ -22,6 +22,20 @@ function writeText(file, value) {
   fs.writeFileSync(file, value);
 }
 
+test("update_history normalizes legacy Jazz JSON timing logs for report cards", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-legacy-history-"));
+  const legacy = path.join(root, "native", "legacy-jazz");
+  writeJson(path.join(legacy, "metadata.json"), { run_id: "1", run_attempt: "1", sha: "abc", generated_at: "2026-01-01T00:00:00Z" });
+  writeJson(path.join(legacy, "manifest.json"), { kind: "realistic-bench-legacy-jazz" });
+  writeJson(path.join(legacy, "suite_status.json"), { benchmarks: [{ id: "legacy-jazz:sync", status: "passed", output_path: "logs/sync.log" }] });
+  writeText(path.join(legacy, "logs/sync.log"), '{"scenario":"sync","phase":"timing","elapsed_us":1250,"ingest_edits_per_sec":800}\n');
+  execFileSync("node", ["dev/benchmarks/realistic/update_history.mjs", "--history", path.join(root, "history.json"), "--native", path.join(root, "native")], { cwd: REPO_ROOT });
+  const scenario = readJson(path.join(root, "history.json")).runs[0].scenarios[0];
+  assert.equal(scenario.scenario_id, "sync");
+  assert.equal(scenario.wall_time_ms, 1.25);
+  assert.equal(scenario.throughput_ops_per_sec, 800);
+});
+
 test("browser benchmark identity distinguishes the current page store from retained OPFS history", () => {
   const runner = fs.readFileSync(
     path.join(REPO_ROOT, "dev/benchmarks/realistic/run_ci_benchmarks.mjs"),
