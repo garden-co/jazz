@@ -25,3 +25,14 @@ Run `pnpm --dir examples/big-label test` for the deterministic fixture and isola
 - Future blocker: schema migrations/versioned reconnect are recorded for a shared migration/topology lane. This example does not invent a migration mechanism.
 
 All identities, names, and IDs are generated public fixtures; no adopter data is used.
+
+## Admission boundary
+
+The first organization is provisioned by a trusted server-side flow that issues
+the `biglabel_admin` JWT claim. The browser never creates that claim, and the
+claim is only an admission capability: after bootstrap, an existing
+organization membership with role `admin` is required for tenant mutations.
+The local-server authority regression covers both paths. Test JWT issuance is
+confined to the Jazz policy-test harness; production deployments must issue the
+claim from their own authenticated provisioning service and keep signing keys
+off the client.
