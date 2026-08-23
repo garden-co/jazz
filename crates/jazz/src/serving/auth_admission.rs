@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::groove::records::Value;
-use crate::ids::AuthorId;
+use crate::ids::AuthorSubject;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 
@@ -156,7 +156,7 @@ pub struct AdmittedSession {
     /// Auth subject from the accepted credential.
     pub subject: String,
     /// Deterministic Jazz author identity derived from `subject`.
-    pub author: AuthorId,
+    pub author: AuthorSubject,
     /// Application claims admitted for this session.
     pub claims: BTreeMap<String, Value>,
     /// Admission source.
@@ -233,7 +233,13 @@ pub fn admit_static_bearer_with_claims(
         ));
     }
     Ok(AdmittedSession {
-        author: author_id_from_subject(&subject),
+        author: author_subject_from_issuer_and_subject(
+            match source {
+                AdmissionSource::Anonymous => ANONYMOUS_ISSUER,
+                _ => STATIC_BEARER_ISSUER,
+            },
+            &subject,
+        ),
         subject,
         claims,
         source,
@@ -254,16 +260,18 @@ pub fn admit_bearer_jwt(
     let key = jwt_decoding_key(verifier)?;
     let mut validation = Validation::new(verifier.algorithm);
     validation.required_spec_claims.insert("exp".to_owned());
+    validation.required_spec_claims.insert("iss".to_owned());
     validation.required_spec_claims.insert("sub".to_owned());
     let decoded = decode::<JwtClaims>(token, &key, &validation).map_err(jwt_error)?;
     if !crate::tools::identity::principal_is_nonempty(&decoded.claims.sub) {
         return Err(AuthAdmissionError::InvalidJwt("missing sub".to_owned()));
     }
+    let issuer = decoded.claims.iss;
     let subject = decoded.claims.sub;
     let mut claims = jwt_json_claims_to_policy_claims(decoded.claims.extra)?;
     claims.insert("sub".to_owned(), Value::String(subject.clone()));
     Ok(AdmittedSession {
-        author: author_id_from_subject(&subject),
+        author: author_subject_from_issuer_and_subject(&issuer, &subject),
         subject,
         claims,
         source,
@@ -272,6 +280,10 @@ pub fn admit_bearer_jwt(
 
 /// Issuer required for local-first admission tokens.
 pub const LOCAL_FIRST_JWT_ISSUER: &str = "urn:jazz:local-first";
+/// Reserved issuer for subjects admitted by the process-local static bearer gate.
+pub const STATIC_BEARER_ISSUER: &str = "urn:jazz:static-bearer";
+/// Reserved issuer for sessions admitted without an external credential.
+pub const ANONYMOUS_ISSUER: &str = "urn:jazz:anonymous";
 
 /// Admit a signed local-first JWT.
 ///
@@ -330,7 +342,7 @@ pub fn admit_local_first_jwt(
         Value::String(LOCAL_FIRST_JWT_ISSUER.to_owned()),
     );
     Ok(AdmittedSession {
-        author: author_id_from_subject(&subject),
+        author: author_subject_from_issuer_and_subject(LOCAL_FIRST_JWT_ISSUER, &subject),
         subject,
         claims,
         source: AdmissionSource::LocalFirstJwt,
@@ -352,6 +364,7 @@ fn jwt_decoding_key(verifier: &JwtVerifierConfig) -> Result<DecodingKey, AuthAdm
 
 #[derive(Clone, Debug, Deserialize)]
 struct JwtClaims {
+    iss: String,
     sub: String,
     #[serde(rename = "exp")]
     _exp: u64,
@@ -444,9 +457,9 @@ fn json_claim_to_policy_claim(
     }
 }
 
-/// Deterministically map an auth subject to a Jazz author id.
-pub fn author_id_from_subject(subject: &str) -> AuthorId {
-    crate::tools::identity::author_id_from_principal(subject)
+/// Bind an exact issuer/subject pair into the logical Jazz author identity.
+pub fn author_subject_from_issuer_and_subject(issuer: &str, subject: &str) -> AuthorSubject {
+    AuthorSubject::authenticated(issuer, subject)
 }
 
 /// Extract a bearer token from an `Authorization` header value.
@@ -462,11 +475,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn uuid_subjects_preserve_author_identity() {
+    fn issuer_and_subject_define_author_identity() {
         let subject = "00000000-0000-4000-8000-0000000000b2";
         assert_eq!(
-            author_id_from_subject(subject),
-            AuthorId::from_bytes(*uuid::Uuid::parse_str(subject).unwrap().as_bytes())
+            author_subject_from_issuer_and_subject("https://issuer.example", subject),
+            AuthorSubject::authenticated("https://issuer.example", subject)
         );
     }
 

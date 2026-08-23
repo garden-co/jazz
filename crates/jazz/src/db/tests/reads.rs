@@ -21,7 +21,7 @@ fn indexed_documents_schema() -> JazzSchema {
 #[test]
 fn prepared_query_discards_graph_handle_when_runtime_changes() {
     let schema = issue_schema();
-    let db = open_db(0xb7, AuthorId::SYSTEM, &schema);
+    let db = open_db(0xb7, AuthorSubject::SYSTEM, &schema);
     let prepared = db.prepare_query(&joined_issue_query()).unwrap();
     let runtime_token = db.node.node.borrow().groove_runtime_token();
     assert!(
@@ -36,7 +36,7 @@ fn prepared_query_discards_graph_handle_when_runtime_changes() {
     );
 }
 
-fn seed_issue_project(db: &Db<RocksDbStorage>, author: AuthorId) {
+fn seed_issue_project(db: &Db<RocksDbStorage>, author: AuthorSubject) {
     db.seed_settled_mergeable_for_bootstrap(
         "projects",
         row(10),
@@ -66,7 +66,7 @@ fn seed_issue_project(db: &Db<RocksDbStorage>, author: AuthorId) {
 #[test]
 fn prepared_current_write_query_installs_and_reads_non_simple_plan() {
     let schema = issue_schema();
-    let author = AuthorId::from_bytes([0xa1; 16]);
+    let author = AuthorSubject::for_test_bytes([0xa1; 16]);
     let db = open_db(0xa1, author, &schema);
     seed_issue_project(&db, author);
 
@@ -93,7 +93,7 @@ fn prepared_current_write_query_installs_and_reads_non_simple_plan() {
 #[test]
 fn local_subscribe_uses_prepared_non_simple_plan() {
     let schema = issue_schema();
-    let author = AuthorId::from_bytes([0xa1; 16]);
+    let author = AuthorSubject::for_test_bytes([0xa1; 16]);
     let db = open_db(0xa2, author, &schema);
     seed_issue_project(&db, author);
 
@@ -131,7 +131,7 @@ fn local_subscribe_uses_prepared_non_simple_plan() {
 #[test]
 fn subscription_reset_preserves_ordered_window_rank() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xa1; 16]);
+    let author = AuthorSubject::for_test_bytes([0xa1; 16]);
     let db = open_db(0xa3, author, &schema);
     for (id, title) in [(4, "alpha"), (1, "bravo"), (3, "charlie"), (2, "delta")] {
         db.seed_settled_mergeable_for_bootstrap(
@@ -170,7 +170,7 @@ fn subscription_reset_preserves_ordered_window_rank() {
 #[test]
 fn simple_prepared_current_write_query_uses_lowered_plan() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xa1; 16]);
+    let author = AuthorSubject::for_test_bytes([0xa1; 16]);
     let db = open_db(0xa3, author, &schema);
     db.insert_with_id("todos", row(1), cells("simple", false, author))
         .unwrap();
@@ -194,7 +194,7 @@ fn simple_prepared_current_write_query_uses_lowered_plan() {
 #[test]
 fn filtered_root_prepared_query_still_reads_without_preinstalled_plan() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xa1; 16]);
+    let author = AuthorSubject::for_test_bytes([0xa1; 16]);
     let db = open_db(0xa4, author, &schema);
     db.insert_with_id("todos", row(1), cells("wanted", false, author))
         .unwrap();
@@ -277,7 +277,7 @@ fn authoritative_global_bound_read_uses_the_declared_index() {
 #[test]
 fn relation_query_one_shot_hop_uses_unified_query_path() {
     let schema = relation_schema();
-    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
     db.insert_with_id(
         "users",
         row(0xa1),
@@ -374,7 +374,7 @@ fn relation_query_one_shot_hop_uses_unified_query_path() {
 #[test]
 fn relation_query_one_shot_hop_accepts_runtime_uuid_literal_filter() {
     let schema = relation_schema();
-    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
     db.insert_with_id(
         "users",
         row(0xa1),
@@ -475,7 +475,7 @@ fn relation_query_one_shot_hop_accepts_runtime_uuid_literal_filter() {
 #[test]
 fn relation_query_one_shot_multi_hop_scalar_fk_uses_nested_join_path() {
     let schema = relation_hop_schema();
-    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
     db.insert_with_id(
         "orgs",
         row(0x01),
@@ -522,7 +522,7 @@ fn relation_query_one_shot_multi_hop_scalar_fk_uses_nested_join_path() {
 #[test]
 fn relation_query_subscription_hop_uses_unified_query_path() {
     let schema = relation_schema();
-    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
     db.insert_with_id(
         "users",
         row(0xa1),
@@ -593,7 +593,7 @@ fn relation_query_subscription_hop_uses_unified_query_path() {
 #[test]
 fn relation_query_subscription_hop_preserves_projected_self_reference_cells() {
     let schema = relation_hop_schema();
-    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
     let parent = row(0x10);
     let team = row(0x11);
     let user = row(0x21);
@@ -740,7 +740,7 @@ fn users_to_teams_relation_query() -> RelationQuery {
 #[test]
 fn relation_query_subscription_multi_hop_scalar_fk_uses_nested_join_path() {
     let schema = relation_hop_schema();
-    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
     let query = users_to_orgs_relation_query();
     let mut stream = block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
     assert!(opened_rows(stream.try_next_event().expect("opened event")).is_empty());
@@ -853,7 +853,7 @@ fn relation_query_gather_uses_unified_reachable_lowering_for_reads_and_subscript
                 .nullable_fk_column("parent_id", "teams"),
         ),
     );
-    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
     let query = teams_gather_relation_query();
     let mut stream = block_on(db.subscribe_relation_query(&query, ReadOpts::default())).unwrap();
     assert!(opened_rows(stream.try_next_event().expect("opened event")).is_empty());
@@ -1053,7 +1053,7 @@ fn teams_gather_relation_query() -> RelationQuery {
 #[test]
 fn relation_snapshot_reverse_array_skips_deleted_children() {
     let schema = relation_schema();
-    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
     db.insert_with_id(
         "users",
         row(0xa1),
@@ -1102,8 +1102,8 @@ fn relation_snapshot_reverse_array_skips_deleted_children() {
 #[test]
 fn maintained_subscription_with_two_reference_includes_opens_with_source_coverage() {
     let schema = access_edge_include_schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0xee, AuthorId::SYSTEM, &schema);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0xee, AuthorSubject::SYSTEM, &schema);
     server
         .insert_with_id(
             "teams",
@@ -1216,7 +1216,7 @@ fn relation_snapshot_reverse_array_skips_deleted_children_with_camel_case_ref() 
                     .nullable_fk_column("ownerId", "users"),
             ),
     );
-    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
     db.insert_with_id(
         "users",
         row(0xa1),
@@ -1349,7 +1349,7 @@ fn relation_snapshot_reverse_array_reads_local_nullable_ref_child() {
                     .nullable_fk_column("ownerId", "users"),
             ),
     );
-    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
     let user = db
         .insert(
             "users",
@@ -1399,7 +1399,7 @@ fn relation_snapshot_reverse_array_limit_reads_local_child() {
                     .fk_column("projectId", "projects"),
             ),
     );
-    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
     let project = db
         .insert(
             "projects",
@@ -1440,7 +1440,7 @@ fn relation_snapshot_reverse_array_limit_reads_local_child() {
 #[test]
 fn relation_snapshot_unordered_array_offset_uses_child_row_id_order() {
     let schema = relation_schema();
-    let db = open_db(0xd4, AuthorId::from_bytes([0xd4; 16]), &schema);
+    let db = open_db(0xd4, AuthorSubject::for_test_bytes([0xd4; 16]), &schema);
     let parent = row(0x41);
     db.insert_with_id(
         "todos",
@@ -1499,7 +1499,7 @@ fn relation_snapshot_reverse_array_projects_provenance_magic_columns() {
             )
             .table(PublicTableSchemaBuilder::new("users").column("name", PublicColumnType::Text)),
     );
-    let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
+    let db = open_db(0xc1, AuthorSubject::for_test_bytes([0xc1; 16]), &schema);
     db.insert_with_id(
         "projects",
         row(0xa1),
@@ -1599,8 +1599,8 @@ fn version_bearing_current_source_preserves_provenance_timestamps() {
 #[test]
 fn db_at_reads_historical_cut_and_partial_requires_server() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xa1; 16]);
-    let core = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let author = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let core = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let partial = open_db(0xc1, author, &schema);
     let todo = row(0x42);
 
@@ -1641,8 +1641,8 @@ fn db_query_builder_expresses_s1_shaped_filters_and_include_modes() {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(dir.path(), &refs).unwrap();
-    let alice = AuthorId::from_bytes([0xa1; 16]);
-    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
     let db = block_on(Db::open(DbConfig {
         schema: schema.clone(),
         storage,
@@ -1696,7 +1696,7 @@ fn db_query_builder_expresses_s1_shaped_filters_and_include_modes() {
     let s1_query = db
         .table("issues")
         .filter(all_of([
-            eq(col("assignee"), lit(alice.0)),
+            eq(col("assignee"), lit(alice.test_uuid())),
             in_list(col("state"), [lit("open"), lit("blocked")]),
             not(ne(col("state"), lit("open"))),
             any_of([
@@ -1731,7 +1731,7 @@ fn db_query_builder_expresses_s1_shaped_filters_and_include_modes() {
 
     let holes_query = db
         .table("issues")
-        .filter(eq(col("assignee"), lit(alice.0)))
+        .filter(eq(col("assignee"), lit(alice.test_uuid())))
         .filter(eq(col("state"), lit("open")))
         .include_with(Include::new("project").join_mode(JoinMode::Holes));
     assert_eq!(
@@ -1763,7 +1763,7 @@ fn db_query_builder_expresses_s1_shaped_filters_and_include_modes() {
 #[test]
 fn payload_enum_match_filters_one_shot_and_maintained_case_transitions() {
     let schema = payload_enum_query_schema();
-    let db = open_db(0xe7, AuthorId::from_bytes([0xe7; 16]), &schema);
+    let db = open_db(0xe7, AuthorSubject::for_test_bytes([0xe7; 16]), &schema);
     let matching = row(0xe1);
     let other_case = row(0xe2);
     db.insert_with_id(
@@ -1887,9 +1887,9 @@ fn projected_relation_edge_removal_removes_only_its_renamed_related_row() {
 #[test]
 fn client_read_advice_is_unknown_even_when_a_local_winner_exists() {
     let schema = owner_read_schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let other = AuthorId::from_bytes([0xb2; 16]);
-    let core = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let other = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let core = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let row = row(1);
     let write = core
         .insert_with_id("todos", row, cells("private", false, owner))
@@ -2030,7 +2030,7 @@ fn edge_read_opts_and_wait_honor_edge_durability() {
                 include_deleted: false,
                 ..ReadOpts::default()
             },
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
         ))
         .unwrap()
         .is_empty()
@@ -2065,7 +2065,7 @@ fn edge_read_opts_and_wait_honor_edge_durability() {
                     include_deleted: false,
                     ..ReadOpts::default()
                 },
-                AuthorId::SYSTEM,
+                AuthorSubject::SYSTEM,
             ))
             .unwrap()
         ),

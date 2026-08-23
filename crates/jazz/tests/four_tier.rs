@@ -4,7 +4,7 @@ mod common;
 
 use jazz::block_on;
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::peer::{PeerRole, PeerState};
 use jazz::protocol::{SubscriptionKey, SyncMessage, VersionBundle};
@@ -135,10 +135,13 @@ fn reopen_node(
     block_on(NodeState::new(node_uuid, schema, storage)).unwrap()
 }
 
-fn cells(title: &str, owner: AuthorId) -> BTreeMap<String, Value> {
+fn cells(title: &str, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
-        ("owner".to_owned(), Value::Uuid(owner.0)),
+        (
+            "owner".to_owned(),
+            Value::String(owner.canonical().to_owned()),
+        ),
     ])
 }
 
@@ -146,7 +149,11 @@ fn title_only_cells(title: &str) -> BTreeMap<String, Value> {
     BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))])
 }
 
-fn permission_scope_key(schema: &JazzSchema, table: &str, writer: AuthorId) -> SubscriptionKey {
+fn permission_scope_key(
+    schema: &JazzSchema,
+    table: &str,
+    writer: AuthorSubject,
+) -> SubscriptionKey {
     let _policy = schema
         .tables
         .iter()
@@ -154,7 +161,10 @@ fn permission_scope_key(schema: &JazzSchema, table: &str, writer: AuthorId) -> S
         .and_then(|table| table.write_policies.insert_check.clone())
         .expect("table should have a write policy");
     let mut values = BTreeMap::new();
-    values.insert("__jazz_claim_sub".to_owned(), Value::Uuid(writer.0));
+    values.insert(
+        "__jazz_claim_sub".to_owned(),
+        Value::String(writer.canonical().to_owned()),
+    );
     let shape = Query::from(table)
         .filter(eq(col("owner"), param("__jazz_claim_sub")))
         .validate(schema)
@@ -179,10 +189,13 @@ fn whole_table_key(schema: &JazzSchema, table: &str) -> SubscriptionKey {
     }
 }
 
-fn invite_cells(canvas: RowUuid, user: AuthorId) -> BTreeMap<String, Value> {
+fn invite_cells(canvas: RowUuid, user: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("canvas".to_owned(), Value::Uuid(canvas.0)),
-        ("userID".to_owned(), Value::Uuid(user.0)),
+        (
+            "userID".to_owned(),
+            Value::String(user.canonical().to_owned()),
+        ),
     ])
 }
 
@@ -204,14 +217,14 @@ fn commit(
     row_uuid: RowUuid,
     made_at: u64,
     title: &str,
-    owner: AuthorId,
+    owner: AuthorSubject,
     parents: impl IntoIterator<Item = TxId>,
 ) -> (TxId, SyncMessage) {
     block_on(async {
         let (published, unit) = ui
             .commit_mergeable_unit(
                 MergeableCommit::new("todos", row_uuid, made_at)
-                    .made_by(AuthorId::from_bytes([7; 16]))
+                    .made_by(AuthorSubject::for_test_bytes([7; 16]))
                     .parents(parents.into_iter().collect())
                     .cells(cells(title, owner)),
             )
@@ -227,7 +240,7 @@ fn commit_as(
     row_uuid: RowUuid,
     made_at: u64,
     title: &str,
-    writer: AuthorId,
+    writer: AuthorSubject,
     parents: impl IntoIterator<Item = TxId>,
 ) -> (TxId, SyncMessage) {
     block_on(async {
@@ -256,7 +269,7 @@ fn deletion(
         let (published, unit) = ui
             .commit_mergeable_unit(
                 MergeableCommit::new("todos", row_uuid, made_at)
-                    .made_by(AuthorId::from_bytes([7; 16]))
+                    .made_by(AuthorSubject::for_test_bytes([7; 16]))
                     .deletion(event),
             )
             .await
@@ -386,9 +399,9 @@ fn subscription_rows(node: &mut NodeState<RocksDbStorage>) -> Vec<(RowUuid, Valu
 #[test]
 fn four_tier_topology_relays_pending_units_and_core_fates() {
     let schema = schema();
-    let ui_author = AuthorId::from_bytes([7; 16]);
+    let ui_author = AuthorSubject::for_test_bytes([7; 16]);
     let ui_owner = ui_author;
-    let other_owner = AuthorId::from_bytes([8; 16]);
+    let other_owner = AuthorSubject::for_test_bytes([8; 16]);
 
     let (_ui_dir, mut ui) = open_node(node(1), schema.clone());
     let (worker_dir, mut worker) = open_node(node(2), schema.clone());
@@ -536,8 +549,8 @@ fn four_tier_topology_relays_pending_units_and_core_fates() {
 #[test]
 fn edge_peer_terminates_client_identity_and_relays_upstream() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([7; 16]);
-    let other_owner = AuthorId::from_bytes([8; 16]);
+    let client_author = AuthorSubject::for_test_bytes([7; 16]);
+    let other_owner = AuthorSubject::for_test_bytes([8; 16]);
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
     let (_edge_dir, mut edge) = open_node(node(3), schema.clone());
@@ -591,13 +604,13 @@ fn edge_peer_terminates_client_identity_and_relays_upstream() {
     assert_eq!(rows(&mut core), expected_all);
     assert_eq!(rows(&mut edge), expected_all);
     assert_eq!(subscription_rows(&mut client), expected_client);
-    assert_eq!(core_to_edge.identity(), AuthorId::SYSTEM);
+    assert_eq!(core_to_edge.identity(), AuthorSubject::SYSTEM);
 }
 
 #[test]
 fn edge_defers_mergeable_fate_until_permission_scope_settles() {
     let schema = read_write_policy_schema();
-    let client_author = AuthorId::from_bytes([7; 16]);
+    let client_author = AuthorSubject::for_test_bytes([7; 16]);
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
     let (_edge_dir, mut edge) = open_node(node(3), schema);
@@ -654,7 +667,7 @@ fn edge_defers_mergeable_fate_until_permission_scope_settles() {
 #[test]
 fn edge_permission_scope_is_write_policy_claim_not_whole_table() {
     let schema = read_write_policy_schema();
-    let client_author = AuthorId::from_bytes([7; 16]);
+    let client_author = AuthorSubject::for_test_bytes([7; 16]);
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
     let (_edge_dir, mut edge) = open_node(node(3), schema.clone());
@@ -692,8 +705,8 @@ fn edge_permission_scope_is_write_policy_claim_not_whole_table() {
 #[test]
 fn edge_permission_scope_uses_link_identity_not_made_by_provenance() {
     let schema = read_write_policy_schema();
-    let backend_author = AuthorId::from_bytes([0xb0; 16]);
-    let attributed_user = AuthorId::from_bytes([0xa1; 16]);
+    let backend_author = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let attributed_user = AuthorSubject::for_test_bytes([0xa1; 16]);
 
     let (_backend_dir, mut backend) = open_node(node(1), schema.clone());
     let (_edge_dir, mut edge) = open_node(node(3), schema.clone());
@@ -776,7 +789,7 @@ fn edge_permission_scope_uses_link_identity_not_made_by_provenance() {
 #[test]
 fn edge_deduplicates_scope_subscription_for_repeated_deferred_units() {
     let schema = read_write_policy_schema();
-    let client_author = AuthorId::from_bytes([7; 16]);
+    let client_author = AuthorSubject::for_test_bytes([7; 16]);
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
     let (_edge_dir, mut edge) = open_node(node(3), schema);
@@ -814,8 +827,8 @@ fn edge_deduplicates_scope_subscription_for_repeated_deferred_units() {
 #[test]
 fn edge_permission_scopes_are_keyed_by_policy_shape_and_writer_claim() {
     let schema = read_write_policy_schema();
-    let writer_a = AuthorId::from_bytes([0xa1; 16]);
-    let writer_b = AuthorId::from_bytes([0xb2; 16]);
+    let writer_a = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let writer_b = AuthorSubject::for_test_bytes([0xb2; 16]);
 
     let (_client_a_dir, mut client_a) = open_node(node(1), schema.clone());
     let (_client_b_dir, mut client_b) = open_node(node(2), schema.clone());
@@ -891,8 +904,8 @@ fn edge_permission_scopes_are_keyed_by_policy_shape_and_writer_claim() {
 #[test]
 fn settled_permission_scope_for_one_writer_claim_does_not_unlock_whole_table() {
     let schema = read_write_policy_schema();
-    let writer_a = AuthorId::from_bytes([0xa1; 16]);
-    let writer_b = AuthorId::from_bytes([0xb2; 16]);
+    let writer_a = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let writer_b = AuthorSubject::for_test_bytes([0xb2; 16]);
 
     let (_client_a_dir, mut client_a) = open_node(node(1), schema.clone());
     let (_client_b_dir, mut client_b) = open_node(node(2), schema.clone());
@@ -970,7 +983,7 @@ fn settled_permission_scope_for_one_writer_claim_does_not_unlock_whole_table() {
 #[test]
 fn edge_releases_scope_subscription_after_last_deferred_unit_resolves() {
     let schema = read_write_policy_schema();
-    let client_author = AuthorId::from_bytes([7; 16]);
+    let client_author = AuthorSubject::for_test_bytes([7; 16]);
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
     let (_edge_dir, mut edge) = open_node(node(3), schema);
@@ -1007,7 +1020,7 @@ fn edge_releases_scope_subscription_after_last_deferred_unit_resolves() {
 #[test]
 fn edge_restart_recovers_deferred_fate_from_client_outbox_redelivery() {
     let schema = read_write_policy_schema();
-    let client_author = AuthorId::from_bytes([7; 16]);
+    let client_author = AuthorSubject::for_test_bytes([7; 16]);
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
     let (edge_dir, mut edge) = open_node(node(3), schema.clone());
@@ -1113,7 +1126,7 @@ fn edge_restart_recovers_deferred_fate_from_client_outbox_redelivery() {
 #[test]
 fn edge_restart_preserves_edge_accepted_unit_without_redelivery() {
     let schema = public_write_schema();
-    let client_author = AuthorId::from_bytes([7; 16]);
+    let client_author = AuthorSubject::for_test_bytes([7; 16]);
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
     let (edge_dir, mut edge) = open_node(node(3), schema.clone());
@@ -1176,7 +1189,7 @@ fn edge_restart_preserves_edge_accepted_unit_without_redelivery() {
 #[test]
 fn edge_public_write_table_settles_without_deferral_or_scope() {
     let schema = public_write_schema();
-    let client_author = AuthorId::from_bytes([7; 16]);
+    let client_author = AuthorSubject::for_test_bytes([7; 16]);
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
     let (_edge_dir, mut edge) = open_node(node(3), schema);
@@ -1212,7 +1225,7 @@ fn edge_public_write_table_settles_without_deferral_or_scope() {
 #[test]
 fn edge_accepted_mergeable_is_final_at_core_after_policy_revocation() {
     let schema = access_write_policy_schema();
-    let client_author = AuthorId::from_bytes([7; 16]);
+    let client_author = AuthorSubject::for_test_bytes([7; 16]);
     let canvas_row = row(31);
     let invite_row = row(32);
 

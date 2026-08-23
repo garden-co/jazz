@@ -18,7 +18,7 @@ fn maintained_subscription_view_top_by_partitions_windows_by_policy_claim_bindin
         accept_global(
             &mut core,
             MergeableCommit::new("documents", row(index as u8), index).cells(BTreeMap::from([
-                ("owner".to_owned(), Value::Uuid(owner_a.0)),
+                ("owner".to_owned(), Value::Uuid(owner_a.test_uuid())),
                 ("updated_at".to_owned(), Value::U64(index)),
             ])),
         );
@@ -26,7 +26,7 @@ fn maintained_subscription_view_top_by_partitions_windows_by_policy_claim_bindin
             &mut core,
             MergeableCommit::new("documents", row((index + 100) as u8), index + 100)
                 .cells(BTreeMap::from([
-                    ("owner".to_owned(), Value::Uuid(owner_b.0)),
+                    ("owner".to_owned(), Value::Uuid(owner_b.test_uuid())),
                     ("updated_at".to_owned(), Value::U64(index + 100)),
                 ])),
         );
@@ -99,7 +99,7 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
             &mut core,
             MergeableCommit::new("documentAccess", grant, index * 3 + 2).cells(BTreeMap::from([
                 ("document".to_owned(), Value::Uuid(document.0)),
-                ("reader".to_owned(), Value::Uuid(reader.0)),
+                ("reader".to_owned(), Value::Uuid(reader.test_uuid())),
             ])),
         ));
     }
@@ -139,7 +139,7 @@ fn authorization_proofs_are_existential_before_top_by_windows() {
         &mut core,
         MergeableCommit::new("documentAccess", duplicate_grant, 302).cells(BTreeMap::from([
             ("document".to_owned(), Value::Uuid(row(99).0)),
-            ("reader".to_owned(), Value::Uuid(reader.0)),
+            ("reader".to_owned(), Value::Uuid(reader.test_uuid())),
         ])),
     );
     let duplicate = peer.query_update(&mut core, &shape, &binding).unwrap();

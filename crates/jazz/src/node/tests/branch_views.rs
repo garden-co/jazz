@@ -41,7 +41,7 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
     let overridden = row(0x44);
     let base = branch_selector(0x45);
     let head = branch_selector(0x46);
-    let owner = AuthorId::from_bytes([0x48; 16]);
+    let owner = AuthorSubject::for_test_bytes([0x48; 16]);
 
     for (row_uuid, title) in [(inherited, "inherited"), (overridden, "base")] {
         node.commit_mergeable_settled(
@@ -49,7 +49,7 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
                 .branch(base.clone())
                 .cells(BTreeMap::from([
                     ("title".to_owned(), v(title)),
-                    ("owner".to_owned(), Value::Uuid(owner.0)),
+                    ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
                 ])),
         )
         .unwrap();
@@ -59,7 +59,7 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
             .branch(head.clone())
             .cells(BTreeMap::from([
                 ("title".to_owned(), v("head")),
-                ("owner".to_owned(), Value::Uuid(owner.0)),
+                ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
             ])),
     )
     .unwrap();
@@ -83,7 +83,7 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
             &shape,
             &binding,
             DurabilityTier::Local,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             &read_view,
         )
         .unwrap();
@@ -105,7 +105,7 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
     assert_eq!(titles[&inherited], "inherited");
     assert_eq!(titles[&overridden], "head");
     for row in snapshot.rows.iter().take(snapshot.root_count) {
-        assert_eq!(row.cell(todos_table, "owner"), Some(Value::Uuid(owner.0)));
+        assert_eq!(row.cell(todos_table, "owner"), Some(Value::Uuid(owner.test_uuid())));
     }
 
     let authorized = node
@@ -123,7 +123,7 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
             &shape,
             &binding,
             DurabilityTier::Local,
-            AuthorId::from_bytes([0x49; 16]),
+            AuthorSubject::for_test_bytes([0x49; 16]),
             &read_view,
         )
         .unwrap();
@@ -134,7 +134,7 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
             &shape,
             &binding,
             DurabilityTier::Local,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
         )
         .unwrap();
     assert_eq!(
@@ -149,7 +149,7 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
             &users,
             &users_binding,
             DurabilityTier::Local,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             &read_view,
         )
         .unwrap();
@@ -167,7 +167,7 @@ fn branch_view_selects_head_then_base_and_keeps_unbranched_tables_shared() {
             &shape,
             &binding,
             DurabilityTier::Local,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             &read_view,
         )
         .unwrap();
@@ -181,14 +181,14 @@ fn version_parents_cannot_cross_branch_keys() {
     let (_dir, mut node) =
         open_history_complete_node_with_schema(NodeUuid::from_bytes([0x51; 16]), schema);
     let row_uuid = row(0x52);
-    let owner = AuthorId::from_bytes([0x53; 16]);
+    let owner = AuthorSubject::for_test_bytes([0x53; 16]);
     let parent = node
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row_uuid, 10)
                 .branch(branch_selector(0x54))
                 .cells(BTreeMap::from([
                     ("title".to_owned(), v("base")),
-                    ("owner".to_owned(), Value::Uuid(owner.0)),
+                    ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
                 ])),
         )
         .unwrap();
@@ -199,7 +199,7 @@ fn version_parents_cannot_cross_branch_keys() {
                 .parents(vec![parent])
                 .cells(BTreeMap::from([
                     ("title".to_owned(), v("invalid")),
-                    ("owner".to_owned(), Value::Uuid(owner.0)),
+                    ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
                 ])),
         )
         .resolve()
@@ -218,7 +218,7 @@ fn malformed_branch_key_rejects_multi_key_commit_without_residue() {
     let cells = |title: &str| {
         BTreeMap::from([
             ("title".to_owned(), v(title)),
-            ("owner".to_owned(), Value::Uuid(AuthorId::SYSTEM.0)),
+            ("owner".to_owned(), Value::Uuid(AuthorSubject::SYSTEM.test_uuid())),
         ])
     };
     let error = node
@@ -257,15 +257,15 @@ fn remote_authored_branch_keys_are_validated_atomically_before_storage() {
     let (valid_key, branch_cells) = schema.project_branch_selector(table, &selector).unwrap();
     let mut content_cells = branch_cells;
     content_cells.insert("title".to_owned(), v("content"));
-    content_cells.insert("owner".to_owned(), Value::Uuid(AuthorId::SYSTEM.0));
+    content_cells.insert("owner".to_owned(), Value::Uuid(AuthorSubject::SYSTEM.test_uuid()));
     let content = VersionRecord::from_cells(
         table,
         schema.version_id(),
         row(0x63),
         Vec::new(),
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         TxTime(10),
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         TxTime(10),
         &content_cells,
         None,
@@ -277,9 +277,9 @@ fn remote_authored_branch_keys_are_validated_atomically_before_storage() {
         schema.version_id(),
         row(0x64),
         Vec::new(),
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         TxTime(10),
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         TxTime(10),
         &BTreeMap::<String, Value>::new(),
         Some(DeletionEvent::Deleted),
@@ -368,7 +368,7 @@ fn remote_authored_branch_keys_are_validated_atomically_before_storage() {
             tx_id,
             kind: TxKind::Mergeable,
             n_total_writes: 2,
-            made_by: AuthorId::SYSTEM,
+            made_by: AuthorSubject::SYSTEM,
             permission_subject: None,
             base_snapshot: None,
             row_read_set: None,
@@ -410,7 +410,7 @@ fn remote_branch_write_does_not_invalidate_live_branch_view_plans() {
                 .branch(branch_selector(0x59))
                 .cells(BTreeMap::from([
                     ("title".to_owned(), v("remote")),
-                    ("owner".to_owned(), Value::Uuid(AuthorId::SYSTEM.0)),
+                    ("owner".to_owned(), Value::Uuid(AuthorSubject::SYSTEM.test_uuid())),
                 ])),
         )
         .unwrap();
@@ -462,7 +462,7 @@ fn calculated_merge_commit_persists_only_emitted_target_coordinates() {
                 .branch(target)
                 .cells(BTreeMap::from([
                     ("title".to_owned(), v("merged")),
-                    ("owner".to_owned(), Value::Uuid(AuthorId::SYSTEM.0)),
+                    ("owner".to_owned(), Value::Uuid(AuthorSubject::SYSTEM.test_uuid())),
                 ]))],
             provenance.clone(),
         )
@@ -488,7 +488,7 @@ fn scalar_contribution_merge_is_retry_safe_and_does_not_echo_home() {
             .branch(a.clone())
             .cells(BTreeMap::from([
                 ("title".to_owned(), v("from a")),
-                ("owner".to_owned(), Value::Uuid(AuthorId::SYSTEM.0)),
+                ("owner".to_owned(), Value::Uuid(AuthorSubject::SYSTEM.test_uuid())),
             ])),
     )
     .unwrap();
@@ -500,7 +500,7 @@ fn scalar_contribution_merge_is_retry_safe_and_does_not_echo_home() {
                 table: "todos".to_owned(),
                 row_uuid,
             }],
-            made_by: AuthorId::SYSTEM,
+            made_by: AuthorSubject::SYSTEM,
             permission_subject: None,
             now_ms,
         }
@@ -549,7 +549,7 @@ fn contribution_merge_carries_delete_and_restore_register_events() {
             .branch(source.clone())
             .cells(BTreeMap::from([
                 ("title".to_owned(), v("row")),
-                ("owner".to_owned(), Value::Uuid(AuthorId::SYSTEM.0)),
+                ("owner".to_owned(), Value::Uuid(AuthorSubject::SYSTEM.test_uuid())),
             ])),
     )
     .unwrap();
@@ -560,7 +560,7 @@ fn contribution_merge_carries_delete_and_restore_register_events() {
             table: "todos".to_owned(),
             row_uuid,
         }],
-        made_by: AuthorId::SYSTEM,
+        made_by: AuthorSubject::SYSTEM,
         permission_subject: None,
         now_ms,
     };
@@ -613,7 +613,7 @@ fn contribution_merge_receiver_needs_no_source_history() {
                 .branch(source.clone())
                 .cells(BTreeMap::from([
                     ("title".to_owned(), v("portable")),
-                    ("owner".to_owned(), Value::Uuid(AuthorId::SYSTEM.0)),
+                    ("owner".to_owned(), Value::Uuid(AuthorSubject::SYSTEM.test_uuid())),
                 ])),
         )
         .unwrap();
@@ -625,7 +625,7 @@ fn contribution_merge_receiver_needs_no_source_history() {
                 table: "todos".to_owned(),
                 row_uuid,
             }],
-            made_by: AuthorId::SYSTEM,
+            made_by: AuthorSubject::SYSTEM,
             permission_subject: None,
             now_ms: 20,
         })
@@ -656,11 +656,11 @@ fn contribution_merge_denies_unreadable_source_before_minting() {
             .branch(source.clone())
             .cells(BTreeMap::from([
                 ("title".to_owned(), v("private")),
-                ("owner".to_owned(), Value::Uuid(AuthorId::SYSTEM.0)),
+                ("owner".to_owned(), Value::Uuid(AuthorSubject::SYSTEM.test_uuid())),
             ])),
     )
     .unwrap();
-    let unauthorized = AuthorId::from_bytes([0x7b; 16]);
+    let unauthorized = AuthorSubject::for_test_bytes([0x7b; 16]);
     let error = node
         .merge_branch_contributions(ContributionMergeRequest {
             source,
@@ -727,7 +727,7 @@ fn counter_contribution_merge_imports_only_novel_native_deltas() {
                 table: "counts".to_owned(),
                 row_uuid,
             }],
-            made_by: AuthorId::SYSTEM,
+            made_by: AuthorSubject::SYSTEM,
             permission_subject: None,
             now_ms,
         }
@@ -791,7 +791,7 @@ fn gset_contribution_merge_tracks_elements_as_native_operations() {
                 table: "sets".to_owned(),
                 row_uuid,
             }],
-            made_by: AuthorId::SYSTEM,
+            made_by: AuthorSubject::SYSTEM,
             permission_subject: None,
             now_ms,
         }
@@ -835,7 +835,7 @@ fn maintained_live_base_emits_a_delta_before_facade_refresh() {
             .branch(base.clone())
             .cells(BTreeMap::from([
                 ("title".to_owned(), v("base")),
-                ("owner".to_owned(), Value::Uuid(AuthorId::SYSTEM.0)),
+                ("owner".to_owned(), Value::Uuid(AuthorSubject::SYSTEM.test_uuid())),
             ])),
     )
     .unwrap();
@@ -850,7 +850,7 @@ fn maintained_live_base_emits_a_delta_before_facade_refresh() {
             &shape,
             &binding,
             DurabilityTier::Local,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             QueryAuthorizationMode::ClientLocal,
         )
         .unwrap();
@@ -858,7 +858,7 @@ fn maintained_live_base_emits_a_delta_before_facade_refresh() {
         .open_maintained_view_subscription_in_authorization_mode(
             &shape,
             &binding,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             DurabilityTier::Local,
             &read_view,
             Some(plan),
@@ -872,7 +872,7 @@ fn maintained_live_base_emits_a_delta_before_facade_refresh() {
             .branch(base)
             .cells(BTreeMap::from([
                 ("title".to_owned(), v("base edited")),
-                ("owner".to_owned(), Value::Uuid(AuthorId::SYSTEM.0)),
+                ("owner".to_owned(), Value::Uuid(AuthorSubject::SYSTEM.test_uuid())),
             ])),
     )
     .unwrap();
@@ -935,7 +935,7 @@ fn added_branch_column_defaults_old_history_and_survives_column_rename() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved_version.id,
@@ -971,7 +971,7 @@ fn added_branch_column_defaults_old_history_and_survives_column_rename() {
             &shape,
             &binding,
             DurabilityTier::Local,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             &view,
         )
         .unwrap()
@@ -1022,7 +1022,7 @@ fn added_branch_column_defaults_old_history_and_survives_column_rename() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 2,
             schema: renamed_version.id,
@@ -1047,7 +1047,7 @@ fn branched_table_writes_require_an_explicit_exact_selector() {
         .commit_mergeable(
             MergeableCommit::new("todos", row(0x98), 10).cells(BTreeMap::from([
                 ("title".to_owned(), v("missing branch")),
-                ("owner".to_owned(), Value::Uuid(AuthorId::SYSTEM.0)),
+                ("owner".to_owned(), Value::Uuid(AuthorSubject::SYSTEM.test_uuid())),
             ])),
         )
         .resolve()

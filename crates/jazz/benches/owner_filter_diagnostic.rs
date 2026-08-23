@@ -13,7 +13,7 @@ use jazz::db::{
 };
 use jazz::groove::db::StorageReadMetrics;
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TablePolicies, TableSchemaBuilder};
@@ -22,8 +22,10 @@ use jazz_storage_rocksdb::RocksDbStorage;
 use serde_json::{Map, json};
 
 const TABLE: &str = "documents";
-const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
-const OTHER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
+const AUTHOR: AuthorSubject =
+    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
+const OTHER_AUTHOR: AuthorSubject =
+    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
 
 fn main() {
     jazz_benchmark_guard::refuse_contaminated_measurement();

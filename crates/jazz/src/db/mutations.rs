@@ -982,7 +982,7 @@ where
     /// serving-node concern on inbound commit-unit ingestion.
     pub async fn insert_attributed(
         &self,
-        made_by: AuthorId,
+        made_by: AuthorSubject,
         table: &str,
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
@@ -1044,7 +1044,7 @@ where
     /// Insert one exact branch-local row while evaluating policy as `identity`.
     pub async fn insert_with_id_in_branch_for_identity(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         branch: BranchSelector,
         row: RowUuid,
@@ -1072,7 +1072,7 @@ where
     /// See [`Db::insert_attributed`] for the security boundary.
     pub async fn insert_with_id_attributed(
         &self,
-        made_by: AuthorId,
+        made_by: AuthorSubject,
         table: &str,
         row: RowUuid,
         cells: RowCells,
@@ -1086,7 +1086,7 @@ where
     /// Insert a row while evaluating write policy as `identity`.
     pub async fn insert_for_identity(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         cells: RowCells,
     ) -> Result<WriteHandle<S>, Error> {
@@ -1125,7 +1125,7 @@ where
     /// the same identity, without changing the Db's own authority.
     pub async fn insert_with_id_for_identity(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         row: RowUuid,
         cells: RowCells,
@@ -1149,7 +1149,7 @@ where
     /// Insert a caller-id row for `identity` with an explicit millisecond provenance time.
     pub async fn insert_with_id_for_identity_at_ms(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         row: RowUuid,
         cells: RowCells,
@@ -1188,7 +1188,7 @@ where
         &self,
         table: &str,
         cells: RowCells,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<PermissionAdvice, Error> {
         let cells = self.apply_insert_defaults(table, cells)?;
         self.node
@@ -1306,7 +1306,7 @@ where
     /// Patch one exact branch-local row while evaluating policy as `identity`.
     pub async fn update_in_branch_for_identity(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         branch: BranchSelector,
         row: RowUuid,
@@ -1391,7 +1391,7 @@ where
     /// Patch through a branch view while evaluating policy as `identity`.
     pub async fn update_in_branch_view_for_identity(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         head: BranchSelector,
         base: Option<BranchViewBase>,
@@ -1487,7 +1487,7 @@ where
     /// See [`Db::insert_attributed`] for the security boundary.
     pub async fn update_attributed(
         &self,
-        made_by: AuthorId,
+        made_by: AuthorSubject,
         table: &str,
         row: RowUuid,
         patch: RowCells,
@@ -1515,7 +1515,7 @@ where
     /// Update a row while evaluating write policy as `identity`.
     pub async fn update_for_identity(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         row: RowUuid,
         patch: RowCells,
@@ -1545,7 +1545,7 @@ where
     /// Update a row for `identity` with an explicit millisecond provenance time.
     pub async fn update_for_identity_at_ms(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         row: RowUuid,
         patch: RowCells,
@@ -1667,7 +1667,7 @@ where
     /// Upsert a row while evaluating write policy as `identity`.
     pub async fn upsert_for_identity(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         row: RowUuid,
         cells: RowCells,
@@ -1702,7 +1702,7 @@ where
     /// Upsert a row for `identity` with an explicit millisecond provenance time.
     pub async fn upsert_for_identity_at_ms(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         row: RowUuid,
         cells: RowCells,
@@ -1797,7 +1797,7 @@ where
     /// Delete one exact branch-local row while evaluating policy as `identity`.
     pub async fn delete_in_branch_for_identity(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         branch: BranchSelector,
         row: RowUuid,
@@ -1895,7 +1895,7 @@ where
     /// Delete through a branch view while evaluating policy as `identity`.
     pub async fn delete_in_branch_view_for_identity(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         head: BranchSelector,
         base: Option<BranchViewBase>,
@@ -2007,7 +2007,7 @@ where
     /// Restore an exact branch-local row while evaluating policy as `identity`.
     pub async fn restore_with_cells_in_branch_as_identity(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         branch: BranchSelector,
         row: RowUuid,
@@ -2027,8 +2027,8 @@ where
     #[allow(clippy::too_many_arguments)]
     async fn restore_with_cells_in_branch_for_identity(
         &self,
-        made_by: AuthorId,
-        permission_subject: Option<AuthorId>,
+        made_by: AuthorSubject,
+        permission_subject: Option<AuthorSubject>,
         table: &str,
         branch: BranchSelector,
         row: RowUuid,
@@ -2134,7 +2134,7 @@ where
     /// See [`Db::insert_attributed`] for the security boundary.
     pub async fn delete_attributed(
         &self,
-        made_by: AuthorId,
+        made_by: AuthorSubject,
         table: &str,
         row: RowUuid,
     ) -> Result<WriteHandle<S>, Error> {
@@ -2154,7 +2154,7 @@ where
     /// Soft-delete a row while evaluating write policy as `identity`.
     pub async fn delete_for_identity(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         row: RowUuid,
     ) -> Result<WriteHandle<S>, Error> {
@@ -2165,7 +2165,7 @@ where
     /// Soft-delete a row while evaluating write policy as `identity`, with explicit time.
     pub async fn delete_for_identity_at_ms(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         row: RowUuid,
         now_ms: u64,
@@ -2176,7 +2176,7 @@ where
 
     async fn delete_for_identity_at_ms_option(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         row: RowUuid,
         now_ms: Option<u64>,
@@ -2223,7 +2223,7 @@ where
         &self,
         table: &str,
         row: RowUuid,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<PermissionAdvice, Error> {
         self.table_schema(table)?;
         crate::db::block_on(
@@ -2249,7 +2249,7 @@ where
     }
 
     /// Attach process-local auth claims for `identity`.
-    pub fn set_identity_claims(&self, identity: AuthorId, claims: BTreeMap<String, Value>) {
+    pub fn set_identity_claims(&self, identity: AuthorSubject, claims: BTreeMap<String, Value>) {
         let changed = {
             let mut node = self.node.node.borrow_mut();
             let previous_revision = node.session_claim_revision(identity);
@@ -2273,7 +2273,7 @@ where
         &self,
         table: &str,
         row: RowUuid,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<PermissionAdvice, Error> {
         self.table_schema(table)?;
         self.node
@@ -2355,7 +2355,7 @@ where
     /// Restore a row while evaluating write policy as `identity`.
     pub async fn restore_for_identity(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         row: RowUuid,
         cells: RowCells,
@@ -2403,7 +2403,7 @@ where
 
     async fn write_mergeable_as_session_subject(
         &self,
-        made_by: AuthorId,
+        made_by: AuthorSubject,
         table: &str,
         row: RowUuid,
         cells: RowCells,
@@ -2425,7 +2425,7 @@ where
 
     async fn write_mergeable_as_session_subject_with_authored_columns(
         &self,
-        made_by: AuthorId,
+        made_by: AuthorSubject,
         table: &str,
         row: RowUuid,
         cells: RowCells,
@@ -2485,7 +2485,7 @@ where
     /// Restore a row for `identity` with an explicit millisecond provenance time.
     pub async fn restore_for_identity_at_ms(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         table: &str,
         row: RowUuid,
         cells: RowCells,
@@ -2521,8 +2521,8 @@ where
 
     async fn write_mergeable(
         &self,
-        made_by: AuthorId,
-        permission_subject: Option<AuthorId>,
+        made_by: AuthorSubject,
+        permission_subject: Option<AuthorSubject>,
         table: &str,
         row: RowUuid,
         cells: RowCells,
@@ -2544,8 +2544,8 @@ where
 
     async fn write_mergeable_at_ms(
         &self,
-        made_by: AuthorId,
-        permission_subject: Option<AuthorId>,
+        made_by: AuthorSubject,
+        permission_subject: Option<AuthorSubject>,
         table: &str,
         row: RowUuid,
         cells: RowCells,
@@ -2569,8 +2569,8 @@ where
 
     async fn write_mergeable_with_authored_columns(
         &self,
-        made_by: AuthorId,
-        permission_subject: Option<AuthorId>,
+        made_by: AuthorSubject,
+        permission_subject: Option<AuthorSubject>,
         table: &str,
         row: RowUuid,
         cells: RowCells,
@@ -2594,8 +2594,8 @@ where
 
     async fn write_mergeable_at_ms_with_authorship(
         &self,
-        made_by: AuthorId,
-        permission_subject: Option<AuthorId>,
+        made_by: AuthorSubject,
+        permission_subject: Option<AuthorSubject>,
         table: &str,
         row: RowUuid,
         cells: RowCells,
@@ -2622,8 +2622,8 @@ where
     #[allow(clippy::too_many_arguments)]
     async fn write_mergeable_at_ms_with_authorship_in_branch(
         &self,
-        made_by: AuthorId,
-        permission_subject: Option<AuthorId>,
+        made_by: AuthorSubject,
+        permission_subject: Option<AuthorSubject>,
         table: &str,
         row: RowUuid,
         cells: RowCells,
@@ -2740,7 +2740,7 @@ where
                     .apply_sync_message_with_ingest_context(
                         message,
                         Some(CommitUnitIngestContext {
-                            identity: AuthorId::SYSTEM,
+                            identity: AuthorSubject::SYSTEM,
                             trust: CommitUnitTrust::TrustedBackend,
                             edge_authority: false,
                         }),
@@ -2753,7 +2753,7 @@ where
         })
     }
 
-    fn check_attribution_allowed(&self, made_by: AuthorId) -> Result<(), Error> {
+    fn check_attribution_allowed(&self, made_by: AuthorSubject) -> Result<(), Error> {
         if made_by == self.identity.author {
             return Ok(());
         }
@@ -2764,7 +2764,7 @@ where
     }
 
     pub(super) fn check_catalogue_admin(&self) -> Result<(), Error> {
-        if self.identity.author == AuthorId::SYSTEM {
+        if self.identity.author == AuthorSubject::SYSTEM {
             return Ok(());
         }
         Err(Error::new(
@@ -2842,7 +2842,7 @@ where
         &self,
         table: &str,
         row: RowUuid,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<Option<CurrentRow>, Error> {
         let target = self
             .local_row_for_client_identity(table, row, identity)
@@ -2858,7 +2858,7 @@ where
         if self.local_current_row(table, row).await?.is_none() {
             return Ok(None);
         }
-        if identity == AuthorId::SYSTEM || self.table_schema(table)?.read_policy.is_none() {
+        if identity == AuthorSubject::SYSTEM || self.table_schema(table)?.read_policy.is_none() {
             return Ok(None);
         }
         Err(read_for_write_denied("UPSERT", table))
@@ -2868,7 +2868,7 @@ where
         &self,
         table: &str,
         row: RowUuid,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<Option<CurrentRow>, Error> {
         let target = self
             .local_row_for_trusted_identity(table, row, identity)
@@ -2882,7 +2882,7 @@ where
         if self.local_current_row(table, row).await?.is_none() {
             return Ok(None);
         }
-        if identity == AuthorId::SYSTEM || self.table_schema(table)?.read_policy.is_none() {
+        if identity == AuthorSubject::SYSTEM || self.table_schema(table)?.read_policy.is_none() {
             return Ok(None);
         }
         Err(read_for_write_denied("UPSERT", table))
@@ -2911,7 +2911,7 @@ where
         &self,
         table: &str,
         row: RowUuid,
-        _identity: AuthorId,
+        _identity: AuthorSubject,
     ) -> Result<(), Error> {
         self.table_schema(table)?;
         let (content_parent, deletion_parent) = {
@@ -2965,7 +2965,7 @@ where
         &self,
         table: &str,
         row: RowUuid,
-        _identity: AuthorId,
+        _identity: AuthorSubject,
     ) -> Result<(), Error> {
         self.table_schema(table)?;
         let deleted = self
@@ -3026,7 +3026,7 @@ where
         &self,
         table: &str,
         row: RowUuid,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<Option<CurrentRow>, Error> {
         let query = self.prepare_query(&Query::from(table))?;
         Ok(self
@@ -3049,7 +3049,7 @@ where
         &self,
         table: &str,
         row: RowUuid,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<Option<CurrentRow>, Error> {
         let query = self.prepare_query(&Query::from(table))?;
         Ok(self
@@ -3073,7 +3073,7 @@ where
         &self,
         table: &str,
         row: RowUuid,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row).await?;
         let existing = self
@@ -3101,7 +3101,7 @@ where
         &self,
         table: &str,
         row: RowUuid,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<WriteHandle<S>, Error> {
         self.ensure_row_not_deleted(table, row).await?;
         let existing = self
@@ -3140,7 +3140,7 @@ where
         table: &str,
         row: RowUuid,
         patch: RowCells,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
         let table_schema = self.table_schema(table)?;
         self.ensure_row_not_deleted(table, row).await?;
@@ -3189,7 +3189,7 @@ where
         table: &str,
         row: RowUuid,
         patch: RowCells,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
         let table_schema = self.table_schema(table)?;
         self.ensure_row_not_deleted(table, row).await?;

@@ -31,7 +31,7 @@ fn provenance_values(title: &str, created_by: &str, updated_by: &str) -> Vec<Val
 
 async fn create_note_as(client: &JazzClient, user_id: &str, title: &str) -> ObjectId {
     client
-        .for_session(Session::new(user_id))
+        .for_session(Session::new("urn:jazz:test", user_id))
         .insert("notes", note_input(title))
         .expect("create note with session-authored provenance")
         .0
@@ -137,14 +137,14 @@ async fn created_by_policies_scope_crud_to_creators_inner() {
     );
 
     let denied_update = bob
-        .for_session(Session::new(super::BOB_ID))
+        .for_session(Session::new("urn:jazz:test", super::BOB_ID))
         .update(alice_note, vec![("title".to_string(), "bob edit".into())]);
     assert!(
         denied_update.is_err(),
         "bob should not be able to update alice's row under $createdBy policy"
     );
     let denied_delete = bob
-        .for_session(Session::new(super::BOB_ID))
+        .for_session(Session::new("urn:jazz:test", super::BOB_ID))
         .delete(alice_note);
     assert!(
         denied_delete.is_err(),
@@ -490,7 +490,7 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor_inner() {
     // The shared flag bootstraps the row into Bob's local state before the
     // `$updatedBy` handoff on the later update.
     let note_id = alice
-        .for_session(Session::new(super::ALICE_ID))
+        .for_session(Session::new("urn:jazz:test", super::ALICE_ID))
         .insert(
             "notes",
             jazz::row_input!("title" => "draft", "shared" => true),
@@ -528,7 +528,7 @@ async fn updated_by_select_policy_moves_visibility_to_last_editor_inner() {
     assert_eq!(bob_rows[0].1[2], Value::from(super::ALICE_ID));
     assert_eq!(bob_rows[0].1[3], Value::from(super::ALICE_ID));
 
-    bob.for_session(Session::new(super::BOB_ID))
+    bob.for_session(Session::new("urn:jazz:test", super::BOB_ID))
         .update(
             note_id,
             vec![

@@ -394,7 +394,7 @@ where
     pub(super) async fn version_satisfies_write_policy(
         &mut self,
         version: &VersionRecord,
-        author: AuthorId,
+        author: AuthorSubject,
         candidate_tx_id: TxId,
     ) -> Result<bool, Error> {
         self.write_policy_allows_version_record(version, author, Some(candidate_tx_id))

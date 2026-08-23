@@ -17,7 +17,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource, block_on};
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{CmpOp, PolicyValue};
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TableSchemaBuilder};
@@ -25,8 +25,10 @@ use jazz::tx::DurabilityTier;
 
 type BenchDb = Db<MemoryStorage>;
 
-const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
-const OTHER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
+const AUTHOR: AuthorSubject =
+    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
+const OTHER_AUTHOR: AuthorSubject =
+    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
 
 fn public_schema_convert() -> JazzSchema {
     let folder_owner = schema_fixture::session_user_id_column("owner");
@@ -106,7 +108,7 @@ fn current_timestamp() -> u64 {
         .as_micros() as u64
 }
 
-fn folder_cells(index: usize, owner: AuthorId) -> BTreeMap<String, Value> {
+fn folder_cells(index: usize, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("name".to_owned(), Value::String(format!("Folder {index}"))),
         ("owner".to_owned(), Value::Uuid(owner.0)),
@@ -114,7 +116,7 @@ fn folder_cells(index: usize, owner: AuthorId) -> BTreeMap<String, Value> {
     ])
 }
 
-fn access_cells(folder: RowUuid, user: AuthorId, role: &str) -> BTreeMap<String, Value> {
+fn access_cells(folder: RowUuid, user: AuthorSubject, role: &str) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("folder".to_owned(), Value::Uuid(folder.0)),
         ("user".to_owned(), Value::Uuid(user.0)),
@@ -126,7 +128,7 @@ fn document_cells(
     folder: RowUuid,
     title: String,
     content: &'static str,
-    author: AuthorId,
+    author: AuthorSubject,
     created_at: u64,
 ) -> BTreeMap<String, Value> {
     BTreeMap::from([

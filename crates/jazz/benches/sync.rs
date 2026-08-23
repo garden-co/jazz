@@ -9,7 +9,7 @@ use support::BenchFutureExt as _;
 
 use hdrhistogram::Histogram;
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::peer::PeerState;
 use jazz::protocol::SyncMessage;
@@ -67,9 +67,9 @@ struct SyncBench {
     core_to_edge: PeerState,
     edge_to_worker: PeerState,
     worker_to_ui: PeerState,
-    ui_author: AuthorId,
-    ui_owner: AuthorId,
-    other_owner: AuthorId,
+    ui_author: AuthorSubject,
+    ui_owner: AuthorSubject,
+    other_owner: AuthorSubject,
     rng: Rng,
     parents: BTreeMap<RowUuid, TxId>,
     metrics: Metrics,
@@ -87,7 +87,7 @@ impl SyncBench {
         dirs.push(dir);
         let (dir, core) = open_node(node(4), schema);
         dirs.push(dir);
-        let ui_author = AuthorId::from_bytes([7; 16]);
+        let ui_author = AuthorSubject::for_test_bytes([7; 16]);
         Self {
             config,
             ui,
@@ -100,7 +100,7 @@ impl SyncBench {
             worker_to_ui: PeerState::client_link(ui_author),
             ui_author,
             ui_owner: ui_author,
-            other_owner: AuthorId::from_bytes([8; 16]),
+            other_owner: AuthorSubject::for_test_bytes([8; 16]),
             rng: Rng::new(config.seed),
             parents: BTreeMap::new(),
             metrics: Metrics::default(),
@@ -490,7 +490,7 @@ fn current_rows(
 
 fn rows_owned_by(
     rows: &BTreeMap<RowUuid, BTreeMap<String, Value>>,
-    owner: AuthorId,
+    owner: AuthorSubject,
 ) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     rows.iter()
         .filter(|(_row_uuid, cells)| cells.get("owner") == Some(&Value::Uuid(owner.0)))
@@ -533,7 +533,7 @@ fn open_node(
     (temp_dir, node)
 }
 
-fn cells(title: impl Into<String>, owner: AuthorId) -> BTreeMap<String, Value> {
+fn cells(title: impl Into<String>, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.into())),
         ("owner".to_owned(), Value::Uuid(owner.0)),

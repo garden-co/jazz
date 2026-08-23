@@ -5,10 +5,10 @@ use super::*;
 #[test]
 fn server_reset_subscription_materializes_without_local_snapshot_eval() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0xa1; 16]);
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
 
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
 
     seed(&server, "todos", cells("first", false, owner));
@@ -63,7 +63,7 @@ fn server_reset_subscription_materializes_without_local_snapshot_eval() {
 #[test]
 fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
 
     let first = row(0x71);
@@ -191,8 +191,8 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
 #[test]
 fn authoritative_reset_with_missing_payload_falls_back_to_refresh() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
 
     let (client_transport, server_transport) = duplex();
@@ -268,7 +268,7 @@ fn authoritative_reset_with_missing_payload_falls_back_to_refresh() {
 #[test]
 fn authoritative_reset_skips_stale_member_without_falling_back() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
 
     let query = Query::from("todos");
@@ -359,8 +359,8 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
     // only the published row. This guards against an Edge facade widening
     // server scope by re-scanning a broad local transport cache.
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let db = open_db(0xc1, client_author, &schema);
     let published = seed(&server, "todos", cells("published", false, client_author));
     let server_overemitted = row(0x72);
@@ -525,10 +525,10 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
     assert!(db.query_attachment_is_covered(&refresh_attachment));
     db.detach_query(refresh_attachment);
     assert_eq!(
-        ids(
-            block_on(db.all_for_identity(&prepared, edge_subscribe_opts(), AuthorId::SYSTEM,))
-                .unwrap()
-        ),
+        ids(block_on(
+            db.all_for_identity(&prepared, edge_subscribe_opts(), AuthorSubject::SYSTEM,)
+        )
+        .unwrap()),
         BTreeSet::from([published, server_overemitted]),
         "serving hosts remain TrustedServing and do not consume a client result cache"
     );
@@ -545,8 +545,8 @@ fn client_settled_file_member_reads_bytes_for_bound_id_read() {
             )
             .table(PublicTableSchemaBuilder::new("attachments").fk_column("file_id", "files")),
     );
-    let client_author = AuthorId::from_bytes([0xc2; 16]);
-    let server = open_core(0x5f, AuthorId::SYSTEM, &schema);
+    let client_author = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let server = open_core(0x5f, AuthorSubject::SYSTEM, &schema);
     let db = open_db(0xc2, client_author, &schema);
     let bytes = vec![0, 1, 9, 3, 255, 64, 128, 200];
     let file = seed(
@@ -603,7 +603,7 @@ fn client_settled_file_member_reads_bytes_for_bound_id_read() {
 #[test]
 fn propagated_authoritative_reset_uses_delivered_binding_view() {
     let schema = schema();
-    let client_author = AuthorId::from_bytes([0xc1; 16]);
+    let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
 
     let query = Query::from("todos");

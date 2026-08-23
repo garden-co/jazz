@@ -26,7 +26,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::{MemoryStorage, OrderedKvStorage};
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{Query, all_of, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::public_schema::{CmpOp, RelValueRef};
@@ -44,8 +44,10 @@ use tempfile::TempDir;
 type BenchDb = Db<MemoryStorage>;
 type RocksBenchDb = Db<RocksDbStorage>;
 
-const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
-const READER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
+const AUTHOR: AuthorSubject =
+    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
+const READER_AUTHOR: AuthorSubject =
+    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
 const R3_REOPEN_SEED: u64 = 31;
 
 #[derive(Debug, Clone, Copy)]
@@ -200,16 +202,16 @@ fn open_db(seed: u64) -> BenchDb {
 }
 
 fn open_core_db(seed: u64) -> BenchDb {
-    open_db_with_author(seed, AuthorId::SYSTEM, true)
+    open_db_with_author(seed, AuthorSubject::SYSTEM, true)
 }
 
-fn open_db_with_author(seed: u64, author: AuthorId, history_complete: bool) -> BenchDb {
+fn open_db_with_author(seed: u64, author: AuthorSubject, history_complete: bool) -> BenchDb {
     open_db_with_schema(seed, author, history_complete, schema())
 }
 
 fn open_db_with_schema(
     seed: u64,
-    author: AuthorId,
+    author: AuthorSubject,
     history_complete: bool,
     schema: JazzSchema,
 ) -> BenchDb {
@@ -225,7 +227,7 @@ fn open_db_with_schema(
 
 fn open_rocks_db_with_author(
     seed: u64,
-    author: AuthorId,
+    author: AuthorSubject,
     history_complete: bool,
     path: &Path,
 ) -> RocksBenchDb {
@@ -241,7 +243,7 @@ fn open_rocks_db_with_author(
 
 fn open_db_with_storage<S>(
     seed: u64,
-    author: AuthorId,
+    author: AuthorSubject,
     history_complete: bool,
     schema: JazzSchema,
     storage: impl FnOnce(&[&str]) -> S,
@@ -308,7 +310,7 @@ fn byte_duplex() -> (Box<dyn jazz::db::Transport>, Box<dyn jazz::db::Transport>)
 }
 
 fn byte_duplex_with_session(
-    identity: AuthorId,
+    identity: AuthorSubject,
     epoch: u64,
 ) -> (Box<dyn jazz::db::Transport>, Box<dyn jazz::db::Transport>) {
     let left = Rc::new(RefCell::new(VecDeque::new()));
@@ -744,7 +746,7 @@ fn recursive_team_edge_cells(member: RowUuid, parent: RowUuid) -> BTreeMap<Strin
 fn open_recursive_permissions_db(seed: u64) -> BenchDb {
     open_db_with_schema(
         seed,
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         false,
         recursive_permissions_schema(),
     )
@@ -752,7 +754,7 @@ fn open_recursive_permissions_db(seed: u64) -> BenchDb {
 
 fn open_recursive_permissions_db_with_author(
     seed: u64,
-    author: AuthorId,
+    author: AuthorSubject,
     history_complete: bool,
 ) -> BenchDb {
     open_db_with_schema(
@@ -763,7 +765,7 @@ fn open_recursive_permissions_db_with_author(
     )
 }
 
-fn open_claim_resume_db(seed: u64, author: AuthorId, history_complete: bool) -> BenchDb {
+fn open_claim_resume_db(seed: u64, author: AuthorSubject, history_complete: bool) -> BenchDb {
     open_db_with_schema(seed, author, history_complete, claim_resume_schema())
 }
 
@@ -1278,7 +1280,7 @@ fn evict_path_from_linux_page_cache(_path: &Path) {
 
 fn open_rocks_db_with_phases(
     seed: u64,
-    author: AuthorId,
+    author: AuthorSubject,
     path: &Path,
 ) -> (RocksBenchDb, Duration, Duration, Option<R3OpenBreakdown>) {
     let schema = schema();
@@ -1989,8 +1991,8 @@ fn r12_recursive_permissions(c: &mut Criterion) {
 fn run_permission_filtered_resume(
     churn: PermissionResumeChurn,
 ) -> (Duration, usize, usize, usize, usize, usize) {
-    let writer = open_recursive_permissions_db_with_author(130, AuthorId::SYSTEM, false);
-    let server = open_recursive_permissions_db_with_author(131, AuthorId::SYSTEM, true);
+    let writer = open_recursive_permissions_db_with_author(130, AuthorSubject::SYSTEM, false);
+    let server = open_recursive_permissions_db_with_author(131, AuthorSubject::SYSTEM, true);
     let client = open_recursive_permissions_db_with_author(132, READER_AUTHOR, false);
     seed_permission_resume_fixture(&writer);
     let prepared = client
@@ -1998,9 +2000,10 @@ fn run_permission_filtered_resume(
         .expect("prepare permission-filtered docs query");
 
     let (writer_transport, server_writer_transport) =
-        byte_duplex_with_session(AuthorId::SYSTEM, 13_001);
+        byte_duplex_with_session(AuthorSubject::SYSTEM, 13_001);
     let writer_upstream = block_on(writer.connect_upstream(writer_transport));
-    let writer_subscriber = server.accept_subscriber(server_writer_transport, AuthorId::SYSTEM);
+    let writer_subscriber =
+        server.accept_subscriber(server_writer_transport, AuthorSubject::SYSTEM);
     writer.tick().expect("ship permission seed rows");
     server.tick().expect("ingest permission seed rows");
     assert!(writer.detach_connection(&writer_upstream));
@@ -2075,9 +2078,10 @@ fn run_permission_filtered_resume(
 
     if churn.grants() || churn.revokes() {
         let (writer_transport, server_writer_transport) =
-            byte_duplex_with_session(AuthorId::SYSTEM, 13_003);
+            byte_duplex_with_session(AuthorSubject::SYSTEM, 13_003);
         let writer_upstream = block_on(writer.connect_upstream(writer_transport));
-        let writer_subscriber = server.accept_subscriber(server_writer_transport, AuthorId::SYSTEM);
+        let writer_subscriber =
+            server.accept_subscriber(server_writer_transport, AuthorSubject::SYSTEM);
         writer.tick().expect("ship disconnected permission changes");
         server
             .tick()
@@ -2166,8 +2170,8 @@ fn run_permission_filtered_resume(
 fn run_claim_filtered_resume(
     churn: ClaimResumeChurn,
 ) -> (Duration, usize, usize, usize, usize, usize) {
-    let writer = open_claim_resume_db(133, AuthorId::SYSTEM, false);
-    let server = open_claim_resume_db(134, AuthorId::SYSTEM, true);
+    let writer = open_claim_resume_db(133, AuthorSubject::SYSTEM, false);
+    let server = open_claim_resume_db(134, AuthorSubject::SYSTEM, true);
     let client = open_claim_resume_db(135, READER_AUTHOR, false);
     for (row, title) in [
         (CLAIM_RESUME_DOC_A, "claim-a"),
@@ -2188,9 +2192,10 @@ fn run_claim_filtered_resume(
         .expect("prepare claim-filtered docs query");
 
     let (writer_transport, server_writer_transport) =
-        byte_duplex_with_session(AuthorId::SYSTEM, 13_101);
+        byte_duplex_with_session(AuthorSubject::SYSTEM, 13_101);
     let writer_upstream = block_on(writer.connect_upstream(writer_transport));
-    let writer_subscriber = server.accept_subscriber(server_writer_transport, AuthorId::SYSTEM);
+    let writer_subscriber =
+        server.accept_subscriber(server_writer_transport, AuthorSubject::SYSTEM);
     writer.tick().expect("ship claim-resume seed rows");
     server.tick().expect("ingest claim-resume seed rows");
     assert!(writer.detach_connection(&writer_upstream));

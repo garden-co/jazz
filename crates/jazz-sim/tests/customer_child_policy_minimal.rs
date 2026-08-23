@@ -7,7 +7,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::protocol::SyncMessage;
 use jazz::query::Query;
 use jazz::schema::JazzSchema;
@@ -153,7 +153,11 @@ fn node_seed(node_uuid: NodeUuid) -> u64 {
     u64::from_be_bytes(bytes[..8].try_into().unwrap())
 }
 
-fn db_config(schema: JazzSchema, node_uuid: NodeUuid, author: AuthorId) -> DbConfig<MemoryStorage> {
+fn db_config(
+    schema: JazzSchema,
+    node_uuid: NodeUuid,
+    author: AuthorSubject,
+) -> DbConfig<MemoryStorage> {
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     DbConfig {
@@ -167,14 +171,14 @@ fn db_config(schema: JazzSchema, node_uuid: NodeUuid, author: AuthorId) -> DbCon
     }
 }
 
-fn open_db(schema: JazzSchema, node_uuid: NodeUuid, author: AuthorId) -> Db<MemoryStorage> {
+fn open_db(schema: JazzSchema, node_uuid: NodeUuid, author: AuthorSubject) -> Db<MemoryStorage> {
     jazz::db::block_on(Db::open(db_config(schema, node_uuid, author))).expect("open db")
 }
 
 fn open_history_complete_db(
     schema: JazzSchema,
     node_uuid: NodeUuid,
-    author: AuthorId,
+    author: AuthorSubject,
 ) -> Db<MemoryStorage> {
     jazz::db::block_on(Db::open_history_complete(db_config(
         schema, node_uuid, author,
@@ -183,11 +187,11 @@ fn open_history_complete_db(
 }
 
 fn insert(db: &Db<MemoryStorage>, table: &str, row: RowUuid, cells: BTreeMap<String, Value>) {
-    db.seed_settled_mergeable_for_bootstrap(table, row, AuthorId::SYSTEM, cells)
+    db.seed_settled_mergeable_for_bootstrap(table, row, AuthorSubject::SYSTEM, cells)
         .expect("seed settled row");
 }
 
-fn count(db: &Db<MemoryStorage>, table: &str, author: AuthorId) -> usize {
+fn count(db: &Db<MemoryStorage>, table: &str, author: AuthorSubject) -> usize {
     let prepared = db.prepare_query(&Query::from(table)).expect("prepare");
     let rows = jazz::db::block_on(db.all_for_identity(&prepared, ReadOpts::default(), author))
         .expect("one-shot");
@@ -229,9 +233,9 @@ fn tick_all(core: &Db<MemoryStorage>, relay: &Db<MemoryStorage>, client: &Db<Mem
 #[test]
 fn child_policy_reaches_client_through_relay() {
     let schema = schema();
-    let member = AuthorId(row(0x10).0);
-    let core = open_history_complete_db(schema.clone(), node(0x01), AuthorId::SYSTEM);
-    let relay = open_db(schema.clone(), node(0x02), AuthorId::SYSTEM);
+    let member = AuthorSubject::for_test_uuid(row(0x10).0);
+    let core = open_history_complete_db(schema.clone(), node(0x01), AuthorSubject::SYSTEM);
+    let relay = open_db(schema.clone(), node(0x02), AuthorSubject::SYSTEM);
     let client = open_db(schema.clone(), node(0x03), member);
 
     let member_group = row(0x10);
@@ -314,7 +318,7 @@ fn child_policy_reaches_client_through_relay() {
     let client_relay_left_sent = Rc::clone(&client_relay.left_sent);
     let client_relay_right_sent = Rc::clone(&client_relay.right_sent);
     let _relay_upstream = jazz::db::block_on(relay.connect_upstream(relay_core.left));
-    let _core_sub = core.accept_subscriber(relay_core.right, AuthorId::SYSTEM);
+    let _core_sub = core.accept_subscriber(relay_core.right, AuthorSubject::SYSTEM);
     let _client_upstream = jazz::db::block_on(client.connect_upstream(client_relay.left));
     let _relay_sub = relay.accept_subscriber(client_relay.right, member);
 
@@ -350,10 +354,10 @@ fn child_policy_reaches_client_through_relay() {
 
         if tick == 10 || tick == 50 || tick == 199 {
             let relay_member_count = count(&relay, CHILD, member);
-            let relay_system_child = count(&relay, CHILD, AuthorId::SYSTEM);
-            let relay_system_child_access = count(&relay, CHILD_ACCESS, AuthorId::SYSTEM);
-            let relay_system_group_entry = count(&relay, GROUP_ENTRY, AuthorId::SYSTEM);
-            let relay_system_parent_access = count(&relay, PARENT_ACCESS, AuthorId::SYSTEM);
+            let relay_system_child = count(&relay, CHILD, AuthorSubject::SYSTEM);
+            let relay_system_child_access = count(&relay, CHILD_ACCESS, AuthorSubject::SYSTEM);
+            let relay_system_group_entry = count(&relay, GROUP_ENTRY, AuthorSubject::SYSTEM);
+            let relay_system_parent_access = count(&relay, PARENT_ACCESS, AuthorSubject::SYSTEM);
             eprintln!(
                 "MIN_CHILD tick={tick} relay->core={} core->relay={} client->relay={} relay->client={} relay member child={relay_member_count} relay system child={relay_system_child} child_access={relay_system_child_access} group_entry={relay_system_group_entry} parent_access={relay_system_parent_access} client_subscription_rows={}",
                 relay_core_left_sent.get(),
@@ -374,10 +378,10 @@ fn child_policy_reaches_client_through_relay() {
     }
 
     let relay_member_count = count(&relay, CHILD, member);
-    let relay_system_child = count(&relay, CHILD, AuthorId::SYSTEM);
-    let relay_system_child_access = count(&relay, CHILD_ACCESS, AuthorId::SYSTEM);
-    let relay_system_group_entry = count(&relay, GROUP_ENTRY, AuthorId::SYSTEM);
-    let relay_system_parent_access = count(&relay, PARENT_ACCESS, AuthorId::SYSTEM);
+    let relay_system_child = count(&relay, CHILD, AuthorSubject::SYSTEM);
+    let relay_system_child_access = count(&relay, CHILD_ACCESS, AuthorSubject::SYSTEM);
+    let relay_system_group_entry = count(&relay, GROUP_ENTRY, AuthorSubject::SYSTEM);
+    let relay_system_parent_access = count(&relay, PARENT_ACCESS, AuthorSubject::SYSTEM);
     let seen = subscriptions
         .iter()
         .find(|(table, _, _)| *table == CHILD)

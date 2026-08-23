@@ -23,9 +23,9 @@ struct CanonicalVersionRecord {
     schema_version: SchemaVersionId,
     row_uuid: RowUuid,
     parents: Vec<TxId>,
-    created_by: AuthorId,
+    created_by: AuthorSubject,
     created_at: TxTime,
-    updated_by: AuthorId,
+    updated_by: AuthorSubject,
     updated_at: TxTime,
     deletion: Option<DeletionEvent>,
     cells: Vec<String>,
@@ -117,7 +117,7 @@ fn assert_real_peer_tick(
     expected_adds: &[ResultRowEntry],
     expected_removes: &[ResultRowEntry],
     expected_reset_result_set: bool,
-    case: (AuthorId, u64, &str),
+    case: (AuthorSubject, u64, &str),
 ) {
     let (identity, seed, tick) = case;
     capture.result_member_adds.sort();
@@ -157,7 +157,7 @@ fn assert_maintained_subscription_view_tick(
     expected_adds: &[ResultRowEntry],
     expected_removes: &[ResultRowEntry],
     expected_reset_result_set: bool,
-    case: (AuthorId, u64, &str),
+    case: (AuthorSubject, u64, &str),
 ) -> SyncMessage {
     let (identity, seed, tick) = case;
     let capture = capture_view_update(update.clone());
@@ -189,7 +189,7 @@ fn accept_owner_capture_row(
     core: &mut NodeState<RocksDbStorage>,
     parents: &mut BTreeMap<RowUuid, TxId>,
     row_uuid: RowUuid,
-    owner: AuthorId,
+    owner: AuthorSubject,
     title: impl Into<String>,
     made_at: u64,
 ) -> TxId {
@@ -293,7 +293,7 @@ impl MaintainedSubscriptionViewSubscription {
         shape: &ValidatedQuery,
         binding: &Binding,
         subscription_key: SubscriptionKey,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> (Self, SyncMessage) {
         let (subscription, maintained, terminal_schemas, transitions, tables, _incomplete) = core
             .open_seeded_maintained_subscription_view(
@@ -351,7 +351,7 @@ impl MaintainedSubscriptionViewSubscription {
         core: &mut NodeState<RocksDbStorage>,
         shape: &ValidatedQuery,
         subscription_key: SubscriptionKey,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> SyncMessage {
         crate::db::block_on(core.drive_query_runtime()).unwrap();
         let output_tables = self.tables.clone();
@@ -432,7 +432,7 @@ impl MaintainedSubscriptionViewSubscription {
         result_member_adds: Vec<ResultRowEntry>,
         result_member_removes: Vec<ResultRowEntry>,
         reset_result_set: bool,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<SyncMessage, Error> {
         let previous_result_set = self
             .previous_result_set
@@ -553,7 +553,7 @@ fn assert_retraction_without_replacement_leak(
     );
 }
 
-fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity: AuthorId) {
+fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity: AuthorSubject) {
     let schema = maintained_view_capture_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(0x82), schema.clone());
     let alice = user(0xa1);
@@ -606,7 +606,7 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
         subscription,
         identity,
     );
-    let expected_initial = if identity == AuthorId::SYSTEM {
+    let expected_initial = if identity == AuthorSubject::SYSTEM {
         vec![
             result_row("todos", initial_alice, txs[&initial_alice]),
             result_row("todos", initial_bob, txs[&initial_bob]),
@@ -637,7 +637,7 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
         let tx_id = accept_owner_capture_row(&mut core, &mut parents, row_uuid, owner, title, made_at);
         txs.insert(row_uuid, tx_id);
     }
-    let add_rows = if identity == AuthorId::SYSTEM {
+    let add_rows = if identity == AuthorSubject::SYSTEM {
         vec![
             result_row("todos", added, txs[&added]),
             result_row("todos", hidden_added, txs[&hidden_added]),
@@ -674,7 +674,7 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
     txs.insert(sibling_match, sibling_tx);
     txs.insert(sibling_nonmatch, sibling_tx);
     txs.insert(sibling_hidden, sibling_tx);
-    let sibling_add_rows = if identity == AuthorId::SYSTEM {
+    let sibling_add_rows = if identity == AuthorSubject::SYSTEM {
         vec![
             result_row("todos", sibling_match, txs[&sibling_match]),
             result_row("todos", sibling_hidden, txs[&sibling_hidden]),
@@ -736,7 +736,7 @@ fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity:
 
     let rls_revoked_unreadable_tx =
         accept_owner_capture_row(&mut core, &mut parents, rls_revoked, bob, "match", 2_300);
-    let rls_adds = if identity == AuthorId::SYSTEM {
+    let rls_adds = if identity == AuthorSubject::SYSTEM {
         vec![result_row("todos", rls_revoked, rls_revoked_unreadable_tx)]
     } else {
         vec![]
@@ -837,18 +837,18 @@ fn maintained_view_multitable_capture_schema() -> JazzSchema {
     )
 }
 
-fn root_cells(owner: AuthorId, title: &str, target: RowUuid) -> BTreeMap<String, Value> {
+fn root_cells(owner: AuthorSubject, title: &str, target: RowUuid) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
-        ("owner".to_owned(), Value::Uuid(owner.0)),
+        ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
         ("target".to_owned(), Value::Uuid(target.0)),
     ])
 }
 
-fn member_cells(owner: AuthorId, title: &str, root: RowUuid) -> BTreeMap<String, Value> {
+fn member_cells(owner: AuthorSubject, title: &str, root: RowUuid) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
-        ("owner".to_owned(), Value::Uuid(owner.0)),
+        ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
         ("root".to_owned(), Value::Uuid(root.0)),
     ])
 }
@@ -903,17 +903,17 @@ fn doc_cells(title: &str, kind: &str) -> BTreeMap<String, Value> {
     ])
 }
 
-fn doc_access_cells(doc: RowUuid, team: AuthorId) -> BTreeMap<String, Value> {
+fn doc_access_cells(doc: RowUuid, team: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("doc".to_owned(), Value::Uuid(doc.0)),
-        ("team".to_owned(), Value::Uuid(team.0)),
+        ("team".to_owned(), Value::Uuid(team.test_uuid())),
     ])
 }
 
-fn team_edge_cells(member: AuthorId, parent: AuthorId) -> BTreeMap<String, Value> {
+fn team_edge_cells(member: AuthorSubject, parent: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
-        ("member".to_owned(), Value::Uuid(member.0)),
-        ("parent".to_owned(), Value::Uuid(parent.0)),
+        ("member".to_owned(), Value::Uuid(member.test_uuid())),
+        ("parent".to_owned(), Value::Uuid(parent.test_uuid())),
     ])
 }
 
@@ -959,7 +959,7 @@ fn delete_recursive_row(
     tx_id
 }
 
-fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity: AuthorId) {
+fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity: AuthorSubject) {
     let schema = recursive_rls_capture_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(0x82), schema.clone());
     let alice = user(0xa1);
@@ -981,24 +981,24 @@ fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity
         &mut core,
         &mut parents,
         "teams",
-        RowUuid(alice.0),
-        team_cells(RowUuid(alice.0), "alice"),
+        RowUuid(alice.test_uuid()),
+        team_cells(RowUuid(alice.test_uuid()), "alice"),
         900,
     );
     accept_recursive_row(
         &mut core,
         &mut parents,
         "teams",
-        RowUuid(parent_team.0),
-        team_cells(RowUuid(parent_team.0), "parent"),
+        RowUuid(parent_team.test_uuid()),
+        team_cells(RowUuid(parent_team.test_uuid()), "parent"),
         901,
     );
     accept_recursive_row(
         &mut core,
         &mut parents,
         "teams",
-        RowUuid(other_team.0),
-        team_cells(RowUuid(other_team.0), "other"),
+        RowUuid(other_team.test_uuid()),
+        team_cells(RowUuid(other_team.test_uuid()), "other"),
         902,
     );
     let direct_doc_tx = accept_recursive_row(
@@ -1065,7 +1065,7 @@ fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity
         .validate(&schema)
         .unwrap();
     let binding = shape
-        .bind(BTreeMap::from([("team".to_owned(), Value::Uuid(alice.0))]))
+        .bind(BTreeMap::from([("team".to_owned(), Value::Uuid(alice.test_uuid()))]))
         .unwrap();
     let subscription = SubscriptionKey {
         shape_id: shape.shape_id(),
@@ -1188,7 +1188,7 @@ impl MultiTableCaptureShape {
 
 fn seeded_maintained_subscription_view_multitable_capture(
     seed: u64,
-    identity: AuthorId,
+    identity: AuthorSubject,
     capture_shape: MultiTableCaptureShape,
 ) {
     let schema = maintained_view_multitable_capture_schema();
@@ -1304,7 +1304,7 @@ fn seeded_maintained_subscription_view_multitable_capture(
         subscription,
         identity,
     );
-    let expected_initial_rows = match (capture_shape, identity == AuthorId::SYSTEM) {
+    let expected_initial_rows = match (capture_shape, identity == AuthorSubject::SYSTEM) {
         (MultiTableCaptureShape::JoinVia, _) => vec![
             ("roots", root_visible),
             ("targets", target_visible),
@@ -1403,12 +1403,12 @@ fn seeded_maintained_subscription_view_multitable_capture(
         )]
     };
     if matches!(capture_shape, MultiTableCaptureShape::IncludeInner)
-        && identity != AuthorId::SYSTEM
+        && identity != AuthorSubject::SYSTEM
     {
         update_adds.push(result_row_from(&txs, "roots", root_hidden_target));
     }
     let update_removes =
-        if !matches!(capture_shape, MultiTableCaptureShape::JoinVia) && identity == AuthorId::SYSTEM
+        if !matches!(capture_shape, MultiTableCaptureShape::JoinVia) && identity == AuthorSubject::SYSTEM
         {
             vec![result_row(
                 "targets",
@@ -1485,7 +1485,7 @@ fn seeded_maintained_subscription_view_multitable_capture(
     );
 }
 
-fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: AuthorId) {
+fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: AuthorSubject) {
     let schema = maintained_view_capture_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(0x82), schema.clone());
     let alice = user(0xa1);
@@ -1524,14 +1524,14 @@ fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: Au
         .validate(&schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let mut peer = if identity == AuthorId::SYSTEM {
+    let mut peer = if identity == AuthorSubject::SYSTEM {
         PeerState::new()
     } else {
         PeerState::client_link(identity)
     };
 
     let todo_entry = |row_uuid| (groove::Intern::new("todos".to_owned()), row_uuid, txs[&row_uuid]);
-    let expected_initial = if identity == AuthorId::SYSTEM {
+    let expected_initial = if identity == AuthorSubject::SYSTEM {
         vec![
             todo_entry(initial_alice),
             todo_entry(initial_bob),
@@ -1593,7 +1593,7 @@ fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: Au
         let tx_id = accept_owner_capture_row(&mut core, &mut parents, row_uuid, owner, title, made_at);
         txs.insert(row_uuid, tx_id);
     }
-    let add_rows = if identity == AuthorId::SYSTEM {
+    let add_rows = if identity == AuthorSubject::SYSTEM {
         vec![added, hidden_added]
     } else {
         vec![added]
@@ -1620,7 +1620,7 @@ fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: Au
     txs.insert(sibling_match, sibling_tx);
     txs.insert(sibling_nonmatch, sibling_tx);
     txs.insert(sibling_hidden, sibling_tx);
-    let sibling_add_rows = if identity == AuthorId::SYSTEM {
+    let sibling_add_rows = if identity == AuthorSubject::SYSTEM {
         vec![sibling_match, sibling_hidden]
     } else {
         vec![sibling_match]
@@ -1661,7 +1661,7 @@ fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: Au
         previous_rls_revoked_tx,
     );
     let new_rls_entry = (groove::Intern::new("todos".to_owned()), rls_revoked, tx_id);
-    let (rls_adds, rls_removes) = if identity == AuthorId::SYSTEM {
+    let (rls_adds, rls_removes) = if identity == AuthorSubject::SYSTEM {
         (vec![new_rls_entry], vec![old_rls_entry])
     } else {
         (vec![], vec![old_rls_entry])
@@ -1797,7 +1797,7 @@ fn maintained_subscription_view_emits_expected_owner_policy_updates() {
         seeds.len()
     );
     for seed in seeds {
-        seeded_maintained_subscription_view_subscription_capture(seed, AuthorId::SYSTEM);
+        seeded_maintained_subscription_view_subscription_capture(seed, AuthorSubject::SYSTEM);
         seeded_maintained_subscription_view_subscription_capture(seed, user(0xa1));
     }
 }
@@ -1823,7 +1823,7 @@ fn maintained_subscription_view_multitable_emits_expected_updates() {
             MultiTableCaptureShape::IncludeHoles,
             MultiTableCaptureShape::JoinVia,
         ] {
-            seeded_maintained_subscription_view_multitable_capture(seed, AuthorId::SYSTEM, shape);
+            seeded_maintained_subscription_view_multitable_capture(seed, AuthorSubject::SYSTEM, shape);
             seeded_maintained_subscription_view_multitable_capture(seed, user(0xa1), shape);
         }
     }
@@ -1844,7 +1844,7 @@ fn maintained_subscription_view_recursive_rls_emits_expected_updates() {
         seeds.len()
     );
     for seed in seeds {
-        seeded_maintained_subscription_view_recursive_rls_capture(seed, AuthorId::SYSTEM);
+        seeded_maintained_subscription_view_recursive_rls_capture(seed, AuthorSubject::SYSTEM);
         seeded_maintained_subscription_view_recursive_rls_capture(seed, user(0xa1));
     }
 }
@@ -1861,7 +1861,7 @@ fn maintained_subscription_view_real_peer_path_emits_expected_view_updates() {
             .join(",")
     );
     for seed in seeds {
-        seeded_real_peer_maintained_subscription_view_capture(seed, AuthorId::SYSTEM);
+        seeded_real_peer_maintained_subscription_view_capture(seed, AuthorSubject::SYSTEM);
         seeded_real_peer_maintained_subscription_view_capture(seed, user(0xa1));
     }
 }

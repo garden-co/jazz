@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::process::ExitCode;
 
 use jazz::db::DbIdentity;
-use jazz::ids::{AuthorId, NodeUuid};
+use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::schema::JazzSchema;
 use jazz::serving::{
     DeploymentProfile, DrainState, DryRunReport, HealthStatus, NodeRole, ServerShell,
@@ -174,7 +174,7 @@ fn run_server_app(app_id: &str, args: Vec<String>, program: &str) -> ExitCode {
     };
     let identity = DbIdentity {
         node: NodeUuid::from_bytes([0x5e; 16]),
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
     };
     let storage = options.storage.clone();
     let auth_admission = options.auth_admission.clone();
@@ -259,7 +259,7 @@ fn run_loopback_websocket_schema(
 
     let identity = DbIdentity {
         node: NodeUuid::from_bytes([0x5e; 16]),
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
     };
     let mut config = match options.storage {
         StorageConfig::InMemory => LoopbackWebSocketServerConfig::in_memory(schema, identity),

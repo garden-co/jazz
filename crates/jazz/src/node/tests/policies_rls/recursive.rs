@@ -79,7 +79,7 @@ fn recursive_reachable_write_policy_allows_direct_and_closure_docs() {
     let hidden_team = RowUuid(uuid::uuid!("20000000-0000-0000-0000-000000000003"));
 
     for (team, name) in [
-        (RowUuid(reader.0), "reader"),
+        (RowUuid(reader.test_uuid()), "reader"),
         (parent_team, "parent"),
         (hidden_team, "hidden"),
     ] {
@@ -102,7 +102,7 @@ fn recursive_reachable_write_policy_allows_direct_and_closure_docs() {
         );
     }
     for (idx, doc, team) in [
-        (0xa1, direct_doc, RowUuid(reader.0)),
+        (0xa1, direct_doc, RowUuid(reader.test_uuid())),
         (0xa2, closure_doc, parent_team),
         (0xa3, hidden_doc, hidden_team),
     ] {
@@ -117,7 +117,7 @@ fn recursive_reachable_write_policy_allows_direct_and_closure_docs() {
     accept_global(
         &mut core,
         MergeableCommit::new("team_edges", row(0xe1), 40).cells(BTreeMap::from([
-            ("member".to_owned(), Value::Uuid(reader.0)),
+            ("member".to_owned(), Value::Uuid(reader.test_uuid())),
             ("parent".to_owned(), Value::Uuid(parent_team.0)),
         ])),
     );
@@ -185,7 +185,7 @@ fn recursive_reachable_insert_policy_allows_direct_and_closure_docs() {
     let hidden_team = RowUuid(uuid::uuid!("20000000-0000-0000-0000-000000000013"));
 
     for (team, name) in [
-        (RowUuid(reader.0), "reader"),
+        (RowUuid(reader.test_uuid()), "reader"),
         (parent_team, "parent"),
         (hidden_team, "hidden"),
     ] {
@@ -198,7 +198,7 @@ fn recursive_reachable_insert_policy_allows_direct_and_closure_docs() {
         );
     }
     for (idx, doc, team) in [
-        (0xb1, direct_doc, RowUuid(reader.0)),
+        (0xb1, direct_doc, RowUuid(reader.test_uuid())),
         (0xb2, closure_doc, parent_team),
         (0xb3, hidden_doc, hidden_team),
     ] {
@@ -213,7 +213,7 @@ fn recursive_reachable_insert_policy_allows_direct_and_closure_docs() {
     accept_global(
         &mut core,
         MergeableCommit::new("team_edges", row(0xe2), 40).cells(BTreeMap::from([
-            ("member".to_owned(), Value::Uuid(reader.0)),
+            ("member".to_owned(), Value::Uuid(reader.test_uuid())),
             ("parent".to_owned(), Value::Uuid(parent_team.0)),
         ])),
     );
@@ -270,7 +270,7 @@ fn recursive_reachable_read_policy_claim_seed_rehydrates_through_query_engine() 
     let hidden_team = RowUuid(uuid::uuid!("20000000-0000-0000-0000-000000000003"));
 
     for (team, name) in [
-        (RowUuid(reader.0), "reader"),
+        (RowUuid(reader.test_uuid()), "reader"),
         (parent_team, "parent"),
         (hidden_team, "hidden"),
     ] {
@@ -293,7 +293,7 @@ fn recursive_reachable_read_policy_claim_seed_rehydrates_through_query_engine() 
         );
     }
     for (idx, doc, team) in [
-        (0xa1, direct_doc, RowUuid(reader.0)),
+        (0xa1, direct_doc, RowUuid(reader.test_uuid())),
         (0xa2, closure_doc, parent_team),
         (0xa3, hidden_doc, hidden_team),
     ] {
@@ -308,7 +308,7 @@ fn recursive_reachable_read_policy_claim_seed_rehydrates_through_query_engine() 
     accept_global(
         &mut core,
         MergeableCommit::new("team_edges", row(0xe1), 40).cells(BTreeMap::from([
-            ("member".to_owned(), Value::Uuid(reader.0)),
+            ("member".to_owned(), Value::Uuid(reader.test_uuid())),
             ("parent".to_owned(), Value::Uuid(parent_team.0)),
         ])),
     );
@@ -377,7 +377,7 @@ fn reverse_referencing_select_policy_allows_root_row_through_source_row() {
         &mut core,
         MergeableCommit::new("attachments", row(0xa7), 20).cells(BTreeMap::from([
             ("fileId".to_owned(), Value::Uuid(alice_file.0)),
-            ("ownerId".to_owned(), Value::String(alice.0.to_string())),
+            ("ownerId".to_owned(), Value::String(alice.test_uuid().to_string())),
         ])),
     );
 

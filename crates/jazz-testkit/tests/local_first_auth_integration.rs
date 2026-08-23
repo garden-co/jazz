@@ -305,7 +305,7 @@ async fn local_first_writes_carry_derived_principal_as_created_by_impl() {
     let alice_user_id = identity::derive_user_id(&alice_seed()).to_string();
 
     let (todo_id, _, _) = alice
-        .for_session(Session::new(&alice_user_id))
+        .for_session(Session::new("urn:jazz:test", &alice_user_id))
         .insert("todos", todo_values("provenance check", false))
         .expect("alice creates todo");
 
@@ -365,11 +365,11 @@ async fn local_first_and_jwt_clients_coexist_impl() {
         .expect("connect bob (jwt)");
 
     let (alice_id, _, _) = alice
-        .for_session(Session::new(&alice_user_id))
+        .for_session(Session::new("urn:jazz:test", &alice_user_id))
         .insert("todos", todo_values("alice via ed25519", false))
         .expect("alice creates todo");
     let (bob_id, _, _) = bob
-        .for_session(Session::new("bob"))
+        .for_session(Session::new("urn:jazz:test", "bob"))
         .insert("todos", todo_values("bob via jwt", true))
         .expect("bob creates todo");
 

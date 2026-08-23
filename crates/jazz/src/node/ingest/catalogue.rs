@@ -44,7 +44,7 @@ where
         self.apply_sync_message_with_ingest_context(
             message,
             Some(CommitUnitIngestContext {
-                identity: AuthorId::SYSTEM,
+                identity: AuthorSubject::SYSTEM,
                 trust: CommitUnitTrust::TrustedBackend,
                 edge_authority: false,
             }),
@@ -366,7 +366,7 @@ where
 
     async fn apply_publish_schema(
         &mut self,
-        author: AuthorId,
+        author: AuthorSubject,
         ingest_context: Option<CommitUnitIngestContext>,
         schema: SchemaVersion,
     ) -> Result<PublicationOutcome<Vec<SyncMessage>>, Error>
@@ -427,7 +427,7 @@ where
 
     async fn apply_publish_schema_with_lens(
         &mut self,
-        author: AuthorId,
+        author: AuthorSubject,
         ingest_context: Option<CommitUnitIngestContext>,
         catalogue_seq: u64,
         publication: SchemaLineagePublication,
@@ -769,7 +769,7 @@ where
 
     async fn apply_publish_lens(
         &mut self,
-        author: AuthorId,
+        author: AuthorSubject,
         ingest_context: Option<CommitUnitIngestContext>,
         lens: MigrationLens,
     ) -> Result<Vec<SyncMessage>, Error>
@@ -827,7 +827,7 @@ where
 
     async fn apply_set_current_write_schema(
         &mut self,
-        author: AuthorId,
+        author: AuthorSubject,
         ingest_context: Option<CommitUnitIngestContext>,
         pointer: CurrentWriteSchema,
     ) -> Result<Vec<SyncMessage>, Error>
@@ -920,13 +920,13 @@ where
 
     fn require_catalogue_admin(
         &self,
-        _claimed_author: AuthorId,
+        _claimed_author: AuthorSubject,
         ingest_context: Option<CommitUnitIngestContext>,
     ) -> Result<(), Error> {
         if matches!(
             ingest_context,
             Some(context)
-                if context.identity == AuthorId::SYSTEM
+                if context.identity == AuthorSubject::SYSTEM
                     && context.trust == CommitUnitTrust::TrustedBackend
         ) {
             Ok(())

@@ -27,7 +27,7 @@ impl TestRocksOpen for RocksDbStorage {
 }
 
 use super::*;
-use crate::ids::{AuthorId, NodeUuid};
+use crate::ids::{AuthorSubject, NodeUuid};
 use crate::legacy_test_future::{
     FutureResolveExt as _, OptionFutureExt as _, ResultFutureExt as _, SettledNodeTestExt as _,
 };

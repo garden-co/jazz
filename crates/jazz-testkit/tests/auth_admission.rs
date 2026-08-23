@@ -230,7 +230,10 @@ fn subject_admission_rejects_blank_but_preserves_opaque_spelling() {
     assert_eq!(admitted.subject, exact);
     assert_eq!(
         admitted.author,
-        jazz::serving::auth_admission::author_id_from_subject(exact)
+        jazz::serving::auth_admission::author_subject_from_issuer_and_subject(
+            LOCAL_FIRST_JWT_ISSUER,
+            exact,
+        )
     );
 
     let static_admitted = admit_static_bearer(
@@ -241,7 +244,14 @@ fn subject_admission_rejects_blank_but_preserves_opaque_spelling() {
     )
     .unwrap();
     assert_eq!(static_admitted.subject, exact);
-    assert_eq!(static_admitted.author, admitted.author);
+    assert_ne!(static_admitted.author, admitted.author);
+    assert_eq!(
+        static_admitted.author,
+        jazz::serving::auth_admission::author_subject_from_issuer_and_subject(
+            jazz::serving::auth_admission::STATIC_BEARER_ISSUER,
+            exact,
+        )
+    );
 }
 
 #[test]
@@ -274,7 +284,10 @@ fn static_bearer_claim_admission_rejects_ascii_blank_and_preserves_exact_subject
     assert_eq!(admitted.subject, exact);
     assert_eq!(
         admitted.author,
-        jazz::serving::auth_admission::author_id_from_subject(exact)
+        jazz::serving::auth_admission::author_subject_from_issuer_and_subject(
+            jazz::serving::auth_admission::STATIC_BEARER_ISSUER,
+            exact,
+        )
     );
 }
 

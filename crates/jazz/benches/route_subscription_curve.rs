@@ -20,7 +20,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, param};
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
@@ -31,7 +31,7 @@ const TEAMS: usize = 1_001;
 const HOT_TEAM_DOCUMENTS: usize = 1_000;
 const PAGE_SIZE: usize = 100;
 const MAX_ROUTES: usize = 1_000;
-const WRITER: AuthorId = AuthorId::SYSTEM;
+const WRITER: AuthorSubject = AuthorSubject::SYSTEM;
 
 type BenchDb = Db<MemoryStorage>;
 

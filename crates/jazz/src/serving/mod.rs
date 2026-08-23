@@ -24,7 +24,7 @@ use crate::db::{
 };
 use crate::groove::records::Value;
 use crate::groove::storage::{BoxedStorage, MemoryStorage, StorageFactory};
-use crate::ids::{AuthorId, MigrationLensId, RowUuid, SchemaVersionId};
+use crate::ids::{AuthorSubject, MigrationLensId, RowUuid, SchemaVersionId};
 use crate::node::EdgeCacheBudget;
 use crate::protocol::{
     CatalogueAck, CurrentWriteSchema, MigrationLens, SchemaLineagePublication, SchemaVersion,
@@ -52,7 +52,7 @@ pub type AbiBytes = Vec<u8>;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct ServerSession {
     transport: usize,
-    identity: AuthorId,
+    identity: AuthorSubject,
 }
 
 impl ServerSession {
@@ -60,7 +60,7 @@ impl ServerSession {
         self.transport
     }
 
-    fn identity(self) -> AuthorId {
+    fn identity(self) -> AuthorSubject {
         self.identity
     }
 }
@@ -72,7 +72,7 @@ impl ServerSession {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ServerSessionResume {
     /// Subscriber author identity to serve the resumed connection under.
-    pub identity: AuthorId,
+    pub identity: AuthorSubject,
     /// One-shot in-process resume token returned by disconnect-for-resume.
     pub resume_token: u64,
 }
@@ -186,7 +186,7 @@ pub struct InMemoryServerShell {
     role: NodeRole,
     sessions: Vec<Option<ServerSessionState>>,
     upstream_connections: Vec<ShellPeerConnection>,
-    resume_cursors: BTreeMap<u64, (AuthorId, ResumeCursor)>,
+    resume_cursors: BTreeMap<u64, (AuthorSubject, ResumeCursor)>,
     next_resume_token: u64,
     runtime_schema_state: RuntimeSchemaState,
     metrics: InMemoryServerShellMetrics,
@@ -260,7 +260,7 @@ struct ServerSessionState {
     transport: SharedWireTransport,
     auxiliary_pump: crate::db::PeerIoPump,
     negotiated_features: crate::wire::WireFeatures,
-    identity: AuthorId,
+    identity: AuthorSubject,
     epoch: u64,
     resume_status: ServerResumeStatus,
 }
@@ -556,7 +556,7 @@ impl ShellDb {
     fn accept_subscriber_with_claims(
         &self,
         transport: Box<dyn crate::db::Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
         cursor: Option<ResumeCursor>,
     ) -> ShellPeerConnection {
@@ -579,7 +579,7 @@ impl ShellDb {
     fn accept_subscriber_with_claims_and_trust(
         &self,
         transport: Box<dyn crate::db::Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
         trust: CommitUnitTrust,
     ) -> ShellPeerConnection {
@@ -596,7 +596,7 @@ impl ShellDb {
     fn accept_edge_authority_subscriber_with_claims(
         &self,
         transport: Box<dyn crate::db::Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> ShellPeerConnection {
         match self {
@@ -632,7 +632,7 @@ impl ShellDb {
         &self,
         table: String,
         row_id: RowUuid,
-        author: AuthorId,
+        author: AuthorSubject,
         cells: RowCells,
     ) -> ShellResult<()> {
         match self {
@@ -1082,14 +1082,17 @@ impl InMemoryServerShell {
     }
 
     /// Accept one subscriber byte session under the supplied author identity.
-    pub fn accept_subscriber_session(&mut self, identity: AuthorId) -> ShellResult<ServerSession> {
+    pub fn accept_subscriber_session(
+        &mut self,
+        identity: AuthorSubject,
+    ) -> ShellResult<ServerSession> {
         self.accept_subscriber_session_with_claims(identity, BTreeMap::new())
     }
 
     /// Accept one subscriber byte session under the supplied identity and claims.
     pub fn accept_subscriber_session_with_claims(
         &mut self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> ShellResult<ServerSession> {
         self.accept_subscriber_session_with_claims_and_trust(
@@ -1102,7 +1105,7 @@ impl InMemoryServerShell {
     /// Accept one subscriber byte session under the supplied identity, claims, and trust mode.
     pub fn accept_subscriber_session_with_claims_and_trust(
         &mut self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
         trust: CommitUnitTrust,
     ) -> ShellResult<ServerSession> {
@@ -1119,7 +1122,7 @@ impl InMemoryServerShell {
     /// endpoint context. Callers without receipt-capable negotiation pass None.
     pub fn accept_subscriber_session_with_claims_and_trust_and_context(
         &mut self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
         trust: CommitUnitTrust,
         negotiated_features: crate::wire::WireFeatures,
@@ -1483,8 +1486,12 @@ impl InMemoryServerShell {
         row_id: RowUuid,
         cells: RowCells,
     ) -> ShellResult<()> {
-        self.db
-            .seed_settled_mergeable_for_bootstrap(table.into(), row_id, AuthorId::SYSTEM, cells)
+        self.db.seed_settled_mergeable_for_bootstrap(
+            table.into(),
+            row_id,
+            AuthorSubject::SYSTEM,
+            cells,
+        )
     }
 
     fn is_draining(&self) -> bool {
@@ -1544,9 +1551,9 @@ pub enum ShellError {
     /// A process-local resume token was presented for the wrong identity.
     ResumeIdentityMismatch {
         /// Identity that owns the resume cursor.
-        expected: AuthorId,
+        expected: AuthorSubject,
         /// Identity supplied by the caller.
-        actual: AuthorId,
+        actual: AuthorSubject,
     },
     /// A new session was rejected because the shell is draining.
     SessionRejected {
@@ -2156,7 +2163,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let identity = DbIdentity {
             node: crate::ids::NodeUuid::from_bytes([0x5e; 16]),
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
         };
         let config = InMemoryServerShellConfig::new(structural.clone(), identity)
             .with_runtime_schema_bootstrap()

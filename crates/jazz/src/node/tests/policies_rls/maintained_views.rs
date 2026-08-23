@@ -47,7 +47,7 @@ fn maintained_view_seeded_query_engine_snapshot_matches_rows_and_witnesses() {
         &mut core,
         &shape,
         &binding,
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         [
             (sibling_tx, row(0x90), VersionLayer::Content),
             (sibling_tx, row(0x91), VersionLayer::Content),
@@ -165,7 +165,7 @@ fn maintained_view_cold_snapshot_seeds_maintained_indexes_equal_one_shot() {
         &mut core,
         &shape,
         &binding,
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
     );
     assert_maintained_view_cold_snapshot_seed_matches_one_shot(
         &mut core, &shape, &binding, author_a,
@@ -302,14 +302,14 @@ fn maintained_view_join_policy_retained_claim_param_matches_query_engine_result(
         &mut core,
         MergeableCommit::new("members", row(0xa1), 12).cells(BTreeMap::from([
             ("owner".to_owned(), Value::Uuid(row(0xa0).0)),
-            ("user".to_owned(), Value::Uuid(author.0)),
+            ("user".to_owned(), Value::Uuid(author.test_uuid())),
         ])),
     );
     accept_global(
         &mut core,
         MergeableCommit::new("members", row(0xb1), 13).cells(BTreeMap::from([
             ("owner".to_owned(), Value::Uuid(row(0xb0).0)),
-            ("user".to_owned(), Value::Uuid(other.0)),
+            ("user".to_owned(), Value::Uuid(other.test_uuid())),
         ])),
     );
 
@@ -375,7 +375,7 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
         &mut core,
         MergeableCommit::new("members", member_row, 10).cells(BTreeMap::from([
             ("name".to_owned(), Value::String("hidden owner".to_owned())),
-            ("userID".to_owned(), Value::Uuid(other.0)),
+            ("userID".to_owned(), Value::Uuid(other.test_uuid())),
         ])),
     );
     let todo_tx = accept_global(
@@ -406,7 +406,7 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
             .parents(vec![hidden_member_tx])
             .cells(BTreeMap::from([
                 ("name".to_owned(), Value::String("visible owner".to_owned())),
-                ("userID".to_owned(), Value::Uuid(reader.0)),
+                ("userID".to_owned(), Value::Uuid(reader.test_uuid())),
             ])),
     );
     let grant = peer.query_update(&mut core, &shape, &binding).unwrap();
@@ -429,7 +429,7 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
             .parents(vec![visible_member_tx])
             .cells(BTreeMap::from([
                 ("name".to_owned(), Value::String("hidden again".to_owned())),
-                ("userID".to_owned(), Value::Uuid(other.0)),
+                ("userID".to_owned(), Value::Uuid(other.test_uuid())),
             ])),
     );
     let revoke = peer.query_update(&mut core, &shape, &binding).unwrap();
@@ -509,21 +509,21 @@ fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_deriva
         &mut core,
         MergeableCommit::new("containerAccess", first_edge, 12).cells(BTreeMap::from([
             ("container".to_owned(), Value::Uuid(container.0)),
-            ("reader".to_owned(), Value::Uuid(reader.0)),
+            ("reader".to_owned(), Value::Uuid(reader.test_uuid())),
         ])),
     );
     let second_edge_tx = accept_global(
         &mut core,
         MergeableCommit::new("containerAccess", second_edge, 13).cells(BTreeMap::from([
             ("container".to_owned(), Value::Uuid(container.0)),
-            ("reader".to_owned(), Value::Uuid(reader.0)),
+            ("reader".to_owned(), Value::Uuid(reader.test_uuid())),
         ])),
     );
     accept_global(
         &mut core,
         MergeableCommit::new("containerAccess", row(0xaf), 14).cells(BTreeMap::from([
             ("container".to_owned(), Value::Uuid(container.0)),
-            ("reader".to_owned(), Value::Uuid(other.0)),
+            ("reader".to_owned(), Value::Uuid(other.test_uuid())),
         ])),
     );
 
@@ -598,7 +598,7 @@ fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_deriva
         &mut core,
         MergeableCommit::new("containerAccess", third_edge, 17).cells(BTreeMap::from([
             ("container".to_owned(), Value::Uuid(container.0)),
-            ("reader".to_owned(), Value::Uuid(reader.0)),
+            ("reader".to_owned(), Value::Uuid(reader.test_uuid())),
         ])),
     );
     let regrant = peer.query_update(&mut core, &shape, &binding).unwrap();
@@ -812,19 +812,19 @@ fn retained_user_param_filter_graph_matches_literal_filter() {
     ));
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let owner = user(0xa1);
-    core.set_session_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.0))]));
+    core.set_session_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.test_uuid()))]));
     accept_global(
         &mut core,
         MergeableCommit::new("docs", row(0xd1), 10).cells(BTreeMap::from([
             ("title".to_owned(), v("owned")),
-            ("owner".to_owned(), Value::Uuid(owner.0)),
+            ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
         ])),
     );
     accept_global(
         &mut core,
         MergeableCommit::new("docs", row(0xd2), 11).cells(BTreeMap::from([
             ("title".to_owned(), v("other")),
-            ("owner".to_owned(), Value::Uuid(user(0xb2).0)),
+            ("owner".to_owned(), Value::Uuid(user(0xb2).test_uuid())),
         ])),
     );
 
@@ -833,7 +833,7 @@ fn retained_user_param_filter_graph_matches_literal_filter() {
         .validate(&core.catalogue.schema)
         .unwrap();
     let binding = shape
-        .bind(BTreeMap::from([("owner".to_owned(), Value::Uuid(owner.0))]))
+        .bind(BTreeMap::from([("owner".to_owned(), Value::Uuid(owner.test_uuid()))]))
         .unwrap();
     let (shape, binding, plan) = core
         .prepare_query_binding_for_link(&shape, &binding, DurabilityTier::Global, owner)
@@ -876,17 +876,17 @@ fn session_sub_claim_cannot_override_authenticated_subject() {
         &mut core,
         MergeableCommit::new("docs", owned_doc, 10).cells(BTreeMap::from([
             ("title".to_owned(), v("owned")),
-            ("owner".to_owned(), Value::Uuid(owner.0)),
+            ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
         ])),
     );
     accept_global(
         &mut core,
         MergeableCommit::new("docs", other_doc, 11).cells(BTreeMap::from([
             ("title".to_owned(), v("other")),
-            ("owner".to_owned(), Value::Uuid(other.0)),
+            ("owner".to_owned(), Value::Uuid(other.test_uuid())),
         ])),
     );
-    core.set_session_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(other.0))]));
+    core.set_session_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(other.test_uuid()))]));
 
     let shape = Query::from("docs")
         .validate(&core.catalogue.schema)

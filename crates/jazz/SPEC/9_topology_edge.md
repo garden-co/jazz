@@ -17,7 +17,7 @@ versions merely because it has the payload (`INV-TX-23`).
 
 Invariant digest:
 
-- `INV-EDGE-1`: A `PeerRole::Relay` link MUST use `AuthorId::SYSTEM` as its link identity and MUST NOT terminate a client identity.
+- `INV-EDGE-1`: A `PeerRole::Relay` link MUST use `AuthorSubject::SYSTEM` as its link identity and MUST NOT terminate a client identity.
 - `INV-EDGE-2`: A relay MUST store/forward `TxKind::Mergeable` and `TxKind::Exclusive` commit units as `Fate::Pending` with `DurabilityTier::Local` and MUST NOT assign an authority fate.
 - `INV-EDGE-3`: An edge-client link MUST terminate exactly one client author identity as `PeerRole::ClientLink { identity }`, and downstream reads on that link MUST use that identity for policy composition.
 - `INV-EDGE-4`: An edge MUST NOT assign a mergeable fate until the needed permission-scope subscription has delivered an initial settled result; before that, the transaction MUST remain pending and deferred.
@@ -48,7 +48,7 @@ Trust is the axis:
 
 - **client** — untrusted; no fate authority; local preview only.
 - **relay** — semi-trusted passthrough/cache; never assigns fates or enforces
-  per-user permissions; forwards opaquely under `AuthorId::SYSTEM`.
+  per-user permissions; forwards opaquely under `AuthorSubject::SYSTEM`.
 - **edge** — operator-trusted; may finally decide _mergeable_ fates and enforces
   read/write policy for the identities it terminates.
 - **core** — operator-trusted; the exclusive-transaction authority and global
@@ -115,7 +115,7 @@ same client-worker link. A worker without an upstream can therefore satisfy
 ### 9.3 Relays
 
 Relays provide unopinionated transport and caching. A relay link uses
-`PeerRole::Relay` with identity `AuthorId::SYSTEM` (`INV-EDGE-1`) and forwards
+`PeerRole::Relay` with identity `AuthorSubject::SYSTEM` (`INV-EDGE-1`) and forwards
 both mergeable and exclusive commit units without deciding their outcome: stored
 units remain `Fate::Pending` / `DurabilityTier::Local`, and the relay assigns no
 fate (`INV-EDGE-2`).
@@ -129,7 +129,7 @@ the browser. Server-deployed relays are the exception.
 
 The edge-client boundary is where the system binds a link to a user identity and
 applies the last-hop policy view. An edge-client link terminates exactly one
-client `AuthorId` as `PeerRole::ClientLink { identity }`, and downstream reads on
+client `AuthorSubject` as `PeerRole::ClientLink { identity }`, and downstream reads on
 that link are policy-composed for that identity (`INV-EDGE-3`, ch. 7).
 
 Upstream commit-unit uploads on a normal session link are authorized under the

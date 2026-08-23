@@ -27,7 +27,7 @@ struct DifferentialShape {
     name: &'static str,
     shape: ValidatedQuery,
     binding: Binding,
-    identity: AuthorId,
+    identity: AuthorSubject,
     subscription: SubscriptionKey,
 }
 
@@ -42,7 +42,7 @@ struct AggregateDifferential {
     name: &'static str,
     shape: ValidatedQuery,
     binding: Binding,
-    identity: AuthorId,
+    identity: AuthorSubject,
     subscription: SubscriptionKey,
     peer: PeerState,
     output: &'static str,
@@ -1194,10 +1194,10 @@ fn seed_m3_differential_base(core: &mut NodeState<RocksDbStorage>, seed: u64) {
             MergeableCommit::new("teams", team, 1).cells(BTreeMap::from([
                 ("id".to_owned(), Value::Uuid(team.0)),
                 ("name".to_owned(), Value::String(name.to_owned())),
-                ("identity_key".to_owned(), Value::Uuid(identity.0)),
+                ("identity_key".to_owned(), Value::Uuid(identity.test_uuid())),
                 (
                     "identity_key_text".to_owned(),
-                    Value::String(identity.0.to_string()),
+                    Value::String(identity.test_uuid().to_string()),
                 ),
             ])),
         );
@@ -1209,7 +1209,7 @@ fn seed_m3_differential_base(core: &mut NodeState<RocksDbStorage>, seed: u64) {
     accept_global(
         core,
         MergeableCommit::new("group_access_edges", row(0x42), 3).cells(BTreeMap::from([
-            ("user_id".to_owned(), Value::Uuid(alice.0)),
+            ("user_id".to_owned(), Value::Uuid(alice.test_uuid())),
             ("group_id".to_owned(), Value::Uuid(row(0x31).0)),
         ])),
     );
@@ -1397,7 +1397,7 @@ fn m3_differential_parent_map(
 fn differential_doc_cells(
     title: &str,
     kind: &str,
-    author: AuthorId,
+    author: AuthorSubject,
     created_at: u64,
     bucket: u64,
     f64_value: f64,
@@ -1408,7 +1408,7 @@ fn differential_doc_cells(
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
         ("kind".to_owned(), Value::String(kind.to_owned())),
-        ("createdBy".to_owned(), Value::Uuid(author.0)),
+        ("createdBy".to_owned(), Value::Uuid(author.test_uuid())),
         ("createdAt".to_owned(), Value::U64(created_at)),
         ("bucket".to_owned(), Value::U64(bucket)),
         ("f64_value".to_owned(), Value::F64(f64_value)),
@@ -1532,7 +1532,7 @@ fn grant_edge_access(
         row(0x42),
         180 + step,
         BTreeMap::from([
-            ("user_id".to_owned(), Value::Uuid(user(0xa1).0)),
+            ("user_id".to_owned(), Value::Uuid(user(0xa1).test_uuid())),
             ("group_id".to_owned(), Value::Uuid(row(0x31).0)),
         ]),
     );
@@ -1604,7 +1604,7 @@ fn one_shot_rows<S: OrderedKvStorage>(
     core: &mut NodeState<S>,
     shape: &ValidatedQuery,
     binding: &Binding,
-    identity: AuthorId,
+    identity: AuthorSubject,
 ) -> BTreeSet<(String, RowUuid)> {
     core.query_rows_for_link(shape, binding, DurabilityTier::Global, identity)
         .unwrap()
@@ -1722,7 +1722,7 @@ fn one_shot_aggregate_values<S: OrderedKvStorage>(
     core: &mut NodeState<S>,
     shape: &ValidatedQuery,
     binding: &Binding,
-    identity: AuthorId,
+    identity: AuthorSubject,
     output: &str,
 ) -> BTreeMap<u64, Value> {
     core.query_rows_for_link(shape, binding, DurabilityTier::Global, identity)

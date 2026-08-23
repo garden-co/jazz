@@ -9,7 +9,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType as PublicColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -22,9 +22,17 @@ use common::{
 const TEAMS: &str = "teams";
 const MEMBERSHIPS: &str = "team_memberships";
 const DOCUMENTS: &str = "documents";
-const WRITER: AuthorId = AuthorId(uuid::uuid!("81000000-0000-0000-0000-000000000001"));
-const READER: AuthorId = AuthorId(uuid::uuid!("81000000-0000-0000-0000-000000000002"));
-const MAINTAINER: AuthorId = AuthorId(uuid::uuid!("81000000-0000-0000-0000-000000000003"));
+fn writer() -> AuthorSubject {
+    AuthorSubject::authenticated("urn:jazz:test", "writer")
+}
+
+fn reader() -> AuthorSubject {
+    AuthorSubject::authenticated("urn:jazz:test", "reader")
+}
+
+fn maintainer() -> AuthorSubject {
+    AuthorSubject::authenticated("urn:jazz:test", "maintainer")
+}
 
 fn row(seed: u8) -> RowUuid {
     RowUuid::from_bytes([seed; 16])
@@ -48,7 +56,7 @@ fn schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new(MEMBERSHIPS)
                     .fk_column("team", TEAMS)
-                    .column("user", PublicColumnType::Uuid)
+                    .column("user", PublicColumnType::Text)
                     .policies(read_and_allow_all_writes(session_eq(
                         "user",
                         &["claims", "sub"],
@@ -75,7 +83,7 @@ fn open_db() -> Db<TestStorage> {
             TestStorage::new(&family_refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x81; 16]),
-                author: WRITER,
+                author: writer(),
             },
         )
         .with_id_source(SeededRowIdSource::new(0x8100)),
@@ -105,13 +113,16 @@ fn insert_document(db: &Db<TestStorage>, id: RowUuid, team: RowUuid, rank: u64) 
     .expect("insert document");
 }
 
-fn insert_membership(db: &Db<TestStorage>, id: RowUuid, team: RowUuid, user: AuthorId) {
+fn insert_membership(db: &Db<TestStorage>, id: RowUuid, team: RowUuid, user: AuthorSubject) {
     block_on(db.insert_with_id(
         MEMBERSHIPS,
         id,
         BTreeMap::from([
             ("team".to_owned(), Value::Uuid(team.0)),
-            ("user".to_owned(), Value::Uuid(user.0)),
+            (
+                "user".to_owned(),
+                Value::String(user.canonical().to_owned()),
+            ),
         ]),
     ))
     .expect("insert membership");
@@ -133,9 +144,9 @@ fn upsert_applies_insert_policy_only_to_a_genuinely_absent_target() {
         ("rank".to_owned(), Value::U64(1)),
     ]);
 
-    block_on(db.upsert_for_identity(READER, DOCUMENTS, document, cells.clone()))
+    block_on(db.upsert_for_identity(reader(), DOCUMENTS, document, cells.clone()))
         .expect("absent target follows public insert policy");
-    let error = match block_on(db.upsert_for_identity(READER, DOCUMENTS, document, cells)) {
+    let error = match block_on(db.upsert_for_identity(reader(), DOCUMENTS, document, cells)) {
         Ok(_) => panic!("hidden existing target requires read permission"),
         Err(error) => error,
     };
@@ -145,7 +156,7 @@ fn upsert_applies_insert_policy_only_to_a_genuinely_absent_target() {
 
 fn ordered_page(
     db: &Db<TestStorage>,
-    identity: AuthorId,
+    identity: AuthorSubject,
     prepared: &jazz::db::PreparedQuery,
 ) -> Vec<RowUuid> {
     block_on(db.all_for_identity(prepared, opts(), identity))
@@ -242,7 +253,7 @@ fn write_only_full_row_update_succeeds_but_partial_update_and_upsert_are_denied(
         BTreeMap::from([("name".to_owned(), Value::String("authorized".to_owned()))]),
     ))
     .expect("insert team");
-    insert_membership(&db, row(0x31), authorized_team, READER);
+    insert_membership(&db, row(0x31), authorized_team, reader());
     insert_document(&db, winner, authorized_team, 30);
     insert_document(&db, second, authorized_team, 20);
     insert_document(&db, refill, authorized_team, 10);
@@ -256,7 +267,7 @@ fn write_only_full_row_update_succeeds_but_partial_update_and_upsert_are_denied(
         .expect("prepare exact ordered page");
 
     block_on(db.update_for_identity(
-        WRITER,
+        writer(),
         DOCUMENTS,
         winner,
         BTreeMap::from([
@@ -265,10 +276,10 @@ fn write_only_full_row_update_succeeds_but_partial_update_and_upsert_are_denied(
         ]),
     ))
     .expect("write-only principal can issue a full-row update");
-    assert_eq!(ordered_page(&db, READER, &prepared), vec![second, refill]);
+    assert_eq!(ordered_page(&db, reader(), &prepared), vec![second, refill]);
 
     let partial_error = match block_on(db.update_for_identity(
-        WRITER,
+        writer(),
         DOCUMENTS,
         winner,
         BTreeMap::from([("rank".to_owned(), Value::U64(40))]),
@@ -282,10 +293,10 @@ fn write_only_full_row_update_succeeds_but_partial_update_and_upsert_are_denied(
             && partial_error.message.contains("requires read permission"),
         "partial-update denial must explain its read authorization requirement: {partial_error:?}"
     );
-    assert_eq!(ordered_page(&db, READER, &prepared), vec![second, refill]);
+    assert_eq!(ordered_page(&db, reader(), &prepared), vec![second, refill]);
 
     let upsert_error = match block_on(db.upsert_for_identity(
-        WRITER,
+        writer(),
         DOCUMENTS,
         winner,
         BTreeMap::from([
@@ -341,9 +352,9 @@ fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
         ))
         .expect("insert team");
     }
-    insert_membership(&db, row(0x31), authorized_team, READER);
-    insert_membership(&db, row(0x32), authorized_team, MAINTAINER);
-    insert_membership(&db, row(0x33), unauthorized_team, MAINTAINER);
+    insert_membership(&db, row(0x31), authorized_team, reader());
+    insert_membership(&db, row(0x32), authorized_team, maintainer());
+    insert_membership(&db, row(0x33), unauthorized_team, maintainer());
     insert_document(&db, winner, authorized_team, 30);
     insert_document(&db, second, authorized_team, 20);
     insert_document(&db, refill, authorized_team, 10);
@@ -355,27 +366,27 @@ fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
                 .limit(2),
         )
         .expect("prepare exact ordered page");
-    let writer_page = || ordered_page(&db, WRITER, &prepared);
-    let reader_page = || ordered_page(&db, READER, &prepared);
-    let mut stream = block_on(db.subscribe_for_identity(&prepared, opts(), READER))
+    let writer_page = || ordered_page(&db, writer(), &prepared);
+    let reader_page = || ordered_page(&db, reader(), &prepared);
+    let mut stream = block_on(db.subscribe_for_identity(&prepared, opts(), reader()))
         .expect("subscribe reader page");
 
     let mut maintained = initial_rows(&mut stream);
     assert_eq!(maintained, BTreeSet::from([winner, second]));
     assert_eq!(reader_page(), vec![winner, second]);
 
-    // The whole scenario rests on WRITER being able to write these documents
+    // The whole scenario rests on writer() being able to write these documents
     // without being able to read them. Assert that premise directly: without
-    // this, a read policy that accidentally admitted WRITER would leave every
+    // this, a read policy that accidentally admitted writer() would leave every
     // other assertion in this test passing while testing nothing.
     assert!(
         writer_page().is_empty(),
-        "WRITER must not be able to read documents; the partial-update scenario \
+        "writer() must not be able to read documents; the partial-update scenario \
          is only meaningful for a write-only principal"
     );
 
     let denied = match block_on(db.update_for_identity(
-        WRITER,
+        writer(),
         DOCUMENTS,
         winner,
         BTreeMap::from([("team".to_owned(), Value::Uuid(unauthorized_team.0))]),
@@ -391,7 +402,7 @@ fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
     assert!(stream.try_next_event().is_none());
 
     block_on(db.update_for_identity(
-        MAINTAINER,
+        maintainer(),
         DOCUMENTS,
         winner,
         BTreeMap::from([("team".to_owned(), Value::Uuid(unauthorized_team.0))]),
@@ -408,10 +419,10 @@ fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
     assert_eq!(reader_page(), vec![second, refill]);
     assert!(
         writer_page().is_empty(),
-        "WRITER must still not read documents after the move out of scope"
+        "writer() must still not read documents after the move out of scope"
     );
 
-    block_on(db.transaction_for_identity(MAINTAINER, async |tx| {
+    block_on(db.transaction_for_identity(maintainer(), async |tx| {
         tx.update(
             DOCUMENTS,
             winner,
@@ -470,7 +481,7 @@ fn client_subscription_skips_policy_only_compile_validation_but_identity_subscri
             TestStorage::new(&family_refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x82; 16]),
-                author: WRITER,
+                author: writer(),
             },
         )
         .with_id_source(SeededRowIdSource::new(0x8200)),
@@ -492,7 +503,7 @@ fn client_subscription_skips_policy_only_compile_validation_but_identity_subscri
     if let Err(error) = client {
         panic!("client-local subscription must skip serving-only policy compilation: {error:?}");
     }
-    let trusted = block_on(db.subscribe_for_identity(&prepared, opts(), WRITER));
+    let trusted = block_on(db.subscribe_for_identity(&prepared, opts(), writer()));
     assert!(
         trusted.is_err(),
         "trusted-serving subscription must continue to validate policy dependencies"

@@ -18,7 +18,9 @@ use crate::db::{
 };
 use crate::groove::records::{BorrowedRecord, OwnedRecord, Value as CoreValue};
 use crate::groove::storage::{BoxedStorage as CoreStorage, MemoryStorage as CoreMemoryStorage};
-use crate::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
+use crate::ids::{
+    AuthorSubject as CoreAuthorSubject, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid,
+};
 use crate::protocol::ReadViewSpec as CoreReadViewSpec;
 use crate::query::{Aggregate as CoreAggregate, AggregateFunction as CoreAggregateFunction, Query};
 use crate::tools::OpenTransactionId;
@@ -81,6 +83,7 @@ struct AppliedTerminalOperations {
 
 #[derive(Debug, Deserialize)]
 struct UnverifiedJwtClaims {
+    iss: String,
     sub: String,
     #[serde(default)]
     claims: JwtClaimsPayload,
@@ -270,7 +273,7 @@ impl Backend {
         self.0.detach_connection(connection)
     }
 
-    fn set_identity_claims(&self, identity: CoreAuthorId, claims: HashMap<String, CoreValue>) {
+    fn set_identity_claims(&self, identity: CoreAuthorSubject, claims: HashMap<String, CoreValue>) {
         self.0
             .set_identity_claims(identity, claims.into_iter().collect());
     }
@@ -290,7 +293,7 @@ impl Backend {
 
     fn insert_for_identity(
         &self,
-        identity: CoreAuthorId,
+        identity: CoreAuthorSubject,
         table: &str,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
@@ -309,7 +312,7 @@ impl Backend {
 
     fn insert_with_id_for_identity(
         &self,
-        identity: CoreAuthorId,
+        identity: CoreAuthorSubject,
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
@@ -332,7 +335,7 @@ impl Backend {
 
     fn upsert_for_identity(
         &self,
-        identity: CoreAuthorId,
+        identity: CoreAuthorSubject,
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
@@ -354,7 +357,7 @@ impl Backend {
 
     fn delete_for_identity(
         &self,
-        identity: CoreAuthorId,
+        identity: CoreAuthorSubject,
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
@@ -414,7 +417,7 @@ impl Backend {
         &self,
         tx_id: OpenTransactionId,
         prepared: &crate::db::PreparedQuery,
-        author: CoreAuthorId,
+        author: CoreAuthorSubject,
         opts: CoreReadOpts,
     ) -> std::result::Result<Vec<crate::node::CurrentRow>, CoreDbError> {
         crate::db::block_on(
@@ -613,7 +616,7 @@ impl ClientDb {
         opts: CoreReadOpts,
         transaction_id: OpenTransactionId,
         table: String,
-        author: CoreAuthorId,
+        author: CoreAuthorSubject,
     ) -> Result<Vec<crate::node::CurrentRow>> {
         let prepared = {
             let inner = self.inner.borrow();
@@ -660,7 +663,7 @@ impl ClientDb {
         table: String,
         row_id: Option<Uuid>,
         cells: crate::db::RowCells,
-        identity: Option<CoreAuthorId>,
+        identity: Option<CoreAuthorSubject>,
     ) -> Result<(ObjectId, CoreTxId)> {
         let mut inner = self.inner.borrow_mut();
         let (row_uuid, tx_id) = match row_id {
@@ -727,7 +730,7 @@ impl ClientDb {
         table: String,
         row_id: Uuid,
         cells: crate::db::RowCells,
-        identity: Option<CoreAuthorId>,
+        identity: Option<CoreAuthorSubject>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let write = match identity {
@@ -777,7 +780,7 @@ impl ClientDb {
         &self,
         row_id: ObjectId,
         cells: crate::db::RowCells,
-        identity: Option<CoreAuthorId>,
+        identity: Option<CoreAuthorSubject>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
@@ -822,7 +825,7 @@ impl ClientDb {
         Ok(())
     }
 
-    fn delete(&self, row_id: ObjectId, identity: Option<CoreAuthorId>) -> Result<CoreTxId> {
+    fn delete(&self, row_id: ObjectId, identity: Option<CoreAuthorSubject>) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
             JazzError::Write("delete requires a row created or observed by this client".to_string())
@@ -1575,12 +1578,13 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
     }
 
     Some(Session {
+        issuer: claims.iss.clone(),
         user_id: user_id.to_string(),
         claims: match claims.claims {
             JwtClaimsPayload::Absent => serde_json::Value::Object(serde_json::Map::new()),
             JwtClaimsPayload::Present(claims) => claims,
         },
-        ..Session::new(user_id)
+        ..Session::new(claims.iss, user_id)
     })
 }
 
@@ -1600,17 +1604,19 @@ fn core_identity(context: &AppContext, default_session: Option<&Session>) -> Cor
         .client_id
         .map(|id| id.0)
         .unwrap_or_else(Uuid::now_v7);
-    let author_uuid = default_session
-        .map(|session| crate::tools::identity::author_id_from_principal(&session.user_id).0)
-        .unwrap_or(node_uuid);
+    let author = default_session
+        .map(|session| CoreAuthorSubject::authenticated(&session.issuer, &session.user_id))
+        .unwrap_or_else(|| {
+            CoreAuthorSubject::authenticated("urn:jazz:anonymous-node", &node_uuid.to_string())
+        });
     CoreDbIdentity {
         node: CoreNodeUuid(node_uuid),
-        author: CoreAuthorId(author_uuid),
+        author,
     }
 }
 
-fn core_author_from_principal(principal: &str) -> CoreAuthorId {
-    crate::tools::identity::author_id_from_principal(principal)
+fn core_author_from_session(session: &Session) -> CoreAuthorSubject {
+    CoreAuthorSubject::authenticated(&session.issuer, session.get_user_id())
 }
 
 fn core_storage(schema: &crate::schema::JazzSchema, context: &AppContext) -> Result<StorageBundle> {
@@ -1825,9 +1831,9 @@ fn core_row_provenance_to_public(
     provenance: crate::node::RowProvenance,
 ) -> crate::tools::metadata::RowProvenance {
     crate::tools::metadata::RowProvenance {
-        created_by: provenance.created_by.0.to_string(),
+        created_by: provenance.created_by.canonical().to_owned(),
         created_at: provenance.created_at.0,
-        updated_by: provenance.updated_by.0.to_string(),
+        updated_by: provenance.updated_by.canonical().to_owned(),
         updated_at: provenance.updated_at.0,
     }
 }
@@ -2088,12 +2094,12 @@ fn transaction_rejected_before_tier_message(
 }
 
 impl JazzClient {
-    fn write_identity(&self) -> Option<CoreAuthorId> {
+    fn write_identity(&self) -> Option<CoreAuthorSubject> {
         self.write_context
             .as_ref()
             .and_then(|context| context.session())
             .or(self.default_session.as_ref())
-            .map(|session| core_author_from_principal(session.get_user_id()))
+            .map(core_author_from_session)
     }
 
     fn check_core_write_not_rejected(db: &Backend, tx_id: CoreTxId) -> Result<()> {
@@ -2681,8 +2687,8 @@ impl PublicQueryDecoder {
                 match column {
                     "$createdAt" => Value::Timestamp(provenance.created_at.0),
                     "$updatedAt" => Value::Timestamp(provenance.updated_at.0),
-                    "$createdBy" => Value::Text(provenance.created_by.0.to_string()),
-                    "$updatedBy" => Value::Text(provenance.updated_by.0.to_string()),
+                    "$createdBy" => Value::Text(provenance.created_by.canonical().to_owned()),
+                    "$updatedBy" => Value::Text(provenance.updated_by.canonical().to_owned()),
                     _ => unreachable!("matched provenance magic column"),
                 }
             }
@@ -3263,7 +3269,7 @@ mod tests {
 
     #[test]
     fn client_session_reserved_claims_override_application_claims() {
-        let session = Session::new("trusted-user")
+        let session = Session::new("urn:jazz:test", "trusted-user")
             .with_auth_mode(crate::tools::public_api::session::AuthMode::LocalFirst)
             .with_claims(json!({
                 "sub": "spoofed-subject",

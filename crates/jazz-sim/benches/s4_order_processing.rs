@@ -9,7 +9,7 @@ use std::time::Instant;
 use hdrhistogram::Histogram;
 use jazz::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps, SeededRowIdSource, Transport};
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::peer::PeerState;
 use jazz::protocol::SyncMessage;
@@ -1109,7 +1109,11 @@ fn open_clients(
     (0..count)
         .map(|idx| {
             let byte = base_node + idx as u8;
-            let (dir, db) = open_db(node(byte), schema.clone(), AuthorId::from_bytes([byte; 16]));
+            let (dir, db) = open_db(
+                node(byte),
+                schema.clone(),
+                AuthorSubject::for_test_bytes([byte; 16]),
+            );
             let outbound = Rc::new(RefCell::new(VecDeque::new()));
             let inbound = Rc::new(RefCell::new(VecDeque::new()));
             let upstream = jazz::db::block_on(db.connect_upstream(Box::new(QueueTransport {
@@ -1982,7 +1986,7 @@ fn open_node(
 fn open_db(
     node_uuid: NodeUuid,
     schema: JazzSchema,
-    author: AuthorId,
+    author: AuthorSubject,
 ) -> (tempfile::TempDir, Db<RocksDbStorage>) {
     let dir = tempfile::tempdir().unwrap();
     let cfs = schema.column_families();

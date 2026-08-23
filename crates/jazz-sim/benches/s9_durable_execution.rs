@@ -11,7 +11,7 @@ use std::time::Instant;
 use hdrhistogram::Histogram;
 use jazz::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps, SeededRowIdSource, Transport};
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::peer::PeerState;
 use jazz::protocol::SyncMessage;
@@ -1033,7 +1033,7 @@ fn open_worker(node_uuid: NodeUuid, edge_uuid: NodeUuid, schema: JazzSchema) -> 
     let (dir, db) = open_db(
         node_uuid,
         schema.clone(),
-        AuthorId::from_bytes([node_uuid.as_bytes()[0]; 16]),
+        AuthorSubject::for_test_bytes([node_uuid.as_bytes()[0]; 16]),
     );
     let outbound = Rc::new(RefCell::new(VecDeque::new()));
     let inbound = Rc::new(RefCell::new(VecDeque::new()));
@@ -1118,7 +1118,7 @@ fn open_node(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, NodeState<Roc
 fn open_db(
     node_uuid: NodeUuid,
     schema: JazzSchema,
-    author: AuthorId,
+    author: AuthorSubject,
 ) -> (TempDir, Db<RocksDbStorage>) {
     let dir = tempfile::tempdir().unwrap();
     let refs = schema.column_families();

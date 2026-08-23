@@ -19,8 +19,9 @@ use axum::{
 use futures::SinkExt as _;
 use jazz::db::{CommitUnitTrust, ConnectionSessionContext};
 use jazz::groove::records::Value as CoreValue;
-use jazz::ids::{AuthorId, NodeUuid};
+use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::protocol_limits::{MAX_WIRE_BATCH_FRAMES, MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
+use jazz::tools::Session;
 use jazz::wire::{
     FEATURE_SYNC_MESSAGE_PAYLOAD, WIRE_PROTOCOL_VERSION, WireAuthorityEndpoint, WireError,
     WireErrorCode, WireFrame, WireHello, WirePeerRole, WireRetry, current_wire_features,
@@ -69,7 +70,7 @@ pub(super) async fn ws_handler(
 
 #[derive(Clone, Debug)]
 struct WebSocketAdmission {
-    identity: AuthorId,
+    identity: AuthorSubject,
     claims: BTreeMap<String, CoreValue>,
     trust: CommitUnitTrust,
     credential: WebSocketCredential,
@@ -88,7 +89,7 @@ enum WebSocketCredential {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct WebSocketAdmissionKey {
     app_id: jazz::tools::AppId,
-    identity: AuthorId,
+    identity: AuthorSubject,
 }
 
 #[derive(Debug)]
@@ -246,7 +247,7 @@ async fn ws_admission(
         return Err("Session required. Provide JWT, backend secret, or admin secret.".to_owned());
     };
 
-    ws_validate_session_identity(&session.user_id, peer_identity)?;
+    ws_validate_session_identity(&session, peer_identity)?;
     Ok(WebSocketAdmission {
         identity: peer_identity,
         claims: session_claims(session)?,
@@ -312,19 +313,15 @@ fn json_claim_to_core_value(value: serde_json::Value) -> Result<CoreValue, Strin
     }
 }
 
-fn ws_peer_identity(identity: &str) -> Result<AuthorId, String> {
-    if identity.len() != 32 {
-        return Err("peer_identity must be 32 hex characters".to_owned());
-    }
-    let bytes: [u8; 16] = hex::decode(identity)
-        .map_err(|_| "peer_identity contains non-hex digit".to_owned())?
-        .try_into()
-        .map_err(|_| "peer_identity must be 32 hex characters".to_owned())?;
-    Ok(AuthorId::from_bytes(bytes))
+fn ws_peer_identity(identity: &str) -> Result<AuthorSubject, String> {
+    AuthorSubject::from_canonical(identity)
 }
 
-fn ws_validate_session_identity(user_id: &str, peer_identity: AuthorId) -> Result<(), String> {
-    let session_identity = jazz::tools::identity::author_id_from_principal(user_id);
+fn ws_validate_session_identity(
+    session: &Session,
+    peer_identity: AuthorSubject,
+) -> Result<(), String> {
+    let session_identity = AuthorSubject::authenticated(&session.issuer, &session.user_id);
     if session_identity != peer_identity {
         return Err("websocket peer_identity must match authenticated session user_id".to_owned());
     }
@@ -566,7 +563,7 @@ async fn handle_ws_connection(
 
     if bootstrap_catalogue {
         if admission.credential != WebSocketCredential::Admin
-            || admission.identity != AuthorId::SYSTEM
+            || admission.identity != AuthorSubject::SYSTEM
             || state.topology != crate::server::ServerTopology::Core
         {
             send_ws_error(
@@ -1011,6 +1008,16 @@ mod tests {
     };
 
     const WS_STORM_SIZE: usize = 24;
+
+    fn session_for(identity: AuthorSubject) -> Session {
+        let (issuer, subject): (String, String) =
+            serde_json::from_str(identity.canonical()).expect("authenticated test subject");
+        Session::new(issuer, subject)
+    }
+
+    fn issuer_and_subject(identity: AuthorSubject) -> (String, String) {
+        serde_json::from_str(identity.canonical()).expect("authenticated test subject")
+    }
     const WS_SETTLE_DEADLINE: Duration = Duration::from_secs(5);
     const WS_PUMP_DEADLINE: Duration = Duration::from_secs(5);
 
@@ -1031,29 +1038,27 @@ mod tests {
     }
 
     #[test]
-    fn ws_peer_identity_requires_hex_author() {
-        assert_eq!(
-            ws_peer_identity("0102030405060708090a0b0c0d0e0f10").unwrap(),
-            AuthorId::from_bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16])
-        );
+    fn ws_peer_identity_requires_canonical_author_subject() {
+        let identity =
+            AuthorSubject::for_test_bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+        assert_eq!(ws_peer_identity(identity.canonical()).unwrap(), identity);
 
         assert!(ws_peer_identity("not-hex").is_err());
     }
 
     #[test]
     fn ws_session_identity_must_match_peer_identity() {
-        let peer = AuthorId::from_bytes([1; 16]);
-        let matching = uuid::Uuid::from_bytes([1; 16]).to_string();
-        let mismatching = uuid::Uuid::from_bytes([2; 16]).to_string();
+        let peer = AuthorSubject::for_test_bytes([1; 16]);
+        let matching = session_for(peer);
+        let mismatching = session_for(AuthorSubject::for_test_bytes([2; 16]));
         let external_subject = "better-auth-user";
-        let external_peer = AuthorId::from_bytes(
-            *uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, external_subject.as_bytes()).as_bytes(),
-        );
+        let external_peer = AuthorSubject::authenticated("https://auth.example", external_subject);
+        let external_session = Session::new("https://auth.example", external_subject);
 
         assert!(ws_validate_session_identity(&matching, peer).is_ok());
         assert!(ws_validate_session_identity(&mismatching, peer).is_err());
-        assert!(ws_validate_session_identity(external_subject, external_peer).is_ok());
-        assert!(ws_validate_session_identity(external_subject, peer).is_err());
+        assert!(ws_validate_session_identity(&external_session, external_peer).is_ok());
+        assert!(ws_validate_session_identity(&external_session, peer).is_err());
     }
 
     #[test]
@@ -1243,15 +1248,17 @@ mod tests {
     #[tokio::test]
     async fn ws_backend_session_must_match_peer_identity() {
         let state = make_ws_test_state().await;
-        let authenticated = AuthorId::from_bytes([0x51; 16]);
-        let forged_peer = AuthorId::from_bytes([0x52; 16]);
+        let authenticated = AuthorSubject::for_test_bytes([0x51; 16]);
+        let forged_peer = AuthorSubject::for_test_bytes([0x52; 16]);
+        let (issuer, user_id) = issuer_and_subject(authenticated);
         let prelude = WebSocketPrelude {
-            peer_identity: hex::encode(forged_peer.as_bytes()),
+            peer_identity: forged_peer.canonical().to_owned(),
             bootstrap_catalogue: false,
             auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                 backend_secret: Some("backend-secret".to_owned()),
                 backend_session: Some(serde_json::json!({
-                    "user_id": uuid::Uuid::from_bytes(*authenticated.as_bytes()).to_string(),
+                    "issuer": issuer,
+                    "user_id": user_id,
                     "claims": {},
                     "authMode": "external",
                 })),
@@ -1276,14 +1283,15 @@ mod tests {
     #[tokio::test]
     async fn ws_backend_session_admits_session_claims_for_policy_reads() {
         let state = make_ws_test_state().await;
-        let identity = AuthorId::from_bytes([0x61; 16]);
-        let user_id = uuid::Uuid::from_bytes(*identity.as_bytes()).to_string();
+        let identity = AuthorSubject::for_test_bytes([0x61; 16]);
+        let (issuer, user_id) = issuer_and_subject(identity);
         let prelude = WebSocketPrelude {
-            peer_identity: hex::encode(identity.as_bytes()),
+            peer_identity: identity.canonical().to_owned(),
             bootstrap_catalogue: false,
             auth: jazz::tools::websocket_prelude_auth::AuthConfig {
                 backend_secret: Some("backend-secret".to_owned()),
                 backend_session: Some(serde_json::json!({
+                    "issuer": issuer,
                     "user_id": user_id,
                     "claims": {
                         "role": "reader",
@@ -1349,7 +1357,7 @@ mod tests {
         let transport = WebSocketTransport::connect(
             format!("http://{addr}"),
             state.app_id,
-            AuthorId::from_bytes([0x41; 16]),
+            AuthorSubject::for_test_bytes([0x41; 16]),
             jazz::tools::websocket_prelude_auth::AuthConfig {
                 admin_secret: Some("admin-secret".to_owned()),
                 ..Default::default()
@@ -1360,7 +1368,10 @@ mod tests {
         let (protocol_version, features, session_context) =
             transport.negotiated_transport_metadata();
         let context = session_context.expect("receipt-capable route admission context");
-        assert_eq!(context.link_identity, AuthorId::from_bytes([0x41; 16]));
+        assert_eq!(
+            context.link_identity,
+            AuthorSubject::for_test_bytes([0x41; 16])
+        );
         assert_eq!(context.local.node, NodeUuid::from_bytes([0x41; 16]));
         assert_eq!(context.remote.node, NodeUuid::from_bytes([0x5e; 16]));
         assert_ne!(context.local.epoch, 0);
@@ -1378,7 +1389,7 @@ mod tests {
                 CoreMemoryStorage::new(&refs),
                 DbIdentity {
                     node: NodeUuid::from_bytes([0x41; 16]),
-                    author: AuthorId::from_bytes([0x41; 16]),
+                    author: AuthorSubject::for_test_bytes([0x41; 16]),
                 },
             )
             .with_id_source(SeededRowIdSource::new(0x4100)),
@@ -1426,7 +1437,7 @@ mod tests {
         let mut outbound_probe = WebSocketTransport::connect_with_wake(
             &base_url,
             state.app_id,
-            AuthorId::from_bytes([0x71; 16]),
+            AuthorSubject::for_test_bytes([0x71; 16]),
             auth.clone(),
             outbound_wake,
         )
@@ -1454,7 +1465,7 @@ mod tests {
         let transport = WebSocketTransport::connect_with_wake(
             &base_url,
             state.app_id,
-            AuthorId::from_bytes([0x72; 16]),
+            AuthorSubject::for_test_bytes([0x72; 16]),
             auth,
             inbound_wake,
         )
@@ -1474,7 +1485,7 @@ mod tests {
                 CoreMemoryStorage::new(&refs),
                 DbIdentity {
                     node: NodeUuid::from_bytes([0x72; 16]),
-                    author: AuthorId::from_bytes([0x72; 16]),
+                    author: AuthorSubject::for_test_bytes([0x72; 16]),
                 },
             )
             .with_id_source(SeededRowIdSource::new(0x7200)),
@@ -1541,21 +1552,22 @@ mod tests {
         format!("ws://{addr}/apps/{app_id}/ws")
     }
 
-    fn ws_prelude(identity: AuthorId) -> Vec<u8> {
+    fn ws_prelude(identity: AuthorSubject) -> Vec<u8> {
         format!(
             r#"{{"peer_identity":"{}","auth":{{"admin_secret":"admin-secret"}}}}"#,
-            hex::encode(identity.as_bytes())
+            identity.canonical().to_owned()
         )
         .into_bytes()
     }
 
-    fn ws_session_prelude(identity: AuthorId) -> Vec<u8> {
-        let user_id = uuid::Uuid::from_bytes(*identity.as_bytes()).to_string();
+    fn ws_session_prelude(identity: AuthorSubject) -> Vec<u8> {
+        let (issuer, user_id) = issuer_and_subject(identity);
         serde_json::json!({
-            "peer_identity": hex::encode(identity.as_bytes()),
+            "peer_identity": identity.canonical().to_owned(),
             "auth": {
                 "backend_secret": "backend-secret",
                 "backend_session": {
+                    "issuer": issuer,
                     "user_id": user_id,
                     "claims": {},
                     "authMode": "external",
@@ -1631,7 +1643,7 @@ mod tests {
     async fn open_negotiated_ws(
         addr: std::net::SocketAddr,
         state: &Arc<ServerState>,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
     {
         open_negotiated_ws_with_prelude(addr, state, ws_prelude(identity)).await
@@ -1640,7 +1652,7 @@ mod tests {
     async fn open_negotiated_ws_session(
         addr: std::net::SocketAddr,
         state: &Arc<ServerState>,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
     {
         open_negotiated_ws_with_prelude(addr, state, ws_session_prelude(identity)).await
@@ -1765,7 +1777,7 @@ mod tests {
                     CoreMemoryStorage::new(&refs),
                     DbIdentity {
                         node: NodeUuid::from_bytes([node_seed; 16]),
-                        author: AuthorId::from_bytes([node_seed; 16]),
+                        author: AuthorSubject::for_test_bytes([node_seed; 16]),
                     },
                 )
                 .with_id_source(SeededRowIdSource::new(row_seed)),
@@ -1815,8 +1827,8 @@ mod tests {
             .mergeable_tx_id()
         }
 
-        fn insert_private_doc(&self, title: &str, owner: AuthorId) -> jazz::ids::RowUuid {
-            let owner = uuid::Uuid::from_bytes(*owner.as_bytes()).to_string();
+        fn insert_private_doc(&self, title: &str, owner: AuthorSubject) -> jazz::ids::RowUuid {
+            let owner = owner.canonical().to_owned();
             jazz::db::block_on(self.db.insert(
                 "docs",
                 RowCells::from([
@@ -2112,8 +2124,10 @@ mod tests {
         let schema = ws_public_schema_convert();
         let client_a = TestClient::new(schema.clone(), 0xa1, 0xa100).await;
         let client_b = TestClient::new(schema, 0xb2, 0xb200).await;
-        let mut ws_a = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xa1; 16])).await;
-        let mut ws_b = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xb2; 16])).await;
+        let mut ws_a =
+            open_negotiated_ws(addr, &state, AuthorSubject::for_test_bytes([0xa1; 16])).await;
+        let mut ws_b =
+            open_negotiated_ws(addr, &state, AuthorSubject::for_test_bytes([0xb2; 16])).await;
         let (client_b_todos, client_b_todos_attachment) = client_b.attach_todos_query();
         let _inserted = client_a.insert_todo("route sync");
 
@@ -2162,7 +2176,8 @@ mod tests {
         let state = make_ws_convergence_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
         let client = TestClient::new(ws_public_schema_convert(), 0xa1, 0xa100).await;
-        let mut ws = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xa1; 16])).await;
+        let mut ws =
+            open_negotiated_ws(addr, &state, AuthorSubject::for_test_bytes([0xa1; 16])).await;
 
         let (_, setup_attachment) = settle_ws_todos_query(&client, &mut ws).await;
         client.detach_query(setup_attachment);
@@ -2218,7 +2233,8 @@ mod tests {
         let addr = start_ws_test_server(state.clone()).await;
         let schema = ws_public_schema_convert();
         let client_b = TestClient::new(schema.clone(), 0xb2, 0xb200).await;
-        let mut ws_b = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xb2; 16])).await;
+        let mut ws_b =
+            open_negotiated_ws(addr, &state, AuthorSubject::for_test_bytes([0xb2; 16])).await;
         let (client_b_todos, client_b_todos_attachment) = client_b.attach_todos_query();
 
         let start = tokio::time::Instant::now();
@@ -2237,7 +2253,8 @@ mod tests {
             "reader should settle the initial covered result as empty"
         );
         let client_a = TestClient::new(schema, 0xa1, 0xa100).await;
-        let mut ws_a = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xa1; 16])).await;
+        let mut ws_a =
+            open_negotiated_ws(addr, &state, AuthorSubject::for_test_bytes([0xa1; 16])).await;
         let _inserted = client_a.insert_todo("after empty coverage");
 
         let start = tokio::time::Instant::now();
@@ -2276,7 +2293,8 @@ mod tests {
         let state = make_ws_convergence_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
         let client = TestClient::new(ws_public_schema_convert(), 0xb2, 0xb200).await;
-        let mut ws = open_negotiated_ws(addr, &state, AuthorId::from_bytes([0xb2; 16])).await;
+        let mut ws =
+            open_negotiated_ws(addr, &state, AuthorSubject::for_test_bytes([0xb2; 16])).await;
 
         let (_, setup_attachment) = settle_ws_todos_query(&client, &mut ws).await;
         client.detach_query(setup_attachment);
@@ -2328,8 +2346,8 @@ mod tests {
             .expect("build websocket private docs test state")
             .state;
         let addr = start_ws_test_server(state.clone()).await;
-        let alice = AuthorId::from_bytes([0xa1; 16]);
-        let bob = AuthorId::from_bytes([0xb2; 16]);
+        let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+        let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
         let client_a = TestClient::new(schema.clone(), 0xa1, 0xa100).await;
         let mut ws_a = open_negotiated_ws_session(addr, &state, alice).await;
         let _inserted = client_a.insert_private_doc("alice private", alice);
@@ -2392,7 +2410,7 @@ mod tests {
     async fn same_peer_identity_connections_are_bounded_by_eviction() {
         let state = make_ws_convergence_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
-        let identity = AuthorId::from_bytes([0x42; 16]);
+        let identity = AuthorSubject::for_test_bytes([0x42; 16]);
         let key = WebSocketAdmissionKey {
             app_id: state.app_id,
             identity,
@@ -2454,7 +2472,7 @@ mod tests {
     async fn peer_identity_storm_is_bounded_without_rejecting_newest_connections() {
         let state = make_ws_convergence_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
-        let identity = AuthorId::from_bytes([0x24; 16]);
+        let identity = AuthorSubject::for_test_bytes([0x24; 16]);
         let key = WebSocketAdmissionKey {
             app_id: state.app_id,
             identity,
@@ -2489,8 +2507,8 @@ mod tests {
     async fn peer_identity_eviction_does_not_affect_other_identities() {
         let state = make_ws_convergence_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
-        let noisy_identity = AuthorId::from_bytes([0x31; 16]);
-        let quiet_identity = AuthorId::from_bytes([0x32; 16]);
+        let noisy_identity = AuthorSubject::for_test_bytes([0x31; 16]);
+        let quiet_identity = AuthorSubject::for_test_bytes([0x32; 16]);
         let noisy_key = WebSocketAdmissionKey {
             app_id: state.app_id,
             identity: noisy_identity,
@@ -2540,7 +2558,7 @@ mod tests {
     async fn repeated_peer_identity_evictions_keep_live_admissions_at_cap() {
         let state = make_ws_convergence_test_state().await;
         let addr = start_ws_test_server(state.clone()).await;
-        let identity = AuthorId::from_bytes([0x33; 16]);
+        let identity = AuthorSubject::for_test_bytes([0x33; 16]);
         let key = WebSocketAdmissionKey {
             app_id: state.app_id,
             identity,

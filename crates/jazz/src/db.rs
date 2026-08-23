@@ -33,7 +33,7 @@ use crate::authorization_scope::{
     AuthorizationScopeInstall, AuthorizationScopeLease, AuthorizationScopeOwnerToken,
     AuthorizationScopeReadiness, AuthorizationScopeRegistry, MAX_AUTHORIZATION_SCOPES,
 };
-use crate::ids::{AuthorId, NodeUuid, RowUuid, SchemaVersionId};
+use crate::ids::{AuthorSubject, NodeUuid, RowUuid, SchemaVersionId};
 pub use crate::node::CommitUnitTrust;
 #[cfg(feature = "testing")]
 pub use crate::node::NodeOpenReceipt as DbOpenReceipt;
@@ -1370,7 +1370,7 @@ struct PendingUpstreamSubscription {
     shape: ValidatedQuery,
     binding: Binding,
     opts: RegisterShapeOptions,
-    identity: AuthorId,
+    identity: AuthorSubject,
 }
 
 struct QueryCoverageRegistration {
@@ -1791,7 +1791,7 @@ pub mod doctest_support {
     pub use groove::storage::MemoryStorage;
 
     use crate::db::{Db, DbConfig, DbIdentity, Error, RowCells, SeededRowIdSource};
-    use crate::ids::{AuthorId, NodeUuid};
+    use crate::ids::{AuthorSubject, NodeUuid};
     use crate::schema::JazzSchema;
     use crate::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
@@ -1822,7 +1822,7 @@ pub mod doctest_support {
             storage: MemoryStorage::new(&refs),
             identity: DbIdentity {
                 node: NodeUuid::from_bytes([0x11; 16]),
-                author: AuthorId::from_bytes([0xa1; 16]),
+                author: AuthorSubject::for_test_bytes([0xa1; 16]),
             },
             id_source: Some(Box::new(SeededRowIdSource::new(0x1111))),
         })
@@ -2080,10 +2080,10 @@ fn subscriber_inbound_message_is_authority_only(
     ) || (trust == CommitUnitTrust::Session && matches!(message, SyncMessage::SessionClaims { .. }))
 }
 
-fn subscriber_permission_subject(ingest: CommitUnitIngestContext) -> AuthorId {
+fn subscriber_permission_subject(ingest: CommitUnitIngestContext) -> AuthorSubject {
     match ingest.trust {
         CommitUnitTrust::Session => ingest.identity,
-        CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => AuthorId::SYSTEM,
+        CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => AuthorSubject::SYSTEM,
     }
 }
 
@@ -2350,7 +2350,7 @@ where
     async fn all_prepared_for_identity(
         &self,
         prepared: &PreparedQuery,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.all_prepared_for_identity_with_opts(prepared, author, ReadOpts::default())
             .await
@@ -2360,7 +2360,7 @@ where
     async fn all_prepared_for_identity_with_opts(
         &self,
         prepared: &PreparedQuery,
-        author: AuthorId,
+        author: AuthorSubject,
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.db()
@@ -2555,7 +2555,7 @@ where
     async fn all_prepared_for_identity(
         &self,
         prepared: &PreparedQuery,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.all_prepared_for_identity_with_opts(prepared, author, ReadOpts::default())
             .await
@@ -2565,7 +2565,7 @@ where
     async fn all_prepared_for_identity_with_opts(
         &self,
         prepared: &PreparedQuery,
-        author: AuthorId,
+        author: AuthorSubject,
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.db()
@@ -2896,7 +2896,7 @@ struct SubscriptionState {
     /// closure, so finalization always retires the currently live state.
     upstream_subscription_handles: Vec<UpstreamCoverageHandle>,
     propagates_upstream: bool,
-    author: AuthorId,
+    author: AuthorSubject,
     authorization_mode: QueryAuthorizationMode,
     read_tier: DurabilityTier,
     remote_read_tier: Option<DurabilityTier>,

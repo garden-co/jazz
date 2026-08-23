@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use groove::records::{OwnedRecord, Value};
 
 use crate::ids::{
-    AuthorId, MigrationLensId, NodeUuid, RowUuid, SchemaLineagePublicationId, SchemaVersionId,
+    AuthorSubject, MigrationLensId, NodeUuid, RowUuid, SchemaLineagePublicationId, SchemaVersionId,
 };
 use crate::query::{BindingId, Query, RelationQuery, ShapeId};
 use crate::schema::{JazzSchema, TableSchema};
@@ -34,7 +34,7 @@ pub enum SyncMessage {
     /// Trusted backend assertion of process-local auth claims for a write subject.
     SessionClaims {
         /// Identity these claims describe.
-        identity: AuthorId,
+        identity: AuthorSubject,
         /// Claims used by policy evaluation for this identity.
         claims: BTreeMap<String, Value>,
     },
@@ -82,14 +82,14 @@ pub enum SyncMessage {
     /// Publish an immutable schema-version payload.
     PublishSchema {
         /// Authenticated catalogue admin.
-        author: AuthorId,
+        author: AuthorSubject,
         /// Schema payload.
         schema: Box<SchemaVersion>,
     },
     /// Atomically publish a non-genesis schema with its lineage-defining lens.
     PublishSchemaWithLens {
         /// Authenticated catalogue admin.
-        author: AuthorId,
+        author: AuthorSubject,
         /// Database-wide authoritative catalogue ordering position.
         catalogue_seq: u64,
         /// Complete schema-and-lineage publication bundle.
@@ -98,14 +98,14 @@ pub enum SyncMessage {
     /// Publish an immutable migration lens payload.
     PublishLens {
         /// Authenticated catalogue admin.
-        author: AuthorId,
+        author: AuthorSubject,
         /// Lens payload.
         lens: MigrationLens,
     },
     /// Set the current write-schema pointer.
     SetCurrentWriteSchema {
         /// Authenticated catalogue admin.
-        author: AuthorId,
+        author: AuthorSubject,
         /// Core-ordered pointer payload.
         pointer: CurrentWriteSchema,
     },
@@ -414,7 +414,7 @@ pub struct AuthorizationSupportScopeKey {
     /// Compiled policy support shape, including the selected operation clause.
     pub support_shape_digest: [u8; 32],
     /// Authenticated subject, never caller-supplied on a serving link.
-    pub subject: AuthorId,
+    pub subject: AuthorSubject,
     /// Canonical digest of authenticated claims.
     pub claims_digest: [u8; 32],
     /// Compiled policy shape and selected policy epoch.
@@ -451,7 +451,7 @@ pub struct AuthorizationScopeReceipt {
     /// Authenticated authority identity that issued this receipt.
     pub authority: [u8; 16],
     /// Authenticated subscriber link to which this proof is restricted.
-    pub link: [u8; 16],
+    pub link: AuthorSubject,
     /// Authority-local connection/process epoch.
     pub authority_epoch: u64,
     /// Authenticated-claims revision paired with this proof.
@@ -663,9 +663,9 @@ impl VersionRecord {
         schema_version: SchemaVersionId,
         row_uuid: RowUuid,
         parents: Vec<TxId>,
-        created_by: AuthorId,
+        created_by: AuthorSubject,
         created_at: TxTime,
-        updated_by: AuthorId,
+        updated_by: AuthorSubject,
         updated_at: TxTime,
         cells_by_position: &[Option<Value>],
         deletion: Option<DeletionEvent>,
@@ -675,9 +675,9 @@ impl VersionRecord {
         let values = [
             Value::Uuid(row_uuid.0),
             Value::Array(parents.into_iter().map(tx_id_value).collect()),
-            Value::Uuid(created_by.0),
+            Value::String(created_by.canonical().to_owned()),
             Value::U64(created_at.0),
-            Value::Uuid(updated_by.0),
+            Value::String(updated_by.canonical().to_owned()),
             Value::U64(updated_at.0),
             Value::Nullable(deletion.map(|deletion| {
                 Box::new(Value::EnumTag(match deletion {
@@ -710,9 +710,9 @@ impl VersionRecord {
         schema_version: SchemaVersionId,
         row_uuid: RowUuid,
         parents: Vec<TxId>,
-        created_by: AuthorId,
+        created_by: AuthorSubject,
         created_at: TxTime,
-        updated_by: AuthorId,
+        updated_by: AuthorSubject,
         updated_at: TxTime,
         cells: &BTreeMap<String, V>,
         deletion: Option<DeletionEvent>,
@@ -784,13 +784,14 @@ impl VersionRecord {
     }
 
     /// Original author for this logical row.
-    pub fn created_by(&self) -> AuthorId {
-        AuthorId(
+    pub fn created_by(&self) -> AuthorSubject {
+        AuthorSubject::from_canonical(
             self.record
                 .borrowed()
-                .get_uuid(WireRowRecord::FIELD_CREATED_BY_IDX)
+                .get_str(WireRowRecord::FIELD_CREATED_BY_IDX)
                 .expect("valid wire created_by"),
         )
+        .expect("canonical wire created_by")
     }
 
     /// Original creation timestamp for this logical row.
@@ -804,13 +805,14 @@ impl VersionRecord {
     }
 
     /// Author of this row version.
-    pub fn updated_by(&self) -> AuthorId {
-        AuthorId(
+    pub fn updated_by(&self) -> AuthorSubject {
+        AuthorSubject::from_canonical(
             self.record
                 .borrowed()
-                .get_uuid(WireRowRecord::FIELD_UPDATED_BY_IDX)
+                .get_str(WireRowRecord::FIELD_UPDATED_BY_IDX)
                 .expect("valid wire updated_by"),
         )
+        .expect("canonical wire updated_by")
     }
 
     /// Update timestamp for this row version.
@@ -893,9 +895,9 @@ groove::define_record! {
     struct WireRowRecord {
         0 => row_uuid: RowUuid,
         1 => parents: ParentRefs,
-        2 => created_by: AuthorId,
+        2 => created_by: AuthorSubject,
         3 => created_at: TxTime,
-        4 => updated_by: AuthorId,
+        4 => updated_by: AuthorSubject,
         5 => updated_at: TxTime,
         6 => _deletion: Option<Value>,
         .. user_cells,
@@ -3299,9 +3301,9 @@ mod tests {
             schema_id(1),
             RowUuid::from_bytes([1; 16]),
             Vec::new(),
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             TxTime(1),
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             TxTime(1),
             &BTreeMap::from([("title".to_owned(), Value::String("x".to_owned()))]),
             None,

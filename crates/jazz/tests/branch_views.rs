@@ -8,7 +8,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::ContributionMergeRow;
 use jazz::protocol::{
     BranchSelector, BranchViewBase, ReadViewSourceSpec, ReadViewSpec, SnapshotRef,
@@ -108,7 +108,7 @@ fn open_db() -> (Db<MemoryStorage>, JazzSchema) {
             storage,
             DbIdentity {
                 node: NodeUuid::from_bytes([0x62; 16]),
-                author: AuthorId::from_bytes([0x63; 16]),
+                author: AuthorSubject::for_test_bytes([0x63; 16]),
             },
         )
         .with_id_source(SeededRowIdSource::new(1)),
@@ -136,7 +136,7 @@ fn open_history_complete_db() -> (Db<MemoryStorage>, JazzSchema) {
             storage,
             DbIdentity {
                 node: NodeUuid::from_bytes([0x90; 16]),
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
             },
         )
         .with_id_source(SeededRowIdSource::new(9)),
@@ -158,7 +158,7 @@ fn open_rocks_db(path: &std::path::Path, schema: &JazzSchema) -> Db<RocksDbStora
             storage,
             DbIdentity {
                 node: NodeUuid::from_bytes([0xa4; 16]),
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
             },
         )
         .with_id_source(SeededRowIdSource::new(10)),
@@ -297,7 +297,7 @@ fn branch_view_join_projects_branch_column_subsets_and_shared_tables() {
             MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>()),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x83; 16]),
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
             },
         )
         .with_id_source(SeededRowIdSource::new(3)),
@@ -402,7 +402,7 @@ fn branch_view_reachability_consumes_effective_sources() {
         MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>()),
         DbIdentity {
             node: NodeUuid::from_bytes([0x9d; 16]),
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
         },
     )))
     .unwrap();
@@ -482,7 +482,7 @@ fn open_policy_db() -> (Db<MemoryStorage>, JazzSchema) {
                 TableSchemaBuilder::new("branches")
                     .fk_column("branch_key", "branches")
                     .column("name", ColumnType::Text)
-                    .column("owner", ColumnType::Uuid)
+                    .column("owner", ColumnType::Text)
                     .policies(allow_all_policies()),
             )
             .table(
@@ -502,7 +502,7 @@ fn open_policy_db() -> (Db<MemoryStorage>, JazzSchema) {
             storage,
             DbIdentity {
                 node: NodeUuid::from_bytes([0x75; 16]),
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
             },
         )
         .with_id_source(SeededRowIdSource::new(2)),
@@ -514,8 +514,8 @@ fn open_policy_db() -> (Db<MemoryStorage>, JazzSchema) {
 #[test]
 fn branch_column_reference_policy_controls_effective_reads() {
     let (db, _schema) = open_policy_db();
-    let owner = AuthorId::from_bytes([0x76; 16]);
-    let outsider = AuthorId::from_bytes([0x77; 16]);
+    let owner = AuthorSubject::for_test_bytes([0x76; 16]);
+    let outsider = AuthorSubject::for_test_bytes([0x77; 16]);
     let branch = RowUuid::from_bytes([0x78; 16]);
     let selector = BranchSelector::new([("branch_id", Value::Uuid(branch.0))]);
     db.insert_with_id(
@@ -524,7 +524,10 @@ fn branch_column_reference_policy_controls_effective_reads() {
         BTreeMap::from([
             ("branch_key".to_owned(), Value::Uuid(branch.0)),
             ("name".to_owned(), Value::String("draft".to_owned())),
-            ("owner".to_owned(), Value::Uuid(owner.0)),
+            (
+                "owner".to_owned(),
+                Value::String(owner.canonical().to_owned()),
+            ),
         ]),
     )
     .unwrap();
@@ -555,7 +558,10 @@ fn branch_column_reference_policy_controls_effective_reads() {
         .prepare_query(&Query::from("todos").join_via_row_id(
             "branches",
             "branch_id",
-            [eq(col("owner"), jazz::query::lit(owner.0))],
+            [eq(
+                col("owner"),
+                jazz::query::lit(owner.canonical().to_owned()),
+            )],
         ))
         .unwrap();
     assert_eq!(
@@ -605,7 +611,7 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
                     .column("branch_id", ColumnType::Uuid)
                     .fk_column("branch_key", "branches")
                     .column("name", ColumnType::Text)
-                    .column("owner", ColumnType::Uuid)
+                    .column("owner", ColumnType::Text)
                     .branch_by("branch_id")
                     .policies(allow_all_policies()),
             )
@@ -624,12 +630,12 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
         MemoryStorage::new(&families.iter().map(String::as_str).collect::<Vec<_>>()),
         DbIdentity {
             node: NodeUuid::from_bytes([0xa9; 16]),
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
         },
     )))
     .unwrap();
-    let before = AuthorId::from_bytes([0xad; 16]);
-    let after = AuthorId::from_bytes([0xae; 16]);
+    let before = AuthorSubject::for_test_bytes([0xad; 16]);
+    let after = AuthorSubject::for_test_bytes([0xae; 16]);
     let base_branch = RowUuid::from_bytes([0xaa; 16]);
     let head_branch = RowUuid::from_bytes([0xab; 16]);
     let base = BranchSelector::new([("branch_id", Value::Uuid(base_branch.0))]);
@@ -642,7 +648,10 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
             BTreeMap::from([
                 ("branch_key".to_owned(), Value::Uuid(branch.0)),
                 ("name".to_owned(), Value::String("branch".to_owned())),
-                ("owner".to_owned(), Value::Uuid(before.0)),
+                (
+                    "owner".to_owned(),
+                    Value::String(before.canonical().to_owned()),
+                ),
             ]),
         )
         .unwrap();
@@ -668,7 +677,10 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
         "branches",
         base.clone(),
         head_branch,
-        BTreeMap::from([("owner".to_owned(), Value::Uuid(after.0))]),
+        BTreeMap::from([(
+            "owner".to_owned(),
+            Value::String(after.canonical().to_owned()),
+        )]),
     )
     .unwrap();
 
@@ -689,7 +701,7 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
         .find(|table| table.name == "branches")
         .unwrap();
     assert!(branch_rows.iter().all(|row| {
-        row.cell(branch_table, "owner") == Some(Value::Uuid(before.0))
+        row.cell(branch_table, "owner") == Some(Value::String(before.canonical().to_owned()))
             && row.cell(branch_table, "branch_id") == Some(Value::Uuid(head_branch.0))
     }));
     let system_rows = block_on(db.all(&query, opts.clone())).unwrap();
@@ -724,8 +736,8 @@ fn frozen_base_applies_one_cut_to_policy_dependencies() {
 #[test]
 fn branch_view_subscription_tracks_reference_policy_revoke_and_grant() {
     let (db, _schema) = open_policy_db();
-    let owner = AuthorId::from_bytes([0xb5; 16]);
-    let outsider = AuthorId::from_bytes([0xb6; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xb5; 16]);
+    let outsider = AuthorSubject::for_test_bytes([0xb6; 16]);
     let branch = RowUuid::from_bytes([0xb7; 16]);
     let selector = BranchSelector::new([("branch_id", Value::Uuid(branch.0))]);
     db.insert_with_id(
@@ -734,7 +746,10 @@ fn branch_view_subscription_tracks_reference_policy_revoke_and_grant() {
         BTreeMap::from([
             ("branch_key".to_owned(), Value::Uuid(branch.0)),
             ("name".to_owned(), Value::String("draft".to_owned())),
-            ("owner".to_owned(), Value::Uuid(owner.0)),
+            (
+                "owner".to_owned(),
+                Value::String(owner.canonical().to_owned()),
+            ),
         ]),
     )
     .unwrap();
@@ -763,7 +778,10 @@ fn branch_view_subscription_tracks_reference_policy_revoke_and_grant() {
     db.update(
         "branches",
         branch,
-        BTreeMap::from([("owner".to_owned(), Value::Uuid(outsider.0))]),
+        BTreeMap::from([(
+            "owner".to_owned(),
+            Value::String(outsider.canonical().to_owned()),
+        )]),
     )
     .unwrap();
     assert!(matches!(
@@ -775,7 +793,10 @@ fn branch_view_subscription_tracks_reference_policy_revoke_and_grant() {
     db.update(
         "branches",
         branch,
-        BTreeMap::from([("owner".to_owned(), Value::Uuid(owner.0))]),
+        BTreeMap::from([(
+            "owner".to_owned(),
+            Value::String(owner.canonical().to_owned()),
+        )]),
     )
     .unwrap();
     assert!(matches!(

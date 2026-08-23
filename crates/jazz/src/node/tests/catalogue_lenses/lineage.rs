@@ -74,7 +74,7 @@ fn non_genesis_schema_activates_only_with_its_ordered_lineage_bundle() {
     let (dir, mut core) = open_node_with_schema(node(0x2e), base.clone());
 
     let standalone = core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         schema: Box::new(target.clone()),
     });
     assert!(matches!(
@@ -87,7 +87,7 @@ fn non_genesis_schema_activates_only_with_its_ordered_lineage_bundle() {
 
     let ack = core
         .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(publication.clone()),
         })
@@ -108,7 +108,7 @@ fn non_genesis_schema_activates_only_with_its_ordered_lineage_bundle() {
 
     let duplicate = core
         .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(publication),
         })
@@ -190,7 +190,7 @@ fn pending_lineage_reserves_its_target_and_sequence() {
 
     assert!(
         core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             catalogue_seq: 2,
             publication: Box::new(publication.clone()),
         })
@@ -200,7 +200,7 @@ fn pending_lineage_reserves_its_target_and_sequence() {
     assert!(matches!(
         core.apply_sync_message_with_ingest_context(
             SyncMessage::PublishSchemaWithLens {
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
                 catalogue_seq: 2,
                 publication: Box::new(publication),
             },
@@ -214,7 +214,7 @@ fn pending_lineage_reserves_its_target_and_sequence() {
     ));
     assert!(matches!(
         core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             catalogue_seq: 2,
             publication: Box::new(conflict.clone()),
         }),
@@ -224,7 +224,7 @@ fn pending_lineage_reserves_its_target_and_sequence() {
     ));
     assert!(matches!(
         core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             catalogue_seq: 3,
             publication: Box::new(conflict),
         }),
@@ -259,7 +259,7 @@ fn lineage_operations_must_exhaustively_reproduce_target_columns_before_staging(
 
     assert!(matches!(
         core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(publication),
         }),
@@ -290,7 +290,7 @@ fn lineage_operations_must_exhaustively_reproduce_target_columns_before_staging(
         Vec::<String>::new(),
     );
     core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(correction),
     })
@@ -343,7 +343,7 @@ fn schema_lineage_gaps_and_inactive_sources_park_durably_then_drain_in_order() {
 
     let parked = core
         .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             catalogue_seq: 2,
             publication: Box::new(publication_2),
         })
@@ -357,7 +357,7 @@ fn schema_lineage_gaps_and_inactive_sources_park_durably_then_drain_in_order() {
     assert!(!reopened.catalogue_schemas().contains_key(&v3.id));
     let drained = reopened
         .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(publication_1),
         })
@@ -443,7 +443,7 @@ fn malformed_unknown_source_bundle_is_quarantined_when_parent_arrives() {
 
     assert!(
         core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             catalogue_seq: 2,
             publication: Box::new(malformed),
         })
@@ -451,7 +451,7 @@ fn malformed_unknown_source_bundle_is_quarantined_when_parent_arrives() {
         .is_empty()
     );
     core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(parent),
     })
@@ -465,7 +465,7 @@ fn malformed_unknown_source_bundle_is_quarantined_when_parent_arrives() {
     assert!(!core.catalogue.pending_lineages.contains_key(&2));
 
     core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         catalogue_seq: 2,
         publication: Box::new(valid),
     })
@@ -504,7 +504,7 @@ fn staged_lineage_resumes_after_each_activation_crash_boundary() {
 
         assert!(matches!(
             core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
                 catalogue_seq: 1,
                 publication: Box::new(publication),
             }),
@@ -513,7 +513,7 @@ fn staged_lineage_resumes_after_each_activation_crash_boundary() {
         assert!(!core.catalogue_schemas().contains_key(&target.id));
         assert!(matches!(
             core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchema {
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
                 schema: Box::new(target.clone()),
             }),
             Err(Error::CatalogueActivationFailed)
@@ -640,7 +640,7 @@ fn active_history_projection_accepts_a_new_schema_variant_without_rebuild() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved.id,
@@ -724,7 +724,7 @@ fn dropped_history_receiver_allows_cold_registry_rebuild() {
     let runtime = core.groove_runtime_token();
 
     core.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(SchemaLineagePublication::new(
             evolved,
@@ -749,7 +749,7 @@ fn dropped_history_receiver_allows_cold_registry_rebuild() {
     assert_eq!(core.runtime_stats_for_test().active_subscriptions, 0);
     assert_ne!(core.groove_runtime_token(), runtime);
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: evolved_id,
