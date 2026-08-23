@@ -38,3 +38,27 @@ test("jazz-rn release verification covers every Android ABI and the iOS XCFramew
     assert.match(script, new RegExp(artifact.replaceAll("/", "\\/")));
   }
 });
+
+test("jazz-rn reserves a thin binary relay TurboModule boundary for matching native builds", async () => {
+  const relay = await readFile(
+    new URL("../../../crates/jazz-rn/src/relay.ts", import.meta.url),
+    "utf8",
+  );
+  const nativeSpec = await readFile(
+    new URL("../../../crates/jazz-rn/src/NativeJazzRelay.ts", import.meta.url),
+    "utf8",
+  );
+  const codegenGate = await readFile(
+    new URL("../../../crates/jazz-rn/scripts/test-codegen.sh", import.meta.url),
+    "utf8",
+  );
+
+  assert.equal(packageJson.exports["./relay"].source, "./src/relay.ts");
+  assert.equal(packageJson.scripts["test:codegen"], "bash scripts/test-codegen.sh");
+  assert.match(nativeSpec, /TurboModuleRegistry\.get<Spec>\('JazzRelay'\)/);
+  assert.match(nativeSpec, /execute\(commandBase64: string\): Promise<string>/);
+  assert.match(relay, /getAbiVersion\(\)/);
+  assert.match(relay, /matching native development or release build/);
+  assert.match(codegenGate, /for platform in android ios/);
+  assert.match(codegenGate, /NativeJazzRelay/);
+});

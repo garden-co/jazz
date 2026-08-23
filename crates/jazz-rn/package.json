@@ -47,6 +47,11 @@
       "source": "./src/index.tsx",
       "default": "./lib/module/index.js"
     },
+    "./relay": {
+      "types": "./lib/typescript/src/relay.d.ts",
+      "source": "./src/relay.ts",
+      "default": "./lib/module/relay.js"
+    },
     "./app.plugin": "./app.plugin.js",
     "./package.json": "./package.json"
   },
@@ -65,6 +70,7 @@
     "build:rn:android": "pnpm ubrn:android",
     "build:rn:ios": "pnpm ubrn:ios",
     "verify:native-artifacts": "node scripts/verify-native-artifacts.mjs",
+    "test:codegen": "bash scripts/test-codegen.sh",
     "test": "jest",
     "typecheck": "tsc",
     "lint": "eslint \"**/*.{js,ts,tsx}\"",
