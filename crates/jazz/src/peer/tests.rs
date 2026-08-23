@@ -801,7 +801,7 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
     let mut wrong_subject_peer =
         PeerState::edge_client_with_permission_identity(transport_identity, transport_identity);
     let bound_subscriptions = wrong_subject_peer
-        .unsettled_authority_scope_subscriptions(&mut bound_edge, writer, &versions, true)
+        .unsettled_authority_scope_subscriptions(&mut bound_edge, writer, &versions, None, true)
         .expect("edge support must bind the writer rather than the transport identity");
     let bound_subscription = bound_subscriptions
         .and_then(|subscriptions| subscriptions.into_iter().next())
@@ -831,7 +831,13 @@ fn edge_support_hydration_uses_writer_claims_and_fails_closed_when_missing() {
     let mut wrong_type_peer =
         PeerState::edge_client_with_permission_identity(transport_identity, transport_identity);
     wrong_type_peer
-        .unsettled_authority_scope_subscriptions(&mut wrong_type_edge, writer, &versions, true)
+        .unsettled_authority_scope_subscriptions(
+            &mut wrong_type_edge,
+            writer,
+            &versions,
+            None,
+            true,
+        )
         .expect_err("present ill-typed claim must remain an error");
     assert_eq!(wrong_type_peer.link_identity(), transport_identity);
     assert_eq!(wrong_type_peer.identity(), transport_identity);

@@ -21,9 +21,23 @@ where
     /// version record.  This is the sole bridge from committed wire data to
     /// authorization support hydration: callers must not substitute a
     /// table-wide or placeholder update action.
+    #[cfg(test)]
     pub(crate) async fn authorization_actions_for_versions(
         &mut self,
         versions: &[VersionRecord],
+    ) -> Result<Vec<PermissionAdviceAction>, Error> {
+        self.authorization_actions_for_versions_in_transaction(versions, None)
+            .await
+    }
+
+    /// Reconstruct operation-specific authorization actions while excluding
+    /// the candidate transaction from prior-row lookup.  An authority stores
+    /// a pending candidate before it assigns its fate, so treating that row as
+    /// prior evidence would turn a new insert into an update.
+    pub(crate) async fn authorization_actions_for_versions_in_transaction(
+        &mut self,
+        versions: &[VersionRecord],
+        candidate_tx_id: Option<TxId>,
     ) -> Result<Vec<PermissionAdviceAction>, Error> {
         let mut actions = Vec::with_capacity(versions.len());
         for version in versions {
@@ -37,7 +51,12 @@ where
                 continue;
             }
             let is_update = self
-                .policy_previous_content_subject_row(policy_schema_version, &table, version)
+                .policy_previous_content_subject_row(
+                    policy_schema_version,
+                    &table,
+                    version,
+                    candidate_tx_id,
+                )
                 .await?
                 .is_some();
             if is_update {
@@ -67,8 +86,9 @@ where
         &mut self,
         version: &VersionRecord,
         author: AuthorId,
+        candidate_tx_id: Option<TxId>,
     ) -> Result<bool, Error> {
-        self.write_policy_allows_version_record_for_view(version, author, None)
+        self.write_policy_allows_version_record_for_view(version, author, None, candidate_tx_id)
             .await
     }
 
@@ -77,6 +97,7 @@ where
         version: &VersionRecord,
         author: AuthorId,
         exact_view: Option<&JazzSchema>,
+        candidate_tx_id: Option<TxId>,
     ) -> Result<bool, Error> {
         if author == AuthorId::SYSTEM {
             return Ok(true);
@@ -113,7 +134,7 @@ where
                 return Ok(false);
             };
             let current = match self
-                .policy_delete_subject_row(policy_schema_version, &table, version)
+                .policy_delete_subject_row(policy_schema_version, &table, version, candidate_tx_id)
                 .await?
             {
                 Some(current) => current,
@@ -141,12 +162,22 @@ where
                 .await;
         }
         let is_update = self
-            .policy_previous_content_subject_row(policy_schema_version, &table, version)
+            .policy_previous_content_subject_row(
+                policy_schema_version,
+                &table,
+                version,
+                candidate_tx_id,
+            )
             .await?
             .is_some();
         if is_update {
             let Some(previous) = self
-                .policy_previous_content_subject_row(policy_schema_version, &table, version)
+                .policy_previous_content_subject_row(
+                    policy_schema_version,
+                    &table,
+                    version,
+                    candidate_tx_id,
+                )
                 .await?
             else {
                 return Ok(false);
@@ -221,8 +252,12 @@ where
         let write_schema_version = self.catalogue.current_write_schema.schema;
         let table = self.table_in_schema(&commit.table, write_schema_version)?;
         let version = VersionRecord::from_commit(&commit, &table, write_schema_version)?;
-        self.write_policy_allows_version_record(&version, commit.effective_permission_subject())
-            .await
+        self.write_policy_allows_version_record(
+            &version,
+            commit.effective_permission_subject(),
+            None,
+        )
+        .await
     }
 
     #[cfg(test)]
@@ -245,8 +280,12 @@ where
     ) -> Result<bool, Error> {
         let table = self.table_in_schema(&commit.table, write_schema_version)?;
         let version = VersionRecord::from_commit(&commit, &table, write_schema_version)?;
-        self.write_policy_allows_version_record(&version, commit.effective_permission_subject())
-            .await
+        self.write_policy_allows_version_record(
+            &version,
+            commit.effective_permission_subject(),
+            None,
+        )
+        .await
     }
 
     #[cfg(test)]
@@ -266,6 +305,7 @@ where
             &version,
             commit.effective_permission_subject(),
             Some(exact_view),
+            None,
         )
         .await
     }
@@ -595,9 +635,15 @@ where
         policy_schema_version: SchemaVersionId,
         table: &TableSchema,
         version: &VersionRecord,
+        candidate_tx_id: Option<TxId>,
     ) -> Result<Option<CurrentRow>, Error> {
-        self.policy_previous_content_subject_row(policy_schema_version, table, version)
-            .await
+        self.policy_previous_content_subject_row(
+            policy_schema_version,
+            table,
+            version,
+            candidate_tx_id,
+        )
+        .await
     }
 
     async fn policy_previous_content_subject_row(
@@ -605,6 +651,7 @@ where
         _policy_schema_version: SchemaVersionId,
         table: &TableSchema,
         version: &VersionRecord,
+        candidate_tx_id: Option<TxId>,
     ) -> Result<Option<CurrentRow>, Error> {
         let subject_table = if self
             .table_in_schema(version.table(), self.catalogue.current_write_schema.schema)
@@ -650,15 +697,28 @@ where
             }
         }
 
-        if let Some(current_version) = self
-            .query_local_layer_winner_in_branch(
-                subject_table,
-                version.branch_key(),
-                version.row_uuid(),
-                VersionLayer::Content,
-            )
-            .await?
-        {
+        let local_previous = match candidate_tx_id {
+            Some(candidate_tx_id) => {
+                self.query_local_layer_winner_in_branch_excluding_tx(
+                    subject_table,
+                    version.branch_key(),
+                    version.row_uuid(),
+                    VersionLayer::Content,
+                    candidate_tx_id,
+                )
+                .await?
+            }
+            None => {
+                self.query_local_layer_winner_in_branch(
+                    subject_table,
+                    version.branch_key(),
+                    version.row_uuid(),
+                    VersionLayer::Content,
+                )
+                .await?
+            }
+        };
+        if let Some(current_version) = local_previous {
             let (_policy_schema_version, projected_table, cells) =
                 self.policy_projection_for_version_row(&current_version)?;
             if projected_table.name == table.name {
@@ -675,10 +735,12 @@ where
             )
             .await?
         {
-            let (_policy_schema_version, projected_table, cells) =
-                self.policy_projection_for_version_row(&current_version)?;
-            if projected_table.name == table.name {
-                return current_row_from_cells(table, version.row_uuid(), &cells).map(Some);
+            if candidate_tx_id != Some(self.version_tx_id(&current_version)?) {
+                let (_policy_schema_version, projected_table, cells) =
+                    self.policy_projection_for_version_row(&current_version)?;
+                if projected_table.name == table.name {
+                    return current_row_from_cells(table, version.row_uuid(), &cells).map(Some);
+                }
             }
         }
 
