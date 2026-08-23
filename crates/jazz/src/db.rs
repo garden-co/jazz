@@ -753,6 +753,14 @@ pub enum TickUrgency {
 pub trait TickScheduler {
     /// Schedule a future [`Db::tick`] for pending peer-connection work.
     fn schedule_tick(&self, urgency: TickUrgency);
+
+    /// Schedule one future tick no earlier than the supplied delay.
+    ///
+    /// This is deliberately distinct from [`TickUrgency::Deferred`]: callers
+    /// use it for protocol admission windows, where turning a deadline into a
+    /// microtask would create a resend hot loop. Every host therefore supplies
+    /// a real timer implementation.
+    fn schedule_tick_after(&self, delay_ms: u64);
 }
 
 /// A locally-originated transaction rejection that was not consumed by an
@@ -959,6 +967,33 @@ type ActiveAuthorityViewReceipts = Rc<RefCell<Option<AuthorityViewReceipts>>>;
 type UpstreamSubscriptionOwners =
     Rc<RefCell<BTreeMap<SubscriptionKey, Vec<Weak<RefCell<SubscriptionState>>>>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
+pub(crate) trait UploadRetryClock {
+    fn now_ms(&self) -> u64;
+}
+
+struct MonotonicUploadRetryClock {
+    started: web_time::Instant,
+}
+
+impl MonotonicUploadRetryClock {
+    fn new() -> Self {
+        Self {
+            started: web_time::Instant::now(),
+        }
+    }
+}
+
+impl UploadRetryClock for MonotonicUploadRetryClock {
+    fn now_ms(&self) -> u64 {
+        web_time::Instant::now()
+            .duration_since(self.started)
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX)
+    }
+}
+
+type SharedUploadRetryClock = Rc<RefCell<Rc<dyn UploadRetryClock>>>;
 type WriteStateWaiters = Rc<RefCell<BTreeMap<TxId, Vec<WriteStateWaiter>>>>;
 type PermissionAdviceWaiters =
     Rc<RefCell<BTreeMap<PermissionAdviceRequestId, oneshot::Sender<PermissionAdvice>>>>;

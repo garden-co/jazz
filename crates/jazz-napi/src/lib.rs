@@ -161,6 +161,13 @@ impl CoreTickScheduler for NapiTickScheduler {
             ThreadsafeFunctionCallMode::NonBlocking,
         );
     }
+
+    fn schedule_tick_after(&self, delay_ms: u64) {
+        let _ = self.callback.call(
+            Ok(format!("after:{delay_ms}")),
+            ThreadsafeFunctionCallMode::NonBlocking,
+        );
+    }
 }
 
 impl CoreWireTransport for NapiWireTransport {

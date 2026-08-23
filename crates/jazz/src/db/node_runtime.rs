@@ -32,6 +32,7 @@ where
     pub(super) upstream_subscription_owners: UpstreamSubscriptionOwners,
     pub(super) connections: RefCell<Vec<Rc<LocalMutex<PeerConnection<S>>>>>,
     pub(super) scheduler: SharedTickScheduler,
+    pub(super) upload_retry_clock: SharedUploadRetryClock,
     pub(super) write_state_waiters: WriteStateWaiters,
     pub(super) permission_advice_waiters: PermissionAdviceWaiters,
     pub(super) edge_fate_routes: EdgeFateRoutes,
@@ -90,6 +91,7 @@ where
             upstream_subscription_owners: Rc::new(RefCell::new(BTreeMap::new())),
             connections: RefCell::new(Vec::new()),
             scheduler: Rc::new(RefCell::new(None)),
+            upload_retry_clock: Rc::new(RefCell::new(Rc::new(MonotonicUploadRetryClock::new()))),
             write_state_waiters: Rc::new(RefCell::new(BTreeMap::new())),
             mutation_errors: Rc::new(RefCell::new(MutationErrorState {
                 callback: None,
@@ -349,6 +351,11 @@ where
 
     pub(super) fn set_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
         *self.scheduler.borrow_mut() = scheduler;
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_upload_retry_clock_for_test(&self, clock: Rc<dyn UploadRetryClock>) {
+        *self.upload_retry_clock.borrow_mut() = clock;
     }
 
     pub(super) fn set_edge_cache_budget(&self, budget: Option<EdgeCacheBudget>) {
@@ -849,6 +856,7 @@ where
             ),
             active_authority_view_receipts: Rc::clone(&self.active_authority_view_receipts),
             scheduler: Rc::clone(&self.scheduler),
+            upload_retry_clock: Rc::clone(&self.upload_retry_clock),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
             edge_fate_routes: Rc::clone(&self.edge_fate_routes),
@@ -1073,6 +1081,7 @@ where
             ),
             active_authority_view_receipts: Rc::clone(&self.active_authority_view_receipts),
             scheduler: Rc::clone(&self.scheduler),
+            upload_retry_clock: Rc::clone(&self.upload_retry_clock),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
             edge_fate_routes: Rc::clone(&self.edge_fate_routes),

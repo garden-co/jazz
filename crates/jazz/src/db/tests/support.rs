@@ -692,17 +692,26 @@ where
 #[derive(Default)]
 pub(super) struct RecordingScheduler {
     calls: RefCell<Vec<TickUrgency>>,
+    delayed_calls_ms: RefCell<Vec<u64>>,
 }
 
 impl TickScheduler for RecordingScheduler {
     fn schedule_tick(&self, urgency: TickUrgency) {
         self.calls.borrow_mut().push(urgency);
     }
+
+    fn schedule_tick_after(&self, delay_ms: u64) {
+        self.delayed_calls_ms.borrow_mut().push(delay_ms);
+    }
 }
 
 impl RecordingScheduler {
     pub(super) fn take(&self) -> Vec<TickUrgency> {
         std::mem::take(&mut self.calls.borrow_mut())
+    }
+
+    pub(super) fn take_delays(&self) -> Vec<u64> {
+        std::mem::take(&mut self.delayed_calls_ms.borrow_mut())
     }
 }
 

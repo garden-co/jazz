@@ -271,6 +271,7 @@ where
     pub(super) awaiting_initial_authority_coverage: AwaitingInitialAuthorityCoverage,
     pub(super) active_authority_view_receipts: ActiveAuthorityViewReceipts,
     pub(super) scheduler: SharedTickScheduler,
+    pub(super) upload_retry_clock: SharedUploadRetryClock,
     pub(super) write_state_waiters: WriteStateWaiters,
     pub(super) permission_advice_waiters: PermissionAdviceWaiters,
     pub(super) edge_fate_routes: EdgeFateRoutes,
@@ -318,8 +319,11 @@ pub(super) struct PendingLargeValueUpload {
     /// Nodes sent in the current batch, retained until the receiver accepts
     /// them so a rate-limited batch can be retried without restarting upload.
     in_flight: VecDeque<groove::large_values::NodeRef>,
+    retry_not_before_ms: Option<u64>,
     started: bool,
 }
+
+const RATE_LIMITED_UPLOAD_RETRY_DELAY_MS: u64 = 1_000;
 
 fn collect_large_value_refs(value: &Value, refs: &mut Vec<groove::large_values::LargeValueRef>) {
     match value {
@@ -1066,6 +1070,7 @@ where
                                         value_ref,
                                         requested: VecDeque::new(),
                                         in_flight: VecDeque::new(),
+                                        retry_not_before_ms: None,
                                         started: false,
                                     });
                                 }
@@ -1075,6 +1080,11 @@ where
                                 .get_mut(&tx_id)
                                 .expect("initialized above");
                             if let Some(upload) = uploads.front_mut() {
+                                let now_ms = self.upload_retry_clock.borrow().now_ms();
+                                if upload.retry_not_before_ms.is_some_and(|deadline| now_ms < deadline) {
+                                    continue;
+                                }
+                                upload.retry_not_before_ms = None;
                                 let supplying_nodes = upload.started;
                                 let mut supplied_count = 0_usize;
                                 let message = if !upload.started {
@@ -1199,6 +1209,10 @@ where
                                 continue;
                             }
                             SyncMessage::ChunkUploadResult(result) => {
+                                let rate_limited = matches!(
+                                    &result.status,
+                                    crate::protocol::ChunkUploadStatus::RateLimited
+                                );
                                 let pending_tx = awaiting_large_value_uploads
                                     .iter()
                                     .find_map(|(tx_id, value_ref)| {
@@ -1240,6 +1254,16 @@ where
                                                 while let Some(node) = upload.in_flight.pop_back() {
                                                     upload.requested.push_front(node);
                                                 }
+                                                let now_ms =
+                                                    self.upload_retry_clock.borrow().now_ms();
+                                                upload.retry_not_before_ms = Some(
+                                                    now_ms.saturating_add(
+                                                        RATE_LIMITED_UPLOAD_RETRY_DELAY_MS,
+                                                    ),
+                                                );
+                                                if let Some(scheduler) = self.scheduler.borrow().as_ref() {
+                                                    scheduler.schedule_tick_after(RATE_LIMITED_UPLOAD_RETRY_DELAY_MS);
+                                                }
                                             }
                                         }
                                     }
@@ -1267,7 +1291,9 @@ where
                                         }
                                     }
                                 }
-                                schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                if !rate_limited {
+                                    schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
+                                }
                                 continue;
                             }
                             SyncMessage::CatalogueSnapshot(snapshot) => {

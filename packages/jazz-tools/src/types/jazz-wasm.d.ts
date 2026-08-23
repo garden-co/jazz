@@ -214,7 +214,9 @@ declare module "jazz-wasm" {
       cells: Uint8Array,
       author: Uint8Array,
     ): WasmWrite;
-    setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void;
+    setTickScheduler(
+      callback: (urgency: "immediate" | "deferred" | `after:${number}`) => void,
+    ): void;
     onMutationError(callback: (event: any) => void): void;
     tick(): Promise<void>;
     setNonDurableClient(): void;

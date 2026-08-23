@@ -172,8 +172,20 @@ fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_evictio
     );
 }
 
+#[derive(Clone)]
+struct PausedUploadRetryClock(Rc<Cell<u64>>);
+
+impl UploadRetryClock for PausedUploadRetryClock {
+    fn now_ms(&self) -> u64 {
+        self.0.get()
+    }
+}
+
+/// Internal transport test: the public write outcome is asserted below, but
+/// the exact-batch retry and no-early-resend properties sit below the public
+/// API at the peer protocol boundary.
 #[test]
-fn rate_limited_push_rejects_locally_without_sending_the_referencing_row() {
+fn rate_limited_push_waits_then_retries_the_exact_batch_without_rejecting_the_write() {
     let schema = schema();
     let author = AuthorId::from_bytes([0xc2; 16]);
     let core = open_core(0xc3, AuthorId::SYSTEM, &schema);
@@ -185,7 +197,13 @@ fn rate_limited_push_rejects_locally_without_sending_the_referencing_row() {
             max_age_ms: 10 * 60 * 1_000,
         });
     let writer = open_db(0xc2, author, &schema);
-    let (writer_transport, core_transport) = duplex();
+    let clock = Rc::new(Cell::new(10_000));
+    writer
+        .node
+        .set_upload_retry_clock_for_test(Rc::new(PausedUploadRetryClock(Rc::clone(&clock))));
+    let scheduler = Rc::new(RecordingScheduler::default());
+    writer.set_tick_scheduler(Some(scheduler.clone()));
+    let (writer_transport, core_transport, writer_outbound) = duplex_with_client_outbound_tap();
     let _upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
     let _subscriber = core.accept_subscriber(core_transport, author);
     let write = writer
@@ -201,15 +219,80 @@ fn rate_limited_push_rejects_locally_without_sending_the_referencing_row() {
             ]),
         )
         .unwrap();
-    for _ in 0..6 {
+
+    // Start, receive the requested frontier, then send the first batch that
+    // Core rate-limits. Capture it before the Core transport drains it.
+    writer.tick().unwrap();
+    core.tick().unwrap();
+    writer.tick().unwrap();
+    let first_batch = writer_outbound
+        .borrow()
+        .iter()
+        .find_map(|message| match message {
+            SyncMessage::ChunkUploadNodes(batch) => Some(batch.clone()),
+            _ => None,
+        })
+        .expect("writer sends the requested chunk batch");
+    core.tick().unwrap();
+    writer.tick().unwrap();
+
+    assert_eq!(
+        scheduler.take_delays(),
+        vec![1_000],
+        "RateLimited schedules the bounded admission deadline rather than a deferred hot loop"
+    );
+    assert!(
+        !matches!(
+            writer.write_state(write.tx_id).unwrap().fate,
+            Fate::Rejected(_)
+        ),
+        "a rate-limited batch remains resumable"
+    );
+
+    // An unrelated immediate/manual host tick before the deadline must not
+    // resend the batch. The paused clock makes this deterministic.
+    for _ in 0..3 {
         writer.tick().unwrap();
-        core.tick().unwrap();
+        assert!(
+            writer_outbound.borrow().is_empty(),
+            "no chunk batch is resent before the scheduled admission deadline"
+        );
     }
 
-    let error = crate::db::block_on(write.wait(DurabilityTier::Global)).unwrap_err();
-    assert_eq!(error.code, ErrorCode::WriteRejected);
-    assert!(error.message.contains("large-value upload rate limited"));
-    assert!(core.read(&core.table("todos")).unwrap().is_empty());
+    // The receiver becomes admissible before the scheduled retry, then the
+    // fake clock advances exactly to that deadline. The retry is byte-for-byte
+    // the same requested batch, not a restarted upload or a new row write.
+    core.node()
+        .borrow_mut()
+        .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy::default());
+    clock.set(11_000);
+    writer.tick().unwrap();
+    let retry_batch = writer_outbound
+        .borrow()
+        .iter()
+        .find_map(|message| match message {
+            SyncMessage::ChunkUploadNodes(batch) => Some(batch.clone()),
+            _ => None,
+        })
+        .expect("the deadline permits the retained batch to retry");
+    assert_eq!(
+        retry_batch, first_batch,
+        "retry retains the exact failed batch"
+    );
+
+    for _ in 0..128 {
+        core.tick().unwrap();
+        writer.tick().unwrap();
+        if writer.write_state(write.tx_id).unwrap().durability == DurabilityTier::Global {
+            break;
+        }
+    }
+    assert_eq!(
+        writer.write_state(write.tx_id).unwrap().durability,
+        DurabilityTier::Global,
+        "the delayed retry eventually publishes the original write"
+    );
+    assert_eq!(core.read(&core.table("todos")).unwrap().len(), 1);
 }
 
 /// A Core immediately refreshes a peer-edge subscriber that was visited before

@@ -34,11 +34,20 @@ trait FutureResultExpectExt<T, E>: Future<Output = Result<T, E>> + Sized {
 impl<F, T, E> FutureResultExpectExt<T, E> for F where F: Future<Output = Result<T, E>> {}
 
 #[derive(Default)]
-struct CountingScheduler(Cell<usize>);
+struct CountingScheduler {
+    calls: Cell<usize>,
+    deadlines_ms: RefCell<Vec<u64>>,
+}
 
 impl TickScheduler for CountingScheduler {
     fn schedule_tick(&self, _urgency: TickUrgency) {
-        self.0.set(self.0.get() + 1);
+        self.calls.set(self.calls.get() + 1);
+    }
+
+    fn schedule_tick_after(&self, delay_ms: u64) {
+        // This is a paused test host: retain deadlines for the harness rather
+        // than converting them to an immediate callback.
+        self.deadlines_ms.borrow_mut().push(delay_ms);
     }
 }
 
@@ -569,7 +578,7 @@ fn reopened_browser_worker_hydrates_local_subscription_without_query_warmup() {
     worker.set_tick_scheduler(Some(scheduler.clone()));
     worker.tick().expect("admit cold subscription request");
     assert!(
-        scheduler.0.get() > 0,
+        scheduler.calls.get() > 0,
         "cold subscription admission must schedule its deferred hydration turn"
     );
 

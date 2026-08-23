@@ -77,6 +77,7 @@ const SERVER_PUMP_DEBOUNCE_MS = 16;
 const MAX_CORE_TICKS_PER_TURN = 4;
 
 type ReadAuthorizationHost = "client-local" | "trusted-serving";
+type CoreTickWake = "immediate" | "deferred" | `after:${number}`;
 
 type NativeDbConstructor = {
   openMemory(schema: Uint8Array, config: Uint8Array): NativeDb;
@@ -671,8 +672,12 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     this.db.setTickScheduler(((first: Error | string | null, second?: string) => {
       const urgency = typeof first === "string" ? first : second;
-      if (urgency === "immediate" || urgency === "deferred") {
-        this.scheduleCoreWake(urgency);
+      if (
+        urgency === "immediate" ||
+        urgency === "deferred" ||
+        (typeof urgency === "string" && urgency.startsWith("after:"))
+      ) {
+        this.scheduleCoreWake(urgency as CoreTickWake);
       }
     }) as (error: Error | null, urgency: string) => void);
   }
@@ -2257,8 +2262,17 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
-  private scheduleCoreWake(urgency: "immediate" | "deferred"): void {
+  private scheduleCoreWake(urgency: CoreTickWake): void {
     if (this.closed) return;
+    if (urgency.startsWith("after:")) {
+      const delayMs = Number(urgency.slice("after:".length));
+      if (!Number.isSafeInteger(delayMs) || delayMs < 0) return;
+      // A protocol admission deadline is not a deferred microtask. Keep the
+      // host event loop live and only wake the thread-affine core after the
+      // promised window has elapsed.
+      setTimeout(() => this.scheduleCoreWake("immediate"), delayMs);
+      return;
+    }
     this.notifyPeerTransportWork();
     if (urgency === "immediate") {
       this.scheduleCoreTick();

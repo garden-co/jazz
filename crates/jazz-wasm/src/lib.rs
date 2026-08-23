@@ -539,6 +539,13 @@ impl TickScheduler for WasmTickScheduler {
             .callback
             .call1(&JsValue::NULL, &JsValue::from_str(urgency));
     }
+
+    fn schedule_tick_after(&self, delay_ms: u64) {
+        let _ = self.callback.call1(
+            &JsValue::NULL,
+            &JsValue::from_str(&format!("after:{delay_ms}")),
+        );
+    }
 }
 
 impl WireTransport for WasmWireTransport {

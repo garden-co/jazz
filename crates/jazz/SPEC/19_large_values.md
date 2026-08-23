@@ -184,12 +184,17 @@ old, the row write fails safely and the client must upload the value again.
 
 `RateLimited` is retryable backpressure, not rejection: the receiver retains
 the descriptor-scoped pending claim and every previously accepted node, and the
-sender retries the exact unaccepted node batch after the next admission window.
+sender retries the exact unaccepted node batch after a bounded admission delay.
 It MUST NOT discard the upload or reject the referencing transaction merely
 because one batch was rate limited. The staging maximum age is mandatory and
 finite for both incomplete uploads and completed receipts; configuration may
 tighten it but cannot disable expiry. Thus an abandoned resumable upload is
 eventually reclaimed by the ordinary host maintenance pass.
+
+The current wire result does not carry a receiver-provided retry-after. Until
+it does, every sender waits the named, bounded one-second admission delay before
+retrying the retained batch. That delay is a real host deadline, never a
+`Deferred` microtask; unrelated peer work continues while it waits.
 
 Jazz exposes the same policy setter and idempotent maintenance operation through
 Rust `Db`, server-shell, NAPI, and WASM boundaries. Native servers/NAPI runtimes

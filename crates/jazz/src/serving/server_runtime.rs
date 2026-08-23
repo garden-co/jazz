@@ -119,25 +119,30 @@ struct ServerShellTickScheduler {
 #[derive(Default)]
 struct ServerShellTickState {
     queued: AtomicBool,
+    delayed: AtomicBool,
 }
 
-impl TickScheduler for ServerShellTickScheduler {
-    fn schedule_tick(&self, _urgency: TickUrgency) {
-        if self.state.queued.swap(true, Ordering::AcqRel) {
+impl ServerShellTickScheduler {
+    fn enqueue_tick(
+        jobs: &mpsc::UnboundedSender<ServerShellCommand>,
+        activity_tx: &watch::Sender<u64>,
+        io_wakers: &Arc<Mutex<Vec<mpsc::UnboundedSender<()>>>>,
+        state: &Arc<ServerShellTickState>,
+    ) {
+        if state.queued.swap(true, Ordering::AcqRel) {
             return;
         }
 
-        let activity_tx = self.activity_tx.clone();
-        let io_wakers = Arc::clone(&self.io_wakers);
-        let state = Arc::clone(&self.state);
-        if self
-            .jobs
+        let activity_tx = activity_tx.clone();
+        let io_wakers = Arc::clone(io_wakers);
+        let tick_state = Arc::clone(state);
+        if jobs
             .unbounded_send(ServerShellCommand::RunAsync(Box::new(move |shell| {
                 Box::pin(async move {
                     // Mark this turn consumed before ticking. Work discovered by
                     // the tick itself queues one follow-up turn instead of being
                     // lost behind the currently running command.
-                    state.queued.store(false, Ordering::Release);
+                    tick_state.queued.store(false, Ordering::Release);
                     if shell.tick_async().await.is_ok() {
                         notify_shell_activity(&activity_tx);
                         if let Ok(mut wakers) = io_wakers.lock() {
@@ -148,8 +153,33 @@ impl TickScheduler for ServerShellTickScheduler {
             })))
             .is_err()
         {
-            self.state.queued.store(false, Ordering::Release);
+            state.queued.store(false, Ordering::Release);
         }
+    }
+}
+
+impl TickScheduler for ServerShellTickScheduler {
+    fn schedule_tick(&self, _urgency: TickUrgency) {
+        Self::enqueue_tick(&self.jobs, &self.activity_tx, &self.io_wakers, &self.state);
+    }
+
+    fn schedule_tick_after(&self, delay_ms: u64) {
+        // The shell owner must not sleep: it owns the thread-affine database
+        // and needs to keep accepting transport work while an upload waits for
+        // its admission window. Coalesce same-window retry wakes, then return
+        // to the owner queue from a tiny timer thread.
+        if self.state.delayed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let jobs = self.jobs.clone();
+        let activity_tx = self.activity_tx.clone();
+        let io_wakers = Arc::clone(&self.io_wakers);
+        let state = Arc::clone(&self.state);
+        thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_millis(delay_ms));
+            state.delayed.store(false, Ordering::Release);
+            Self::enqueue_tick(&jobs, &activity_tx, &io_wakers, &state);
+        });
     }
 }
 
@@ -960,6 +990,7 @@ mod tests {
     use crate::query::{BindingId, ShapeId};
     use crate::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
     use crate::wire::{WireEnvelope, encode_frame, encode_sync_message};
+    use futures::FutureExt;
     use std::time::Duration;
 
     fn encode_message(message: SyncMessage) -> Vec<u8> {
@@ -988,6 +1019,42 @@ mod tests {
         }));
         assert_eq!(inbound_frame_phase(&subscribe), "Subscribe");
         assert_eq!(inbound_frame_phase(&[0xff]), "malformed wire frame");
+    }
+
+    #[test]
+    fn delayed_tick_keeps_the_native_shell_owner_live_and_does_not_replace_deferred_work() {
+        let (jobs, mut receiver) = mpsc::unbounded();
+        let (activity_tx, _) = watch::channel(0_u64);
+        let io_wakers = Arc::new(Mutex::new(Vec::new()));
+        let state = Arc::new(ServerShellTickState::default());
+        let scheduler = ServerShellTickScheduler {
+            jobs,
+            activity_tx,
+            io_wakers,
+            state: Arc::clone(&state),
+        };
+
+        scheduler.schedule_tick_after(20);
+        assert!(
+            receiver.next().now_or_never().is_none(),
+            "an admission deadline must not enqueue an early shell tick"
+        );
+
+        // Ordinary deferred work remains immediately serviceable while the
+        // separate timer waits. This is the native owner-liveness guarantee:
+        // the owner queue never sleeps for an upload admission window.
+        scheduler.schedule_tick(TickUrgency::Deferred);
+        assert!(matches!(
+            receiver.next().now_or_never().flatten(),
+            Some(ServerShellCommand::RunAsync(_))
+        ));
+        state.queued.store(false, Ordering::Release);
+
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(matches!(
+            receiver.next().now_or_never().flatten(),
+            Some(ServerShellCommand::RunAsync(_))
+        ));
     }
 
     #[tokio::test]
