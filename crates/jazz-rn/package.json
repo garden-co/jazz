@@ -110,6 +110,14 @@
     ]
   },
   "prettier": {
+    "overrides": [
+      {
+        "files": "react-native.config.js",
+        "options": {
+          "singleQuote": false
+        }
+      }
+    ],
     "quoteProps": "consistent",
     "singleQuote": true,
     "tabWidth": 2,
