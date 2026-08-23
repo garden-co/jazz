@@ -32,6 +32,10 @@ import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 import { encodeNativeNullValue, storageColumnValueType } from "./native-row-codec.js";
 import { type BatchId, type WriteReceipt } from "../client.js";
 
+type NativeDbForTest = ReturnType<
+  NonNullable<ConstructorParameters<typeof NativeRuntimeAdapter>[0]>["openMemory"]
+>;
+
 async function committedBatchId(receipt: WriteReceipt): Promise<BatchId> {
   if (receipt.kind !== "committed") throw new Error("expected committed write receipt");
   return await receipt.batchId;
@@ -102,6 +106,22 @@ describe("NativeRuntimeAdapter server transport", () => {
       },
     });
     expect(decodeSchemaSource(encoded).tables.docs?.columns[0]?.merge_strategy).toBe("GSet");
+  });
+
+  it("accepts and ignores a synchronous native database close result", async () => {
+    const close = vi.fn(() => true);
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: () => fakeDb({ close }) },
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await expect(runtime.close()).resolves.toBeUndefined();
+    await expect(runtime.close()).resolves.toBeUndefined();
+    expect(close).toHaveBeenCalledTimes(1);
   });
 
   it("resolves connect only after the owned native transport has pumped", async () => {
@@ -5337,9 +5357,7 @@ function encodeArrayRows(): Uint8Array {
   return writer.finish();
 }
 
-function fakeDb<T extends object>(
-  db: T,
-): T & { setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void } {
+function fakeDb<T extends object>(db: T): T & NativeDbForTest {
   type FakeOpenBatch = {
     kind: "mergeable" | "exclusive";
     author?: Uint8Array;
@@ -5399,9 +5417,7 @@ function fakeDb<T extends object>(
       await upstream?.tick();
     };
   }
-  return result as T & {
-    setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void;
-  };
+  return result as T & NativeDbForTest;
 }
 
 function fakeTx(overrides: Partial<TxForTest> = {}): TxForTest {
