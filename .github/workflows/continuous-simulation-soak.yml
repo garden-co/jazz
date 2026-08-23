@@ -108,10 +108,20 @@ jobs:
             const failures = summaries.flatMap(s => s.failures || []);
             if (!failures.length) return;
             const issues = await github.paginate(github.rest.issues.listForRepo, { ...context.repo, state: "all", per_page: 100 });
+            const reportErrors = [];
             for (const f of failures) {
-              if (!["sync", "differential", "soak"].includes(f.suite) || !["failed", "timeout", "budget_exhausted"].includes(f.status) || !Number.isSafeInteger(f.seed) || !f.config) throw new Error("invalid trusted soak receipt");
+              try {
+              const fail = message => { throw new Error(`invalid soak receipt: ${message}`); };
+              if (!["sync", "differential", "soak"].includes(f.suite)) fail("suite");
+              if (!["failed", "timeout", "budget_exhausted"].includes(f.status)) fail("status");
+              if (!Number.isSafeInteger(f.seed) || f.seed < 0 || f.seed > 9_999_999 || (f.suite === "soak" && f.seed !== 0)) fail("seed");
               const c = f.config, sha = summaries.find(s => s.failures?.includes(f))?.sha;
-              if (!/^[0-9a-f]{40}$/.test(sha || "") || !Number.isSafeInteger(c.effective_timeout_seconds) || c.effective_timeout_seconds < 1 || c.effective_timeout_seconds > c.watchdog_seconds) throw new Error("invalid receipt fields");
+              if (!c || !/^[0-9a-f]{40}$/.test(sha || "")) fail("config or SHA");
+              for (const key of ["sync_commits", "differential_steps", "watchdog_seconds", "effective_timeout_seconds"]) {
+                if (!Number.isSafeInteger(c[key]) || c[key] < 1 || c[key] > 10_000) fail(key);
+              }
+              if (c.effective_timeout_seconds > c.watchdog_seconds) fail("effective timeout");
+              if (typeof c.churn_depths !== "string" || !/^[1-9][0-9]*(,[1-9][0-9]*)*$/.test(c.churn_depths) || c.churn_depths.split(",").some(value => Number(value) > 100_000)) fail("churn depths");
               const key = `continuous-simulation-soak:${f.suite}:${f.seed}:${c.sync_commits}:${c.differential_steps}:${c.churn_depths}:${c.effective_timeout_seconds}`, marker = `<!-- ${key} -->`;
               const env = f.suite === "sync" ? `JAZZ_SEED=${f.seed} JAZZ_COMMIT_COUNT=${c.sync_commits}` : `JAZZ_SEED=${f.seed} JAZZ_DIFFERENTIAL_STEP_COUNT=${c.differential_steps} JAZZ_DIFFERENTIAL_CHURN_DEPTHS=${c.churn_depths}`;
               const test = f.suite === "sync" ? "node::tests::sync::convergence_and_fates::m3_seeded_sync_interleavings_converge_against_oracle -- --exact" : "node::tests::harness::m3_maintained_one_shot_differential_oracle -- --exact --ignored";
@@ -119,4 +129,8 @@ jobs:
               const url = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`, body = `🤖 Nightly simulation soak failed.\n${marker}\n\nSHA: \`${sha}\`\nResult: \`${f.status}\`\n\nReplay:\n\`\`\`sh\n${replay}\n\`\`\`\n\n[Run](${url}) · [Artifacts](${url}#artifacts)`;
               const existing = issues.find(i => i.body?.includes(marker));
               if (existing) await github.rest.issues.update({ ...context.repo, issue_number: existing.number, title: `Simulation soak failure: ${f.suite} seed ${f.seed}`, body, state: "open" }); else await github.rest.issues.create({ ...context.repo, title: `Simulation soak failure: ${f.suite} seed ${f.seed}`, body });
+              } catch (error) {
+                reportErrors.push(`${typeof f?.suite === "string" ? f.suite : "unknown"}: ${error instanceof Error ? error.message : String(error)}`);
+              }
             }
+            if (reportErrors.length) core.warning(`Could not publish ${reportErrors.length} soak issue(s): ${reportErrors.join(" | ")}`);
