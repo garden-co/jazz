@@ -850,6 +850,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         JSON.stringify({
           user_id: "00000000-0000-0000-0000-0000000000a1",
           claims: {},
+          issuer: "urn:jazz:anonymous",
           authMode: "anonymous",
         }),
         "local",
@@ -891,6 +892,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       true,
     );
     const session = {
+      issuer: "https://issuer.example",
       user_id: "00000000-0000-0000-0000-0000000000a1",
       claims: {},
       authMode: "external" as const,
@@ -925,6 +927,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       runtime.canDeleteLocally("todos", "00000000-0000-0000-0000-000000000001", {
         user_id: "00000000-0000-0000-0000-0000000000a1",
         claims: {},
+        issuer: "https://issuer.example",
         authMode: "external",
       }),
     ).toBe("unknown");
@@ -992,6 +995,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       { readAuthorizationHost: "trusted-serving" },
     );
     const session = {
+      issuer: "https://issuer.example",
       user_id: "00000000-0000-0000-0000-0000000000a1",
       claims: {},
       authMode: "external" as const,
@@ -1015,7 +1019,7 @@ describe("NativeRuntimeAdapter server transport", () => {
               throw new Error("trusted serving query must not use client-local all");
             },
             allForIdentity: (_query: unknown, author: Uint8Array) => {
-              authors.push(formatUuidForTest(author));
+              authors.push(new TextDecoder().decode(author));
               return encodeRows([
                 {
                   table: "todos",
@@ -1045,6 +1049,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         JSON.stringify({
           user_id: "00000000-0000-0000-0000-0000000000a1",
           claims: {},
+          issuer: "urn:jazz:anonymous",
           authMode: "anonymous",
         }),
         "local",
@@ -1056,7 +1061,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         values: [{ type: "Text", value: "trusted serving" }],
       },
     ]);
-    expect(authors).toEqual(["00000000-0000-0000-0000-0000000000a1"]);
+    expect(authors).toEqual(['["urn:jazz:anonymous","00000000-0000-0000-0000-0000000000a1"]']);
   });
 
   it("decodes fixed-width array columns from native row batches", async () => {
@@ -2222,12 +2227,18 @@ describe("NativeRuntimeAdapter server transport", () => {
     await Promise.all([
       runtime.query(
         JSON.stringify({ table: "todos" }),
-        JSON.stringify({ user_id: "00000000-0000-0000-0000-0000000000a1" }),
+        JSON.stringify({
+          issuer: "https://issuer.example",
+          user_id: "00000000-0000-0000-0000-0000000000a1",
+        }),
         "edge",
       ),
       runtime.query(
         JSON.stringify({ table: "todos" }),
-        JSON.stringify({ user_id: "00000000-0000-0000-0000-0000000000b2" }),
+        JSON.stringify({
+          issuer: "https://issuer.example",
+          user_id: "00000000-0000-0000-0000-0000000000b2",
+        }),
         "edge",
       ),
     ]);
@@ -2788,15 +2799,24 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(() =>
       runtime.createSubscription(
         JSON.stringify({ table: "todos" }),
-        JSON.stringify({ user_id: "00000000-0000-0000-0000-000000000000" }),
+        JSON.stringify({
+          issuer: "https://issuer.example",
+          user_id: "00000000-0000-0000-0000-000000000000",
+        }),
       ),
     ).not.toThrow();
     expect(() =>
       runtime.createSubscription(
         JSON.stringify({ table: "todos" }),
-        JSON.stringify({ user_id: null }),
+        JSON.stringify({ issuer: "https://issuer.example", user_id: null }),
       ),
     ).toThrow("session is missing user_id");
+    expect(() =>
+      runtime.createSubscription(
+        JSON.stringify({ table: "todos" }),
+        JSON.stringify({ user_id: "00000000-0000-0000-0000-000000000000" }),
+      ),
+    ).toThrow("session is missing issuer");
   });
 
   it("applies subscription deltas to the full keyed snapshot", async () => {

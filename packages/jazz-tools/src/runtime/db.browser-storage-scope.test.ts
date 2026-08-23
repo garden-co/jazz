@@ -29,20 +29,24 @@ describe("resolveDefaultPersistentDbName", () => {
     const config: DbConfig = {
       appId: "chat-app",
       driver: { type: "persistent" },
-      jwtToken: makeJwt({ sub: "alice@example.com" }),
+      jwtToken: makeJwt({ iss: "https://issuer.example", sub: "alice@example.com" }),
     };
 
-    expect(resolveDefaultPersistentDbName(config)).toBe("chat-app::alice%40example.com");
+    expect(resolveDefaultPersistentDbName(config)).toBe(
+      "chat-app::%5B%22https%3A%2F%2Fissuer.example%22%2C%22alice%40example.com%22%5D",
+    );
   });
 
   it("url-encodes the sub when scoping the namespace", () => {
     const config: DbConfig = {
       appId: "chat-app",
       driver: { type: "persistent" },
-      jwtToken: makeJwt({ sub: "principal/456" }),
+      jwtToken: makeJwt({ iss: "https://issuer.example", sub: "principal/456" }),
     };
 
-    expect(resolveDefaultPersistentDbName(config)).toBe("chat-app::principal%2F456");
+    expect(resolveDefaultPersistentDbName(config)).toBe(
+      "chat-app::%5B%22https%3A%2F%2Fissuer.example%22%2C%22principal%2F456%22%5D",
+    );
   });
 
   it("scopes the default namespace by user_id for cookie sessions", () => {
@@ -52,11 +56,14 @@ describe("resolveDefaultPersistentDbName", () => {
       cookieSession: {
         user_id: "alice@example.com",
         claims: {},
+        issuer: "https://issuer.example",
         authMode: "external",
       },
     };
 
-    expect(resolveDefaultPersistentDbName(config)).toBe("chat-app::alice%40example.com");
+    expect(resolveDefaultPersistentDbName(config)).toBe(
+      "chat-app::%5B%22https%3A%2F%2Fissuer.example%22%2C%22alice%40example.com%22%5D",
+    );
   });
 
   it("does not scope by user_id for anonymous cookie sessions", () => {
@@ -66,6 +73,7 @@ describe("resolveDefaultPersistentDbName", () => {
       cookieSession: {
         user_id: "ephemeral-visitor",
         claims: {},
+        issuer: "urn:jazz:anonymous",
         authMode: "anonymous",
       },
     };
@@ -99,6 +107,20 @@ describe("resolveDefaultPersistentDbName", () => {
       jwtToken: makeJwt({ sub: "stable-pubkey", iss: LOCAL_FIRST_JWT_ISSUER }),
     };
 
-    expect(resolveDefaultPersistentDbName(config)).toBe("chat-app::stable-pubkey");
+    expect(resolveDefaultPersistentDbName(config)).toBe(
+      "chat-app::%5B%22urn%3Ajazz%3Alocal-first%22%2C%22stable-pubkey%22%5D",
+    );
+  });
+
+  it("separates the same subject issued by different authorities", () => {
+    const from = (issuer: string): DbConfig => ({
+      appId: "chat-app",
+      driver: { type: "persistent" },
+      jwtToken: makeJwt({ iss: issuer, sub: "alice" }),
+    });
+
+    expect(resolveDefaultPersistentDbName(from("https://issuer-a.example"))).not.toBe(
+      resolveDefaultPersistentDbName(from("https://issuer-b.example")),
+    );
   });
 });

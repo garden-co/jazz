@@ -297,6 +297,7 @@ describe("Db runtime schema order", () => {
     const session: Session = {
       user_id: "00000000-0000-0000-0000-0000000000a1",
       claims: {},
+      issuer: "urn:jazz:anonymous",
       authMode: "anonymous",
     };
     const query = vi.fn(

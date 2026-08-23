@@ -94,6 +94,7 @@ describe("Db auth state", () => {
         subject: "alice-subject",
         issuer: "https://issuer.example",
       },
+      issuer: "https://issuer.example",
       authMode: "external",
     });
 
@@ -108,6 +109,7 @@ describe("Db auth state", () => {
 
   it("reports backend-scoped auth state for session-backed dbs", () => {
     const session = {
+      issuer: "https://issuer.example",
       user_id: "alice",
       claims: { role: "writer" },
       authMode: "external" as const,
@@ -161,7 +163,12 @@ describe("Db auth state", () => {
       runtimeClient as any,
       {
         authMode: "external",
-        session: { user_id: "bob", claims: { role: "writer" }, authMode: "external" },
+        session: {
+          issuer: "https://issuer.example",
+          user_id: "bob",
+          claims: { role: "writer" },
+          authMode: "external",
+        },
       },
     );
 
@@ -169,12 +176,14 @@ describe("Db auth state", () => {
 
     expect(runtimeClient.updateAuthToken).not.toHaveBeenCalled();
     expect(sharedDb.getAuthState()).toMatchObject({
+      issuer: "https://issuer.example",
       authMode: "external",
       session: {
         user_id: "alice",
       },
     });
     expect(scopedDb.getAuthState()).toMatchObject({
+      issuer: "https://issuer.example",
       authMode: "external",
       session: {
         user_id: "bob",
@@ -186,6 +195,7 @@ describe("Db auth state", () => {
     const { db } = makeDbWithJwt(makeJwt({ sub: "alice", claims: { role: "reader" } }));
 
     expect(db.getAuthState()).toMatchObject({
+      issuer: "https://issuer.example",
       authMode: "external",
       session: {
         user_id: "alice",
@@ -210,6 +220,7 @@ describe("Db auth state", () => {
 
     expect(runtimeClient.updateAuthToken).toHaveBeenCalledWith(refreshed);
     expect(db.getAuthState()).toMatchObject({
+      issuer: "https://issuer.example",
       authMode: "external",
       session: {
         user_id: "alice",
@@ -218,6 +229,7 @@ describe("Db auth state", () => {
     });
     expect(db.getAuthState().error).toBeUndefined();
     expect(states.at(-1)).toMatchObject({
+      issuer: "https://issuer.example",
       authMode: "external",
     });
     expect(states.at(-1)?.error).toBeUndefined();
@@ -238,6 +250,7 @@ describe("Db auth state", () => {
     expect(runtimeClient.updateAuthToken).not.toHaveBeenCalled();
     expect(states).toHaveLength(1);
     expect(states[0]).toMatchObject({
+      issuer: "https://issuer.example",
       authMode: "external",
       session: {
         user_id: "alice",
@@ -254,6 +267,7 @@ describe("Db auth state", () => {
     );
     expect(runtimeClient.updateAuthToken).not.toHaveBeenCalled();
     expect(db.getAuthState()).toMatchObject({
+      issuer: "https://issuer.example",
       authMode: "external",
       session: {
         user_id: "alice",
@@ -271,6 +285,7 @@ describe("Db auth state", () => {
         subject: "alice-subject",
         issuer: "https://issuer.example",
       },
+      issuer: "https://issuer.example",
       authMode: "external",
     });
     const refreshed: Session = {
@@ -281,6 +296,7 @@ describe("Db auth state", () => {
         subject: "alice-subject",
         issuer: "https://issuer.example",
       },
+      issuer: "https://issuer.example",
       authMode: "external",
     };
     const states: AuthState[] = [];
@@ -295,6 +311,7 @@ describe("Db auth state", () => {
 
     expect(runtimeClient.updateCookieSession).toHaveBeenCalledWith(refreshed);
     expect(db.getAuthState()).toMatchObject({
+      issuer: "https://issuer.example",
       authMode: "external",
       session: {
         user_id: "alice",
@@ -302,6 +319,7 @@ describe("Db auth state", () => {
       },
     });
     expect(states.at(-1)).toMatchObject({
+      issuer: "https://issuer.example",
       authMode: "external",
     });
   });

@@ -14,7 +14,9 @@ function beginTestBatch(runtime: NativeRuntimeAdapter, userId?: string): OpenBat
   runtime.beginTransaction(
     "mergeable",
     id,
-    userId === undefined ? undefined : JSON.stringify({ user_id: userId }),
+    userId === undefined
+      ? undefined
+      : JSON.stringify({ issuer: "https://issuer.example", user_id: userId }),
   );
   return id;
 }
@@ -175,10 +177,6 @@ function uuidBytes(value: string): Uint8Array {
   return bytes;
 }
 
-function formatUuidForTest(bytes: Uint8Array): string {
-  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
 it("stages authenticated client mutations through the optimistic local core path", () => {
   const staged: string[] = [];
   const runtime = new NativeRuntimeAdapter(
@@ -211,7 +209,12 @@ it("stages authenticated client mutations through the optimistic local core path
   runtime.insert(
     "todos",
     { title: { type: "Text", value: "optimistic" } },
-    JSON.stringify({ session: { user_id: "00000000-0000-0000-0000-0000000000a1" } }),
+    JSON.stringify({
+      session: {
+        issuer: "https://issuer.example",
+        user_id: "00000000-0000-0000-0000-0000000000a1",
+      },
+    }),
     "00000000-0000-0000-0000-000000000001",
   );
 
@@ -272,7 +275,7 @@ it("uses identity-aware core txs only on an explicit trusted-serving host", () =
           all: () => encodeRows([]),
           allForIdentity: () => encodeRows([]),
           mergeableTxForIdentity: (_openBatchId: string, author: Uint8Array) => {
-            authors.push(formatUuidForTest(author));
+            authors.push(new TextDecoder().decode(author));
             return fakeTx({
               insertWithIdEncoded: (table: string) => staged.push(table),
             });
@@ -298,12 +301,12 @@ it("uses identity-aware core txs only on an explicit trusted-serving host", () =
     { title: { type: "Text", value: "session tx" } },
     JSON.stringify({
       batch_id: tx,
-      session: { user_id: alice },
+      session: { issuer: "https://issuer.example", user_id: alice },
     }),
     "00000000-0000-0000-0000-000000000001",
   );
 
-  expect(authors).toEqual(["00000000-0000-0000-0000-0000000000a1"]);
+  expect(authors).toEqual(['["https://issuer.example","00000000-0000-0000-0000-0000000000a1"]']);
   expect(staged).toEqual(["todos"]);
 });
 
@@ -725,7 +728,7 @@ it("rejects mixed identities within one trusted-serving mergeable transaction", 
     { title: { type: "Text", value: "one" } },
     JSON.stringify({
       batch_id: tx,
-      session: { user_id: alice },
+      session: { issuer: "https://issuer.example", user_id: alice },
     }),
     "00000000-0000-0000-0000-000000000001",
   );
@@ -736,7 +739,10 @@ it("rejects mixed identities within one trusted-serving mergeable transaction", 
       { title: { type: "Text", value: "two" } },
       JSON.stringify({
         batch_id: tx,
-        session: { user_id: "00000000-0000-0000-0000-0000000000b2" },
+        session: {
+          issuer: "https://issuer.example",
+          user_id: "00000000-0000-0000-0000-0000000000b2",
+        },
       }),
       "00000000-0000-0000-0000-000000000002",
     ),
@@ -787,7 +793,10 @@ it("keeps session-scoped transaction reads on the client-local native method", a
     { title: { type: "Text", value: "alice pending" } },
     JSON.stringify({
       batch_id: transactionId,
-      session: { user_id: "00000000-0000-0000-0000-0000000000a1" },
+      session: {
+        issuer: "https://issuer.example",
+        user_id: "00000000-0000-0000-0000-0000000000a1",
+      },
     }),
     "00000000-0000-0000-0000-000000000001",
   );
@@ -795,7 +804,10 @@ it("keeps session-scoped transaction reads on the client-local native method", a
   await expect(
     runtime.query(
       JSON.stringify({ table: "todos" }),
-      JSON.stringify({ user_id: "00000000-0000-0000-0000-0000000000b2" }),
+      JSON.stringify({
+        issuer: "https://issuer.example",
+        user_id: "00000000-0000-0000-0000-0000000000b2",
+      }),
       "local",
       JSON.stringify({ transaction_batch_id: transactionId }),
     ),
@@ -809,7 +821,10 @@ it("keeps session-scoped transaction reads on the client-local native method", a
   await expect(
     runtime.query(
       JSON.stringify({ table: "todos" }),
-      JSON.stringify({ user_id: "00000000-0000-0000-0000-0000000000a1" }),
+      JSON.stringify({
+        issuer: "https://issuer.example",
+        user_id: "00000000-0000-0000-0000-0000000000a1",
+      }),
       "local",
       JSON.stringify({ transaction_batch_id: transactionId }),
     ),

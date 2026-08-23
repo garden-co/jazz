@@ -16,6 +16,7 @@ export interface ClientSessionState {
 
 export const LOCAL_FIRST_JWT_ISSUER = "urn:jazz:local-first";
 export const ANONYMOUS_JWT_ISSUER = "urn:jazz:anonymous";
+export const SYSTEM_SESSION_ISSUER = "urn:jazz:system";
 
 export interface JwtPayload {
   sub?: unknown;
@@ -32,10 +33,6 @@ function trimOptional(value?: string): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
-}
-
-function asNonEmptyString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
 
 function asUsableSubjectString(value: unknown): string | undefined {
@@ -105,14 +102,11 @@ export function parseJwtPayload(jwtToken: string): JwtPayload | null {
 
 export function sessionFromJwtPayload(payload: JwtPayload): Session | null {
   const subject = asUsableSubjectString(payload.sub);
-  if (!subject) return null;
-
-  const issuer = asNonEmptyString(payload.iss);
+  const issuer = asUsableSubjectString(payload.iss);
+  if (!subject || !issuer || issuer === SYSTEM_SESSION_ISSUER) return null;
 
   const claimsSource = payload.claims;
   const claims: Record<string, unknown> = isRecord(claimsSource) ? { ...claimsSource } : {};
-  claims.subject = subject;
-  if (issuer) claims.issuer = issuer;
 
   let authMode: Session["authMode"];
   if (issuer === LOCAL_FIRST_JWT_ISSUER) {
@@ -124,6 +118,7 @@ export function sessionFromJwtPayload(payload: JwtPayload): Session | null {
   }
 
   return {
+    issuer,
     user_id: subject,
     claims,
     authMode,
@@ -150,7 +145,12 @@ export function resolveClientSessionStateSync(config: ClientSessionInput): Clien
     };
   }
 
-  if (config.cookieSession) {
+  if (
+    config.cookieSession &&
+    config.cookieSession.issuer !== SYSTEM_SESSION_ISSUER &&
+    isUsableSubject(config.cookieSession.issuer) &&
+    isUsableSubject(config.cookieSession.user_id)
+  ) {
     return {
       transport: "cookie",
       session: config.cookieSession,

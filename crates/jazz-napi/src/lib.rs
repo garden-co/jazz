@@ -3154,10 +3154,9 @@ fn checked_u64_range(start: f64, end: f64) -> napi::Result<std::ops::Range<u64>>
 }
 
 fn core_author_id_from_bytes(bytes: &[u8]) -> napi::Result<CoreAuthorSubject> {
-    let bytes: [u8; 16] = bytes
-        .try_into()
-        .map_err(|_| napi::Error::from_reason("author id must be 16 bytes"))?;
-    Ok(CoreAuthorSubject::for_test_bytes(bytes))
+    let canonical = std::str::from_utf8(bytes)
+        .map_err(|_| napi::Error::from_reason("author subject must be canonical UTF-8 JSON"))?;
+    CoreAuthorSubject::from_canonical(canonical).map_err(napi::Error::from_reason)
 }
 
 fn core_write_memory(
@@ -3195,10 +3194,10 @@ fn core_write_persistent(
 }
 
 fn core_claims_from_json(
-    author: CoreAuthorSubject,
+    _author: CoreAuthorSubject,
     claims: Option<JsonValue>,
 ) -> napi::Result<BTreeMap<String, CoreValue>> {
-    let mut claims = match claims {
+    let claims = match claims {
         None | Some(JsonValue::Null) => BTreeMap::new(),
         Some(JsonValue::Object(map)) => map
             .into_iter()
@@ -3210,16 +3209,6 @@ fn core_claims_from_json(
             ));
         }
     };
-    let subject = author.canonical().to_owned();
-    claims
-        .entry("subject".to_owned())
-        .or_insert_with(|| CoreValue::String(subject.clone()));
-    claims
-        .entry("sub".to_owned())
-        .or_insert_with(|| CoreValue::String(subject.clone()));
-    claims
-        .entry("user_id".to_owned())
-        .or_insert_with(|| CoreValue::String(subject));
     Ok(claims)
 }
 

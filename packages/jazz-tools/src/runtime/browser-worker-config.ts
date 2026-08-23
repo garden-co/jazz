@@ -67,5 +67,5 @@ function resolveAuthClass(config: DbConfig): string {
     cookieSession: config.cookieSession,
   });
   if (!session?.user_id || session.authMode === "anonymous") return "anonymous";
-  return `${session.authMode}:${session.user_id}`;
+  return `${session.authMode}:${JSON.stringify([session.issuer, session.user_id])}`;
 }

@@ -352,8 +352,18 @@ describe("createPolicyTestApp", () => {
         });
       });
 
-      const alice = policyTestApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
-      const bob = policyTestApp.as({ user_id: "bob", claims: {}, authMode: "local-first" });
+      const alice = policyTestApp.as({
+        issuer: "urn:jazz:local-first",
+        user_id: "alice",
+        claims: {},
+        authMode: "local-first",
+      });
+      const bob = policyTestApp.as({
+        issuer: "urn:jazz:local-first",
+        user_id: "bob",
+        claims: {},
+        authMode: "local-first",
+      });
 
       await expect(alice.all(testApp.todos.where({ id: seeded.id }))).resolves.toEqual([
         expect.objectContaining({ id: seeded.id }),
@@ -368,8 +378,18 @@ describe("createPolicyTestApp", () => {
     const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
 
     try {
-      const alice = policyTestApp.as({ user_id: "alice", claims: {}, authMode: "local-first" });
-      const bob = policyTestApp.as({ user_id: "bob", claims: {}, authMode: "local-first" });
+      const alice = policyTestApp.as({
+        issuer: "urn:jazz:local-first",
+        user_id: "alice",
+        claims: {},
+        authMode: "local-first",
+      });
+      const bob = policyTestApp.as({
+        issuer: "urn:jazz:local-first",
+        user_id: "bob",
+        claims: {},
+        authMode: "local-first",
+      });
 
       alice.expectAllowed((db) => {
         db.insert(testApp.todos, {

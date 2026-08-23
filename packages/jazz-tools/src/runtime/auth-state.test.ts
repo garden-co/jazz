@@ -18,7 +18,11 @@ describe("auth-state", () => {
   it("keeps the last session while unauthenticated", () => {
     const store = createAuthStateStore({
       appId: "test-app",
-      jwtToken: makeJwt({ sub: "alice", claims: { role: "reader" } }),
+      jwtToken: makeJwt({
+        iss: "https://issuer.example",
+        sub: "alice",
+        claims: { role: "reader" },
+      }),
     });
 
     store.markUnauthenticated("expired");
@@ -27,11 +31,9 @@ describe("auth-state", () => {
       authMode: "external",
       error: "expired",
       session: {
+        issuer: "https://issuer.example",
         user_id: "alice",
-        claims: {
-          role: "reader",
-          subject: "alice",
-        },
+        claims: { role: "reader" },
         authMode: "external",
       },
     });
@@ -40,7 +42,7 @@ describe("auth-state", () => {
   it("deduplicates repeated auth-loss notifications", () => {
     const store = createAuthStateStore({
       appId: "test-app",
-      jwtToken: makeJwt({ sub: "alice" }),
+      jwtToken: makeJwt({ iss: "https://issuer.example", sub: "alice" }),
     });
     const states: AuthState[] = [];
 
@@ -61,12 +63,23 @@ describe("auth-state", () => {
   it("rejects principal hot-swap on a live client", () => {
     const store = createAuthStateStore({
       appId: "test-app",
-      jwtToken: makeJwt({ sub: "alice" }),
+      jwtToken: makeJwt({ iss: "https://issuer.example", sub: "alice" }),
     });
 
-    expect(() => store.applyJwtToken(makeJwt({ sub: "bob" }))).toThrow(
-      "Changing auth principal on a live client is not supported. Recreate the Db.",
-    );
+    expect(() =>
+      store.applyJwtToken(makeJwt({ iss: "https://issuer.example", sub: "bob" })),
+    ).toThrow("Changing auth principal on a live client is not supported. Recreate the Db.");
+  });
+
+  it("treats the issuer as part of the live principal identity", () => {
+    const store = createAuthStateStore({
+      appId: "test-app",
+      jwtToken: makeJwt({ iss: "https://issuer-a.example", sub: "alice" }),
+    });
+
+    expect(() =>
+      store.applyJwtToken(makeJwt({ iss: "https://issuer-b.example", sub: "alice" })),
+    ).toThrow("Changing auth principal on a live client is not supported. Recreate the Db.");
   });
 });
 

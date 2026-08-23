@@ -25,6 +25,7 @@ describe("registerWindowJazzStorageClient", () => {
         cookieSession: {
           user_id: "alice@example.com",
           claims: {},
+          issuer: "https://issuer.example",
           authMode: "external",
         },
       }),
@@ -36,6 +37,7 @@ describe("registerWindowJazzStorageClient", () => {
         cookieSession: {
           user_id: "ephemeral-visitor",
           claims: {},
+          issuer: "urn:jazz:anonymous",
           authMode: "anonymous",
         },
       }),
@@ -47,6 +49,7 @@ describe("registerWindowJazzStorageClient", () => {
         cookieSession: {
           user_id: "alice@example.com",
           claims: {},
+          issuer: "https://issuer.example",
           authMode: "external",
         },
       }),
@@ -58,6 +61,7 @@ describe("registerWindowJazzStorageClient", () => {
         cookieSession: {
           user_id: "bob@example.com",
           claims: {},
+          issuer: "https://issuer.example",
           authMode: "external",
         },
       }),

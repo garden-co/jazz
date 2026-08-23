@@ -286,13 +286,25 @@ function websocketCloseDetails(event: unknown): { code?: number; reason?: string
 
 export function encodeWebSocketPrelude(authJson: string, peerIdentity: Uint8Array): string {
   const auth = JSON.parse(authJson) as Record<string, unknown>;
-  const sub = authSub(auth) ?? bytesToHex(peerIdentity);
+  const peerAuthor = new TextDecoder().decode(peerIdentity);
+  const sub = authSub(auth) ?? canonicalAuthorSubjectPart(peerAuthor) ?? peerAuthor;
   return JSON.stringify({
-    peer_identity: bytesToHex(peerIdentity),
+    peer_identity: peerAuthor,
     ...auth,
     auth: { ...auth, sub },
     sub,
   });
+}
+
+function canonicalAuthorSubjectPart(author: string): string | null {
+  try {
+    const parsed = JSON.parse(author) as unknown;
+    return Array.isArray(parsed) && parsed.length === 2 && typeof parsed[1] === "string"
+      ? parsed[1]
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function connectWebSocketCarrier(
@@ -371,10 +383,6 @@ function waitForOpen(socket: BrowserWebSocket): Promise<void> {
       settle(() => reject(new Error("websocket closed before open"))),
     );
   });
-}
-
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function authSub(auth: Record<string, unknown>): string | null {
