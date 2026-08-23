@@ -22,7 +22,18 @@ typedef enum jazz_native_relay_status {
   JAZZ_NATIVE_RELAY_INVALID_ARGUMENT = 1,
   JAZZ_NATIVE_RELAY_INVALID_COMMAND = 2,
   JAZZ_NATIVE_RELAY_ENCODE_FAILURE = 3,
+  JAZZ_NATIVE_RELAY_INVALID_HANDLE = 4,
+  JAZZ_NATIVE_RELAY_LIFECYCLE_FAILURE = 5,
 } jazz_native_relay_status;
+
+typedef struct jazz_native_relay_host jazz_native_relay_host;
+jazz_native_relay_host *jazz_native_relay_host_new(void);
+void jazz_native_relay_host_free(jazz_native_relay_host *host);
+jazz_native_relay_status jazz_native_relay_host_execute(
+    jazz_native_relay_host *host,
+    const uint8_t *request,
+    size_t request_len,
+    jazz_native_relay_bytes *out);
 
 /*
  * Execute one complete postcard RelayCommandRequest. On success, response

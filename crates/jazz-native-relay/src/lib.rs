@@ -37,15 +37,56 @@ pub const NATIVE_RELAY_ABI_VERSION: u16 = 1;
 /// `Probe` is intentionally the only command until the shared relay command
 /// taxonomy is specified. JNI/Swift wrappers must carry these postcard bytes
 /// unchanged; they must not recreate database, query, or mutation semantics.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum RelayCommandRequest {
     Probe,
+    Open {
+        scope: RelayScopeRequest,
+        sqlite_path: String,
+        schema_json: String,
+        identity: DbIdentity,
+    },
+    Attach {
+        relay: u64,
+        identity: DbIdentity,
+        claims: BTreeMap<String, Value>,
+    },
+    CloseClient {
+        client: u64,
+    },
+    CloseRelay {
+        relay: u64,
+    },
+    Pump {
+        relay: u64,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct RelayScopeRequest {
+    pub app_namespace: String,
+    pub storage_namespace: String,
+    pub auth_scope: Option<String>,
+}
+
+impl From<RelayScopeRequest> for RelayScope {
+    fn from(value: RelayScopeRequest) -> Self {
+        Self {
+            app_namespace: value.app_namespace,
+            storage_namespace: value.storage_namespace,
+            auth_scope: value.auth_scope,
+        }
+    }
 }
 
 /// Codec-owned response for [`RelayCommandRequest`].
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum RelayCommandResponse {
     Probe { abi_version: u16 },
+    Opened { relay: u64 },
+    Attached { client: u64 },
+    Closed { closed: bool },
+    Pumped,
 }
 
 /// ABI-owned response buffer. On successful execution, `data` is allocated by
@@ -68,11 +109,143 @@ impl JazzNativeRelayBytes {
 /// types intentionally remain inside the host binding; callers branch only on
 /// these stable classes.
 #[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JazzNativeRelayStatus {
     Ok = 0,
     InvalidArgument = 1,
     InvalidCommand = 2,
     EncodeFailure = 3,
+    InvalidHandle = 4,
+    LifecycleFailure = 5,
+}
+
+/// Explicit host-owned lifecycle registry for JNI/Swift. No global relay map.
+pub struct NativeRelayHost {
+    registry: NativeRelayRegistry,
+    relays: BTreeMap<u64, (RelayScope, NativeRelay)>,
+    clients: BTreeMap<u64, (u64, NativeRelayClient)>,
+    next_handle: u64,
+}
+
+impl Default for NativeRelayHost {
+    fn default() -> Self {
+        Self {
+            registry: NativeRelayRegistry::default(),
+            relays: BTreeMap::new(),
+            clients: BTreeMap::new(),
+            next_handle: 1,
+        }
+    }
+}
+
+impl NativeRelayHost {
+    fn allocate(&mut self) -> Result<u64, RelayError> {
+        let handle = self.next_handle;
+        self.next_handle = self
+            .next_handle
+            .checked_add(1)
+            .ok_or(RelayError::ClientIdExhausted)?;
+        Ok(handle)
+    }
+
+    fn execute(
+        &mut self,
+        command: RelayCommandRequest,
+    ) -> Result<RelayCommandResponse, JazzNativeRelayStatus> {
+        match command {
+            RelayCommandRequest::Probe => Ok(RelayCommandResponse::Probe {
+                abi_version: NATIVE_RELAY_ABI_VERSION,
+            }),
+            RelayCommandRequest::Open {
+                scope,
+                sqlite_path,
+                schema_json,
+                identity,
+            } => {
+                let public_schema = serde_json::from_str(&schema_json)
+                    .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+                let schema = JazzSchema::new(&public_schema)
+                    .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+                let scope = RelayScope::from(scope);
+                let relay = self
+                    .registry
+                    .open(RelayOpenConfig {
+                        supported_abi: NativeRelayAbiRange {
+                            minimum: NATIVE_RELAY_ABI_VERSION,
+                            maximum: NATIVE_RELAY_ABI_VERSION,
+                        },
+                        scope: scope.clone(),
+                        sqlite_path: PathBuf::from(sqlite_path),
+                        schema,
+                        identity,
+                        #[cfg(test)]
+                        thread_start_counter: None,
+                    })
+                    .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+                let handle = self
+                    .allocate()
+                    .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+                self.relays.insert(handle, (scope, relay));
+                Ok(RelayCommandResponse::Opened { relay: handle })
+            }
+            RelayCommandRequest::Attach {
+                relay: relay_handle,
+                identity,
+                claims,
+            } => {
+                let relay = self
+                    .relays
+                    .get(&relay_handle)
+                    .ok_or(JazzNativeRelayStatus::InvalidHandle)?
+                    .1
+                    .clone();
+                let client = relay
+                    .attach_client(identity, claims)
+                    .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+                let handle = self
+                    .allocate()
+                    .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+                self.clients.insert(handle, (relay_handle, client));
+                Ok(RelayCommandResponse::Attached { client: handle })
+            }
+            RelayCommandRequest::CloseClient { client } => Ok(RelayCommandResponse::Closed {
+                closed: self
+                    .clients
+                    .remove(&client)
+                    .map(|(_, client)| client.close().is_ok())
+                    .unwrap_or(false),
+            }),
+            RelayCommandRequest::CloseRelay { relay } => {
+                let Some((scope, _)) = self.relays.remove(&relay) else {
+                    return Ok(RelayCommandResponse::Closed { closed: false });
+                };
+                let clients = self
+                    .clients
+                    .iter()
+                    .filter_map(|(handle, (owner, _))| (*owner == relay).then_some(*handle))
+                    .collect::<Vec<_>>();
+                for handle in clients {
+                    if let Some((_, client)) = self.clients.remove(&handle) {
+                        let _ = client.close();
+                    }
+                }
+                let closed = self
+                    .registry
+                    .close(&scope)
+                    .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+                Ok(RelayCommandResponse::Closed { closed })
+            }
+            RelayCommandRequest::Pump { relay } => {
+                self.relays
+                    .get(&relay)
+                    .ok_or(JazzNativeRelayStatus::InvalidHandle)?
+                    .1
+                    .pump()
+                    .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+                Ok(RelayCommandResponse::Pumped)
+            }
+        }
+    }
 }
 
 /// C ABI seam for Android/JNI, Swift, and other platform artifact wrappers.
@@ -123,6 +296,7 @@ pub unsafe extern "C" fn jazz_native_relay_execute(
         RelayCommandRequest::Probe => RelayCommandResponse::Probe {
             abi_version: NATIVE_RELAY_ABI_VERSION,
         },
+        _ => return JazzNativeRelayStatus::InvalidCommand,
     };
     let bytes = match postcard::to_allocvec(&response) {
         Ok(bytes) => bytes,
@@ -131,6 +305,77 @@ pub unsafe extern "C" fn jazz_native_relay_execute(
     let boxed = bytes.into_boxed_slice();
     // SAFETY: `out` was validated above; the returned allocation remains owned
     // by Rust until the matching free call below.
+    unsafe {
+        *out = JazzNativeRelayBytes {
+            len: boxed.len(),
+            data: Box::into_raw(boxed).cast(),
+        };
+    }
+    JazzNativeRelayStatus::Ok
+}
+
+/// Opaque C-owned native relay host. It owns one scope registry and all handles.
+#[repr(C)]
+pub struct JazzNativeRelayHost {
+    inner: NativeRelayHost,
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn jazz_native_relay_host_new() -> *mut JazzNativeRelayHost {
+    Box::into_raw(Box::new(JazzNativeRelayHost {
+        inner: NativeRelayHost::default(),
+    }))
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+///
+/// `host` must be null or an unfreed pointer returned by host_new, and no
+/// concurrent call may retain or execute it while this function runs.
+pub unsafe extern "C" fn jazz_native_relay_host_free(host: *mut JazzNativeRelayHost) {
+    if !host.is_null() {
+        unsafe {
+            drop(Box::from_raw(host));
+        }
+    }
+}
+
+/// Execute lifecycle commands against one explicit host context.
+///
+/// # Safety
+/// `host`, request bytes, and `out` follow the same validity rules as
+/// [`jazz_native_relay_execute`]; `host` must be returned by host_new and not freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_native_relay_host_execute(
+    host: *mut JazzNativeRelayHost,
+    request: *const u8,
+    request_len: usize,
+    out: *mut JazzNativeRelayBytes,
+) -> JazzNativeRelayStatus {
+    if host.is_null() || out.is_null() || (request.is_null() && request_len != 0) {
+        return JazzNativeRelayStatus::InvalidArgument;
+    }
+    unsafe {
+        *out = JazzNativeRelayBytes::EMPTY;
+    }
+    let request = if request_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(request, request_len) }
+    };
+    let command = match postcard::from_bytes::<RelayCommandRequest>(request) {
+        Ok(command) => command,
+        Err(_) => return JazzNativeRelayStatus::InvalidCommand,
+    };
+    let response = match unsafe { (&mut *host).inner.execute(command) } {
+        Ok(response) => response,
+        Err(status) => return status,
+    };
+    let bytes = match postcard::to_allocvec(&response) {
+        Ok(bytes) => bytes,
+        Err(_) => return JazzNativeRelayStatus::EncodeFailure,
+    };
+    let boxed = bytes.into_boxed_slice();
     unsafe {
         *out = JazzNativeRelayBytes {
             len: boxed.len(),
@@ -1044,5 +1289,92 @@ mod tests {
             Some(SyncMessage::SessionClaims { claims, .. })
                 if matches!(claims.get("payload"), Some(Value::String(value)) if value.len() == MAX_LOGICAL_MESSAGE_BYTES + 1)
         ));
+    }
+
+    #[test]
+    fn c_host_lifecycle_open_attach_close_and_bounded_pump_are_handle_safe() {
+        let directory = tempfile::tempdir().unwrap();
+        let host = jazz_native_relay_host_new();
+        assert!(!host.is_null());
+        let identity = DbIdentity {
+            node: NodeUuid::from_bytes([0x71; 16]),
+            author: AuthorId::from_bytes([0x72; 16]),
+        };
+        let open = RelayCommandRequest::Open {
+            scope: RelayScopeRequest {
+                app_namespace: "host-receipt".to_owned(),
+                storage_namespace: "default".to_owned(),
+                auth_scope: Some("opaque-subject".to_owned()),
+            },
+            sqlite_path: directory.path().join("host.sqlite").display().to_string(),
+            schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
+            identity,
+        };
+        unsafe fn command(
+            host: *mut JazzNativeRelayHost,
+            request: RelayCommandRequest,
+        ) -> Result<RelayCommandResponse, JazzNativeRelayStatus> {
+            let bytes = postcard::to_allocvec(&request).unwrap();
+            let mut output = JazzNativeRelayBytes::EMPTY;
+            let status = unsafe {
+                jazz_native_relay_host_execute(host, bytes.as_ptr(), bytes.len(), &mut output)
+            };
+            if !matches!(status, JazzNativeRelayStatus::Ok) {
+                return Err(status);
+            }
+            let response = postcard::from_bytes(unsafe {
+                std::slice::from_raw_parts(output.data, output.len)
+            })
+            .unwrap();
+            unsafe { jazz_native_relay_bytes_free(&mut output) };
+            Ok(response)
+        }
+        let relay = match unsafe { command(host, open) }.unwrap() {
+            RelayCommandResponse::Opened { relay } => relay,
+            response => panic!("unexpected open response: {response:?}"),
+        };
+        let client = match unsafe {
+            command(
+                host,
+                RelayCommandRequest::Attach {
+                    relay,
+                    identity: DbIdentity {
+                        node: NodeUuid::from_bytes([0x73; 16]),
+                        author: AuthorId::from_bytes([0x74; 16]),
+                    },
+                    claims: BTreeMap::new(),
+                },
+            )
+        }
+        .unwrap()
+        {
+            RelayCommandResponse::Attached { client } => client,
+            response => panic!("unexpected attach response: {response:?}"),
+        };
+        assert!(matches!(
+            unsafe { command(host, RelayCommandRequest::Pump { relay }) },
+            Ok(RelayCommandResponse::Pumped)
+        ));
+        assert_eq!(
+            unsafe { command(host, RelayCommandRequest::CloseClient { client }) }.unwrap(),
+            RelayCommandResponse::Closed { closed: true }
+        );
+        assert_eq!(
+            unsafe { command(host, RelayCommandRequest::CloseClient { client }) }.unwrap(),
+            RelayCommandResponse::Closed { closed: false }
+        );
+        assert_eq!(
+            unsafe { command(host, RelayCommandRequest::CloseRelay { relay }) }.unwrap(),
+            RelayCommandResponse::Closed { closed: true }
+        );
+        assert_eq!(
+            unsafe { command(host, RelayCommandRequest::CloseRelay { relay }) }.unwrap(),
+            RelayCommandResponse::Closed { closed: false }
+        );
+        assert!(matches!(
+            unsafe { command(host, RelayCommandRequest::Pump { relay }) },
+            Err(JazzNativeRelayStatus::InvalidHandle)
+        ));
+        unsafe { jazz_native_relay_host_free(host) };
     }
 }

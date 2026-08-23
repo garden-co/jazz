@@ -2138,6 +2138,7 @@ dependencies = [
  "jazz-storage-sqlite",
  "postcard",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]

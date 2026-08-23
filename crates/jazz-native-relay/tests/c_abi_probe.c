@@ -24,6 +24,14 @@ int main(void) {
     return 1;
   }
   jazz_native_relay_bytes_free(&response);
+  jazz_native_relay_host *host = jazz_native_relay_host_new();
+  if (host == NULL || jazz_native_relay_host_execute(host, probe, sizeof(probe), &response) !=
+      JAZZ_NATIVE_RELAY_OK) {
+    fprintf(stderr, "host-owned relay probe failed\n");
+    return 1;
+  }
+  jazz_native_relay_bytes_free(&response);
+  jazz_native_relay_host_free(host);
   if (jazz_native_relay_execute((const uint8_t *)"\xff", 1, &response) !=
       JAZZ_NATIVE_RELAY_INVALID_COMMAND) {
     fprintf(stderr, "relay invalid command did not report a typed error\n");
