@@ -255,21 +255,18 @@ impl NativeRelayWire {
             .map_err(|_| RelayError::Poisoned("upstream outbound queue"))?;
         // Encode while the batch remains queued. A failed codec/size check
         // leaves every message intact for retry and diagnostics.
-        let encoded = encode_queued_peer_messages(&outbound, |message| {
-            let bytes = encode_sync_message(message).map_err(RelayError::EncodePeerMessage)?;
-            validate_logical_message_len(bytes.len()).map_err(RelayError::PeerMessageTooLarge)?;
-            Ok(bytes)
-        })?;
+        let encoded = outbound
+            .iter()
+            .map(|message| {
+                let bytes = encode_sync_message(message).map_err(RelayError::EncodePeerMessage)?;
+                validate_logical_message_len(bytes.len())
+                    .map_err(RelayError::PeerMessageTooLarge)?;
+                Ok(bytes)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         outbound.clear();
         Ok(encoded)
     }
-}
-
-fn encode_queued_peer_messages(
-    messages: &VecDeque<SyncMessage>,
-    encode: impl FnMut(&SyncMessage) -> Result<Vec<u8>, RelayError>,
-) -> Result<Vec<Vec<u8>>, RelayError> {
-    messages.iter().map(encode).collect()
 }
 
 fn validate_encoded_peer_message_len(len: usize) -> Result<(), RelayError> {
@@ -839,8 +836,9 @@ mod tests {
 
     #[test]
     fn encoded_peer_messages_reject_the_exact_logical_message_limit_boundary() {
+        let bytes = vec![0; MAX_LOGICAL_MESSAGE_BYTES + 1];
         assert!(matches!(
-            validate_encoded_peer_message_len(MAX_LOGICAL_MESSAGE_BYTES + 1),
+            NativeRelayWire::default().push_inbound_encoded(&bytes),
             Err(RelayError::PeerMessageTooLarge(message))
                 if message.contains(&(MAX_LOGICAL_MESSAGE_BYTES + 1).to_string())
         ));
@@ -848,19 +846,34 @@ mod tests {
 
     #[test]
     fn outbound_queue_keeps_messages_when_an_oversized_batch_is_rejected() {
-        let message = SyncMessage::SessionClaims {
+        let normal = SyncMessage::SessionClaims {
             identity: AuthorId::SYSTEM,
             claims: BTreeMap::new(),
         };
-        let queue = VecDeque::from([message.clone()]);
+        let oversized = SyncMessage::SessionClaims {
+            identity: AuthorId::SYSTEM,
+            claims: BTreeMap::from([(
+                "payload".to_owned(),
+                Value::String("x".repeat(MAX_LOGICAL_MESSAGE_BYTES + 1)),
+            )]),
+        };
+        let wire = NativeRelayWire::default();
+        wire.outbound
+            .lock()
+            .unwrap()
+            .extend([normal.clone(), oversized]);
 
         assert!(matches!(
-            encode_queued_peer_messages(&queue, |_| {
-                validate_encoded_peer_message_len(MAX_LOGICAL_MESSAGE_BYTES + 1)?;
-                unreachable!("oversized payload validation must fail")
-            }),
+            wire.take_outbound_encoded(),
             Err(RelayError::PeerMessageTooLarge(_))
         ));
-        assert_eq!(queue, VecDeque::from([message]));
+        let queued = wire.outbound.lock().unwrap();
+        assert_eq!(queued.len(), 2, "a rejected batch must not be drained");
+        assert_eq!(queued.front(), Some(&normal));
+        assert!(matches!(
+            queued.back(),
+            Some(SyncMessage::SessionClaims { claims, .. })
+                if matches!(claims.get("payload"), Some(Value::String(value)) if value.len() == MAX_LOGICAL_MESSAGE_BYTES + 1)
+        ));
     }
 }
