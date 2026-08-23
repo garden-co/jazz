@@ -769,14 +769,20 @@ async fn array_subquery_orders_inner_rows() {
 local_tokio_test! {
 /// Verifies that an array subquery can limit ordered inner rows.
 ///
-/// Actors: alice writes five posts, bob reads only the first two ordered by id.
-#[ignore = "bounded array subqueries materialize an empty child array regardless of sort column"]
+/// Actors: alice writes five posts, bob reads bounded windows ordered by both
+/// the declared `id` column and the ordinary `title` column.
 async fn array_subquery_limits_ordered_inner_rows() {
     let clients = Clients::start().await;
 
     let user_id = create_user(&clients.alice, "Alice").await;
-    for id in 100..105 {
-        create_post(&clients.alice, id, &format!("Post {id}"), user_id).await;
+    for (id, title) in [
+        (100, "Zulu"),
+        (101, "Alpha"),
+        (102, "Echo"),
+        (103, "Bravo"),
+        (104, "Delta"),
+    ] {
+        create_post(&clients.alice, id, title, user_id).await;
     }
 
     let query = Query::from("users").array_subquery(
@@ -801,6 +807,30 @@ async fn array_subquery_limits_ordered_inner_rows() {
     assert_eq!(
         post_ids(posts_array(find_row_by_id(&rows, user_id))),
         vec![100, 101]
+    );
+
+    let title_window = Query::from("users").array_subquery(
+        ArraySubquery::new("posts", "posts", "author_id", "id")
+            .order_by("title", OrderDirection::Asc)
+            .offset(1)
+            .limit(2),
+    );
+    let rows = wait_for_rows(
+        &clients.bob,
+        title_window,
+        "bob sees the offset title-ordered child window",
+        |rows| {
+            rows.iter()
+                .any(|(id, values)| {
+                    *id == user_id && post_ids(posts_array(values)) == vec![103, 104]
+                })
+                .then_some(rows)
+        },
+    )
+    .await;
+    assert_eq!(
+        post_ids(posts_array(find_row_by_id(&rows, user_id))),
+        vec![103, 104]
     );
 
     clients.shutdown().await;
