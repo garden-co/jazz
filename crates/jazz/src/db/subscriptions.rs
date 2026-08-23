@@ -398,12 +398,14 @@ where
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<SubscriptionStream, Error> {
         ensure_supported_subscription_read_opts(&opts)?;
-        self.validate_prepared_shape_for_registration(prepared)?;
+        self.validate_prepared_shape_for_registration(prepared)
+            .await?;
         let requested_read_tier = effective_read_tier(&opts);
+        let authored_commit_durability = self.node.node.lock().await.authored_commit_durability();
         let read_tier = if opts.local_updates == LocalUpdates::Immediate
             && opts.propagation == Propagation::Full
             && supports_pending_overlay_reconciliation(prepared.shape.query())
-            && self.node.node.borrow().authored_commit_durability() == DurabilityTier::None
+            && authored_commit_durability == DurabilityTier::None
         {
             DurabilityTier::Local
         } else {
@@ -411,7 +413,8 @@ where
         };
         self.node
             .node
-            .borrow_mut()
+            .lock()
+            .await
             .ensure_peer_maintained_subscription_view_supported(
                 &prepared.shape,
                 &prepared.binding,
@@ -424,7 +427,8 @@ where
         let (local_shape, local_binding, _local_plan) = self
             .node
             .node
-            .borrow_mut()
+            .lock()
+            .await
             .prepare_query_binding_for_link_in_authorization_mode(
                 &prepared.shape,
                 &prepared.binding,
@@ -436,7 +440,8 @@ where
         let (subscription, snapshot) = self
             .node
             .node
-            .borrow_mut()
+            .lock()
+            .await
             .open_maintained_view_subscription_in_authorization_mode(
                 &local_shape,
                 &local_binding,
@@ -450,7 +455,7 @@ where
         let root_occurrence_ids = subscription.root_occurrence_ids().to_vec();
         let local_subscription_id = subscription.subscription_id();
         let local_node = Rc::clone(&self.node.node);
-        let local_runtime_token = local_node.borrow().groove_runtime_token();
+        let local_runtime_token = local_node.lock().await.groove_runtime_token();
         let local_subscription_cleanup = Rc::new(Cell::new(Some((
             local_runtime_token,
             local_subscription_id,
@@ -494,7 +499,8 @@ where
                 let (shape, binding, _) = self
                     .node
                     .node
-                    .borrow_mut()
+                    .lock()
+                    .await
                     .prepare_query_binding_for_link_in_authorization_mode(
                         &prepared.shape,
                         &prepared.binding,
@@ -545,20 +551,24 @@ where
             if let Some(maintained) = maintained_subscription.as_mut() {
                 self.node
                     .node
-                    .borrow()
+                    .lock()
+                    .await
                     .seed_local_maintained_authoritative_generation(maintained, binding_view_key);
             }
         }
-        let settled = subscription_is_settled(
-            &self.node.node.borrow(),
-            &self.node.active_authority_view_receipts,
-            &state_shape,
-            &state_binding,
-            settled_tier,
-            opts.read_view.clone(),
-            remote_propagate_upstream,
-            requires_authority_receipt,
-        );
+        let settled = {
+            let node = self.node.node.lock().await;
+            subscription_is_settled(
+                &node,
+                &self.node.active_authority_view_receipts,
+                &state_shape,
+                &state_binding,
+                settled_tier,
+                opts.read_view.clone(),
+                remote_propagate_upstream,
+                requires_authority_receipt,
+            )
+        };
         // An empty local opening carries no observable result information at
         // an Edge/Global request.  Until the authority replies, publishing it
         // would let a public subscription report a provisional empty view as
@@ -589,7 +599,7 @@ where
                 binding: state_binding,
                 maintained_subscription,
             },
-            groove_runtime_token: self.node.node.borrow().groove_runtime_token(),
+            groove_runtime_token: self.node.node.lock().await.groove_runtime_token(),
             local_subscription_cleanup,
             propagates_upstream,
             author,
@@ -649,13 +659,13 @@ where
         })
     }
 
-    fn validate_prepared_shape_for_registration(
+    async fn validate_prepared_shape_for_registration(
         &self,
         prepared: &PreparedQuery,
     ) -> Result<(), Error> {
         let ast = ShapeAst::from_validated(&prepared.shape);
         let validation = {
-            let node = self.node.node.borrow();
+            let node = self.node.node.lock().await;
             validate_shape_ast_for_registration(&node, prepared.shape.shape_id(), &ast)
         };
         validation.map(|_| ()).map_err(Error::from)
