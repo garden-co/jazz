@@ -362,7 +362,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const config = Buffer.from(
       openConfig(
         deterministicBytes("jazz-napi-native-runtime:retained-view-node"),
-        deterministicBytes("jazz-napi-native-runtime:retained-view-author"),
+        testAuthorBytes("jazz-napi-native-runtime:retained-view-author"),
         1,
         true,
       ),
