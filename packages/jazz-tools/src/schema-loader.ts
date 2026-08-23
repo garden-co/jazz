@@ -196,7 +196,9 @@ function wasmSchemaToAst(wasmSchema: WasmSchema): Schema {
   };
 }
 
-function isTypedAppLike(value: Record<string, unknown>): value is { wasmSchema: WasmSchema } {
+function isTypedAppLike(
+  value: Record<string, unknown>,
+): value is { wasmSchema: WasmSchema; schemaAst?: Schema } {
   if (!("wasmSchema" in value)) {
     return false;
   }
@@ -219,7 +221,7 @@ function schemaFromLoadedModule(loaded: Record<string, unknown>): LoadedSchemaIn
   for (const candidate of candidates) {
     if (isTypedAppLike(candidate)) {
       return {
-        schema: wasmSchemaToAst(candidate.wasmSchema),
+        schema: candidate.schemaAst ?? wasmSchemaToAst(candidate.wasmSchema),
         wasmSchema: candidate.wasmSchema,
       };
     }

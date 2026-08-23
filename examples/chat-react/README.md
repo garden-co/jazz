@@ -26,16 +26,16 @@ pnpm build              # Optional schema validation + production build
 
 **The invite flow** works in two steps: `InviteHandler` subscribes to the chat with `{ claims: { join_code: code } }` as a session override. The server matches `chat.joinCode = @session.claims.join_code` and syncs the chat row locally. Once the row is present (FK constraint satisfied), the handler inserts the `chatMembers` row and navigates to the chat.
 
-**Collaborative canvases** attach to a chat. Strokes are rows, synced in real time. Delete access is scoped to `{ ownerId: session.user_id }`; the canvas component has no explicit access checks.
+**Collaborative canvases** attach to a chat. Strokes are rows, synced in real time. Delete access is scoped to `{ $createdBy: session.user_id }`; the canvas component has no explicit access checks.
 
 ## Schema
 
 Defined in `schema.ts` using the Jazz typed schema DSL. Running `pnpm build` validates `schema.ts` before the production build; the app imports the typed `app` export directly from that file.
 
 - **profiles** — userId, name, avatar
-- **chats** — isPublic, createdBy, joinCode (nullable — set for private chats)
+- **chats** — isPublic, joinCode (nullable — set for private chats); authorship comes from `$createdBy`
 - **chatMembers** — chat (ref), userId, joinCode
-- **messages** — chat (ref), text, sender (ref), senderId, createdAt
+- **messages** — chat (ref), text, sender (ref), senderId; display order/time comes from `$createdAt`
 - **reactions** — message (ref), userId, emoji
-- **canvases** — chat (ref), createdAt
-- **strokes** — canvas (ref), ownerId, color, width, pointsJson, createdAt
+- **canvases** — chat (ref)
+- **strokes** — canvas (ref), color, width, pointsJson; authorship/time comes from `$createdBy`/`$createdAt`

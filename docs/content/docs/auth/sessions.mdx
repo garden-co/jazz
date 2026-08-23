@@ -134,6 +134,12 @@ Use whatever column fits your schema&hairsp;—&hairsp;`owner_id`, `author_id`, 
 Jazz also records authorship and edit times through the edit metadata magic columns `$createdBy`,
 `$createdAt`, `$updatedBy`, and `$updatedAt`.
 
+Do not declare `createdAt`, `createdBy`, `updatedAt`, or `updatedBy` merely to model that same
+metadata: use these `$...` columns in queries, ordering, and permissions, and let Jazz stamp writes.
+`jazz-tools validate` points out those conventional duplicates. If importing an external system whose
+field really has one of those names, mark that one field explicitly with
+`s.allowExternalProvenanceName(...)`.
+
 See [Queries](/docs/reading/queries#edit-metadata-columns) for how to select and filter on these
 columns.
 

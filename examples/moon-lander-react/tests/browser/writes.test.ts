@@ -128,7 +128,7 @@ function makeDeposit(overrides: Partial<FuelDeposit> & { fuelType: string }): Fu
   return {
     id: `dep-${overrides.fuelType}-${Math.random().toString(36).slice(2, 6)}`,
     positionX: Math.floor(Math.random() * MOON_SURFACE_WIDTH),
-    createdAt: 1000,
+    spawnedAtSeconds: 1000,
     collected: false,
     collectedBy: "",
     ...overrides,
@@ -214,7 +214,7 @@ describe("reconcileDeposits", () => {
     const { db, inserts, updates } = mockDb();
 
     // Only 1 circle deposit exists, all other types have 0
-    const existing = [makeDeposit({ fuelType: "circle", createdAt: 1000 })];
+    const existing = [makeDeposit({ fuelType: "circle", spawnedAtSeconds: 1000 })];
 
     // Targets: DEPOSITS_PER_TYPE (3) for each type
     const limits = FUEL_TYPES.map(() => DEPOSITS_PER_TYPE);
@@ -250,7 +250,7 @@ describe("reconcileDeposits", () => {
     const existing: FuelDeposit[] = [];
     for (const ft of FUEL_TYPES) {
       for (let i = 0; i < DEPOSITS_PER_TYPE; i++) {
-        existing.push(makeDeposit({ fuelType: ft, createdAt: 1000 + i }));
+        existing.push(makeDeposit({ fuelType: ft, spawnedAtSeconds: 1000 + i }));
       }
     }
 
@@ -268,21 +268,21 @@ describe("reconcileDeposits", () => {
   //   uncollected: [circle x5]   target: [circle x3]
   //                               → marks 2 newest circles as collected
   //
-  //   createdAt:  10  20  30  40  50
+  //   spawnedAtSeconds:  10  20  30  40  50
   //                              ^^  ^^  ← trimmed (newest first)
   // =========================================================================
 
   it("trims excess deposits by marking newest as collected", async () => {
     const { db, inserts, updates } = mockDb();
 
-    // 5 circle deposits with ascending createdAt
+    // 5 circle deposits with ascending spawnedAtSeconds
     const circles: FuelDeposit[] = [];
     for (let i = 0; i < 5; i++) {
       circles.push(
         makeDeposit({
           fuelType: "circle",
           id: `circle-${i}`,
-          createdAt: 100 + i * 10,
+          spawnedAtSeconds: 100 + i * 10,
         }),
       );
     }
@@ -292,7 +292,7 @@ describe("reconcileDeposits", () => {
     for (const ft of FUEL_TYPES) {
       if (ft === "circle") continue;
       for (let i = 0; i < DEPOSITS_PER_TYPE; i++) {
-        existing.push(makeDeposit({ fuelType: ft, createdAt: 1000 + i }));
+        existing.push(makeDeposit({ fuelType: ft, spawnedAtSeconds: 1000 + i }));
       }
     }
 
@@ -304,10 +304,10 @@ describe("reconcileDeposits", () => {
     expect(inserts.length).toBe(0);
     expect(updates.length).toBe(2);
 
-    // Trimmed deposits should be the two newest (createdAt 140, 130)
+    // Trimmed deposits should be the two newest (spawnedAtSeconds 140, 130)
     const trimmedIds = updates.map((u) => u.id);
-    expect(trimmedIds).toContain("circle-4"); // createdAt 140
-    expect(trimmedIds).toContain("circle-3"); // createdAt 130
+    expect(trimmedIds).toContain("circle-4"); // spawnedAtSeconds 140
+    expect(trimmedIds).toContain("circle-3"); // spawnedAtSeconds 130
 
     // Each trimmed deposit gets marked as collected with sentinel
     for (const upd of updates) {
@@ -334,15 +334,15 @@ describe("reconcileDeposits", () => {
       if (ft === "circle") {
         // 5 circles — 2 excess
         for (let i = 0; i < 5; i++) {
-          existing.push(makeDeposit({ fuelType: ft, id: `c-${i}`, createdAt: 100 + i }));
+          existing.push(makeDeposit({ fuelType: ft, id: `c-${i}`, spawnedAtSeconds: 100 + i }));
         }
       } else if (ft === "triangle") {
         // 1 triangle — 2 short
-        existing.push(makeDeposit({ fuelType: ft, createdAt: 500 }));
+        existing.push(makeDeposit({ fuelType: ft, spawnedAtSeconds: 500 }));
       } else {
         // Exactly at target
         for (let i = 0; i < DEPOSITS_PER_TYPE; i++) {
-          existing.push(makeDeposit({ fuelType: ft, createdAt: 1000 + i }));
+          existing.push(makeDeposit({ fuelType: ft, spawnedAtSeconds: 1000 + i }));
         }
       }
     }

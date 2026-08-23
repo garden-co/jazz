@@ -94,6 +94,7 @@ interface ColumnBuilder {
   _sqlType: SqlType;
   _references: string | undefined;
   _transform?: ColumnTransform<unknown, unknown>;
+  _allowExternalProvenanceName?: true;
 }
 
 type MergeStrategyColumnType = {
@@ -172,6 +173,22 @@ export type AnyTypedColumnBuilder = Omit<
   readonly __jazzHasDefault: boolean;
   readonly __jazzValue: unknown;
 };
+
+/**
+ * Acknowledge that a conventional provenance name is imported domain data,
+ * not Jazz's authenticated `$createdAt`/`$createdBy` metadata. Use sparingly.
+ */
+export function allowExternalProvenanceName<T extends AnyTypedColumnBuilder>(column: T): T {
+  (column as unknown as { _allowExternalProvenanceName?: true })._allowExternalProvenanceName =
+    true;
+  return column;
+}
+
+export function hasExternalProvenanceNameAllowance(column: {
+  _allowExternalProvenanceName?: true;
+}): boolean {
+  return column._allowExternalProvenanceName === true;
+}
 export type ColumnBuilderSqlType<TBuilder extends AnyTypedColumnBuilder> =
   TBuilder["__jazzSqlType"];
 export type ColumnBuilderOptional<TBuilder extends AnyTypedColumnBuilder> =
@@ -992,7 +1009,9 @@ export function table<const T extends Record<string, ColumnBuilder>>(
   for (const [colName, builder] of Object.entries(columns as Record<string, ColumnBuilder>)) {
     validateReferenceColumnName(colName, builder);
     assertUserColumnNameAllowed(colName);
-    cols.push(builder._build(colName));
+    const column = builder._build(colName);
+    if (hasExternalProvenanceNameAllowance(builder)) column.allowExternalProvenanceName = true;
+    cols.push(column);
   }
   collectedTables.push({
     name,

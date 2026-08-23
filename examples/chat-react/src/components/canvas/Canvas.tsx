@@ -56,19 +56,20 @@ export function CollaborativeCanvas({
   }, [profiles]);
 
   // Fetch all strokes for this canvas
-  const { data: allStrokes = [] } = useAll(app.strokes.where({ canvasId }));
+  const { data: allStrokes = [] } = useAll(
+    app.strokes.select("*", "$createdBy").where({ canvasId }),
+  );
 
-  // Group strokes by ownerId
+  // Group strokes by Jazz-authenticated author.
   const strokesByOwner: Record<string, StrokeData[]> = {};
   for (const s of allStrokes) {
-    if (!strokesByOwner[s.ownerId]) strokesByOwner[s.ownerId] = [];
+    if (!strokesByOwner[s.$createdBy]) strokesByOwner[s.$createdBy] = [];
     const points: Point[] = JSON.parse(s.pointsJson);
-    strokesByOwner[s.ownerId].push({
+    strokesByOwner[s.$createdBy].push({
       id: s.id,
       points,
       color: s.color,
       width: s.width,
-      createdAt: new Date(s.createdAt),
     });
   }
 
@@ -120,7 +121,6 @@ export function CollaborativeCanvas({
       points: [point],
       color: mode === "draw" ? myColor : "#ffffff",
       width: mode === "draw" ? STROKE_WIDTH : ERASER_WIDTH,
-      createdAt: new Date(),
     };
 
     currentStrokeRef.current = newStroke;
@@ -162,11 +162,9 @@ export function CollaborativeCanvas({
       fireAndReport(
         db.insert(app.strokes, {
           canvasId,
-          ownerId: userId,
           color: stroke.color,
           width: stroke.width,
           pointsJson: JSON.stringify(stroke.points),
-          createdAt: stroke.createdAt,
         }),
         "failed to save stroke",
       );
@@ -179,7 +177,7 @@ export function CollaborativeCanvas({
 
   const handleClearMyStrokes = () => {
     if (!userId) return;
-    const myStrokes = allStrokes.filter((s) => s.ownerId === userId);
+    const myStrokes = allStrokes.filter((s) => s.$createdBy === userId);
     for (const s of myStrokes) {
       fireAndReport(db.delete(app.strokes, s.id), "failed to delete stroke");
     }

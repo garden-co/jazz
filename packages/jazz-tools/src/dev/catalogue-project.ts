@@ -15,6 +15,7 @@ import type { WasmSchema } from "../drivers/types.js";
 import type { DefinedMigration } from "../migrations.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
 import { collectMissingExplicitPolicyDiagnostics } from "../schema-permissions.js";
+import { collectConventionalProvenanceDiagnostics } from "../provenance-guidance.js";
 import {
   fetchPermissionsHead,
   fetchSchemaConnectivity,
@@ -126,11 +127,11 @@ export interface DeployOptions extends CatalogueProjectOptions {
   noVerify?: boolean;
 }
 
-interface ValidateProjectOptions {
+export interface ValidateProjectOptions {
   schemaDir: string;
 }
 
-interface ValidateProjectResult {
+export interface ValidateProjectResult {
   schemaFile: string;
   permissionsFile?: string;
   tableCount: number;
@@ -251,10 +252,13 @@ export async function validateProject(
     schemaFile: compiled.schemaFile,
     permissionsFile: compiled.permissionsFile,
     tableCount: compiled.schema.tables.length,
-    warnings: collectMissingExplicitPolicyDiagnostics(
-      compiled.schema.tables.map((table) => table.name),
-      compiled.permissions,
-    ).map((diagnostic) => diagnostic.message),
+    warnings: [
+      ...collectConventionalProvenanceDiagnostics(compiled.schema),
+      ...collectMissingExplicitPolicyDiagnostics(
+        compiled.schema.tables.map((table) => table.name),
+        compiled.permissions,
+      ).map((diagnostic) => diagnostic.message),
+    ],
   };
 }
 

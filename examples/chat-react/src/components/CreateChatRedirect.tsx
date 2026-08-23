@@ -27,7 +27,6 @@ export const CreateChatRedirect = () => {
       const chatWrite = await Promise.resolve(
         db.insert(app.chats, {
           isPublic: true,
-          createdBy: userId,
         }),
       );
       const chat = chatWrite.value;
@@ -43,7 +42,6 @@ export const CreateChatRedirect = () => {
           chatId: chat.id,
           text: "Hello world",
           senderId: myProfile.id,
-          createdAt: new Date(),
         }),
         sharedWriteOptions,
       );

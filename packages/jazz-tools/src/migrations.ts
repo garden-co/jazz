@@ -4,6 +4,7 @@ import type {
   ColumnBuilderReferences,
   ColumnBuilderSqlType,
 } from "./dsl.js";
+import { hasExternalProvenanceNameAllowance } from "./dsl.js";
 import { assertUserColumnNameAllowed } from "./magic-columns.js";
 import type {
   AddOp,
@@ -536,7 +537,11 @@ function tableDefinitionToAst(
     name: tableName,
     columns: Object.entries(columnsDefinition).map(([columnName, builder]) => {
       assertUserColumnNameAllowed(columnName);
-      return builder._build(columnName);
+      const column = builder._build(columnName);
+      if (hasExternalProvenanceNameAllowance(builder)) {
+        column.allowExternalProvenanceName = true;
+      }
+      return column;
     }),
     ...(indexedColumns ? { indexedColumns } : {}),
     ...(branchBy ? { branchBy } : {}),

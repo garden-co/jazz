@@ -124,9 +124,10 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   const canReadChatContents = chatKnown || membershipReady;
   const { data: messages = [] } = useAll(
     app.messages
+      .select("*", "$createdAt")
       .where({ chatId: canReadChatContents ? chatId : "00000000-0000-0000-0000-000000000000" })
       .include({ sender: true })
-      .orderBy("createdAt", "desc")
+      .orderBy("$createdAt", "desc")
       .limit(showNLastMessages + 1),
   );
 

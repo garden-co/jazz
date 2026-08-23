@@ -13,3 +13,9 @@ schema lineage and migration conventions; do not create a migration format of yo
 
 Check the generated public types before choosing relation names or policy-builder syntax. A
 permission policy is the enforcement boundary; UI checks are not a substitute.
+
+Do not declare `createdAt`, `createdBy`, `updatedAt`, or `updatedBy` to duplicate Jazz provenance.
+Jazz supplies `$createdAt`, `$createdBy`, `$updatedAt`, and `$updatedBy` for queries, ordering, and
+permissions, and stamps them on writes. Use a domain-specific name such as `publishedAt` only when
+the field has distinct application semantics. Imported records that must preserve an external
+system's conventional field name can use `s.allowExternalProvenanceName(...)` explicitly.
