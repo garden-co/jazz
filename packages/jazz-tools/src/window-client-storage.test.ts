@@ -69,8 +69,8 @@ describe("registerWindowJazzStorageClient", () => {
 
     expect(window.__jazz?.listLiveStorageNamespaces()).toEqual([
       "chat-app",
-      "chat-app::alice%40example.com",
-      "chat-app::bob%40example.com",
+      "chat-app::%5B%22https%3A%2F%2Fissuer.example%22%2C%22alice%40example.com%22%5D",
+      "chat-app::%5B%22https%3A%2F%2Fissuer.example%22%2C%22bob%40example.com%22%5D",
     ]);
 
     unregisterExternal();
