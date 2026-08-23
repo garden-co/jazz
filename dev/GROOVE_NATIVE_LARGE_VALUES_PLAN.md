@@ -412,8 +412,9 @@ large-value accounting.
    operations through NAPI
    using an async source, per-chunk backpressure, cancellation, and a bounded-V8
    temporary-file spool; infer the physical kind from the runtime schema and
-   preserve ordinary identity, branch-view, and timestamp context. Add
-   the browser/WASM bridge only when it preserves that contract without whole-
+   preserve ordinary identity, branch-view, and timestamp context. WASM uses a
+   resumable Groove push preparation with awaited per-chunk persistence and
+   incremental JSON validation, preserving the same contract without whole-
    value buffering. Keep streaming query deferred until the primitive query
    machinery proves insufficient; do not require an object-like mutable handle.
 7. Document bearer-locator limitations and operational proxy requirements.

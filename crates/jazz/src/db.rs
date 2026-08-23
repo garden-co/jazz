@@ -1565,7 +1565,7 @@ impl Drop for PermissionAdviceFuture {
 mod catalogue;
 mod lifecycle;
 mod mutations;
-pub use mutations::StreamingMutationKind;
+pub use mutations::{StreamingMutationKind, StreamingValueUpload};
 mod reads;
 mod subscriptions;
 mod transactions;

@@ -15,6 +15,18 @@ pub enum StreamingMutationKind {
     Upsert,
 }
 
+type PushPreparation = groove::large_values::PushStreamingPreparation<
+    Box<dyn FnMut(groove::large_values::ContentHash) -> groove::large_values::Locator>,
+    Box<dyn FnMut(groove::large_values::StagedChunk) -> Result<(), groove::large_values::Error>>,
+>;
+
+/// Resumable host-driven upload used by asynchronous bindings such as WASM.
+pub struct StreamingValueUpload {
+    id: groove::large_values::StagedLargeValueId,
+    preparation: Option<PushPreparation>,
+    emitted: Rc<RefCell<Vec<groove::large_values::StagedChunk>>>,
+}
+
 fn large_value_cell_type_error(table: &str, column: &str) -> Error {
     Error::new(
         ErrorCode::Schema,
@@ -528,6 +540,112 @@ where
     where
         R: std::io::Read + Send + 'static,
     {
+        let nullable = self.validate_streaming_column(table, &cells, column, kind)?;
+        let (staged, _) = self
+            .node
+            .node
+            .lock()
+            .await
+            .prepare_and_stage_large_value_streaming(kind, reader)
+            .await?;
+        self.publish_streaming_value_with_id(
+            mutation, table, row, cells, column, staged, nullable, identity, now_ms, head, base,
+        )
+        .await
+    }
+
+    /// Begin a resumable push preparation without retaining the logical value.
+    pub fn begin_streaming_value_upload(
+        &self,
+        table: &str,
+        cells: &RowCells,
+        column: &str,
+        kind: groove::large_values::LargeValueKind,
+    ) -> Result<StreamingValueUpload, Error> {
+        self.validate_streaming_column(table, cells, column, kind)?;
+        let emitted = Rc::new(RefCell::new(Vec::new()));
+        let emitted_for_stage = Rc::clone(&emitted);
+        let preparation = groove::large_values::PushStreamingPreparation::new(
+            kind,
+            Box::new(|_| groove::large_values::Locator(uuid::Uuid::new_v4().as_bytes().to_vec()))
+                as Box<dyn FnMut(_) -> _>,
+            Box::new(move |chunk| {
+                emitted_for_stage.borrow_mut().push(chunk);
+                Ok(())
+            }) as Box<dyn FnMut(_) -> _>,
+        );
+        Ok(StreamingValueUpload {
+            id: groove::large_values::StagedLargeValueId(*uuid::Uuid::new_v4().as_bytes()),
+            preparation: Some(preparation),
+            emitted,
+        })
+    }
+
+    /// Feed one host chunk and durably stage every tree node finalized by it.
+    pub async fn push_streaming_value_upload(
+        &self,
+        upload: &mut StreamingValueUpload,
+        bytes: &[u8],
+    ) -> Result<(), Error> {
+        upload
+            .preparation
+            .as_mut()
+            .ok_or_else(|| Error::new(ErrorCode::Schema, "streaming upload is closed"))?
+            .push(bytes)
+            .map_err(crate::node::Error::from)?;
+        let chunks = std::mem::take(&mut *upload.emitted.borrow_mut());
+        self.node
+            .node
+            .lock()
+            .await
+            .stage_large_value_chunk_batch(upload.id, chunks)
+            .await?;
+        Ok(())
+    }
+
+    /// Finish a resumable upload and publish its ordinary row mutation.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn finish_streaming_value_upload(
+        &self,
+        mut upload: StreamingValueUpload,
+        mutation: StreamingMutationKind,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        column: &str,
+        identity: Option<AuthorId>,
+        now_ms: Option<u64>,
+        head: Option<BranchSelector>,
+        base: Option<BranchViewBase>,
+    ) -> Result<WriteHandle<S>, Error> {
+        let preparation = upload
+            .preparation
+            .take()
+            .ok_or_else(|| Error::new(ErrorCode::Schema, "streaming upload is closed"))?;
+        let (value_ref, _) = preparation.finish().map_err(crate::node::Error::from)?;
+        let chunks = std::mem::take(&mut *upload.emitted.borrow_mut());
+        let staged = {
+            let node = self.node.node.lock().await;
+            node.stage_large_value_chunk_batch(upload.id, chunks)
+                .await?;
+            node.finalize_large_value_upload(upload.id, value_ref)
+                .await?
+        };
+        let nullable =
+            self.validate_streaming_column(table, &cells, column, staged.value_ref.kind)?;
+        self.publish_streaming_value_with_id(
+            mutation, table, row, cells, column, staged, nullable, identity, now_ms, head, base,
+        )
+        .await
+    }
+
+    fn validate_streaming_column(
+        &self,
+        table: &str,
+        cells: &RowCells,
+        column: &str,
+        kind: groove::large_values::LargeValueKind,
+    ) -> Result<bool, Error> {
         if cells.contains_key(column) {
             return Err(Error::new(
                 ErrorCode::Schema,
@@ -562,13 +680,24 @@ where
         if !kind_matches {
             return Err(large_value_cell_type_error(table, column));
         }
-        let (staged, _) = self
-            .node
-            .node
-            .lock()
-            .await
-            .prepare_and_stage_large_value_streaming(kind, reader)
-            .await?;
+        Ok(nullable)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn publish_streaming_value_with_id(
+        &self,
+        mutation: StreamingMutationKind,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        column: &str,
+        staged: groove::large_values::StagedLargeValue,
+        nullable: bool,
+        identity: Option<AuthorId>,
+        now_ms: Option<u64>,
+        head: Option<BranchSelector>,
+        base: Option<BranchViewBase>,
+    ) -> Result<WriteHandle<S>, Error> {
         let made_by = identity.unwrap_or(self.identity.author);
         let permission_subject = identity;
         let branch = head.clone().unwrap_or_default();

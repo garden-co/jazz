@@ -1,6 +1,9 @@
 //! Canonical indirect representation for large logical scalar values.
 
 use serde::{Deserialize, Serialize};
+
+mod json_syntax;
+use json_syntax::StreamingJsonValidator;
 use thiserror::Error;
 
 use crate::chunks::ChunkRequest;
@@ -307,47 +310,55 @@ pub fn prepare_streaming<R: std::io::Read>(
     locator_for: impl FnMut(ContentHash) -> Locator,
     stage: impl FnMut(StagedChunk) -> Result<(), Error>,
 ) -> Result<(LargeValueRef, StreamingPrepareStats), Error> {
-    let mut builder = StreamingTreeBuilder::new(kind, locator_for, stage);
-    if kind == LargeValueKind::Json {
-        let mut input = StreamingBuilderReader {
-            reader: &mut reader,
-            builder: &mut builder,
-        };
-        let mut deserializer = serde_json::Deserializer::from_reader(&mut input);
-        serde::de::IgnoredAny::deserialize(&mut deserializer).map_err(|_| Error::InvalidJson)?;
-        deserializer.end().map_err(|_| Error::InvalidJson)?;
-    } else {
-        let mut read_buffer = vec![0_u8; LEAF_MIN_BYTES];
-        loop {
-            let count = reader
-                .read(&mut read_buffer)
-                .map_err(|_| Error::MalformedScalar)?;
-            if count == 0 {
-                break;
-            }
-            builder.feed(&read_buffer[..count])?;
+    let mut builder = PushStreamingPreparation::new(kind, locator_for, stage);
+    let mut read_buffer = vec![0_u8; LEAF_MIN_BYTES];
+    loop {
+        let count = reader
+            .read(&mut read_buffer)
+            .map_err(|_| Error::MalformedScalar)?;
+        if count == 0 {
+            break;
         }
+        builder.push(&read_buffer[..count])?;
     }
     builder.finish()
 }
 
-struct StreamingBuilderReader<'a, R, L, S> {
-    reader: &'a mut R,
-    builder: &'a mut StreamingTreeBuilder<L, S>,
-}
-
-impl<R, L, S> std::io::Read for StreamingBuilderReader<'_, R, L, S>
+/// Resumable, bounded-memory construction of a canonical large-value tree.
+/// Hosts may persist chunks from `stage` between calls to [`Self::push`].
+pub struct PushStreamingPreparation<L, S>
 where
-    R: std::io::Read,
     L: FnMut(ContentHash) -> Locator,
     S: FnMut(StagedChunk) -> Result<(), Error>,
 {
-    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        let count = self.reader.read(buffer)?;
-        self.builder
-            .feed(&buffer[..count])
-            .map_err(std::io::Error::other)?;
-        Ok(count)
+    builder: StreamingTreeBuilder<L, S>,
+    json: Option<StreamingJsonValidator>,
+}
+
+impl<L, S> PushStreamingPreparation<L, S>
+where
+    L: FnMut(ContentHash) -> Locator,
+    S: FnMut(StagedChunk) -> Result<(), Error>,
+{
+    pub fn new(kind: LargeValueKind, locator_for: L, stage: S) -> Self {
+        Self {
+            builder: StreamingTreeBuilder::new(kind, locator_for, stage),
+            json: (kind == LargeValueKind::Json).then(StreamingJsonValidator::new),
+        }
+    }
+
+    pub fn push(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        if let Some(json) = &mut self.json {
+            json.push(bytes).map_err(|()| Error::InvalidJson)?;
+        }
+        self.builder.feed(bytes)
+    }
+
+    pub fn finish(self) -> Result<(LargeValueRef, StreamingPrepareStats), Error> {
+        if let Some(json) = self.json {
+            json.finish().map_err(|()| Error::InvalidJson)?;
+        }
+        self.builder.finish()
     }
 }
 
@@ -3215,6 +3226,25 @@ mod tests {
                 assert!(stats.peak_frontier_nodes <= BRANCH_MAX_CHILDREN * MAX_TREE_DEPTH);
             }
         }
+    }
+
+    #[test]
+    fn push_streaming_json_does_not_buffer_one_large_string_token() {
+        let bytes = format!("{{\"body\":\"{}\"}}", "x".repeat(LEAF_MAX_BYTES * 8)).into_bytes();
+        let expected = prepare(LargeValueKind::Json, &bytes, deterministic_locator).unwrap();
+        let mut staged = Vec::new();
+        let mut preparation =
+            PushStreamingPreparation::new(LargeValueKind::Json, deterministic_locator, |chunk| {
+                staged.push(chunk);
+                Ok(())
+            });
+        for byte in &bytes {
+            preparation.push(std::slice::from_ref(byte)).unwrap();
+        }
+        let (actual, stats) = preparation.finish().unwrap();
+        assert_eq!(actual, expected.value_ref);
+        assert!(stats.peak_leaf_buffer_bytes <= LEAF_MAX_BYTES + 1);
+        assert_eq!(staged.len(), expected.staged_chunks.len());
     }
 
     #[test]

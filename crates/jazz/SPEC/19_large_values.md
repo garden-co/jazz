@@ -410,11 +410,13 @@ root in the same ordinary row-version commit.
 The NAPI adapter implements that async contract with an unlink-on-drop temporary
 file. Each host chunk is copied once into the spool before the producer is
 allowed to advance; `finish` passes a native reader plus the ordinary mutation
-context to Jazz and `abort` drops
-the spool without staging a root. This bounds V8 memory, preserves producer
-backpressure, and avoids holding a Jazz transaction open while JavaScript is
-producing data. Browser/WASM support remains open: it requires an equivalent
-async producer bridge without first collecting the complete logical value.
+context to Jazz and `abort` drops the spool without staging a root. Browser/WASM
+uses Groove's resumable push constructor instead: each awaited `push` advances
+content-defined chunking, incrementally validates UTF-8/JSON syntax, persists
+finalized nodes under a pending upload, and releases the producer only after
+that persistence completes. `finish` registers the validated root and performs
+the same ordinary Jazz mutation lifecycle. Neither binding collects the whole
+logical value or holds a Jazz transaction open while JavaScript produces data.
 
 NAPI and WASM preserve the existing encoded-row boundary and copy completed
 results into host-owned buffers. No chunk lease crosses either binding. Complete
@@ -439,6 +441,3 @@ leases, retry tokens, partially materialized handles, or Groove request state.
 - Whether a future multipart/handle binding protocol should expose chunk-backed
   `Blob`/bytes results. It is outside the current design and would require host
   finalizers, external-memory accounting and lease-aware backpressure.
-- The WASM implementation of the established asynchronous streaming-create
-  contract. It must preserve cancellation and producer backpressure without
-  buffering the complete logical value.

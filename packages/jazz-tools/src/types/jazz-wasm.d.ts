@@ -32,6 +32,12 @@ declare module "jazz-wasm" {
     close(): boolean;
   }
 
+  export class StreamingMutation {
+    push(chunk: Uint8Array): Promise<void>;
+    finish(): Promise<WasmWrite>;
+    abort(): boolean;
+  }
+
   export class WasmTransport {
     sendWireFrame(frame: Uint8Array): void;
     recvWireFrames(): Uint8Array[];
@@ -79,6 +85,18 @@ declare module "jazz-wasm" {
       maxAgeMs?: number | null,
     ): void;
     evictExpiredStagedLargeValues(): Promise<number>;
+    beginStreamingMutationEncoded(
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      column: string,
+      kind: "Text" | "Json" | "Bytea",
+      mutation?: "insert" | "update" | "upsert",
+      author?: Uint8Array,
+      updatedAtMs?: number,
+      head?: unknown,
+      base?: unknown,
+    ): StreamingMutation;
     readValueRange(
       table: string,
       rowId: Uint8Array,

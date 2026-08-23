@@ -13,8 +13,8 @@ use jazz::db::{
     block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, ExclusiveTxOps,
     InitialSyncFlushCadence, LocalUpdates, MergeableTxOps, MutationErrorCallback, PeerConnection,
     PermissionAdvice, PreparedQuery, Propagation, QueryAttachment, ReadOpts, RowCells,
-    SeededRowIdSource, SubscriptionEvent, TickScheduler, TickUrgency, WireTransportAdapter,
-    WriteHandle,
+    SeededRowIdSource, StreamingMutationKind, StreamingValueUpload, SubscriptionEvent,
+    TickScheduler, TickUrgency, WireTransportAdapter, WriteHandle,
 };
 use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 #[cfg(target_arch = "wasm32")]
@@ -208,6 +208,106 @@ pub struct WasmWrite {
     payload: Vec<u8>,
     batch_id: TransactionId,
     inner: Option<WasmWriteInner>,
+}
+
+struct WasmStreamingMutationState {
+    db: WasmDbInner,
+    upload: StreamingValueUpload,
+    mutation: StreamingMutationKind,
+    table: String,
+    row_id: RowUuid,
+    cells: RowCells,
+    column: String,
+    identity: Option<AuthorId>,
+    updated_at_ms: Option<u64>,
+    head: Option<BranchSelector>,
+    base: Option<BranchViewBase>,
+}
+
+#[wasm_bindgen(js_name = StreamingMutation)]
+pub struct WasmStreamingMutation {
+    state: Rc<RefCell<Option<WasmStreamingMutationState>>>,
+}
+
+#[wasm_bindgen]
+impl WasmStreamingMutation {
+    pub fn push(&self, chunk: Vec<u8>) -> js_sys::Promise {
+        let state_cell = Rc::clone(&self.state);
+        future_to_promise(async move {
+            let mut state = state_cell
+                .borrow_mut()
+                .take()
+                .ok_or_else(|| JsValue::from_str("streaming mutation is closed"))?;
+            let result = match &state.db {
+                WasmDbInner::Memory(db) => {
+                    db.push_streaming_value_upload(&mut state.upload, &chunk)
+                        .await
+                }
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => {
+                    db.push_streaming_value_upload(&mut state.upload, &chunk)
+                        .await
+                }
+                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+            };
+            result.map_err(to_js_error)?;
+            *state_cell.borrow_mut() = Some(state);
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
+    pub fn finish(&self) -> js_sys::Promise {
+        let state_cell = Rc::clone(&self.state);
+        future_to_promise(async move {
+            let state = state_cell
+                .borrow_mut()
+                .take()
+                .ok_or_else(|| JsValue::from_str("streaming mutation is closed"))?;
+            let write = match &state.db {
+                WasmDbInner::Memory(db) => wasm_write_memory(
+                    Rc::clone(db),
+                    db.finish_streaming_value_upload(
+                        state.upload,
+                        state.mutation,
+                        &state.table,
+                        state.row_id,
+                        state.cells,
+                        &state.column,
+                        state.identity,
+                        state.updated_at_ms,
+                        state.head,
+                        state.base,
+                    )
+                    .await
+                    .map_err(to_js_error)?,
+                ),
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => wasm_write_browser(
+                    Rc::clone(db),
+                    db.finish_streaming_value_upload(
+                        state.upload,
+                        state.mutation,
+                        &state.table,
+                        state.row_id,
+                        state.cells,
+                        &state.column,
+                        state.identity,
+                        state.updated_at_ms,
+                        state.head,
+                        state.base,
+                    )
+                    .await
+                    .map_err(to_js_error)?,
+                ),
+                WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
+            }?;
+            Ok(write.into())
+        })
+    }
+
+    pub fn abort(&self) -> bool {
+        self.state.borrow_mut().take().is_some()
+    }
 }
 
 enum WasmWriteInner {
@@ -2570,6 +2670,84 @@ impl WasmDb {
             }
             .map_err(to_js_error)?;
             Ok(JsValue::from_f64(evicted as f64))
+        })
+    }
+
+    #[wasm_bindgen(js_name = beginStreamingMutationEncoded)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_streaming_mutation_encoded(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        cells: Vec<u8>,
+        column: String,
+        kind: String,
+        mutation: Option<String>,
+        author: Option<Vec<u8>>,
+        updated_at_ms: Option<f64>,
+        head: Option<JsValue>,
+        base: Option<JsValue>,
+    ) -> Result<WasmStreamingMutation, JsValue> {
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let cells = decode_cells(&cells)?;
+        let kind = match kind.as_str() {
+            "Text" => jazz::groove::large_values::LargeValueKind::String,
+            "Json" => jazz::groove::large_values::LargeValueKind::Json,
+            "Bytea" => jazz::groove::large_values::LargeValueKind::Bytes,
+            _ => {
+                return Err(JsValue::from_str(
+                    "streaming kind must be Text, Json, or Bytea",
+                ));
+            }
+        };
+        let mutation = match mutation.as_deref().unwrap_or("insert") {
+            "insert" => StreamingMutationKind::Insert,
+            "update" => StreamingMutationKind::Update,
+            "upsert" => StreamingMutationKind::Upsert,
+            _ => return Err(JsValue::from_str("unknown streaming mutation kind")),
+        };
+        let identity = author.as_deref().map(author_id_from_bytes).transpose()?;
+        let updated_at_ms = updated_at_ms
+            .map(|value| checked_js_u64(value, "updatedAtMs"))
+            .transpose()?;
+        let head = head
+            .filter(|value| !value.is_null() && !value.is_undefined())
+            .map(|value| serde_wasm_bindgen::from_value(value).map_err(to_js_error))
+            .transpose()?;
+        let base = base
+            .filter(|value| !value.is_null() && !value.is_undefined())
+            .map(|value| serde_wasm_bindgen::from_value(value).map_err(to_js_error))
+            .transpose()?;
+        if base.is_some() && head.is_none() {
+            return Err(JsValue::from_str(
+                "streaming mutation base requires a branch head",
+            ));
+        }
+        let upload = match &self.inner {
+            WasmDbInner::Memory(db) => {
+                db.begin_streaming_value_upload(&table, &cells, &column, kind)
+            }
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => {
+                db.begin_streaming_value_upload(&table, &cells, &column, kind)
+            }
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        }
+        .map_err(to_js_error)?;
+        Ok(WasmStreamingMutation {
+            state: Rc::new(RefCell::new(Some(WasmStreamingMutationState {
+                db: self.inner.clone(),
+                upload,
+                mutation,
+                table,
+                row_id,
+                cells,
+                column,
+                identity,
+                updated_at_ms,
+                head,
+                base,
+            }))),
         })
     }
 

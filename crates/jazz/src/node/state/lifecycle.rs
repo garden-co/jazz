@@ -69,12 +69,9 @@ where
         // too: an empty catalogue does not make an existing Jazz store safe to
         // repurpose as an uninitialized edge.
         let meta_schema = bootstrap_schema.lower_to_groove();
-        let meta_database = Database::new_with_storage_layout(
-            meta_schema,
-            storage,
-            StorageLayout::jazz_class_v1(),
-        )
-        .await?;
+        let meta_database =
+            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v1())
+                .await?;
         let mut genesis = None;
         let mut schemas = BTreeMap::new();
         let mut bootstrap_ready = None;
@@ -321,13 +318,15 @@ where
             CatalogueBootstrapState::Uninitialized => {
                 NodeState::<BoxedStorage>::new_catalogue_uninitialized(node_uuid, storage).await?
             }
-            CatalogueBootstrapState::Ready => NodeState::<BoxedStorage>::new_with_history_complete(
-                node_uuid,
-                catalogue.schema,
-                storage,
-                history_complete,
-            )
-            .await?,
+            CatalogueBootstrapState::Ready => {
+                NodeState::<BoxedStorage>::new_with_history_complete(
+                    node_uuid,
+                    catalogue.schema,
+                    storage,
+                    history_complete,
+                )
+                .await?
+            }
         };
         reopened
             .database
@@ -481,8 +480,8 @@ where
                 );
             }
             let applied = database.apply_batch(batch).await?;
-let persisted = applied.persist().await;
-database.finish_persistence(persisted)?;
+            let persisted = applied.persist().await;
+            database.finish_persistence(persisted)?;
             schemas.insert(
                 staged.publication.schema.id,
                 staged.publication.schema.clone(),
@@ -641,7 +640,8 @@ database.finish_persistence(persisted)?;
         let started = receipt.as_ref().map(|_| Instant::now());
         #[cfg(feature = "testing")]
         if let Some(receipt) = receipt.as_deref_mut() {
-            node.rebuild_ahead_current_keys_with_receipt(receipt).await?;
+            node.rebuild_ahead_current_keys_with_receipt(receipt)
+                .await?;
         } else {
             node.rebuild_ahead_current_keys().await?;
         }
@@ -760,10 +760,7 @@ database.finish_persistence(persisted)?;
 
     /// Replace the policy-blind immutable content backend used by Groove.
     /// The backend instance and verified cache survive catalogue rebuilds.
-    pub fn set_chunk_storage(
-        &mut self,
-        storage: Rc<dyn groove::chunks::ChunkStorage>,
-    ) {
+    pub fn set_chunk_storage(&mut self, storage: Rc<dyn groove::chunks::ChunkStorage>) {
         self.database.set_chunk_storage(storage);
         self.database
             .set_missing_chunk_resolver(self.chunk_resolver.clone());
@@ -827,16 +824,17 @@ database.finish_persistence(persisted)?;
             self.database.evict_staged_large_value(newest.id).await?;
             return Err(Error::LargeValueIngressRateLimited);
         }
-        let now_ms: u64 = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now_ms: u64 = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis()
             .try_into()
             .unwrap_or(u64::MAX);
         for staged in self.database.staged_large_values().await? {
-            let expired = self.large_value_staging_policy.max_age_ms.is_some_and(|max_age| {
-                now_ms.saturating_sub(staged.created_at_ms) > max_age
-            });
+            let expired = self
+                .large_value_staging_policy
+                .max_age_ms
+                .is_some_and(|max_age| now_ms.saturating_sub(staged.created_at_ms) > max_age);
             if expired && staged.id != newest.id {
                 self.database.evict_staged_large_value(staged.id).await?;
             }
@@ -845,8 +843,8 @@ database.finish_persistence(persisted)?;
     }
 
     pub(super) fn admit_large_value_ingress(&self, encoded_bytes: u64) -> bool {
-        let now_ms: u64 = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now_ms: u64 = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis()
             .try_into()
@@ -874,8 +872,8 @@ database.finish_persistence(persisted)?;
         if ids.is_empty() {
             return Ok(());
         }
-        let now_ms: u64 = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now_ms: u64 = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis()
             .try_into()
@@ -891,9 +889,11 @@ database.finish_persistence(persisted)?;
             let Some(receipt) = staged.get(id) else {
                 return Err(Error::LargeValueStageExpired);
             };
-            if self.large_value_staging_policy.max_age_ms.is_some_and(|max_age| {
-                now_ms.saturating_sub(receipt.created_at_ms) > max_age
-            }) {
+            if self
+                .large_value_staging_policy
+                .max_age_ms
+                .is_some_and(|max_age| now_ms.saturating_sub(receipt.created_at_ms) > max_age)
+            {
                 self.database.evict_staged_large_value(*id).await?;
                 return Err(Error::LargeValueStageExpired);
             }
@@ -909,8 +909,8 @@ database.finish_persistence(persisted)?;
         if descriptors.is_empty() {
             return Ok(Vec::new());
         }
-        let now_ms: u64 = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now_ms: u64 = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis()
             .try_into()
@@ -920,17 +920,23 @@ database.finish_persistence(persisted)?;
         for descriptor in descriptors {
             if let Some(expired) = staged.iter().find(|receipt| {
                 &receipt.value_ref == descriptor
-                    && self.large_value_staging_policy.max_age_ms.is_some_and(|max_age| {
-                        now_ms.saturating_sub(receipt.created_at_ms) > max_age
-                    })
+                    && self
+                        .large_value_staging_policy
+                        .max_age_ms
+                        .is_some_and(|max_age| {
+                            now_ms.saturating_sub(receipt.created_at_ms) > max_age
+                        })
             }) {
                 self.database.evict_staged_large_value(expired.id).await?;
             }
             let receipt = staged.iter().find(|receipt| {
                 &receipt.value_ref == descriptor
-                    && !self.large_value_staging_policy.max_age_ms.is_some_and(|max_age| {
-                        now_ms.saturating_sub(receipt.created_at_ms) > max_age
-                    })
+                    && !self
+                        .large_value_staging_policy
+                        .max_age_ms
+                        .is_some_and(|max_age| {
+                            now_ms.saturating_sub(receipt.created_at_ms) > max_age
+                        })
             });
             if let Some(receipt) = receipt {
                 ids.push(receipt.id);
@@ -958,8 +964,8 @@ database.finish_persistence(persisted)?;
         let Some(max_age_ms) = self.large_value_staging_policy.max_age_ms else {
             return Ok(0);
         };
-        let now_ms: u64 = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
+        let now_ms: u64 = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis()
             .try_into()
@@ -1019,6 +1025,30 @@ database.finish_persistence(persisted)?;
             .await?;
         self.enforce_large_value_staging_policy(&staged).await?;
         Ok((staged, stats))
+    }
+
+    pub(crate) async fn stage_large_value_chunk_batch(
+        &self,
+        upload_id: groove::large_values::StagedLargeValueId,
+        chunks: Vec<groove::large_values::StagedChunk>,
+    ) -> Result<(), Error> {
+        Ok(self
+            .database
+            .stage_large_value_chunk_batch(upload_id, chunks)
+            .await?)
+    }
+
+    pub(crate) async fn finalize_large_value_upload(
+        &self,
+        upload_id: groove::large_values::StagedLargeValueId,
+        value_ref: groove::large_values::LargeValueRef,
+    ) -> Result<groove::large_values::StagedLargeValue, Error> {
+        let staged = self
+            .database
+            .finalize_large_value_upload(upload_id, value_ref)
+            .await?;
+        self.enforce_large_value_staging_policy(&staged).await?;
+        Ok(staged)
     }
 
     /// Stage one Groove-owned preparation and attach its physical descriptor
@@ -1124,18 +1154,13 @@ database.finish_persistence(persisted)?;
         self.hydrate_large_value_values(cells.values_mut()).await
     }
 
-    pub(crate) async fn hydrate_current_rows(
-        &self,
-        rows: &mut [CurrentRow],
-    ) -> Result<(), Error> {
+    pub(crate) async fn hydrate_current_rows(&self, rows: &mut [CurrentRow]) -> Result<(), Error> {
         for row in rows {
             let descriptor = row.record.descriptor().clone();
             let mut values = row.record.to_values()?;
             self.hydrate_large_value_values(values.iter_mut()).await?;
-            row.record = std::sync::Arc::new(OwnedRecord::new(
-                descriptor.create(&values)?,
-                descriptor,
-            ));
+            row.record =
+                std::sync::Arc::new(OwnedRecord::new(descriptor.create(&values)?, descriptor));
         }
         Ok(())
     }
@@ -1303,12 +1328,9 @@ database.finish_persistence(persisted)?;
     {
         let current_schema_version_id = schema.version_id();
         let meta_schema = schema.lower_catalogue_meta_to_groove();
-        let mut meta_database = Database::new_with_storage_layout(
-            meta_schema,
-            storage,
-            StorageLayout::jazz_class_v1(),
-        )
-        .await?;
+        let mut meta_database =
+            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v1())
+                .await?;
         let mut catalogue_schemas = BTreeMap::new();
         let mut catalogue_lenses = BTreeMap::new();
         let mut staged_lineages_by_id = BTreeMap::new();
@@ -1625,8 +1647,8 @@ database.finish_persistence(persisted)?;
                     &mapping,
                 )?;
                 let applied = meta_database.apply_batch(batch).await?;
-let persisted = applied.persist().await;
-meta_database.finish_persistence(persisted)?;
+                let persisted = applied.persist().await;
+                meta_database.finish_persistence(persisted)?;
             }
             schema_version_aliases.insert(current_schema_version_id, alias);
             physical_mappings.insert(current_schema_version_id, mapping);
@@ -1697,5 +1719,4 @@ meta_database.finish_persistence(persisted)?;
         })?;
         Ok(())
     }
-
 }

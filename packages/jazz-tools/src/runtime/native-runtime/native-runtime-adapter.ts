@@ -342,9 +342,9 @@ type NativeDb = {
 };
 
 type NativeStreamingMutation = {
-  push(chunk: Uint8Array): void;
-  finish(): Write;
-  abort(): boolean;
+  push(chunk: Uint8Array): void | Promise<void>;
+  finish(): Write | Promise<Write>;
+  abort(): boolean | Promise<boolean>;
 };
 
 type NativePermissionAdviceRequest = {
@@ -1056,22 +1056,22 @@ export class NativeRuntimeAdapter implements Runtime {
             pendingHighSurrogate = text.slice(-1);
             text = text.slice(0, -1);
           }
-          if (text.length > 0) upload.push(encoder.encode(text));
+          if (text.length > 0) await upload.push(encoder.encode(text));
         } else if (chunk instanceof Uint8Array) {
           if (pendingHighSurrogate) {
-            upload.push(encoder.encode(pendingHighSurrogate));
+            await upload.push(encoder.encode(pendingHighSurrogate));
             pendingHighSurrogate = "";
           }
-          upload.push(chunk);
+          await upload.push(chunk);
         } else {
           throw new Error("Streaming insert chunks must be strings or Uint8Array values");
         }
       }
-      if (pendingHighSurrogate) upload.push(encoder.encode(pendingHighSurrogate));
-      const receipt = this.finishMutation(upload.finish());
+      if (pendingHighSurrogate) await upload.push(encoder.encode(pendingHighSurrogate));
+      const receipt = this.finishMutation(await upload.finish());
       return { id: formatUuid(rowId), ...receipt };
     } catch (error) {
-      upload.abort();
+      await upload.abort();
       throw error;
     }
   }

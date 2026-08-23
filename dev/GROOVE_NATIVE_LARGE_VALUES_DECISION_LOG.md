@@ -137,9 +137,9 @@ runtime schema infers the physical kind rather than trusting a caller tag.
 Node/NAPI accepts a `ReadableStream` or `AsyncIterable`, spools each awaited
 chunk to an unlink-on-drop temporary file, then finishes through the native
 reader API. Producer failure aborts before any root is staged. We still do not
-expose pre-collected arrays or synchronous JS callbacks. Browser/WASM remains a
-follow-up requiring the same explicit async producer, cancellation, and
-backpressure contract.
+expose pre-collected arrays or synchronous JS callbacks. Browser/WASM uses the
+same explicit async producer, cancellation, and backpressure contract through
+the resumable push preparation described below.
 
 ## 2026-08-23 — Streaming mutation parity
 
@@ -152,3 +152,15 @@ after EOF. Insert derives its selector from authored `branchBy` cells and does
 not accept a separate branch option. Update/upsert retain branch-view options
 because a row UUID does not identify one branch-local version. Streaming a
 branch column is rejected.
+
+## 2026-08-23 — Browser/WASM streaming parity
+
+WASM uses a Groove-owned resumable push preparation rather than buffering the
+source or pretending that a single-threaded browser can provide a blocking
+reader. Each awaited host push emits a bounded batch of canonical nodes and
+Jazz persists it as a pending Groove upload before applying backpressure.
+Incremental JSON syntax validation retains structural state but no token
+contents, so a single huge JSON string does not become a whole-value buffer.
+Finish registers the validated root and invokes the same insert/update/upsert
+publication path as NAPI. The staging limiter clock is `web_time` so this path
+is portable to WASM.
