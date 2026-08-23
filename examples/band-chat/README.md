@@ -11,6 +11,13 @@ Open the demo room, send a message (or attach a small file), then briefly discon
 
 ## Contract
 
+The React structure is intentionally split by data ownership: the session shell
+only resolves identity, the room workspace/list owns room queries, the selected
+conversation owns its room/message queries, and the composer owns the current
+profile query plus writes. Reads remain declarative and have no provisioning
+side effects. The empty-state button invokes a separate idempotent provisioning
+function; this makes normal subscription renders safe to replay or remount.
+
 - `schema.ts` and `permissions.ts` define the identity and membership boundary. A user can only read a room after becoming a member, and can write messages only in a member room.
 - `src/fixture.ts` is the versioned, deterministic, public/name-blind smoke fixture.
 - `src/scenario.ts` is the framework-neutral workload contract. A headless check verifies its determinism; UI/E2E runners consume the same operation names.
