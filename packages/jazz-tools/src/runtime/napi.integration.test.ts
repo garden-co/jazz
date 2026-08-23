@@ -540,6 +540,7 @@ describe("NAPI integration", () => {
         issuer: "https://issuer.example",
         user_id: "alice",
         claims: { role: "editor", team: "alpha" },
+        authMode: "external",
       });
 
       const createdTodo = await withTimeout(
@@ -1412,6 +1413,7 @@ describe("NAPI integration", () => {
         issuer: "https://issuer.example",
         user_id: "alice",
         claims: { role: "editor", team: "alpha" },
+        authMode: "external",
       });
 
       const createdTodo = await aliceDb

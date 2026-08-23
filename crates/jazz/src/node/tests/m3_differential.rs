@@ -10,7 +10,7 @@
 // | claim/provenance-scoped `$createdBy`         | `docs_created_by`                           |
 // | claim/provenance-scoped `$createdAt`         | `docs_created_at`                           |
 // | seeded reachable closure, edge-table seed    | `docs_edge_seeded_reachable`                |
-// | seeded reachable closure, same-table UUID seed | `resources_same_table_seeded_reachable`   |
+// | seeded reachable closure, same-table canonical subject seed | `resources_same_table_seeded_reachable`   |
 // | seeded reachable closure, same-table string seed | `string_resources_same_table_seeded_reachable` |
 // | inherits, 1-level                            | `children_inherit_doc`                      |
 // | inherits, 2-level                            | `grandchildren_inherit_child`               |
@@ -898,7 +898,7 @@ fn m3_differential_schema() -> JazzSchema {
                 PublicTableSchemaBuilder::new("teams")
                     .column("id", PublicColumnType::Uuid)
                     .column("name", PublicColumnType::Text)
-                    .column("identity_key", PublicColumnType::Uuid)
+                    .column("identity_key", PublicColumnType::Text)
                     .column("identity_key_text", PublicColumnType::Text)
                     .policies(public_all_policies()),
             )
@@ -1194,10 +1194,13 @@ fn seed_m3_differential_base(core: &mut NodeState<RocksDbStorage>, seed: u64) {
             MergeableCommit::new("teams", team, 1).cells(BTreeMap::from([
                 ("id".to_owned(), Value::Uuid(team.0)),
                 ("name".to_owned(), Value::String(name.to_owned())),
-                ("identity_key".to_owned(), Value::Uuid(identity.test_uuid())),
+                (
+                    "identity_key".to_owned(),
+                    Value::String(identity.canonical().to_owned()),
+                ),
                 (
                     "identity_key_text".to_owned(),
-                    Value::String(identity.test_uuid().to_string()),
+                    Value::String(identity.canonical().to_owned()),
                 ),
             ])),
         );
@@ -1532,7 +1535,10 @@ fn grant_edge_access(
         row(0x42),
         180 + step,
         BTreeMap::from([
-            ("user_id".to_owned(), Value::Uuid(user(0xa1).test_uuid())),
+            (
+                "user_id".to_owned(),
+                Value::String(user(0xa1).canonical().to_owned()),
+            ),
             ("group_id".to_owned(), Value::Uuid(row(0x31).0)),
         ]),
     );
