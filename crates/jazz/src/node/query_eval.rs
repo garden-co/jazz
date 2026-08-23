@@ -2541,18 +2541,19 @@ where
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         let identity = match self.open_tx(tx_id)?.kind {
-            OpenTransactionKind::Exclusive => {
-                let bound_identity = self.open_tx(tx_id)?.provisional_author;
+            OpenTransactionKind::Exclusive {
+                bound_author: Some(bound_identity),
+            } => {
                 if matches!(authorization_mode, QueryAuthorizationMode::TrustedServing)
                     && identity != bound_identity
                 {
                     return Err(Error::OpenTransactionIdentityMismatch);
                 }
-                // Exclusive transactions are identity capabilities: both ordinary
-                // binding reads and serving reads authorize against the identity
-                // fixed at begin, never an identity supplied by a later call.
+                // Explicitly bound exclusive transactions are identity capabilities:
+                // ordinary and serving reads use the identity fixed at begin.
                 bound_identity
             }
+            OpenTransactionKind::Exclusive { bound_author: None } => identity,
             OpenTransactionKind::Mergeable { .. } => identity,
         };
         let query = shape.query();
