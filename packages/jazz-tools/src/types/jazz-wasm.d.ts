@@ -79,6 +79,40 @@ declare module "jazz-wasm" {
       maxAgeMs?: number | null,
     ): void;
     evictExpiredStagedLargeValues(): Promise<number>;
+    readValueRange(
+      table: string,
+      rowId: Uint8Array,
+      column: string,
+      start: number,
+      end: number,
+    ): Promise<Uint8Array>;
+    readTextUtf16Range(
+      table: string,
+      rowId: Uint8Array,
+      column: string,
+      start: number,
+      end: number,
+    ): Promise<string>;
+    readJsonPointer(
+      table: string,
+      rowId: Uint8Array,
+      column: string,
+      pointer: string,
+    ): Promise<unknown | null>;
+    appendValue(
+      table: string,
+      rowId: Uint8Array,
+      column: string,
+      bytes: Uint8Array,
+    ): Promise<WasmWrite>;
+    spliceValue(
+      table: string,
+      rowId: Uint8Array,
+      column: string,
+      offset: number,
+      deleteLength: number,
+      insert: Uint8Array,
+    ): Promise<WasmWrite>;
     static destroyBrowserStorage(namespace: string): Promise<void>;
 
     registerSchema(schema: Uint8Array): WasmDb;

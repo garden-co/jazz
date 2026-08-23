@@ -2390,6 +2390,159 @@ impl NapiDb {
         Ok(evicted.try_into().unwrap_or(u32::MAX))
     }
 
+    #[napi(js_name = "readValueRange")]
+    pub fn read_value_range(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        column: String,
+        start: f64,
+        end: f64,
+    ) -> napi::Result<Uint8Array> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let range = checked_u64_range(start, end)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let bytes = match db {
+            NapiDbInnerStorage::Memory(db) => {
+                core_block_on(db.read_value_range(&table, row_id, &column, range))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.read_value_range(&table, row_id, &column, range))
+            }
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        Ok(Uint8Array::new(bytes))
+    }
+
+    #[napi(js_name = "readTextUtf16Range")]
+    pub fn read_text_utf16_range(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        column: String,
+        start: f64,
+        end: f64,
+    ) -> napi::Result<String> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let range = checked_u64_range(start, end)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => {
+                core_block_on(db.read_text_utf16_range(&table, row_id, &column, range))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.read_text_utf16_range(&table, row_id, &column, range))
+            }
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    #[napi(js_name = "readJsonPointer")]
+    pub fn read_json_pointer(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        column: String,
+        pointer: String,
+    ) -> napi::Result<Option<String>> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let value = match db {
+            NapiDbInnerStorage::Memory(db) => {
+                core_block_on(db.read_json_pointer(&table, row_id, &column, &pointer))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.read_json_pointer(&table, row_id, &column, &pointer))
+            }
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        value
+            .map(|value| serde_json::to_string(&value))
+            .transpose()
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    #[napi(js_name = "appendValue")]
+    pub fn append_value(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        column: String,
+        bytes: Uint8Array,
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                core_block_on(db.append_value(&table, row_id, &column, bytes.to_vec()))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                core_block_on(db.append_value(&table, row_id, &column, bytes.to_vec()))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "spliceValue")]
+    pub fn splice_value(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        column: String,
+        offset: f64,
+        delete_length: f64,
+        insert: Uint8Array,
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let offset = checked_u64(offset, "offset")?;
+        let delete_length = checked_u64(delete_length, "deleteLength")?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                core_block_on(db.splice_value(
+                    &table,
+                    row_id,
+                    &column,
+                    offset,
+                    delete_length,
+                    insert.to_vec(),
+                ))
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                core_block_on(db.splice_value(
+                    &table,
+                    row_id,
+                    &column,
+                    offset,
+                    delete_length,
+                    insert.to_vec(),
+                ))
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
     #[napi(js_name = "setNonDurableClient")]
     pub fn set_non_durable_client(&self) -> napi::Result<()> {
         let db = self.inner.borrow();
@@ -2703,6 +2856,24 @@ fn core_row_uuid_from_bytes(bytes: &[u8]) -> napi::Result<CoreRowUuid> {
         .try_into()
         .map_err(|_| napi::Error::from_reason("row id must be 16 bytes"))?;
     Ok(CoreRowUuid::from_bytes(bytes))
+}
+
+fn checked_u64(value: f64, name: &str) -> napi::Result<u64> {
+    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > u64::MAX as f64 {
+        return Err(napi::Error::from_reason(format!(
+            "{name} must be a nonnegative integer"
+        )));
+    }
+    Ok(value as u64)
+}
+
+fn checked_u64_range(start: f64, end: f64) -> napi::Result<std::ops::Range<u64>> {
+    let start = checked_u64(start, "start")?;
+    let end = checked_u64(end, "end")?;
+    if start > end {
+        return Err(napi::Error::from_reason("start must not exceed end"));
+    }
+    Ok(start..end)
 }
 
 fn core_author_id_from_bytes(bytes: &[u8]) -> napi::Result<CoreAuthorId> {

@@ -381,6 +381,11 @@ tree. Completion is derived from an empty validated frontier rather than a
 sender finalization assertion. Partial uploads and completed timestamped
 retainer claims carry persisted creation/accounting metadata so host-driven
 expiry can reclaim abandoned uploads without consulting Jazz row history.
+Frontier collection itself stops at the negotiated batch bound; it does not
+allocate an unbounded list and truncate it after returning. A stale frontier
+response racing another uploader is accepted only when its redundant nodes
+exactly match the already-installed immutable mappings, after which Groove may
+issue a distinct timestamped claim without recounting those nodes.
 
 The initial metadata layout reserves Groove's `__groove_large_values` logical
 storage family. Completed staging persists descriptor-keyed retainer claims plus

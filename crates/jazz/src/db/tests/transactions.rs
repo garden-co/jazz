@@ -3,6 +3,36 @@
 use super::*;
 
 #[test]
+fn exclusive_transactions_lower_oversized_scalars_before_publication() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let title = "x".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 91);
+    let row = row(0x4e);
+    let tx = db.exclusive_tx().unwrap();
+    tx.insert_with_id("todos", row, doctest_support::todo_cells(&title, false))
+        .unwrap();
+    tx.commit().unwrap();
+
+    let physical = block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .current_physical_cell_in_schema(db.schema_version_id, "todos", row, "title")
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    assert!(matches!(physical, Value::Large(_)));
+    let result = db
+        .read(&db.prepare_query(&db.table("todos")).unwrap())
+        .unwrap();
+    assert_eq!(
+        result[0].cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String(title))
+    );
+}
+
+#[test]
 fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
     let empty = build_public_db_test_schema(PublicSchemaBuilder::new());
     let refs = empty.column_families();

@@ -379,27 +379,48 @@ impl Database {
         value_ref: crate::large_values::LargeValueRef,
         chunks: Vec<crate::large_values::StagedChunk>,
     ) -> Result<crate::large_values::LargeValueUploadProgress, Error> {
+        const FRONTIER_LIMIT: usize = 64;
         let upload_id = Self::descriptor_upload_id(&value_ref)?;
-        let requested =
-            crate::large_values::missing_upload_frontier(&value_ref, self.local_chunk_reader())
-                .await
-                .map_err(|error| match error {
-                    crate::large_values::ReachabilityError::LargeValue(error) => {
-                        crate::ivm::runtime::IvmRuntimeError::from(error)
-                    }
-                    crate::large_values::ReachabilityError::Chunk(error) => {
-                        crate::ivm::runtime::IvmRuntimeError::from(error)
-                    }
-                })?;
-        if chunks
-            .iter()
-            .any(|chunk| !requested.contains(&chunk.node_ref))
-        {
+        let requested = crate::large_values::missing_upload_frontier(
+            &value_ref,
+            self.local_chunk_reader(),
+            FRONTIER_LIMIT,
+        )
+        .await
+        .map_err(|error| match error {
+            crate::large_values::ReachabilityError::LargeValue(error) => {
+                crate::ivm::runtime::IvmRuntimeError::from(error)
+            }
+            crate::large_values::ReachabilityError::Chunk(error) => {
+                crate::ivm::runtime::IvmRuntimeError::from(error)
+            }
+        })?;
+        if chunks.is_empty() && !requested.is_empty() {
             return Err(Error::InvalidLargeValueMetadata(
-                "upload supplied a node outside the authenticated missing frontier".to_owned(),
+                "upload supplied no requested nodes".to_owned(),
             ));
         }
-        self.stage_large_value_chunk_batch(upload_id, chunks)
+        let mut new_chunks = Vec::with_capacity(chunks.len());
+        for chunk in chunks {
+            if requested.contains(&chunk.node_ref) {
+                new_chunks.push(chunk);
+                continue;
+            }
+            // Another connection may have satisfied the same authenticated
+            // frontier after it was sent to this peer. Such a stale response
+            // is idempotent only when it is byte-for-byte the stored node.
+            let already_stored = self
+                .local_chunk_reader()
+                .get(chunk.node_ref.locator.0.clone(), chunk.node_ref.object_hash)
+                .await
+                .is_ok_and(|encoded| encoded.as_ref() == chunk.encoded.as_slice());
+            if !already_stored {
+                return Err(Error::InvalidLargeValueMetadata(
+                    "upload supplied a node outside the authenticated missing frontier".to_owned(),
+                ));
+            }
+        }
+        self.stage_large_value_chunk_batch(upload_id, new_chunks)
             .await?;
         self.large_value_upload_progress(upload_id, value_ref).await
     }
@@ -410,7 +431,7 @@ impl Database {
         value_ref: crate::large_values::LargeValueRef,
     ) -> Result<crate::large_values::LargeValueUploadProgress, Error> {
         let missing =
-            crate::large_values::missing_upload_frontier(&value_ref, self.local_chunk_reader())
+            crate::large_values::missing_upload_frontier(&value_ref, self.local_chunk_reader(), 64)
                 .await
                 .map_err(|error| match error {
                     crate::large_values::ReachabilityError::LargeValue(error) => {
@@ -1027,18 +1048,15 @@ impl Database {
     }
 
     /// Consolidate and persist every newly emitted immutable node inside
-    /// Groove, returning only the publishable physical descriptor.
+    /// Groove, returning the opaque staging claim for later publication.
     pub async fn consolidate_and_stage_large_value(
         &self,
         value: crate::large_values::LargeValueRef,
-    ) -> Result<crate::large_values::LargeValueRef, Error> {
+    ) -> Result<crate::large_values::StagedLargeValue, Error> {
         let prepared = self
             .consolidate_large_value(value, Self::fresh_chunk_locator)
             .await?;
-        Ok(self
-            .stage_large_value_preparation(prepared)
-            .await?
-            .value_ref)
+        self.stage_large_value_preparation(prepared).await
     }
 
     /// Prepare an append using the bounded edit tail, consolidating through a
@@ -1069,14 +1087,11 @@ impl Database {
         &self,
         value: crate::large_values::LargeValueRef,
         bytes: Vec<u8>,
-    ) -> Result<crate::large_values::LargeValueRef, Error> {
+    ) -> Result<crate::large_values::StagedLargeValue, Error> {
         let prepared = self
             .append_large_value(value, bytes, Self::fresh_chunk_locator)
             .await?;
-        Ok(self
-            .stage_large_value_preparation(prepared)
-            .await?
-            .value_ref)
+        self.stage_large_value_preparation(prepared).await
     }
 
     /// Prepare an arbitrary byte-coordinate splice. Text boundary/UTF-16 and
@@ -1137,7 +1152,7 @@ impl Database {
         offset: u64,
         delete_length: u64,
         insert_bytes: Vec<u8>,
-    ) -> Result<crate::large_values::LargeValueRef, Error> {
+    ) -> Result<crate::large_values::StagedLargeValue, Error> {
         let prepared = self
             .edit_large_value(
                 value,
@@ -1147,10 +1162,7 @@ impl Database {
                 Self::fresh_chunk_locator,
             )
             .await?;
-        Ok(self
-            .stage_large_value_preparation(prepared)
-            .await?
-            .value_ref)
+        self.stage_large_value_preparation(prepared).await
     }
 
     /// Read one byte-coordinate range from the final logical scalar while the
@@ -1290,7 +1302,10 @@ impl Database {
         value: &crate::large_values::LargeValueRef,
         pointer: &str,
     ) -> Result<Option<serde_json::Value>, Error> {
-        if value.kind != crate::large_values::LargeValueKind::Json {
+        if !matches!(
+            value.kind,
+            crate::large_values::LargeValueKind::Json | crate::large_values::LargeValueKind::String
+        ) {
             return Err(crate::ivm::runtime::IvmRuntimeError::from(
                 crate::large_values::Error::InvalidJson,
             )

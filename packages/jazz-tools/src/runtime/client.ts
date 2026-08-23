@@ -131,6 +131,40 @@ export interface Runtime {
     write_context_json?: string | null,
   ): MutationResult;
   delete(table: string, object_id: string, write_context_json?: string | null): MutationResult;
+  readValueRange?(
+    table: string,
+    objectId: string,
+    column: string,
+    start: number,
+    end: number,
+  ): Promise<Uint8Array>;
+  readTextUtf16Range?(
+    table: string,
+    objectId: string,
+    column: string,
+    start: number,
+    end: number,
+  ): Promise<string>;
+  readJsonPointer?(
+    table: string,
+    objectId: string,
+    column: string,
+    pointer: string,
+  ): Promise<unknown>;
+  appendValue?(
+    table: string,
+    objectId: string,
+    column: string,
+    bytes: Uint8Array,
+  ): Promise<MutationResult>;
+  spliceValue?(
+    table: string,
+    objectId: string,
+    column: string,
+    offset: number,
+    deleteLength: number,
+    insert: Uint8Array,
+  ): Promise<MutationResult>;
   canInsertLocally?(table: string, values: InsertValues, session?: Session): PermissionAdvice;
   canReadLocally?(table: string, objectId: string, session?: Session): PermissionAdvice;
   canUpdateLocally?(
@@ -810,6 +844,71 @@ export class JazzClient {
 
   onMutationError(listener: (event: MutationErrorEvent) => void): void {
     this.runtime.onMutationError(listener);
+  }
+
+  async readValueRange(
+    table: string,
+    objectId: string,
+    column: string,
+    start: number,
+    end: number,
+  ): Promise<Uint8Array> {
+    if (!this.runtime.readValueRange) throw new Error("Runtime does not support value ranges");
+    return await this.runtime.readValueRange(table, objectId, column, start, end);
+  }
+
+  async readTextUtf16Range(
+    table: string,
+    objectId: string,
+    column: string,
+    start: number,
+    end: number,
+  ): Promise<string> {
+    if (!this.runtime.readTextUtf16Range) {
+      throw new Error("Runtime does not support UTF-16 value ranges");
+    }
+    return await this.runtime.readTextUtf16Range(table, objectId, column, start, end);
+  }
+
+  async readJsonPointer(
+    table: string,
+    objectId: string,
+    column: string,
+    pointer: string,
+  ): Promise<unknown> {
+    if (!this.runtime.readJsonPointer) throw new Error("Runtime does not support JSON pointers");
+    return await this.runtime.readJsonPointer(table, objectId, column, pointer);
+  }
+
+  async appendValue(
+    table: string,
+    objectId: string,
+    column: string,
+    bytes: Uint8Array,
+  ): Promise<WriteHandle> {
+    if (!this.runtime.appendValue) throw new Error("Runtime does not support value append");
+    const result = await this.runtime.appendValue(table, objectId, column, bytes);
+    return new WriteHandle(committedBatchId(result), this);
+  }
+
+  async spliceValue(
+    table: string,
+    objectId: string,
+    column: string,
+    offset: number,
+    deleteLength: number,
+    insert: Uint8Array,
+  ): Promise<WriteHandle> {
+    if (!this.runtime.spliceValue) throw new Error("Runtime does not support value splice");
+    const result = await this.runtime.spliceValue(
+      table,
+      objectId,
+      column,
+      offset,
+      deleteLength,
+      insert,
+    );
+    return new WriteHandle(committedBatchId(result), this);
   }
 
   commitTransaction(id: OpenBatchId): WriteHandle {

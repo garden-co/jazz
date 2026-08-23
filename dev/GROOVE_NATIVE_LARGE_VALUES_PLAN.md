@@ -308,7 +308,8 @@ of scope.
 
 1. Route every complete-value and edit mutation through Groove preparation.
 2. Upload descriptor/root first. Groove authenticates nodes, derives a bounded
-   restartable missing frontier from persisted nodes, requests only absent descendants, and creates a timestamped
+   restartable missing frontier from persisted nodes, stops collection at the
+   wire batch bound, requests only absent descendants, and creates a timestamped
    descriptor-keyed retainer claim when graph closure validates; Jazz applies
    product quotas and expiry policy to the accounting receipts.
 3. Evaluate ordinary Jazz Insert/Update policy against the owning row mutation.
@@ -329,6 +330,9 @@ of scope.
    walking Jazz history.
 9. Cover insert, update, transaction, merge, authority ingress, repair, Rust
    `Db`, NAPI, WASM and TypeScript through one lowering/admission seam.
+10. Address partial operations through public `(table, row, column)` APIs;
+    authorize before private descriptor lookup and preserve exact inherited
+    descriptors on unrelated row updates.
 
 ### Proofs
 

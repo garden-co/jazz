@@ -1,7 +1,5 @@
 //! Canonical indirect representation for large logical scalar values.
 
-use std::collections::BTreeSet;
-
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -1401,6 +1399,7 @@ impl LargeValueUploadCursor {
 pub(crate) async fn missing_upload_frontier(
     value: &LargeValueRef,
     reader: crate::chunks::LocalChunkReader,
+    limit: usize,
 ) -> Result<Vec<NodeRef>, ReachabilityError> {
     check_format(value.format_version)?;
     let root_metrics = value.edit_tail.is_empty().then_some(NodeMetrics {
@@ -1413,12 +1412,8 @@ pub(crate) async fn missing_upload_frontier(
         root_metrics,
         value.logical_hash,
     )];
-    let mut visited = BTreeSet::new();
     let mut missing = Vec::new();
     while let Some((node_ref, depth, expected_metrics, expected_logical_hash)) = pending.pop() {
-        if !visited.insert(node_ref.clone()) {
-            continue;
-        }
         if depth > MAX_TREE_DEPTH {
             return Err(Error::InvalidTree.into());
         }
@@ -1429,6 +1424,9 @@ pub(crate) async fn missing_upload_frontier(
             Ok(encoded) => encoded,
             Err(crate::chunks::ChunkStorageError::Unavailable) => {
                 missing.push(node_ref);
+                if missing.len() == limit {
+                    break;
+                }
                 continue;
             }
             Err(error) => return Err(crate::chunks::ChunkError::from(error).into()),

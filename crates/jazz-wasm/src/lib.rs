@@ -2573,6 +2573,159 @@ impl WasmDb {
         })
     }
 
+    #[wasm_bindgen(js_name = readValueRange)]
+    pub fn read_value_range(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        column: String,
+        start: f64,
+        end: f64,
+    ) -> Result<js_sys::Promise, JsValue> {
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let range = checked_js_u64_range(start, end)?;
+        let inner = self.inner.clone();
+        Ok(future_to_promise(async move {
+            let bytes = match &inner {
+                WasmDbInner::Memory(db) => {
+                    db.read_value_range(&table, row_id, &column, range).await
+                }
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => {
+                    db.read_value_range(&table, row_id, &column, range).await
+                }
+                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+            }
+            .map_err(to_js_error)?;
+            Ok(js_sys::Uint8Array::from(bytes.as_slice()).into())
+        }))
+    }
+
+    #[wasm_bindgen(js_name = readTextUtf16Range)]
+    pub fn read_text_utf16_range(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        column: String,
+        start: f64,
+        end: f64,
+    ) -> Result<js_sys::Promise, JsValue> {
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let range = checked_js_u64_range(start, end)?;
+        let inner = self.inner.clone();
+        Ok(future_to_promise(async move {
+            let text = match &inner {
+                WasmDbInner::Memory(db) => {
+                    db.read_text_utf16_range(&table, row_id, &column, range)
+                        .await
+                }
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => {
+                    db.read_text_utf16_range(&table, row_id, &column, range)
+                        .await
+                }
+                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+            }
+            .map_err(to_js_error)?;
+            Ok(JsValue::from_str(&text))
+        }))
+    }
+
+    #[wasm_bindgen(js_name = readJsonPointer)]
+    pub fn read_json_pointer(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        column: String,
+        pointer: String,
+    ) -> Result<js_sys::Promise, JsValue> {
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let inner = self.inner.clone();
+        Ok(future_to_promise(async move {
+            let value = match &inner {
+                WasmDbInner::Memory(db) => {
+                    db.read_json_pointer(&table, row_id, &column, &pointer)
+                        .await
+                }
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => {
+                    db.read_json_pointer(&table, row_id, &column, &pointer)
+                        .await
+                }
+                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+            }
+            .map_err(to_js_error)?;
+            serde_wasm_bindgen::to_value(&value)
+                .map_err(|error| JsValue::from_str(&error.to_string()))
+        }))
+    }
+
+    #[wasm_bindgen(js_name = appendValue)]
+    pub fn append_value(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        column: String,
+        bytes: Vec<u8>,
+    ) -> Result<js_sys::Promise, JsValue> {
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let inner = self.inner.clone();
+        Ok(future_to_promise(async move {
+            let write = match &inner {
+                WasmDbInner::Memory(db) => wasm_write_memory(
+                    Rc::clone(db),
+                    db.append_value(&table, row_id, &column, bytes)
+                        .await
+                        .map_err(to_js_error)?,
+                ),
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => wasm_write_browser(
+                    Rc::clone(db),
+                    db.append_value(&table, row_id, &column, bytes)
+                        .await
+                        .map_err(to_js_error)?,
+                ),
+                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+            }?;
+            Ok(write.into())
+        }))
+    }
+
+    #[wasm_bindgen(js_name = spliceValue)]
+    pub fn splice_value(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        column: String,
+        offset: f64,
+        delete_length: f64,
+        insert: Vec<u8>,
+    ) -> Result<js_sys::Promise, JsValue> {
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let offset = checked_js_u64(offset, "offset")?;
+        let delete_length = checked_js_u64(delete_length, "deleteLength")?;
+        let inner = self.inner.clone();
+        Ok(future_to_promise(async move {
+            let write = match &inner {
+                WasmDbInner::Memory(db) => wasm_write_memory(
+                    Rc::clone(db),
+                    db.splice_value(&table, row_id, &column, offset, delete_length, insert)
+                        .await
+                        .map_err(to_js_error)?,
+                ),
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => wasm_write_browser(
+                    Rc::clone(db),
+                    db.splice_value(&table, row_id, &column, offset, delete_length, insert)
+                        .await
+                        .map_err(to_js_error)?,
+                ),
+                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+            }?;
+            Ok(write.into())
+        }))
+    }
+
     /// Configure this runtime as the optimistic in-memory side of a browser
     /// client/worker pair. Must be called before application writes begin.
     #[wasm_bindgen(js_name = setNonDurableClient)]
@@ -3359,6 +3512,24 @@ fn row_uuid_from_bytes(bytes: &[u8]) -> Result<RowUuid, JsValue> {
         .try_into()
         .map_err(|_| JsValue::from_str("row id must be 16 bytes"))?;
     Ok(RowUuid::from_bytes(bytes))
+}
+
+fn checked_js_u64(value: f64, name: &str) -> Result<u64, JsValue> {
+    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > u64::MAX as f64 {
+        return Err(JsValue::from_str(&format!(
+            "{name} must be a nonnegative integer"
+        )));
+    }
+    Ok(value as u64)
+}
+
+fn checked_js_u64_range(start: f64, end: f64) -> Result<std::ops::Range<u64>, JsValue> {
+    let start = checked_js_u64(start, "start")?;
+    let end = checked_js_u64(end, "end")?;
+    if start > end {
+        return Err(JsValue::from_str("start must not exceed end"));
+    }
+    Ok(start..end)
 }
 
 fn author_id_from_bytes(bytes: &[u8]) -> Result<AuthorId, JsValue> {

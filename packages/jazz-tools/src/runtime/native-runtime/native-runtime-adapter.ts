@@ -277,6 +277,40 @@ type NativeDb = {
     maxAgeMs?: number | null,
   ): void;
   evictExpiredStagedLargeValues?(): number | Promise<number>;
+  readValueRange?(
+    table: string,
+    rowId: Uint8Array,
+    column: string,
+    start: number,
+    end: number,
+  ): Uint8Array | Promise<Uint8Array>;
+  readTextUtf16Range?(
+    table: string,
+    rowId: Uint8Array,
+    column: string,
+    start: number,
+    end: number,
+  ): string | Promise<string>;
+  readJsonPointer?(
+    table: string,
+    rowId: Uint8Array,
+    column: string,
+    pointer: string,
+  ): unknown | Promise<unknown>;
+  appendValue?(
+    table: string,
+    rowId: Uint8Array,
+    column: string,
+    bytes: Uint8Array,
+  ): Write | Promise<Write>;
+  spliceValue?(
+    table: string,
+    rowId: Uint8Array,
+    column: string,
+    offset: number,
+    deleteLength: number,
+    insert: Uint8Array,
+  ): Write | Promise<Write>;
   connectUpstream(): Transport;
   connectUpstreamWithSession?(
     protocolVersion: number,
@@ -696,6 +730,89 @@ export class NativeRuntimeAdapter implements Runtime {
       throw new Error("Native runtime does not expose large-value staging maintenance");
     }
     return await this.db.evictExpiredStagedLargeValues();
+  }
+
+  async readValueRange(
+    table: string,
+    objectId: string,
+    column: string,
+    start: number,
+    end: number,
+  ): Promise<Uint8Array> {
+    if (this !== this.ownerRuntime) {
+      return await this.ownerRuntime.readValueRange(table, objectId, column, start, end);
+    }
+    if (!this.db.readValueRange) throw new Error("Native runtime does not expose value ranges");
+    return await this.db.readValueRange(table, parseUuid(objectId), column, start, end);
+  }
+
+  async readTextUtf16Range(
+    table: string,
+    objectId: string,
+    column: string,
+    start: number,
+    end: number,
+  ): Promise<string> {
+    if (this !== this.ownerRuntime) {
+      return await this.ownerRuntime.readTextUtf16Range(table, objectId, column, start, end);
+    }
+    if (!this.db.readTextUtf16Range) {
+      throw new Error("Native runtime does not expose UTF-16 value ranges");
+    }
+    return await this.db.readTextUtf16Range(table, parseUuid(objectId), column, start, end);
+  }
+
+  async readJsonPointer(
+    table: string,
+    objectId: string,
+    column: string,
+    pointer: string,
+  ): Promise<unknown> {
+    if (this !== this.ownerRuntime) {
+      return await this.ownerRuntime.readJsonPointer(table, objectId, column, pointer);
+    }
+    if (!this.db.readJsonPointer) throw new Error("Native runtime does not expose JSON pointers");
+    const value = await this.db.readJsonPointer(table, parseUuid(objectId), column, pointer);
+    return typeof value === "string" ? JSON.parse(value) : value;
+  }
+
+  async appendValue(
+    table: string,
+    objectId: string,
+    column: string,
+    bytes: Uint8Array,
+  ): Promise<MutationResult> {
+    if (this !== this.ownerRuntime) {
+      return await this.ownerRuntime.appendValue(table, objectId, column, bytes);
+    }
+    if (!this.db.appendValue) throw new Error("Native runtime does not expose value append");
+    return this.finishMutation(
+      await this.db.appendValue(table, parseUuid(objectId), column, bytes),
+    );
+  }
+
+  async spliceValue(
+    table: string,
+    objectId: string,
+    column: string,
+    offset: number,
+    deleteLength: number,
+    insert: Uint8Array,
+  ): Promise<MutationResult> {
+    if (this !== this.ownerRuntime) {
+      return await this.ownerRuntime.spliceValue(
+        table,
+        objectId,
+        column,
+        offset,
+        deleteLength,
+        insert,
+      );
+    }
+    if (!this.db.spliceValue) throw new Error("Native runtime does not expose value splice");
+    return this.finishMutation(
+      await this.db.spliceValue(table, parseUuid(objectId), column, offset, deleteLength, insert),
+    );
   }
 
   acceptPeer(claims: Record<string, unknown> = {}): Transport {

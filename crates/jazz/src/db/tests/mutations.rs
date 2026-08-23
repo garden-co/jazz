@@ -157,6 +157,143 @@ fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
 }
 
 #[test]
+fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let mut title = "a".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 257);
+    title.push_str("🙂tail");
+    let write = db
+        .insert("todos", doctest_support::todo_cells(&title, false))
+        .unwrap();
+    let row = write.row_uuid();
+    block_on(write.wait(DurabilityTier::Local)).unwrap();
+    let original_ref = block_on(async {
+        let mut node = db.node.node.lock().await;
+        match node
+            .current_physical_cell_in_schema(db.schema_version_id, "todos", row, "title")
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Value::Large(value_ref) => value_ref,
+            other => panic!("oversized title stayed inline: {other:?}"),
+        }
+    });
+
+    let unrelated = db
+        .update(
+            "todos",
+            row,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        )
+        .unwrap();
+    block_on(unrelated.wait(DurabilityTier::Local)).unwrap();
+    let after_unrelated = block_on(async {
+        let mut node = db.node.node.lock().await;
+        match node
+            .current_physical_cell_in_schema(db.schema_version_id, "todos", row, "title")
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Value::Large(value_ref) => value_ref,
+            other => panic!("updated title became inline: {other:?}"),
+        }
+    });
+    assert_eq!(original_ref, after_unrelated);
+
+    assert_eq!(
+        block_on(db.read_value_range("todos", row, "title", 10..18)).unwrap(),
+        b"aaaaaaaa"
+    );
+    assert_eq!(
+        block_on(db.read_text_utf16_range(
+            "todos",
+            row,
+            "title",
+            title.encode_utf16().count() as u64 - 6..title.encode_utf16().count() as u64 - 4,
+        ))
+        .unwrap(),
+        "🙂"
+    );
+
+    let append = block_on(db.append_value("todos", row, "title", b"/appended".to_vec())).unwrap();
+    block_on(append.wait(DurabilityTier::Local)).unwrap();
+    title.push_str("/appended");
+
+    let splice = block_on(db.splice_value("todos", row, "title", 4, 3, b"XYZ".to_vec())).unwrap();
+    block_on(splice.wait(DurabilityTier::Local)).unwrap();
+    title.replace_range(4..7, "XYZ");
+    let edited_ref = block_on(async {
+        let mut node = db.node.node.lock().await;
+        match node
+            .current_physical_cell_in_schema(db.schema_version_id, "todos", row, "title")
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Value::Large(value_ref) => value_ref,
+            other => panic!("edited title became inline: {other:?}"),
+        }
+    });
+    assert_eq!(original_ref.root, edited_ref.root);
+
+    let rows = db
+        .read(&db.prepare_query(&db.table("todos")).unwrap())
+        .unwrap();
+    assert_eq!(
+        rows[0].cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String(title))
+    );
+
+    let json = format!(
+        "{{\"padding\":\"{}\",\"selected\":{{\"answer\":42}}}}",
+        "p".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES)
+    );
+    let json_row = db
+        .insert("todos", doctest_support::todo_cells(&json, false))
+        .unwrap()
+        .row_uuid();
+    assert_eq!(
+        block_on(db.read_json_pointer("todos", json_row, "title", "/selected/answer")).unwrap(),
+        Some(serde_json::json!(42))
+    );
+}
+
+#[test]
+fn nullable_large_text_uses_the_same_high_level_read_and_edit_surface() {
+    let schema = build_public_db_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("notes").nullable_column("body", PublicColumnType::Text),
+    ));
+    let db = open_db(0x4d, AuthorId::SYSTEM, &schema);
+    let row = row(0x4d);
+    let body = "n".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 73);
+    db.insert_with_id(
+        "notes",
+        row,
+        BTreeMap::from([(
+            "body".to_owned(),
+            Value::Nullable(Some(Box::new(Value::String(body.clone())))),
+        )]),
+    )
+    .unwrap();
+
+    assert_eq!(
+        block_on(db.read_value_range("notes", row, "body", 7..13)).unwrap(),
+        b"nnnnnn"
+    );
+    block_on(db.append_value("notes", row, "body", b"end".to_vec())).unwrap();
+    let result = db
+        .read(&db.prepare_query(&db.table("notes")).unwrap())
+        .unwrap();
+    assert_eq!(
+        result[0].cell(&schema.tables[0], "body"),
+        Some(Value::Nullable(Some(Box::new(Value::String(format!(
+            "{body}end"
+        ))))))
+    );
+}
+
+#[test]
 fn db_facade_runs_saas_shaped_local_lane_end_to_end() {
     let schema = schema();
     let dir = tempfile::tempdir().unwrap();

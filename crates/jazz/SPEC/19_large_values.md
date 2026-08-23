@@ -164,6 +164,10 @@ restart. The upload becomes `Staged` only when every
 reachable node is locally present and the descriptor's kind, metrics, logical
 hash, depth and fan-out validate. Only then does the writer send the ordinary
 referencing `CommitUnit`. No sender `finish` assertion is trusted.
+Concurrent peers may hold the same now-stale frontier. A receiver treats an
+extra node as idempotent only when its exact locator, hash and encoded bytes
+already match local storage; a conflicting or unauthenticated node yields the
+descriptor-scoped `Rejected` result without poisoning the peer connection.
 Download remains locator-driven pull with `ChunkRequestBatch` and
 `ChunkResponseBatch`; download bytes are not upload ingress and do not consume
 the upload rate limit. Edges terminate or forward push uploads before forwarding
@@ -199,6 +203,11 @@ All logical write paths, including Rust `Db`, bindings, transactions, merge,
 sync ingress and repair, MUST pass through the same Groove lowering/admission
 boundary; no caller may publish an unlowered oversized value or handcrafted
 descriptor.
+
+Present nullable scalar cells use the same inline/indirect physical choice
+inside their nullable wrapper. Partial reads and edits preserve that wrapper;
+exclusive and mergeable transactions share the same lowering seam before
+version publication.
 
 ## 19.5 Groove storage contract
 
@@ -345,6 +354,14 @@ Schemas continue to declare ordinary string, bytes and JSON columns. Small and
 large values use the same idiomatic full-value API. Query options may request
 byte slices, UTF-16 text slices or JSON pointers. Mutation options may express
 append or splice operations; complete primitives replace complete values.
+
+The first high-level surface addresses partial operations by ordinary
+`(table, row, column)` identity: Rust `Db` exposes `read_value_range`,
+`read_text_utf16_range`, `read_json_pointer`, `append_value`, and
+`splice_value`; NAPI, WASM, the native runtime adapter, and `JazzClient` expose
+the corresponding camel-case methods. These methods authorize the row before
+resolving its private physical cell. Updating another column inherits the exact
+existing descriptor rather than hydrating and re-preparing it.
 
 Rust exposes explicit byte and UTF-16 text coordinates. TypeScript exposes
 UTF-16 text coordinates and byte coordinates for bytes. Invalid UTF-8 boundaries

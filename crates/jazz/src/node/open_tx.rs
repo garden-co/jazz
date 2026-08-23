@@ -710,11 +710,14 @@ where
                 )
                 .await;
             let table_schema = self.table_in_schema(&write.table, write.schema_version)?;
-            let PendingCells::Replace(cells) = write.cells else {
+            let PendingCells::Replace(mut cells) = write.cells else {
                 return Err(Error::InvalidMergeableCommit(
                     "exclusive transaction cannot contain update patches",
                 ));
             };
+            for value in cells.values_mut() {
+                self.prepare_and_stage_large_scalar(value).await?;
+            }
             let cells = positional_cells_from_map(&table_schema, &cells)?;
             let provenance_at = TxTime(write.now_ms.unwrap_or(now_ms));
             let (created_by, created_at) = snapshot_content

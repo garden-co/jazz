@@ -241,6 +241,66 @@ fn pushed_chunks_must_be_staged_before_the_referencing_authority_commit() {
 }
 
 #[test]
+fn corrupt_root_first_upload_is_rejected_without_poisoning_the_receiver() {
+    let schema = two_column_schema();
+    let (_receiver_dir, mut receiver) = open_node_with_schema(node(0x7f), schema);
+    let prepared = groove::large_values::prepare(
+        groove::large_values::LargeValueKind::String,
+        "corrupt upload/".repeat(8_000).as_bytes(),
+        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
+    )
+    .unwrap();
+    let context = Some(CommitUnitIngestContext {
+        identity: AuthorId::SYSTEM,
+        trust: CommitUnitTrust::Session,
+        edge_authority: false,
+    });
+    let mut root = prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == prepared.value_ref.root)
+        .unwrap()
+        .clone();
+    root.encoded[0] ^= 0xff;
+    let rejected = receiver
+        .apply_sync_message_with_ingest_context(
+            SyncMessage::ChunkUploadNodes(crate::protocol::ChunkUploadNodes {
+                value_ref: prepared.value_ref.clone(),
+                chunks: vec![root],
+            }),
+            context,
+        )
+        .resolve()
+        .unwrap()
+        .value;
+    assert!(matches!(
+        rejected.as_slice(),
+        [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+            status: crate::protocol::ChunkUploadStatus::Rejected,
+            ..
+        })]
+    ));
+
+    let retry = receiver
+        .apply_sync_message_with_ingest_context(
+            SyncMessage::ChunkUploadStart(crate::protocol::ChunkUploadStart {
+                value_ref: prepared.value_ref.clone(),
+            }),
+            context,
+        )
+        .resolve()
+        .unwrap()
+        .value;
+    assert!(matches!(
+        retry.as_slice(),
+        [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+            status: crate::protocol::ChunkUploadStatus::Need(nodes),
+            ..
+        })] if nodes == &[prepared.value_ref.root]
+    ));
+}
+
+#[test]
 fn synced_descriptor_reads_through_shared_opaque_chunk_backend() {
     let schema = two_column_schema();
     let (_writer_dir, mut writer) = open_node_with_schema(node(0x73), schema.clone());

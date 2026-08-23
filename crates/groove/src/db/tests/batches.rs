@@ -192,6 +192,14 @@ async fn root_first_upload_requests_only_authenticated_missing_frontier() {
         ]),
         "the receiver cannot discover children before authenticating the root"
     );
+    let concurrent_frontier = match database
+        .begin_large_value_upload(prepared.value_ref.clone())
+        .await
+        .unwrap()
+    {
+        crate::large_values::LargeValueUploadProgress::Missing(nodes) => nodes,
+        crate::large_values::LargeValueUploadProgress::Staged(_) => unreachable!(),
+    };
     let unsolicited = prepared
         .staged_chunks
         .iter()
@@ -228,6 +236,28 @@ async fn root_first_upload_requests_only_authenticated_missing_frontier() {
         crate::large_values::LargeValueUploadProgress::Staged(staged) => staged,
         crate::large_values::LargeValueUploadProgress::Missing(_) => unreachable!(),
     };
+    let stale_chunks = concurrent_frontier
+        .into_iter()
+        .map(|node_ref| {
+            prepared
+                .staged_chunks
+                .iter()
+                .find(|chunk| chunk.node_ref == node_ref)
+                .expect("concurrent frontier contains a prepared node")
+                .clone()
+        })
+        .collect();
+    let concurrent_claim = match database
+        .continue_large_value_upload(prepared.value_ref.clone(), stale_chunks)
+        .await
+        .unwrap()
+    {
+        crate::large_values::LargeValueUploadProgress::Staged(staged) => staged,
+        crate::large_values::LargeValueUploadProgress::Missing(_) => {
+            panic!("a stale matching batch must observe the concurrently completed tree")
+        }
+    };
+    assert_ne!(first_claim.id, concurrent_claim.id);
     let second_claim = match database
         .begin_large_value_upload(prepared.value_ref)
         .await
@@ -239,6 +269,79 @@ async fn root_first_upload_requests_only_authenticated_missing_frontier() {
         }
     };
     assert_ne!(first_claim.id, second_claim.id);
+}
+
+#[futures_test::test]
+async fn root_first_upload_resumes_from_the_persisted_authenticated_frontier() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema.clone(), storage.clone())
+        .await
+        .unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![6; crate::large_values::INLINE_VALUE_MAX_BYTES * 8],
+        |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
+    )
+    .unwrap();
+    let root = prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == prepared.value_ref.root)
+        .unwrap()
+        .clone();
+    let progress = database
+        .continue_large_value_upload(prepared.value_ref.clone(), vec![root])
+        .await
+        .unwrap();
+    assert!(matches!(
+        progress,
+        crate::large_values::LargeValueUploadProgress::Missing(ref missing)
+            if !missing.contains(&prepared.value_ref.root)
+    ));
+    drop(database);
+
+    let mut reopened = Database::new(schema, storage).await.unwrap();
+    reopened.set_chunk_storage(chunks);
+    let mut progress = reopened
+        .begin_large_value_upload(prepared.value_ref.clone())
+        .await
+        .unwrap();
+    assert!(matches!(
+        progress,
+        crate::large_values::LargeValueUploadProgress::Missing(ref missing)
+            if !missing.contains(&prepared.value_ref.root)
+    ));
+    while let crate::large_values::LargeValueUploadProgress::Missing(missing) = progress {
+        let batch = missing
+            .into_iter()
+            .map(|node_ref| {
+                prepared
+                    .staged_chunks
+                    .iter()
+                    .find(|chunk| chunk.node_ref == node_ref)
+                    .unwrap()
+                    .clone()
+            })
+            .collect();
+        progress = reopened
+            .continue_large_value_upload(prepared.value_ref.clone(), batch)
+            .await
+            .unwrap();
+    }
+    assert!(matches!(
+        progress,
+        crate::large_values::LargeValueUploadProgress::Staged(_)
+    ));
 }
 
 #[futures_test::test]

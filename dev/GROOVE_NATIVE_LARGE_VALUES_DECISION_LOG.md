@@ -1,0 +1,69 @@
+# Groove-native large values decision log
+
+This log records implementation forks that were not settled by the normative
+Jazz and Groove specifications. It is append-only for the lifetime of the
+feature branch; superseded entries are retained and marked as such.
+
+## 2026-08-23 — Descriptor identity and transport correlation
+
+The canonical identity of an uploaded value is its `LargeValueRef`. Jazz wire
+messages do not carry a staging-claim or upload-attempt ID. The current peer
+transport is ordered, does not duplicate messages within a connection, and
+serializes outstanding large-value negotiations on each connection; reconnect
+starts a new negotiation. Therefore a second correlation nonce would carry no
+additional correctness information today. If a future transport permits
+concurrent or duplicated same-descriptor exchanges on one connection, it must
+add a hop-local message correlation field, not a canonical upload identity.
+
+## 2026-08-23 — Restartable root-first frontier
+
+Groove derives the next missing frontier from locally persisted, authenticated
+nodes instead of persisting a separate frontier. This makes a start or retry
+after restart self-describing and prevents frontier metadata from disagreeing
+with chunk storage. Frontier results are bounded before they cross into Jazz.
+
+## 2026-08-23 — Concurrent uploads of identical content
+
+Staging claims are timestamped and fungible per exact descriptor. Concurrent
+peers can receive the same authenticated frontier. If one peer installs it
+first, Groove accepts another peer's stale response only when every no-longer-
+missing node is byte-for-byte identical to the locally verified node. It then
+issues an independent claim without recounting or rewriting those nodes.
+Unproven or conflicting nodes remain rejected.
+
+Malformed descriptor/node content is a descriptor-scoped protocol rejection,
+not a peer-fatal error. Backend/storage failures remain connection errors so a
+caller does not mistake unavailable infrastructure for invalid content.
+
+## 2026-08-23 — Public partial-value API shape
+
+Partial reads and edits are addressed by ordinary Jazz `(table, row, column)`
+identity. Public APIs do not accept or return `LargeValueRef`, locators, staging
+claims, or chunk handles. Jazz resolves the authorized current row and delegates
+content work to Groove. Default reads still return ordinary owned primitives;
+NAPI and WASM continue to copy completed results into host-owned memory.
+
+## 2026-08-23 — One lowering seam for transaction kinds
+
+Exclusive transactions lower oversized scalar cells through the same Groove
+preparation helper used by mergeable publication before encoding their version
+records. Publication then discovers and atomically accepts the matching live
+claim from the descriptor, exactly as authority ingress does. Transaction kind
+does not create a second large-value admission mechanism or put claim identity
+on `CommitUnit`.
+
+## 2026-08-23 — Nullable scalar representation
+
+Nullability remains a schema-level wrapper around the ordinary scalar. A
+present nullable string or bytes value may therefore contain the same indirect
+physical arm as its non-nullable counterpart. High-level range/edit APIs unwrap
+that physical arm privately and preserve the nullable wrapper on publication;
+`null` has no byte/text/JSON content and receives the ordinary type error.
+
+## 2026-08-23 — Physical inheritance across schema views
+
+An unchanged indirect cell is resolved in the schema version authoring the new
+commit, not only the database's current write schema. Jazz projects the stored
+winner through the registered lens while retaining the descriptor arm, then
+requires exact descriptor equality. This preserves locators across historical
+schema-view writes without allowing a caller to introduce a descriptor.

@@ -1045,11 +1045,13 @@ database.finish_persistence(persisted)?;
     pub async fn consolidate_and_stage_large_value(
         &self,
         value: groove::large_values::LargeValueRef,
-    ) -> Result<groove::large_values::LargeValueRef, Error> {
-        Ok(self
+    ) -> Result<groove::large_values::StagedLargeValue, Error> {
+        let staged = self
             .database
             .consolidate_and_stage_large_value(value)
-            .await?)
+            .await?;
+        self.enforce_large_value_staging_policy(&staged).await?;
+        Ok(staged)
     }
 
     /// Prepare and stage a logical append through Groove's bounded tail and
@@ -1058,11 +1060,13 @@ database.finish_persistence(persisted)?;
         &self,
         value: groove::large_values::LargeValueRef,
         bytes: Vec<u8>,
-    ) -> Result<groove::large_values::LargeValueRef, Error> {
-        Ok(self
+    ) -> Result<groove::large_values::StagedLargeValue, Error> {
+        let staged = self
             .database
             .append_and_stage_large_value(value, bytes)
-            .await?)
+            .await?;
+        self.enforce_large_value_staging_policy(&staged).await?;
+        Ok(staged)
     }
 
     /// Prepare and stage a logical byte-coordinate splice through Groove.
@@ -1072,10 +1076,42 @@ database.finish_persistence(persisted)?;
         offset: u64,
         delete_length: u64,
         insert_bytes: Vec<u8>,
-    ) -> Result<groove::large_values::LargeValueRef, Error> {
-        Ok(self
+    ) -> Result<groove::large_values::StagedLargeValue, Error> {
+        let staged = self
             .database
             .edit_and_stage_large_value(value, offset, delete_length, insert_bytes)
+            .await?;
+        self.enforce_large_value_staging_policy(&staged).await?;
+        Ok(staged)
+    }
+
+    pub(crate) async fn read_large_value_range(
+        &self,
+        value: &groove::large_values::LargeValueRef,
+        range: std::ops::Range<u64>,
+    ) -> Result<Vec<u8>, Error> {
+        Ok(self.database.read_large_value_range(value, range).await?)
+    }
+
+    pub(crate) async fn read_large_text_utf16_range(
+        &self,
+        value: &groove::large_values::LargeValueRef,
+        range: std::ops::Range<u64>,
+    ) -> Result<String, Error> {
+        Ok(self
+            .database
+            .read_large_text_utf16_range(value, range)
+            .await?)
+    }
+
+    pub(crate) async fn read_large_json_pointer(
+        &self,
+        value: &groove::large_values::LargeValueRef,
+        pointer: &str,
+    ) -> Result<Option<serde_json::Value>, Error> {
+        Ok(self
+            .database
+            .read_large_json_pointer(value, pointer)
             .await?)
     }
 

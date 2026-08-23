@@ -4,6 +4,19 @@ enum CatalogueActivationMode {
     Live,
 }
 
+fn large_value_upload_is_rejected(error: &groove::db::Error) -> bool {
+    matches!(
+        error,
+        groove::db::Error::InvalidLargeValueMetadata(_)
+            | groove::db::Error::IvmRuntime(
+                groove::ivm::runtime::IvmRuntimeError::LargeValue(_)
+                    | groove::ivm::runtime::IvmRuntimeError::Chunk(
+                        groove::chunks::ChunkError::Integrity
+                    )
+            )
+    )
+}
+
 impl<S> NodeState<S>
 where
     S: OrderedKvStorage,
@@ -67,10 +80,22 @@ where
             .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
         match message {
             SyncMessage::ChunkUploadStart(start) => {
-                let progress = self
+                let progress = match self
                     .database
                     .begin_large_value_upload(start.value_ref.clone())
-                    .await?;
+                    .await
+                {
+                    Ok(progress) => progress,
+                    Err(error) if large_value_upload_is_rejected(&error) => {
+                        return Ok(PublicationOutcome::settled(vec![
+                            SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                                value_ref: start.value_ref,
+                                status: crate::protocol::ChunkUploadStatus::Rejected,
+                            }),
+                        ]));
+                    }
+                    Err(error) => return Err(error.into()),
+                };
                 let status = match progress {
                     groove::large_values::LargeValueUploadProgress::Missing(mut nodes) => {
                         nodes.truncate(64);
@@ -113,10 +138,22 @@ where
                         }),
                     ]));
                 }
-                let progress = self
+                let progress = match self
                     .database
                     .continue_large_value_upload(batch.value_ref.clone(), batch.chunks)
-                    .await?;
+                    .await
+                {
+                    Ok(progress) => progress,
+                    Err(error) if large_value_upload_is_rejected(&error) => {
+                        return Ok(PublicationOutcome::settled(vec![
+                            SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                                value_ref: batch.value_ref,
+                                status: crate::protocol::ChunkUploadStatus::Rejected,
+                            }),
+                        ]));
+                    }
+                    Err(error) => return Err(error.into()),
+                };
                 let status = match progress {
                     groove::large_values::LargeValueUploadProgress::Missing(mut nodes) => {
                         nodes.truncate(64);
