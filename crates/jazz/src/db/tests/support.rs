@@ -168,7 +168,7 @@ pub(super) fn rocks_storage(schema: &JazzSchema) -> RocksDbStorage {
     RocksDbStorage::open(&path, &refs).unwrap()
 }
 
-pub(super) fn open_db(node: u8, author: AuthorId, schema: &JazzSchema) -> Db<RocksDbStorage> {
+pub(super) fn open_db(node: u8, author: AuthorSubject, schema: &JazzSchema) -> Db<RocksDbStorage> {
     let storage = rocks_storage(schema);
     block_on(Db::open(DbConfig {
         schema: schema.clone(),
@@ -306,7 +306,7 @@ pub(super) fn duplex_with_client_outbound_tap() -> (
 /// In-memory handshake pairing needs an internal test because it verifies the
 /// transport/admission boundary before any user-visible sync payload exists.
 pub(super) fn duplex_with_admitted_session_context(
-    identity: AuthorId,
+    identity: AuthorSubject,
     client_node: NodeUuid,
     client_epoch: u64,
     server_node: NodeUuid,
@@ -1665,11 +1665,11 @@ pub(super) fn relation_snapshot_row(table: &str, row_uuid: RowUuid) -> CurrentRo
 /// A reset may carry canonical relation provenance while the materialized
 /// related row is named by a newer read schema. Ordinary removal must use the
 /// same projected edge identity, retaining an unrelated same-UUID row.
-pub(super) fn cells(title: &str, done: bool, owner: AuthorId) -> RowCells {
+pub(super) fn cells(title: &str, done: bool, owner: AuthorSubject) -> RowCells {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
         ("done".to_owned(), Value::Bool(done)),
-        ("owner".to_owned(), Value::Uuid(owner.0)),
+        ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
     ])
 }
 
@@ -1703,7 +1703,7 @@ pub(super) fn issue_schema() -> JazzSchema {
 pub(super) fn issue_cells(
     title: &str,
     state: &str,
-    assignee: AuthorId,
+    assignee: AuthorSubject,
     project: RowUuid,
     priority: u64,
     labels: &[&str],
@@ -1712,7 +1712,7 @@ pub(super) fn issue_cells(
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
         ("state".to_owned(), Value::String(state.to_owned())),
-        ("assignee".to_owned(), Value::Uuid(assignee.0)),
+        ("assignee".to_owned(), Value::Uuid(assignee.test_uuid())),
         ("project".to_owned(), Value::Uuid(project.0)),
         ("priority".to_owned(), Value::U64(priority)),
         (
@@ -1734,12 +1734,12 @@ pub(super) fn issue_cells(
 pub(super) struct CoreDb {
     pub(super) server: Node<RocksDbStorage>,
     schema: JazzSchema,
-    author: AuthorId,
+    author: AuthorSubject,
     pub(super) next_now_ms: Cell<u64>,
     id_source: RefCell<SeededRowIdSource>,
 }
 
-pub(super) fn open_core(node_byte: u8, author: AuthorId, schema: &JazzSchema) -> CoreDb {
+pub(super) fn open_core(node_byte: u8, author: AuthorSubject, schema: &JazzSchema) -> CoreDb {
     let storage = rocks_storage(schema);
     let node = NodeState::new_history_complete(
         NodeUuid::from_bytes([node_byte; 16]),
@@ -1889,7 +1889,7 @@ impl CoreDb {
 
     pub(super) fn insert_attributed(
         &self,
-        made_by: AuthorId,
+        made_by: AuthorSubject,
         table: &str,
         cells: RowCells,
     ) -> Result<WriteHandle<RocksDbStorage>, Error> {
@@ -1926,7 +1926,7 @@ impl CoreDb {
 
     pub(super) fn update_attributed(
         &self,
-        made_by: AuthorId,
+        made_by: AuthorSubject,
         table: &str,
         row: RowUuid,
         patch: RowCells,
@@ -1977,7 +1977,7 @@ impl CoreDb {
     pub(super) fn accept_subscriber(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Rc<LocalMutex<PeerConnection<RocksDbStorage>>> {
         self.server.accept_subscriber(transport, identity)
     }
@@ -1985,7 +1985,7 @@ impl CoreDb {
     pub(super) fn accept_subscriber_with_trust(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         trust: CommitUnitTrust,
     ) -> Rc<LocalMutex<PeerConnection<RocksDbStorage>>> {
         self.server
@@ -1995,7 +1995,7 @@ impl CoreDb {
     pub(super) fn accept_subscriber_with_claims(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
     ) -> Rc<LocalMutex<PeerConnection<RocksDbStorage>>> {
         self.server
@@ -2005,7 +2005,7 @@ impl CoreDb {
     pub(super) fn accept_subscriber_with_resume(
         &self,
         transport: Box<dyn Transport>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         cursor: ResumeCursor,
     ) -> Rc<LocalMutex<PeerConnection<RocksDbStorage>>> {
         self.server

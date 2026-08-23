@@ -540,7 +540,7 @@ where
         binding: &Binding,
         subscription: SubscriptionKey,
         values: &[Value],
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<Option<KnownStateDeclaration>, Error> {
         let binding_view_key = BindingViewKey {
             shape_id: shape.shape_id(),

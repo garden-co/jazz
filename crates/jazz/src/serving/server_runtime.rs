@@ -12,7 +12,7 @@ use crate::db::{
 };
 use crate::groove::records::Value;
 use crate::groove::storage::StorageFactory;
-use crate::ids::{AuthorId, NodeUuid, SchemaVersionId};
+use crate::ids::{AuthorSubject, NodeUuid, SchemaVersionId};
 use crate::node::EdgeCacheBudget;
 use crate::protocol::{MigrationLens, SyncMessage};
 use crate::schema::JazzSchema;
@@ -390,7 +390,7 @@ impl ServerRuntimeHandle {
                 let shell = match InMemoryServerShell::try_start_dynamic_edge_from_storage(
                     DbIdentity {
                         node: NodeUuid::from_bytes([0x5e; 16]),
-                        author: AuthorId::SYSTEM,
+                        author: AuthorSubject::SYSTEM,
                     },
                     storage_config,
                     storage_factory,
@@ -454,7 +454,7 @@ impl ServerRuntimeHandle {
                 let shell = match InMemoryServerShell::start_dynamic_edge_with_catalogue_snapshot(
                     DbIdentity {
                         node: NodeUuid::from_bytes([0x5e; 16]),
-                        author: AuthorId::SYSTEM,
+                        author: AuthorSubject::SYSTEM,
                     },
                     storage_config,
                     storage_factory,
@@ -615,7 +615,7 @@ impl ServerRuntimeHandle {
                     schema,
                     DbIdentity {
                         node: NodeUuid::from_bytes([0x5e; 16]),
-                        author: AuthorId::SYSTEM,
+                        author: AuthorSubject::SYSTEM,
                     },
                 )
                 .with_row_id_seed(0x5e)
@@ -678,7 +678,7 @@ impl ServerRuntimeHandle {
     /// Admit an authenticated session into the semantic runtime.
     pub async fn open_with_session_context(
         &self,
-        identity: AuthorId,
+        identity: AuthorSubject,
         claims: BTreeMap<String, Value>,
         trust: CommitUnitTrust,
         negotiated_features: crate::wire::WireFeatures,
@@ -1068,7 +1068,7 @@ mod tests {
     #[test]
     fn inbound_frame_phase_labels_semantic_transport_work() {
         let encoded = encode_message(SyncMessage::SessionClaims {
-            identity: AuthorId::from_bytes([7; 16]),
+            identity: AuthorSubject::for_test_bytes([7; 16]),
             claims: BTreeMap::new(),
         });
 

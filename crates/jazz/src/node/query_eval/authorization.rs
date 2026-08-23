@@ -237,15 +237,18 @@ where
         result
     }
 
-    pub(super) fn query_program_policy_context(&self, identity: AuthorId) -> PolicyContext {
-        if identity == AuthorId::SYSTEM {
+    pub(super) fn query_program_policy_context(&self, identity: AuthorSubject) -> PolicyContext {
+        if identity == AuthorSubject::SYSTEM {
             PolicyContext::System
         } else {
             let mut claims = default_policy_claim_values(identity);
             if let Some(session_claims) = self.session_claims.get(&identity) {
                 claims.extend(session_claims.clone());
             }
-            claims.insert("sub".to_owned(), Value::Uuid(identity.0));
+            claims.insert(
+                "sub".to_owned(),
+                Value::String(identity.canonical().to_owned()),
+            );
             PolicyContext::Identity {
                 mode: PolicyEnforcementMode::Enforcing,
                 permission_subject: identity,
@@ -259,7 +262,7 @@ where
         &mut self,
         policy: &crate::query::Query,
         row_uuid: RowUuid,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<bool, Error> {
         let policy_shape = policy.validate(&self.catalogue.schema)?;
         let policy_binding = policy_shape.bind(BTreeMap::new())?;
@@ -343,7 +346,7 @@ where
         policy: &crate::query::Query,
         row_uuid: RowUuid,
         cells: &BTreeMap<String, Value>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         insert_candidate: bool,
     ) -> Result<bool, Error> {
         let policy_schema_version = if self
@@ -387,7 +390,7 @@ where
         policy: &crate::query::Query,
         row_uuid: RowUuid,
         cells: &BTreeMap<String, Value>,
-        identity: AuthorId,
+        identity: AuthorSubject,
         insert_candidate: bool,
     ) -> Result<bool, Error> {
         let mut policy = policy.clone();
@@ -692,7 +695,7 @@ where
         &mut self,
         policy_schema_version: SchemaVersionId,
         table_name: &str,
-        identity: AuthorId,
+        identity: AuthorSubject,
         param_binding_mode: ParamBindingMode,
         tier: DurabilityTier,
         binding_source_shape: Option<String>,
@@ -716,7 +719,7 @@ where
         &self,
         policy_schema_version: SchemaVersionId,
         table_name: &str,
-        identity: AuthorId,
+        identity: AuthorSubject,
         param_binding_mode: ParamBindingMode,
         position: GlobalTime,
         binding_source_shape: Option<String>,
@@ -822,7 +825,7 @@ where
         &mut self,
         policy_schema_version: SchemaVersionId,
         table_name: &str,
-        identity: AuthorId,
+        identity: AuthorSubject,
         tier: DurabilityTier,
         binding_source_shape: Option<String>,
         binding_user_params: BTreeMap<String, ColumnType>,
@@ -845,7 +848,7 @@ where
         &mut self,
         policy_schema_version: SchemaVersionId,
         table_name: &str,
-        identity: AuthorId,
+        identity: AuthorSubject,
         param_binding_mode: ParamBindingMode,
         tier: DurabilityTier,
         binding_source_shape: Option<String>,
@@ -1121,7 +1124,7 @@ where
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn authorization_support_scope(
         &self,
-        writer: AuthorId,
+        writer: AuthorSubject,
         action: &PermissionAdviceAction,
     ) -> Result<AuthorizationSupportScope, Error> {
         let (operation, table_name) = authorization_scope_action(action);
@@ -1310,7 +1313,7 @@ mod authorization_scope_compiler_tests {
         let storage =
             RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
         let mut node = NodeState::new(NodeUuid::from_bytes([7; 16]), schema, storage).unwrap();
-        let identity = AuthorId::from_bytes([8; 16]);
+        let identity = AuthorSubject::for_test_bytes([8; 16]);
         node.set_session_claims(
             identity,
             BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
@@ -1397,7 +1400,7 @@ mod authorization_scope_compiler_tests {
         let storage =
             RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
         let mut node = NodeState::new(NodeUuid::from_bytes([9; 16]), schema, storage).unwrap();
-        let identity = AuthorId::from_bytes([3; 16]);
+        let identity = AuthorSubject::for_test_bytes([3; 16]);
         node.set_session_claims(
             identity,
             BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
@@ -1492,7 +1495,7 @@ mod authorization_scope_compiler_tests {
             NodeState::new(NodeUuid::from_bytes([0x31; 16]), base.clone(), storage).unwrap();
         let evolved_id = evolved.version_id();
         node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(SchemaLineagePublication::new(
                 SchemaVersion::new(evolved),
@@ -1514,7 +1517,7 @@ mod authorization_scope_compiler_tests {
         })
         .unwrap();
         node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
                 schema: evolved_id,
@@ -1524,7 +1527,7 @@ mod authorization_scope_compiler_tests {
 
         let scope = node
             .authorization_support_scope(
-                AuthorId::from_bytes([0x32; 16]),
+                AuthorSubject::for_test_bytes([0x32; 16]),
                 &PermissionAdviceAction::Read {
                     table: "notes".to_owned(),
                     row: RowUuid::from_bytes([0x33; 16]),
@@ -1538,7 +1541,7 @@ mod authorization_scope_compiler_tests {
         );
         let insert = node
             .authorization_support_scope(
-                AuthorId::from_bytes([0x32; 16]),
+                AuthorSubject::for_test_bytes([0x32; 16]),
                 &PermissionAdviceAction::Insert {
                     table: "notes".to_owned(),
                     cells: BTreeMap::from([(
@@ -1552,7 +1555,7 @@ mod authorization_scope_compiler_tests {
             insert.subscriptions.is_empty(),
             "v2's read-only policy closes insert support instead of retaining v1's grant"
         );
-        let writer = AuthorId::from_bytes([0x32; 16]);
+        let writer = AuthorSubject::for_test_bytes([0x32; 16]);
         assert!(
             !node
                 .dry_run_mergeable_write_allows_in_schema(
@@ -1602,7 +1605,7 @@ mod authorization_scope_compiler_tests {
             NodeState::new(NodeUuid::from_bytes([0x41; 16]), base.clone(), storage).unwrap();
         let evolved_id = evolved.version_id();
         node.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(SchemaLineagePublication::new(
                 SchemaVersion::new(evolved),
@@ -1630,7 +1633,7 @@ mod authorization_scope_compiler_tests {
         })
         .unwrap();
         node.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
                 schema: evolved_id,
@@ -1652,7 +1655,7 @@ mod authorization_scope_compiler_tests {
         };
         assert_eq!(table, "people");
         let scope = node
-            .authorization_support_scope(AuthorId::from_bytes([0x44; 16]), &actions[0])
+            .authorization_support_scope(AuthorSubject::for_test_bytes([0x44; 16]), &actions[0])
             .unwrap();
         assert_eq!(
             scope.subscriptions.len(),

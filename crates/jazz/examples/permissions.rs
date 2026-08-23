@@ -9,7 +9,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::protocol::SyncMessage;
 use jazz::schema::JazzSchema;
@@ -18,8 +18,8 @@ use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSch
 use jazz::tx::{DurabilityTier, Fate, RejectionReason};
 use jazz::wire::TransportError;
 
-fn author(byte: u8) -> AuthorId {
-    AuthorId::from_bytes([byte; 16])
+fn author(byte: u8) -> AuthorSubject {
+    AuthorSubject::for_test_bytes([byte; 16])
 }
 
 fn todo_schema() -> JazzSchema {
@@ -38,24 +38,27 @@ fn todo_schema() -> JazzSchema {
             TableSchemaBuilder::new("todos")
                 .column("title", ColumnType::Text)
                 .column("done", ColumnType::Boolean)
-                .column("owner", ColumnType::Uuid)
+                .column("owner", ColumnType::Text)
                 .policies(policies),
         )
         .build();
     JazzSchema::new(&source).expect("permissions public schema compiles")
 }
 
-fn todo_cells(title: &str, done: bool, owner: AuthorId) -> RowCells {
+fn todo_cells(title: &str, done: bool, owner: AuthorSubject) -> RowCells {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
         ("done".to_owned(), Value::Bool(done)),
-        ("owner".to_owned(), Value::Uuid(owner.0)),
+        (
+            "owner".to_owned(),
+            Value::String(owner.canonical().to_owned()),
+        ),
     ])
 }
 
 fn open_db(
     node_byte: u8,
-    author: AuthorId,
+    author: AuthorSubject,
     schema: JazzSchema,
     storage: MemoryStorage,
 ) -> Result<Db<MemoryStorage>, Box<dyn std::error::Error>> {
@@ -72,14 +75,14 @@ fn open_db(
 
 struct CoreDb {
     server: Node<MemoryStorage>,
-    author: AuthorId,
+    author: AuthorSubject,
     next_now_ms: u64,
     id_source: SeededRowIdSource,
 }
 
 fn open_core(
     node_byte: u8,
-    author: AuthorId,
+    author: AuthorSubject,
     schema: JazzSchema,
     storage: MemoryStorage,
 ) -> Result<CoreDb, Box<dyn std::error::Error>> {
@@ -105,7 +108,7 @@ impl CoreDb {
 
     fn insert_attributed(
         &mut self,
-        made_by: AuthorId,
+        made_by: AuthorSubject,
         table: &str,
         cells: RowCells,
     ) -> Result<RowUuid, Error> {
@@ -142,7 +145,7 @@ impl CoreDb {
         .map_err(Into::into)
     }
 
-    fn accept_subscriber(&self, transport: Box<dyn Transport>, identity: AuthorId) {
+    fn accept_subscriber(&self, transport: Box<dyn Transport>, identity: AuthorSubject) {
         let _subscriber = self.server.accept_subscriber(transport, identity);
     }
 
@@ -185,7 +188,7 @@ fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
 fn sync_client_to_core(
     client: &Db<MemoryStorage>,
     core: &CoreDb,
-    identity: AuthorId,
+    identity: AuthorSubject,
 ) -> Result<(), Error> {
     let (client_transport, server_transport) = duplex();
     let _upstream = block_on(client.connect_upstream(client_transport));

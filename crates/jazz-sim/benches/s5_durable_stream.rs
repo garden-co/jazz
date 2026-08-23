@@ -14,7 +14,7 @@ use jazz::db::{
     SubscriptionStream, Transport,
 };
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState};
 use jazz::peer::PeerState;
 use jazz::protocol::SyncMessage;
@@ -324,7 +324,7 @@ fn run_jazz(config: &Config) -> JazzSummary {
             let before = Instant::now();
             append_tokens(config, content, stream, seq);
             let commit = MergeableCommit::new(STREAM_DOCS, stream_doc_row(stream), now_ms)
-                .made_by(AuthorId::SYSTEM)
+                .made_by(AuthorSubject::SYSTEM)
                 .cells(cells([
                     ("stream", Value::Uuid(stream_row(stream).0)),
                     ("content", Value::Bytes(content.clone())),
@@ -577,7 +577,7 @@ async fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary
 
     let (client_transport, server_transport) = queue_duplex();
     let upstream = block_on(client.connect_upstream(client_transport));
-    let subscriber = server.accept_subscriber(server_transport, AuthorId::SYSTEM);
+    let subscriber = server.accept_subscriber(server_transport, AuthorSubject::SYSTEM);
     let query = Query::from(STREAM_DOCS);
     let prepared = client
         .prepare_query(&query)
@@ -646,7 +646,8 @@ async fn run_process_local_resume_canary(config: &Config) -> ResumeCanarySummary
 
     let (client_transport, server_transport) = queue_duplex();
     let _resumed_upstream = block_on(client.connect_upstream(client_transport));
-    let resumed = server.accept_subscriber_with_resume(server_transport, AuthorId::SYSTEM, cursor);
+    let resumed =
+        server.accept_subscriber_with_resume(server_transport, AuthorSubject::SYSTEM, cursor);
 
     client.tick().await.expect("client resumed subscribe tick");
     resumed
@@ -1121,7 +1122,7 @@ fn open_db(node_uuid: NodeUuid, schema: JazzSchema) -> (TempDir, Db<RocksDbStora
         storage,
         identity: DbIdentity {
             node: node_uuid,
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(u64::from_le_bytes(
             node_uuid.as_bytes()[..8]

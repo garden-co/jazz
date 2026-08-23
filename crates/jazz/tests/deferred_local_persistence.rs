@@ -6,7 +6,7 @@ use futures::executor::block_on;
 use futures::task::noop_waker;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts};
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
-use jazz::ids::{AuthorId, NodeUuid};
+use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::row;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -36,7 +36,7 @@ fn rocksdb_writes_are_resident_before_the_sync_call_returns() {
         storage,
         DbIdentity {
             node: NodeUuid::from_bytes([0x52; 16]),
-            author: AuthorId::from_bytes([0x62; 16]),
+            author: AuthorSubject::for_test_bytes([0x62; 16]),
         },
     )))
     .expect("open persistent database");
@@ -63,7 +63,7 @@ fn deferred_persistence_keeps_resident_write_sync_and_local_durability_pending()
         storage,
         DbIdentity {
             node: NodeUuid::from_bytes([0x51; 16]),
-            author: AuthorId::from_bytes([0x61; 16]),
+            author: AuthorSubject::for_test_bytes([0x61; 16]),
         },
     )))
     .expect("open test database");

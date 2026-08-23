@@ -17,7 +17,7 @@ use groove::storage::{OrderedKvStorage, ReopenableStorage};
 use web_time::Instant;
 
 use crate::authorization_scope::AuthorityScopeAggregate;
-use crate::ids::AuthorId;
+use crate::ids::AuthorSubject;
 use crate::node::maintained_subscription_view::{
     MaintainedSubscriptionViewFootprint as MaintainedSubscriptionViewIndexFootprint,
     ResultTransitions,
@@ -55,7 +55,7 @@ pub use subscription_state::{PeerEvictionPins, PeerRole};
 #[derive(Debug)]
 pub struct PeerState {
     role: PeerRole,
-    permission_identity: Option<AuthorId>,
+    permission_identity: Option<AuthorSubject>,
     shipped_complete_tx_payloads: BTreeSet<TxId>,
     ship_complete_exclusive_payloads: bool,
     /// Maintained evaluator and shipped-membership state for canonical

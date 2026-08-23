@@ -232,7 +232,7 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: renamed.id,
@@ -360,9 +360,9 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
         renamed.id,
         row_uuid,
         Vec::new(),
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         tx_id.time,
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         tx_id.time,
         &BTreeMap::from([("body".to_owned(), v("wrong physical table"))]),
         None,
@@ -408,7 +408,7 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     // payload is considered: logical-name matching must fail closed.
     let unknown = crate::protocol::RowVersionRef::new("unknown", row_uuid, tx_id);
     assert!(
-        core.row_version_payloads_for_refs(std::slice::from_ref(&unknown), AuthorId::SYSTEM)
+        core.row_version_payloads_for_refs(std::slice::from_ref(&unknown), AuthorSubject::SYSTEM)
             .is_err(),
         "the serving repair path must reject an unknown projected table too"
     );
@@ -475,7 +475,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
     .unwrap();
     receiver
         .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 2,
                 schema: reintroduced_version.id,
@@ -501,7 +501,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
         tx_id,
         kind: TxKind::Mergeable,
         n_total_writes: 1,
-        made_by: AuthorId::SYSTEM,
+        made_by: AuthorSubject::SYSTEM,
         permission_subject: None,
         base_snapshot: None,
         row_read_set: None,
@@ -516,9 +516,9 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
         original.version_id(),
         task_row,
         Vec::new(),
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         tx_id.time,
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         tx_id.time,
         &BTreeMap::from([("name".to_owned(), v("old physical task"))]),
         None,

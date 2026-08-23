@@ -102,7 +102,7 @@ impl AuthorityScopeAggregate {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AuthorityContext {
     pub authority: [u8; 16],
-    pub link: [u8; 16],
+    pub link: crate::ids::AuthorSubject,
     /// Locally generated identity for one physical admitted upstream link.
     /// It never crosses the wire; it prevents a parallel connection to the
     /// same remote authority epoch from discharging another link's routes.
@@ -395,14 +395,14 @@ impl Drop for AuthorizationScopeLease {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ids::AuthorId;
+    use crate::ids::AuthorSubject;
     use crate::query::{BindingId, ShapeId};
     use crate::time::GlobalTime;
 
     fn k(n: u8) -> AuthorizationSupportScopeKey {
         AuthorizationSupportScopeKey {
             support_shape_digest: [n; 32],
-            subject: AuthorId::from_bytes([1; 16]),
+            subject: AuthorSubject::for_test_bytes([1; 16]),
             claims_digest: [2; 32],
             policy_digest: [3; 32],
         }
@@ -418,7 +418,7 @@ mod tests {
     fn c() -> AuthorityContext {
         AuthorityContext {
             authority: [4; 16],
-            link: [5; 16],
+            link: AuthorSubject::for_test_bytes([5; 16]),
             connection_id: 1,
             connection_epoch: 1,
             claims_revision: 1,
@@ -431,7 +431,7 @@ mod tests {
         AuthorizationScopeReceipt {
             key,
             authority: [4; 16],
-            link: [5; 16],
+            link: AuthorSubject::for_test_bytes([5; 16]),
             authority_epoch: 1,
             claims_revision: 1,
             policy_epoch: 1,
@@ -580,7 +580,7 @@ mod tests {
                 ..c()
             },
             AuthorityContext {
-                link: [9; 16],
+                link: AuthorSubject::for_test_bytes([9; 16]),
                 ..c()
             },
             AuthorityContext {

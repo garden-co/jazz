@@ -826,7 +826,7 @@ fn executable_magic_column_type(column: &str) -> Result<Option<&'static ColumnTy
         });
     }
     match column {
-        "$createdBy" | "$updatedBy" => Ok(Some(&ColumnType::Uuid)),
+        "$createdBy" | "$updatedBy" => Ok(Some(&ColumnType::String)),
         "$createdAt" | "$updatedAt" => Ok(Some(&ColumnType::U64)),
         _ => Ok(None),
     }

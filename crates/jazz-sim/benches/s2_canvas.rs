@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use hdrhistogram::Histogram;
 use jazz::db::{Db, DbConfig, DbIdentity, ReadOpts, SeededRowIdSource, SubscriptionEvent};
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, MergeableCommit, NodeState};
 use jazz::peer::PeerState;
 use jazz::protocol::{RegisterShapeOptions, ShapeAst, Subscribe, SubscriptionKey, SyncMessage};
@@ -268,7 +268,12 @@ fn run_live(ctx: &mut dyn DriverContext, config: &Config, coalesced: bool) -> Li
 
     let (shape, binding) = shape_subscription(&schema, canvas);
     let mut participants = open_participants(config, &schema);
-    let mut spy = open_participant("spy", node(90), schema, AuthorId::from_bytes([0x55; 16]));
+    let mut spy = open_participant(
+        "spy",
+        node(90),
+        schema,
+        AuthorSubject::for_test_bytes([0x55; 16]),
+    );
     for participant in &mut participants {
         hydrate(ctx, &mut core, participant, &shape, &binding);
     }
@@ -1831,7 +1836,10 @@ fn run_db_surface(config: &Config, coalesced: bool) -> DbSurfaceSummary {
             row(10_000 + idx),
             BTreeMap::from([
                 ("canvas".to_owned(), Value::Uuid(canvas.0)),
-                ("userID".to_owned(), Value::Uuid(participant_author(idx).0)),
+                (
+                    "userID".to_owned(),
+                    Value::String(participant_author(idx).canonical().to_owned()),
+                ),
             ]),
         ))
         .expect("db invite insert");
@@ -1955,7 +1963,7 @@ fn run_failure(ctx: &mut dyn DriverContext, config: &Config) -> FailureSummary {
         "spy",
         node(62),
         schema.clone(),
-        AuthorId::from_bytes([0x44; 16]),
+        AuthorSubject::for_test_bytes([0x44; 16]),
     );
     hydrate(ctx, &mut core, &mut spy, &shape, &binding);
 
@@ -2060,7 +2068,7 @@ fn seed_fixture(
         core,
         CANVASES,
         canvas,
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         canvas_cells(),
         1,
     );
@@ -2071,10 +2079,13 @@ fn seed_fixture(
             core,
             INVITES,
             row(10_000 + idx),
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             BTreeMap::from([
                 ("canvas".to_owned(), Value::Uuid(canvas.0)),
-                ("userID".to_owned(), Value::Uuid(participant_author(idx).0)),
+                (
+                    "userID".to_owned(),
+                    Value::String(participant_author(idx).canonical().to_owned()),
+                ),
             ]),
             100 + idx as u64,
         );
@@ -2086,7 +2097,7 @@ fn seed_fixture(
             core,
             SHAPES,
             shape_row(idx),
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             shape_cells(canvas, idx, idx as f64, idx as f64),
             1_000 + idx as u64,
         );
@@ -2106,7 +2117,7 @@ fn seed_concurrent_fixture(
         core,
         CANVASES,
         canvas,
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         canvas_cells(),
         0,
     );
@@ -2117,10 +2128,13 @@ fn seed_concurrent_fixture(
             core,
             INVITES,
             row(10_000 + idx),
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             BTreeMap::from([
                 ("canvas".to_owned(), Value::Uuid(canvas.0)),
-                ("userID".to_owned(), Value::Uuid(participant_author(idx).0)),
+                (
+                    "userID".to_owned(),
+                    Value::String(participant_author(idx).canonical().to_owned()),
+                ),
             ]),
             0,
         );
@@ -2132,7 +2146,7 @@ fn seed_concurrent_fixture(
             core,
             SHAPES,
             shape_row(idx),
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             shape_cells(canvas, idx, idx as f64, idx as f64),
             0,
         );
@@ -2146,7 +2160,7 @@ fn commit_global(
     core: &mut NodeState<RocksDbStorage>,
     table: &str,
     row_uuid: RowUuid,
-    made_by: AuthorId,
+    made_by: AuthorSubject,
     cells: BTreeMap<String, Value>,
     seq: u64,
 ) {
@@ -2169,7 +2183,7 @@ fn commit_global_at(
     core: &mut NodeState<RocksDbStorage>,
     table: &str,
     row_uuid: RowUuid,
-    made_by: AuthorId,
+    made_by: AuthorSubject,
     cells: BTreeMap<String, Value>,
     made_at: u64,
 ) {
@@ -2331,7 +2345,7 @@ fn open_participant(
     name: &str,
     node_uuid: NodeUuid,
     schema: JazzSchema,
-    identity: AuthorId,
+    identity: AuthorSubject,
 ) -> Participant {
     let edge_schema = schema.clone();
     let (dir, participant_node) = open_node(node_uuid, schema);
@@ -2379,7 +2393,7 @@ fn reopen_node(
 
 fn open_db(
     node_uuid: NodeUuid,
-    author: AuthorId,
+    author: AuthorSubject,
     schema: JazzSchema,
 ) -> (tempfile::TempDir, Db<RocksDbStorage>) {
     let dir = tempfile::tempdir().unwrap();
@@ -2536,11 +2550,11 @@ fn merge_counters(core: &mut NodeState<RocksDbStorage>, shapes: usize) -> (usize
     let mut merges_of_merges = 0;
     for idx in 0..shapes {
         for entry in block_on(core.row_history(SHAPES, shape_row(idx))).unwrap() {
-            if entry.parents().len() > 1 && entry.made_by() == AuthorId::SYSTEM {
+            if entry.parents().len() > 1 && entry.made_by() == AuthorSubject::SYSTEM {
                 merges += 1;
                 if entry.parents().iter().any(|parent| {
                     block_on(core.transaction_record(*parent))
-                        .is_some_and(|record| record.made_by == AuthorId::SYSTEM)
+                        .is_some_and(|record| record.made_by == AuthorSubject::SYSTEM)
                 }) {
                     merges_of_merges += 1;
                 }
@@ -2559,7 +2573,7 @@ fn assert_merges_are_concurrent(core: &mut NodeState<RocksDbStorage>, shapes: us
             .collect::<BTreeMap<_, _>>();
         for entry in &history {
             let parents = entry.parents();
-            if parents.len() <= 1 || entry.made_by() != AuthorId::SYSTEM {
+            if parents.len() <= 1 || entry.made_by() != AuthorSubject::SYSTEM {
                 continue;
             }
             for (left_idx, left) in parents.iter().enumerate() {
@@ -3037,8 +3051,8 @@ fn shape_row(idx: usize) -> RowUuid {
     row(1_000 + idx)
 }
 
-fn participant_author(idx: usize) -> AuthorId {
-    AuthorId(row(20_000 + idx).0)
+fn participant_author(idx: usize) -> AuthorSubject {
+    AuthorSubject::for_test_uuid(row(20_000 + idx).0)
 }
 
 fn node(byte: u8) -> NodeUuid {

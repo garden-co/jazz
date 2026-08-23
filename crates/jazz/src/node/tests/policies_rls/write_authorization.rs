@@ -426,7 +426,7 @@ fn session_owner_string_uuid_write_policy_accepts_matching_author() {
                 .made_by(author)
                 .cells(BTreeMap::from([
                     ("title".to_owned(), Value::String("owned".to_owned())),
-                    ("owner_id".to_owned(), Value::String(author.0.to_string())),
+                    ("owner_id".to_owned(), Value::String(author.test_uuid().to_string())),
                 ])),
         )
         .unwrap();
@@ -451,7 +451,7 @@ fn session_owner_string_uuid_write_policy_accepts_matching_author() {
             row_uuid,
             BTreeMap::from([
                 ("title".to_owned(), Value::String("owned".to_owned())),
-                ("owner_id".to_owned(), Value::String(author.0.to_string())),
+                ("owner_id".to_owned(), Value::String(author.test_uuid().to_string())),
             ]),
         )]
     );
@@ -594,7 +594,7 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
                 .made_by(alice)
                 .cells(BTreeMap::from([
                     ("body".to_owned(), v("alice private")),
-                    ("owner_id".to_owned(), Value::String(alice.0.to_string())),
+                    ("owner_id".to_owned(), Value::String(alice.test_uuid().to_string())),
                 ])),
         ])
         .unwrap();
@@ -793,7 +793,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
         .commit_mergeable_settled(MergeableCommit::new("canvasInvites", invite_row, 11).cells(
             BTreeMap::from([
                 ("canvas".to_owned(), Value::Uuid(canvas_row.0)),
-                ("userID".to_owned(), Value::Uuid(invited.0)),
+                ("userID".to_owned(), Value::Uuid(invited.test_uuid())),
             ]),
         ))
         .unwrap();
@@ -1475,7 +1475,7 @@ fn write_policy_branch_or_join_allows_either_literal_branch_or_membership_join()
         .commit_mergeable_settled(MergeableCommit::new("canvasInvites", invite_row, 3).cells(
             BTreeMap::from([
                 ("canvas".to_owned(), Value::Uuid(private_canvas.0)),
-                ("userID".to_owned(), Value::Uuid(invited.0)),
+                ("userID".to_owned(), Value::Uuid(invited.test_uuid())),
             ]),
         ))
         .unwrap();
@@ -1596,7 +1596,7 @@ fn read_policy_branch_or_join_allows_public_or_membership_reads() {
             .cells(BTreeMap::from([
                 ("title".to_owned(), Value::String("public".to_owned())),
                 ("isPublic".to_owned(), Value::Bool(true)),
-                ("createdBy".to_owned(), Value::Uuid(member.0)),
+                ("createdBy".to_owned(), Value::Uuid(member.test_uuid())),
             ])),
     );
     accept_global(
@@ -1606,14 +1606,14 @@ fn read_policy_branch_or_join_allows_public_or_membership_reads() {
             .cells(BTreeMap::from([
                 ("title".to_owned(), Value::String("private".to_owned())),
                 ("isPublic".to_owned(), Value::Bool(false)),
-                ("createdBy".to_owned(), Value::Uuid(member.0)),
+                ("createdBy".to_owned(), Value::Uuid(member.test_uuid())),
             ])),
     );
     accept_global(
         &mut core,
         MergeableCommit::new("chatMembers", membership, 12).cells(BTreeMap::from([
             ("chatId".to_owned(), Value::Uuid(private_chat.0)),
-            ("userId".to_owned(), Value::String(member.0.to_string())),
+            ("userId".to_owned(), Value::String(member.test_uuid().to_string())),
         ])),
     );
     let shape = Query::from("chats").validate(&core.catalogue.schema).unwrap();

@@ -899,23 +899,24 @@ pub fn resolve_verified_jwt_session(
         .issuer
         .as_deref()
         .map(str::trim)
-        .filter(|v| !v.is_empty());
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| UnauthenticatedResponse::invalid("JWT iss claim is required"))?
+        .to_owned();
 
     let claims = match verified.claims {
         serde_json::Value::Object(mut map) => {
             map.insert("subject".to_string(), serde_json::json!(subject));
-            if let Some(iss) = issuer {
-                map.insert("issuer".to_string(), serde_json::json!(iss));
-            }
+            map.insert("issuer".to_string(), serde_json::json!(issuer.clone()));
             serde_json::Value::Object(map)
         }
         _ => serde_json::json!({
             "subject": subject,
-            "issuer": issuer,
+            "issuer": issuer.clone(),
         }),
     };
 
     Ok(Session {
+        issuer,
         user_id: subject,
         claims,
         auth_mode: jazz::tools::AuthMode::External,
@@ -1031,6 +1032,7 @@ pub async fn extract_session(
                 _ => jazz::tools::AuthMode::LocalFirst,
             };
             return Ok(Some(Session {
+                issuer: verified.issuer.to_owned(),
                 user_id: verified.user_id,
                 claims: serde_json::Value::Object(serde_json::Map::new()),
                 auth_mode,
@@ -1243,7 +1245,8 @@ mod tests {
 
     #[test]
     fn test_decode_session_header() {
-        let session = Session::new("user-456").with_claims(serde_json::json!({"teams": ["eng"]}));
+        let session = Session::new("urn:jazz:test", "user-456")
+            .with_claims(serde_json::json!({"teams": ["eng"]}));
         let json = serde_json::to_string(&session).unwrap();
         let b64 = base64::engine::general_purpose::STANDARD.encode(&json);
 
@@ -1263,7 +1266,7 @@ mod tests {
         let config = make_test_config();
         let mut headers = HeaderMap::new();
 
-        let session = Session::new("impersonated-user");
+        let session = Session::new("urn:jazz:test", "impersonated-user");
         let session_json = serde_json::to_string(&session).unwrap();
         let session_b64 = base64::engine::general_purpose::STANDARD.encode(&session_json);
 
@@ -1285,7 +1288,7 @@ mod tests {
         let config = make_test_config();
         let mut headers = HeaderMap::new();
 
-        let session = Session::new("user");
+        let session = Session::new("urn:jazz:test", "user");
         let session_json = serde_json::to_string(&session).unwrap();
         let session_b64 = base64::engine::general_purpose::STANDARD.encode(&session_json);
 
@@ -1383,7 +1386,7 @@ mod tests {
         let mut headers = HeaderMap::new();
 
         // Add both backend and JWT auth - backend should win
-        let session = Session::new("backend-user");
+        let session = Session::new("urn:jazz:test", "backend-user");
         let session_json = serde_json::to_string(&session).unwrap();
         let session_b64 = base64::engine::general_purpose::STANDARD.encode(&session_json);
 

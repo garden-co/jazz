@@ -1,7 +1,7 @@
 //! Session context for policy evaluation.
 //!
 //! A Session represents the authenticated user's context, containing:
-//! - `user_id`: Required unique identifier for the user
+//! - `issuer` + `user_id`: Required authenticated JWT `iss` and `sub`
 //! - `claims`: JSON object with user-defined claims (roles, teams, etc.)
 //! - `auth_mode`: First-class auth-mode discriminator derived from the JWT `iss`
 
@@ -29,6 +29,8 @@ pub enum AuthMode {
 /// expressions to check row access permissions.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
+    /// Validated JWT issuer (`iss`).
+    pub issuer: String,
     /// Required user identifier.
     pub user_id: String,
     /// User-defined claims as a JSON object (e.g., `{"teams": ["eng", "design"]}`).
@@ -48,9 +50,10 @@ impl Session {
         matches!(path, [segment] if segment == "auth_mode" || segment == "authMode")
     }
 
-    /// Create a new session with just a user ID. Defaults to external auth mode.
-    pub fn new(user_id: impl Into<String>) -> Self {
+    /// Create a session from a validated issuer and subject.
+    pub fn new(issuer: impl Into<String>, user_id: impl Into<String>) -> Self {
         Self {
+            issuer: issuer.into(),
             user_id: user_id.into(),
             claims: JsonValue::Object(serde_json::Map::new()),
             auth_mode: AuthMode::External,
@@ -243,7 +246,7 @@ mod tests {
 
     #[test]
     fn test_session_user_id() {
-        let session = Session::new("user123");
+        let session = Session::new("urn:jazz:test", "user123");
         assert_eq!(session.get_user_id(), "user123");
         assert_eq!(session.get_string(&["user_id".into()]), Some("user123"));
         assert_eq!(session.get_string(&["userId".into()]), Some("user123"));
@@ -253,7 +256,7 @@ mod tests {
 
     #[test]
     fn test_session_claims() {
-        let session = Session::new("user123").with_claims(json!({
+        let session = Session::new("urn:jazz:test", "user123").with_claims(json!({
             "teams": ["eng", "design"],
             "role": "admin",
             "nested": {
@@ -285,7 +288,7 @@ mod tests {
 
     #[test]
     fn test_session_missing_paths() {
-        let session = Session::new("user123");
+        let session = Session::new("urn:jazz:test", "user123");
 
         // Non-existent claim
         assert!(!session.has_path(&["claims".into(), "missing".into()]));
@@ -302,7 +305,7 @@ mod tests {
     #[test]
     fn test_write_context_author_principal_prefers_attribution() {
         let context = WriteContext {
-            session: Some(Session::new("session-user")),
+            session: Some(Session::new("urn:jazz:test", "session-user")),
             attribution: Some("attributed-user".into()),
             updated_at: None,
             transaction_id: None,
@@ -314,7 +317,8 @@ mod tests {
 
     #[test]
     fn test_write_context_author_principal_falls_back_to_session_then_system() {
-        let session_context = WriteContext::from_session(Session::new("session-user"));
+        let session_context =
+            WriteContext::from_session(Session::new("urn:jazz:test", "session-user"));
         assert_eq!(session_context.author_principal(), "session-user");
 
         let system_context = WriteContext::default();
@@ -324,7 +328,7 @@ mod tests {
     #[test]
     fn test_write_context_batch_id_override() {
         let transaction_id = OpenTransactionId::new();
-        let context = WriteContext::from_session(Session::new("session-user"))
+        let context = WriteContext::from_session(Session::new("urn:jazz:test", "session-user"))
             .with_transaction_id(transaction_id);
 
         assert_eq!(context.transaction_id(), Some(transaction_id));
@@ -332,7 +336,7 @@ mod tests {
 
     #[test]
     fn test_write_context_target_branch_name_override() {
-        let context = WriteContext::from_session(Session::new("session-user"))
+        let context = WriteContext::from_session(Session::new("urn:jazz:test", "session-user"))
             .with_target_branch_name("dev-111111111111-main");
 
         assert_eq!(context.target_branch_name(), Some("dev-111111111111-main"));
@@ -340,14 +344,15 @@ mod tests {
 
     #[test]
     fn test_write_context_updated_at_override() {
-        let context = WriteContext::from_session(Session::new("session-user")).with_updated_at(42);
+        let context = WriteContext::from_session(Session::new("urn:jazz:test", "session-user"))
+            .with_updated_at(42);
 
         assert_eq!(context.updated_at(), Some(42));
     }
 
     #[test]
     fn session_auth_mode_defaults_to_external() {
-        let session = Session::new("user-1");
+        let session = Session::new("urn:jazz:test", "user-1");
         assert_eq!(session.auth_mode, AuthMode::External);
     }
 
@@ -358,7 +363,7 @@ mod tests {
             AuthMode::LocalFirst,
             AuthMode::Anonymous,
         ] {
-            let session = Session::new("user-1").with_auth_mode(mode);
+            let session = Session::new("urn:jazz:test", "user-1").with_auth_mode(mode);
             let json = serde_json::to_string(&session).unwrap();
             let back: Session = serde_json::from_str(&json).unwrap();
             assert_eq!(back.auth_mode, mode);
@@ -374,7 +379,7 @@ mod tests {
 
     #[test]
     fn session_get_string_returns_auth_mode_as_kebab_string() {
-        let s = Session::new("u").with_auth_mode(AuthMode::LocalFirst);
+        let s = Session::new("urn:jazz:test", "u").with_auth_mode(AuthMode::LocalFirst);
         assert_eq!(s.get_string(&["authMode".into()]), Some("local-first"));
         assert_eq!(s.get_string(&["auth_mode".into()]), Some("local-first"));
         assert!(s.has_path(&["authMode".into()]));

@@ -157,43 +157,132 @@ impl RowUuid {
     }
 }
 
-/// Authenticated user identity recorded on transactions.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct AuthorId(pub uuid::Uuid);
+/// Authenticated subject recorded on transactions and row provenance.
+///
+/// The portable identity is canonical JSON `[issuer, subject]`. Authenticated
+/// values are interned in memory; the intern handle is never persisted, sent,
+/// exposed to queries, or used as public ordering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AuthorSubject {
+    /// Internal authority capability; never admitted from JWT claims.
+    System,
+    /// One canonical, interned `[issuer, subject]` JSON string.
+    Authenticated(internment::Intern<String>),
+}
 
-impl AuthorId {
-    /// Internal/system author with unrestricted policy identity.
+impl AuthorSubject {
+    /// Internal authority subject that bypasses policy checks.
+    pub const SYSTEM: Self = Self::System;
+    /// Reserved issuer namespace for internal authority work.
+    pub const SYSTEM_ISSUER: &'static str = "urn:jazz:system";
+    /// Subject component of the internal authority identity.
+    pub const SYSTEM_SUBJECT: &'static str = "system";
+    /// Portable canonical representation of the internal authority identity.
+    pub const SYSTEM_CANONICAL: &'static str = r#"["urn:jazz:system","system"]"#;
+
+    /// Construct a subject from already authenticated JWT components.
+    pub fn authenticated(issuer: &str, subject: &str) -> Self {
+        assert_ne!(issuer, Self::SYSTEM_ISSUER, "system issuer is reserved");
+        let canonical = serde_json::to_string(&(issuer, subject))
+            .expect("two strings always have a canonical JSON encoding");
+        Self::Authenticated(internment::Intern::new(canonical))
+    }
+
+    /// Deterministic identity for internal fixtures and simulations.
+    pub fn for_test_bytes(bytes: [u8; 16]) -> Self {
+        Self::authenticated("urn:jazz:test", &uuid::Uuid::from_bytes(bytes).to_string())
+    }
+
+    /// Deterministic identity for fixtures that already use UUID values.
+    pub fn for_test_uuid(value: uuid::Uuid) -> Self {
+        Self::authenticated("urn:jazz:test", &value.to_string())
+    }
+
+    /// Recover the UUID subject used by deterministic legacy fixtures.
     ///
-    /// Derived as `Uuid::new_v5(&Uuid::NAMESPACE_OID, b"jazz:system-author")`.
-    pub const SYSTEM: Self = Self(uuid::uuid!("93c209ee-dbae-5071-a90d-02f8c0bbcf6a"));
-
-    /// Construct from UUID bytes in wire order.
-    pub fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self(uuid::Uuid::from_bytes(bytes))
+    /// This is test support only; production identity semantics use the full
+    /// canonical issuer-and-subject string.
+    #[doc(hidden)]
+    pub fn test_uuid(&self) -> uuid::Uuid {
+        let (issuer, subject): (String, String) =
+            serde_json::from_str(self.canonical()).expect("authenticated fixture subject");
+        assert_eq!(issuer, "urn:jazz:test", "not a UUID-backed test subject");
+        uuid::Uuid::parse_str(&subject).expect("test subject is a UUID")
     }
 
-    /// Return the UUID bytes in wire order.
-    pub fn to_bytes(self) -> Vec<u8> {
-        self.0.as_bytes().to_vec()
+    /// Parse a portable canonical subject, rejecting alternate JSON spellings.
+    pub fn from_canonical(canonical: &str) -> Result<Self, String> {
+        if canonical == Self::SYSTEM_CANONICAL {
+            return Ok(Self::SYSTEM);
+        }
+        let (issuer, subject): (String, String) =
+            serde_json::from_str(canonical).map_err(|error| error.to_string())?;
+        if issuer == Self::SYSTEM_ISSUER {
+            return Err("system issuer is reserved".to_owned());
+        }
+        let author = Self::authenticated(&issuer, &subject);
+        if author.canonical() != canonical {
+            return Err("author subject is not canonically JSON encoded".to_owned());
+        }
+        Ok(author)
     }
 
-    /// Borrow the UUID bytes in wire order.
-    pub fn as_bytes(&self) -> &[u8; 16] {
-        self.0.as_bytes()
+    /// Return the portable canonical JSON string.
+    pub fn canonical(&self) -> &str {
+        match self {
+            Self::System => Self::SYSTEM_CANONICAL,
+            Self::Authenticated(value) => value.as_str(),
+        }
+    }
+}
+
+impl PartialOrd for AuthorSubject {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for AuthorSubject {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.canonical().cmp(other.canonical())
+    }
+}
+
+impl serde::Serialize for AuthorSubject {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.canonical())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AuthorSubject {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let canonical = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Self::from_canonical(&canonical).map_err(serde::de::Error::custom)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::AuthorId;
+    use super::AuthorSubject;
 
     #[test]
-    fn system_author_uuid_matches_v5_derivation() {
+    fn author_subject_is_canonical_json_and_interned() {
+        let first = AuthorSubject::authenticated("https://issuer.example", "opaque:subject");
+        let second = AuthorSubject::authenticated("https://issuer.example", "opaque:subject");
+        assert_eq!(first, second);
         assert_eq!(
-            AuthorId::SYSTEM.0,
-            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, b"jazz:system-author")
+            first.canonical(),
+            r#"["https://issuer.example","opaque:subject"]"#
+        );
+        assert_eq!(
+            AuthorSubject::SYSTEM.canonical(),
+            AuthorSubject::SYSTEM_CANONICAL
         );
     }
 }

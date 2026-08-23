@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use hdrhistogram::Histogram;
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::protocol::{SyncMessage, VersionRecord};
 use jazz::schema::{JazzSchema, TableSchema};
@@ -235,9 +235,9 @@ fn run_commit_unit(config: &Config) {
                         schema_version,
                         row(20_000 + iter * rows_per_unit + idx),
                         Vec::new(),
-                        AuthorId::SYSTEM,
+                        AuthorSubject::SYSTEM,
                         TxTime(iter as u64),
-                        AuthorId::SYSTEM,
+                        AuthorSubject::SYSTEM,
                         TxTime(iter as u64),
                         &cells(&format!("cu-{iter}-{idx}")),
                         None,
@@ -252,7 +252,7 @@ fn run_commit_unit(config: &Config) {
                 ),
                 kind: jazz::tx::TxKind::Mergeable,
                 n_total_writes: rows_per_unit.try_into().expect("rows per unit fits u32"),
-                made_by: AuthorId::SYSTEM,
+                made_by: AuthorSubject::SYSTEM,
                 permission_subject: None,
                 base_snapshot: None,
                 row_read_set: None,
@@ -336,7 +336,7 @@ fn run_validation_entries(config: &Config) {
         let unit = commit_mergeable_unit_settled(
             &mut client,
             MergeableCommit::new(TABLE, row(idx), 1_000 + idx as u64)
-                .made_by(AuthorId::SYSTEM)
+                .made_by(AuthorSubject::SYSTEM)
                 .cells(cells(&format!("seed-{idx}"))),
         )
         .expect("seed unit")
@@ -359,7 +359,7 @@ fn run_validation_entries(config: &Config) {
         ))
         .expect("tx write");
         let (_tx_id, unit) =
-            commit_exclusive_settled(&mut client, tx, AuthorId::SYSTEM, 10_000 + idx as u64)
+            commit_exclusive_settled(&mut client, tx, AuthorSubject::SYSTEM, 10_000 + idx as u64)
                 .expect("commit exclusive");
         let (tx, versions) = commit_parts(&unit);
         let start = Instant::now();
@@ -392,7 +392,7 @@ fn run_validation_entries(config: &Config) {
         ))
         .expect("tx write");
         let (_tx_id, unit) =
-            commit_exclusive_settled(&mut client, tx, AuthorId::SYSTEM, 100_000 + idx as u64)
+            commit_exclusive_settled(&mut client, tx, AuthorSubject::SYSTEM, 100_000 + idx as u64)
                 .expect("commit exclusive");
         let (tx, versions) = commit_parts(&unit);
         let start = Instant::now();
@@ -417,7 +417,7 @@ fn seed_local_rows(node_: &mut NodeState<RocksDbStorage>, rows: usize) {
         let _ = commit_mergeable_unit_settled(
             node_,
             MergeableCommit::new(TABLE, row(idx), 1_000 + idx as u64)
-                .made_by(AuthorId::SYSTEM)
+                .made_by(AuthorSubject::SYSTEM)
                 .cells(cells(&format!("seed-{idx}"))),
         )
         .expect("seed local");
@@ -434,7 +434,7 @@ fn commit_unit(
     commit_mergeable_unit_settled(
         &mut node_,
         MergeableCommit::new(TABLE, row_uuid, 1_000 + idx)
-            .made_by(AuthorId::SYSTEM)
+            .made_by(AuthorSubject::SYSTEM)
             .parents(parents)
             .cells(cells(&format!("v-{idx}"))),
     )
@@ -452,7 +452,7 @@ fn commit_deletion_unit(
     commit_mergeable_unit_settled(
         &mut node_,
         MergeableCommit::new(TABLE, row_uuid, 2_000 + idx)
-            .made_by(AuthorId::SYSTEM)
+            .made_by(AuthorSubject::SYSTEM)
             .deletion(deletion),
     )
     .expect("deletion unit")
@@ -546,7 +546,7 @@ fn open_node_at(
 fn cells(title: &str) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
-        ("owner".to_owned(), Value::Uuid(AuthorId::SYSTEM.0)),
+        ("owner".to_owned(), Value::Uuid(AuthorSubject::SYSTEM.0)),
     ])
 }
 

@@ -58,7 +58,7 @@ determined by its role, not by a separate wire language (ch. 1, principle 2).
 Roles include relay links (`PeerRole::Relay`), edge-client links
 (`PeerRole::ClientLink { identity }`), fate authority, durability, and eviction.
 
-A relay link represents the system author (`AuthorId::SYSTEM`) and performs no
+A relay link represents the system author (`AuthorSubject::SYSTEM`) and performs no
 read narrowing. An edge-client link carries the terminated peer identity and
 narrows reads under that identity (ch. 7, ch. 9).
 

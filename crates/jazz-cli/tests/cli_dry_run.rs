@@ -20,7 +20,7 @@ use jazz::ids::{NodeUuid, RowUuid};
 use jazz::query::{ArraySubquery, Query};
 use jazz::schema::JazzSchema;
 use jazz::schema::TableSchema;
-use jazz::serving::auth_admission::author_id_from_subject;
+use jazz::serving::auth_admission::{STATIC_BEARER_ISSUER, author_subject_from_issuer_and_subject};
 use jazz::tools::{
     ColumnType as PublicColumnType, SchemaBuilder as PublicSchemaBuilder,
     TableSchemaBuilder as PublicTableSchemaBuilder,
@@ -183,7 +183,7 @@ fn empty_schema() -> JazzSchema {
 fn identity_for_subject(node: u8, subject: &str) -> DbIdentity {
     DbIdentity {
         node: NodeUuid::from_bytes([node; 16]),
-        author: author_id_from_subject(subject),
+        author: author_subject_from_issuer_and_subject(STATIC_BEARER_ISSUER, subject),
     }
 }
 

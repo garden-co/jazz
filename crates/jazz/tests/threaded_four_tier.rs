@@ -7,7 +7,7 @@ mod common;
 
 use jazz::block_on;
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::node::{CurrentRow, MergeableCommit, NodeState, SKEW_TOLERANCE_MS};
 use jazz::peer::{PeerMetrics, PeerState};
 use jazz::protocol::SyncMessage;
@@ -132,10 +132,13 @@ fn open_node(
     (temp_dir, node)
 }
 
-fn cells(title: impl Into<String>, owner: AuthorId) -> BTreeMap<String, Value> {
+fn cells(title: impl Into<String>, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.into())),
-        ("owner".to_owned(), Value::Uuid(owner.0)),
+        (
+            "owner".to_owned(),
+            Value::String(owner.canonical().to_owned()),
+        ),
     ])
 }
 
@@ -333,8 +336,8 @@ fn ui_thread(
     schema: JazzSchema,
     to_worker: Sender<Wire>,
     from_worker: Receiver<Wire>,
-    ui_author: AuthorId,
-    ui_owner: AuthorId,
+    ui_author: AuthorSubject,
+    ui_owner: AuthorSubject,
 ) -> UiResult {
     let (_dir, mut ui) = open_node(node(1), schema);
     let mut tx_ids = Vec::new();
@@ -467,7 +470,7 @@ fn assert_link_dedup(summary: LinkSummary) {
 #[test]
 fn threaded_four_tier_converges_with_fifo_links() {
     let schema = schema();
-    let ui_author = AuthorId::from_bytes([7; 16]);
+    let ui_author = AuthorSubject::for_test_bytes([7; 16]);
     let ui_owner = ui_author;
 
     let (ui_to_worker_tx, ui_to_worker_rx) = mpsc::channel::<Wire>();
@@ -534,11 +537,9 @@ fn threaded_four_tier_converges_with_fifo_links() {
 
     let ui_policy_rows = &ui_result.receipt.subscription_rows;
     assert!(!ui_policy_rows.is_empty());
-    assert!(
-        ui_policy_rows
-            .values()
-            .all(|cells| cells.get("owner") == Some(&Value::Uuid(ui_author.0)))
-    );
+    assert!(ui_policy_rows.values().all(|cells| {
+        cells.get("owner") == Some(&Value::String(ui_author.canonical().to_owned()))
+    }));
 
     for tx_id in ui_result.tx_ids {
         let core_fact = core_result.transaction_states.get(&tx_id).unwrap();

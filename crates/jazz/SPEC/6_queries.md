@@ -247,7 +247,8 @@ Claims are a separate input channel. `Operand::Claim` is _not_
 client-supplied binding data: claim bindings are injected server-side from the
 subscriber's authenticated identity and admission/session claims by policy
 composition (ch. 7). `sub` is the canonical identity claim and resolves to the
-authenticated `AuthorId`; additional claim names are product/admission-defined
+authenticated `AuthorSubject` JSON string `[iss,sub]`; raw provider claims stay
+available through their admission-defined names. Additional claim names are product/admission-defined
 and must come from the trusted admission/session context, never from ordinary
 query bindings.
 

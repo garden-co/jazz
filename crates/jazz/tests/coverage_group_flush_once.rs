@@ -10,7 +10,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{Query, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -44,7 +44,7 @@ fn open_client(seed: u8, schema: JazzSchema) -> Db<TestStorage> {
             TestStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([seed; 16]),
-                author: AuthorId::from_bytes([seed; 16]),
+                author: AuthorSubject::for_test_bytes([seed; 16]),
             },
         )
         .with_id_source(SeededRowIdSource::new(seed as u64)),
@@ -64,7 +64,7 @@ fn open_server(schema: JazzSchema) -> Db<TestStorage> {
             TestStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x5e; 16]),
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
             },
         )
         .with_id_source(SeededRowIdSource::new(0x5e)),
@@ -101,7 +101,8 @@ fn prepare_coverage_group_fixture(group_count: usize) -> CoverageGroupFixture {
     let client = open_client(0xc1, schema);
     let (client_transport, server_transport) = duplex();
     let _upstream = jazz::db::block_on(client.connect_upstream(client_transport));
-    let _subscriber = server.accept_subscriber(server_transport, AuthorId::from_bytes([0xc1; 16]));
+    let _subscriber =
+        server.accept_subscriber(server_transport, AuthorSubject::for_test_bytes([0xc1; 16]));
 
     let attachments = (0..group_count)
         .map(|route| {
@@ -148,7 +149,7 @@ impl CoverageGroupFixture {
             .seed_settled_mergeable_for_bootstrap(
                 "items",
                 row(self.next_row),
-                AuthorId::SYSTEM,
+                AuthorSubject::SYSTEM,
                 BTreeMap::from([
                     ("route".to_owned(), Value::I64(i64::from(u32::MAX))),
                     ("label".to_owned(), Value::String("unrelated".to_owned())),

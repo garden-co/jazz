@@ -154,7 +154,7 @@ impl PeerState {
     pub(crate) async fn prove_terminal_commit_authorization<S>(
         &mut self,
         node: &mut NodeState<S>,
-        writer: AuthorId,
+        writer: AuthorSubject,
         versions: &[VersionRecord],
         candidate_tx_id: TxId,
     ) -> Result<(), Error>
@@ -251,7 +251,7 @@ impl PeerState {
     async fn unsettled_authority_scope_subscriptions<S>(
         &mut self,
         node: &mut NodeState<S>,
-        writer: AuthorId,
+        writer: AuthorSubject,
         versions: &[VersionRecord],
         candidate_tx_id: Option<TxId>,
         retained_scope_is_unsettled: bool,

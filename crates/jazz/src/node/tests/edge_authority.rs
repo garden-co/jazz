@@ -237,7 +237,7 @@ fn edge_authority_rejects_exclusive_and_catalogue_writes_loudly() {
         tx_id: TxId::new(TxTime::from(10), node(0xee)),
         kind: TxKind::Exclusive,
         n_total_writes: 1,
-        made_by: AuthorId::SYSTEM,
+        made_by: AuthorSubject::SYSTEM,
         permission_subject: None,
         base_snapshot: None,
         row_read_set: None,
@@ -289,7 +289,7 @@ fn edge_authority_rejects_exclusive_and_catalogue_writes_loudly() {
         Err(Error::UnauthorizedCatalogueUpdate)
     ));
     edge.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         catalogue_seq: 1,
         publication: Box::new(publication),
     })

@@ -8,7 +8,7 @@ fn schema_version_id_round_trips_through_wire_ingest_and_recovery() {
     let (core_dir, mut core) = open_node_with_schema(node(0x32), schema.clone());
 
     let commit = MergeableCommit::new("todos", row(0x44), 1_000)
-        .made_by(AuthorId::SYSTEM)
+        .made_by(AuthorSubject::SYSTEM)
         .cells(BTreeMap::from([(
             "title".to_owned(),
             Value::String("lens hook".to_owned()),
@@ -116,7 +116,7 @@ fn trusted_catalogue_snapshot_installs_lineage_before_authored_payloads() {
     .unwrap();
     authority
         .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
                 schema: evolved.id,
@@ -181,7 +181,7 @@ fn catalogue_snapshot_preserves_active_schema_storage_identity() {
     .unwrap();
     authority
         .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
                 schema: evolved.id,
@@ -244,7 +244,7 @@ fn settled_view_projects_old_authored_row_into_clients_active_schema() {
     .unwrap();
     authority
         .apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
                 schema: evolved.id,
@@ -1226,7 +1226,7 @@ fn dynamic_edge_reopen_drains_after_staged_lineage_crash() {
     edge.set_catalogue_activation_failpoint(CatalogueActivationFailpoint::AfterStaged);
     assert!(matches!(
         edge.apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             catalogue_seq: 1,
             publication: Box::new(publication),
         }),
@@ -1315,7 +1315,7 @@ fn dynamic_edge_bootstrap_rejects_incremental_catalogue_messages_without_residue
 
     assert!(matches!(
         edge.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
                 schema: schema().version_id(),
@@ -1373,7 +1373,7 @@ fn dynamic_edge_bootstrap_rejects_direct_ingest_and_fate_without_residue() {
             tx.clone(),
             versions.clone(),
             20,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
         ).resolve(),
         Err(Error::CatalogueUninitialized)
     ));
@@ -1491,7 +1491,7 @@ fn trusted_catalogue_snapshot_activation_failure_never_exposes_a_prefix_and_reop
     assert_eq!(core.current_write_schema().unwrap().revision, 0);
     assert!(matches!(
         core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
             pointer: CurrentWriteSchema {
                 revision: 1,
                 schema: base.version_id(),

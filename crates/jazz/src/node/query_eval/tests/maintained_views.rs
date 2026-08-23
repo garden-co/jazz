@@ -22,8 +22,8 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
     register_query_shape(&mut client, &shape, opts.clone());
     subscribe_query_binding(&mut client, &shape, &binding);
 
-    let initial_tx = commit_global_issue(&mut server, 0, "open", AuthorId::SYSTEM, 1);
-    let mut peer = PeerState::edge_client(AuthorId::SYSTEM);
+    let initial_tx = commit_global_issue(&mut server, 0, "open", AuthorSubject::SYSTEM, 1);
+    let mut peer = PeerState::edge_client(AuthorSubject::SYSTEM);
     let initial = peer
         .rehydrate_query_with_opts(&mut server, &shape, &binding, opts.clone())
         .expect("serve initial settled issues view");
@@ -43,7 +43,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
             &shape,
             &binding,
             DurabilityTier::Local,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             QueryAuthorizationMode::ClientLocal,
         )
         .expect("prepare client-local maintained issues query");
@@ -51,7 +51,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
         .open_maintained_view_subscription_in_authorization_mode(
             &local_shape,
             &local_binding,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             DurabilityTier::Local,
             &ReadViewSpec::default(),
             Some(local_plan),
@@ -64,7 +64,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
     let updated_tx = client
         .commit_mergeable_settled(
             MergeableCommit::new("issues", issue, 2_000)
-                .made_by(AuthorId::SYSTEM)
+                .made_by(AuthorSubject::SYSTEM)
                 .parents(vec![initial_tx])
                 .cells(BTreeMap::from([
                     (
@@ -72,7 +72,10 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
                         Value::String("updated title".to_owned()),
                     ),
                     ("state".to_owned(), Value::String("open".to_owned())),
-                    ("assignee".to_owned(), Value::Uuid(AuthorId::SYSTEM.0)),
+                    (
+                        "assignee".to_owned(),
+                        Value::Uuid(AuthorSubject::SYSTEM.test_uuid()),
+                    ),
                     ("priority".to_owned(), Value::U64(0)),
                 ])),
         )

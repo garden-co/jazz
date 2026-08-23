@@ -20,7 +20,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid};
+use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::query::Query;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TablePolicies, TableSchemaBuilder};
@@ -28,8 +28,10 @@ use jazz::tx::DurabilityTier;
 
 type DirectDb = Db<MemoryStorage>;
 
-const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
-const OTHER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
+const AUTHOR: AuthorSubject =
+    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
+const OTHER_AUTHOR: AuthorSubject =
+    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
 
 fn authorization_schema(extra_columns: usize) -> JazzSchema {
     let mut table = TableSchemaBuilder::new("items")

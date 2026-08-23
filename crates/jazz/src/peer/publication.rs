@@ -101,7 +101,7 @@ impl PeerState {
     }
 
     /// Construct a peer link that terminates one client author identity.
-    pub fn client_link(identity: AuthorId) -> Self {
+    pub fn client_link(identity: AuthorSubject) -> Self {
         Self {
             role: PeerRole::ClientLink { identity },
             ..Self::default()
@@ -109,7 +109,7 @@ impl PeerState {
     }
 
     /// Construct an edge-boundary peer that terminates one client author identity.
-    pub fn edge_client(identity: AuthorId) -> Self {
+    pub fn edge_client(identity: AuthorSubject) -> Self {
         Self::client_link(identity)
     }
 
@@ -118,8 +118,8 @@ impl PeerState {
     /// Trusted backend websocket links still speak as their concrete peer identity
     /// for session/resume validation, but served reads must bypass row policies.
     pub fn edge_client_with_permission_identity(
-        identity: AuthorId,
-        permission_identity: AuthorId,
+        identity: AuthorSubject,
+        permission_identity: AuthorSubject,
     ) -> Self {
         Self {
             role: PeerRole::ClientLink { identity },
@@ -134,12 +134,12 @@ impl PeerState {
     }
 
     /// Return the wire/session identity for this peer link.
-    pub fn link_identity(&self) -> AuthorId {
+    pub fn link_identity(&self) -> AuthorSubject {
         self.role.identity()
     }
 
     /// Return the identity used to evaluate reads on this peer link.
-    pub fn identity(&self) -> AuthorId {
+    pub fn identity(&self) -> AuthorSubject {
         self.permission_identity
             .unwrap_or_else(|| self.role.identity())
     }

@@ -27,7 +27,7 @@ use jazz::db::{
 };
 use jazz::groove::db::StorageReadMetrics;
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit, param};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -304,7 +304,7 @@ fn open_db(path: &Path, schema: JazzSchema) -> (Db<RocksDbStorage>, u128, u128) 
             storage,
             DbIdentity {
                 node: NodeUuid::from_bytes([0x73; 16]),
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
             },
         )
         .with_id_source(SeededRowIdSource::new(0x73)),

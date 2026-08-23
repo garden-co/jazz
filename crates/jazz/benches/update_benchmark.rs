@@ -16,14 +16,15 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use jazz::db::{Db, DbConfig, DbIdentity, SeededRowIdSource, block_on};
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
 type CoreDb = Db<MemoryStorage>;
 
-const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
+const AUTHOR: AuthorSubject =
+    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
 
 fn schema() -> JazzSchema {
     let author = schema_fixture::session_user_id_column("author");

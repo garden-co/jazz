@@ -238,7 +238,10 @@ fn nested_read_policies_reuse_an_outer_equivalent_claim_slot() {
     let identity = author(0xf5);
     node.set_session_claims(
         identity,
-        BTreeMap::from([("user_id".to_owned(), Value::String(identity.0.to_string()))]),
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(identity.test_uuid().to_string()),
+        )]),
     );
 
     let claim_name = claim_param_field(&ClaimPath(vec!["user_id".to_owned()]));
@@ -441,7 +444,10 @@ fn prepared_query_lowering_matches_expected_sets() {
         ];
         for (shape, expected) in shapes {
             let binding = shape
-                .bind(BTreeMap::from([("user".to_owned(), Value::Uuid(user.0))]))
+                .bind(BTreeMap::from([(
+                    "user".to_owned(),
+                    Value::Uuid(user.test_uuid()),
+                )]))
                 .unwrap();
             let prepared = prepared_node
                 .query_rows(&shape, &binding, DurabilityTier::Local)

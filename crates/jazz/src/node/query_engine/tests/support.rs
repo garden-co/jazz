@@ -10,8 +10,8 @@ pub(super) fn row(byte: u8) -> RowUuid {
     RowUuid::from_bytes([byte; 16])
 }
 
-pub(super) fn author(byte: u8) -> AuthorId {
-    AuthorId::from_bytes([byte; 16])
+pub(super) fn author(byte: u8) -> AuthorSubject {
+    AuthorSubject::for_test_bytes([byte; 16])
 }
 
 pub(super) fn shape(byte: u8) -> ShapeId {

@@ -224,7 +224,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
                 ("isPublic".to_owned(), Value::Bool(false)),
                 (
                     "createdBy".to_owned(),
-                    Value::String(identity.0.to_string()),
+                    Value::String(identity.test_uuid().to_string()),
                 ),
                 (
                     "joinCode".to_owned(),
@@ -244,7 +244,10 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     let profile_tx = node
         .commit_mergeable_settled(MergeableCommit::new("profiles", profile, 11).cells(
             BTreeMap::from([
-                ("userId".to_owned(), Value::String(identity.0.to_string())),
+                (
+                    "userId".to_owned(),
+                    Value::String(identity.test_uuid().to_string()),
+                ),
                 ("name".to_owned(), Value::String("Alice".to_owned())),
                 ("avatar".to_owned(), Value::Nullable(None)),
             ]),
@@ -384,7 +387,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
             &shape,
             &server_binding,
             DurabilityTier::Edge,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             CurrentQueryProgramOutput::MaintainedView,
             &ReadViewSpec::default(),
         )
@@ -470,7 +473,10 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         .commit_mergeable_settled(MergeableCommit::new("chatMembers", row(0xab), 11).cells(
             BTreeMap::from([
                 ("chatId".to_owned(), Value::Uuid(chat.0)),
-                ("userId".to_owned(), Value::String(identity.0.to_string())),
+                (
+                    "userId".to_owned(),
+                    Value::String(identity.test_uuid().to_string()),
+                ),
                 (
                     "joinCode".to_owned(),
                     Value::Nullable(Some(Box::new(Value::String("invite-123".to_owned())))),
@@ -496,7 +502,10 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     // membership itself.
     node.set_session_claims(
         identity,
-        BTreeMap::from([("user_id".to_owned(), Value::String(identity.0.to_string()))]),
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(identity.test_uuid().to_string()),
+        )]),
     );
     let message_shape = Query::from("messages")
         .filter(eq(col("chatId"), param("chat_id")))
@@ -539,7 +548,10 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         open_node_with_uuid(NodeUuid::from_bytes([0xae; 16]), schema.clone());
     normal_client.set_session_claims(
         identity,
-        BTreeMap::from([("user_id".to_owned(), Value::String(identity.0.to_string()))]),
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(identity.test_uuid().to_string()),
+        )]),
     );
     let mut normal_membership_peer = PeerState::edge_client(identity);
     normal_client
@@ -651,7 +663,9 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
                 .borrowed()
                 .get_idx(7)
                 .expect("decode sender wire userId"),
-            Value::Nullable(Some(Box::new(Value::String(identity.0.to_string())))),
+            Value::Nullable(Some(Box::new(Value::String(
+                identity.test_uuid().to_string()
+            )))),
             "the relation sender version ships userId content"
         );
     } else {
@@ -708,7 +722,7 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
             .into_iter()
             .next()
             .and_then(|row| row.cell(normal_client.table("profiles").unwrap(), "userId")),
-        Some(Value::String(identity.0.to_string())),
+        Some(Value::String(identity.test_uuid().to_string())),
         "the delivered sender version retains its required userId"
     );
     let (local_shape, local_binding, local_plan) = normal_client
@@ -802,7 +816,7 @@ fn missing_policy_relation_seed_claim_fails_closed_without_breaking_prepared_bin
         row(0xc6),
         BTreeMap::from([
             ("team".to_owned(), Value::Uuid(team.0)),
-            ("user".to_owned(), Value::Uuid(reader.0)),
+            ("user".to_owned(), Value::Uuid(reader.test_uuid())),
         ]),
         3,
         3,
@@ -841,7 +855,7 @@ fn missing_policy_relation_seed_claim_fails_closed_without_breaking_prepared_bin
 
     node.set_session_claims(
         reader,
-        BTreeMap::from([("session_id".to_owned(), Value::Uuid(reader.0))]),
+        BTreeMap::from([("session_id".to_owned(), Value::Uuid(reader.test_uuid()))]),
     );
     let allowed_rows = node
         .query_rows_for_link(&shape, &binding, DurabilityTier::Global, reader)
@@ -879,11 +893,11 @@ fn declared_id_point_read_prepares_claim_policy_bindings() {
 
     node.set_session_claims(
         alice,
-        BTreeMap::from([("user_id".to_owned(), Value::Uuid(alice.0))]),
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(alice.test_uuid()))]),
     );
     node.set_session_claims(
         bob,
-        BTreeMap::from([("user_id".to_owned(), Value::Uuid(bob.0))]),
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(bob.test_uuid()))]),
     );
     commit_global_cells(
         &mut node,
@@ -891,7 +905,7 @@ fn declared_id_point_read_prepares_claim_policy_bindings() {
         document,
         BTreeMap::from([
             ("id".to_owned(), Value::Uuid(row(0xd5).0)),
-            ("owner".to_owned(), Value::Uuid(alice.0)),
+            ("owner".to_owned(), Value::Uuid(alice.test_uuid())),
             ("title".to_owned(), Value::String("private".to_owned())),
         ]),
         1,
@@ -923,7 +937,7 @@ fn declared_id_point_read_prepares_claim_policy_bindings() {
         &mut node,
         "documents",
         document,
-        BTreeMap::from([("owner".to_owned(), Value::Uuid(bob.0))]),
+        BTreeMap::from([("owner".to_owned(), Value::Uuid(bob.test_uuid()))]),
         2,
         2,
     );
@@ -985,7 +999,7 @@ fn missing_policy_seed_claim_denies_authorization_support_rehydration() {
         row(0xcc),
         BTreeMap::from([
             ("team".to_owned(), Value::Uuid(team.0)),
-            ("user".to_owned(), Value::Uuid(writer.0)),
+            ("user".to_owned(), Value::Uuid(writer.test_uuid())),
         ]),
         3,
         3,
@@ -1057,7 +1071,7 @@ fn policy_claim_array_string_ids_bind_as_uuid_array() {
         reader,
         BTreeMap::from([(
             "team_ids".to_owned(),
-            Value::Array(vec![Value::String(alice.0.to_string())]),
+            Value::Array(vec![Value::String(alice.test_uuid().to_string())]),
         )]),
     );
     let shape = Query::from("issues").validate_runtime(&schema).unwrap();
@@ -1106,13 +1120,16 @@ fn prepared_policy_plan_is_recompiled_after_same_identity_claim_revision_changes
 
     node.set_session_claims(
         identity,
-        BTreeMap::from([("selected_assignee".to_owned(), Value::Uuid(alice.0))]),
+        BTreeMap::from([(
+            "selected_assignee".to_owned(),
+            Value::Uuid(alice.test_uuid()),
+        )]),
     );
     assert_eq!(visible_for(&mut node), BTreeSet::from([row(1)]));
 
     node.set_session_claims(
         identity,
-        BTreeMap::from([("selected_assignee".to_owned(), Value::Uuid(bob.0))]),
+        BTreeMap::from([("selected_assignee".to_owned(), Value::Uuid(bob.test_uuid()))]),
     );
     assert_eq!(
         visible_for(&mut node),

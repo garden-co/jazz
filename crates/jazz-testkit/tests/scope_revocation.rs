@@ -105,7 +105,7 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
             wait_for_edge_query_ready(&bob, "docs", READY_TIMEOUT).await;
 
             let (doc_id, _, create_tx) = writer
-                .for_session(Session::new(writer_user_id.clone()))
+                .for_session(Session::new("urn:jazz:test", writer_user_id.clone()))
                 .insert(
                     "docs",
                     row_input!(
@@ -132,7 +132,7 @@ async fn scope_revocation_removes_edge_results_without_redacting_local_copy() {
             // that access only through this row's transfer_writer_id, keeping
             // Bob's owner-scoped revocation behavior intact.
             let revoke_tx = writer
-                .for_session(Session::new(writer_user_id))
+                .for_session(Session::new("urn:jazz:test", writer_user_id))
                 .update(doc_id, vec![("owner_id".to_owned(), Value::Uuid(alice_owner_id))])
                 .expect("narrowly authorized writer transfers ownership away from bob");
             support::wait_for_edge_txs(&writer, &[revoke_tx.expect("ordinary mutation commits immediately")]).await;
