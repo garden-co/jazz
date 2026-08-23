@@ -23,6 +23,13 @@ embeds the shared Rust relay artifact. This is a thin platform checkpoint, not
 device support: there is still no executable relay command codec, XCFramework,
 AAR, or Expo development-build receipt.
 
+The shared artifact seam is `jazz_native_relay_abi_version` from
+`jazz-native-relay`'s C ABI (`include/jazz_native_relay.h`). Android/JNI will
+link that artifact directly when the Android build pipeline exists; it must not
+route through the obsolete UniFFI library. The remaining Android runner gate is
+a real Gradle/NDK AAR build and emulator installation against that linked
+artifact.
+
 ## What remains before React Native is supported
 
 1. Define and implement the relay command/event codecs, then generate a small

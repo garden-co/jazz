@@ -32,6 +32,16 @@ use thiserror::Error;
 /// incompatible.
 pub const NATIVE_RELAY_ABI_VERSION: u16 = 1;
 
+/// C ABI seam for Android/JNI, Swift, and other platform artifact wrappers.
+///
+/// The platform layer may use this probe before it decodes any relay command.
+/// It deliberately exposes no `Db`, storage, row, or query handles; commands
+/// stay behind the future shared binary relay codec.
+#[unsafe(no_mangle)]
+pub extern "C" fn jazz_native_relay_abi_version() -> u16 {
+    NATIVE_RELAY_ABI_VERSION
+}
+
 /// Inclusive ABI-version range understood by a native host wrapper.
 ///
 /// This is deliberately independent of any particular binding generator.
