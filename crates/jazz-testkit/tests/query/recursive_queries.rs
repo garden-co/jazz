@@ -167,7 +167,7 @@ local_tokio_test! {
 ///
 /// alice writes leaf -> mid -> root in `team_edges`
 /// bob subscribes to the recursive query from leaf and sees all three teams
-#[ignore = "recursive gather subscription rows omit the gathered teams' user fields"]
+#[ignore = "#1767: recursive gather subscription rows omit the gathered teams' user fields"]
 async fn recursive_gather_query_returns_seed_and_ancestors_from_edge_table() {
     let clients = Clients::start(team_graph_schema()).await;
     let query = Query::from("teams")
@@ -234,7 +234,7 @@ local_tokio_test! {
 ///
 /// alice writes team 1 plus cyclic edges 1 -> 2 -> 3 -> 1
 /// bob queries from seed team_id=1 and sees the recursive closure {1, 2, 3}
-#[ignore = "canonical Query reachability does not materialize scalar frontier values without backing root rows"]
+#[ignore = "#1767: canonical Query reachability does not materialize scalar frontier values without backing root rows"]
 async fn recursive_query_expands_column_frontier_through_cycle() {
     let clients = Clients::start(integer_frontier_schema()).await;
 
@@ -275,7 +275,7 @@ local_tokio_test! {
 ///
 /// alice writes team-1 -> team-2, bob subscribes from team-1
 /// alice adds team-2 -> team-3, bob receives team-3 and the query has all teams
-#[ignore = "canonical Query reachability is a membership filter, not the output-expanding recursive relation asserted here"]
+#[ignore = "#1767: canonical Query reachability is a membership filter, not the output-expanding recursive relation asserted here"]
 async fn recursive_hop_subscription_updates_when_new_edge_extends_closure() {
     let clients = Clients::start(team_graph_schema()).await;
 
@@ -350,7 +350,7 @@ local_tokio_test! {
 ///
 /// alice writes root <- mid <- leaf
 /// bob seeds on leaf and follows parent_id until root, seeing all ancestors
-#[ignore = "canonical Query reachability is a membership filter, not the output-expanding recursive relation asserted here"]
+#[ignore = "#1767: canonical Query reachability is a membership filter, not the output-expanding recursive relation asserted here"]
 async fn recursive_query_expands_self_parent_ancestors() {
     let clients = Clients::start(team_graph_schema()).await;
 

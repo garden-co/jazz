@@ -505,6 +505,7 @@ struct TickSchedulerImpl {
 struct TickState {
     immediate: AtomicBool,
     deferred: AtomicBool,
+    delayed: AtomicBool,
     notify: tokio::sync::Notify,
 }
 
@@ -531,11 +532,31 @@ impl TickSchedulerImpl {
     fn wake_handle(&self) -> Arc<TickState> {
         Arc::clone(&self.state)
     }
+
+    fn wake_after(&self, delay_ms: u64) {
+        // One delayed wake is enough to service all currently rate-limited
+        // uploads. The protocol has no receiver-supplied retry-after, so every
+        // caller uses the same bounded default admission window.
+        if self.state.delayed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let state = Arc::clone(&self.state);
+        tokio::task::spawn_local(async move {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            state.delayed.store(false, Ordering::Release);
+            state.deferred.store(true, Ordering::Release);
+            state.notify.notify_one();
+        });
+    }
 }
 
 impl TickScheduler for TickSchedulerImpl {
     fn schedule_tick(&self, urgency: TickUrgency) {
         self.wake(urgency);
+    }
+
+    fn schedule_tick_after(&self, delay_ms: u64) {
+        self.wake_after(delay_ms);
     }
 }
 

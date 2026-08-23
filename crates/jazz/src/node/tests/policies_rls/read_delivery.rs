@@ -188,6 +188,78 @@ fn message_read_policy_allows_public_chat_or_membership_join() {
 }
 
 #[test]
+fn read_policy_compares_indirect_text_by_its_logical_value() {
+    let reader = user(0xa1);
+    let allowed = "policy-visible/".repeat(6_000);
+    let denied = format!("{}x", &allowed[..allowed.len() - 1]);
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("documents")
+            .column("classification", PublicColumnType::Text)
+            .policies(
+                public_all_policies().with_select(public_literal_eq(
+                    "classification",
+                    PublicValue::Text(allowed.clone()),
+                )),
+            ),
+    ));
+    let (_core_dir, mut core) = open_node_with_schema(node(0x6c), schema);
+    let visible = row(0x6c);
+    let hidden = row(0x6d);
+    accept_global(
+        &mut core,
+        MergeableCommit::new("documents", visible, 10).cells(BTreeMap::from([(
+            "classification".to_owned(),
+            Value::String(allowed.clone()),
+        )])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("documents", hidden, 11).cells(BTreeMap::from([(
+            "classification".to_owned(),
+            Value::String(denied),
+        )])),
+    );
+
+    let table = core.table("documents").unwrap().clone();
+    let physical = core.query_table_versions("documents").unwrap();
+    assert!(matches!(physical[0].cell(&table, "classification"), Ok(Some(Value::Large(_)))));
+    assert_eq!(
+        core.current_rows("documents", DurabilityTier::Local)
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.row_uuid() == visible)
+            .and_then(|candidate| candidate.cell(&table, "classification")),
+        Some(Value::String(allowed.clone()))
+    );
+    let direct = Query::from("documents")
+        .filter(eq(col("classification"), lit(allowed.clone())))
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let direct_binding = direct.bind(BTreeMap::new()).unwrap();
+    assert_eq!(
+        core.query_rows_for_link(
+            &direct,
+            &direct_binding,
+            DurabilityTier::Local,
+            AuthorId::SYSTEM,
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+
+    assert!(
+        core.dry_run_read_current_allows("documents", visible, reader)
+            .unwrap()
+    );
+    assert!(
+        !core
+            .dry_run_read_current_allows("documents", hidden, reader)
+            .unwrap()
+    );
+}
+
+#[test]
 fn camel_case_message_read_policy_incrementally_adds_member_message() {
     let alice = user(0xa1);
     let bob = user(0xb2);

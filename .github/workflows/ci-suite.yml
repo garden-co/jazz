@@ -104,7 +104,7 @@ jobs:
           sccache-s3: ${{ inputs.trusted-cache && (inputs.sccache-write && vars.SCCACHE_TRUSTED_WRITER_AWS_ROLE_ARN != '' || !inputs.sccache-write && vars.SCCACHE_PR_READER_AWS_ROLE_ARN != '') }}
       - name: Workspace Rust tests (bounded, sharded, receipted)
         run: node dev/gates/run-rust-tests.mjs --timeout-seconds 780 --nextest-profile jazz-ci -- --workspace --lib --bins --tests --features jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test
-      - name: Benchmark API and deterministic scenario smoke
+      - name: Benchmark deterministic scenario smoke
         run: dev/gates/benchmark-smoke.sh --ci
       - name: Verify Nextest partition coverage
         run: node --test dev/gates/test/nextest-partitions.test.mjs

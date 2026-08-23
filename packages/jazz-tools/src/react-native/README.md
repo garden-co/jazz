@@ -40,7 +40,6 @@ Useful pointers:
 
 - Native module scaffold: `crates/jazz-rn/` (`android/`, `ios/`,
   `JazzRn.podspec`, and the generated `JazzRelay` TurboModule contract).
-- Port ledger rows: `dev/MAIN_INTEGRATION_LEDGER.md` rows for
-  `f072cb04e`, `42e77fd38`, `52ec1e1b8`, `64b033b19`, and `6e65acff3`.
+- Tracking issue: [#1756](https://github.com/garden-co/jazz/issues/1756).
 - Owning spec: `crates/jazz/SPEC/13_db_api.md`, open questions for binding
   storage and React Native runtime reuse.

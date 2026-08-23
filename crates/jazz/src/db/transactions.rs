@@ -6,6 +6,14 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Return whether two schema facades share one open-transaction runtime.
+    ///
+    /// This compares the private runtime capability, not caller-controlled ids.
+    #[doc(hidden)]
+    pub fn shares_runtime_with(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.node, &other.node)
+    }
+
     /// Build a mergeable transaction that commits multiple writes under one id.
     pub async fn mergeable_tx(&self) -> Result<MergeableTx<'_, S>, Error> {
         let tx_id = OpenTransactionId::new();
@@ -466,6 +474,24 @@ where
         self.open_exclusive_handle(id).await
     }
 
+    /// Open an exclusive transaction whose identity is fixed for its lifetime.
+    ///
+    /// Transaction-local reads, authorization, provenance, and commit
+    /// attribution all use `author`; subsequent calls cannot replace it.
+    pub async fn begin_exclusive_for_identity(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorId,
+    ) -> Result<(), Error> {
+        self.node
+            .node
+            .lock()
+            .await
+            .open_exclusive_for_identity(id, author)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Return a non-owning operations handle for an already-open exclusive transaction.
     ///
     /// This handle never closes the transaction when dropped, so it is suitable
@@ -476,19 +502,20 @@ where
         ExclusiveTxRef { db: self, tx_id }
     }
 
-    pub(super) async fn exclusive_read(
+    pub(super) async fn transaction_read(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
         row: RowUuid,
     ) -> Result<Option<RowCells>, Error> {
-        self.node
-            .node
-            .lock()
-            .await
+        let mut node = self.node.node.lock().await;
+        let mut cells = node
             .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
-            .await
-            .map_err(Into::into)
+            .await?;
+        if let Some(cells) = &mut cells {
+            node.hydrate_large_value_cells(cells).await?;
+        }
+        Ok(cells)
     }
 
     pub(super) async fn transaction_all(
@@ -534,7 +561,7 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         ensure_default_read_view(&opts)?;
         let mut node = self.node.node.lock().await;
-        match authorization_mode {
+        let mut rows = match authorization_mode {
             QueryAuthorizationMode::ClientLocal => node
                 .tx_query_with_options(
                     tx_id,
@@ -543,7 +570,7 @@ where
                     opts.include_deleted,
                 )
                 .await
-                .map_err(Into::into),
+                .map_err(Error::from)?,
             QueryAuthorizationMode::TrustedServing => node
                 .tx_query_for_identity_with_options(
                     tx_id,
@@ -553,8 +580,21 @@ where
                     opts.include_deleted,
                 )
                 .await
-                .map_err(Into::into),
-        }
+                .map_err(Error::from)?,
+        };
+        node.hydrate_current_rows(&mut rows).await?;
+        Ok(rows)
+    }
+
+    pub(super) async fn transaction_current_rows(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let mut node = self.node.node.lock().await;
+        let mut rows = node.tx_current_rows(tx_id, table).await?;
+        node.hydrate_current_rows(&mut rows).await?;
+        Ok(rows)
     }
 
     pub(super) async fn stage_exclusive_insert(
@@ -581,6 +621,33 @@ where
             )
             .await
             .map_err(Into::into)
+    }
+
+    pub(super) async fn stage_exclusive_update(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+    ) -> Result<(), Error> {
+        let now_ms = self.next_now_ms();
+        let mut node = self.node.node.lock().await;
+        let mut cells = node
+            .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
+            .await?
+            .unwrap_or_default();
+        cells.extend(patch);
+        node.tx_write_in_schema_at_ms(
+            tx_id,
+            self.schema_version_id,
+            table,
+            row,
+            cells,
+            None,
+            Some(now_ms),
+        )
+        .await?;
+        Ok(())
     }
 
     pub(super) async fn stage_exclusive_delete(
@@ -654,7 +721,7 @@ where
             .node
             .lock()
             .await
-            .commit_exclusive(open_tx_id, self.identity.author, self.next_now_ms())
+            .commit_exclusive_bound(open_tx_id, self.next_now_ms())
             .await?;
         let tx_id = published.tx_id;
         if self.node.defer_local_persistence.get() {

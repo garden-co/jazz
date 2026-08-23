@@ -100,6 +100,16 @@ _Further invariants._ `INV-DATA-11` — a merge-strategy declaration names an
 existing user column. `INV-DATA-12` — a table policy validates against the whole
 schema.
 
+### 2.3.1 Ordinary-value baseline
+
+`string` and `bytes` are ordinary column values with ordinary Jazz row history.
+The current core has no specialized Text/Blob large-value type, edit API,
+materialized value handle, content store, extent/chunk protocol traffic, or
+large-value query source. Sync transports only ordinary commit, schema, query,
+and subscription data. A future large-value design is tracked in
+[#1757](https://github.com/garden-co/jazz/issues/1757); it must be introduced as
+new semantics rather than inferred from this baseline.
+
 ### 2.4 Schema identity is content-addressed
 
 Schema identity is derived from schema content so independently observed copies
@@ -214,17 +224,5 @@ and sync machinery.
 
 ## Open Questions
 
-### Open questions
-
-- 🔶 **`jazz_nodes.uuid` uniqueness.** The README states the interned node UUID
-  is unique, but `schema.rs::nodes_table` declares only the `id` primary key with
-  no uniqueness constraint. Decide whether UUID uniqueness is a normative
-  invariant with storage-level enforcement, or the README prose is stale.
-- 🔶 **Mixed-version row descriptors.** What compatibility guarantees, if any,
-  must sync provide when sender and receiver row descriptors differ? Ch. 8 /
-  ch. 10 own the answer.
-- 🔶 **Visible-row common-case encoding.** The old visible-row notes and later
-  storage TODO both called out duplication between current visible entries and
-  retained history. Decide the compact encoding for singleton frontiers, empty
-  metadata, and deletion/register metadata without changing the row/version
-  identity model.
+- 🔶 [#1758](https://github.com/garden-co/jazz/issues/1758) — Canonical authorship and node identity.
+- 🔶 [#1777](https://github.com/garden-co/jazz/issues/1777) — Mixed-version descriptors and visible-row encoding.

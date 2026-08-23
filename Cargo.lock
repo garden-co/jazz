@@ -1488,6 +1488,7 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 name = "groove"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "bytes",
  "futures",
  "futures-test",
@@ -2004,6 +2005,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "blake3",
+ "bytes",
  "criterion",
  "ed25519-dalek",
  "futures",
@@ -2124,6 +2126,7 @@ dependencies = [
  "postcard",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "uuid",

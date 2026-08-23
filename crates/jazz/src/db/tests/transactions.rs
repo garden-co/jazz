@@ -3,6 +3,92 @@
 use super::*;
 
 #[test]
+fn exclusive_transactions_lower_oversized_scalars_before_publication() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let title = "x".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 91);
+    let row = row(0x4e);
+    let tx = db.exclusive_tx().unwrap();
+    tx.insert_with_id("todos", row, doctest_support::todo_cells(&title, false))
+        .unwrap();
+    tx.commit().unwrap();
+
+    let physical = block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .current_physical_cell_in_schema(db.schema_version_id, "todos", row, "title")
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    assert!(matches!(physical, Value::Large(_)));
+    let result = db
+        .read(&db.prepare_query(&db.table("todos")).unwrap())
+        .unwrap();
+    assert_eq!(
+        result[0].cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String(title.clone()))
+    );
+
+    let update = db.exclusive_tx().unwrap();
+    assert_eq!(
+        update.read("todos", row).unwrap().unwrap().get("title"),
+        Some(&Value::String(title.clone())),
+        "public transaction reads must not expose the physical descriptor"
+    );
+    assert_eq!(
+        update.all("todos").unwrap()[0].cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String(title.clone()))
+    );
+    update
+        .update(
+            "todos",
+            row,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        )
+        .unwrap();
+    update.commit().unwrap();
+    let after_update = block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .current_physical_cell_in_schema(db.schema_version_id, "todos", row, "title")
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    assert_eq!(physical, after_update, "unchanged locators must be stable");
+
+    let mergeable = db.mergeable_tx().unwrap();
+    assert_eq!(
+        mergeable.read("todos", row).unwrap().unwrap().get("title"),
+        Some(&Value::String(title.clone()))
+    );
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    assert_eq!(
+        mergeable.all_prepared(&prepared).unwrap()[0]
+            .cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String(title.clone()))
+    );
+
+    let forged = db.exclusive_tx().unwrap();
+    forged
+        .insert_with_id(
+            "todos",
+            RowUuid::from_bytes([0x4f; 16]),
+            BTreeMap::from([
+                ("title".to_owned(), physical),
+                ("done".to_owned(), Value::Bool(false)),
+            ]),
+        )
+        .unwrap();
+    let error = block_on(forged.commit()).unwrap_err();
+    assert!(error.message.contains("unverified large-value descriptor"));
+}
+
+#[test]
 fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
     let empty = build_public_db_test_schema(PublicSchemaBuilder::new());
     let refs = empty.column_families();
@@ -838,6 +924,121 @@ fn exclusive_tx_ref_survives_handle_reconstruction_until_explicit_commit() {
         Some(Value::String("base".to_owned()))
     );
     assert_eq!(current.cell(table, "done"), Some(Value::Bool(true)));
+}
+
+/// An exclusive transaction binds alice at begin: its staged read cannot be
+/// re-authorized as bob, while the handle commit consumes that bound identity.
+#[test]
+fn identity_bound_exclusive_transaction_rejects_cross_identity_reads_and_commits_as_bound_author() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let alice = AuthorId::from_bytes([0xc1; 16]);
+    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let open = OpenTransactionId::new();
+    let row = row(0xa1);
+    assert_ne!(alice, db.identity.author);
+    let prepared = db
+        .prepare_query(
+            &db.table("todos")
+                .select(["title", "$createdBy", "$updatedBy"]),
+        )
+        .unwrap();
+
+    db.begin_exclusive_for_identity(open, alice).unwrap();
+    db.exclusive_tx_ref(open)
+        .insert_with_id("todos", row, doctest_support::todo_cells("alice", false))
+        .unwrap();
+
+    // Planted positive: the bound identity can read the transaction overlay.
+    let staged = db
+        .exclusive_tx_ref(open)
+        .all_prepared_for_identity(&prepared, alice)
+        .unwrap();
+    assert_eq!(staged.len(), 1);
+    let staged_provenance = staged[0].provenance().unwrap().unwrap();
+    assert_eq!(staged_provenance.created_by, alice);
+    assert_eq!(staged_provenance.updated_by, alice);
+    assert!(matches!(
+        doctest_support::block_on(
+            db.exclusive_tx_ref(open)
+                .all_prepared_for_identity(&prepared, bob),
+        ),
+        Err(error) if error.code == ErrorCode::Protocol
+    ));
+
+    db.commit_exclusive_handle(open).unwrap();
+    let committed = prepared_one(
+        &db,
+        &db.table("todos")
+            .select(["title", "$createdBy", "$updatedBy"]),
+    )
+    .unwrap();
+    assert_eq!(committed.row_uuid(), row);
+    let committed_provenance = committed.provenance().unwrap().unwrap();
+    assert_eq!(committed_provenance.created_by, alice);
+    assert_eq!(committed_provenance.updated_by, alice);
+}
+
+/// Mergeable serving reads retain their existing per-call identity semantics.
+#[test]
+fn mergeable_transaction_identity_reads_are_not_forced_to_begin_author() {
+    let schema = owner_read_schema();
+    let db = open_db(0xd3, AuthorId::SYSTEM, &schema);
+    let alice = AuthorId::from_bytes([0xa3; 16]);
+    let bob = AuthorId::from_bytes([0xb3; 16]);
+    let open = OpenTransactionId::new();
+    let prepared = db
+        .prepare_query(&db.table("todos").filter(eq(col("owner"), claim("sub"))))
+        .unwrap();
+    db.set_identity_claims(
+        alice,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(alice.0))]),
+    );
+    db.set_identity_claims(
+        bob,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(bob.0))]),
+    );
+    let alice_row = row(0xa3);
+    let bob_row = row(0xb3);
+    db.insert_with_id("todos", alice_row, cells("alice", false, alice))
+        .unwrap();
+    db.insert_with_id("todos", bob_row, cells("bob", false, bob))
+        .unwrap();
+
+    assert_eq!(
+        block_on(db.all_for_identity(&prepared, ReadOpts::default(), alice))
+            .unwrap()
+            .iter()
+            .map(CurrentRow::row_uuid)
+            .collect::<Vec<_>>(),
+        vec![alice_row]
+    );
+
+    db.begin_mergeable_for_identity(open, alice).unwrap();
+    let alice_rows = doctest_support::block_on(
+        db.mergeable_tx_ref(open)
+            .all_prepared_for_identity(&prepared, alice),
+    )
+    .unwrap();
+    let bob_rows = doctest_support::block_on(
+        db.mergeable_tx_ref(open)
+            .all_prepared_for_identity(&prepared, bob),
+    )
+    .unwrap();
+    assert_eq!(
+        alice_rows
+            .iter()
+            .map(CurrentRow::row_uuid)
+            .collect::<Vec<_>>(),
+        vec![alice_row]
+    );
+    assert_eq!(
+        bob_rows
+            .iter()
+            .map(CurrentRow::row_uuid)
+            .collect::<Vec<_>>(),
+        vec![bob_row]
+    );
+    db.abandon_transaction_handle(open).unwrap();
 }
 
 #[test]

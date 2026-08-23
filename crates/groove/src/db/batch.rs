@@ -48,11 +48,14 @@ pub struct DatabaseBatch {
     pub(super) txn_operations: RefCell<StagedWriteState>,
     pub(super) txn_indexed_operations: Cell<usize>,
     pub(super) notification_timing: NotificationTiming,
+    pub(super) accepted_large_values: Vec<crate::large_values::StagedLargeValueId>,
 }
 
 impl PartialEq for DatabaseBatch {
     fn eq(&self, other: &Self) -> bool {
-        self.operations == other.operations && self.notification_timing == other.notification_timing
+        self.operations == other.operations
+            && self.notification_timing == other.notification_timing
+            && self.accepted_large_values == other.accepted_large_values
     }
 }
 
@@ -75,6 +78,15 @@ impl DatabaseBatch {
 
     pub fn reserve(&mut self, additional: usize) {
         self.operations.reserve(additional);
+    }
+
+    /// Atomically consume a Groove staging root with this physical-record
+    /// batch. The id is opaque to callers and acceptance is idempotent only as
+    /// part of retrying the same uncommitted batch.
+    pub fn accept_large_value(&mut self, id: crate::large_values::StagedLargeValueId) {
+        if !self.accepted_large_values.contains(&id) {
+            self.accepted_large_values.push(id);
+        }
     }
 
     pub fn insert(&mut self, table: impl Into<String>, record: impl Into<RecordInput>) {

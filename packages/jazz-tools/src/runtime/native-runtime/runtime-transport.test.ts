@@ -101,6 +101,51 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(sockets[1]!.closed).toBe(true);
   });
 
+  it("routes auxiliary frames and drains their output without semantic delivery", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const transport = new FakeTransport([]);
+    transport.auxiliaryConsumedFirstByte = 99;
+    transport.auxiliaryOutgoing.push(Uint8Array.from([88]));
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            connectUpstream: () => transport,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([99, 1])]));
+    await waitForServerPumpTimer();
+
+    expect(transport.received).toEqual([]);
+    expect(
+      sockets[0]!.sent.some(
+        (batch) =>
+          batch instanceof Uint8Array &&
+          decodeWebSocketFrameBatch(batch).some((frame) => frame[0] === 88),
+      ),
+    ).toBe(true);
+    runtime.disconnect();
+  });
+
   it("does not emit the fake server hello before the client prelude and hello", async () => {
     const socket = new FakeWebSocket("ws://127.0.0.1:4200/apps/app-a/ws");
     const received: Uint8Array[] = [];
@@ -607,6 +652,8 @@ class FakeTransport implements Transport {
   readonly received: Uint8Array[] = [];
   readonly receivedBatches: Uint8Array[][] = [];
   tickCount = 0;
+  auxiliaryConsumedFirstByte: number | undefined;
+  readonly auxiliaryOutgoing: Uint8Array[] = [];
 
   constructor(private readonly outgoing: Uint8Array[]) {}
 
@@ -627,6 +674,14 @@ class FakeTransport implements Transport {
     const batch = [...frames];
     this.receivedBatches.push(batch);
     this.received.push(...batch);
+  }
+
+  routeAuxiliaryWireFrame(frame: Uint8Array): Uint8Array | undefined {
+    return frame[0] === this.auxiliaryConsumedFirstByte ? undefined : frame;
+  }
+
+  recvAuxiliaryWireFrames(): unknown[] {
+    return this.auxiliaryOutgoing.splice(0);
   }
 
   tick(): number {

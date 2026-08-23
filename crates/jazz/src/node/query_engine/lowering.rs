@@ -329,6 +329,20 @@ pub(crate) fn graph_declared_output_fields(graph: &GraphBuilder) -> Option<BTree
                 .map(|field| field.output_name.clone())
                 .collect(),
         ),
+        GraphBuilder::StreamingChecksum {
+            input,
+            field,
+            output_field,
+            ..
+        } => {
+            let mut fields = graph_declared_output_fields(input)?;
+            let groove::ivm::FieldRef::Name(field) = field else {
+                return None;
+            };
+            fields.remove(field);
+            fields.insert(output_field.clone());
+            Some(fields)
+        }
         GraphBuilder::Aggregate {
             group_cols,
             aggregates,
@@ -657,6 +671,7 @@ fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDom
         | GraphBuilder::VariantProject { input, .. }
         | GraphBuilder::Unnest { input, .. }
         | GraphBuilder::Project { input, .. }
+        | GraphBuilder::StreamingChecksum { input, .. }
         | GraphBuilder::ArgMaxBy { input, .. }
         | GraphBuilder::ArgMinBy { input, .. }
         | GraphBuilder::TopBy { input, .. }

@@ -149,6 +149,16 @@ pub struct MapProjectOp {
     pub mapping: Vec<(usize, usize)>,
 }
 
+/// Replace one String/Bytes field with its logical BLAKE3 checksum.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct StreamingChecksumOp {
+    pub field: String,
+    pub field_idx: usize,
+    pub output_field: String,
+    pub window_bytes: usize,
+    pub max_bytes_per_turn: usize,
+}
+
 /// Per-occurrence enum tag translation at a descriptor boundary.
 ///
 /// The paths name an enum occurrence relative to one projected field: `root`,
@@ -559,7 +569,7 @@ impl From<Value> for LiteralValue {
             Value::Array(values) => Self::Array(values.into_iter().map(Into::into).collect()),
             Value::Nullable(value) => Self::Nullable(value.map(|value| Box::new((*value).into()))),
             // Neither records nor tagged payload unions are supported predicate literals.
-            Value::Record(_) | Value::Enum(_) => Self::Record,
+            Value::Record(_) | Value::Enum(_) | Value::Large(_) => Self::Record,
         }
     }
 }

@@ -32,6 +32,12 @@ declare module "jazz-wasm" {
     close(): boolean;
   }
 
+  export class StreamingMutation {
+    push(chunk: Uint8Array): Promise<void>;
+    finish(): Promise<WasmWrite>;
+    abort(): Promise<boolean>;
+  }
+
   export class WasmTransport {
     sendWireFrame(frame: Uint8Array): void;
     recvWireFrames(): Uint8Array[];
@@ -73,6 +79,58 @@ declare module "jazz-wasm" {
   export class WasmDb {
     static openMemory(schema: Uint8Array, config: Uint8Array): WasmDb;
     static openBrowser(pageStore: unknown, schema: Uint8Array, config: Uint8Array): Promise<WasmDb>;
+    setLargeValueStagingPolicy(
+      incomingBytesPerWindow: number,
+      windowMs: number,
+      maxAgeMs?: number | null,
+    ): void;
+    evictExpiredStagedLargeValues(): Promise<number>;
+    beginStreamingMutationEncoded(
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      column: string,
+      kind: "Text" | "Json" | "Bytea",
+      mutation?: "insert" | "update" | "upsert",
+      author?: Uint8Array,
+      updatedAtMs?: number,
+      head?: unknown,
+      base?: unknown,
+    ): StreamingMutation;
+    readValueRange(
+      table: string,
+      rowId: Uint8Array,
+      column: string,
+      start: number,
+      end: number,
+    ): Promise<Uint8Array>;
+    readTextUtf16Range(
+      table: string,
+      rowId: Uint8Array,
+      column: string,
+      start: number,
+      end: number,
+    ): Promise<string>;
+    readJsonPointer(
+      table: string,
+      rowId: Uint8Array,
+      column: string,
+      pointer: string,
+    ): Promise<unknown | null>;
+    appendValue(
+      table: string,
+      rowId: Uint8Array,
+      column: string,
+      bytes: Uint8Array,
+    ): Promise<WasmWrite>;
+    spliceValue(
+      table: string,
+      rowId: Uint8Array,
+      column: string,
+      offset: number,
+      deleteLength: number,
+      insert: Uint8Array,
+    ): Promise<WasmWrite>;
     static destroyBrowserStorage(namespace: string): Promise<void>;
 
     registerSchema(schema: Uint8Array): WasmDb;
@@ -156,7 +214,9 @@ declare module "jazz-wasm" {
       cells: Uint8Array,
       author: Uint8Array,
     ): WasmWrite;
-    setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void;
+    setTickScheduler(
+      callback: (urgency: "immediate" | "deferred" | `after:${number}`) => void,
+    ): void;
     onMutationError(callback: (event: any) => void): void;
     tick(): Promise<void>;
     setNonDurableClient(): void;

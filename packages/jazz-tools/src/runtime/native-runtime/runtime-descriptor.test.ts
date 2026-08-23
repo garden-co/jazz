@@ -159,7 +159,7 @@ describe("native row descriptor cache keys", () => {
           raw: createRecord(firstDescriptor, [
             createRecord(firstChildDescriptor, [
               uuidBytes(childId),
-              new TextEncoder().encode("first"),
+              Uint8Array.from([0, ...new TextEncoder().encode("first")]),
             ]),
           ]),
         },
@@ -175,7 +175,7 @@ describe("native row descriptor cache keys", () => {
           raw: createRecord(secondDescriptor, [
             createRecord(secondChildDescriptor, [
               uuidBytes(childId),
-              new TextEncoder().encode("second"),
+              Uint8Array.from([0, ...new TextEncoder().encode("second")]),
               i32Bytes(42),
             ]),
           ]),
@@ -227,7 +227,10 @@ describe("nested row physical carriers", () => {
   ];
 
   it("decodes a full snapshot record without stripping its row_uuid field", () => {
-    const bytes = createRecord(descriptor, [uuidBytes(id), new TextEncoder().encode("snapshot")]);
+    const bytes = createRecord(descriptor, [
+      uuidBytes(id),
+      Uint8Array.from([0, ...new TextEncoder().encode("snapshot")]),
+    ]);
 
     const row = decodeNestedRowBytes(columns, bytes, descriptor, "full-record");
 
@@ -238,7 +241,9 @@ describe("nested row physical carriers", () => {
   it("decodes an explicitly keyed terminal payload with the same descriptor", () => {
     const bytes = concatBytes([
       uuidBytes(id),
-      createRecord(descriptor.slice(1), [new TextEncoder().encode("terminal")]),
+      createRecord(descriptor.slice(1), [
+        Uint8Array.from([0, ...new TextEncoder().encode("terminal")]),
+      ]),
     ]);
 
     const row = decodeNestedRowBytes(columns, bytes, descriptor, "keyed-terminal");
@@ -265,11 +270,11 @@ describe("nested row physical carriers", () => {
     ];
     const bytes = createRecord(todoDescriptor, [
       uuidBytes("e20942bf-8789-e652-23fd-c86c3a105743"),
-      new TextEncoder().encode("owned-todo"),
+      Uint8Array.from([0, ...new TextEncoder().encode("owned-todo")]),
       Uint8Array.of(0),
       presentBytes(Uint8Array.of(1, 0, 0, 0)),
       presentBytes(uuidBytes("06839e1b-9b29-732c-1b39-8ee592bd2a68")),
-      concatBytes([Uint8Array.of(1, 0, 0, 0), new TextEncoder().encode("x")]),
+      concatBytes([Uint8Array.of(1, 0, 0, 0, 0), new TextEncoder().encode("x")]),
     ]);
 
     expect(decodeNestedRowBytes(todoColumns, bytes, todoDescriptor, "full-record")).toMatchObject({

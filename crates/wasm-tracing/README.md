@@ -22,13 +22,14 @@ Leverage performance profiling with your browser tools with the [tracing crate](
 
 Note: `wasm_tracing` uses the global JavaScript `console` and `performance` objects. It will not work in environments where one or both of these are not available, such as Node.js or Cloudflare Workers.
 
-## TODOs
+## Follow-up
 
 These features are things I'd like to do with `wasm-tracing`. Suggestions, comments, and complaints are encouraged!
 Please file an issue if you are passionate about a particular use-case or implementation detail.
 
-- [ ] Traces from `#[tracing::instrument]` macro should be visible in the console
-- [ ] Rewrite how the config works, possibly dependent/mirrored by another `tracing` crates' config w/ console specifics
+- [#1786](https://github.com/garden-co/jazz/issues/1786): expose
+  `#[tracing::instrument]` traces in the console and decide whether the config
+  should follow an upstream tracing crate.
 
 ## Usage
 

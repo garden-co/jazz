@@ -458,7 +458,7 @@ function predicateOpTag(op: QueryPredicateOp): number {
 
 function writeGrooveValue(writer: PostcardWriter, value: QueryLiteral): void {
   if (value.type === "Nullable") {
-    writer.u64(12); // groove::records::Value::Nullable
+    writer.u64(13); // groove::records::Value::Nullable
     if (value.value == null) {
       writer.none();
     } else {
@@ -479,7 +479,7 @@ function writeGrooveValue(writer: PostcardWriter, value: QueryLiteral): void {
     ) {
       throw new Error("Integer value must be a signed 32-bit integer");
     }
-    writer.u64(14); // groove::records::Value::I32
+    writer.u64(15); // groove::records::Value::I32
     writer.i64(value.value);
     return;
   }
@@ -487,7 +487,7 @@ function writeGrooveValue(writer: PostcardWriter, value: QueryLiteral): void {
     if (value.value < -(1n << 63n) || value.value > (1n << 63n) - 1n) {
       throw new Error("BigInt value must be a signed 64-bit integer");
     }
-    writer.u64(13); // groove::records::Value::I64
+    writer.u64(14); // groove::records::Value::I64
     writer.i64(value.value);
     return;
   }
@@ -508,7 +508,7 @@ function writeGrooveValue(writer: PostcardWriter, value: QueryLiteral): void {
     return;
   }
   if (value.type === "Uuid") {
-    writer.u64(8); // groove::records::Value::Uuid
+    writer.u64(9); // groove::records::Value::Uuid
     writer.bytes(parseUuidBytes(value.value));
     return;
   }
@@ -518,7 +518,7 @@ function writeGrooveValue(writer: PostcardWriter, value: QueryLiteral): void {
     return;
   }
   if (value.type === "Array") {
-    writer.u64(11); // groove::records::Value::Array
+    writer.u64(12); // groove::records::Value::Array
     writer.vec((item, index) => writeGrooveValue(item, value.value[index]!), value.value.length);
     return;
   }

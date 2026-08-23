@@ -4,10 +4,393 @@ use super::*;
 use crate::node::{ContributionMergeRequest, ContributionMergeRow};
 use crate::protocol::{BranchSelector, BranchViewBase};
 
+/// Ordinary row mutation completed with one Groove-staged scalar.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StreamingMutationKind {
+    /// Create a new branch-local row.
+    Insert,
+    /// Patch an existing row visible in the selected branch view.
+    Update,
+    /// Patch the visible row or create it when absent.
+    Upsert,
+}
+
+type PushPreparation = groove::large_values::PushStreamingPreparation<
+    Box<dyn FnMut(groove::large_values::ContentHash) -> groove::large_values::Locator>,
+    Box<dyn FnMut(groove::large_values::StagedChunk) -> Result<(), groove::large_values::Error>>,
+>;
+
+/// Resumable host-driven upload used by asynchronous bindings such as WASM.
+pub struct StreamingValueUpload {
+    id: groove::large_values::StagedLargeValueId,
+    kind: groove::large_values::LargeValueKind,
+    preparation: Option<PushPreparation>,
+    emitted: Rc<RefCell<Vec<groove::large_values::StagedChunk>>>,
+}
+
+fn large_value_cell_type_error(table: &str, column: &str) -> Error {
+    Error::new(
+        ErrorCode::Schema,
+        format!("{table}.{column} is not a bytes or string cell"),
+    )
+}
+
+fn checked_usize(value: u64, what: &str) -> Result<usize, Error> {
+    usize::try_from(value).map_err(|_| {
+        Error::new(
+            ErrorCode::Query,
+            format!("{what} exceeds addressable memory"),
+        )
+    })
+}
+
+fn owned_byte_range(bytes: Vec<u8>, range: std::ops::Range<u64>) -> Result<Vec<u8>, Error> {
+    let start = checked_usize(range.start, "range start")?;
+    let end = checked_usize(range.end, "range end")?;
+    if start > end || end > bytes.len() {
+        return Err(Error::new(ErrorCode::Query, "value range is out of bounds"));
+    }
+    Ok(bytes[start..end].to_vec())
+}
+
+fn owned_utf16_range(text: &str, range: std::ops::Range<u64>) -> Result<String, Error> {
+    let total = text.encode_utf16().count() as u64;
+    if range.start > range.end || range.end > total {
+        return Err(Error::new(
+            ErrorCode::Query,
+            "UTF-16 range is out of bounds",
+        ));
+    }
+    let byte_at = |target: u64| {
+        if target == total {
+            return Some(text.len());
+        }
+        text.char_indices()
+            .scan(0_u64, |offset, (byte, character)| {
+                let current = *offset;
+                *offset += character.len_utf16() as u64;
+                Some((current, byte))
+            })
+            .find_map(|(offset, byte)| (offset == target).then_some(byte))
+    };
+    let Some(start) = byte_at(range.start) else {
+        return Err(Error::new(
+            ErrorCode::Query,
+            "UTF-16 range starts inside a surrogate pair",
+        ));
+    };
+    let Some(end) = byte_at(range.end) else {
+        return Err(Error::new(
+            ErrorCode::Query,
+            "UTF-16 range ends inside a surrogate pair",
+        ));
+    };
+    Ok(text[start..end].to_owned())
+}
+
+fn splice_owned_bytes(
+    bytes: &mut Vec<u8>,
+    offset: u64,
+    delete_length: u64,
+    insert: Vec<u8>,
+) -> Result<(), Error> {
+    let start = checked_usize(offset, "splice offset")?;
+    let end_u64 = offset
+        .checked_add(delete_length)
+        .ok_or_else(|| Error::new(ErrorCode::Query, "splice range overflows"))?;
+    let end = checked_usize(end_u64, "splice end")?;
+    if start > end || end > bytes.len() {
+        return Err(Error::new(
+            ErrorCode::Query,
+            "splice range is out of bounds",
+        ));
+    }
+    bytes.splice(start..end, insert);
+    Ok(())
+}
+
+fn unwrap_present_nullable(value: Value) -> (Value, bool) {
+    match value {
+        Value::Nullable(Some(value)) => (*value, true),
+        value => (value, false),
+    }
+}
+
+fn preserve_nullable(value: Value, nullable: bool) -> Value {
+    if nullable {
+        Value::Nullable(Some(Box::new(value)))
+    } else {
+        value
+    }
+}
+
 impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Read a byte range from an ordinary bytes or string cell without
+    /// exposing its physical representation. Inline and indirect cells share
+    /// this API; only the intersecting chunk paths are requested.
+    pub async fn read_value_range(
+        &self,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<Vec<u8>, Error> {
+        let (value, _) =
+            unwrap_present_nullable(self.authorized_physical_cell(table, row, column).await?);
+        match value {
+            Value::Bytes(bytes) => owned_byte_range(bytes, range),
+            Value::String(text) => owned_byte_range(text.into_bytes(), range),
+            Value::Large(value_ref) => Ok(self
+                .node
+                .node
+                .lock()
+                .await
+                .read_large_value_range(&value_ref, range)
+                .await?),
+            _ => Err(large_value_cell_type_error(table, column)),
+        }
+    }
+
+    /// Read a UTF-16 code-unit range from an ordinary string cell. Boundaries
+    /// that split a surrogate pair fail safely.
+    pub async fn read_text_utf16_range(
+        &self,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<String, Error> {
+        let (value, _) =
+            unwrap_present_nullable(self.authorized_physical_cell(table, row, column).await?);
+        match value {
+            Value::String(text) => owned_utf16_range(&text, range),
+            Value::Large(value_ref) => Ok(self
+                .node
+                .node
+                .lock()
+                .await
+                .read_large_text_utf16_range(&value_ref, range)
+                .await?),
+            _ => Err(large_value_cell_type_error(table, column)),
+        }
+    }
+
+    /// Resolve a JSON Pointer against the literal source in a string/JSON
+    /// cell, returning an owned host-safe value.
+    pub async fn read_json_pointer(
+        &self,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+        pointer: &str,
+    ) -> Result<Option<serde_json::Value>, Error> {
+        let (value, _) =
+            unwrap_present_nullable(self.authorized_physical_cell(table, row, column).await?);
+        match value {
+            Value::String(text) => {
+                let value: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
+                    Error::new(ErrorCode::Query, format!("invalid stored JSON: {error}"))
+                })?;
+                Ok(value.pointer(pointer).cloned())
+            }
+            Value::Large(value_ref) => Ok(self
+                .node
+                .node
+                .lock()
+                .await
+                .read_large_json_pointer(&value_ref, pointer)
+                .await?),
+            _ => Err(large_value_cell_type_error(table, column)),
+        }
+    }
+
+    /// Append encoded bytes to an ordinary bytes or UTF-8 string cell and
+    /// publish the resulting descriptor as one ordinary authorized row update.
+    pub async fn append_value(
+        &self,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+        bytes: Vec<u8>,
+    ) -> Result<WriteHandle<S>, Error> {
+        let (value, nullable) =
+            unwrap_present_nullable(self.authorized_physical_cell(table, row, column).await?);
+        match value {
+            Value::Bytes(mut current) => {
+                current.extend(bytes);
+                self.update(
+                    table,
+                    row,
+                    BTreeMap::from([(
+                        column.to_owned(),
+                        preserve_nullable(Value::Bytes(current), nullable),
+                    )]),
+                )
+                .await
+            }
+            Value::String(mut current) => {
+                let suffix = String::from_utf8(bytes).map_err(|_| {
+                    Error::new(ErrorCode::Schema, "string append is not valid UTF-8")
+                })?;
+                current.push_str(&suffix);
+                self.update(
+                    table,
+                    row,
+                    BTreeMap::from([(
+                        column.to_owned(),
+                        preserve_nullable(Value::String(current), nullable),
+                    )]),
+                )
+                .await
+            }
+            Value::Large(value_ref) => {
+                let staged = self
+                    .node
+                    .node
+                    .lock()
+                    .await
+                    .append_and_stage_large_value(value_ref, bytes)
+                    .await?;
+                self.write_staged_large_value_update(table, row, column, staged, nullable)
+                    .await
+            }
+            _ => Err(large_value_cell_type_error(table, column)),
+        }
+    }
+
+    /// Apply a byte-coordinate splice to an ordinary bytes or UTF-8 string
+    /// cell and publish it through the normal Jazz row-write lifecycle.
+    pub async fn splice_value(
+        &self,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+        offset: u64,
+        delete_length: u64,
+        insert: Vec<u8>,
+    ) -> Result<WriteHandle<S>, Error> {
+        let (value, nullable) =
+            unwrap_present_nullable(self.authorized_physical_cell(table, row, column).await?);
+        match value {
+            Value::Bytes(mut current) => {
+                splice_owned_bytes(&mut current, offset, delete_length, insert)?;
+                self.update(
+                    table,
+                    row,
+                    BTreeMap::from([(
+                        column.to_owned(),
+                        preserve_nullable(Value::Bytes(current), nullable),
+                    )]),
+                )
+                .await
+            }
+            Value::String(current) => {
+                let mut bytes = current.into_bytes();
+                splice_owned_bytes(&mut bytes, offset, delete_length, insert)?;
+                let text = String::from_utf8(bytes).map_err(|_| {
+                    Error::new(ErrorCode::Schema, "string splice is not valid UTF-8")
+                })?;
+                self.update(
+                    table,
+                    row,
+                    BTreeMap::from([(
+                        column.to_owned(),
+                        preserve_nullable(Value::String(text), nullable),
+                    )]),
+                )
+                .await
+            }
+            Value::Large(value_ref) => {
+                let staged = self
+                    .node
+                    .node
+                    .lock()
+                    .await
+                    .edit_and_stage_large_value(value_ref, offset, delete_length, insert)
+                    .await?;
+                self.write_staged_large_value_update(table, row, column, staged, nullable)
+                    .await
+            }
+            _ => Err(large_value_cell_type_error(table, column)),
+        }
+    }
+
+    async fn authorized_physical_cell(
+        &self,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+    ) -> Result<Value, Error> {
+        let table_schema = self.table_schema(table)?;
+        if !table_schema
+            .columns
+            .iter()
+            .any(|candidate| candidate.name == column)
+        {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                format!("unknown column {table}.{column}"),
+            ));
+        }
+        if self.authorize_read_for_identity(table, row, self.identity.author)?
+            != PermissionAdvice::Allowed
+        {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "large-value cell is not observed",
+            ));
+        }
+        self.node
+            .node
+            .lock()
+            .await
+            .current_physical_cell_in_schema(self.schema_version_id, table, row, column)
+            .await?
+            .ok_or_else(|| Error::new(ErrorCode::NotObserved, "large-value cell is not observed"))
+    }
+
+    async fn write_staged_large_value_update(
+        &self,
+        table: &str,
+        row: RowUuid,
+        column: &str,
+        staged: groove::large_values::StagedLargeValue,
+        nullable: bool,
+    ) -> Result<WriteHandle<S>, Error> {
+        let published = {
+            let mut node = self.node.node.lock().await;
+            let mut cells = node
+                .current_physical_cells_in_schema(self.schema_version_id, table, row)
+                .await?
+                .ok_or_else(|| {
+                    Error::new(ErrorCode::NotObserved, "large-value row is not observed")
+                })?;
+            cells.insert(
+                column.to_owned(),
+                preserve_nullable(Value::Large(staged.value_ref.clone()), nullable),
+            );
+            let parents = node
+                .local_content_winner_tx_id_in_schema(self.schema_version_id, table, row)
+                .await?
+                .into_iter()
+                .collect();
+            let commit = MergeableCommit::new(table, row, self.next_now_ms())
+                .made_by(self.identity.author)
+                .parents(parents)
+                .cells(cells)
+                .authored_columns(BTreeSet::from([column.to_owned()]));
+            let commit = node
+                .seal_large_value_update(commit, column, staged, self.schema_version_id)
+                .await?;
+            node.commit_mergeable_in_schema(self.schema_version_id, commit)
+                .await?
+        };
+        self.finish_published_write(row, published).await
+    }
+
     /// Calculate and commit novel contributions from one exact branch key into
     /// another. This requires a history-complete database and emits an ordinary
     /// mergeable transaction when the target does not already represent every
@@ -74,6 +457,495 @@ where
             None,
         )
         .await
+    }
+
+    /// Stream one large scalar into a newly inserted row without retaining the
+    /// complete logical value in Jazz memory.
+    ///
+    /// `cells` contains the other row fields; `column` is inserted from
+    /// `reader`. Groove incrementally constructs and stages the immutable tree
+    /// with bounded buffering. Jazz publishes the resulting descriptor only
+    /// after the reader reaches EOF and text/JSON validation succeeds. A write
+    /// rejected by row policy leaves only the ordinary expiring staging claim.
+    ///
+    /// This native-reader API is not available on WebAssembly. Browser hosts
+    /// require an asynchronous stream adapter rather than `std::io::Read`.
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn insert_streaming_value<R>(
+        &self,
+        table: &str,
+        cells: RowCells,
+        column: &str,
+        kind: groove::large_values::LargeValueKind,
+        reader: R,
+    ) -> Result<WriteHandle<S>, Error>
+    where
+        R: std::io::Read + Send + 'static,
+    {
+        let row = self.row_id_source.borrow_mut().next_row_id();
+        self.insert_streaming_value_with_id(table, row, cells, column, kind, reader)
+            .await
+    }
+
+    /// Stream one large scalar into a newly inserted row with an explicit row
+    /// id. Binding adapters use this to choose the public id before consuming
+    /// an asynchronous host stream.
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn insert_streaming_value_with_id<R>(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        column: &str,
+        kind: groove::large_values::LargeValueKind,
+        reader: R,
+    ) -> Result<WriteHandle<S>, Error>
+    where
+        R: std::io::Read + Send + 'static,
+    {
+        self.write_streaming_value_with_id(
+            StreamingMutationKind::Insert,
+            table,
+            row,
+            cells,
+            column,
+            kind,
+            reader,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Complete an insert, update, or upsert with one streamed scalar.
+    /// Binding adapters supply the same identity, timestamp, and branch view
+    /// that their ordinary mutation path would use.
+    #[cfg(not(target_family = "wasm"))]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_streaming_value_with_id<R>(
+        &self,
+        mutation: StreamingMutationKind,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        column: &str,
+        kind: groove::large_values::LargeValueKind,
+        reader: R,
+        identity: Option<AuthorId>,
+        now_ms: Option<u64>,
+        head: Option<BranchSelector>,
+        base: Option<BranchViewBase>,
+    ) -> Result<WriteHandle<S>, Error>
+    where
+        R: std::io::Read + Send + 'static,
+    {
+        use futures::{SinkExt, StreamExt};
+
+        let mut upload = self.begin_streaming_value_upload(table, &cells, column, kind)?;
+        let (mut bytes_tx, mut bytes_rx) = futures::channel::mpsc::channel::<Vec<u8>>(8);
+        let (result_tx, result_rx) = futures::channel::oneshot::channel();
+        std::thread::spawn(move || {
+            let mut reader = reader;
+            let mut buffer = vec![0_u8; 64 * 1024];
+            let result = loop {
+                match std::io::Read::read(&mut reader, &mut buffer) {
+                    Ok(0) => break Ok(()),
+                    Ok(read) => {
+                        if futures::executor::block_on(bytes_tx.send(buffer[..read].to_vec()))
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Err(_) => break Err(groove::large_values::Error::MalformedScalar),
+                }
+            };
+            drop(bytes_tx);
+            let _ = result_tx.send(result);
+        });
+
+        while let Some(bytes) = bytes_rx.next().await {
+            if let Err(error) = self.push_streaming_value_upload(&mut upload, &bytes).await {
+                drop(bytes_rx);
+                return Err(error);
+            }
+        }
+
+        match result_rx.await {
+            Ok(Ok(())) => {
+                self.finish_streaming_value_upload(
+                    upload, mutation, table, row, cells, column, identity, now_ms, head, base,
+                )
+                .await
+            }
+            Ok(Err(error)) => {
+                self.abort_streaming_value_upload(upload).await?;
+                Err(crate::node::Error::from(error).into())
+            }
+            Err(_) => {
+                self.abort_streaming_value_upload(upload).await?;
+                Err(crate::node::Error::from(groove::large_values::Error::MalformedScalar).into())
+            }
+        }
+    }
+
+    /// Begin a resumable push preparation without retaining the logical value.
+    pub fn begin_streaming_value_upload(
+        &self,
+        table: &str,
+        cells: &RowCells,
+        column: &str,
+        kind: groove::large_values::LargeValueKind,
+    ) -> Result<StreamingValueUpload, Error> {
+        self.validate_streaming_column(table, cells, column, kind)?;
+        let emitted = Rc::new(RefCell::new(Vec::new()));
+        let emitted_for_stage = Rc::clone(&emitted);
+        let preparation = groove::large_values::PushStreamingPreparation::new(
+            kind,
+            Box::new(|_| groove::large_values::Locator(uuid::Uuid::new_v4().as_bytes().to_vec()))
+                as Box<dyn FnMut(_) -> _>,
+            Box::new(move |chunk| {
+                emitted_for_stage.borrow_mut().push(chunk);
+                Ok(())
+            }) as Box<dyn FnMut(_) -> _>,
+        );
+        Ok(StreamingValueUpload {
+            id: groove::large_values::StagedLargeValueId(*uuid::Uuid::new_v4().as_bytes()),
+            kind,
+            preparation: Some(preparation),
+            emitted,
+        })
+    }
+
+    /// Feed one host chunk and durably stage every tree node finalized by it.
+    pub async fn push_streaming_value_upload(
+        &self,
+        upload: &mut StreamingValueUpload,
+        bytes: &[u8],
+    ) -> Result<(), Error> {
+        let push_result = upload
+            .preparation
+            .as_mut()
+            .ok_or_else(|| Error::new(ErrorCode::Schema, "streaming upload is closed"))?
+            .push(bytes);
+        if let Err(error) = push_result {
+            upload.preparation.take();
+            self.node
+                .node
+                .lock()
+                .await
+                .evict_pending_large_value_upload(upload.id)
+                .await?;
+            return Err(crate::node::Error::from(error).into());
+        }
+        let chunks = std::mem::take(&mut *upload.emitted.borrow_mut());
+        let stage_result = {
+            let node = self.node.node.lock().await;
+            node.stage_large_value_chunk_batch(upload.id, upload.kind, chunks)
+                .await
+        };
+        if let Err(error) = stage_result {
+            upload.preparation.take();
+            let _ = self
+                .node
+                .node
+                .lock()
+                .await
+                .evict_pending_large_value_upload(upload.id)
+                .await;
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
+    /// Abort a resumable upload and release its persisted pending retainers.
+    pub async fn abort_streaming_value_upload(
+        &self,
+        mut upload: StreamingValueUpload,
+    ) -> Result<(), Error> {
+        upload.preparation.take();
+        self.node
+            .node
+            .lock()
+            .await
+            .evict_pending_large_value_upload(upload.id)
+            .await?;
+        Ok(())
+    }
+
+    /// Finish a resumable upload and publish its ordinary row mutation.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn finish_streaming_value_upload(
+        &self,
+        mut upload: StreamingValueUpload,
+        mutation: StreamingMutationKind,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        column: &str,
+        identity: Option<AuthorId>,
+        now_ms: Option<u64>,
+        head: Option<BranchSelector>,
+        base: Option<BranchViewBase>,
+    ) -> Result<WriteHandle<S>, Error> {
+        let preparation = upload
+            .preparation
+            .take()
+            .ok_or_else(|| Error::new(ErrorCode::Schema, "streaming upload is closed"))?;
+        let (value_ref, _) = match preparation.finish() {
+            Ok(finished) => finished,
+            Err(error) => {
+                let _ = self
+                    .node
+                    .node
+                    .lock()
+                    .await
+                    .evict_pending_large_value_upload(upload.id)
+                    .await;
+                return Err(crate::node::Error::from(error).into());
+            }
+        };
+        let chunks = std::mem::take(&mut *upload.emitted.borrow_mut());
+        let staged_result = {
+            let node = self.node.node.lock().await;
+            match node
+                .stage_large_value_chunk_batch(upload.id, upload.kind, chunks)
+                .await
+            {
+                Ok(()) => node.finalize_large_value_upload(upload.id, value_ref).await,
+                Err(error) => Err(error),
+            }
+        };
+        let staged = match staged_result {
+            Ok(staged) => staged,
+            Err(error) => {
+                // Cleanup is best-effort here so the terminal operation reports
+                // its original staging/finalization failure.
+                let _ = self
+                    .node
+                    .node
+                    .lock()
+                    .await
+                    .evict_pending_large_value_upload(upload.id)
+                    .await;
+                return Err(error.into());
+            }
+        };
+        let nullable =
+            match self.validate_streaming_column(table, &cells, column, staged.value_ref.kind) {
+                Ok(nullable) => nullable,
+                Err(error) => {
+                    let _ = self
+                        .node
+                        .node
+                        .lock()
+                        .await
+                        .evict_staged_large_value(staged.id)
+                        .await;
+                    return Err(error);
+                }
+            };
+        self.publish_streaming_value_with_id(
+            mutation, table, row, cells, column, staged, nullable, identity, now_ms, head, base,
+        )
+        .await
+    }
+
+    fn validate_streaming_column(
+        &self,
+        table: &str,
+        cells: &RowCells,
+        column: &str,
+        kind: groove::large_values::LargeValueKind,
+    ) -> Result<bool, Error> {
+        if cells.contains_key(column) {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                format!("streamed column {table}.{column} was also supplied in row cells"),
+            ));
+        }
+        let table_schema = self.table_schema(table)?;
+        let column_type = &table_schema
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column)
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Schema,
+                    format!("unknown streamed column {table}.{column}"),
+                )
+            })?
+            .column_type;
+        let (column_type, nullable) = match column_type {
+            groove::records::ValueType::Nullable(inner) => (inner.as_ref(), true),
+            column_type => (column_type, false),
+        };
+        let kind_matches = match kind {
+            groove::large_values::LargeValueKind::Bytes => {
+                matches!(column_type, groove::records::ValueType::Bytes)
+            }
+            groove::large_values::LargeValueKind::String
+            | groove::large_values::LargeValueKind::Json => {
+                matches!(column_type, groove::records::ValueType::String)
+            }
+        };
+        if !kind_matches {
+            return Err(large_value_cell_type_error(table, column));
+        }
+        Ok(nullable)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn publish_streaming_value_with_id(
+        &self,
+        mutation: StreamingMutationKind,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        column: &str,
+        staged: groove::large_values::StagedLargeValue,
+        nullable: bool,
+        identity: Option<AuthorId>,
+        now_ms: Option<u64>,
+        head: Option<BranchSelector>,
+        base: Option<BranchViewBase>,
+    ) -> Result<WriteHandle<S>, Error> {
+        let made_by = identity.unwrap_or(self.identity.author);
+        let permission_subject = identity;
+        let branch = head.clone().unwrap_or_default();
+        let (mut cells, parents, authored_columns, inserting) = match mutation {
+            StreamingMutationKind::Insert => {
+                if head.is_some() {
+                    self.ensure_exact_branch_row_absent(table, &branch, row)
+                        .await?;
+                } else {
+                    self.ensure_row_absent(table, row, made_by).await?;
+                }
+                (cells, Vec::new(), None, true)
+            }
+            StreamingMutationKind::Update => {
+                let authored = cells
+                    .keys()
+                    .cloned()
+                    .chain(std::iter::once(column.to_owned()))
+                    .collect();
+                if let Some(head) = head.as_ref() {
+                    let mut node = self.node.node.lock().await;
+                    if let Some(mut current) = node
+                        .visible_current_cells_in_branch(table, head, row)
+                        .await?
+                    {
+                        let parent = node
+                            .local_content_winner_tx_id_in_branch(table, head, row)
+                            .await?;
+                        drop(node);
+                        current.extend(cells);
+                        (current, parent.into_iter().collect(), Some(authored), false)
+                    } else {
+                        let Some(mut inherited) = node
+                            .visible_current_cells_in_branch_view(table, head, base.as_ref(), row)
+                            .await?
+                        else {
+                            return Err(Error::new(
+                                ErrorCode::NotObserved,
+                                format!("row is not visible in branch view: {}", row.0),
+                            ));
+                        };
+                        drop(node);
+                        inherited.extend(cells);
+                        (inherited, Vec::new(), Some(authored), true)
+                    }
+                } else {
+                    let (merged, parent, _) = if let Some(identity) = identity {
+                        self.merge_existing_cells_for_identity(table, row, cells, identity)
+                            .await?
+                    } else {
+                        self.merge_existing_cells(table, row, cells).await?
+                    };
+                    (merged, parent.into_iter().collect(), Some(authored), false)
+                }
+            }
+            StreamingMutationKind::Upsert => {
+                let authored = cells
+                    .keys()
+                    .cloned()
+                    .chain(std::iter::once(column.to_owned()))
+                    .collect();
+                if let Some(head) = head.as_ref() {
+                    let mut node = self.node.node.lock().await;
+                    if let Some(mut current) = node
+                        .visible_current_cells_in_branch(table, head, row)
+                        .await?
+                    {
+                        let parent = node
+                            .local_content_winner_tx_id_in_branch(table, head, row)
+                            .await?;
+                        drop(node);
+                        current.extend(cells);
+                        (current, parent.into_iter().collect(), Some(authored), false)
+                    } else if let Some(mut inherited) = node
+                        .visible_current_cells_in_branch_view(table, head, base.as_ref(), row)
+                        .await?
+                    {
+                        drop(node);
+                        inherited.extend(cells);
+                        (inherited, Vec::new(), Some(authored), true)
+                    } else {
+                        drop(node);
+                        (cells, Vec::new(), None, true)
+                    }
+                } else {
+                    self.ensure_row_not_deleted(table, row).await?;
+                    let exists = if let Some(identity) = identity {
+                        self.upsert_target_for_trusted_identity(table, row, identity)
+                            .await?
+                            .is_some()
+                    } else {
+                        self.upsert_target_for_client_identity(table, row, self.identity.author)
+                            .await?
+                            .is_some()
+                    };
+                    if exists {
+                        let (merged, parent, _) = if let Some(identity) = identity {
+                            self.merge_existing_cells_for_identity(table, row, cells, identity)
+                                .await?
+                        } else {
+                            self.merge_existing_cells(table, row, cells).await?
+                        };
+                        (merged, parent.into_iter().collect(), Some(authored), false)
+                    } else {
+                        (cells, Vec::new(), None, true)
+                    }
+                }
+            }
+        };
+        if inserting {
+            cells = self.apply_insert_defaults(table, cells)?;
+        }
+        let mut commit =
+            MergeableCommit::new(table, row, now_ms.unwrap_or_else(|| self.next_now_ms()))
+                .branch(branch)
+                .made_by(made_by)
+                .parents(parents)
+                .cells(cells);
+        if let Some(authored_columns) = authored_columns {
+            commit = commit.authored_columns(authored_columns);
+        }
+        if let Some(permission_subject) = permission_subject {
+            commit = commit.permission_subject(permission_subject);
+        }
+        let published = {
+            let mut node = self.node.node.lock().await;
+            let commit = node
+                .seal_inherited_large_values(commit, self.schema_version_id)
+                .await?
+                .staged_large_cell(column, staged, nullable);
+            node.commit_mergeable_in_schema(self.schema_version_id, commit)
+                .await?
+        };
+        self.finish_published_write(row, published).await
     }
 
     /// Insert a row while attributing provenance to `made_by`.
@@ -1762,13 +2634,14 @@ where
         }
         // Db is an untrusted client: structurally valid writes are staged and
         // sent optimistically. A serving authority assigns the policy fate.
-        let published = self
-            .node
-            .node
-            .lock()
-            .await
-            .commit_mergeable_in_schema(self.schema_version_id, commit)
-            .await?;
+        let published = {
+            let mut node = self.node.node.lock().await;
+            let commit = node
+                .seal_inherited_large_values(commit, self.schema_version_id)
+                .await?;
+            node.commit_mergeable_in_schema(self.schema_version_id, commit)
+                .await?
+        };
         self.finish_published_write(row, published).await
     }
 
@@ -2257,26 +3130,19 @@ where
             let authored_columns = patch.keys().cloned().collect();
             return Ok((patch, parent, authored_columns));
         }
-        let mut cells = BTreeMap::new();
         let existing = self
             .local_row_for_client_identity(table, row, identity)
             .await?
             .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
-        for column in &table_schema.columns {
-            if let Some(value) = existing.cell(table_schema, &column.name) {
-                cells.insert(
-                    column.name.clone(),
-                    default_cell_for_column_type(&column.column_type, &value),
-                );
-            }
-        }
-        let parent = self
-            .node
-            .node
-            .lock()
-            .await
-            .current_row_tx_id(&existing)
-            .await;
+        let (mut cells, parent) = {
+            let mut node = self.node.node.lock().await;
+            let cells = node
+                .current_physical_cells_in_schema(self.schema_version_id, table, row)
+                .await?
+                .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+            let parent = node.current_row_tx_id(&existing).await;
+            (cells, parent)
+        };
         let authored_columns = patch.keys().cloned().collect();
         cells.extend(patch);
         Ok((cells, parent, authored_columns))
@@ -2313,26 +3179,19 @@ where
         if self.authorize_read_for_identity(table, row, identity)? != PermissionAdvice::Allowed {
             return Err(read_for_write_denied("partial UPDATE", table));
         }
-        let mut cells = BTreeMap::new();
         let existing = self
             .local_row_for_trusted_identity(table, row, identity)
             .await?
             .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
-        for column in &table_schema.columns {
-            if let Some(value) = existing.cell(table_schema, &column.name) {
-                cells.insert(
-                    column.name.clone(),
-                    default_cell_for_column_type(&column.column_type, &value),
-                );
-            }
-        }
-        let parent = self
-            .node
-            .node
-            .lock()
-            .await
-            .current_row_tx_id(&existing)
-            .await;
+        let (mut cells, parent) = {
+            let mut node = self.node.node.lock().await;
+            let cells = node
+                .current_physical_cells_in_schema(self.schema_version_id, table, row)
+                .await?
+                .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+            let parent = node.current_row_tx_id(&existing).await;
+            (cells, parent)
+        };
         let authored_columns = patch.keys().cloned().collect();
         cells.extend(patch);
         Ok((cells, parent, authored_columns))

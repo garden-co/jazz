@@ -66,6 +66,12 @@ jobs:
       - name: Prepare libclang for bindgen
         run: bash dev/benchmarks/realistic/prepare_libclang_env.sh
 
+      # Ordinary PR CI retains the deterministic benchmark-derived assertions.
+      # Compile all maintained benchmark APIs on this opt-in/native benchmark
+      # surface instead of extending every PR's Rust critical path.
+      - name: Compile maintained benchmark APIs
+        run: dev/gates/benchmark-smoke.sh --compile-ci
+
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version-file: .nvmrc

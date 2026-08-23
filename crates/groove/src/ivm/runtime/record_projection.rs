@@ -553,6 +553,7 @@ pub(super) fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<()
             }
             GraphBuilder::Filter { input, .. }
             | GraphBuilder::Project { input, .. }
+            | GraphBuilder::StreamingChecksum { input, .. }
             | GraphBuilder::UnwrapNullable { input, .. }
             | GraphBuilder::Unnest { input, .. }
             | GraphBuilder::VariantProject { input, .. }
@@ -589,6 +590,12 @@ pub(super) fn validate_collect_by_terminality(graph: &GraphBuilder) -> Result<()
             validate_collect_by_terminality(step)
         }
         GraphBuilder::Filter { input, .. } | GraphBuilder::Project { input, .. } => {
+            validate_collect_by_terminality(input)
+        }
+        GraphBuilder::StreamingChecksum { input, .. } => {
+            if contains_collect_by(input) {
+                return Err(IvmRuntimeError::CollectByMustBeTerminal);
+            }
             validate_collect_by_terminality(input)
         }
         GraphBuilder::UnwrapNullable { input, .. }

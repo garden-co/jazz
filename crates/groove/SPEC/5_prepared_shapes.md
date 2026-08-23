@@ -179,25 +179,5 @@ behavior.
 
 ## Open Questions
 
-### Open questions
-
-- 🔶 **Same-name binding sources across distinct shapes.** The README calls
-  sharing one `binding_source_shape` string across _identical_ graphs a sharp
-  edge, but a regression test exercises two _different_ sibling shapes sharing one
-  source. Decide whether distinct shapes sharing a source name is supported or
-  forbidden.
-- 🔶 **`prepare`-time binding-source validation.** `prepare` does not clearly
-  reject a graph whose `BindingSource` names don't match the supplied
-  `binding_source_shape`, nor check descriptor compatibility when the same source
-  name is re-prepared with a different descriptor (`or_insert_with` keeps the
-  first). Decide what `prepare` must validate.
-- 🔶 **Partitioned sink operator.** Routed multisink bindings currently append
-  per-binding filter/project tails to route a shared shape's internal output into
-  public sink rows. Decide whether groove should add a first-class partitioned
-  sink operator so hot shapes avoid evaluating binding-count by sink-count tails
-  while preserving the same "route-carrying graph -> binding partition -> public
-  sink" semantics.
-- 🔶 **Correlated array-subquery bindings.** Jazz array-subquery sharing can be
-  expressed as parent correlation keys flowing through prepared-shape style
-  binding sources. Decide whether this is ordinary prepared-shape routing or a
-  specialized correlation source.
+- 🔶 [#1777](https://github.com/garden-co/jazz/issues/1777) — Prepared-shape validation, source sharing, and partitioned output routing.
+- 🔶 [#1765](https://github.com/garden-co/jazz/issues/1765) — Correlated array-subquery bindings.

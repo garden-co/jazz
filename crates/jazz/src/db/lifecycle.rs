@@ -6,6 +6,16 @@ impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
+    /// Configure Jazz-owned ingress and expiry policy for unpublished large values.
+    pub fn set_large_value_staging_policy(&self, policy: crate::node::LargeValueStagingPolicy) {
+        self.node.set_large_value_staging_policy(policy);
+    }
+
+    /// Run one host-driven staging-expiry maintenance pass.
+    pub async fn evict_expired_staged_large_values(&self) -> Result<usize, Error> {
+        self.node.evict_expired_staged_large_values().await
+    }
+
     /// Open a database over the supplied storage and recover local state.
     ///
     /// ```rust

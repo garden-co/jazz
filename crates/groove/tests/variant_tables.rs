@@ -412,7 +412,7 @@ fn table_variant_tags_use_canonical_bounded_varints() {
 /// this exercises write, index maintenance, immediate projection, and delivery
 /// together while the codec test above isolates the changed prefix.
 #[futures_test::test]
-#[ignore = "manual performance receipt"]
+#[ignore = "#1787: manual performance receipt"]
 async fn measure_variant_write_projection_and_index_path() -> Result<(), Box<dyn std::error::Error>>
 {
     const ROWS: u64 = 20_000;
