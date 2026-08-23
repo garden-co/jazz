@@ -7,6 +7,7 @@ import { WebSocket as UndiciWebSocket } from "undici";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { WasmSchema } from "../drivers/types.js";
 import { type BatchId, type Row } from "./client.js";
+import type { Session } from "./context.js";
 import type { Db, QueryBuilder, TableProxy } from "./db.js";
 import { translateQuery } from "./query-adapter.js";
 import { loadCompiledSchema, type LoadedSchemaProject } from "../schema-loader.js";
@@ -503,7 +504,7 @@ describe("NAPI integration", () => {
     });
     let context: {
       asBackend(): Db;
-      forSession(session: { user_id: string; claims: Record<string, unknown> }): Db;
+      forSession(session: Session): Db;
       forRequest(request: Request): Promise<Db>;
       shutdown(): Promise<void>;
     } | null = null;
@@ -536,6 +537,7 @@ describe("NAPI integration", () => {
 
       const backendDb = context.asBackend();
       const aliceDb = context.forSession({
+        issuer: "https://issuer.example",
         user_id: "alice",
         claims: { role: "editor", team: "alpha" },
       });
@@ -870,7 +872,7 @@ describe("NAPI integration", () => {
     });
     let context: {
       asBackend(): Db;
-      forSession(session: { user_id: string; claims: Record<string, unknown> }): Db;
+      forSession(session: Session): Db;
       forRequest(request: Request): Promise<Db>;
       shutdown(): Promise<void>;
     } | null = null;
@@ -1376,7 +1378,7 @@ describe("NAPI integration", () => {
     });
     let context: {
       asBackend(): Db;
-      forSession(session: { user_id: string; claims: Record<string, unknown> }): Db;
+      forSession(session: Session): Db;
       shutdown(): Promise<void>;
     } | null = null;
 
@@ -1407,6 +1409,7 @@ describe("NAPI integration", () => {
       await settleAsyncSyncWork();
 
       const aliceDb = context.forSession({
+        issuer: "https://issuer.example",
         user_id: "alice",
         claims: { role: "editor", team: "alpha" },
       });

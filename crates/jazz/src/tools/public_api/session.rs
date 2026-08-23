@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
+use crate::ids::AuthorSubject;
 use crate::tools::metadata::SYSTEM_PRINCIPAL_ID;
 use crate::tools::transaction::OpenTransactionId;
 
@@ -42,6 +43,23 @@ pub struct Session {
 }
 
 impl Session {
+    /// Return the canonical author subject admitted by this session's auth mode.
+    /// Reserved issuers are valid only for their matching first-party modes.
+    pub fn author_subject(&self) -> Result<AuthorSubject, crate::ids::AuthorSubjectError> {
+        match self.auth_mode {
+            AuthMode::External => AuthorSubject::authenticated(&self.issuer, self.get_user_id()),
+            AuthMode::LocalFirst if self.issuer == AuthorSubject::LOCAL_FIRST_ISSUER => {
+                AuthorSubject::reserved(&self.issuer, self.get_user_id())
+            }
+            AuthMode::Anonymous if self.issuer == AuthorSubject::ANONYMOUS_ISSUER => {
+                AuthorSubject::reserved(&self.issuer, self.get_user_id())
+            }
+            _ => Err(crate::ids::AuthorSubjectError::ReservedIssuer(
+                self.issuer.clone(),
+            )),
+        }
+    }
+
     fn is_user_id_path(path: &[String]) -> bool {
         matches!(path, [segment] if segment == "user_id" || segment == "userId")
     }
@@ -363,7 +381,12 @@ mod tests {
             AuthMode::LocalFirst,
             AuthMode::Anonymous,
         ] {
-            let session = Session::new("urn:jazz:test", "user-1").with_auth_mode(mode);
+            let issuer = match mode {
+                AuthMode::External => "https://issuer.example",
+                AuthMode::LocalFirst => AuthorSubject::LOCAL_FIRST_ISSUER,
+                AuthMode::Anonymous => AuthorSubject::ANONYMOUS_ISSUER,
+            };
+            let session = Session::new(issuer, "user-1").with_auth_mode(mode);
             let json = serde_json::to_string(&session).unwrap();
             let back: Session = serde_json::from_str(&json).unwrap();
             assert_eq!(back.auth_mode, mode);
@@ -372,7 +395,8 @@ mod tests {
 
     #[test]
     fn session_auth_mode_accepts_camel_case_alias() {
-        let json = r#"{"user_id":"u","claims":{},"authMode":"anonymous"}"#;
+        let json =
+            r#"{"issuer":"urn:jazz:anonymous","user_id":"u","claims":{},"authMode":"anonymous"}"#;
         let session: Session = serde_json::from_str(json).unwrap();
         assert_eq!(session.auth_mode, AuthMode::Anonymous);
     }
