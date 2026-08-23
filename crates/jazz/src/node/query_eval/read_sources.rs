@@ -2760,10 +2760,14 @@ where
     S: OrderedKvStorage,
 {
     /// Select physical current-source access paths from the normalized program
-    /// itself.  This intentionally has no policy branch: an authorization
-    /// proof is just another normalized program with a different policy
-    /// context.  Every selected path merely narrows candidate rows; the
-    /// lowered predicate graph still decides membership.
+    /// itself. `Access path` is standard query-planner terminology, but this
+    /// deliberately trivial, rule-based planner only recognizes supported
+    /// indexed equality constraints and otherwise falls back to a full scan;
+    /// it makes no cardinality/selectivity estimates or cost comparisons.
+    /// This intentionally has no policy branch: an authorization proof is just
+    /// another normalized program with a different policy context. Every
+    /// selected path merely narrows candidate rows; the lowered predicate graph
+    /// still decides membership.
     pub(super) fn query_program_access_paths(
         &self,
         request: &QueryProgramRequest,
