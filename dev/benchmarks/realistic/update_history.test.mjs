@@ -25,12 +25,42 @@ function writeText(file, value) {
 test("update_history normalizes legacy Jazz JSON timing logs for report cards", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-legacy-history-"));
   const legacy = path.join(root, "native", "legacy-jazz");
-  writeJson(path.join(legacy, "metadata.json"), { run_id: "1", run_attempt: "1", sha: "abc", generated_at: "2026-01-01T00:00:00Z" });
+  writeJson(path.join(legacy, "metadata.json"), {
+    run_id: "1",
+    run_attempt: "1",
+    sha: "abc",
+    generated_at: "2026-01-01T00:00:00Z",
+  });
   writeJson(path.join(legacy, "manifest.json"), { kind: "realistic-bench-legacy-jazz" });
-  writeJson(path.join(legacy, "suite_status.json"), { benchmarks: [{ id: "legacy-jazz:sync", status: "passed", output_path: "logs/sync.log" }, { id: "legacy-jazz:route_subscription_curve", status: "passed", output_path: "logs/route.log" }] });
-  writeText(path.join(legacy, "logs/sync.log"), '{"phase":"sync","wall_us":1250,"ingest_edits_per_sec":800}\n');
-  writeText(path.join(legacy, "logs/route.log"), '{"seed_us":100,"hydration_us":200,"subscribe_us":300}\n');
-  execFileSync("node", ["dev/benchmarks/realistic/update_history.mjs", "--history", path.join(root, "history.json"), "--native", path.join(root, "native")], { cwd: REPO_ROOT });
+  writeJson(path.join(legacy, "suite_status.json"), {
+    benchmarks: [
+      { id: "legacy-jazz:sync", status: "passed", output_path: "logs/sync.log" },
+      {
+        id: "legacy-jazz:route_subscription_curve",
+        status: "passed",
+        output_path: "logs/route.log",
+      },
+    ],
+  });
+  writeText(
+    path.join(legacy, "logs/sync.log"),
+    '{"phase":"sync","wall_us":1250,"ingest_edits_per_sec":800}\n',
+  );
+  writeText(
+    path.join(legacy, "logs/route.log"),
+    '{"seed_us":100,"hydration_us":200,"subscribe_us":300}\n',
+  );
+  execFileSync(
+    "node",
+    [
+      "dev/benchmarks/realistic/update_history.mjs",
+      "--history",
+      path.join(root, "history.json"),
+      "--native",
+      path.join(root, "native"),
+    ],
+    { cwd: REPO_ROOT },
+  );
   const scenarios = readJson(path.join(root, "history.json")).runs[0].scenarios;
   const scenario = scenarios.find((item) => item.scenario_id === "sync");
   assert.equal(scenario.scenario_id, "sync");

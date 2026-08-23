@@ -518,7 +518,10 @@ function extractLegacyJazz(dir) {
       .map((record) => {
         const fallbackScenario = item.id.replace(/^legacy-jazz:/, "");
         const routeWallUs = Object.entries(record)
-          .filter(([key, value]) => key.endsWith("_us") && key !== "wall_us" && Number.isFinite(Number(value)))
+          .filter(
+            ([key, value]) =>
+              key.endsWith("_us") && key !== "wall_us" && Number.isFinite(Number(value)),
+          )
           .reduce((total, [, value]) => total + Number(value), 0);
         return jazzSimScenarioSummary(
           {
@@ -533,7 +536,25 @@ function extractLegacyJazz(dir) {
       .filter((record) => Number.isFinite(record.wall_time_ms));
   });
   if (!scenarios.length) return [];
-  return [{ id: buildRunId(["legacy-jazz", metadata.run_id, metadata.run_attempt, metadata.sha]), suite: "legacy-jazz", storage_engine: null, generated_at: metadata.generated_at, repository: metadata.repository ?? null, run_id: metadata.run_id ?? null, run_attempt: metadata.run_attempt ?? null, sha: metadata.sha ?? null, ref: metadata.ref ?? null, branch: resolveBranch(metadata, manifest, metadata.ref), profile: metadata.profile ?? null, runner_name: metadata.runner_name ?? null, runner_os: metadata.runner_os ?? null, runner_arch: metadata.runner_arch ?? null, scenarios }];
+  return [
+    {
+      id: buildRunId(["legacy-jazz", metadata.run_id, metadata.run_attempt, metadata.sha]),
+      suite: "legacy-jazz",
+      storage_engine: null,
+      generated_at: metadata.generated_at,
+      repository: metadata.repository ?? null,
+      run_id: metadata.run_id ?? null,
+      run_attempt: metadata.run_attempt ?? null,
+      sha: metadata.sha ?? null,
+      ref: metadata.ref ?? null,
+      branch: resolveBranch(metadata, manifest, metadata.ref),
+      profile: metadata.profile ?? null,
+      runner_name: metadata.runner_name ?? null,
+      runner_os: metadata.runner_os ?? null,
+      runner_arch: metadata.runner_arch ?? null,
+      scenarios,
+    },
+  ];
 }
 
 function extractNativeCriterion(nativeDir) {
