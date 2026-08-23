@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "next dev",
-    "build": "node ../../packages/jazz-tools/dist/cli.js validate && next build",
+    "build": "env NEXT_PUBLIC_APP_ORIGIN=http://127.0.0.1:3000 NEXT_PUBLIC_JAZZ_APP_ID=00000000-0000-0000-0000-000000000301 NEXT_PUBLIC_JAZZ_SERVER_URL=http://127.0.0.1:4200 BACKEND_SECRET=big-label-build-backend-secret BETTER_AUTH_SECRET=9d1b6e04f3a2c8517d0ea13b8c5f9264d1e6a3b74f0c28d915be46a7f38cd205 sh -c 'node ../../packages/jazz-tools/dist/cli.js validate && next build'",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

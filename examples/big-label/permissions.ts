@@ -3,6 +3,29 @@ import { app } from "./schema.js";
 
 /** Tenant admission has one authority: a server-issued bootstrap-admin claim. */
 export default definePermissions(app, ({ policy, session, allowedTo, allOf }) => {
+  // Better Auth is accessed only by this Next app's backend context. Never
+  // expose its credential/session tables through ordinary Jazz clients.
+  policy.better_auth_user.allowRead.never();
+  policy.better_auth_user.allowInsert.never();
+  policy.better_auth_user.allowUpdate.never();
+  policy.better_auth_user.allowDelete.never();
+  policy.better_auth_session.allowRead.never();
+  policy.better_auth_session.allowInsert.never();
+  policy.better_auth_session.allowUpdate.never();
+  policy.better_auth_session.allowDelete.never();
+  policy.better_auth_account.allowRead.never();
+  policy.better_auth_account.allowInsert.never();
+  policy.better_auth_account.allowUpdate.never();
+  policy.better_auth_account.allowDelete.never();
+  policy.better_auth_verification.allowRead.never();
+  policy.better_auth_verification.allowInsert.never();
+  policy.better_auth_verification.allowUpdate.never();
+  policy.better_auth_verification.allowDelete.never();
+  policy.better_auth_jwks.allowRead.never();
+  policy.better_auth_jwks.allowInsert.never();
+  policy.better_auth_jwks.allowUpdate.never();
+  policy.better_auth_jwks.allowDelete.never();
+
   const bootstrapAdmin = session.where({ "claims.biglabel_admin": true });
   // userId is deliberately denormalized so this is an indexed membership lookup.
   const member = (organizationId: unknown) =>
