@@ -1,6 +1,8 @@
 # Realistic E2E Benchmarks
 
 Shared benchmark definitions for the realistic, scenario-driven benchmark suite.
+The program plan that assigns these workloads to the forthcoming interactive
+example apps is [Examples & Benchmarks Program](../../EXAMPLES_AND_BENCHMARKS_PROGRAM.md).
 
 ## Files
 
