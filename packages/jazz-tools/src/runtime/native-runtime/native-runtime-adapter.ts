@@ -3035,7 +3035,9 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
       parsed.attribution === SYSTEM_AUTHOR_ID
         ? SYSTEM_READ_SESSION.issuer
         : (attributedAuthor?.issuer ?? parsed.session?.issuer ?? parsed.issuer);
-    if (typeof issuer !== "string" || !isUsableSubject(issuer)) return null;
+    if (typeof issuer !== "string" || !isUsableSubject(issuer)) {
+      throw new Error("session is missing issuer");
+    }
     const session = {
       issuer,
       user_id: userId,
@@ -3048,7 +3050,8 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
     };
     const claims = sessionClaims(parsed.session?.claims ?? parsed.claims, session);
     return { ...session, claims, identity: authorBytesForSession(session) };
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.message === "session is missing issuer") throw error;
     return null;
   }
 }

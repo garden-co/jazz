@@ -2793,6 +2793,13 @@ describe("NativeRuntimeAdapter server transport", () => {
         JSON.stringify({ user_id: "00000000-0000-0000-0000-000000000000" }),
       ),
     ).toThrow("session is missing issuer");
+    expect(() =>
+      runtime.insert(
+        "todos",
+        { title: { type: "Text", value: "missing issuer" } },
+        JSON.stringify({ user_id: "00000000-0000-0000-0000-000000000000" }),
+      ),
+    ).toThrow("session is missing issuer");
   });
 
   it("applies subscription deltas to the full keyed snapshot", async () => {
