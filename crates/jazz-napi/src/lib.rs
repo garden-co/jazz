@@ -3148,7 +3148,8 @@ fn checked_u64_range(start: f64, end: f64) -> napi::Result<std::ops::Range<u64>>
 fn core_author_id_from_bytes(bytes: &[u8]) -> napi::Result<CoreAuthorSubject> {
     let canonical = std::str::from_utf8(bytes)
         .map_err(|_| napi::Error::from_reason("author subject must be canonical UTF-8 JSON"))?;
-    CoreAuthorSubject::from_canonical(canonical).map_err(napi::Error::from_reason)
+    CoreAuthorSubject::from_canonical(canonical)
+        .map_err(|error| napi::Error::from_reason(error.to_string()))
 }
 
 fn core_write_memory(
