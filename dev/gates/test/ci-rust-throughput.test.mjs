@@ -460,7 +460,7 @@ test("Rust CI splits a bounded real differential-oracle smoke behind a stable ag
   assert.doesNotMatch(differential, /tracked red debt/);
   assert.match(
     m3Differential,
-    /#\[ignore = "manual randomized differential soak; bounded seed 11 runs in CI"\]\n(?:pub )?fn m3_maintained_one_shot_differential_oracle/,
+    /#\[ignore = "#\d+: manual randomized differential soak; bounded seed 11 runs in CI"\]\n(?:pub )?fn m3_maintained_one_shot_differential_oracle/,
   );
   assert.doesNotMatch(workspace, /m3_maintained_one_shot_differential_oracle/);
   assert.match(aggregate, /if: always\(\)/);
