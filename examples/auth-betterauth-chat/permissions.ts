@@ -6,7 +6,7 @@ const CHAT_ID = process.env.NEXT_PUBLIC_CHAT_ID!;
 
 export default definePermissions(app, ({ policy, allOf, anyOf, session }) => {
   const isAuthenticated = session.where({ authMode: "external" });
-  const canMutateGenericChat = { $createdBy: session.user_id };
+  const canMutateGenericChat = { $createdBy: session.author };
 
   policy.messages.allowRead.where({ chat_id: ANNOUNCEMENTS_CHAT_ID });
   policy.messages.allowRead.where({ chat_id: CHAT_ID });

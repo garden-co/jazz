@@ -474,22 +474,13 @@ where
         self.open_exclusive_handle(id).await
     }
 
-    /// Open an exclusive transaction whose identity is fixed for its lifetime.
-    ///
-    /// Transaction-local reads, authorization, provenance, and commit
-    /// attribution all use `author`; subsequent calls cannot replace it.
-    pub async fn begin_exclusive_for_identity(
+    /// Open an exclusive transaction with an explicit session policy identity.
+    pub(crate) async fn begin_exclusive_for_identity(
         &self,
         id: OpenTransactionId,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<(), Error> {
-        self.node
-            .node
-            .lock()
-            .await
-            .open_exclusive_for_identity(id, author)
-            .await
-            .map_err(Into::into)
+        self.open_exclusive_handle_for_identity(id, author).await
     }
 
     /// Return a non-owning operations handle for an already-open exclusive transaction.
@@ -755,11 +746,20 @@ where
     }
 
     pub(crate) async fn open_exclusive_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
+        self.open_exclusive_handle_for_identity(id, self.identity.author)
+            .await
+    }
+
+    async fn open_exclusive_handle_for_identity(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
         self.node
             .node
             .lock()
             .await
-            .open_exclusive_for_identity(id, self.identity.author)
+            .open_exclusive_for_identity(id, author)
             .await
             .map_err(Into::into)
     }

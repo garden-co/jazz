@@ -3391,6 +3391,17 @@ mod tests {
             LoweredRelValue::Operand(Operand::Claim(claim)) if claim == DIRECT_USER_ID_CLAIM
         ));
 
+        let author = rel_value_to_policy_operand(
+            &table,
+            path,
+            &RelValueRef::SessionRef(vec!["author".to_owned()]),
+        )
+        .expect("author is a supported canonical provenance session field");
+        assert!(matches!(
+            author,
+            LoweredRelValue::Operand(Operand::Claim(claim)) if claim == DIRECT_AUTHOR_CLAIM
+        ));
+
         for path_segments in [["author"], ["user_id"], ["authMode"], ["auth_mode"]] {
             rel_value_to_policy_operand(
                 &table,

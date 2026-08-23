@@ -103,6 +103,18 @@ async fn backend_session_transaction_preserves_raw_claims_and_logical_author_inn
         )
         .expect("raw UUID user_id and logical author policy allow staged insert");
     assert_eq!(staged, None);
+    let staged_rows = transaction
+        .query(
+            Query::from("notes").select(["title", "$createdBy", "$updatedBy"]),
+            None,
+        )
+        .await
+        .expect("transaction reads retain the explicit session author");
+    assert_eq!(
+        staged_rows[0].1,
+        provenance_values("session transaction", super::ALICE_ID, super::ALICE_ID),
+        "staged provenance must not use the backend SYSTEM author"
+    );
     let transaction_id = transaction.commit().expect("commit session transaction");
     wait_for_edge_txs(&backend, &[transaction_id]).await;
 

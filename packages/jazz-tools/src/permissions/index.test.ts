@@ -6,6 +6,7 @@ import {
   type PermissionRelation,
 } from "./index.js";
 import type { PolicyExpr } from "../schema.js";
+import { canonicalAuthorSubject } from "../runtime/author-id.js";
 import {
   toAssertionPolicyExprWithRelForTest,
   toAssertionRelExprForTest,
@@ -362,7 +363,7 @@ const creatorCondition = {
   op: "Eq",
   value: {
     type: "SessionRef",
-    path: ["user_id"],
+    path: ["author"],
   },
 };
 
@@ -432,10 +433,10 @@ describe("permissions DSL", () => {
 
   it("compiles provenance magic column policies", () => {
     const compiled = definePermissions(app, ({ policy, session }) => [
-      policy.todos.allowRead.where({ $createdBy: session.userId }),
+      policy.todos.allowRead.where({ $createdBy: session.author }),
       policy.todos.allowUpdate
-        .whereOld({ $createdBy: session.userId })
-        .whereNew({ $updatedBy: session.userId }),
+        .whereOld({ $createdBy: session.author })
+        .whereNew({ $updatedBy: session.author }),
     ]);
 
     expect(compiled.todos!.select?.using).toEqual({
@@ -444,7 +445,7 @@ describe("permissions DSL", () => {
       op: "Eq",
       value: {
         type: "SessionRef",
-        path: ["userId"],
+        path: ["author"],
       },
     });
     expect(compiled.todos!.update?.using).toEqual({
@@ -453,7 +454,7 @@ describe("permissions DSL", () => {
       op: "Eq",
       value: {
         type: "SessionRef",
-        path: ["userId"],
+        path: ["author"],
       },
     });
     expect(compiled.todos!.update?.with_check).toEqual({
@@ -462,7 +463,7 @@ describe("permissions DSL", () => {
       op: "Eq",
       value: {
         type: "SessionRef",
-        path: ["userId"],
+        path: ["author"],
       },
     });
   });
@@ -476,6 +477,22 @@ describe("permissions DSL", () => {
     expect(compiled.todos!.select?.using).toEqual(creatorCondition);
     expect(compiled.todos!.update?.using).toEqual(creatorCondition);
     expect(compiled.todos!.update?.with_check).toEqual(creatorCondition);
+  });
+
+  it("scopes creator helpers to the canonical issuer-scoped author", () => {
+    const compiled = definePermissions(app, ({ policy, isCreator }) => [
+      policy.todos.allowRead.where(isCreator),
+    ]);
+    expect(compiled.todos!.select?.using).toEqual({
+      type: "Cmp",
+      column: "$createdBy",
+      op: "Eq",
+      value: { type: "SessionRef", path: ["author"] },
+    });
+
+    const matching = canonicalAuthorSubject("https://issuer-a.example", "same-sub");
+    expect(matching).toBe(canonicalAuthorSubject("https://issuer-a.example", "same-sub"));
+    expect(matching).not.toBe(canonicalAuthorSubject("https://issuer-b.example", "same-sub"));
   });
 
   it("compiles managedByCreator() to creator-scoped CRUD rules", () => {

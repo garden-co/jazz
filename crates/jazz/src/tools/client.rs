@@ -449,6 +449,14 @@ impl Backend {
         crate::db::block_on(self.0.begin_exclusive(id))
     }
 
+    fn begin_exclusive_for_identity(
+        &self,
+        id: OpenTransactionId,
+        author: CoreAuthorSubject,
+    ) -> std::result::Result<(), CoreDbError> {
+        crate::db::block_on(self.0.begin_exclusive_for_identity(id, author))
+    }
+
     fn exclusive_write(
         &self,
         tx_id: OpenTransactionId,
@@ -881,10 +889,13 @@ impl ClientDb {
         {
             transaction_id = OpenTransactionId::new();
         }
-        inner
-            .db
-            .begin_exclusive(transaction_id)
-            .map_err(|error| JazzError::Write(error.to_string()))?;
+        match author {
+            Some(author) => inner
+                .db
+                .begin_exclusive_for_identity(transaction_id, author),
+            None => inner.db.begin_exclusive(transaction_id),
+        }
+        .map_err(|error| JazzError::Write(error.to_string()))?;
         inner.transactions.insert(
             transaction_id,
             ExclusiveTransactionState {
