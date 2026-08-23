@@ -140,3 +140,15 @@ reader API. Producer failure aborts before any root is staged. We still do not
 expose pre-collected arrays or synchronous JS callbacks. Browser/WASM remains a
 follow-up requiring the same explicit async producer, cancellation, and
 backpressure contract.
+
+## 2026-08-23 — Streaming mutation parity
+
+The object-shaped API extends to `updateStreaming` and `upsertStreaming` with a
+separately derived streaming-update type: exactly one eligible column is a
+source and all other fields are optional. The NAPI finish boundary carries one
+mutation enum plus the ordinary trusted identity, `updatedAt`, head and base;
+Jazz performs the normal existence, parent, inheritance and authorization work
+after EOF. Insert derives its selector from authored `branchBy` cells and does
+not accept a separate branch option. Update/upsert retain branch-view options
+because a row UUID does not identify one branch-local version. Streaming a
+branch column is rejected.

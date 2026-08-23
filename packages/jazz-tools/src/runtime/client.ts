@@ -112,7 +112,8 @@ export interface Runtime {
     write_context_json?: string | null,
     object_id?: string | null,
   ): InsertResult;
-  insertStreaming?(
+  streamingMutation?(
+    mutation: StreamingMutationKind,
     table: string,
     values: InsertValues,
     column: string,
@@ -455,6 +456,7 @@ export type StreamingValueSource =
   | ReadableStream<StreamingValueChunk>
   | AsyncIterable<StreamingValueChunk>;
 export type StreamingInsertResult = { id: string } & WriteReceipt;
+export type StreamingMutationKind = "insert" | "update" | "upsert";
 export type MutationResult = WriteReceipt;
 
 interface WriteContextPayload {
@@ -898,7 +900,7 @@ export class JazzClient {
     objectId: string,
     column: string,
     bytes: Uint8Array,
-  ): Promise<WriteHandle> {
+  ): Promise<WriteHandle<{ id: string }>> {
     if (!this.runtime.appendValue) throw new Error("Runtime does not support value append");
     const result = await this.runtime.appendValue(table, objectId, column, bytes);
     return new WriteHandle(committedBatchId(result), this);
@@ -911,7 +913,7 @@ export class JazzClient {
     offset: number,
     deleteLength: number,
     insert: Uint8Array,
-  ): Promise<WriteHandle> {
+  ): Promise<WriteHandle<{ id: string }>> {
     if (!this.runtime.spliceValue) throw new Error("Runtime does not support value splice");
     const result = await this.runtime.spliceValue(
       table,
@@ -1067,8 +1069,77 @@ export class JazzClient {
     session?: Session,
     attribution?: string,
   ): Promise<WriteHandle<{ id: string }>> {
-    if (!this.runtime.insertStreaming) {
-      throw new Error("This runtime does not support streaming insert");
+    return this.streamingMutation(
+      "insert",
+      table,
+      values,
+      column,
+      source,
+      options,
+      session,
+      attribution,
+    );
+  }
+
+  async updateStreaming(
+    table: string,
+    objectId: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    options?: UpdateOptions,
+    session?: Session,
+    attribution?: string,
+  ): Promise<WriteHandle<{ id: string }>> {
+    return this.streamingMutation(
+      "update",
+      table,
+      values,
+      column,
+      source,
+      options,
+      session,
+      attribution,
+      objectId,
+    );
+  }
+
+  async upsertStreaming(
+    table: string,
+    objectId: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    options?: UpdateOptions,
+    session?: Session,
+    attribution?: string,
+  ): Promise<WriteHandle<{ id: string }>> {
+    return this.streamingMutation(
+      "upsert",
+      table,
+      values,
+      column,
+      source,
+      options,
+      session,
+      attribution,
+      objectId,
+    );
+  }
+
+  private async streamingMutation(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    options?: InsertOptions | UpdateOptions,
+    session?: Session,
+    attribution?: string,
+    objectId?: string,
+  ): Promise<WriteHandle<{ id: string }>> {
+    if (!this.runtime.streamingMutation) {
+      throw new Error("This runtime does not support streaming mutations");
     }
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
@@ -1076,18 +1147,23 @@ export class JazzClient {
       attribution,
       undefined,
       options?.updatedAt,
-      options?.branch ? { head: options.branch } : undefined,
+      options?.branch
+        ? mutation === "insert"
+          ? { head: options.branch as BranchSelector }
+          : (options.branch as BranchView)
+        : undefined,
     );
-    const result = await this.runtime.insertStreaming(
+    const result = await this.runtime.streamingMutation(
+      mutation,
       table,
       values,
       column,
       source,
       writeContext,
-      options?.id,
+      objectId ?? ("id" in (options ?? {}) ? (options as InsertOptions).id : undefined),
     );
     if (result.kind !== "committed") {
-      throw new Error("Streaming inserts cannot be staged inside an open transaction");
+      throw new Error("Streaming mutations cannot be staged inside an open transaction");
     }
     return new WriteHandle(result.batchId, this, { id: result.id });
   }

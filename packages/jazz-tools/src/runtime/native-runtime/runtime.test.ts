@@ -4166,8 +4166,19 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
   it("infers the physical kind and applies backpressure to async chunks", async () => {
     const pushed: Uint8Array[] = [];
     let finished = false;
-    const beginStreamingInsertEncoded = vi.fn(
-      (_table: string, _rowId: Uint8Array, _cells: Uint8Array, _column: string, _kind: string) => ({
+    const beginStreamingMutationEncoded = vi.fn(
+      (
+        _table: string,
+        _rowId: Uint8Array,
+        _cells: Uint8Array,
+        _column: string,
+        _kind: string,
+        _mutation?: string,
+        _author?: Uint8Array,
+        _updatedAtMs?: number,
+        _head?: unknown,
+        _base?: unknown,
+      ) => ({
         push(chunk: Uint8Array) {
           pushed.push(Uint8Array.from(chunk));
         },
@@ -4188,7 +4199,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     } satisfies WasmSchema;
     const runtime = new NativeRuntimeAdapter(
       {
-        openMemory: () => fakeDb({ beginStreamingInsertEncoded }),
+        openMemory: () => fakeDb({ beginStreamingMutationEncoded }),
         openBrowser: async () => {
           throw new Error("not used");
         },
@@ -4200,7 +4211,8 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       true,
     );
 
-    const result = await runtime.insertStreaming(
+    const result = await runtime.streamingMutation(
+      "insert",
       "todos",
       { done: { type: "Boolean", value: false } },
       "title",
@@ -4212,12 +4224,59 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       "00000000-0000-0000-0000-000000000123",
     );
 
-    expect(beginStreamingInsertEncoded).toHaveBeenCalledOnce();
-    expect(beginStreamingInsertEncoded.mock.calls[0]?.[3]).toBe("title");
-    expect(beginStreamingInsertEncoded.mock.calls[0]?.[4]).toBe("Text");
+    expect(beginStreamingMutationEncoded).toHaveBeenCalledOnce();
+    expect(beginStreamingMutationEncoded.mock.calls[0]?.[3]).toBe("title");
+    expect(beginStreamingMutationEncoded.mock.calls[0]?.[4]).toBe("Text");
     expect(pushed.map((chunk) => new TextDecoder().decode(chunk))).toEqual(["hello ", "world"]);
     expect(finished).toBe(true);
     expect(result.id).toBe("00000000-0000-0000-0000-000000000123");
+  });
+
+  it("forwards update identity, branch view, and custom timestamp to native finish", async () => {
+    const beginStreamingMutationEncoded = vi.fn(() => ({
+      push: () => undefined,
+      finish: () => fakeWrite(),
+      abort: vi.fn(),
+    }));
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ beginStreamingMutationEncoded }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+      { readAuthorizationHost: "trusted-serving" },
+    );
+    const head = { values: { workspace: [1, 2] } };
+    const base = { Current: { values: { workspace: [1, 1] } } };
+
+    await runtime.streamingMutation(
+      "update",
+      "todos",
+      {},
+      "title",
+      (async function* () {
+        yield "updated";
+      })(),
+      JSON.stringify({
+        session: { user_id: "user-1", claims: { role: "editor" } },
+        updated_at: 1_234_000,
+        branch_view: { head, base },
+      }),
+      "00000000-0000-0000-0000-000000000123",
+    );
+
+    const call = beginStreamingMutationEncoded.mock.calls[0] as unknown[];
+    expect(call[5]).toBe("update");
+    expect(call[6]).toBeInstanceOf(Uint8Array);
+    expect(call[7]).toBe(1234);
+    expect(call[8]).toEqual(head);
+    expect(call[9]).toEqual(base);
   });
 
   it("aborts the native upload when the producer fails", async () => {
@@ -4226,7 +4285,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       {
         openMemory: () =>
           fakeDb({
-            beginStreamingInsertEncoded: () => ({
+            beginStreamingMutationEncoded: () => ({
               push: () => undefined,
               finish: () => fakeWrite(),
               abort,
@@ -4244,7 +4303,8 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     );
 
     await expect(
-      runtime.insertStreaming(
+      runtime.streamingMutation(
+        "insert",
         "todos",
         {},
         "title",

@@ -275,6 +275,7 @@ describe("typed app prototype", () => {
     type TodoRow = s.RowOf<typeof app.todos>;
     type TodoInsert = s.InsertOf<typeof app.todos>;
     type TodoStreamingInsert = s.StreamingInsertOf<typeof app.todos>;
+    type TodoStreamingUpdate = s.StreamingUpdateOf<typeof app.todos>;
     type TodoWhere = s.WhereOf<typeof app.todos>;
     type TodoWithProject = s.RowOf<typeof todoWithProjectQuery>;
     type ProjectWithTitles = s.RowOf<typeof projectWithTitlesQuery>;
@@ -294,6 +295,9 @@ describe("typed app prototype", () => {
       attachment: new ReadableStream<Uint8Array>(),
       project: "project-id",
     } satisfies TodoStreamingInsert;
+    const streamedTitleUpdate = {
+      title: new ReadableStream<string>(),
+    } satisfies TodoStreamingUpdate;
     const todoWithProject = {} as TodoWithProject;
     const projectWithTitles = {} as ProjectWithTitles;
 
@@ -313,6 +317,7 @@ describe("typed app prototype", () => {
     expectTypeOf(todoInsert.owner).toEqualTypeOf<string | null | undefined>();
     expectTypeOf(streamedTitle.title).toEqualTypeOf<ReadableStream<string>>();
     expectTypeOf(streamedAttachment.attachment).toEqualTypeOf<ReadableStream<Uint8Array>>();
+    expectTypeOf(streamedTitleUpdate.title).toEqualTypeOf<ReadableStream<string>>();
 
     expectTypeOf<TodoWhere["project"]>().branded.toEqualTypeOf<
       string | { eq?: string; ne?: string; in?: string[] } | undefined
@@ -343,6 +348,7 @@ describe("typed app prototype", () => {
     void todoTitleRecords;
     void streamedTitle;
     void streamedAttachment;
+    void streamedTitleUpdate;
     void queryContract;
     void typedQueryContract;
     void tableProxyContract;

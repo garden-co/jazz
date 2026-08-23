@@ -19,6 +19,7 @@ import type {
   PermissionAdvice,
   Runtime,
   StreamingInsertResult,
+  StreamingMutationKind,
   StreamingValueSource,
   TransactionKind,
 } from "../client.js";
@@ -139,13 +140,18 @@ type NativeDb = {
     cells: Uint8Array,
     updatedAtMs?: number | null,
   ): Write;
-  beginStreamingInsertEncoded?(
+  beginStreamingMutationEncoded?(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
     column: string,
     kind: "Text" | "Json" | "Bytea",
-  ): NativeStreamingInsert;
+    mutation?: StreamingMutationKind,
+    author?: Uint8Array,
+    updatedAtMs?: number,
+    head?: unknown,
+    base?: unknown,
+  ): NativeStreamingMutation;
   insertWithIdEncodedInBranch?(
     table: string,
     rowId: Uint8Array,
@@ -335,7 +341,7 @@ type NativeDb = {
   free?(): void;
 };
 
-type NativeStreamingInsert = {
+type NativeStreamingMutation = {
   push(chunk: Uint8Array): void;
   finish(): Write;
   abort(): boolean;
@@ -989,7 +995,8 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.finishInsert(table, rowId, values, write);
   }
 
-  async insertStreaming(
+  async streamingMutation(
+    mutation: StreamingMutationKind,
     table: string,
     values: InsertValues,
     column: string,
@@ -997,22 +1004,18 @@ export class NativeRuntimeAdapter implements Runtime {
     writeContext?: string | null,
     objectId?: string | null,
   ): Promise<StreamingInsertResult> {
-    const begin = this.db.beginStreamingInsertEncoded;
-    if (!begin) throw new Error("Native runtime does not expose streaming insert");
-    if (this.currentTx(writeContext, "Insert")) {
-      throw new Error("Streaming inserts are not supported inside a transaction");
+    const begin = this.db.beginStreamingMutationEncoded;
+    if (!begin) throw new Error("Native runtime does not expose streaming mutations");
+    const operation =
+      mutation === "insert" ? "Insert" : mutation === "update" ? "Update" : "Upsert";
+    if (this.currentTx(writeContext, operation)) {
+      throw new Error("Streaming mutations are not supported inside a transaction");
     }
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
-    if (this.trustedWriteIdentity(writeSession)) {
-      throw new Error("Identity-attributed streaming inserts are not supported yet");
-    }
-    if (
-      branchViewFromWriteContext(writeContext) ||
-      updatedAtMsFromWriteContext(writeContext) != null
-    ) {
-      throw new Error("Branch and timestamp overrides are not supported for streaming inserts");
-    }
+    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const branchView = branchViewFromWriteContext(writeContext);
+    const updatedAtMs = effectiveUpdatedAtMs(writeContext);
 
     const definition = this.table(table);
     const descriptor = definition.columns.find((candidate) => candidate.name === column);
@@ -1023,8 +1026,23 @@ export class NativeRuntimeAdapter implements Runtime {
       );
     }
     const rowId = objectId ? parseUuid(objectId) : crypto.getRandomValues(new Uint8Array(16));
-    const cells = encodeCellsForStreamingRow(definition, values, column, table);
-    const upload = begin.call(this.db, table, rowId, cells, column, kind);
+    const cells =
+      mutation === "insert"
+        ? encodeCellsForStreamingRow(definition, values, column, table)
+        : encodeCellsForStreamingPatch(definition, values, column);
+    const upload = begin.call(
+      this.db,
+      table,
+      rowId,
+      cells,
+      column,
+      kind,
+      mutation,
+      writeIdentity,
+      updatedAtMs ?? undefined,
+      branchView?.head,
+      branchView?.base,
+    );
     const encoder = new TextEncoder();
     let pendingHighSurrogate = "";
     try {
@@ -4408,6 +4426,17 @@ function encodeCellsForStreamingRow(
         (column.column_type.type === "Array" && column.default == null)),
   );
   return encodeCells(columns, (column) => row[column.name], true);
+}
+
+function encodeCellsForStreamingPatch(
+  definition: { columns: ColumnDescriptor[]; policies?: TablePolicies },
+  row: InsertValues,
+  streamedColumn: string,
+): Uint8Array {
+  const columns = definition.columns.filter(
+    (column) => column.name !== streamedColumn && Object.hasOwn(row, column.name),
+  );
+  return encodeCells(columns, (column) => row[column.name], false);
 }
 
 async function* streamingChunks(source: StreamingValueSource): AsyncGenerator<Uint8Array | string> {

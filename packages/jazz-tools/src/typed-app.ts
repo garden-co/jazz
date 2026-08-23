@@ -264,6 +264,15 @@ export type TableStreamingInit<TSchema extends SchemaLike, TTable extends TableN
   >;
 }[StreamingColumnName<TSchema, TTable>];
 
+/** Streaming update/upsert input with one required streamed scalar. */
+export type TableStreamingUpdate<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
+  [TColumn in StreamingColumnName<TSchema, TTable>]: Simplify<
+    Partial<Omit<TableInit<TSchema, TTable>, TColumn>> & {
+      [TStreamed in TColumn]-?: StreamingValueSource;
+    }
+  >;
+}[StreamingColumnName<TSchema, TTable>];
+
 type MaybeNullableWhere<T, TOptional extends boolean> = TOptional extends true ? T | null : T;
 type WhereEqNe<T, TOptional extends boolean, TExtra extends object = {}> =
   | MaybeNullableWhere<T, TOptional>
@@ -497,6 +506,7 @@ type QueryBuilderShape<
   readonly _table: TTable;
   readonly _initType: TableInit<TSchema, TTable>;
   readonly _streamingInitType: TableStreamingInit<TSchema, TTable>;
+  readonly _streamingUpdateType: TableStreamingUpdate<TSchema, TTable>;
 };
 
 type RelationSeedQuery<TTable extends string = string> = QueryBuilder<unknown> & {
@@ -643,11 +653,13 @@ export interface TableMeta<
   TWhere extends object = Record<string, never>,
   TRelations extends TableRelationMap = {},
   TStreamingInit = never,
+  TStreamingUpdate = never,
 > {
   readonly name: TName;
   readonly row: TRow;
   readonly init: TInit;
   readonly streamingInit: TStreamingInit;
+  readonly streamingUpdate: TStreamingUpdate;
   readonly where: TWhere;
   readonly relations: TRelations;
 }
@@ -658,6 +670,7 @@ export type AnyTableMeta = TableMeta<
   Record<string, unknown>,
   Record<string, unknown>,
   TableRelationMap,
+  unknown,
   unknown
 >;
 
@@ -665,6 +678,7 @@ type TableNameFromMeta<TMeta extends AnyTableMeta> = TMeta["name"];
 type TableRowFromMeta<TMeta extends AnyTableMeta> = TMeta["row"];
 type TableInitFromMeta<TMeta extends AnyTableMeta> = TMeta["init"];
 type TableStreamingInitFromMeta<TMeta extends AnyTableMeta> = TMeta["streamingInit"];
+type TableStreamingUpdateFromMeta<TMeta extends AnyTableMeta> = TMeta["streamingUpdate"];
 type TableWhereFromMeta<TMeta extends AnyTableMeta> = TMeta["where"];
 type TableRelationsFromMeta<TMeta extends AnyTableMeta> = TMeta["relations"];
 type RelationNameFromMeta<TMeta extends AnyTableMeta> = Extract<
@@ -719,7 +733,8 @@ export type SchemaTable<TTable extends string, TSchema extends SchemaLike> =
         TableInit<TSchema, TTable>,
         TableWhereInput<TSchema, TTable>,
         SchemaRelations<TTable, TSchema>,
-        TableStreamingInit<TSchema, TTable>
+        TableStreamingInit<TSchema, TTable>,
+        TableStreamingUpdate<TSchema, TTable>
       >
     : never;
 
@@ -729,6 +744,7 @@ type MetaQueryBuilderShape<TMeta extends AnyTableMeta, TRow = unknown> = QueryBu
   readonly _table: TableNameFromMeta<TMeta>;
   readonly _initType: TableInitFromMeta<TMeta>;
   readonly _streamingInitType: TableStreamingInitFromMeta<TMeta>;
+  readonly _streamingUpdateType: TableStreamingUpdateFromMeta<TMeta>;
 };
 
 type BuilderInclude<TMeta extends AnyTableMeta> = {
@@ -872,6 +888,7 @@ export class TypedTableQueryBuilder<
   declare readonly _rowType: SelectedWithIncludesFromMeta<TMeta, TInclude, TSelection, TRequired>;
   declare readonly _initType: TableInitFromMeta<TMeta>;
   declare readonly _streamingInitType: TableStreamingInitFromMeta<TMeta>;
+  declare readonly _streamingUpdateType: TableStreamingUpdateFromMeta<TMeta>;
   private _conditions: BuiltCondition[] = [];
   private _includes: Partial<BuilderInclude<TMeta>> = {};
   private _requireIncludes = false;
@@ -1243,6 +1260,12 @@ export type StreamingInsertOf<TTable> = TTable extends {
 }
   ? TStreamingInit
   : never;
+export type StreamingUpdateOf<TTable> = TTable extends {
+  readonly _streamingUpdateType: infer TStreamingUpdate;
+}
+  ? TStreamingUpdate
+  : never;
+export type StreamingUpsertOf<TTable> = StreamingUpdateOf<TTable>;
 export type TableMetaOf<TTable> =
   TTable extends Table<infer TTableName, infer TSchema>
     ? SchemaMeta<Extract<TTableName, string>, Extract<TSchema, SchemaLike>>

@@ -465,10 +465,12 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       deterministicBytes("jazz-napi-streaming-insert:author"),
       1,
       true,
+      { readAuthorizationHost: "trusted-serving" },
     );
     runtimes.push(runtime);
 
-    const inserted = await runtime.insertStreaming(
+    const inserted = await runtime.streamingMutation(
+      "insert",
       "todos",
       { done: { type: "Boolean", value: false } },
       "title",
@@ -489,6 +491,43 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         values: [
           { type: "Text", value: "streamed through NAPI 🚀" },
           { type: "Boolean", value: false },
+        ],
+      },
+    ]);
+
+    await runtime.streamingMutation(
+      "update",
+      "todos",
+      { done: { type: "Boolean", value: true } },
+      "title",
+      (async function* () {
+        yield "streamed update";
+      })(),
+      JSON.stringify({
+        session: { user_id: ALICE_ID, claims: { role: "editor" } },
+        updated_at: 42_000,
+      }),
+      inserted.id,
+    );
+    await runtime.streamingMutation(
+      "upsert",
+      "todos",
+      {},
+      "title",
+      (async function* () {
+        yield "streamed upsert";
+      })(),
+      null,
+      inserted.id,
+    );
+
+    await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([
+      {
+        id: inserted.id,
+        table: "todos",
+        values: [
+          { type: "Text", value: "streamed upsert" },
+          { type: "Boolean", value: true },
         ],
       },
     ]);

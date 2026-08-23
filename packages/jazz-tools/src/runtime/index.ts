@@ -38,6 +38,7 @@ export {
   type BranchValue,
   type QualifiedBranch,
   type InsertOptions,
+  type StreamingInsertOptions,
   type RestoreOptions,
   type UpdateOptions,
   type DeleteOptions,

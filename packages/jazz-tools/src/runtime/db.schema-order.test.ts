@@ -48,6 +48,47 @@ function makeWriteHandle(transactionId: string): WriteHandle {
 }
 
 describe("Db runtime schema order", () => {
+  it("derives a streaming insert branch selector from branchBy cells", async () => {
+    const runtimeSchema: WasmSchema = {
+      documents: {
+        columns: [
+          { name: "branch", column_type: { type: "Text" }, nullable: false },
+          { name: "body", column_type: { type: "Text" }, nullable: false },
+        ],
+        branchBy: ["branch"],
+      },
+    };
+    const insertStreaming = vi.fn(async (..._args: unknown[]) =>
+      makeWriteHandle("streaming-branch-insert"),
+    );
+    const db = new TestDb({ insertStreaming } as unknown as JazzClient);
+    const table = {
+      _table: "documents",
+      _schema: runtimeSchema,
+      _rowType: {} as { id: string; branch: string; body: string },
+      _initType: {} as { branch: string; body: string },
+      _streamingInitType: {} as {
+        branch: string;
+        body: AsyncIterable<string | Uint8Array>;
+      },
+    } satisfies TableProxy<
+      { id: string; branch: string; body: string },
+      { branch: string; body: string },
+      { branch: string; body: AsyncIterable<string | Uint8Array> }
+    >;
+    const source = (async function* () {
+      yield "draft body";
+    })();
+
+    await db.insertStreaming(table, { branch: "draft", body: source }, { updatedAt: 42 });
+
+    const options = insertStreaming.mock.calls[0]?.[4];
+    expect(options).toMatchObject({
+      updatedAt: 42,
+      branch: { values: { branch: { type: "Text", value: "draft" } } },
+    });
+  });
+
   it("extracts a schema-derived stream from the ordinary insert payload shape", async () => {
     const runtimeSchema: WasmSchema = {
       todos: {
@@ -59,9 +100,13 @@ describe("Db runtime schema order", () => {
     };
     const handle = makeWriteHandle("streaming-insert");
     const insertStreaming = vi.fn(async () => handle);
+    const updateStreaming = vi.fn(async () => handle);
+    const upsertStreaming = vi.fn(async () => handle);
     const client = {
       getSchema: () => new Map(Object.entries(runtimeSchema)),
       insertStreaming,
+      updateStreaming,
+      upsertStreaming,
     } as unknown as JazzClient;
     const db = new TestDb(client);
     const table = {
@@ -73,10 +118,15 @@ describe("Db runtime schema order", () => {
         title: AsyncIterable<string | Uint8Array>;
         done: boolean;
       },
+      _streamingUpdateType: {} as {
+        title: AsyncIterable<string | Uint8Array>;
+        done?: boolean;
+      },
     } satisfies TableProxy<
       { id: string; title: string; done: boolean },
       { title: string; done: boolean },
-      { title: AsyncIterable<string | Uint8Array>; done: boolean }
+      { title: AsyncIterable<string | Uint8Array>; done: boolean },
+      { title: AsyncIterable<string | Uint8Array>; done?: boolean }
     >;
     const source = (async function* () {
       yield "streamed title";
@@ -86,6 +136,30 @@ describe("Db runtime schema order", () => {
     expect(insertStreaming).toHaveBeenCalledWith(
       "todos",
       { done: { type: "Boolean", value: false } },
+      "title",
+      source,
+      undefined,
+      undefined,
+      undefined,
+    );
+
+    await db.updateStreaming(table, "todo-1", { title: source });
+    expect(updateStreaming).toHaveBeenCalledWith(
+      "todos",
+      "todo-1",
+      {},
+      "title",
+      source,
+      undefined,
+      undefined,
+      undefined,
+    );
+
+    await db.upsertStreaming(table, "todo-1", { title: source, done: true });
+    expect(upsertStreaming).toHaveBeenCalledWith(
+      "todos",
+      "todo-1",
+      { done: { type: "Boolean", value: true } },
       "title",
       source,
       undefined,

@@ -45,6 +45,7 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures::lock::Mutex as LocalMutex;
+use jazz::db::StreamingMutationKind as CoreStreamingMutationKind;
 use jazz::db::{
     ConnectionSessionContext as CoreConnectionSessionContext, Db as CoreDb,
     DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
@@ -934,23 +935,28 @@ pub struct NapiDb {
     owns_runtime: bool,
 }
 
-/// Native bounded-memory sink used by the TypeScript async streaming-insert
+/// Native bounded-memory sink used by the TypeScript async streaming-mutation
 /// adapter. Host chunks are spooled to an unlink-on-drop file; `finish` then
 /// hands its reader to Jazz's Groove-backed streaming constructor. Dropping or
 /// aborting before finish publishes and stages nothing.
-#[napi(js_name = "StreamingInsert")]
-pub struct StreamingInsert {
+#[napi(js_name = "StreamingMutation")]
+pub struct StreamingMutation {
     db: NapiDbInner,
     table: String,
     row_id: CoreRowUuid,
     cells: Option<CoreRowCells>,
     column: String,
     kind: CoreLargeValueKind,
+    mutation: CoreStreamingMutationKind,
+    identity: Option<CoreAuthorId>,
+    updated_at_ms: Option<u64>,
+    head: Option<CoreBranchSelector>,
+    base: Option<CoreBranchViewBase>,
     file: Option<tempfile::NamedTempFile>,
 }
 
 #[napi]
-impl StreamingInsert {
+impl StreamingMutation {
     #[napi]
     pub fn push(&mut self, chunk: Uint8Array) -> napi::Result<()> {
         let file = self
@@ -983,25 +989,35 @@ impl StreamingInsert {
         match db {
             NapiDbInnerStorage::Memory(db) => core_write_memory(
                 Rc::clone(db),
-                core_block_on(db.insert_streaming_value_with_id(
+                core_block_on(db.write_streaming_value_with_id(
+                    self.mutation,
                     &self.table,
                     self.row_id,
                     cells,
                     &self.column,
                     self.kind,
                     reader,
+                    self.identity,
+                    self.updated_at_ms,
+                    self.head.clone(),
+                    self.base.clone(),
                 ))
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
             NapiDbInnerStorage::Persistent(db) => core_write_persistent(
                 Rc::clone(db),
-                core_block_on(db.insert_streaming_value_with_id(
+                core_block_on(db.write_streaming_value_with_id(
+                    self.mutation,
                     &self.table,
                     self.row_id,
                     cells,
                     &self.column,
                     self.kind,
                     reader,
+                    self.identity,
+                    self.updated_at_ms,
+                    self.head.clone(),
+                    self.base.clone(),
                 ))
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
@@ -1017,15 +1033,21 @@ impl StreamingInsert {
 
 #[napi]
 impl NapiDb {
-    #[napi(js_name = "beginStreamingInsertEncoded")]
-    pub fn begin_streaming_insert_encoded(
+    #[napi(js_name = "beginStreamingMutationEncoded")]
+    #[allow(clippy::too_many_arguments)] // Flat arguments are the generated NAPI ABI.
+    pub fn begin_streaming_mutation_encoded(
         &self,
         table: String,
         row_id: Uint8Array,
         cells: Uint8Array,
         column: String,
         kind: String,
-    ) -> napi::Result<StreamingInsert> {
+        mutation: Option<String>,
+        author: Option<Uint8Array>,
+        updated_at_ms: Option<f64>,
+        head: Option<JsonValue>,
+        base: Option<JsonValue>,
+    ) -> napi::Result<StreamingMutation> {
         if self.inner.borrow().is_none() {
             return Err(napi::Error::from_reason("database is closed"));
         }
@@ -1039,13 +1061,39 @@ impl NapiDb {
                 ));
             }
         };
-        Ok(StreamingInsert {
+        let mutation = match mutation.as_deref().unwrap_or("insert") {
+            "insert" => CoreStreamingMutationKind::Insert,
+            "update" => CoreStreamingMutationKind::Update,
+            "upsert" => CoreStreamingMutationKind::Upsert,
+            _ => {
+                return Err(napi::Error::from_reason(
+                    "streaming mutation must be insert, update, or upsert",
+                ));
+            }
+        };
+        let identity = author
+            .as_ref()
+            .map(|author| core_author_id_from_bytes(author))
+            .transpose()?;
+        let head = head.map(core_branch_selector_from_json).transpose()?;
+        let base = core_branch_base_from_json(base)?;
+        if base.is_some() && head.is_none() {
+            return Err(napi::Error::from_reason(
+                "a streaming mutation branch base requires a branch head",
+            ));
+        }
+        Ok(StreamingMutation {
             db: Rc::clone(&self.inner),
             table,
             row_id: core_row_uuid_from_bytes(&row_id)?,
             cells: Some(decode_core_cells(&cells)?),
             column,
             kind,
+            mutation,
+            identity,
+            updated_at_ms: updated_at_ms.map(|value| value as u64),
+            head,
+            base,
             file: Some(
                 tempfile::NamedTempFile::new()
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,

@@ -196,6 +196,7 @@ export interface InsertOptions extends TimestampOverrideOptions {
   id?: string;
   branch?: Branch;
 }
+export type StreamingInsertOptions = Omit<InsertOptions, "branch">;
 
 export interface RestoreOptions extends TimestampOverrideOptions {
   branch?: Branch;
@@ -604,7 +605,7 @@ function resolveNativeSubscriptionColumns(
  * @typeParam T - The row type (e.g., `{ id: string; title: string; done: boolean }`)
  * @typeParam Init - The init type for inserts (e.g., `{ title: string; done: boolean }`)
  */
-export interface TableProxy<T, Init, StreamingInit = unknown> {
+export interface TableProxy<T, Init, StreamingInit = unknown, StreamingUpdate = unknown> {
   /** Table name */
   readonly _table: string;
   /** Schema reference */
@@ -617,6 +618,8 @@ export interface TableProxy<T, Init, StreamingInit = unknown> {
   readonly _initType: Init;
   /** @internal Phantom brand — enables exact streaming-insert inference. */
   readonly _streamingInitType?: StreamingInit;
+  /** @internal Phantom brand — enables exact streaming update/upsert inference. */
+  readonly _streamingUpdateType?: StreamingUpdate;
 }
 
 export interface ColumnTransform {
@@ -685,7 +688,7 @@ function transformInputColumns(
   return transformed;
 }
 
-function splitStreamingInsert(
+function splitStreamingMutation(
   table: TableProxy<unknown, unknown, unknown>,
   data: unknown,
 ): {
@@ -707,6 +710,9 @@ function splitStreamingInsert(
     throw new Error("Streaming insert requires exactly one streamed Text, Json, or Bytea column");
   }
   const column = streamed[0]!.name;
+  if (table._schema[table._table]?.branchBy?.includes(column)) {
+    throw new Error(`Streaming a branchBy column is not supported: ${table._table}.${column}`);
+  }
   const source = record[column] as StreamingValueSource;
   const values = { ...record };
   delete values[column];
@@ -723,6 +729,26 @@ function isStreamingValueSource(value: unknown): value is StreamingValueSource {
     typeof candidate.getReader === "function" ||
     typeof candidate[Symbol.asyncIterator] === "function"
   );
+}
+
+function deriveStreamingInsertBranch(
+  table: TableProxy<unknown, unknown, unknown, unknown>,
+  values: Record<string, unknown>,
+): Branch | undefined {
+  const branchColumns = table._schema[table._table]?.branchBy ?? [];
+  if (branchColumns.length === 0) return undefined;
+  const branch: QualifiedBranch = {};
+  for (const column of branchColumns) {
+    const value = values[column];
+    if (isStreamingValueSource(value)) {
+      throw new Error(`Streaming a branchBy column is not supported: ${table._table}.${column}`);
+    }
+    if (typeof value !== "string" && typeof value !== "number" && typeof value !== "bigint") {
+      throw new Error(`Streaming insert requires branch column ${table._table}.${column}`);
+    }
+    branch[column] = value;
+  }
+  return branch;
 }
 
 export type { TransactionKind } from "./client.js";
@@ -1509,10 +1535,10 @@ export class Db {
   async insertStreaming<T, Init, StreamingInit>(
     table: TableProxy<T, Init, StreamingInit>,
     data: StreamingInit,
-    options?: InsertOptions,
+    options?: StreamingInsertOptions,
   ): Promise<WriteHandle<{ id: string }>> {
     const client = this.getClient(table._schema);
-    const { column, source, values: ordinaryData } = splitStreamingInsert(table, data);
+    const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
     const transformedData = transformInputColumns(table, ordinaryData);
     const values = toWriteRecordForOperation(
       "Insert",
@@ -1521,12 +1547,73 @@ export class Db {
       table._table,
     );
     const context = this.getRuntimeOperationContext();
+    const branch = deriveStreamingInsertBranch(table, ordinaryData);
     return client.insertStreaming(
       table._table,
       values,
       column,
       source,
-      normalizeInsertOptions(table._schema, table._table, options),
+      normalizeInsertOptions(
+        table._schema,
+        table._table,
+        branch ? { ...options, branch } : options,
+      ),
+      context?.session,
+      context?.attribution,
+    );
+  }
+
+  async updateStreaming<T, Init, StreamingInit, StreamingUpdate>(
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate>,
+    id: string,
+    data: StreamingUpdate,
+    options?: UpdateOptions,
+  ): Promise<WriteHandle<{ id: string }>> {
+    const client = this.getClient(table._schema);
+    const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
+    const transformedData = transformInputColumns(table, ordinaryData);
+    const values = toWriteRecordForOperation(
+      "Update",
+      transformedData,
+      table._schema,
+      table._table,
+    );
+    const context = this.getRuntimeOperationContext();
+    return client.updateStreaming(
+      table._table,
+      id,
+      values,
+      column,
+      source,
+      normalizeUpdateOptions(table._schema, table._table, options),
+      context?.session,
+      context?.attribution,
+    );
+  }
+
+  async upsertStreaming<T, Init, StreamingInit, StreamingUpdate>(
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate>,
+    id: string,
+    data: StreamingUpdate,
+    options?: UpdateOptions,
+  ): Promise<WriteHandle<{ id: string }>> {
+    const client = this.getClient(table._schema);
+    const { column, source, values: ordinaryData } = splitStreamingMutation(table, data);
+    const transformedData = transformInputColumns(table, ordinaryData);
+    const values = toWriteRecordForOperation(
+      "Upsert",
+      transformedData,
+      table._schema,
+      table._table,
+    );
+    const context = this.getRuntimeOperationContext();
+    return client.upsertStreaming(
+      table._table,
+      id,
+      values,
+      column,
+      source,
+      normalizeUpdateOptions(table._schema, table._table, options),
       context?.session,
       context?.attribution,
     );

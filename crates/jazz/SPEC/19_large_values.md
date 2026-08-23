@@ -382,7 +382,7 @@ leave only an expiring unpublished staging claim. The API validates the target
 column and physical kind before consuming the reader and preserves a present
 nullable wrapper where required.
 
-TypeScript exposes the same operation with the ordinary insert payload shape as
+TypeScript exposes the mutation family with ordinary payload shapes as
 `Db.insertStreaming(table, { streamedColumn: source, ...otherData })`. From the
 exact DSL column metadata, each typed table derives a separate streaming-init
 union with one Text, JSON, or Bytea column replaced by a required stream source;
@@ -395,9 +395,22 @@ tag. Sources are `ReadableStream<Uint8Array | string>` or
 operation returns a promise for a write handle containing the generated row id,
 not a materialized copy of the streamed value.
 
+`Db.updateStreaming(table, rowId, patch)` and
+`Db.upsertStreaming(table, rowId, values)` use a derived streaming-update union:
+one stream is required and every other field is optional, matching the ordinary
+update/upsert surface. All three mutations carry ordinary trusted identity and
+custom `updatedAt` context. Insert derives its exact branch selector from the
+non-streamed `branchBy` cells; streaming a branch column is rejected. Update and
+upsert accept the ordinary head/base branch-view options because one `RowUuid`
+may exist in several branch coordinates. Jazz resolves existence, inheritance,
+parents and authorization only after the producer finishes, so a slow upload
+cannot commit against stale pre-upload row state. Publication accepts the staged
+root in the same ordinary row-version commit.
+
 The NAPI adapter implements that async contract with an unlink-on-drop temporary
 file. Each host chunk is copied once into the spool before the producer is
-allowed to advance; `finish` passes a native reader to Jazz and `abort` drops
+allowed to advance; `finish` passes a native reader plus the ordinary mutation
+context to Jazz and `abort` drops
 the spool without staging a root. This bounds V8 memory, preserves producer
 backpressure, and avoids holding a Jazz transaction open while JavaScript is
 producing data. Browser/WASM support remains open: it requires an equivalent

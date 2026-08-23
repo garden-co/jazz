@@ -12,7 +12,7 @@ export declare class JazzServer {
 }
 
 export declare class NapiDb {
-  beginStreamingInsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, kind: string): StreamingInsert
+  beginStreamingMutationEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, kind: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
   static openMemory(schema: Uint8Array, config: Uint8Array): NapiDb
   static openPersistent(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
   /** Register and return a typed view backed by this same runtime owner. */
@@ -97,12 +97,12 @@ export declare class QueryAttachment {
 }
 
 /**
- * Native bounded-memory sink used by the TypeScript async streaming-insert
+ * Native bounded-memory sink used by the TypeScript async streaming-mutation
  * adapter. Host chunks are spooled to an unlink-on-drop file; `finish` then
  * hands its reader to Jazz's Groove-backed streaming constructor. Dropping or
  * aborting before finish publishes and stages nothing.
  */
-export declare class StreamingInsert {
+export declare class StreamingMutation {
   push(chunk: Uint8Array): void
   finish(): Write
   abort(): boolean

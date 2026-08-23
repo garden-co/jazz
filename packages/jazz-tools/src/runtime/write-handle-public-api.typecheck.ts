@@ -12,9 +12,12 @@ type TodoInit = { title: string; done: boolean };
 type TodoStreamingInit =
   | { title: ReadableStream<string | Uint8Array>; done: boolean }
   | { title: AsyncIterable<string | Uint8Array>; done: boolean };
+type TodoStreamingUpdate =
+  | { title: ReadableStream<string | Uint8Array>; done?: boolean }
+  | { title: AsyncIterable<string | Uint8Array>; done?: boolean };
 
 declare const db: Db;
-declare const todos: TableProxy<Todo, TodoInit, TodoStreamingInit>;
+declare const todos: TableProxy<Todo, TodoInit, TodoStreamingInit, TodoStreamingUpdate>;
 
 async function assertWriteHandleContract() {
   const inserted: WriteResult<Todo> = db.insert(todos, { title: "todo", done: false });
@@ -31,6 +34,13 @@ async function assertWriteHandleContract() {
       yield "streamed ";
       yield new TextEncoder().encode("title");
     })(),
+  });
+  const streamedUpdate: Promise<WriteHandle<{ id: string }>> = db.updateStreaming(todos, "todo-1", {
+    title: new ReadableStream<string>(),
+  });
+  const streamedUpsert: Promise<WriteHandle<{ id: string }>> = db.upsertStreaming(todos, "todo-1", {
+    title: new ReadableStream<string>(),
+    done: true,
   });
 
   // @ts-expect-error Every required non-streamed column remains required.
@@ -66,6 +76,8 @@ async function assertWriteHandleContract() {
   void upserted;
   void deleted;
   void streamed;
+  void streamedUpdate;
+  void streamedUpsert;
   void batchId;
   void mergeableCommit;
   void exclusiveCommit;

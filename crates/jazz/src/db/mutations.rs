@@ -4,6 +4,17 @@ use super::*;
 use crate::node::{ContributionMergeRequest, ContributionMergeRow};
 use crate::protocol::{BranchSelector, BranchViewBase};
 
+/// Ordinary row mutation completed with one Groove-staged scalar.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StreamingMutationKind {
+    /// Create a new branch-local row.
+    Insert,
+    /// Patch an existing row visible in the selected branch view.
+    Update,
+    /// Patch the visible row or create it when absent.
+    Upsert,
+}
+
 fn large_value_cell_type_error(table: &str, column: &str) -> Error {
     Error::new(
         ErrorCode::Schema,
@@ -479,6 +490,44 @@ where
     where
         R: std::io::Read + Send + 'static,
     {
+        self.write_streaming_value_with_id(
+            StreamingMutationKind::Insert,
+            table,
+            row,
+            cells,
+            column,
+            kind,
+            reader,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Complete an insert, update, or upsert with one streamed scalar.
+    /// Binding adapters supply the same identity, timestamp, and branch view
+    /// that their ordinary mutation path would use.
+    #[cfg(not(target_family = "wasm"))]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_streaming_value_with_id<R>(
+        &self,
+        mutation: StreamingMutationKind,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        column: &str,
+        kind: groove::large_values::LargeValueKind,
+        reader: R,
+        identity: Option<AuthorId>,
+        now_ms: Option<u64>,
+        head: Option<BranchSelector>,
+        base: Option<BranchViewBase>,
+    ) -> Result<WriteHandle<S>, Error>
+    where
+        R: std::io::Read + Send + 'static,
+    {
         if cells.contains_key(column) {
             return Err(Error::new(
                 ErrorCode::Schema,
@@ -513,9 +562,6 @@ where
         if !kind_matches {
             return Err(large_value_cell_type_error(table, column));
         }
-        self.ensure_row_absent(table, row, self.identity.author)
-            .await?;
-        let cells = self.apply_insert_defaults(table, cells)?;
         let (staged, _) = self
             .node
             .node
@@ -523,17 +569,139 @@ where
             .await
             .prepare_and_stage_large_value_streaming(kind, reader)
             .await?;
-        let commit = MergeableCommit::new(table, row, self.next_now_ms())
-            .made_by(self.identity.author)
-            .cells(cells)
-            .staged_large_cell(column, staged, nullable);
-        let published = self
-            .node
-            .node
-            .lock()
-            .await
-            .commit_mergeable_in_schema(self.schema_version_id, commit)
-            .await?;
+        let made_by = identity.unwrap_or(self.identity.author);
+        let permission_subject = identity;
+        let branch = head.clone().unwrap_or_default();
+        let (mut cells, parents, authored_columns, inserting) = match mutation {
+            StreamingMutationKind::Insert => {
+                if head.is_some() {
+                    self.ensure_exact_branch_row_absent(table, &branch, row)
+                        .await?;
+                } else {
+                    self.ensure_row_absent(table, row, made_by).await?;
+                }
+                (cells, Vec::new(), None, true)
+            }
+            StreamingMutationKind::Update => {
+                let authored = cells
+                    .keys()
+                    .cloned()
+                    .chain(std::iter::once(column.to_owned()))
+                    .collect();
+                if let Some(head) = head.as_ref() {
+                    let mut node = self.node.node.lock().await;
+                    if let Some(mut current) = node
+                        .visible_current_cells_in_branch(table, head, row)
+                        .await?
+                    {
+                        let parent = node
+                            .local_content_winner_tx_id_in_branch(table, head, row)
+                            .await?;
+                        drop(node);
+                        current.extend(cells);
+                        (current, parent.into_iter().collect(), Some(authored), false)
+                    } else {
+                        let Some(mut inherited) = node
+                            .visible_current_cells_in_branch_view(table, head, base.as_ref(), row)
+                            .await?
+                        else {
+                            return Err(Error::new(
+                                ErrorCode::NotObserved,
+                                format!("row is not visible in branch view: {}", row.0),
+                            ));
+                        };
+                        drop(node);
+                        inherited.extend(cells);
+                        (inherited, Vec::new(), Some(authored), true)
+                    }
+                } else {
+                    let (merged, parent, _) = if let Some(identity) = identity {
+                        self.merge_existing_cells_for_identity(table, row, cells, identity)
+                            .await?
+                    } else {
+                        self.merge_existing_cells(table, row, cells).await?
+                    };
+                    (merged, parent.into_iter().collect(), Some(authored), false)
+                }
+            }
+            StreamingMutationKind::Upsert => {
+                let authored = cells
+                    .keys()
+                    .cloned()
+                    .chain(std::iter::once(column.to_owned()))
+                    .collect();
+                if let Some(head) = head.as_ref() {
+                    let mut node = self.node.node.lock().await;
+                    if let Some(mut current) = node
+                        .visible_current_cells_in_branch(table, head, row)
+                        .await?
+                    {
+                        let parent = node
+                            .local_content_winner_tx_id_in_branch(table, head, row)
+                            .await?;
+                        drop(node);
+                        current.extend(cells);
+                        (current, parent.into_iter().collect(), Some(authored), false)
+                    } else if let Some(mut inherited) = node
+                        .visible_current_cells_in_branch_view(table, head, base.as_ref(), row)
+                        .await?
+                    {
+                        drop(node);
+                        inherited.extend(cells);
+                        (inherited, Vec::new(), Some(authored), true)
+                    } else {
+                        drop(node);
+                        (cells, Vec::new(), None, true)
+                    }
+                } else {
+                    self.ensure_row_not_deleted(table, row).await?;
+                    let exists = if let Some(identity) = identity {
+                        self.upsert_target_for_trusted_identity(table, row, identity)
+                            .await?
+                            .is_some()
+                    } else {
+                        self.upsert_target_for_client_identity(table, row, self.identity.author)
+                            .await?
+                            .is_some()
+                    };
+                    if exists {
+                        let (merged, parent, _) = if let Some(identity) = identity {
+                            self.merge_existing_cells_for_identity(table, row, cells, identity)
+                                .await?
+                        } else {
+                            self.merge_existing_cells(table, row, cells).await?
+                        };
+                        (merged, parent.into_iter().collect(), Some(authored), false)
+                    } else {
+                        (cells, Vec::new(), None, true)
+                    }
+                }
+            }
+        };
+        if inserting {
+            cells = self.apply_insert_defaults(table, cells)?;
+        }
+        let mut commit =
+            MergeableCommit::new(table, row, now_ms.unwrap_or_else(|| self.next_now_ms()))
+                .branch(branch)
+                .made_by(made_by)
+                .parents(parents)
+                .cells(cells);
+        if let Some(authored_columns) = authored_columns {
+            commit = commit.authored_columns(authored_columns);
+        }
+        if let Some(permission_subject) = permission_subject {
+            commit = commit.permission_subject(permission_subject);
+        }
+        let published = {
+            let mut node = self.node.node.lock().await;
+            let commit = node
+                .seal_inherited_large_values(commit, self.schema_version_id)
+                .await?
+                .staged_large_cell(column, staged, nullable);
+            node.commit_mergeable_in_schema(self.schema_version_id, commit)
+                .await?
+        };
         self.finish_published_write(row, published).await
     }
 

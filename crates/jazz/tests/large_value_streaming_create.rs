@@ -4,7 +4,7 @@ use std::io::{Cursor, Read};
 mod common;
 
 use common::{allow_all_policies, compile_schema};
-use jazz::db::{Db, DbConfig, DbIdentity};
+use jazz::db::{Db, DbConfig, DbIdentity, StreamingMutationKind};
 use jazz::groove::large_values::{INLINE_VALUE_MAX_BYTES, LargeValueKind};
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
@@ -98,4 +98,57 @@ fn streaming_create_validation_failure_publishes_no_row() {
 
     let query = db.prepare_query(&db.table("todos")).expect("prepare query");
     assert!(db.read(&query).expect("read rows").is_empty());
+}
+
+#[test]
+fn streaming_update_and_upsert_publish_ordinary_logical_rows() {
+    let db = open_db();
+    let inserted = jazz::block_on(db.insert_streaming_value(
+        "todos",
+        BTreeMap::from([("done".to_owned(), Value::Bool(false))]),
+        "title",
+        LargeValueKind::String,
+        Cursor::new("initial"),
+    ))
+    .expect("streaming insert");
+    let row = inserted.row_uuid();
+
+    jazz::block_on(db.write_streaming_value_with_id(
+        StreamingMutationKind::Update,
+        "todos",
+        row,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        "title",
+        LargeValueKind::String,
+        Cursor::new("updated"),
+        None,
+        Some(42),
+        None,
+        None,
+    ))
+    .expect("streaming update");
+    jazz::block_on(db.write_streaming_value_with_id(
+        StreamingMutationKind::Upsert,
+        "todos",
+        row,
+        BTreeMap::new(),
+        "title",
+        LargeValueKind::String,
+        Cursor::new("upserted"),
+        None,
+        Some(43),
+        None,
+        None,
+    ))
+    .expect("streaming upsert");
+
+    let table = schema().tables()[0].clone();
+    let query = db.prepare_query(&db.table("todos")).expect("prepare query");
+    let rows = db.read(&query).expect("read row");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cell(&table, "title"),
+        Some(Value::String("upserted".to_owned()))
+    );
+    assert_eq!(rows[0].cell(&table, "done"), Some(Value::Bool(true)));
 }

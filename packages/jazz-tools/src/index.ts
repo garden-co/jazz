@@ -22,6 +22,8 @@ import type {
   App as TypedApp,
   InsertOf as TypedInsertOf,
   StreamingInsertOf as TypedStreamingInsertOf,
+  StreamingUpdateOf as TypedStreamingUpdateOf,
+  StreamingUpsertOf as TypedStreamingUpsertOf,
   RowOf as TypedRowOf,
   Schema as TypedSchema,
   SchemaDefinition as TypedSchemaDefinition,
@@ -131,6 +133,7 @@ export type {
   TableRow,
   TableInit,
   TableStreamingInit,
+  TableStreamingUpdate,
   TableWhereInput,
   TableSelectableColumn,
   TableOrderableColumn,
@@ -153,6 +156,8 @@ export type {
   RowOf,
   InsertOf,
   StreamingInsertOf,
+  StreamingUpdateOf,
+  StreamingUpsertOf,
   TableMetaOf,
   WhereOf,
 } from "./typed-app.js";
@@ -214,6 +219,8 @@ export namespace schema {
   export type InsertOf<TTable> = TypedInsertOf<TTable>;
   /** Input type for inserting a row with one streamed Text, JSON, or Bytea column. */
   export type StreamingInsertOf<TTable> = TypedStreamingInsertOf<TTable>;
+  export type StreamingUpdateOf<TTable> = TypedStreamingUpdateOf<TTable>;
+  export type StreamingUpsertOf<TTable> = TypedStreamingUpsertOf<TTable>;
   /**
    * Metadata for a given table.
    */

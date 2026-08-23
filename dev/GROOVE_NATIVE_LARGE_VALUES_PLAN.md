@@ -407,10 +407,12 @@ large-value accounting.
 4. Add append and splice updates; keep whole-row CAS orthogonal.
 5. Document which operations may hydrate complete values while preserving exact
    semantics and which are naturally range/stream bounded.
-6. Expose native streaming create as a one-shot reader-to-insert operation over
-   Groove's bounded builder. Expose the typed TypeScript operation through NAPI
+6. Expose native streaming create/update/upsert as one-shot reader-to-mutation
+   operations over Groove's bounded builder. Expose the typed TypeScript
+   operations through NAPI
    using an async source, per-chunk backpressure, cancellation, and a bounded-V8
-   temporary-file spool; infer the physical kind from the runtime schema. Add
+   temporary-file spool; infer the physical kind from the runtime schema and
+   preserve ordinary identity, branch-view, and timestamp context. Add
    the browser/WASM bridge only when it preserves that contract without whole-
    value buffering. Keep streaming query deferred until the primitive query
    machinery proves insufficient; do not require an object-like mutable handle.
