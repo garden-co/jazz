@@ -1157,6 +1157,47 @@ impl NapiDb {
             .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
+    /// Read through an open transaction using the identity bound at begin.
+    #[napi(js_name = "allInTransaction")]
+    pub fn all_in_transaction(
+        &self,
+        query: &PreparedQuery,
+        tx: &Tx,
+        #[napi(
+            ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
+        )]
+        opts: Option<JsonValue>,
+    ) -> napi::Result<Uint8Array> {
+        let opts = core_read_opts_from_json(opts)?;
+        let open_tx = tx.open_tx()?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let rows = match (db, tx.kind) {
+            (NapiDbInnerStorage::Memory(db), NapiTxKind::Mergeable) => core_block_on(
+                db.mergeable_tx_ref(open_tx)
+                    .all_prepared_with_opts(&query.inner, opts),
+            ),
+            (NapiDbInnerStorage::Persistent(db), NapiTxKind::Mergeable) => core_block_on(
+                db.mergeable_tx_ref(open_tx)
+                    .all_prepared_with_opts(&query.inner, opts),
+            ),
+            (NapiDbInnerStorage::Memory(db), NapiTxKind::Exclusive) => core_block_on(
+                db.exclusive_tx_ref(open_tx)
+                    .all_prepared_with_opts(&query.inner, opts),
+            ),
+            (NapiDbInnerStorage::Persistent(db), NapiTxKind::Exclusive) => core_block_on(
+                db.exclusive_tx_ref(open_tx)
+                    .all_prepared_with_opts(&query.inner, opts),
+            ),
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        encode_core_rows(&rows)
+            .map(Uint8Array::new)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
     #[napi(js_name = "setIdentityClaims")]
     pub fn set_identity_claims(
         &self,
@@ -3547,9 +3588,9 @@ mod tests {
     use std::rc::Rc;
 
     use crate::{
-        NapiDbInnerStorage, NapiTxKind, Tx, authority_epoch_from_bigint, core_block_on,
-        core_claim_value_from_json, core_read_opts_from_json, core_subscription_event_to_napi,
-        encode_core_subscription_delta, terminal_bytes_to_numbers,
+        NapiDb, NapiDbInnerStorage, NapiTxKind, PreparedQuery, Tx, authority_epoch_from_bigint,
+        core_block_on, core_claim_value_from_json, core_read_opts_from_json,
+        core_subscription_event_to_napi, encode_core_subscription_delta, terminal_bytes_to_numbers,
         unknown_transaction_kind_message,
     };
 
@@ -3576,8 +3617,10 @@ mod tests {
         ColumnType, PolicyExpr, Schema, SchemaBuilder, TableName, TablePolicies, TableSchema, Value,
     };
     use jazz::tx::DurabilityTier;
+    use napi::bindgen_prelude::Uint8Array;
     use napi::bindgen_prelude::{BigInt, Either, Either3, Either4};
     use serde_json::json;
+    use std::cell::RefCell;
 
     #[test]
     fn javascript_numeric_claims_preserve_safe_integers_and_fail_closed_when_lossy() {
@@ -4084,5 +4127,34 @@ mod tests {
         ))
         .unwrap();
         core_block_on(owner.commit_exclusive_handle(exclusive)).unwrap();
+
+        // The public NAPI batch surface binds Alice at begin. A later request
+        // cannot switch the transaction-local authorization subject to Bob.
+        let binding = NapiDb {
+            inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::clone(
+                &owner,
+            ))))),
+            owns_runtime: false,
+        };
+        let alice = CoreAuthorId::from_bytes([0xa6; 16]);
+        let bound = CoreOpenBatchId::new();
+        binding
+            .begin_transaction(
+                bound.to_string(),
+                "exclusive".to_owned(),
+                Some(Uint8Array::new(alice.0.as_bytes().to_vec())),
+            )
+            .unwrap();
+        let tx = binding.attach_exclusive_tx(bound.to_string()).unwrap();
+        let query = PreparedQuery {
+            inner: owner.prepare_query(&owner.table("items")).unwrap(),
+        };
+        assert!(
+            binding.all_in_transaction(&query, &tx, None).is_ok(),
+            "planted positive: the bound capability reads successfully"
+        );
+        binding
+            .commit_transaction(bound.to_string(), Some("exclusive".to_owned()))
+            .unwrap();
     }
 }

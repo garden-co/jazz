@@ -3854,5 +3854,55 @@ mod dynamic_schema_view_tests {
         ))
         .unwrap();
         block_on(owner.commit_exclusive_handle(exclusive)).unwrap();
+
+        // The public WASM batch surface binds Alice at begin. A later request
+        // cannot switch the transaction-local authorization subject to Bob.
+        // JsValue construction requires an actual wasm runtime.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let binding = WasmDb {
+                inner: WasmDbInner::Memory(Rc::clone(&owner)),
+                owns_runtime: false,
+            };
+            let alice = AuthorId::from_bytes([0xa7; 16]);
+            let bob = AuthorId::from_bytes([0xb7; 16]);
+            let bound = OpenTransactionId::new();
+            binding
+                .begin_transaction(
+                    bound.to_string(),
+                    "exclusive".to_owned(),
+                    Some(alice.0.as_bytes().to_vec()),
+                )
+                .unwrap();
+            let tx = binding.attach_exclusive_tx(bound.to_string()).unwrap();
+            let query = WasmPreparedQuery {
+                inner: owner.prepare_query(&owner.table("items")).unwrap(),
+            };
+            assert!(
+                binding
+                    .all_in_transaction_for_identity(
+                        &query,
+                        &tx,
+                        alice.0.as_bytes().to_vec(),
+                        JsValue::NULL
+                    )
+                    .is_ok(),
+                "planted positive: Alice retains the bound capability"
+            );
+            let error = binding
+                .all_in_transaction_for_identity(
+                    &query,
+                    &tx,
+                    bob.0.as_bytes().to_vec(),
+                    JsValue::NULL,
+                )
+                .unwrap_err();
+            assert!(error
+                .as_string()
+                .is_some_and(|message| message.contains("bound identity")));
+            binding
+                .commit_transaction(bound.to_string(), Some("exclusive".to_owned()))
+                .unwrap();
+        }
     }
 }
