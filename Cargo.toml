@@ -25,6 +25,7 @@ members = [
   # gates until they are rebuilt around the new server boundary.
   # "examples/todo-server-rs",
   # "examples/docs/todo-server-rs",
+  "examples/benchmarks/smoke",
   "dev/benchmarks/storage/bench-core",
 ]
 exclude = ["crates/jazz-rn/rust", "examples/todo-server-rs", "examples/docs/todo-server-rs"]
@@ -37,6 +38,7 @@ jazz-otel = { path = "crates/jazz-otel" }
 jazz-storage-rocksdb = { path = "crates/jazz-storage-rocksdb" }
 jazz-native-transport = { path = "crates/jazz-native-transport" }
 rustc-hash = "2.1.1"
+divan = { package = "codspeed-divan-compat", version = "5.0.1" }
 
 [patch.crates-io]
 rust-rocksdb = { git = "https://github.com/zaidoon1/rust-rocksdb.git", tag = "v0.48.0" }

@@ -121,6 +121,14 @@ The gallery's interactive deployment is not itself the topology test harness.
 E2E tests control failure injection, clocks where needed, fixture seeds, and
 assertions; benchmark runs additionally record their environment and phases.
 
+## Rust benchmark convention
+
+New Rust benchmark variants use the self-contained package convention in
+[Example benchmarks](../examples/benchmarks/README.md). The workspace-level
+Divan compatibility dependency and CodSpeed workflow provide only discovery,
+instrumentation, and hosted reporting; each app keeps its own schema, fixture,
+scenario construction, scale profiles, and topology metadata.
+
 ## Correctness-forcing loop
 
 When an app exposes a defect, preserve three levels of evidence:

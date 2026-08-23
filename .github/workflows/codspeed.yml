@@ -1,0 +1,49 @@
+name: CodSpeed Example Benchmarks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: codspeed-example-benchmarks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  examples:
+    name: Example benchmark smoke
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: 1.93.1
+
+      # Cache Cargo's root-workspace target directory and the cargo-codspeed
+      # binary. Package selection below limits compilation to the smoke crate's
+      # dependency graph, while Cargo still writes artifacts to the root target.
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-bin: true
+          shared-key: codspeed-example-benches-v1
+          workspaces: . -> target
+
+      - name: Install cargo-codspeed
+        run: cargo install cargo-codspeed --version 5.0.1 --locked
+
+      - name: Build example benchmark suites
+        run: cargo codspeed build --package jazz-example-benchmark-smoke
+
+      - name: Run example benchmark suites
+        uses: CodSpeedHQ/action@4296e51e7041e24dadb86d1d6e8b9320d223dbe8 # v5.0.3
+        with:
+          mode: simulation
+          run: cargo codspeed run --package jazz-example-benchmark-smoke
