@@ -184,6 +184,17 @@ fn explicit_subscription_close_waits_for_tick_and_is_idempotent_through_shutdown
         Poll::Pending
     ));
     drop(close_future);
+    // The initial reset is still buffered. Both inherent helpers must agree
+    // with `Stream::poll_next`: cancellation of close does not make a closed
+    // stream expose pre-close events.
+    assert!(
+        block_on(cancelled_close.next_event()).is_none(),
+        "next_event must honor terminal close before inspecting buffered events"
+    );
+    assert!(
+        cancelled_close.try_next_event().is_none(),
+        "try_next_event must honor terminal close before inspecting buffered events"
+    );
     block_on(db.tick()).expect("dropped close future leaves its command queued");
     assert_eq!(db.active_groove_subscriptions_for_test(), 0);
     block_on(cancelled_close.close()).expect("queued close remains idempotent");
