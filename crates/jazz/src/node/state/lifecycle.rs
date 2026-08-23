@@ -838,10 +838,8 @@ where
             .try_into()
             .unwrap_or(u64::MAX);
         for staged in self.database.staged_large_values().await? {
-            let expired = self
-                .large_value_staging_policy
-                .max_age_ms
-                .is_some_and(|max_age| now_ms.saturating_sub(staged.created_at_ms) > max_age);
+            let expired = now_ms.saturating_sub(staged.created_at_ms)
+                > self.large_value_staging_policy.max_age_ms;
             if expired && staged.id != retained_id {
                 self.database.evict_staged_large_value(staged.id).await?;
             }
@@ -896,10 +894,8 @@ where
             let Some(receipt) = staged.get(id) else {
                 return Err(Error::LargeValueStageExpired);
             };
-            if self
-                .large_value_staging_policy
-                .max_age_ms
-                .is_some_and(|max_age| now_ms.saturating_sub(receipt.created_at_ms) > max_age)
+            if now_ms.saturating_sub(receipt.created_at_ms)
+                > self.large_value_staging_policy.max_age_ms
             {
                 self.database.evict_staged_large_value(*id).await?;
                 return Err(Error::LargeValueStageExpired);
@@ -927,23 +923,15 @@ where
         for descriptor in descriptors {
             if let Some(expired) = staged.iter().find(|receipt| {
                 &receipt.value_ref == descriptor
-                    && self
-                        .large_value_staging_policy
-                        .max_age_ms
-                        .is_some_and(|max_age| {
-                            now_ms.saturating_sub(receipt.created_at_ms) > max_age
-                        })
+                    && now_ms.saturating_sub(receipt.created_at_ms)
+                        > self.large_value_staging_policy.max_age_ms
             }) {
                 self.database.evict_staged_large_value(expired.id).await?;
             }
             let receipt = staged.iter().find(|receipt| {
                 &receipt.value_ref == descriptor
-                    && !self
-                        .large_value_staging_policy
-                        .max_age_ms
-                        .is_some_and(|max_age| {
-                            now_ms.saturating_sub(receipt.created_at_ms) > max_age
-                        })
+                    && now_ms.saturating_sub(receipt.created_at_ms)
+                        <= self.large_value_staging_policy.max_age_ms
             });
             if let Some(receipt) = receipt {
                 ids.push(receipt.id);
@@ -968,9 +956,7 @@ where
     /// policy. Hosts may call this from their ordinary maintenance cadence;
     /// row acceptance independently performs the same freshness check.
     pub async fn evict_expired_staged_large_values(&self) -> Result<usize, Error> {
-        let Some(max_age_ms) = self.large_value_staging_policy.max_age_ms else {
-            return Ok(0);
-        };
+        let max_age_ms = self.large_value_staging_policy.max_age_ms;
         let now_ms: u64 = web_time::SystemTime::now()
             .duration_since(web_time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1213,6 +1199,11 @@ where
         .await?;
         database.set_missing_chunk_resolver(self.chunk_resolver.clone());
         self.content_runtime_provider = database.owned_chunk_provider();
+        // Peer upload retries read through this handle outside the Groove
+        // runtime.  The old reader's ordered chunk backend deliberately holds
+        // only a weak storage reference, so retaining it across a database
+        // rebuild makes a later fragmented upload observe a closed store.
+        self.local_chunk_reader = database.local_chunk_reader();
         self.database.replace(database);
         self.register_physical_history_variant_projections().await?;
         self.register_physical_current_variant_projections().await?;

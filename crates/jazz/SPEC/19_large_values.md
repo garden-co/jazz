@@ -182,6 +182,15 @@ chunks. Expiry is checked again when accepting the referencing row and may also
 be driven periodically by a host scheduler. If the receipt is missing or too
 old, the row write fails safely and the client must upload the value again.
 
+`RateLimited` is retryable backpressure, not rejection: the receiver retains
+the descriptor-scoped pending claim and every previously accepted node, and the
+sender retries the exact unaccepted node batch after the next admission window.
+It MUST NOT discard the upload or reject the referencing transaction merely
+because one batch was rate limited. The staging maximum age is mandatory and
+finite for both incomplete uploads and completed receipts; configuration may
+tighten it but cannot disable expiry. Thus an abandoned resumable upload is
+eventually reclaimed by the ordinary host maintenance pass.
+
 Jazz exposes the same policy setter and idempotent maintenance operation through
 Rust `Db`, server-shell, NAPI, and WASM boundaries. Native servers/NAPI runtimes
 invoke maintenance from their host timer; browser runtimes use a JavaScript

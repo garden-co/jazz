@@ -117,7 +117,7 @@ fn streaming_create_validation_failure_publishes_no_row() {
     db.set_large_value_staging_policy(LargeValueStagingPolicy {
         incoming_bytes_per_window: u64::MAX,
         window_ms: 60_000,
-        max_age_ms: Some(0),
+        max_age_ms: 0,
     });
     std::thread::sleep(std::time::Duration::from_millis(2));
     assert_eq!(
@@ -186,7 +186,7 @@ fn push_streaming_stops_at_the_ingress_limit_and_closes_the_upload() {
     db.set_large_value_staging_policy(LargeValueStagingPolicy {
         incoming_bytes_per_window: 1,
         window_ms: 60_000,
-        max_age_ms: None,
+        max_age_ms: 10 * 60 * 1_000,
     });
     let cells = BTreeMap::from([("done".to_owned(), Value::Bool(false))]);
     let mut upload = db
@@ -213,7 +213,7 @@ fn native_reader_streaming_uses_the_managed_ingress_and_cleanup_path() {
     db.set_large_value_staging_policy(LargeValueStagingPolicy {
         incoming_bytes_per_window: 1,
         window_ms: 60_000,
-        max_age_ms: Some(0),
+        max_age_ms: 0,
     });
 
     let result = jazz::block_on(db.insert_streaming_value(
@@ -256,7 +256,7 @@ fn native_reader_failure_releases_its_pending_upload() {
     db.set_large_value_staging_policy(LargeValueStagingPolicy {
         incoming_bytes_per_window: u64::MAX,
         window_ms: 60_000,
-        max_age_ms: Some(0),
+        max_age_ms: 0,
     });
     std::thread::sleep(std::time::Duration::from_millis(2));
     assert_eq!(
@@ -280,7 +280,7 @@ fn explicit_streaming_abort_releases_the_pending_upload_immediately() {
     db.set_large_value_staging_policy(LargeValueStagingPolicy {
         incoming_bytes_per_window: u64::MAX,
         window_ms: 60_000,
-        max_age_ms: Some(0),
+        max_age_ms: 0,
     });
     std::thread::sleep(std::time::Duration::from_millis(2));
     assert_eq!(

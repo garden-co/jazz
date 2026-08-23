@@ -602,8 +602,8 @@ pub struct LargeValueStagingPolicy {
     pub incoming_bytes_per_window: u64,
     /// Fixed rate-limit window duration.
     pub window_ms: u64,
-    /// Optional maximum staging age; expired roots are evicted on policy checks.
-    pub max_age_ms: Option<u64>,
+    /// Maximum staging age; expired roots are evicted on policy checks.
+    pub max_age_ms: u64,
 }
 
 impl Default for LargeValueStagingPolicy {
@@ -617,7 +617,7 @@ impl Default for LargeValueStagingPolicy {
             // Completed uploads are deliberately short-lived claims. Ten
             // minutes tolerates slow authority synchronization while bounding
             // abandoned staging on an otherwise unconfigured host.
-            max_age_ms: Some(10 * 60 * 1_000),
+            max_age_ms: 10 * 60 * 1_000,
         }
     }
 }

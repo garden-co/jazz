@@ -93,7 +93,7 @@ fn jazz_incoming_data_rate_limit_evicts_the_rejected_root_and_publishes_no_row()
     node.set_large_value_staging_policy(LargeValueStagingPolicy {
         incoming_bytes_per_window: 1,
         window_ms: 60_000,
-        max_age_ms: None,
+        max_age_ms: 10 * 60 * 1_000,
     });
     let result = node.commit_mergeable_settled(
         MergeableCommit::new("todos", row(0x7a), 10).cells(BTreeMap::from([
@@ -114,7 +114,7 @@ fn default_large_value_staging_policy_is_finite() {
     let policy = LargeValueStagingPolicy::default();
     assert_eq!(policy.incoming_bytes_per_window, 256 * 1024 * 1024);
     assert_eq!(policy.window_ms, 1_000);
-    assert_eq!(policy.max_age_ms, Some(10 * 60 * 1_000));
+    assert_eq!(policy.max_age_ms, 10 * 60 * 1_000);
 }
 
 #[test]
@@ -124,7 +124,7 @@ fn expired_staged_tree_requires_reupload_before_row_publication() {
     node.set_large_value_staging_policy(LargeValueStagingPolicy {
         incoming_bytes_per_window: u64::MAX,
         window_ms: 1_000,
-        max_age_ms: Some(1),
+        max_age_ms: 1,
     });
     let logical = "expired staged body/".repeat(8_000);
     let prepared = groove::large_values::prepare(
@@ -306,6 +306,170 @@ fn corrupt_root_first_upload_is_rejected_without_poisoning_the_receiver() {
             ..
         })] if nodes == &[prepared.value_ref.root]
     ));
+}
+
+#[test]
+fn rate_limited_upload_preserves_pending_claim_for_retry() {
+    let schema = two_column_schema();
+    let node_uuid = node(0x80);
+    let (_temp_dir, mut receiver) = open_node_with_schema(node_uuid, schema.clone());
+    let prepared = groove::large_values::prepare(
+        groove::large_values::LargeValueKind::String,
+        "terminal cleanup/".repeat(20_000).as_bytes(),
+        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
+    )
+    .unwrap();
+    let context = Some(CommitUnitIngestContext {
+        identity: AuthorId::SYSTEM,
+        trust: CommitUnitTrust::Session,
+        edge_authority: false,
+    });
+    let start = receiver
+        .apply_sync_message_with_ingest_context(
+            SyncMessage::ChunkUploadStart(crate::protocol::ChunkUploadStart {
+                value_ref: prepared.value_ref.clone(),
+            }),
+            context,
+        )
+        .resolve()
+        .unwrap()
+        .value;
+    let root = match start.as_slice() {
+        [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+            status: crate::protocol::ChunkUploadStatus::Need(nodes),
+            ..
+        })] => nodes[0].clone(),
+        other => panic!("unexpected upload start result: {other:?}"),
+    };
+    let root_chunk = prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == root)
+        .unwrap()
+        .clone();
+    let accepted = receiver
+        .apply_sync_message_with_ingest_context(
+            SyncMessage::ChunkUploadNodes(crate::protocol::ChunkUploadNodes {
+                value_ref: prepared.value_ref.clone(),
+                chunks: vec![root_chunk.clone()],
+            }),
+            context,
+        )
+        .resolve()
+        .unwrap()
+        .value;
+    let mut pending_nodes = match accepted.as_slice() {
+        [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+            status: crate::protocol::ChunkUploadStatus::Need(nodes),
+            ..
+        })] => nodes.clone(),
+        other => panic!("expected a partial upload frontier: {other:?}"),
+    };
+    receiver.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: 1,
+        window_ms: 60_000,
+        max_age_ms: 10 * 60 * 1_000,
+    });
+    let rate_limited = receiver
+        .apply_sync_message_with_ingest_context(
+            SyncMessage::ChunkUploadNodes(crate::protocol::ChunkUploadNodes {
+                value_ref: prepared.value_ref.clone(),
+                chunks: vec![root_chunk.clone()],
+            }),
+            context,
+        )
+        .resolve()
+        .unwrap()
+        .value;
+    assert!(matches!(
+        rate_limited.as_slice(),
+        [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+            status: crate::protocol::ChunkUploadStatus::RateLimited,
+            ..
+        })]
+    ));
+    assert_eq!(
+        crate::db::block_on(receiver.database.pending_large_value_uploads())
+            .unwrap()
+            .len(),
+        1,
+        "rate limiting is resumable and retains prior accepted nodes"
+    );
+    receiver.set_large_value_staging_policy(LargeValueStagingPolicy::default());
+    loop {
+        let chunks = pending_nodes
+            .into_iter()
+            .map(|node_ref| {
+                prepared
+                    .staged_chunks
+                    .iter()
+                    .find(|chunk| chunk.node_ref == node_ref)
+                    .unwrap()
+                    .clone()
+            })
+            .collect();
+        let retried = receiver
+            .apply_sync_message_with_ingest_context(
+                SyncMessage::ChunkUploadNodes(crate::protocol::ChunkUploadNodes {
+                    value_ref: prepared.value_ref.clone(),
+                    chunks,
+                }),
+                context,
+            )
+            .resolve()
+            .unwrap()
+            .value;
+        match retried.as_slice() {
+            [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                status: crate::protocol::ChunkUploadStatus::Need(nodes),
+                ..
+            })] => pending_nodes = nodes.clone(),
+            [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                status: crate::protocol::ChunkUploadStatus::Staged,
+                ..
+            })] => break,
+            other => panic!("retry did not resume the upload: {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn pending_upload_expires_under_the_mandatory_finite_staging_age() {
+    let schema = two_column_schema();
+    let (_temp_dir, mut receiver) = open_node_with_schema(node(0x81), schema);
+    let prepared = groove::large_values::prepare(
+        groove::large_values::LargeValueKind::String,
+        "pending expiry/".repeat(20_000).as_bytes(),
+        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
+    )
+    .unwrap();
+    let context = Some(CommitUnitIngestContext {
+        identity: AuthorId::SYSTEM,
+        trust: CommitUnitTrust::Session,
+        edge_authority: false,
+    });
+    let _ = receiver
+        .apply_sync_message_with_ingest_context(
+            SyncMessage::ChunkUploadStart(crate::protocol::ChunkUploadStart {
+                value_ref: prepared.value_ref,
+            }),
+            context,
+        )
+        .resolve()
+        .unwrap();
+    receiver.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: u64::MAX,
+        window_ms: 1_000,
+        max_age_ms: 0,
+    });
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert_eq!(
+        crate::db::block_on(receiver.evict_expired_staged_large_values()).unwrap(),
+        1
+    );
+    assert!(crate::db::block_on(receiver.database.pending_large_value_uploads())
+        .unwrap()
+        .is_empty());
 }
 
 #[test]

@@ -182,7 +182,7 @@ fn rate_limited_push_rejects_locally_without_sending_the_referencing_row() {
         .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
             incoming_bytes_per_window: 1,
             window_ms: 60_000,
-            max_age_ms: None,
+            max_age_ms: 10 * 60 * 1_000,
         });
     let writer = open_db(0xc2, author, &schema);
     let (writer_transport, core_transport) = duplex();

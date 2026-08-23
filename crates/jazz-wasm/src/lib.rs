@@ -2654,7 +2654,8 @@ impl WasmDb {
         }
         let max_age_ms = max_age_ms
             .map(|value| checked_js_u64(value, "maxAgeMs"))
-            .transpose()?;
+            .transpose()?
+            .unwrap_or(jazz::node::LargeValueStagingPolicy::default().max_age_ms);
         let policy = jazz::node::LargeValueStagingPolicy {
             incoming_bytes_per_window,
             window_ms,

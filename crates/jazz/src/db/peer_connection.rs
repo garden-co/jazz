@@ -315,6 +315,9 @@ pub(super) struct UpstreamConnectionState {
 pub(super) struct PendingLargeValueUpload {
     value_ref: groove::large_values::LargeValueRef,
     requested: VecDeque<groove::large_values::NodeRef>,
+    /// Nodes sent in the current batch, retained until the receiver accepts
+    /// them so a rate-limited batch can be retried without restarting upload.
+    in_flight: VecDeque<groove::large_values::NodeRef>,
     started: bool,
 }
 
@@ -1062,6 +1065,7 @@ where
                                     uploads.push_back(PendingLargeValueUpload {
                                         value_ref,
                                         requested: VecDeque::new(),
+                                        in_flight: VecDeque::new(),
                                         started: false,
                                     });
                                 }
@@ -1126,7 +1130,12 @@ where
                                 }
                                 if supplying_nodes {
                                     for _ in 0..supplied_count {
-                                        upload.requested.pop_front();
+                                        upload.in_flight.push_back(
+                                            upload
+                                                .requested
+                                                .pop_front()
+                                                .expect("sent nodes came from requested frontier"),
+                                        );
                                     }
                                 }
                                 upload.started = true;
@@ -1203,6 +1212,7 @@ where
                                                 .get_mut(&tx_id)
                                                 .and_then(|uploads| uploads.front_mut())
                                             {
+                                                upload.in_flight.clear();
                                                 upload.requested.extend(nodes);
                                             }
                                         }
@@ -1213,12 +1223,27 @@ where
                                             if let Some(uploads) =
                                                 large_value_uploads.get_mut(&tx_id)
                                             {
+                                                if let Some(upload) = uploads.front_mut() {
+                                                    upload.in_flight.clear();
+                                                }
                                                 uploads.pop_front();
                                             }
                                         }
                                     }
-                                    crate::protocol::ChunkUploadStatus::RateLimited
-                                    | crate::protocol::ChunkUploadStatus::Rejected => {
+                                    crate::protocol::ChunkUploadStatus::RateLimited => {
+                                        if let Some(tx_id) = pending_tx {
+                                            awaiting_large_value_uploads.remove(&tx_id);
+                                            if let Some(upload) = large_value_uploads
+                                                .get_mut(&tx_id)
+                                                .and_then(|uploads| uploads.front_mut())
+                                            {
+                                                while let Some(node) = upload.in_flight.pop_back() {
+                                                    upload.requested.push_front(node);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    crate::protocol::ChunkUploadStatus::Rejected => {
                                         if let Some(tx_id) = pending_tx {
                                             awaiting_large_value_uploads.remove(&tx_id);
                                             failed_large_value_uploads.insert(tx_id);
@@ -1226,20 +1251,12 @@ where
                                             outbox
                                                 .borrow_mut()
                                                 .retain(|pending| pending.tx_id != tx_id);
-                                            let reason = match result.status {
-                                                crate::protocol::ChunkUploadStatus::RateLimited => {
-                                                    "large-value upload rate limited; upload again"
-                                                }
-                                                _ => {
-                                                    "large-value upload was not staged; upload again"
-                                                }
-                                            };
                                             self.staged_inbound.push_front(StagedInboundMessage {
                                                 message: SyncMessage::FateUpdate {
                                                     tx_id,
                                                     fate: Fate::Rejected(
                                                         RejectionReason::MalformedCommit(
-                                                            reason.to_owned(),
+                                                            "large-value upload was not staged; upload again".to_owned(),
                                                         ),
                                                     ),
                                                     global_time: None,
