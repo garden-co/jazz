@@ -246,7 +246,7 @@ where
                 claims.extend(session_claims.clone());
             }
             claims.insert(
-                "sub".to_owned(),
+                "author".to_owned(),
                 Value::String(identity.canonical().to_owned()),
             );
             PolicyContext::Identity {
@@ -1216,9 +1216,16 @@ pub(super) fn permission_scope_claim_values(
     claims: Option<&BTreeMap<String, Value>>,
 ) -> BTreeMap<String, Value> {
     let mut claim_values = claims.cloned().unwrap_or_default();
-    // Canonical identity claims are reserved: app-provided claims may not
-    // replace the issuer-scoped author subject used by policy support.
-    claim_values.extend(default_permission_scope_claim_values(writer));
+    // `author` is Jazz's reserved, issuer-scoped logical identity. Provider
+    // claims such as `sub` and `user_id` retain their admitted values, while
+    // other Jazz defaults remain fallbacks.
+    for (name, value) in default_permission_scope_claim_values(writer) {
+        if name == "author" {
+            claim_values.insert(name, value);
+        } else {
+            claim_values.entry(name).or_insert(value);
+        }
+    }
     claim_values
 }
 
@@ -1480,6 +1487,65 @@ mod authorization_scope_compiler_tests {
         );
         assert_ne!(insert.key, update.key);
         assert_ne!(update.key, delete.key);
+    }
+
+    #[test]
+    fn support_scope_preserves_admitted_claims_with_canonical_author() {
+        let schema = public_schema(
+            PublicSchemaBuilder::new().table(
+                PublicTableSchemaBuilder::new("resources")
+                    .column("owner", PublicColumnType::Uuid)
+                    .policies(PublicTablePolicies::new().with_select(
+                        PublicPolicyExpr::eq_session("owner", vec!["user_id".to_owned()]),
+                    )),
+            ),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let cfs = schema.column_families();
+        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage =
+            RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync).unwrap();
+        let mut node = NodeState::new(NodeUuid::from_bytes([0x51; 16]), schema, storage).unwrap();
+        let identity =
+            AuthorSubject::authenticated("https://issuer.example", "opaque-subject").unwrap();
+        let user_id = uuid::Uuid::from_bytes([0x52; 16]);
+        node.set_session_claims(
+            identity,
+            BTreeMap::from([
+                (
+                    "sub".to_owned(),
+                    Value::String("provider-subject".to_owned()),
+                ),
+                ("user_id".to_owned(), Value::Uuid(user_id)),
+            ]),
+        );
+
+        let scope = node
+            .authorization_support_scope(
+                identity,
+                &PermissionAdviceAction::Read {
+                    table: "resources".to_owned(),
+                    row: RowUuid::from_bytes([0x53; 16]),
+                },
+            )
+            .expect("UUID session user_id must bind permission support");
+        assert_eq!(scope.subscriptions.len(), 1);
+        let binding = &scope.subscriptions[0].1;
+        assert!(
+            binding
+                .values()
+                .values()
+                .any(|value| value == &Value::Uuid(user_id))
+        );
+        assert_eq!(
+            permission_scope_claim_values(identity, node.session_claims.get(&identity)).get("sub"),
+            Some(&Value::String("provider-subject".to_owned()))
+        );
+        assert_eq!(
+            permission_scope_claim_values(identity, node.session_claims.get(&identity))
+                .get("author"),
+            Some(&Value::String(identity.canonical().to_owned()))
+        );
     }
 
     /// A newer read-only policy closes inserts for both the current schema and
