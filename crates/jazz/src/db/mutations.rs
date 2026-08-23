@@ -435,6 +435,86 @@ where
         .await
     }
 
+    /// Stream one large scalar into a newly inserted row without retaining the
+    /// complete logical value in Jazz memory.
+    ///
+    /// `cells` contains the other row fields; `column` is inserted from
+    /// `reader`. Groove incrementally constructs and stages the immutable tree
+    /// with bounded buffering. Jazz publishes the resulting descriptor only
+    /// after the reader reaches EOF and text/JSON validation succeeds. A write
+    /// rejected by row policy leaves only the ordinary expiring staging claim.
+    ///
+    /// This native-reader API is not available on WebAssembly. Browser hosts
+    /// require an asynchronous stream adapter rather than `std::io::Read`.
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn insert_streaming_value<R>(
+        &self,
+        table: &str,
+        cells: RowCells,
+        column: &str,
+        kind: groove::large_values::LargeValueKind,
+        reader: R,
+    ) -> Result<WriteHandle<S>, Error>
+    where
+        R: std::io::Read + Send + 'static,
+    {
+        if cells.contains_key(column) {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                format!("streamed column {table}.{column} was also supplied in row cells"),
+            ));
+        }
+        let table_schema = self.table_schema(table)?;
+        let column_type = &table_schema
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == column)
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Schema,
+                    format!("unknown streamed column {table}.{column}"),
+                )
+            })?
+            .column_type;
+        let (column_type, nullable) = match column_type {
+            groove::records::ValueType::Nullable(inner) => (inner.as_ref(), true),
+            column_type => (column_type, false),
+        };
+        let kind_matches = match kind {
+            groove::large_values::LargeValueKind::Bytes => {
+                matches!(column_type, groove::records::ValueType::Bytes)
+            }
+            groove::large_values::LargeValueKind::String
+            | groove::large_values::LargeValueKind::Json => {
+                matches!(column_type, groove::records::ValueType::String)
+            }
+        };
+        if !kind_matches {
+            return Err(large_value_cell_type_error(table, column));
+        }
+        let row = self.row_id_source.borrow_mut().next_row_id();
+        let cells = self.apply_insert_defaults(table, cells)?;
+        let (staged, _) = self
+            .node
+            .node
+            .lock()
+            .await
+            .prepare_and_stage_large_value_streaming(kind, reader)
+            .await?;
+        let commit = MergeableCommit::new(table, row, self.next_now_ms())
+            .made_by(self.identity.author)
+            .cells(cells)
+            .staged_large_cell(column, staged, nullable);
+        let published = self
+            .node
+            .node
+            .lock()
+            .await
+            .commit_mergeable_in_schema(self.schema_version_id, commit)
+            .await?;
+        self.finish_published_write(row, published).await
+    }
+
     /// Insert a row while attributing provenance to `made_by`.
     ///
     /// The Db's authenticated identity remains the write-policy subject. Client

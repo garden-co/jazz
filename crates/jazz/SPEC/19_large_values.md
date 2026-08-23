@@ -372,6 +372,21 @@ Rust exposes explicit byte and UTF-16 text coordinates. TypeScript exposes
 UTF-16 text coordinates and byte coordinates for bytes. Invalid UTF-8 boundaries
 and UTF-16 positions splitting surrogate pairs fail rather than round.
 
+Native Rust additionally exposes `Db::insert_streaming_value`. The caller
+supplies the ordinary non-streamed row cells, the target column and scalar kind,
+and a `std::io::Read`. Groove consumes the reader on a producer thread, keeps a
+bounded chunk frontier, and stages emitted immutable nodes incrementally. Jazz
+does not publish the row until EOF, complete text/JSON validation, staging-policy
+admission, and ordinary row-write admission have succeeded. A failed stream can
+leave only an expiring unpublished staging claim. The API validates the target
+column and physical kind before consuming the reader and preserves a present
+nullable wrapper where required.
+
+This first streaming-create surface is native-only. WASM and JavaScript require
+an asynchronous stream adapter with explicit cancellation and backpressure; a
+synchronous callback or pre-collected chunk array would falsely claim bounded
+streaming and is therefore not exposed as the browser API.
+
 NAPI and WASM preserve the existing encoded-row boundary and copy completed
 results into host-owned buffers. No chunk lease crosses either binding. Complete
 string, bytes and JSON values decoded by TypeScript therefore live inside the
@@ -395,3 +410,6 @@ leases, retry tokens, partially materialized handles, or Groove request state.
 - Whether a future multipart/handle binding protocol should expose chunk-backed
   `Blob`/bytes results. It is outside the current design and would require host
   finalizers, external-memory accounting and lease-aware backpressure.
+- The exact cancellation/backpressure contract for adapting browser
+  `ReadableStream` and Node `AsyncIterable<Uint8Array>` inputs to Groove's
+  streaming-create producer without buffering the complete logical value.

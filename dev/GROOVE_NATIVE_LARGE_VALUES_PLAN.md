@@ -407,8 +407,11 @@ large-value accounting.
 4. Add append and splice updates; keep whole-row CAS orthogonal.
 5. Document which operations may hydrate complete values while preserving exact
    semantics and which are naturally range/stream bounded.
-6. Add streaming-create/query helpers only after the primitive query machinery
-   proves sufficient; do not require an object-like mutable handle.
+6. Expose native streaming create as a one-shot reader-to-insert operation over
+   Groove's bounded builder; add JavaScript/browser adapters only with explicit
+   async backpressure and cancellation. Keep streaming query deferred until the
+   primitive query machinery proves insufficient; do not require an object-like
+   mutable handle.
 7. Document bearer-locator limitations and operational proxy requirements.
 
 ## Canonical adversarial matrix

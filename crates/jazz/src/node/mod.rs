@@ -1533,6 +1533,30 @@ impl MergeableCommit {
         self
     }
 
+    /// Attach Jazz-private provenance for a Groove-staged large scalar. This
+    /// remains crate-private so public callers cannot bless handcrafted
+    /// descriptors.
+    pub(crate) fn staged_large_cell(
+        mut self,
+        column: impl Into<String>,
+        staged: groove::large_values::StagedLargeValue,
+        nullable: bool,
+    ) -> Self {
+        let column = column.into();
+        let value = Value::Large(staged.value_ref);
+        self.cells.insert(
+            column.clone(),
+            if nullable {
+                Value::Nullable(Some(Box::new(value)))
+            } else {
+                value
+            },
+        );
+        self.prepared_large_columns.insert(column);
+        self.staged_large_values.push(staged.id);
+        self
+    }
+
     /// Preserve which cells were explicitly authored when `cells` is a
     /// materialized snapshot assembled for a partial update.
     pub fn authored_columns(mut self, columns: BTreeSet<String>) -> Self {
