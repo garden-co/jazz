@@ -2785,14 +2785,25 @@ where
         read_view: &ReadView<RequestedSourceStage>,
         policy: &PolicyContext,
     ) -> Result<BTreeMap<SourceId, CurrentAccessPath>, Error> {
-        let Some(equalities_by_source) =
-            normalized_program_equalities(&input.shape, &input.shape.root, &input.binding, policy)?
-        else {
-            // Complex paths deliberately retain the ordinary full-scan source.
-            // In particular, we never infer an index restriction through a
-            // relational operator or an alternative branch.
-            return Ok(BTreeMap::new());
-        };
+        let mut equalities_by_source = BTreeMap::new();
+        // This deliberately small access-path selector only recognizes a
+        // source's own Filter -> Source pipeline.  Inspecting every normalized
+        // node lets independent recursive seed/step pipelines participate,
+        // while still refusing to infer restrictions through joins, unions,
+        // or other relational operators.
+        for node_id in input.shape.nodes.keys() {
+            let Some(equalities) =
+                normalized_program_equalities(&input.shape, node_id, &input.binding, policy)?
+            else {
+                continue;
+            };
+            for (source, equalities) in equalities {
+                equalities_by_source
+                    .entry(source)
+                    .or_insert_with(BTreeMap::new)
+                    .extend(equalities);
+            }
+        }
 
         let mut paths = BTreeMap::new();
         for (source, equalities) in equalities_by_source {
@@ -3115,6 +3126,10 @@ fn normalized_bound_value(
         NormalizedValueRef::Literal(bytes) => postcard::from_bytes::<Value>(bytes)
             .map(Some)
             .map_err(|err| Error::QueryLowering(format!("literal decoding failed: {err}"))),
+        // Access-path selection is optional.  System reads have no identity
+        // from which to bind a claim, so they retain the ordinary scan rather
+        // than failing while considering this candidate optimization.
+        NormalizedValueRef::Claim(_) if matches!(policy, PolicyContext::System) => Ok(None),
         NormalizedValueRef::Claim(path) => prepared_claim_value(path, policy),
         _ => Ok(None),
     }
@@ -3830,5 +3845,31 @@ mod tests {
             select_current_access_path(&table, &equalities),
             Some(CurrentAccessPath::PrimaryKey(values)) if values == vec![Value::Uuid(row_id)]
         ));
+    }
+
+    /// This is an internal planner assertion because the fallback is only
+    /// observable as the absence of an optional physical access path. A
+    /// system query has no identity claims, so considering a claim predicate
+    /// must retain its ordinary scan rather than fail the query.
+    #[test]
+    fn system_context_claim_declines_an_access_path_without_failing() {
+        let binding = ProgramBinding {
+            id: BindingId(uuid::Uuid::nil()),
+            source_shape: None,
+            extra_user_params: BTreeMap::new(),
+            param_types: BTreeMap::new(),
+            claim_params: BTreeMap::new(),
+            values: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            normalized_bound_value(
+                &NormalizedValueRef::Claim(ClaimPath(vec!["sub".to_owned()])),
+                &binding,
+                &PolicyContext::System,
+            )
+            .unwrap(),
+            None,
+        );
     }
 }
