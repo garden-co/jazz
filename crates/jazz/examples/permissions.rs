@@ -188,7 +188,7 @@ fn sync_client_to_core(
     identity: AuthorId,
 ) -> Result<(), Error> {
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = block_on(client.connect_upstream(client_transport));
     core.accept_subscriber(server_transport, identity);
     block_on(client.tick())?;
     core.tick()?;

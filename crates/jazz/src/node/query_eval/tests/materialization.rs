@@ -807,7 +807,8 @@ fn flat_join_correlates_projected_v1_sources_across_table_rename() {
             &binding,
             opts.clone(),
         )
-        .expect("publish flat tuple replacement");
+        .expect("publish flat tuple replacement")
+        .expect("expected view update");
     let SyncMessage::ViewUpdate {
         reset_result_set,
         version_carriers,

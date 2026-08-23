@@ -14,6 +14,8 @@
     "url": "https://github.com/garden-co/jazz"
   },
   "files": [
+    "wasm-url.js",
+    "wasm-url.d.ts",
     "pkg/jazz_wasm_bg.wasm",
     "pkg/jazz_wasm.js",
     "pkg/jazz_wasm.d.ts"

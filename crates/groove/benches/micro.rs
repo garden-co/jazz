@@ -84,7 +84,7 @@ fn run_subscribe_unsubscribe(iterations: usize) -> String {
         let start = Instant::now();
         let subscription = block_on(db.subscribe_one_sink(graph)).expect("subscribe");
         let _initial = subscription.recv().expect("initial");
-        block_on(db.unsubscribe(subscription.id()));
+        db.unsubscribe(subscription.id());
         hist.record(duration_nanos(start.elapsed()))
             .expect("record");
     }

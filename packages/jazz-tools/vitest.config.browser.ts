@@ -14,6 +14,11 @@ import {
 import {
   closeRemoteBrowserDb,
   createRemoteBrowserDb,
+  deleteRemoteBrowserIndexedDbAndWaitForReload,
+  insertRemoteBrowserDbRow,
+  updateRemoteBrowserDbRow,
+  queryRemoteBrowserDbRows,
+  restartRemoteBrowserDb,
   waitForRemoteBrowserDbTitle,
 } from "./tests/browser/remote-browser-db-node.js";
 import {
@@ -26,11 +31,16 @@ const realisticBrowserRunId = process.env.JAZZ_REALISTIC_BROWSER_RUN_ID ?? "";
 const realisticBrowserLimitOverrides =
   process.env.JAZZ_REALISTIC_BROWSER_LIMIT_OVERRIDES_JSON ?? "";
 const abstractBench = process.env.JAZZ_ABSTRACT_BENCH ?? "";
+const browserName = process.env.JAZZ_BROWSER ?? "chromium";
+if (!(["chromium", "firefox", "webkit"] as const).includes(browserName as never)) {
+  throw new Error(`Unsupported JAZZ_BROWSER=${browserName}`);
+}
 const excludeRealisticBrowserBench = shouldExcludeRealisticBrowserBench();
 const realisticBrowserBenchReportDir = resolve(__dirname, ".vitest-browser-bench");
 
 export default defineConfig({
   define: {
+    __JAZZ_BROWSER_SOAK__: JSON.stringify(process.env.JAZZ_BROWSER_SOAK ?? ""),
     __JAZZ_ABSTRACT_BENCH__: JSON.stringify(abstractBench),
     __JAZZ_REALISTIC_BROWSER_SCENARIOS__: JSON.stringify(realisticBrowserScenarios),
     __JAZZ_REALISTIC_BROWSER_RUN_ID__: JSON.stringify(realisticBrowserRunId),
@@ -66,11 +76,19 @@ export default defineConfig({
     // Browser-backed files share Chromium CPU and main-thread transport work.
     // Keep concurrency below the host CPU count so worker round trips are not
     // starved when CI runs the Node/Turbo suite alongside this suite.
-    maxWorkers: 4,
+    // WebKit gives each browser file its own heavyweight WPE/WASM process.
+    // Four concurrent files exceed practical memory pressure before exercising
+    // product concurrency; the multi-tab suites below provide that coverage.
+    maxWorkers: browserName === "webkit" ? 1 : 4,
     browser: {
       enabled: true,
       provider: playwright(),
-      instances: [{ browser: "chromium", headless: true }],
+      instances: [
+        {
+          browser: browserName as "chromium" | "firefox" | "webkit",
+          headless: true,
+        },
+      ],
       commands: {
         jazzServerInfo: async (_context, appId, schema) => jazzServerInfo(appId, schema),
         jazzServerBlockNetwork: async ({ context }, serverUrl) =>
@@ -82,6 +100,15 @@ export default defineConfig({
         waitForRemoteBrowserDbTitle: async (_commandContext, input) =>
           waitForRemoteBrowserDbTitle(input),
         closeRemoteBrowserDb: async (_commandContext, id) => closeRemoteBrowserDb(id),
+        insertRemoteBrowserDbRow: async (_commandContext, id, tabIndex, row, table) =>
+          insertRemoteBrowserDbRow(id, tabIndex, row, table),
+        updateRemoteBrowserDbRow: async (_commandContext, id, tabIndex, rowId, patch, table) =>
+          updateRemoteBrowserDbRow(id, tabIndex, rowId, patch, table),
+        queryRemoteBrowserDbRows: async (_commandContext, id, tabIndex, tier) =>
+          queryRemoteBrowserDbRows(id, tabIndex, tier),
+        restartRemoteBrowserDb: async (_commandContext, id) => restartRemoteBrowserDb(id),
+        deleteRemoteBrowserIndexedDbAndWaitForReload: async (_commandContext, id, dbName) =>
+          deleteRemoteBrowserIndexedDbAndWaitForReload(id, dbName),
         jazzServerJwtForUser: async (_context, userId, claims, appId) =>
           jazzServerJwtForUser(userId, claims, appId),
         writeRealisticBrowserReport: async (_context, runId, report) => {

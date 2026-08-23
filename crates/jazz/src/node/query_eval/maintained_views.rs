@@ -25,6 +25,7 @@ pub(crate) struct LocalMaintainedViewSubscription {
     pub(super) result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
     pub(super) program_facts: BTreeSet<ProgramFactEntry>,
     pub(super) root_occurrence_ids: Vec<OutputOccurrenceId>,
+    pub(super) initial_received: bool,
 }
 
 impl LocalMaintainedViewSubscription {
@@ -197,8 +198,8 @@ where
                 self.client_settled_binding_view_key_for_query(shape, binding, tier, read_view)
             })
             .flatten();
-        let (subscription, maintained, terminal_schemas, transitions, tables) = self
-            .open_seeded_maintained_subscription_view_in_authorization_mode(
+        let (subscription, maintained, terminal_schemas, transitions, tables, initial_received) =
+            self.open_seeded_maintained_subscription_view_in_authorization_mode(
                 shape,
                 binding,
                 identity,
@@ -238,6 +239,7 @@ where
             result_payloads: BTreeMap::new(),
             program_facts: BTreeSet::new(),
             root_occurrence_ids: Vec::new(),
+            initial_received,
         };
         let _initial_delta = self
             .apply_local_maintained_view_transitions(&mut local, transitions)
@@ -431,7 +433,7 @@ where
         ),
         Error,
     > {
-        self.drive_query_runtime().await?;
+        self.drive_ready_query_runtime().await?;
         if local.result_query.aggregate.is_some()
             && let Some(remote_members) =
                 self.query.settled_result_sets.get(&local.binding_view_key)
@@ -641,6 +643,7 @@ where
         loop {
             match local.subscription.try_recv() {
                 Ok(deltas) => {
+                    local.initial_received = true;
                     let transitions = local.maintained.apply_multisink_deltas(
                         deltas,
                         &local.terminal_schemas,

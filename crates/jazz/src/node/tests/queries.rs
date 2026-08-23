@@ -1791,7 +1791,7 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
         .validate(&schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let (subscription, mut maintained, terminal_schemas, transitions, tables) = node
+    let (subscription, mut maintained, terminal_schemas, transitions, tables, _incomplete) = node
         .open_seeded_maintained_subscription_view(
             &shape,
             &binding,
@@ -1884,7 +1884,7 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
         bob_before,
         "unaffected parent tree is retained byte-for-byte"
     );
-    crate::db::block_on(node.unsubscribe_groove_subscription(subscription.id()));
+    node.unsubscribe_groove_subscription(subscription.id());
 }
 
 #[test]
@@ -1951,7 +1951,7 @@ fn maintained_nested_collector_keeps_two_route_keys_internal_across_sibling_arra
     let binding = shape
         .bind(BTreeMap::from([("rootName".to_owned(), v("alice"))]))
         .unwrap();
-    let (subscription, mut maintained, terminal_schemas, transitions, tables) = node
+    let (subscription, mut maintained, terminal_schemas, transitions, tables, _incomplete) = node
         .open_seeded_maintained_subscription_view(
             &shape,
             &binding,
@@ -2029,7 +2029,7 @@ fn maintained_nested_collector_keeps_two_route_keys_internal_across_sibling_arra
     };
     assert_eq!(comments.len(), 2);
     assert_eq!(attachments.len(), 1, "sibling route grouping remains isolated");
-    crate::db::block_on(node.unsubscribe_groove_subscription(subscription.id()));
+    node.unsubscribe_groove_subscription(subscription.id());
 }
 
 #[test]

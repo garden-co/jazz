@@ -158,7 +158,7 @@ fn detaching_the_upstream_resolves_pending_global_wait() {
     .expect("open database");
 
     let (upstream_transport, _held_far_end) = duplex();
-    let upstream = node.connect_upstream(upstream_transport);
+    let upstream = block_on(node.connect_upstream(upstream_transport));
 
     let write = block_on(node.insert(
         "documents",

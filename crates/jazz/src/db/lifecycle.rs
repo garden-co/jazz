@@ -349,12 +349,12 @@ where
     }
 
     /// Flush node-local maintenance state, write a clean-close marker, and
-    /// close the underlying storage.
-    pub fn close(&self) -> Result<(), Error> {
+    /// close storage without blocking the caller's executor.
+    pub async fn close(&self) -> Result<(), Error> {
         if self.schema_view_is_fixed {
             return Ok(());
         }
-        Ok(crate::db::block_on(self.node.node.borrow_mut().close())?)
+        Ok(self.node.node.lock().await.close().await?)
     }
 
     /// Configure this database as the optimistic, non-durable side of a
@@ -518,11 +518,11 @@ where
     /// separate history-complete path remains the Core authority.
     /// The binding drives it by calling [`PeerConnection::tick`] (or
     /// [`Db::tick`]) whenever it has staged inbound bytes or wants to flush.
-    pub fn connect_upstream(
+    pub async fn connect_upstream(
         &self,
         transport: Box<dyn Transport>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
-        self.node.connect_upstream(transport)
+        self.node.connect_upstream(transport).await
     }
 
     /// Install or clear the scheduler used to wake this database's live peer

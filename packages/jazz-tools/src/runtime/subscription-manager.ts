@@ -551,6 +551,7 @@ export class SubscriptionManager<T extends { id: string }> {
           this.removeId(rootId);
         } else if ("Move" in edit) {
           if (!this.terminalRows.has(rootId)) {
+            if (isUuidOnlyTerminalKey(operation.root_key)) continue;
             throw new Error(`terminal root move addressed missing root ${rootId}`);
           }
           this.removeId(rootId);

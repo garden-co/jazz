@@ -94,19 +94,31 @@ pub(crate) type WeakNodeState<S> = Weak<LocalMutex<NodeState<S>>>;
 /// synchronous. Storage-facing call sites must use `lock().await` instead.
 /// Remove this trait as the remaining domains become suspendable.
 trait LocalMutexBorrow<T> {
+    #[track_caller]
     fn borrow(&self) -> futures::lock::MutexGuard<'_, T>;
+    #[track_caller]
     fn borrow_mut(&self) -> futures::lock::MutexGuard<'_, T>;
 }
 
 impl<T> LocalMutexBorrow<T> for Rc<LocalMutex<T>> {
+    #[track_caller]
     fn borrow(&self) -> futures::lock::MutexGuard<'_, T> {
-        self.try_lock()
-            .expect("synchronous node operation reentered a suspended operation")
+        self.try_lock().unwrap_or_else(|| {
+            panic!(
+                "synchronous node operation at {} reentered a suspended operation",
+                std::panic::Location::caller()
+            )
+        })
     }
 
+    #[track_caller]
     fn borrow_mut(&self) -> futures::lock::MutexGuard<'_, T> {
-        self.try_lock()
-            .expect("synchronous node operation reentered a suspended operation")
+        self.try_lock().unwrap_or_else(|| {
+            panic!(
+                "synchronous node operation at {} reentered a suspended operation",
+                std::panic::Location::caller()
+            )
+        })
     }
 }
 
@@ -720,6 +732,8 @@ struct CoverageGroup {
     shape: ValidatedQuery,
     binding: Binding,
     subscribers: BTreeSet<SubscriptionKey>,
+    pending_initial_subscribers: BTreeSet<SubscriptionKey>,
+    initialized: bool,
     upstream_subscription: SubscriptionKey,
     upstream_opts: RegisterShapeOptions,
     awaiting_upstream_settlement: bool,
@@ -1358,7 +1372,7 @@ fn coverage_key(
 }
 
 fn subscriber_permissions_ready(permissions_ready: bool, trust: CommitUnitTrust) -> bool {
-    trust == CommitUnitTrust::TrustedBackend || permissions_ready
+    trust.is_trusted() || permissions_ready
 }
 
 /// Messages whose semantics assert downstream authority state must never be
@@ -1389,7 +1403,7 @@ fn subscriber_inbound_message_is_authority_only(
 fn subscriber_permission_subject(ingest: CommitUnitIngestContext) -> AuthorId {
     match ingest.trust {
         CommitUnitTrust::Session => ingest.identity,
-        CommitUnitTrust::TrustedBackend => AuthorId::SYSTEM,
+        CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => AuthorId::SYSTEM,
     }
 }
 
@@ -2367,6 +2381,8 @@ pub enum SubscriptionEvent {
         updated: Vec<SubscriptionOutputRow>,
         /// Rows no longer visible to the subscription.
         removed: Vec<RemovedRow>,
+        /// First public root position of an ordered suffix reconciliation.
+        ordered_suffix_start: Option<usize>,
         /// Typed structural edits to already hydrated terminal rows.
         terminal_operations: Vec<groove::ivm::TerminalOperation>,
         /// Immutable root decoding contract for `terminal_operations`, when
@@ -2620,6 +2636,7 @@ fn subscription_terminal_delta_event(
         added,
         updated,
         removed,
+        ordered_suffix_start: Some(common_prefix),
         terminal_operations: Vec::new(),
         terminal_layout: None,
         settled,
@@ -2650,6 +2667,7 @@ fn subscription_delta_event_with_reset(
                 .collect(),
             updated: Vec::new(),
             removed: Vec::new(),
+            ordered_suffix_start: None,
             terminal_operations: Vec::new(),
             terminal_layout: None,
             settled,
@@ -2696,6 +2714,7 @@ fn subscription_delta_event_with_reset(
         added,
         updated,
         removed,
+        ordered_suffix_start: None,
         terminal_operations: Vec::new(),
         terminal_layout: None,
         settled,
@@ -2747,6 +2766,7 @@ fn apply_maintained_update_to_snapshot(
                     .collect(),
                 updated: Vec::new(),
                 removed: Vec::new(),
+                ordered_suffix_start: None,
                 terminal_operations: terminal_operations.clone(),
                 terminal_layout: terminal_layout.clone(),
                 settled,
@@ -2799,6 +2819,7 @@ fn apply_maintained_update_to_snapshot(
                 .collect(),
             updated: Vec::new(),
             removed: Vec::new(),
+            ordered_suffix_start: None,
             terminal_operations: terminal_operations.clone(),
             terminal_layout: terminal_layout.clone(),
             settled,
@@ -2929,6 +2950,7 @@ fn apply_maintained_update_to_snapshot(
         added,
         updated,
         removed,
+        ordered_suffix_start: None,
         terminal_operations,
         terminal_layout,
         settled,

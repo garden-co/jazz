@@ -182,7 +182,7 @@ async fn ws_admission(
         return Ok(WebSocketAdmission {
             identity: peer_identity,
             claims: BTreeMap::new(),
-            trust: CommitUnitTrust::TrustedBackend,
+            trust: CommitUnitTrust::TrustedAdmin,
             credential: WebSocketCredential::Admin,
         });
     }
@@ -1391,7 +1391,8 @@ mod tests {
             features,
             None,
             Some(context),
-        )));
+        )))
+        .await;
         db.tick()
             .expect("client helper transport should accept db upstream frames");
     }
@@ -1486,7 +1487,8 @@ mod tests {
             features,
             None,
             session_context,
-        )));
+        )))
+        .await;
         let query = db
             .prepare_query(&db.table("todos"))
             .expect("prepare client query");
@@ -1780,7 +1782,8 @@ mod tests {
                 WIRE_PROTOCOL_VERSION,
                 FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
                 None,
-            )));
+            )))
+            .await;
             Self {
                 db,
                 transport,

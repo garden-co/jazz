@@ -271,7 +271,7 @@ fn local_only_subscription_is_not_forwarded_on_late_upstream_connect() {
     let _ = doctest_support::block_on(inspector.next_raw()).unwrap();
 
     let (client_transport, _server_transport) = duplex();
-    let upstream = db.connect_upstream(client_transport);
+    let upstream = crate::db::block_on(db.connect_upstream(client_transport));
     let pending_subscribes = match &upstream.borrow().link {
         ConnectionLink::Upstream(UpstreamConnectionState { pending, .. }) => pending
             .iter()
@@ -289,13 +289,13 @@ fn db_facade_schedules_immediate_tick_for_upstream_connection() {
     db.set_tick_scheduler(Some(scheduler.clone()));
     let (client_transport, _server_transport) = duplex();
 
-    let _upstream = db.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(db.connect_upstream(client_transport));
 
     assert_eq!(scheduler.take(), vec![TickUrgency::Immediate]);
 }
 
 #[test]
-fn upstream_inbound_application_schedules_immediate_tick() {
+fn upstream_inbound_application_completes_synchronously_or_schedules_continuation() {
     let schema = schema();
     let author = AuthorId::from_bytes([0xa1; 16]);
     let server = open_core(0x51, author, &schema);
@@ -303,7 +303,7 @@ fn upstream_inbound_application_schedules_immediate_tick() {
     let scheduler = Rc::new(RecordingScheduler::default());
     client.set_tick_scheduler(Some(scheduler.clone()));
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
     scheduler.take();
 
@@ -314,9 +314,19 @@ fn upstream_inbound_application_schedules_immediate_tick() {
 
     client.tick().unwrap();
     assert!(scheduler.take().is_empty());
-    server.tick().unwrap();
-    assert!(scheduler.take().is_empty());
-    client.tick().unwrap();
-
-    assert_eq!(scheduler.take(), vec![TickUrgency::Immediate]);
+    let mut scheduled = Vec::new();
+    let mut delivered = Vec::new();
+    for _ in 0..32 {
+        server.tick().unwrap();
+        client.tick().unwrap();
+        scheduled.extend(scheduler.take());
+        delivered.extend(std::iter::from_fn(|| subscription.try_next_event()));
+        if !scheduled.is_empty() || !delivered.is_empty() {
+            break;
+        }
+    }
+    assert!(
+        !delivered.is_empty() || scheduled == vec![TickUrgency::Immediate],
+        "inbound application must either publish resident output in this turn or schedule its continuation"
+    );
 }

@@ -646,7 +646,8 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
             &status_binding,
             status_options.clone(),
         )
-        .expect("newly incompatible delta removes the row");
+        .expect("newly incompatible delta removes the row")
+        .expect("expected view update");
     let SyncMessage::ViewUpdate { result_member_removes, .. } = update else {
         panic!("expected maintained view update");
     };
@@ -668,7 +669,8 @@ fn maintained_old_enum_subscriptions_omit_rows_that_require_new_cases() {
             &status_binding,
             status_options,
         )
-        .expect("newly compatible delta re-adds the row");
+        .expect("newly compatible delta re-adds the row")
+        .expect("expected view update");
     let SyncMessage::ViewUpdate { result_member_adds, .. } = update else {
         panic!("expected maintained view update");
     };

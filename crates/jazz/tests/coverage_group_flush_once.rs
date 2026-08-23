@@ -100,7 +100,7 @@ fn prepare_coverage_group_fixture(group_count: usize) -> CoverageGroupFixture {
     let server = open_server(schema.clone());
     let client = open_client(0xc1, schema);
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = jazz::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, AuthorId::from_bytes([0xc1; 16]));
 
     let attachments = (0..group_count)

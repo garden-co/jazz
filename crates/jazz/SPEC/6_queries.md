@@ -896,6 +896,17 @@ parallel query identities.
 
 ### Open questions
 
+- 🔶 **Deleted rows in maintained subscriptions and cancellable one-shots.**
+  `includeDeleted` is currently a one-shot-only widening of the root source.
+  Before admitting it on maintained subscriptions, define tombstone transitions
+  explicitly: whether deletion updates or retains a member, which pre-delete
+  values remain observable, how restoration is represented, and how ordering,
+  filtering, joins, and includes behave while the root is deleted. Separately,
+  async one-shot reads need an explicit cancellation/drop contract so callers
+  that abandon a pending read (for example after a UI or test timeout) do not
+  leave query work or waiters alive. Do not emulate cancellation by repeatedly
+  starting uncancellable one-shots, and do not force `includeDeleted` through a
+  subscription until its maintained semantics are decided.
 - 🔶 **Local one-shot reads vs. settled coverage reads.** Ordinary one-shot
   `all`/`one` reads are local-source reads: at tier `global` they evaluate over
   the globally durable rows known to the node, and may opportunistically reuse a

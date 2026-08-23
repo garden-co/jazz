@@ -119,6 +119,10 @@ export abstract class ConnectionManager {
 
   abstract shouldDeferSubscriptionStart(tier?: DurabilityTier): boolean;
 
+  openInspectorControlPort(): Promise<MessagePort> {
+    return Promise.reject(new Error("This runtime has no shared browser worker"));
+  }
+
   abstract disconnect(): Promise<void>;
 
   abstract reconnect(): Promise<void>;
@@ -141,6 +145,12 @@ export abstract class ConnectionManager {
   protected clearClient(): void {
     this.client = null;
     this.clientSchema = null;
+  }
+
+  protected detachClient(): JazzClient | null {
+    const client = this.client;
+    this.clearClient();
+    return client;
   }
 
   protected telemetryCollectorUrl(): string | undefined {

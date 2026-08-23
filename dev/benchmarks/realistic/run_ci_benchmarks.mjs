@@ -88,7 +88,7 @@ function parseArgs(argv) {
   if (!["native", "browser", "jazz-sim"].includes(out.suite)) {
     fail("--suite must be one of: native, browser, jazz-sim");
   }
-  if (out.suite === "browser" && out.storageEngine && out.storageEngine !== "opfs-btree") {
+  if (out.suite === "browser" && out.storageEngine && out.storageEngine !== "indexeddb-btree") {
     fail("--storage-engine is only supported for native suites");
   }
   if (out.suite === "jazz-sim" && out.storageEngine) {
@@ -1064,7 +1064,11 @@ async function main() {
     generated_at: generatedAt,
     suite: args.suite,
     storage_engine:
-      args.suite === "browser" ? "opfs-btree" : args.suite === "native" ? args.storageEngine : null,
+      args.suite === "browser"
+        ? "indexeddb-btree"
+        : args.suite === "native"
+          ? args.storageEngine
+          : null,
     profile: args.profile,
     repeat_count: args.repeatCount,
     timeout_seconds: args.timeoutSeconds,
@@ -1078,7 +1082,11 @@ async function main() {
       results,
       args.timeoutSeconds,
       args.repeatCount,
-      args.suite === "browser" ? "opfs-btree" : args.suite === "native" ? args.storageEngine : "",
+      args.suite === "browser"
+        ? "indexeddb-btree"
+        : args.suite === "native"
+          ? args.storageEngine
+          : "",
     ),
   );
   writeJson(skipCandidatesFile, {
@@ -1086,7 +1094,11 @@ async function main() {
     generated_at: generatedAt,
     suite: args.suite,
     storage_engine:
-      args.suite === "browser" ? "opfs-btree" : args.suite === "native" ? args.storageEngine : null,
+      args.suite === "browser"
+        ? "indexeddb-btree"
+        : args.suite === "native"
+          ? args.storageEngine
+          : null,
     timeout_seconds: args.timeoutSeconds,
     benchmark_ids: results
       .filter((result) => result.status === "timed_out")
@@ -1098,10 +1110,10 @@ async function main() {
       .filter((result) => result.status === "passed" && result.scenario)
       .map((result) => result.scenario);
     writeJson(path.join(outDir, "realistic.json"), {
-      runner: "jazz-ts-browser-opfs",
+      runner: "jazz-ts-browser-indexeddb",
       generated_at: generatedAt,
       profile: args.profile,
-      storage_engine: "opfs-btree",
+      storage_engine: "indexeddb-btree",
       scenarios,
       benchmark_statuses: results.map(({ scenario, ...rest }) => rest),
     });

@@ -2383,6 +2383,10 @@ fn lower_window(
             group_cols.push(route_field.clone());
         }
     }
+    let order_cols = order
+        .iter()
+        .map(|key| lower_order_key(key, plan, source, request))
+        .collect::<Result<Vec<_>, _>>()?;
     let tie_cols = if tie_breaker.is_empty() {
         vec![source.row_shape.row_uuid_field.clone()]
     } else {
@@ -2390,7 +2394,14 @@ fn lower_window(
             .iter()
             .map(|value| lower_field_ref(value, plan, source, request, "slice tie-breaker"))
             .collect::<Result<Vec<_>, _>>()?
-    };
+    }
+    .into_iter()
+    .filter(|tie| {
+        !order_cols
+            .iter()
+            .any(|order| order.field == FieldRef::name(tie.clone()))
+    })
+    .collect::<Vec<_>>();
     let top_by_limit = match limit {
         Some(limit) => TopByLimit::Finite(u64::from(limit)),
         None => TopByLimit::Unbounded,
@@ -2410,10 +2421,6 @@ fn lower_window(
         ));
     }
 
-    let order_cols = order
-        .iter()
-        .map(|key| lower_order_key(key, plan, source, request))
-        .collect::<Result<Vec<_>, _>>()?;
     Ok(GraphBuilder::top_by(
         graph,
         group_cols,

@@ -52,10 +52,6 @@ function decodeTestDeltas(
   return deltas.map((delta) => decodeNativeDelta(delta as never, columns));
 }
 
-async function waitForServerPumpTimer(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 20));
-}
-
 async function waitForFakeWebSocketNegotiation(): Promise<void> {
   for (let turn = 0; turn < 6; turn += 1) await Promise.resolve();
 }
@@ -136,8 +132,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await waitForFakeWebSocketNegotiation();
-    await waitForServerPumpTimer();
+    await runtime.waitForUpstreamServerConnection();
 
     expect(transport.tickCount).toBeGreaterThan(0);
     expect(decodeWebSocketFrameBatch(sockets[0]!.sent[2]! as Uint8Array)).toEqual([
@@ -173,9 +168,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-    await waitForFakeWebSocketNegotiation();
+    await runtime.waitForUpstreamServerConnection();
     await runtime.updateAuth(JSON.stringify({ jwt_token: "fresh.jwt" }));
-    await waitForFakeWebSocketNegotiation();
+    await runtime.waitForUpstreamServerConnection();
 
     expect(sockets).toHaveLength(2);
     expect(decodeWebSocketFrameBatch(sockets[1]!.sent[2]! as Uint8Array)).toEqual([
@@ -465,7 +460,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(firstDelta.row.values[0]).toEqual({ type: "Text", value: "settled row" });
   });
 
-  it("preserves terminal operations while settle-gating global subscriptions", () => {
+  it("does not replay deferred terminal history over a settle-gated canonical rebuild", () => {
     const key = [10, ...uuidBytes("00000000-0000-0000-0000-000000000123")];
     const terminalOperations = [{ root_key: key, path: [], edit: { Move: { key, index: 0 } } }];
     const events = [
@@ -506,7 +501,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.executeSubscription(handle, updates);
 
     expect(updates).toHaveBeenCalledTimes(1);
-    expect(updates.mock.calls[0]![0].terminalOperations).toEqual(terminalOperations);
+    expect(updates.mock.calls[0]![0].terminalOperations).toBeUndefined();
   });
 
   it("uses the caller-supplied table for update and delete", () => {
@@ -2302,8 +2297,8 @@ describe("NativeRuntimeAdapter server transport", () => {
         1,
         true,
       );
-      await runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
-      await waitForFakeWebSocketNegotiation();
+      runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+      await runtime.waitForUpstreamServerConnection();
 
       const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge");
       await vi.advanceTimersByTimeAsync(40);
@@ -2320,6 +2315,63 @@ describe("NativeRuntimeAdapter server transport", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("waits for suspended evaluation before probing one-shot query coverage", async () => {
+    let releaseTick!: () => void;
+    let reportTickStarted!: () => void;
+    const tickStarted = new Promise<void>((resolve) => {
+      reportTickStarted = resolve;
+    });
+    const tickGate = new Promise<void>((resolve) => {
+      releaseTick = resolve;
+    });
+    let nodeBorrowed = false;
+    let coverageProbeCalls = 0;
+    const transport = new FakeTransport([]);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => new Uint8Array([0]),
+            connectUpstream: () => transport,
+            prepareQuery: () => ({}),
+            attachQuery: () => ({}),
+            queryAttachmentIsCovered: () => {
+              expect(nodeBorrowed).toBe(false);
+              coverageProbeCalls += 1;
+              return true;
+            },
+            detachQuery: () => undefined,
+            tick: async () => {
+              nodeBorrowed = true;
+              reportTickStarted();
+              await tickGate;
+              nodeBorrowed = false;
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    runtime.connectUpstreamPeer();
+
+    const progress = runtime.progressPeerTransport();
+    await tickStarted;
+    const query = runtime.query(JSON.stringify({ table: "todos" }), null, "edge");
+    await Promise.resolve();
+    expect(coverageProbeCalls).toBe(0);
+
+    releaseTick();
+    await progress;
+    await expect(query).resolves.toEqual([]);
+    expect(coverageProbeCalls).toBe(1);
   });
 
   it("rejects pending edge reads when the websocket transport errors during coverage wait", async () => {
@@ -3538,7 +3590,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     ordinary.close();
   });
 
-  it("preserves terminal operations through settle-gated packed Gather reset delivery", () => {
+  it("publishes one canonical reset instead of replaying settle-gated packed Gather history", () => {
     const rowId = uuidBytes("00000000-0000-0000-0000-000000000501");
     const key = [10, ...rowId];
     const terminalOperations = [{ root_key: key, path: [], edit: { Move: { key, index: 0 } } }];
@@ -3565,7 +3617,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     expect(deltas).toHaveLength(1);
     expect(deltas[0]!.reset).toBe(true);
-    expect(deltas[0]!.terminalOperations).toEqual(terminalOperations);
+    expect(deltas[0]!.terminalOperations).toBeUndefined();
     runtime.close();
   });
 
@@ -3667,8 +3719,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     await Promise.resolve();
 
     expect(callbacks).toHaveLength(1);
-    expect(callbacks[0]?.[0]).toBeInstanceOf(Error);
-    expect((callbacks[0]?.[0] as Error).message).toContain(
+    const error = callbacks[0]![0];
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain(
       "settled relation subscription chunk retained unresolved placeholder rows",
     );
     runtime.close();
@@ -3784,8 +3837,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     await Promise.resolve();
 
     expect(callbacks).toHaveLength(1);
-    expect(callbacks[0]?.[0]).toBeInstanceOf(Error);
-    expect((callbacks[0]?.[0] as Error).message).toContain(
+    const error = callbacks[0]![0];
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain(
       "relation subscription buffered unresolved placeholder rows beyond bounded limits",
     );
     runtime.close();
@@ -3836,6 +3890,47 @@ describe("NativeRuntimeAdapter server transport", () => {
       },
     ]);
     runtime.close();
+  });
+
+  it("coerces UUID provenance authors into public text subscription frames", () => {
+    const schema = {
+      notes: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "note", column_type: { type: "Text" }, nullable: true },
+        ],
+      },
+    } satisfies WasmSchema;
+    const publicColumns = [
+      ...schema.notes.columns,
+      { name: "$createdBy", column_type: { type: "Text" }, nullable: false },
+      { name: "$createdAt", column_type: { type: "Timestamp" }, nullable: false },
+    ] as const;
+    const nativeDelta = readNativeSubscriptionDelta(
+      new PostcardReader(
+        encodeUserWrappedSubscriptionDelta({
+          table: "notes",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000321"),
+          title: "public title",
+          note: "public note",
+        }),
+      ),
+    );
+
+    const applied = applySubscriptionDeltaWithWireDelta([], new Map(), nativeDelta, schema, true, {
+      rootTable: "notes",
+      rootColumns: publicColumns,
+    });
+
+    const [change] = decodeNativeDelta(applied.wireDelta, publicColumns);
+    expect(change?.kind).toBe(0);
+    if (!change || change.kind !== 0) throw new Error("expected inserted row");
+    expect(change.row.values).toEqual([
+      { type: "Text", value: "public title" },
+      { type: "Text", value: "public note" },
+      { type: "Text", value: "00000000-0000-0000-0000-0000000000aa" },
+      { type: "Timestamp", value: 123_000 },
+    ]);
   });
 
   it("encodes range id comparisons into prepared native queries", async () => {
@@ -5065,6 +5160,32 @@ it("keeps a remove/add root replacement in place without a terminal move", () =>
   ]);
 });
 
+it("preserves the producer position for an ordered suffix over lazy relation state", () => {
+  const rowId = new Uint8Array(16);
+  rowId[15] = 3;
+  const decode = (bytes: Uint8Array) => readNativeSubscriptionDelta(new PostcardReader(bytes));
+  const applied = applySubscriptionDeltaWithWireDelta(
+    [],
+    new Map(),
+    decode(
+      encodeSubscriptionDelta({
+        added: [{ table: "todos", rowId, title: "third" }],
+        updated: [],
+        removed: [],
+      }),
+    ),
+    testSchema,
+    false,
+    null,
+    undefined,
+    2,
+  );
+
+  expect(decodeNativeDelta(applied.wireDelta, testSchema.todos.columns)).toEqual([
+    expect.objectContaining({ id: formatUuid(rowId), index: 2 }),
+  ]);
+});
+
 function encodeUserWrappedSubscriptionDelta(row: {
   table: string;
   rowId: Uint8Array;
@@ -5075,6 +5196,7 @@ function encodeUserWrappedSubscriptionDelta(row: {
     { name: "row_uuid", valueType: { tag: 10 } },
     { name: "user_title", valueType: { tag: 14, inner: { tag: 8 } } },
     { name: "user_note", valueType: { tag: 14, inner: { tag: 14, inner: { tag: 8 } } } },
+    { name: "$createdBy", valueType: { tag: 10 } },
     { name: "$createdAt", valueType: { tag: 3 } },
   ];
   const delta = new PostcardWriter();
@@ -5089,6 +5211,7 @@ function encodeUserWrappedSubscriptionDelta(row: {
           row.rowId,
           presentBytes(new TextEncoder().encode(row.title)),
           presentBytes(presentBytes(new TextEncoder().encode(row.note))),
+          uuidBytes("00000000-0000-0000-0000-0000000000aa"),
           u64Bytes(123),
         ]),
       );
@@ -5223,6 +5346,8 @@ function fakeDb<T extends object>(
     tx?: TxForTest;
   };
   const implementation = db as T & {
+    connectUpstream?(): Transport;
+    tick?(): void | Promise<void>;
     mergeableTx?(openBatchId: string): TxForTest;
     mergeableTxForIdentity?(openBatchId: string, author: Uint8Array): TxForTest;
     exclusiveTx?(openBatchId: string): TxForTest;
@@ -5239,7 +5364,8 @@ function fakeDb<T extends object>(
           : (implementation.mergeableTx?.(openBatchId) ?? fakeTx());
     return batch.tx;
   };
-  return {
+  let upstream: Transport | undefined;
+  const result: Record<string, unknown> = {
     setTickScheduler: () => undefined,
     onMutationError: () => undefined,
     beginTransaction: (openBatchId: string, kind: FakeOpenBatch["kind"], author?: Uint8Array) => {
@@ -5260,6 +5386,21 @@ function fakeDb<T extends object>(
       openBatches.delete(openBatchId);
     },
     ...db,
+  };
+  if (implementation.connectUpstream) {
+    result.connectUpstream = () => {
+      upstream = implementation.connectUpstream!();
+      return upstream;
+    };
+  }
+  if (implementation.tick) {
+    result.tick = async () => {
+      await implementation.tick!();
+      await upstream?.tick();
+    };
+  }
+  return result as T & {
+    setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void;
   };
 }
 

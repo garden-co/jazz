@@ -14,7 +14,8 @@ impl PeerState {
     /// Drops only the per-subscription result_set cache. Version payload dedup
     /// is per-peer and survives subscription rehydration.
     pub fn forget_subscription(&mut self, subscription: SubscriptionKey) {
-        self.subscriptions.remove(&subscription);
+        self.publication_states.remove(&subscription);
+        self.downstream_known_states.remove(&subscription);
     }
 
     /// Record a downstream known-state declaration for a usage-site subscription.
@@ -23,16 +24,18 @@ impl PeerState {
         subscription: SubscriptionKey,
         declaration: Option<KnownStateDeclaration>,
     ) {
-        self.subscriptions
-            .entry(subscription)
-            .or_default()
-            .known_state = declaration;
+        if let Some(declaration) = declaration {
+            self.downstream_known_states
+                .insert(subscription, declaration);
+        } else {
+            self.downstream_known_states.remove(&subscription);
+        }
     }
 
     /// Advance retained per-binding authorization generations after this
     /// reader's authority is rebuilt.
     pub(crate) fn advance_authorization_progress(&mut self) {
-        for state in self.subscriptions.values_mut() {
+        for state in self.publication_states.values_mut() {
             state.authorization_progress = state
                 .authorization_progress
                 .checked_add(1)
@@ -44,7 +47,7 @@ impl PeerState {
         &self,
         subscription: SubscriptionKey,
     ) -> u64 {
-        self.subscriptions
+        self.publication_states
             .get(&subscription)
             .map_or(0, |state| state.authorization_progress)
     }
@@ -59,17 +62,17 @@ impl PeerState {
     where
         S: OrderedKvStorage,
     {
-        let Some(mut state) = self.subscriptions.remove(&subscription) else {
+        let Some(mut state) = self.publication_states.remove(&subscription) else {
+            self.downstream_known_states.remove(&subscription);
             return false;
         };
+        self.downstream_known_states.remove(&subscription);
         let unsubscribed = if state.groove_runtime_token == Some(node.groove_runtime_token()) {
             state
                 .maintained_subscription_view
                 .take()
                 .is_some_and(|maintained| {
-                    crate::db::block_on(
-                        node.unsubscribe_groove_subscription(maintained.subscription.id()),
-                    )
+                    node.unsubscribe_groove_subscription(maintained.subscription.id())
                 })
         } else {
             false
@@ -193,7 +196,7 @@ impl PeerState {
         &self,
         subscription: SubscriptionKey,
     ) -> Option<BTreeSet<TxId>> {
-        self.subscriptions
+        self.publication_states
             .get(&subscription)
             .map(PeerSubscriptionState::previous_tx_ids)
     }

@@ -836,6 +836,14 @@ pub enum CommitUnitTrust {
     Session,
     /// Trusted backends may preserve user provenance in `made_by`.
     TrustedBackend,
+    /// Administrators may preserve provenance and bypass application write policies.
+    TrustedAdmin,
+}
+
+impl CommitUnitTrust {
+    pub(crate) fn is_trusted(self) -> bool {
+        self != Self::Session
+    }
 }
 
 include!("state/lifecycle.rs");

@@ -313,9 +313,9 @@ fn child_policy_reaches_client_through_relay() {
     let relay_core_right_sent = Rc::clone(&relay_core.right_sent);
     let client_relay_left_sent = Rc::clone(&client_relay.left_sent);
     let client_relay_right_sent = Rc::clone(&client_relay.right_sent);
-    let _relay_upstream = relay.connect_upstream(relay_core.left);
+    let _relay_upstream = jazz::db::block_on(relay.connect_upstream(relay_core.left));
     let _core_sub = core.accept_subscriber(relay_core.right, AuthorId::SYSTEM);
-    let _client_upstream = client.connect_upstream(client_relay.left);
+    let _client_upstream = jazz::db::block_on(client.connect_upstream(client_relay.left));
     let _relay_sub = relay.accept_subscriber(client_relay.right, member);
 
     let mut subscriptions = Vec::new();

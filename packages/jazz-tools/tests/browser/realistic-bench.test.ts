@@ -2385,7 +2385,7 @@ describe("realistic browser benchmark harness", () => {
       const rows = await db.all(workQuery);
       const totalMs = performance.now() - startedAt;
       await commands.writeRealisticBrowserReport("profile-query-my-work", {
-        runner: "jazz-ts-browser-opfs-profile",
+        runner: "jazz-ts-browser-indexeddb-profile",
         generated_at: new Date().toISOString(),
         profile: cfg.id,
         scenarios: [
@@ -2533,7 +2533,7 @@ describe("realistic browser benchmark harness", () => {
       const totalMs = performance.now() - startedAt;
 
       await commands.writeRealisticBrowserReport("profile-permission-read", {
-        runner: "jazz-ts-browser-opfs-profile",
+        runner: "jazz-ts-browser-indexeddb-profile",
         generated_at: new Date().toISOString(),
         profile: cfg.id,
         scenarios: [
@@ -2566,7 +2566,7 @@ describe("realistic browser benchmark harness", () => {
     }
   }, 180_000);
 
-  it("runs local and server-backed realistic scenarios against browser OPFS runtime", async () => {
+  it("runs local and server-backed realistic scenarios against the browser IndexedDB runtime", async () => {
     const restoreLogs = elevateBenchLogLevel();
     const cfg = scaledProfile(profile);
     progressLog(`bench start profile=${cfg.id}`);
@@ -2617,7 +2617,7 @@ describe("realistic browser benchmark harness", () => {
       const resultsById = new Map(scenarioResults.map((result) => [result.scenario_id, result]));
 
       const report = {
-        runner: "jazz-ts-browser-opfs",
+        runner: "jazz-ts-browser-indexeddb",
         generated_at: new Date().toISOString(),
         profile: cfg.id,
         scenarios: scenarioResults,

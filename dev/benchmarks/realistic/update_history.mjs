@@ -580,7 +580,7 @@ function extractBrowser(browserDir) {
       metadata?.storage_engine,
       manifest?.storage_engine,
       realistic?.storage_engine,
-    ) ?? "opfs-btree";
+    ) ?? "indexeddb-btree";
 
   const scenarios = realistic.scenarios
     .filter((x) => x && typeof x === "object" && typeof x.scenario_id === "string")

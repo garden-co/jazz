@@ -146,7 +146,7 @@ fn seed_store(dir: &tempfile::TempDir, schema: &JazzSchema, node_byte: u8) {
         .expect("insert a-2");
     block_on(db.insert_with_id("children", row(201), child_cells(row(2), "b-1", 1)))
         .expect("insert b-1");
-    db.close().expect("close seeded db");
+    block_on(db.close()).expect("close seeded db");
 }
 
 fn table_schema<'a>(schema: &'a JazzSchema, table: &str) -> &'a TableSchema {
@@ -435,8 +435,6 @@ fn reopen_from_rebuild_and_persisted_placeholder_are_incrementally_equivalent() 
         );
     }
 
-    rebuild.close().expect("close rebuild");
-    persisted_placeholder
-        .close()
-        .expect("close persisted placeholder");
+    block_on(rebuild.close()).expect("close rebuild");
+    block_on(persisted_placeholder.close()).expect("close persisted placeholder");
 }

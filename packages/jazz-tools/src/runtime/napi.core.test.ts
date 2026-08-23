@@ -316,7 +316,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
   afterEach(async () => {
     for (const runtime of runtimes.splice(0)) {
-      runtime.close();
+      await runtime.close();
     }
     await server?.stop();
     server = null;
@@ -1196,6 +1196,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     server = await startLocalJazzServer({
       appId,
       inMemory: true,
+      backendSecret: "core-napi-owned-delete-backend",
       adminSecret: "core-napi-owned-delete-admin",
       schema: encodeSchema(OWNED_TODOS_SCHEMA),
     });
@@ -1211,7 +1212,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     runtimes.push(runtime);
     runtime.connect(
       webSocketUrl(server.url, appId),
-      JSON.stringify({ admin_secret: server.adminSecret }),
+      JSON.stringify({ backend_secret: server.backendSecret }),
     );
 
     const aliceSession = JSON.stringify({ user_id: ALICE_ID });
@@ -1274,6 +1275,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     server = await startLocalJazzServer({
       appId,
       inMemory: true,
+      backendSecret: "core-napi-persistent-owned-delete-backend",
       adminSecret: "core-napi-persistent-owned-delete-admin",
       schema: encodeSchema(OWNED_TODOS_SCHEMA),
     });
@@ -1295,7 +1297,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       runtimes.push(runtime);
       runtime.connect(
         webSocketUrl(server.url, appId),
-        JSON.stringify({ admin_secret: server.adminSecret }),
+        JSON.stringify({ backend_secret: server.backendSecret }),
       );
 
       const aliceSession = JSON.stringify({ user_id: ALICE_ID });
@@ -1534,7 +1536,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         writer.waitForTransaction(await committedBatchId(inserted), "edge"),
         "writer insert did not settle at persistent edge",
       );
-      writer.close();
+      await writer.close();
       runtimes.splice(runtimes.indexOf(writer), 1);
 
       await server.stop();
@@ -1700,7 +1702,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         done: { type: "Boolean", value: false },
       });
       await firstRuntime.waitForTransaction(await committedBatchId(inserted), "local");
-      firstRuntime.close();
+      await firstRuntime.close();
       firstRuntime = null;
 
       secondRuntime = new NativeRuntimeAdapter(
@@ -1727,11 +1729,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
           ],
         },
       ]);
-      secondRuntime.close();
+      await secondRuntime.close();
       secondRuntime = null;
     } finally {
-      firstRuntime?.close();
-      secondRuntime?.close();
+      await firstRuntime?.close();
+      await secondRuntime?.close();
       rmSync(tempDir, { recursive: true, force: true });
     }
   });

@@ -8,7 +8,7 @@ fn db_subscription_stream_surfaces_upstream_rejection_after_open() {
     let owner = AuthorId::from_bytes([0xa1; 16]);
     let db = open_db(0x51, owner, &schema);
     let (client_transport, mut server_transport) = duplex();
-    let upstream = db.connect_upstream(client_transport);
+    let upstream = crate::db::block_on(db.connect_upstream(client_transport));
 
     let prepared = db.prepare_query(&Query::from("todos")).unwrap();
     let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default()))
@@ -51,7 +51,7 @@ fn upstream_transport_rejects_forged_system_catalogue_publication() {
     let client_author = AuthorId::from_bytes([0x51; 16]);
     let client = open_db(0x51, client_author, &base);
     let (client_transport, mut upstream_transport) = duplex();
-    let upstream = client.connect_upstream(client_transport);
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let target = SchemaVersion::new(build_public_db_test_schema(
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("todos")
@@ -195,10 +195,8 @@ fn subscriber_connection_serves_default_ordered_window_alongside_unbounded_shape
         }))
         .unwrap();
 
-    subscriber.borrow_mut().tick().unwrap();
     assert_view_update_for_subscription(
-        try_recv_subscriber_payload(client_transport.as_mut())
-            .expect("expected unbounded subscription update"),
+        drive_subscriber_until_payload(&subscriber, client_transport.as_mut()),
         supported_subscription,
     );
 
@@ -211,12 +209,7 @@ fn subscriber_connection_serves_default_ordered_window_alongside_unbounded_shape
         }))
         .unwrap();
     seed(&server, "todos", cells("third", false, owner));
-    subscriber.borrow_mut().tick().unwrap();
-    let first = try_recv_subscriber_payload(client_transport.as_mut())
-        .expect("expected maintained subscription update");
-    let second = try_recv_subscriber_payload(client_transport.as_mut())
-        .expect("expected maintained window update");
-    let subscriptions = [first, second]
+    let subscriptions = drive_subscriber_until_payloads(&subscriber, client_transport.as_mut(), 2)
         .into_iter()
         .map(|message| match message {
             SyncMessage::ViewUpdate { subscription, .. } => subscription,
@@ -293,10 +286,8 @@ fn subscriber_connection_rejects_local_tier_register_shape() {
         }))
         .unwrap();
 
-    subscriber.borrow_mut().tick().unwrap();
     assert_view_update_for_subscription(
-        try_recv_subscriber_payload(client_transport.as_mut())
-            .expect("valid subscription should still be served after malformed register"),
+        drive_subscriber_until_payload(&subscriber, client_transport.as_mut()),
         subscription,
     );
 }
@@ -411,10 +402,8 @@ fn subscriber_connection_drops_oversized_known_state_and_keeps_serving() {
         }))
         .unwrap();
 
-    subscriber.borrow_mut().tick().unwrap();
     assert_view_update_for_subscription(
-        try_recv_subscriber_payload(client_transport.as_mut())
-            .expect("valid resubscribe should be served after malformed known-state"),
+        drive_subscriber_until_payload(&subscriber, client_transport.as_mut()),
         subscription,
     );
 }
@@ -468,10 +457,8 @@ fn subscriber_connection_drops_oversized_fetch_row_versions_and_keeps_serving() 
         }))
         .unwrap();
 
-    subscriber.borrow_mut().tick().unwrap();
     assert_view_update_for_subscription(
-        try_recv_subscriber_payload(client_transport.as_mut())
-            .expect("valid subscription should still be served after malformed repair request"),
+        drive_subscriber_until_payload(&subscriber, client_transport.as_mut()),
         subscription,
     );
 }
@@ -531,10 +518,8 @@ fn subscriber_connection_drops_mismatched_shape_id_and_keeps_serving() {
         }))
         .unwrap();
 
-    subscriber.borrow_mut().tick().unwrap();
     assert_view_update_for_subscription(
-        try_recv_subscriber_payload(client_transport.as_mut())
-            .expect("valid subscription should still be served after mismatched shape id"),
+        drive_subscriber_until_payload(&subscriber, client_transport.as_mut()),
         subscription,
     );
 }
@@ -550,7 +535,7 @@ fn local_live_subscription_requests_global_upstream_coverage() {
     seed(&server, "todos", cells("first", false, owner));
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, client_author);
 
     let query = Query::from("todos");
@@ -582,7 +567,7 @@ fn edge_live_subscription_requests_global_upstream_coverage() {
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let client = open_db(0xc1, client_author, &schema);
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, client_author);
 
     let query = Query::from("todos");
@@ -776,12 +761,11 @@ fn subscriber_connection_accepts_relation_register_shape_for_serving_subscriptio
         }))
         .unwrap();
 
-    subscriber.borrow_mut().tick().unwrap();
-    let Some(SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate {
         subscription: served,
         result_member_adds,
         ..
-    }) = try_recv_subscriber_payload(client_transport.as_mut())
+    } = drive_subscriber_until_payload(&subscriber, client_transport.as_mut())
     else {
         panic!("expected relation facade subscription view update");
     };

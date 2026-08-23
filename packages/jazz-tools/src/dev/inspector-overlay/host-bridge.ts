@@ -1,4 +1,3 @@
-import { resolveBrokerWorkerUrl } from "../../runtime/browser-broker-client.js";
 import type { Db, DbConfig } from "../../runtime/db.js";
 import { resolveDefaultPersistentDbName } from "../../runtime/db.js";
 import { getRegisteredWasmSchema } from "../../typed-app.js";
@@ -8,6 +7,7 @@ import {
   serializeActiveSubscriptions,
   type JazzInspectorHost,
 } from "./inspector-host-types.js";
+import { openAggregatedBrowserInspectorControlPort } from "./browser-control-registry.js";
 
 /**
  * Build the ready-to-use browser config in the host bundle, where the host's
@@ -29,13 +29,9 @@ function buildOverlayDbConfig(config: DbConfig): DbConfig {
     env: config.env,
     ...identityCredential,
     ...(config.adminSecret ? { adminSecret: config.adminSecret } : {}),
-    // `persistent` selects BrowserConnectionManager so this client joins the
-    // host's broker/OPFS store. Its main-thread Db is still in-memory; storage
-    // remains owned by the broker's leader worker.
+    // `persistent` selects the SharedWorker connection so this client joins
+    // the host's IndexedDB-backed runtime. Its main-thread Db remains in-memory.
     driver: { type: "persistent", dbName: resolveDefaultPersistentDbName(config) },
-    // A SharedWorker is identified by URL + name. Forward the exact resolved
-    // URL so the separately-built overlay joins the existing worker.
-    runtimeSources: { brokerWorkerUrl: resolveBrokerWorkerUrl(config.runtimeSources) },
   };
 }
 
@@ -49,6 +45,9 @@ export function installInspectorHost(db: Db, iframeWindow: Window, origin: strin
   const handle: JazzInspectorHost = {
     getConnectionConfig() {
       return buildOverlayDbConfig(db.getConfig());
+    },
+    openControlPort() {
+      return openAggregatedBrowserInspectorControlPort(() => db.openInspectorControlPort());
     },
     getWasmSchema() {
       const live = db.getRuntimeSchema();

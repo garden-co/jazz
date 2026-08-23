@@ -30,6 +30,22 @@ impl Database {
         std::future::poll_fn(|cx| self.poll_progress(cx)).await
     }
 
+    /// Drive every currently runnable incremental evaluation, returning once
+    /// the runtime is either complete or waiting for storage.
+    ///
+    /// Unlike [`Self::drive_progress`], this does not hold an unrelated owner
+    /// loop open while cold inputs are being acquired. The storage futures are
+    /// still polled with the caller's waker, so their completion schedules the
+    /// next owner-loop turn.
+    pub async fn drive_ready_progress(&mut self) -> Result<(), Error> {
+        let progress =
+            std::future::poll_fn(|cx| std::task::Poll::Ready(self.poll_progress(cx))).await;
+        match progress {
+            std::task::Poll::Ready(result) => result,
+            std::task::Poll::Pending => Ok(()),
+        }
+    }
+
     pub fn poll_subscription(
         &mut self,
         subscription: &Subscription,
@@ -201,7 +217,10 @@ impl Database {
             Rc::clone(&self.storage),
             Rc::clone(&self.resident_writes),
         ));
-        let storage = MeteredStorage::new_owned(overlay, Rc::clone(&self.storage_read_metrics));
+        let storage = Rc::new(MeteredStorage::new_owned(
+            overlay,
+            Rc::clone(&self.storage_read_metrics),
+        ));
         self.ivm_runtime
             .subscribe_one_sink(graph, &storage)
             .await
@@ -212,7 +231,7 @@ impl Database {
     ///
     /// The initial message includes every sink, even if that sink is empty.
     /// Later messages are sent only when at least one sink has deltas.
-    pub async fn subscribe<I, K>(&mut self, sinks: I) -> Result<MultisinkSubscription, Error>
+    pub fn subscribe<I, K>(&mut self, sinks: I) -> Result<MultisinkSubscription, Error>
     where
         I: IntoIterator<Item = (K, GraphBuilder)>,
         K: Into<String>,
@@ -222,10 +241,12 @@ impl Database {
             Rc::clone(&self.storage),
             Rc::clone(&self.resident_writes),
         ));
-        let storage = MeteredStorage::new_owned(overlay, Rc::clone(&self.storage_read_metrics));
+        let storage = Rc::new(MeteredStorage::new_owned(
+            overlay,
+            Rc::clone(&self.storage_read_metrics),
+        ));
         self.ivm_runtime
             .subscribe(sinks, &storage)
-            .await
             .map_err(Error::IvmRuntime)
     }
 
@@ -400,11 +421,16 @@ impl Database {
                 return Err(Error::UnknownParameter((*name).to_owned()));
             }
         }
-        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
-        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
+        let overlay = Rc::new(StagedWriteOverlay::new_owned(
+            Rc::clone(&self.storage),
+            Rc::clone(&self.resident_writes),
+        ));
+        let storage = Rc::new(MeteredStorage::new_owned(
+            overlay,
+            Rc::clone(&self.storage_read_metrics),
+        ));
         self.ivm_runtime
             .bind_shape_one_sink_with_output(prepared.id, &values, prepared.output, &storage)
-            .await
             .map_err(Error::IvmRuntime)
     }
 
@@ -541,11 +567,16 @@ impl Database {
         binding_values: &[Value],
     ) -> Result<Subscription, Error> {
         self.ensure_not_poisoned()?;
-        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
-        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
+        let overlay = Rc::new(StagedWriteOverlay::new_owned(
+            Rc::clone(&self.storage),
+            Rc::clone(&self.resident_writes),
+        ));
+        let storage = Rc::new(MeteredStorage::new_owned(
+            overlay,
+            Rc::clone(&self.storage_read_metrics),
+        ));
         self.ivm_runtime
             .bind_shape_one_sink(shape, binding_values, &storage)
-            .await
             .map_err(Error::IvmRuntime)
     }
 
@@ -563,11 +594,16 @@ impl Database {
         public_output: RecordDescriptor,
     ) -> Result<Subscription, Error> {
         self.ensure_not_poisoned()?;
-        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
-        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
+        let overlay = Rc::new(StagedWriteOverlay::new_owned(
+            Rc::clone(&self.storage),
+            Rc::clone(&self.resident_writes),
+        ));
+        let storage = Rc::new(MeteredStorage::new_owned(
+            overlay,
+            Rc::clone(&self.storage_read_metrics),
+        ));
         self.ivm_runtime
             .bind_shape_one_sink_with_output(shape, binding_values, public_output, &storage)
-            .await
             .map_err(Error::IvmRuntime)
     }
 
@@ -578,11 +614,16 @@ impl Database {
         binding_values: &[Value],
     ) -> Result<MultisinkSubscription, Error> {
         self.ensure_not_poisoned()?;
-        let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
-        let storage = MeteredStorage::new(&overlay, &self.storage_read_metrics);
+        let overlay = Rc::new(StagedWriteOverlay::new_owned(
+            Rc::clone(&self.storage),
+            Rc::clone(&self.resident_writes),
+        ));
+        let storage = Rc::new(MeteredStorage::new_owned(
+            overlay,
+            Rc::clone(&self.storage_read_metrics),
+        ));
         self.ivm_runtime
             .bind_shape(shape, binding_values, &storage)
-            .await
             .map_err(Error::IvmRuntime)
     }
 
@@ -688,11 +729,8 @@ impl Database {
             .map_err(Error::IvmRuntime)
     }
 
-    pub async fn unsubscribe(&mut self, subscription_id: SubscriptionId) -> bool {
-        self.ivm_runtime
-            .unsubscribe_with_storage(subscription_id, &self.storage)
-            .await
-            .unwrap_or(false)
+    pub fn unsubscribe(&mut self, subscription_id: SubscriptionId) -> bool {
+        self.ivm_runtime.unsubscribe(subscription_id)
     }
 
     /// Retire a prepared graph after all bindings have been unsubscribed.

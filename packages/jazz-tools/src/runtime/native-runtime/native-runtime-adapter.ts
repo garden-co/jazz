@@ -69,6 +69,9 @@ import {
 export { encodeSchema } from "./schema-codec.js";
 
 const SERVER_PUMP_DEBOUNCE_MS = 16;
+// Amortize scheduler overhead without allowing a ready evaluator to monopolize
+// the browser task queue. Transport pumps never add a second inner tick loop.
+const MAX_CORE_TICKS_PER_TURN = 4;
 
 type ReadAuthorizationHost = "client-local" | "trusted-serving";
 
@@ -78,6 +81,7 @@ type NativeDbConstructor = {
 };
 
 type NativeDb = {
+  close?(): Promise<unknown>;
   registerSchema(schema: Uint8Array): NativeDb;
   beginTransaction(openBatchId: string, kind: TransactionKind, author?: Uint8Array): void;
   commitTransaction(openBatchId: string, kind?: TransactionKind): Write;
@@ -86,14 +90,18 @@ type NativeDb = {
   attachExclusiveTx?(openBatchId: string): Tx;
   all(query: PreparedQuery, opts: unknown): Uint8Array;
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
-  allRelationQuery?(queryJson: string, opts: unknown): Uint8Array;
-  allRelationQueryForIdentity?(queryJson: string, author: Uint8Array, opts: unknown): Uint8Array;
-  allRelationSnapshot?(query: PreparedQuery, opts: unknown): Uint8Array;
+  allRelationQuery?(queryJson: string, opts: unknown): Uint8Array | Promise<Uint8Array>;
+  allRelationQueryForIdentity?(
+    queryJson: string,
+    author: Uint8Array,
+    opts: unknown,
+  ): Uint8Array | Promise<Uint8Array>;
+  allRelationSnapshot?(query: PreparedQuery, opts: unknown): Uint8Array | Promise<Uint8Array>;
   allRelationSnapshotForIdentity?(
     query: PreparedQuery,
     author: Uint8Array,
     opts: unknown,
-  ): Uint8Array;
+  ): Uint8Array | Promise<Uint8Array>;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
   attachQuery?(query: PreparedQuery, opts: unknown): unknown;
   attachQueryForIdentity?(query: PreparedQuery, author: Uint8Array, opts: unknown): unknown;
@@ -268,7 +276,7 @@ type NativeDb = {
     remoteEpoch: bigint,
     localNode: Uint8Array,
     localEpoch: bigint,
-  ): Transport;
+  ): Transport | Promise<Transport>;
   acceptSubscriber?(author: Uint8Array, claims: Record<string, unknown>): Transport;
   tick(): void | Promise<void>;
   close?(): void;
@@ -351,6 +359,8 @@ export type Transport = {
   recvWireFrames(): unknown[];
   sendWireFrame(frame: Uint8Array): void;
   sendWireFrames?(frames: readonly Uint8Array[]): void;
+  setOutboundScheduler?(callback: () => void): void;
+  clearOutboundScheduler?(): void;
   tick(): number | Promise<number>;
   updateAuthenticatedClaims?(claims: Record<string, unknown>): void | Promise<void>;
   free?(): void;
@@ -482,10 +492,13 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly pendingTxs: Map<string, PendingTx>;
   private readonly completedTxs: Map<string, CompletedTx>;
   private readonly writes: Map<string, Write>;
+  private readonly pendingLocalSettlements = new Set<Promise<void>>();
   private readonly ownerRuntime: NativeRuntimeAdapter;
   private readonly readAuthorizationHost: ReadAuthorizationHost;
   private readonly subscriptions = new Map<number, SubscriptionState>();
   private authFailureCallback: ((reason: string) => void) | null = null;
+  private mutationErrorCallback: ((event: MutationErrorEvent) => void) | null = null;
+  private readonly deliveredMutationErrors = new Set<string>();
   private serverTransport: Transport | null = null;
   private peerUpstreamAttached = false;
   private nonDurableClient = false;
@@ -504,6 +517,11 @@ export class NativeRuntimeAdapter implements Runtime {
   private coreTickScheduled = false;
   private coreTickRunning = false;
   private coreTickAgain = false;
+  private coreTickCompletion: Promise<void> | null = null;
+  private readonly pendingTransportRetirements = new Map<
+    Transport,
+    Array<{ resolve: () => void; reject: (error: unknown) => void }>
+  >();
   private serverPumpScheduled = false;
   private serverPumpRunning = false;
   private serverPumpAgain = false;
@@ -609,6 +627,24 @@ export class NativeRuntimeAdapter implements Runtime {
     this.peerTransportActivityEpoch += 1;
   }
 
+  async progressPeerTransport(): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.progressPeerTransport();
+    await this.runCoreTick();
+  }
+
+  retirePeerTransport(transport: Transport): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.retirePeerTransport(transport);
+    if (!this.coreTickRunning) {
+      transport.close();
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve, reject) => {
+      const waiters = this.pendingTransportRetirements.get(transport) ?? [];
+      waiters.push({ resolve, reject });
+      this.pendingTransportRetirements.set(transport, waiters);
+    });
+  }
+
   setNonDurableClient(): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.setNonDurableClient();
     if (!this.db.setNonDurableClient) {
@@ -626,6 +662,21 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.db.acceptSubscriber(this.peerIdentity, claims);
   }
 
+  async acceptPeerWhenIdle(claims: Record<string, unknown> = {}): Promise<Transport> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.acceptPeerWhenIdle(claims);
+    await this.waitForCoreIdle();
+    // No await separates the idle check from admission, so another browser
+    // task cannot enter the evaluator and borrow the connection registry here.
+    return this.acceptPeer(claims);
+  }
+
+  private async waitForCoreIdle(): Promise<void> {
+    const owner = this.ownerRuntime;
+    while (owner.coreTickRunning) {
+      await owner.coreTickCompletion;
+    }
+  }
+
   async waitForUpstreamServerConnection(): Promise<void> {
     if (this !== this.ownerRuntime) {
       return await this.ownerRuntime.waitForUpstreamServerConnection();
@@ -639,8 +690,38 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.ownerRuntime.closed;
   }
 
-  close(): void {
+  async close(): Promise<void> {
+    if (this !== this.ownerRuntime) {
+      this.closeRuntimeState();
+      return;
+    }
     if (this.closed) return;
+    if (this.pendingLocalSettlements.size > 0) {
+      await Promise.all(this.pendingLocalSettlements);
+    }
+    if (this.closed) return;
+    // Stop admitting/scheduling work first, but keep every WASM receiver alive
+    // until the evaluator future that may currently borrow it has unwound.
+    this.closed = true;
+    await this.coreTickCompletion?.catch(() => undefined);
+    this.closeRuntimeState(true);
+    await this.db.close?.();
+    // wasm-bindgen futures may retain this receiver after logical closure.
+    // Its registered finalizer owns physical release; explicit `free()` here
+    // creates a second, unsynchronised lifetime and can corrupt the WASM heap.
+  }
+
+  /** Discard a runtime whose persistence epoch is no longer usable. */
+  discard(): void {
+    // Do not explicitly free the WASM wrapper here. A forced IndexedDB close
+    // can reject a storage Promise while a WASM future is still unwinding;
+    // freeing its receiver in that window is unsafe. Sever all runtime work
+    // and let the now-unreferenced wrapper be garbage-collected instead.
+    this.closeRuntimeState();
+  }
+
+  private closeRuntimeState(alreadyMarkedClosed = false): boolean {
+    if (this.closed && !alreadyMarkedClosed) return false;
     this.closed = true;
     for (const subscription of this.subscriptions.values()) {
       for (const source of subscription.sources) {
@@ -649,8 +730,11 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     if (this !== this.ownerRuntime) {
       this.subscriptions.clear();
-      this.db.free?.();
-      return;
+      // Query and subscription futures may still be unwinding through this
+      // schema-view wrapper. Eagerly freeing a wasm-bindgen receiver here is a
+      // use-after-free; let GC release the Rc-backed view after those promises
+      // drop their references.
+      return false;
     }
     for (const write of this.writes.values()) {
       write.close?.();
@@ -664,13 +748,15 @@ export class NativeRuntimeAdapter implements Runtime {
     this.peerTransportWorkListeners.clear();
     this.queuedServerFrames.length = 0;
     this.pendingInboundServerFrames.length = 0;
-    this.serverTransport?.close();
+    const serverTransport = this.serverTransport;
     this.serverTransport = null;
+    if (serverTransport) {
+      void this.retirePeerTransport(serverTransport).catch(reportAsyncRuntimeError);
+    }
     this.peerUpstreamAttached = false;
     this.serverCarrier?.close();
     this.serverCarrier = null;
-    this.db.close?.();
-    this.db.free?.();
+    return true;
   }
 
   insert(
@@ -1065,7 +1151,9 @@ export class NativeRuntimeAdapter implements Runtime {
     this.pumpSubscriptions();
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
-    return recordWrite(write, this.writes);
+    const batchId = recordWrite(write, this.writes);
+    if (this.nonDurableClient) this.trackLocalSettlement(batchId);
+    return batchId;
   }
 
   async waitForTransaction(batchId: BatchId | Promise<BatchId>, tier: string): Promise<void> {
@@ -1142,7 +1230,7 @@ export class NativeRuntimeAdapter implements Runtime {
         if (!this.db.allRelationQueryForIdentity) {
           throw new Error("Native runtime does not support trusted-serving relation queries");
         }
-        const payload = this.db.allRelationQueryForIdentity(
+        const payload = await this.db.allRelationQueryForIdentity(
           coreQueryJson,
           session?.identity ?? this.peerIdentity,
           opts,
@@ -1152,7 +1240,7 @@ export class NativeRuntimeAdapter implements Runtime {
       if (!this.db.allRelationQuery) {
         throw new Error("Native runtime does not support relation queries");
       }
-      const payload = this.db.allRelationQuery(coreQueryJson, opts);
+      const payload = await this.db.allRelationQuery(coreQueryJson, opts);
       return rowsFromBatches(readRowBatches(payload), this.schema);
     }
     const query = this.prepareQuery(coreQueryJson);
@@ -1165,7 +1253,7 @@ export class NativeRuntimeAdapter implements Runtime {
           if (!this.db.allRelationSnapshotForIdentity) {
             throw new Error("Native runtime does not support trusted-serving relation snapshots");
           }
-          const payload = this.db.allRelationSnapshotForIdentity(
+          const payload = await this.db.allRelationSnapshotForIdentity(
             query,
             session?.identity ?? this.peerIdentity,
             opts,
@@ -1179,7 +1267,7 @@ export class NativeRuntimeAdapter implements Runtime {
         if (!this.db.allRelationSnapshot) {
           throw new Error("Native runtime does not support relation snapshots");
         }
-        const payload = this.db.allRelationSnapshot(query, opts);
+        const payload = await this.db.allRelationSnapshot(query, opts);
         return rowsFromRelationSnapshot(
           readRelationSnapshot(payload),
           this.schema,
@@ -1346,17 +1434,20 @@ export class NativeRuntimeAdapter implements Runtime {
       },
     });
     this.serverCarrier = carrier;
-    this.serverCarrierPromise = carrier.ready().then((negotiation) => {
+    this.serverCarrierPromise = carrier.ready().then(async (negotiation) => {
       if (generation !== this.serverConnectionGeneration || carrier !== this.serverCarrier) {
         carrier.close();
         return carrier;
       }
-      const transport = this.connectNegotiatedUpstream(negotiation);
+      let transport: Transport;
+      try {
+        transport = await this.connectNegotiatedUpstream(negotiation);
+      } catch (error) {
+        throw contextualError("connecting the negotiated upstream transport", error);
+      }
       this.serverTransport = transport;
       this.flushQueuedServerFrames(carrier);
-      void this.pumpServerTransport().catch((error) =>
-        this.handleServerTransportError(error, generation),
-      );
+      await this.pumpServerTransport();
       this.pumpSubscriptions();
       return carrier;
     });
@@ -1365,12 +1456,12 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
-  private connectNegotiatedUpstream(negotiation: WebSocketNegotiation): Transport {
+  private async connectNegotiatedUpstream(negotiation: WebSocketNegotiation): Promise<Transport> {
     const authority = negotiation.authority;
     const connectWithSession = this.db.connectUpstreamWithSession;
     if (!authority || !connectWithSession) return this.db.connectUpstream();
     const localEpoch = this.nextServerConnectionEpoch++;
-    return connectWithSession.call(
+    return await connectWithSession.call(
       this.db,
       negotiation.protocolVersion,
       negotiation.features,
@@ -1381,7 +1472,7 @@ export class NativeRuntimeAdapter implements Runtime {
     );
   }
 
-  disconnect(options: { rejectWaiters?: boolean } = {}): Promise<void> {
+  async disconnect(options: { rejectWaiters?: boolean } = {}): Promise<void> {
     if (this !== this.ownerRuntime) return this.ownerRuntime.disconnect(options);
     this.serverConnectionGeneration += 1;
     this.serverCarrier?.close();
@@ -1394,14 +1485,18 @@ export class NativeRuntimeAdapter implements Runtime {
       this.clearServerTransportErrorWaiters();
     }
     this.resolveServerTransportWorkWaiters();
-    this.serverTransport?.close();
+    const transport = this.serverTransport;
     this.serverTransport = null;
     this.serverEndpointUrl = null;
     this.queuedServerFrames.length = 0;
     this.pendingInboundServerFrames.length = 0;
     this.serverPumpScheduled = false;
     this.serverPumpAgain = false;
-    return Promise.resolve();
+    // Db::tick borrows peer connections across its async evaluator pass.
+    // Detaching the transport while that borrow is live panics on WASM's
+    // single-threaded RefCell mutex. Remove it from new work immediately, then
+    // perform the physical detach once the owning tick has released the borrow.
+    if (transport) await this.retirePeerTransport(transport);
   }
 
   updateAuth(authJson: string): Promise<void> | void {
@@ -1417,7 +1512,39 @@ export class NativeRuntimeAdapter implements Runtime {
 
   onMutationError(callback: (event: MutationErrorEvent) => void): void {
     if (this !== this.ownerRuntime) return this.ownerRuntime.onMutationError(callback);
-    this.db.onMutationError(callback);
+    this.mutationErrorCallback = callback;
+    this.db.onMutationError((event) => this.deliverMutationError(event));
+  }
+
+  reportRemoteMutationError(event: MutationErrorEvent): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.reportRemoteMutationError(event);
+    this.deliverMutationError(event);
+  }
+
+  async flushLocalSettlements(): Promise<void> {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.flushLocalSettlements();
+    if (this.pendingLocalSettlements.size > 0) {
+      await Promise.all(this.pendingLocalSettlements);
+    }
+  }
+
+  private deliverMutationError(event: MutationErrorEvent): void {
+    const transactionId = event.transaction.transactionId;
+    if (this.deliveredMutationErrors.has(transactionId)) return;
+    this.deliveredMutationErrors.add(transactionId);
+    this.mutationErrorCallback?.(event);
+  }
+
+  private trackLocalSettlement(batchId: BatchId): void {
+    if (this !== this.ownerRuntime) return this.ownerRuntime.trackLocalSettlement(batchId);
+    let settlement!: Promise<void>;
+    // The follower itself is non-durable. Its `local` receipt is the durable
+    // worker's acknowledgement, emitted after inbound persistence but before
+    // separately scheduled cold downstream view assembly.
+    settlement = this.waitForTransaction(batchId, "local")
+      .catch(() => undefined)
+      .finally(() => this.pendingLocalSettlements.delete(settlement));
+    this.pendingLocalSettlements.add(settlement);
   }
 
   private finishInsert(
@@ -1427,6 +1554,7 @@ export class NativeRuntimeAdapter implements Runtime {
     write: Write,
   ): InsertResult {
     const batchId = recordWrite(write, this.writes);
+    if (this.nonDurableClient) this.trackLocalSettlement(batchId);
     this.pumpSubscriptions();
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
@@ -1436,6 +1564,7 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private finishMutation(write: Write): MutationResult {
     const batchId = recordWrite(write, this.writes);
+    if (this.nonDurableClient) this.trackLocalSettlement(batchId);
     this.pumpSubscriptions();
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
@@ -1641,6 +1770,11 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!readPropagationIsFull(optionsJson) && !this.nonDurableClient) return;
     if (!this.hasUpstream()) return;
     if (!this.db.attachQuery) return;
+    // Coverage registration and probes are synchronous node operations. A
+    // storage-backed evaluator may hold that node across suspension, so enter
+    // the same owner-wide idle boundary used for peer admission first.
+    await this.waitForCoreIdle();
+    if (this.closed) return;
     const opts = readOptions(tier, false, optionsJson);
     let attachment: unknown;
     if (this.readAuthorizationHost === "trusted-serving") {
@@ -1719,6 +1853,8 @@ export class NativeRuntimeAdapter implements Runtime {
       this.throwServerTransportErrorForTier(tier);
       await this.pumpServerTransport();
       this.throwServerTransportErrorForTier(tier);
+      await this.waitForCoreIdle();
+      if (this.closed) return;
       if (this.db.queryAttachmentIsCovered) {
         const peerHasResponded =
           minimumPeerActivityEpoch == null ||
@@ -1866,20 +2002,59 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
-  private async runCoreTick(): Promise<void> {
-    if (this.closed || this.coreTickRunning) return;
-    this.coreTickRunning = true;
-    try {
-      await this.db.tick();
-      this.pumpSubscriptions();
-      this.scheduleServerPump();
-      this.notifyPeerTransportWork();
-    } finally {
-      this.coreTickRunning = false;
+  private runCoreTick(): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    if (this.coreTickRunning) {
+      this.coreTickAgain = true;
+      return this.coreTickCompletion ?? Promise.resolve();
     }
-    if (this.coreTickAgain) {
-      this.coreTickAgain = false;
-      this.scheduleCoreTick();
+    this.coreTickRunning = true;
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const completion = new Promise<void>((onResolve, onReject) => {
+      resolve = onResolve;
+      reject = onReject;
+    });
+    this.coreTickCompletion = completion;
+    void this.driveCoreTicks().then(resolve, reject);
+    return completion;
+  }
+
+  private async driveCoreTicks(): Promise<void> {
+    let yielded = false;
+    try {
+      for (let round = 0; ; round += 1) {
+        this.coreTickAgain = false;
+        await this.db.tick();
+        this.pumpSubscriptions();
+        this.scheduleServerPump();
+        this.notifyPeerTransportWork();
+        if (this.closed || !this.coreTickAgain) break;
+        if (round + 1 >= MAX_CORE_TICKS_PER_TURN) {
+          yielded = true;
+          break;
+        }
+      }
+    } finally {
+      this.drainTransportRetirements();
+      this.coreTickRunning = false;
+      this.coreTickCompletion = null;
+    }
+    if (yielded && !this.closed) {
+      setTimeout(() => this.scheduleCoreTick(), 0);
+    }
+  }
+
+  private drainTransportRetirements(): void {
+    const retirements = [...this.pendingTransportRetirements];
+    this.pendingTransportRetirements.clear();
+    for (const [transport, waiters] of retirements) {
+      try {
+        transport.close();
+        for (const waiter of waiters) waiter.resolve();
+      } catch (error) {
+        for (const waiter of waiters) waiter.reject(error);
+      }
     }
   }
 
@@ -1906,12 +2081,14 @@ export class NativeRuntimeAdapter implements Runtime {
       while (!subscription.cancelled && this.subscriptions.get(handle) === subscription) {
         const next = await source.source.read();
         if (next.done || subscription.cancelled) return;
-        void this.applySubscriptionChunk(subscription, next.value).catch((error: unknown) => {
+        try {
+          this.applySubscriptionChunk(subscription, next.value);
+        } catch (error) {
           this.failSubscription(
             subscription,
             error instanceof Error ? error : new Error(String(error)),
           );
-        });
+        }
       }
     } finally {
       source.reading = false;
@@ -1926,19 +2103,18 @@ export class NativeRuntimeAdapter implements Runtime {
     if (isReadableSubscriptionReader(source.source)) return;
     for (const event of source.source.readAll()) {
       if (subscription.cancelled || this.subscriptions.get(handle) !== subscription) return;
-      void this.applySubscriptionChunk(subscription, event).catch((error: unknown) => {
+      try {
+        this.applySubscriptionChunk(subscription, event);
+      } catch (error) {
         this.failSubscription(
           subscription,
           error instanceof Error ? error : new Error(String(error)),
         );
-      });
+      }
     }
   }
 
-  private async applySubscriptionChunk(
-    subscription: SubscriptionState,
-    value: unknown,
-  ): Promise<void> {
+  private applySubscriptionChunk(subscription: SubscriptionState, value: unknown): void {
     const chunk = normalizeSubscriptionChunk(value);
     if (chunk.type === "closed") {
       clearDeferredPlaceholderBuffer(subscription);
@@ -2011,6 +2187,7 @@ export class NativeRuntimeAdapter implements Runtime {
             chunk.reset === true,
             subscription.outputColumns,
             chunk.terminalOperations,
+            chunk.orderedSuffixStart,
           );
         } catch (error) {
           const buffered = applySubscriptionDeltaToState(
@@ -2123,18 +2300,25 @@ export class NativeRuntimeAdapter implements Runtime {
       }
     }
 
-    const terminalOperations = [
-      ...subscription.deferredTerminalOperations,
-      ...(wireDelta.terminalOperations ?? []),
-    ];
-    const terminalLayouts = [
-      ...subscription.deferredTerminalLayouts,
-      ...(wireDelta.terminalLayouts ?? []),
-    ];
-    if (terminalOperations.length > 0) {
-      visibleDelta.terminalOperations = terminalOperations;
+    // A canonical delta rebuilt from `subscription.rows` already contains the
+    // full present-state terminal values. Replaying producer operations that
+    // led to that state on top of it can address occurrence lifecycles that no
+    // longer exist (for example, a deferred Move after a synthesized reset).
+    // Raw terminal history belongs only to a forwarded producer delta.
+    if (visibleDelta === wireDelta) {
+      const terminalOperations = [
+        ...subscription.deferredTerminalOperations,
+        ...(wireDelta.terminalOperations ?? []),
+      ];
+      const terminalLayouts = [
+        ...subscription.deferredTerminalLayouts,
+        ...(wireDelta.terminalLayouts ?? []),
+      ];
+      if (terminalOperations.length > 0) {
+        visibleDelta.terminalOperations = terminalOperations;
+      }
+      if (terminalLayouts.length > 0) visibleDelta.terminalLayouts = terminalLayouts;
     }
-    if (terminalLayouts.length > 0) visibleDelta.terminalLayouts = terminalLayouts;
 
     subscription.callback?.(visibleDelta);
     if (visibleDelta === subscription.packedResetRows) {
@@ -2217,9 +2401,16 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     this.serverPumpRunning = true;
     try {
-      this.drainPendingInboundServerFrames(transport);
+      let processedInbound = this.drainPendingInboundServerFrames(transport);
       for (let round = 0; round < 32; round += 1) {
-        await transport.tick();
+        await this.runCoreTick();
+        if (processedInbound) {
+          // Frame arrival wakes waiters promptly, but the observable write or
+          // coverage state changes only after the evaluator consumes it.
+          // Publish that second edge so waiters re-read settled state.
+          processedInbound = false;
+          this.notifyServerTransportWork();
+        }
         if (
           this.closed ||
           generation !== this.serverConnectionGeneration ||
@@ -2247,14 +2438,15 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
-  private drainPendingInboundServerFrames(transport: Transport): void {
-    if (this.pendingInboundServerFrames.length === 0) return;
+  private drainPendingInboundServerFrames(transport: Transport): boolean {
+    if (this.pendingInboundServerFrames.length === 0) return false;
     const frames = this.pendingInboundServerFrames.splice(0);
     if (transport.sendWireFrames) {
       transport.sendWireFrames(frames);
-      return;
+      return true;
     }
     for (const frame of frames) transport.sendWireFrame(frame);
+    return true;
   }
 
   private sendServerFrames(
@@ -2991,6 +3183,11 @@ function errorMessage(error: unknown): string {
     }
   }
   return String(error);
+}
+
+function contextualError(context: string, error: unknown): Error {
+  const cause = error instanceof Error ? error : new Error(errorMessage(error));
+  return new Error(`${context}: ${cause.message}`, { cause });
 }
 
 function schemaHasPolicies(schema: WasmSchema): boolean {
@@ -4095,6 +4292,7 @@ export function applySubscriptionDeltaWithWireDelta(
   reset = false,
   outputColumns: SubscriptionOutputColumns | null = null,
   terminalOperations?: readonly NativeTerminalOperation[],
+  orderedSuffixStart?: number,
 ): { rows: RowState[]; rowIndexByKey: Map<string, number>; wireDelta: NativeRowDelta } {
   const { addedRows, updatedRows, removedEntries, rows, rowIndexByKey } =
     applySubscriptionDeltaToState(
@@ -4106,6 +4304,32 @@ export function applySubscriptionDeltaWithWireDelta(
       outputColumns,
       terminalOperations,
     );
+  const wireIndexByKey = new Map(rowIndexByKey);
+  if (orderedSuffixStart !== undefined) {
+    for (const [index, row] of subscriptionOutputRows(addedRows, outputColumns).entries()) {
+      wireIndexByKey.set(rowStateKey(row), orderedSuffixStart + index);
+    }
+  }
+  // Relation storage order is not public terminal order. A local replacement
+  // carrying terminal edits retains its current slot until SubscriptionManager
+  // applies the edit. An edit-free remove/add pair is instead an authoritative
+  // ordered-suffix reconciliation and must use the producer's new order.
+  const replacedKeys = new Set(
+    delta.removed.map((removed, index) => {
+      const id = formatUuid(removed.rowId);
+      const occurrenceKey = delta.removedOccurrenceKeys[index];
+      return occurrenceKey
+        ? occurrenceStateKey(occurrenceKey, removed.table, id)
+        : rowKey(removed.table, id);
+    }),
+  );
+  for (const row of addedRows.concat(updatedRows)) {
+    const key = rowStateKey(row);
+    const currentIndex = currentIndexByKey.get(key);
+    if (currentIndex !== undefined && replacedKeys.has(key) && terminalOperations?.length) {
+      wireIndexByKey.set(key, currentIndex);
+    }
+  }
   return {
     rows,
     rowIndexByKey,
@@ -4114,7 +4338,7 @@ export function applySubscriptionDeltaWithWireDelta(
         subscriptionOutputRows(addedRows, outputColumns),
         subscriptionOutputRows(updatedRows, outputColumns),
         subscriptionOutputRemovals(removedEntries, outputColumns),
-        rowIndexByKey,
+        wireIndexByKey,
         schema,
         outputColumns,
       ),
@@ -4172,12 +4396,14 @@ function applySubscriptionDeltaToState(
   attachOccurrenceKeys(addedRows, delta.addedOccurrenceKeys);
   attachOccurrenceKeys(updatedRows, delta.updatedOccurrenceKeys);
 
-  // A changed row can arrive as a remove/add pair because relational record
-  // bytes include the changed value. It remains the same public occurrence,
-  // though, and must retain its slot until an explicit terminal Move says
-  // otherwise. Deleting it first makes Map insertion order spuriously turn a
-  // title-only edit into a sort reorder.
-  const replacementKeys = new Set(addedRows.concat(updatedRows).map((row) => rowStateKey(row)));
+  // A locally changed row can arrive as a remove/add pair because relational
+  // record bytes include the changed value. When the frame also carries
+  // terminal edits, it remains the same public occurrence and must retain its
+  // slot until those edits are applied. Edit-free remove/add pairs are ordered
+  // authority suffixes and intentionally fall through to deletion/reinsertion.
+  const replacementKeys = terminalOperations?.length
+    ? new Set(addedRows.concat(updatedRows).map((row) => rowStateKey(row)))
+    : new Set<string>();
   for (const [removedIndex, removed] of delta.removed.entries()) {
     const id = formatUuid(removed.rowId);
     const resultKeyBytes = delta.removedOccurrenceKeys[removedIndex];
@@ -4575,6 +4801,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
       delta: NativeSubscriptionDelta;
       terminalOperations?: NativeTerminalOperation[];
       terminalLayouts?: NativeTerminalRootLayout[];
+      orderedSuffixStart?: number;
       settled?: boolean;
       publishable?: boolean;
     }
@@ -4597,6 +4824,7 @@ function normalizeSubscriptionChunk(chunk: unknown):
     publishable?: unknown;
     terminalOperations?: unknown;
     terminalLayouts?: unknown;
+    orderedSuffixStart?: unknown;
   };
   if (record.type === "closed" || record.type === "Closed") {
     return { type: "closed" };
@@ -4621,6 +4849,12 @@ function normalizeSubscriptionChunk(chunk: unknown):
       terminalLayouts: Array.isArray(record.terminalLayouts)
         ? (record.terminalLayouts as NativeTerminalRootLayout[])
         : undefined,
+      orderedSuffixStart:
+        typeof record.orderedSuffixStart === "number" &&
+        Number.isSafeInteger(record.orderedSuffixStart) &&
+        record.orderedSuffixStart >= 0
+          ? record.orderedSuffixStart
+          : undefined,
       settled: typeof record.settled === "boolean" ? record.settled : undefined,
       publishable: typeof record.publishable === "boolean" ? record.publishable : undefined,
     };
@@ -4971,7 +5205,12 @@ function encodeNativeRows(
       raw = encodeRow(frameValues);
     } catch (error) {
       throw new Error(
-        `${String(error)} while encoding ${row.table}: ${columns.map((column, index) => `${column.name}:${column.column_type.type}=${frameValues[index]?.type}`).join(", ")}`,
+        `${String(error)} while encoding ${row.table}: ${columns
+          .map((column, index) => {
+            const value = frameValues[index];
+            return `${column.name}:${column.column_type.type}=${String(value?.type)}(${typeof value?.type}; value=${typeof (value && "value" in value ? value.value : undefined)})`;
+          })
+          .join(", ")}`,
       );
     }
     chunks.push(requiredUuidBytes(row.id), encodeU32Le(rowIndexByKey.get(rowStateKey(row)) ?? 0));
@@ -4989,9 +5228,15 @@ function valuesForNativeFrame(row: RowState, columns: readonly ColumnDescriptor[
   values.length = columns.length;
   for (let index = 0; index < columns.length; index += 1) {
     const column = columns[index]!;
-    values[index] =
+    const value =
       row.valuesByColumn.get(column.name) ??
       (column.column_type.type === "Array" ? { type: "Array", value: [] } : { type: "Null" });
+    values[index] =
+      (column.name === "$createdBy" || column.name === "$updatedBy") &&
+      column.column_type.type === "Text" &&
+      value.type === "Uuid"
+        ? { type: "Text", value: value.value }
+        : value;
   }
   return values;
 }

@@ -295,7 +295,7 @@ impl MaintainedSubscriptionViewSubscription {
         subscription_key: SubscriptionKey,
         identity: AuthorId,
     ) -> (Self, SyncMessage) {
-        let (subscription, maintained, terminal_schemas, transitions, tables) = core
+        let (subscription, maintained, terminal_schemas, transitions, tables, _incomplete) = core
             .open_seeded_maintained_subscription_view(
                 shape,
                 binding,

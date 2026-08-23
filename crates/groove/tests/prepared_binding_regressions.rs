@@ -102,6 +102,45 @@ async fn dropped_shape_receiver_cleanup_retracts_binding_before_rebind() {
 }
 
 #[futures_test::test]
+async fn immediate_rebind_cancels_queued_final_binding_retraction() {
+    let (_dir, mut db) = open_db().await;
+    insert_edge(&mut db, 1, 7, 100).await;
+    let shape = db
+        .prepare_one_sink(
+            edges_by_src_shape_graph(),
+            "edges_by_src",
+            binding_descriptor(),
+            ["src"],
+        )
+        .await
+        .unwrap();
+
+    let first = db
+        .bind_shape_one_sink(shape.id(), &[Value::U64(7)])
+        .await
+        .unwrap();
+    assert_eq!(first.recv().unwrap().iter().count(), 1);
+    assert!(db.unsubscribe(first.id()));
+
+    // No write or owner-driven tick occurs between releasing and reacquiring
+    // the same binding. Its queued final retraction must be cancelled because
+    // the evaluator still has that binding resident.
+    let rebound = db
+        .bind_shape_one_sink(shape.id(), &[Value::U64(7)])
+        .await
+        .unwrap();
+    let initial = rebound.recv().unwrap();
+    assert_eq!(initial.iter().count(), 1);
+    assert_eq!(
+        initial.to_values().unwrap(),
+        [(vec![Value::U64(7), Value::U64(100)], 1)]
+    );
+
+    insert_edge(&mut db, 2, 7, 200).await;
+    assert_eq!(rebound.recv().unwrap().iter().count(), 1);
+}
+
+#[futures_test::test]
 async fn second_identical_shape_does_not_wipe_existing_bindings() {
     let (_dir, mut db) = open_db().await;
     let shape_a = db

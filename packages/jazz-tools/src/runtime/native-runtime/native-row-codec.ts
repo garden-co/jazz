@@ -5,7 +5,7 @@ import type {
   Value,
   WasmRow,
 } from "../../drivers/types.js";
-import { isProvenanceMagicTimestampColumn } from "../../magic-columns.js";
+import { isProvenanceMagicColumn, isProvenanceMagicTimestampColumn } from "../../magic-columns.js";
 
 const textDecoder = new TextDecoder();
 const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
@@ -432,7 +432,7 @@ export function decodeNativeTerminalRowWithDescriptor(
     const bytes = decodeRecordValue(descriptor, raw, index + 1);
     return bytes == null
       ? ({ type: "Null" } satisfies Value)
-      : decodeTerminalBytes(column.column_type, bytes);
+      : decodeTerminalColumnBytes(column, bytes, descriptor[index + 1]?.valueType);
   });
   const valuesByColumn = new Map(columns.map((column, index) => [column.name, values[index]!]));
   const row = { id, values };
@@ -455,7 +455,8 @@ export function compileNativeTerminalRootDecoder(
   columns: readonly ColumnDescriptor[],
 ): (id: string, raw: Uint8Array) => WasmRow {
   assertTerminalRootLayoutCompatible(descriptor, columns, layout);
-  const slots = layout.publicFields.map((field) => field.slot);
+  const fieldsByName = new Map(layout.publicFields.map((field) => [field.name, field]));
+  const slots = columns.map((column) => fieldsByName.get(column.name)!.slot);
   return (id, raw) => {
     assertRecordLayoutIsComplete(descriptor, raw);
     const key = decodeRecordValue(descriptor, raw, layout.rootKeySlot);
@@ -463,10 +464,11 @@ export function compileNativeTerminalRootDecoder(
       throw new Error("terminal record key does not match addressed key");
     }
     const values = columns.map((column, index) => {
-      const bytes = decodeRecordValue(descriptor, raw, slots[index]!);
+      const slot = slots[index]!;
+      const bytes = decodeRecordValue(descriptor, raw, slot);
       return bytes == null
         ? ({ type: "Null" } satisfies Value)
-        : decodeTerminalBytes(column.column_type, bytes);
+        : decodeTerminalColumnBytes(column, bytes, descriptor[slot]?.valueType);
     });
     const valuesByColumn = new Map(columns.map((column, index) => [column.name, values[index]!]));
     const row = { id, values };
@@ -499,13 +501,16 @@ function assertTerminalRootLayoutCompatible(
   if (layout.publicFields.length !== columns.length) {
     throw new Error("terminal root layout does not match the public projection");
   }
+  const columnsByName = new Map(columns.map((column) => [column.name, column]));
+  const seenNames = new Set<string>();
   const seenSlots = new Set<number>([layout.rootKeySlot]);
-  for (let index = 0; index < columns.length; index++) {
-    const column = columns[index]!;
+  for (let index = 0; index < layout.publicFields.length; index++) {
     const field = layout.publicFields[index]!;
+    const column = columnsByName.get(field.name);
     const descriptorField = descriptor[field.slot];
     if (
-      field.name !== column.name ||
+      !column ||
+      seenNames.has(field.name) ||
       !Number.isSafeInteger(field.slot) ||
       seenSlots.has(field.slot) ||
       descriptorField?.name !== field.descriptorFieldName ||
@@ -517,11 +522,12 @@ function assertTerminalRootLayoutCompatible(
     ) {
       throw new Error(
         `terminal root layout does not match the public projection at ${index}: ` +
-          `${field.name}/${field.descriptorFieldName}@${field.slot} vs ${column.name}/` +
+          `${field.name}/${field.descriptorFieldName}@${field.slot} vs ${column?.name ?? "<missing>"}/` +
           `${descriptorField?.name ?? "<missing>"} (descriptor tag ${descriptorField?.valueType.tag ?? "?"}, ` +
-          `nullable ${String(column.nullable)}, sparse ${String(column.sparse)})`,
+          `nullable ${String(column?.nullable)}, sparse ${String(column?.sparse)})`,
       );
     }
+    seenNames.add(field.name);
     seenSlots.add(field.slot);
   }
 }
@@ -534,6 +540,16 @@ function terminalLayoutValueTypeMatchesColumn(
   // `sparse` describes the TS wildcard/storage carrier, not the declared
   // public value. Rust collector descriptors have already removed it.
   const logicalColumn = logicalStorageColumns([column])[0]!;
+  // Provenance lives in fixed CurrentRow system fields, not nullable user_
+  // carriers. Authors are UUIDs internally and public strings; timestamps
+  // retain their native scalar storage type.
+  if (isProvenanceMagicColumn(column.name)) {
+    const storageColumn =
+      column.name === "$createdBy" || column.name === "$updatedBy"
+        ? { ...logicalColumn, column_type: { type: "Uuid" as const } }
+        : logicalColumn;
+    return terminalValueTypeMatchesColumn(valueType, storageColumn, false);
+  }
   if (carrier === "Logical") {
     return terminalValueTypeMatchesColumn(valueType, logicalColumn, false);
   }
@@ -630,6 +646,12 @@ function terminalValueTypeMatchesColumn(
       terminalValueTypeMatchesColumn(valueType.inner, { ...column, nullable: false }, false)
     );
   }
+  if (
+    (column.name === "$createdBy" || column.name === "$updatedBy") &&
+    column.column_type.type === "Text"
+  ) {
+    return valueType.tag === 10;
+  }
   switch (column.column_type.type) {
     case "Boolean":
       return valueType.tag === 7;
@@ -700,6 +722,23 @@ function terminalValueTypeMatchesColumn(
           ))
       );
   }
+}
+
+function decodeTerminalColumnBytes(
+  column: ColumnDescriptor,
+  bytes: Uint8Array,
+  valueType: ValueType | undefined,
+): Value {
+  let storageType = valueType;
+  while (storageType?.tag === 14) storageType = storageType.inner;
+  if (
+    (column.name === "$createdBy" || column.name === "$updatedBy") &&
+    column.column_type.type === "Text" &&
+    storageType?.tag === 10
+  ) {
+    return { type: "Text", value: formatUuid(bytes) };
+  }
+  return decodeTerminalBytes(column.column_type, bytes);
 }
 
 function isKnownValueType(valueType: ValueType): boolean {

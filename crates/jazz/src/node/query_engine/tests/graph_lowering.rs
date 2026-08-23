@@ -327,8 +327,7 @@ fn current_source_select_projection_and_default_ordered_slice_lower() {
                 field: groove::ivm::FieldRef::Name(field),
                 direction: groove::ivm::TopByDirection::Asc,
             }] if field == "row_uuid")
-            && matches!(tie_cols.as_slice(), [groove::ivm::FieldRef::Name(field)]
-                if field == "row_uuid")
+            && tie_cols.is_empty()
     )));
 }
 

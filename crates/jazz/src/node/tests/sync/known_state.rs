@@ -373,7 +373,8 @@ fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
             &binding,
             RegisterShapeOptions::default(),
         )
-        .unwrap();
+        .unwrap()
+        .expect("expected view update");
     let control_version_bundles = version_bundles_for_update(&control_update);
     let SyncMessage::ViewUpdate {
         result_member_adds: control_result_member_adds,
@@ -402,7 +403,8 @@ fn known_state_rehydrate_skips_known_bodies_and_repairs_missing_payload() {
             &binding,
             RegisterShapeOptions::default(),
         )
-        .unwrap();
+        .unwrap()
+        .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
         settled_through,
@@ -482,7 +484,8 @@ fn fast_known_state_rehydrate_ships_only_members_after_declared_position() {
             &binding,
             RegisterShapeOptions::default(),
         )
-        .unwrap();
+        .unwrap()
+        .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
         settled_through,
@@ -566,7 +569,8 @@ fn exact_known_state_rehydrate_skips_known_bodies_but_preserves_membership() {
             &binding,
             RegisterShapeOptions::default(),
         )
-        .unwrap();
+        .unwrap()
+        .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
         result_member_adds,
@@ -619,7 +623,8 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_for_warm_reader() {
             &binding,
             RegisterShapeOptions::default(),
         )
-        .unwrap();
+        .unwrap()
+        .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
         reset_result_set,
@@ -708,7 +713,8 @@ fn fast_known_state_noop_rehydrate_is_apply_safe_after_reader_reopen() {
             &binding,
             RegisterShapeOptions::default(),
         )
-        .unwrap();
+        .unwrap()
+        .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
         reset_result_set,
@@ -783,7 +789,8 @@ fn exact_known_state_rehydrate_repairs_missing_payload() {
             &binding,
             RegisterShapeOptions::default(),
         )
-        .unwrap();
+        .unwrap()
+        .expect("expected view update");
     let missing = reader
         .missing_known_state_row_version_refs(&update)
         .unwrap();
@@ -903,7 +910,8 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
             &binding,
             RegisterShapeOptions::default(),
         )
-        .unwrap();
+        .unwrap()
+        .expect("expected view update");
     let control_bundles = version_bundles_for_update(&control_update);
     let SyncMessage::ViewUpdate {
         result_member_adds: control_members,
@@ -925,7 +933,8 @@ fn slow_known_state_declaration_skips_exact_local_versions_only() {
             &binding,
             RegisterShapeOptions::default(),
         )
-        .unwrap();
+        .unwrap()
+        .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
         result_member_adds,
@@ -998,7 +1007,8 @@ fn over_cap_slow_known_state_declaration_degrades_to_full_ship() {
             &binding,
             RegisterShapeOptions::default(),
         )
-        .unwrap();
+        .unwrap()
+        .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
         result_member_adds,
@@ -1035,7 +1045,8 @@ fn fast_known_state_fact_survives_reopen_and_eviction_clears_it() {
             &binding,
             RegisterShapeOptions::default(),
         )
-        .unwrap();
+        .unwrap()
+        .expect("expected view update");
     reader.apply_sync_message_settled(update).unwrap();
 
     let mut reopened = reader.reopen_in_place().unwrap();
@@ -1095,7 +1106,8 @@ fn fast_known_state_fact_survives_storage_reopen() {
             &binding,
             RegisterShapeOptions::default(),
         )
-        .unwrap();
+        .unwrap()
+        .expect("expected view update");
     reader.apply_sync_message_settled(update).unwrap();
     drop(reader);
 
@@ -1155,7 +1167,8 @@ fn known_state_declaration_never_skips_unfated_edge_members() {
 
     let update = peer
         .rehydrate_query_for_subscription_with_opts(&mut edge, subscription, &shape, &binding, opts)
-        .unwrap();
+        .unwrap()
+        .expect("expected view update");
     let version_bundles = version_bundles_for_update(&update);
     let SyncMessage::ViewUpdate {
         result_member_adds,

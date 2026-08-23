@@ -29,10 +29,10 @@ async fn duplicate_table_subscriptions_share_graph_nodes_and_gc_eagerly() {
     assert_eq!(first_output, second_output);
     assert_eq!(database.ivm_runtime.retained_node_ids().len(), 1);
 
-    assert!(database.unsubscribe(first.id()).await);
+    assert!(database.unsubscribe(first.id()));
     assert!(database.ivm_runtime.graph().node(first_output).is_some());
 
-    assert!(database.unsubscribe(second.id()).await);
+    assert!(database.unsubscribe(second.id()));
     assert!(database.ivm_runtime.graph().node(first_output).is_none());
     assert!(database.ivm_runtime.retained_node_ids().is_empty());
 }
@@ -280,10 +280,10 @@ async fn duplicate_projected_subscriptions_share_graph_nodes_and_gc_eagerly() {
             .contains(&first_output)
     );
 
-    assert!(database.unsubscribe(first.id()).await);
+    assert!(database.unsubscribe(first.id()));
     assert!(database.ivm_runtime.graph().node(first_output).is_some());
 
-    assert!(database.unsubscribe(second.id()).await);
+    assert!(database.unsubscribe(second.id()));
     assert!(database.ivm_runtime.graph().node(first_output).is_none());
     assert!(database.ivm_runtime.retained_node_ids().is_empty());
 }
@@ -1266,7 +1266,12 @@ async fn anti_join_filters_identical_descriptors_before_projection() {
         .await
         .unwrap();
     assert_eq!(
-        expect_recv_vals(&subscription),
+        database
+            .next_subscription(&subscription)
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap(),
         [(vec![Value::U64(8), Value::U64(4)], 1)]
     );
 }
@@ -1483,7 +1488,7 @@ async fn anti_join_resubscribe_hydrates_from_storage_after_unretained_changes() 
         expect_recv_vals(&subscription),
         [(vec![Value::U64(4), Value::U64(3)], 1)]
     );
-    assert!(database.unsubscribe(subscription.id()).await);
+    assert!(database.unsubscribe(subscription.id()));
 
     let mut batch = database.open_batch();
     batch.insert(

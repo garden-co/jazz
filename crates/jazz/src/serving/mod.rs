@@ -432,8 +432,12 @@ impl ShellDb {
 
     fn connect_upstream(&self, transport: Box<dyn Transport>) -> ShellPeerConnection {
         match self {
-            Self::Memory(db) => ShellPeerConnection::Memory(db.connect_upstream(transport)),
-            Self::Durable(db) => ShellPeerConnection::Durable(db.connect_upstream(transport)),
+            Self::Memory(db) => {
+                ShellPeerConnection::Memory(crate::db::block_on(db.connect_upstream(transport)))
+            }
+            Self::Durable(db) => {
+                ShellPeerConnection::Durable(crate::db::block_on(db.connect_upstream(transport)))
+            }
         }
     }
 

@@ -20,22 +20,9 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Generate a unique dbName to isolate OPFS state between tests. */
+/** Generate a unique dbName to isolate persistent browser state between tests. */
 export function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-/** Abruptly terminate a Db's OPFS worker without running its normal close path. */
-export function simulateCrash(db: Db): void {
-  const role = (db as any).connection?.activeRoleBridge;
-  const bridge = role?.workerBridge;
-  const worker = bridge?.worker as Worker | undefined;
-  if (!bridge || !worker) {
-    throw new Error("persistent browser worker is unavailable");
-  }
-  worker.terminate();
-  // Prevent later test cleanup from trying to exchange messages with the dead worker.
-  bridge.closed = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -236,7 +223,7 @@ export class TestCleanup {
 // ---------------------------------------------------------------------------
 
 /**
- * Create a Db connected to the testing server with OPFS persistence.
+ * Create a Db connected to the testing server with IndexedDB persistence.
  *
  * Equivalent of Rust `TestingClient::builder().with_server(...).connect()`.
  * The returned Db is automatically tracked by `ctx` for cleanup.
@@ -248,13 +235,12 @@ export async function createSyncedDb(
   testingServer?: JazzServerInfo,
 ): Promise<Db> {
   const localFirstSecret = secret ?? generateAuthSecret();
-  const { appId, serverUrl, adminSecret } = testingServer ?? (await getJazzServerInfo());
+  const { appId, serverUrl } = testingServer ?? (await getJazzServerInfo());
   return ctx.track(
     await createDb({
       appId,
       driver: { type: "persistent", dbName: uniqueDbName(label) },
       serverUrl,
-      adminSecret,
       secret: localFirstSecret,
     }),
   );

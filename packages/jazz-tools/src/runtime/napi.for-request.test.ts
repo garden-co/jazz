@@ -105,7 +105,6 @@ async function createTestContext(
     driver: { type: "persistent", dataPath },
     serverUrl: server.url,
     backendSecret,
-    adminSecret,
     env: "test",
     tier: "local",
   });

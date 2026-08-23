@@ -1428,11 +1428,11 @@ fn run_connect_and_subscribe(
     let start = Instant::now();
     let relay_core = duplex_counted();
     let client_relay = duplex_counted();
-    let _relay_upstream = relay.db.connect_upstream(relay_core.left_transport);
+    let _relay_upstream = block_on(relay.db.connect_upstream(relay_core.left_transport));
     let _core_sub = seeded
         .core
         .accept_subscriber(relay_core.right_transport, AuthorId::SYSTEM);
-    let _client_upstream = client.db.connect_upstream(client_relay.left_transport);
+    let _client_upstream = block_on(client.db.connect_upstream(client_relay.left_transport));
     let _relay_sub = relay
         .db
         .accept_subscriber(client_relay.right_transport, config.client_author(seeded));

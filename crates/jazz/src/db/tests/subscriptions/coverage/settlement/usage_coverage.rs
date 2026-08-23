@@ -11,7 +11,7 @@ fn one_shot_propagated_query_records_empty_remote_coverage() {
     let client = open_db(0xc1, client_author, &schema);
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
 
     let query = Query::from("todos");
@@ -38,7 +38,7 @@ fn one_shot_edge_global_coverage_requires_current_authority_after_reconnect() {
     let client = open_db(0xc1, client_author, &schema);
 
     let (first_client_transport, first_server_transport) = duplex();
-    let first_upstream = client.connect_upstream(first_client_transport);
+    let first_upstream = crate::db::block_on(client.connect_upstream(first_client_transport));
     let _first_subscriber = server.accept_subscriber(first_server_transport, client_author);
     let query = Query::from("todos");
     let prepared = prepared(&client, &query);
@@ -57,7 +57,7 @@ fn one_shot_edge_global_coverage_requires_current_authority_after_reconnect() {
     );
 
     let (second_client_transport, second_server_transport) = duplex();
-    let _second_upstream = client.connect_upstream(second_client_transport);
+    let _second_upstream = crate::db::block_on(client.connect_upstream(second_client_transport));
     let _second_subscriber = server.accept_subscriber(second_server_transport, client_author);
     assert!(
         !client.query_attachment_is_covered(&attachment),
@@ -98,7 +98,7 @@ fn one_shot_local_coverage_does_not_require_authority_continuity() {
     let client = open_db(0xc1, client_author, &schema);
     client.node.set_non_durable_client();
     let (client_transport, mut authority_transport) = duplex();
-    let upstream = client.connect_upstream(client_transport);
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let query = Query::from("todos");
     let prepared = prepared(&client, &query);
     let attachment = client
@@ -156,7 +156,7 @@ fn one_shot_propagated_query_attaches_fresh_usage_subscription_for_covered_bindi
     seed(&server, "todos", cells("first", false, owner));
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
 
     let query = Query::from("todos");
@@ -209,7 +209,7 @@ fn final_query_coverage_drop_releases_server_maintained_receiver_before_reopen()
     seed(&server, "todos", cells("initial", false, owner));
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos");
     let prepared = prepared(&client, &query);
@@ -277,7 +277,7 @@ fn one_shot_borrowed_stream_coverage_stays_pinned_until_query_detach() {
     let client = open_db(0xc1, client_author, &schema);
     seed(&server, "todos", cells("pinned", false, owner));
     let (client_transport, server_transport) = duplex();
-    let upstream = client.connect_upstream(client_transport);
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos");
     let prepared = prepared(&client, &query);
@@ -332,7 +332,8 @@ fn one_shot_borrowed_stream_coverage_stays_pinned_until_query_detach() {
     assert!(client.detach_connection(&upstream));
     assert!(server.server.detach_connection(&subscriber));
     let (reconnected_client_transport, reconnected_server_transport) = duplex();
-    let _reconnected_upstream = client.connect_upstream(reconnected_client_transport);
+    let _reconnected_upstream =
+        crate::db::block_on(client.connect_upstream(reconnected_client_transport));
     let reconnected_subscriber =
         server.accept_subscriber(reconnected_server_transport, client_author);
     client.tick().unwrap();
@@ -365,7 +366,7 @@ fn reconnect_replays_each_distinct_usage_subscription_key() {
     let prepared = prepared(&client, &query);
 
     let (first_client_transport, first_server_transport) = duplex();
-    let first_upstream = client.connect_upstream(first_client_transport);
+    let first_upstream = crate::db::block_on(client.connect_upstream(first_client_transport));
     let first_subscriber = server.accept_subscriber(first_server_transport, client_author);
     let stream = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
     let borrowed = client
@@ -381,7 +382,7 @@ fn reconnect_replays_each_distinct_usage_subscription_key() {
     assert!(server.server.detach_connection(&first_subscriber));
 
     let (second_client_transport, second_server_transport) = duplex();
-    let second_upstream = client.connect_upstream(second_client_transport);
+    let second_upstream = crate::db::block_on(client.connect_upstream(second_client_transport));
     let second_subscriber = server.accept_subscriber(second_server_transport, client_author);
     client.tick().unwrap();
     server.tick().unwrap();
@@ -419,7 +420,7 @@ fn reconnect_replays_each_distinct_usage_subscription_key() {
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
     let (third_client_transport, third_server_transport) = duplex();
-    let _third_upstream = client.connect_upstream(third_client_transport);
+    let _third_upstream = crate::db::block_on(client.connect_upstream(third_client_transport));
     let third_subscriber = server.accept_subscriber(third_server_transport, client_author);
     client.tick().unwrap();
     server.tick().unwrap();
@@ -451,7 +452,7 @@ fn subscriber_connection_groups_duplicate_usage_subscriptions_by_coverage_key() 
     seed(&server, "todos", cells("first", false, owner));
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, client_author);
 
     let query = Query::from("todos");
@@ -518,7 +519,7 @@ fn subscription_opening_publication_follows_upstream_coverage_lifecycle() {
     let client = open_db(0xc1, client_author, &schema);
     let seeded = seed(&server, "todos", cells("first", false, owner));
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos");
 
@@ -628,7 +629,7 @@ fn malformed_authority_opening_keeps_shared_coverage_provisional() {
     let schema = schema();
     let client = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
     let (client_transport, mut authority_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let query = Query::from("todos");
     let mut first = prepared_subscribe(&client, &query, global_subscribe_opts()).unwrap();
     client.tick().unwrap();
@@ -711,7 +712,7 @@ fn dropping_live_subscriptions_detaches_usage_subscriptions() {
     let seeded = seed(&server, "todos", cells("first", false, owner));
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, client_author);
 
     let query = Query::from("todos");
@@ -794,7 +795,7 @@ fn one_shot_edge_query_attaches_fresh_usage_subscription_for_covered_binding() {
     seed(&server, "todos", cells("first", false, owner));
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
 
     let query = Query::from("todos");
@@ -836,7 +837,7 @@ fn missing_permissions_head_gates_sessions_but_not_trusted_backend_query_coverag
     let backend_author = AuthorId::from_bytes([0xb0; 16]);
     let backend = open_db(0xb0, backend_author, &schema);
     let (backend_transport, server_backend_transport) = duplex();
-    let _backend_upstream = backend.connect_upstream(backend_transport);
+    let _backend_upstream = crate::db::block_on(backend.connect_upstream(backend_transport));
     let _backend_subscriber = server.accept_subscriber_with_trust(
         server_backend_transport,
         backend_author,
@@ -846,7 +847,7 @@ fn missing_permissions_head_gates_sessions_but_not_trusted_backend_query_coverag
     let session_author = AuthorId::from_bytes([0xc1; 16]);
     let session = open_db(0xc1, session_author, &schema);
     let (session_transport, server_session_transport) = duplex();
-    let _session_upstream = session.connect_upstream(session_transport);
+    let _session_upstream = crate::db::block_on(session.connect_upstream(session_transport));
     let _session_subscriber = server.accept_subscriber(server_session_transport, session_author);
 
     let backend_query = prepared(&backend, &Query::from("todos"));
@@ -908,7 +909,7 @@ fn one_shot_edge_query_attaches_fresh_claim_bound_usage_subscription_for_covered
     );
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber_with_claims(
         server_transport,
         reader,
@@ -991,7 +992,7 @@ fn edge_subscription_with_claim_bound_policy_emits_later_matching_server_write()
     );
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber_with_claims(server_transport, reader, claims);
 
     let query = Query::from("chats");

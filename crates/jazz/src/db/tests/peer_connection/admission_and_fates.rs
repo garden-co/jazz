@@ -161,7 +161,7 @@ fn admitted_duplex_context_binds_peer_epochs_and_rejects_cross_wiring() {
     let server_node = NodeUuid::from_bytes([0x73; 16]);
     let (client_transport, server_transport) =
         duplex_with_admitted_session_context(identity, client_node, 41, server_node, 97);
-    let upstream = client.connect_upstream(client_transport);
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, identity);
     assert_eq!(upstream.borrow().connection_epoch, 41);
     assert_eq!(subscriber.borrow().connection_epoch, 97);
@@ -211,7 +211,7 @@ fn admitted_duplex_context_binds_peer_epochs_and_rejects_cross_wiring() {
 
     let (reconnected_client, reconnected_server) =
         duplex_with_admitted_session_context(identity, client_node, 42, server_node, 98);
-    let reconnect = client.connect_upstream(reconnected_client);
+    let reconnect = crate::db::block_on(client.connect_upstream(reconnected_client));
     let resumed = server.accept_subscriber(reconnected_server, identity);
     assert_ne!(
         upstream.borrow().connection_epoch,
@@ -242,7 +242,7 @@ fn permission_advice_uses_authenticated_link_identity_without_mutating() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let _alice_upstream = alice_client.connect_upstream(alice_transport);
+    let _alice_upstream = crate::db::block_on(alice_client.connect_upstream(alice_transport));
     let _alice_subscriber = server.accept_subscriber(alice_server_transport, alice);
     let alice_advice = alice_client.request_permission_advice(PermissionAdviceAction::Read {
         table: "todos".to_owned(),
@@ -257,7 +257,7 @@ fn permission_advice_uses_authenticated_link_identity_without_mutating() {
         NodeUuid::from_bytes([0x5e; 16]),
         2,
     );
-    let _mallory_upstream = mallory_client.connect_upstream(mallory_transport);
+    let _mallory_upstream = crate::db::block_on(mallory_client.connect_upstream(mallory_transport));
     let _mallory_subscriber = server.accept_subscriber(mallory_server_transport, mallory);
     let mallory_advice = mallory_client.request_permission_advice(PermissionAdviceAction::Read {
         table: "todos".to_owned(),
@@ -299,7 +299,7 @@ fn distinct_advice_actions_with_one_compiled_scope_hydrate_once() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, alice);
 
     let first = client.request_permission_advice(PermissionAdviceAction::Read {
@@ -350,7 +350,7 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, alice);
 
     let first = client.request_permission_advice(PermissionAdviceAction::Read {
@@ -421,7 +421,7 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
         NodeUuid::from_bytes([0xc0; 16]),
         9,
     );
-    let _core_upstream = server.server.connect_upstream(core_upstream);
+    let _core_upstream = crate::db::block_on(server.server.connect_upstream(core_upstream));
     let client = open_db(0xa1, alice, &schema);
     let (client_transport, server_transport) = duplex_with_admitted_session_context(
         alice,
@@ -430,7 +430,7 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, alice);
 
     let inserted = client
@@ -491,7 +491,7 @@ fn concurrent_upstreams_keep_selected_owner_until_detach_handoff() {
         NodeUuid::from_bytes([0xa2; 16]),
         20,
     );
-    let a = edge.server.connect_upstream(a_transport);
+    let a = crate::db::block_on(edge.server.connect_upstream(a_transport));
     let first = *edge.server.admitted_upstream_authority.borrow();
     let (b_transport, _b_peer) = duplex_with_admitted_session_context(
         identity,
@@ -500,7 +500,7 @@ fn concurrent_upstreams_keep_selected_owner_until_detach_handoff() {
         NodeUuid::from_bytes([0xb2; 16]),
         21,
     );
-    let _b = edge.server.connect_upstream(b_transport);
+    let _b = crate::db::block_on(edge.server.connect_upstream(b_transport));
     assert_eq!(
         *edge.server.admitted_upstream_authority.borrow(),
         first,
@@ -548,7 +548,7 @@ fn edge_route_capacity_rejects_instead_of_reporting_edge_acceptance() {
         NodeUuid::from_bytes([0xc0; 16]),
         1,
     );
-    let _upstream = edge.server.connect_upstream(upstream);
+    let _upstream = crate::db::block_on(edge.server.connect_upstream(upstream));
     let selected = edge
         .server
         .admitted_upstream_authority
@@ -563,7 +563,7 @@ fn edge_route_capacity_rejects_instead_of_reporting_edge_acceptance() {
         NodeUuid::from_bytes([0xe0; 16]),
         2,
     );
-    let _client_upstream = client.connect_upstream(client_transport);
+    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = edge.server.accept_edge_authority_subscriber_with_claims(
         edge_transport,
         identity,
@@ -619,7 +619,7 @@ fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
     // different admitted session, so it cannot supply that authority context.
     let (edge_upstream_transport, core_transport) =
         duplex_with_admitted_session_context(AuthorId::SYSTEM, edge_node, 41, core_node, 97);
-    let edge_upstream = edge.server.connect_upstream(edge_upstream_transport);
+    let edge_upstream = crate::db::block_on(edge.server.connect_upstream(edge_upstream_transport));
     let core = open_core(0xc0, AuthorId::SYSTEM, &schema);
     let core_session = core.accept_subscriber(core_transport, AuthorId::SYSTEM);
 
@@ -631,7 +631,7 @@ fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
         edge_node,
         13,
     );
-    let _client_upstream = client.connect_upstream(client_transport);
+    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
         edge_transport,
         alice,
@@ -813,7 +813,7 @@ fn stale_upstream_epoch_cannot_settle_routed_local_fate_before_selected_epoch() 
         NodeUuid::from_bytes([0xa2; 16]),
         1,
     );
-    let _a = edge.server.connect_upstream(a_transport);
+    let _a = crate::db::block_on(edge.server.connect_upstream(a_transport));
     let selected = edge.server.admitted_upstream_authority.borrow().unwrap();
     let (b_transport, mut b_peer) = duplex_with_admitted_session_context(
         identity,
@@ -822,7 +822,7 @@ fn stale_upstream_epoch_cannot_settle_routed_local_fate_before_selected_epoch() 
         NodeUuid::from_bytes([0xb2; 16]),
         2,
     );
-    let _b = edge.server.connect_upstream(b_transport);
+    let _b = crate::db::block_on(edge.server.connect_upstream(b_transport));
     let tx_id = edge
         .node()
         .borrow_mut()
@@ -892,7 +892,7 @@ fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() 
         NodeUuid::from_bytes([0xa2; 16]),
         20,
     );
-    let edge_a = edge.server.connect_upstream(edge_a_transport);
+    let edge_a = crate::db::block_on(edge.server.connect_upstream(edge_a_transport));
     let a = authority_a.accept_subscriber(a_transport, identity);
     let (edge_b_transport, b_transport) = duplex_with_admitted_session_context(
         identity,
@@ -901,7 +901,7 @@ fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() 
         NodeUuid::from_bytes([0xb2; 16]),
         21,
     );
-    let edge_b = edge.server.connect_upstream(edge_b_transport);
+    let edge_b = crate::db::block_on(edge.server.connect_upstream(edge_b_transport));
     let _b = authority_b.accept_subscriber(b_transport, identity);
 
     let client = open_db(0xc1, identity, &schema);
@@ -912,7 +912,7 @@ fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() 
         edge_node,
         2,
     );
-    let _client_upstream = client.connect_upstream(client_transport);
+    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
         edge_transport,
         identity,
@@ -1047,7 +1047,7 @@ fn edge_parks_downstream_fate_until_a_later_authority_connects() {
         NodeUuid::from_bytes([0xa2; 16]),
         20,
     );
-    let edge_a = edge.server.connect_upstream(edge_a_transport);
+    let edge_a = crate::db::block_on(edge.server.connect_upstream(edge_a_transport));
     let _a = authority_a.accept_subscriber(a_transport, identity);
 
     let client = open_db(0xc1, identity, &schema);
@@ -1058,7 +1058,7 @@ fn edge_parks_downstream_fate_until_a_later_authority_connects() {
         edge_node,
         2,
     );
-    let _client_upstream = client.connect_upstream(client_transport);
+    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
         edge_transport,
         identity,
@@ -1094,7 +1094,7 @@ fn edge_parks_downstream_fate_until_a_later_authority_connects() {
         NodeUuid::from_bytes([0xc2; 16]),
         22,
     );
-    let _edge_c = edge.server.connect_upstream(edge_c_transport);
+    let _edge_c = crate::db::block_on(edge.server.connect_upstream(edge_c_transport));
     let _c = authority_c.accept_subscriber(c_transport, identity);
     edge.tick().unwrap();
     authority_c.tick().unwrap();
@@ -1134,7 +1134,7 @@ fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
         edge_node,
         13,
     );
-    let client_upstream = client.connect_upstream(client_transport);
+    let client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
         edge_transport,
         alice,
@@ -1178,7 +1178,7 @@ fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
 
     let (edge_upstream_transport, core_transport) =
         duplex_with_admitted_session_context(AuthorId::SYSTEM, edge_node, 41, core_node, 97);
-    let _edge_upstream = edge.server.connect_upstream(edge_upstream_transport);
+    let _edge_upstream = crate::db::block_on(edge.server.connect_upstream(edge_upstream_transport));
     assert!(
         edge.server.edge_fate_routes.borrow()[&tx_id][0]
             .authority
@@ -1228,11 +1228,11 @@ fn stale_same_authority_session_cannot_settle_or_forward_a_routed_fate() {
 
     let (edge_old_transport, old_transport) =
         duplex_with_admitted_session_context(identity, edge_node, 10, authority_node, 20);
-    let _edge_old = edge.server.connect_upstream(edge_old_transport);
+    let _edge_old = crate::db::block_on(edge.server.connect_upstream(edge_old_transport));
     let old = old_authority.accept_subscriber(old_transport, identity);
     let (edge_current_transport, current_transport) =
         duplex_with_admitted_session_context(identity, edge_node, 11, authority_node, 21);
-    let _edge_current = edge.server.connect_upstream(edge_current_transport);
+    let _edge_current = crate::db::block_on(edge.server.connect_upstream(edge_current_transport));
     let current = current_authority.accept_subscriber(current_transport, identity);
 
     let client = open_db(0xc1, identity, &schema);
@@ -1243,7 +1243,7 @@ fn stale_same_authority_session_cannot_settle_or_forward_a_routed_fate() {
         edge_node,
         2,
     );
-    let _client_upstream = client.connect_upstream(client_transport);
+    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
         edge_transport,
         identity,
@@ -1328,7 +1328,7 @@ fn public_permission_advice_accepts_an_explicit_zero_clause_receipt() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, identity);
     let advice = client.request_permission_advice(PermissionAdviceAction::Read {
         table: "todos".to_owned(),
@@ -1356,7 +1356,7 @@ fn permission_advice_is_unknown_until_authority_permissions_are_ready() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
     let advice = client.request_permission_advice(PermissionAdviceAction::Insert {
         table: "todos".to_owned(),
@@ -1384,7 +1384,7 @@ fn partial_replica_cannot_act_as_permission_advice_authority() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = partial.accept_subscriber(partial_transport, author);
     let advice = client.request_permission_advice(PermissionAdviceAction::Insert {
         table: "todos".to_owned(),
@@ -1424,7 +1424,7 @@ fn permission_advice_update_evaluates_post_patch_update_check() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
     let advice = client.request_permission_advice(PermissionAdviceAction::Update {
         table: "todos".to_owned(),
@@ -1477,7 +1477,7 @@ fn cancelled_permission_advice_ignores_late_or_replayed_response_ids() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
 
     let cancelled = client.request_permission_advice(PermissionAdviceAction::Read {
         table: "todos".to_owned(),
@@ -1528,7 +1528,7 @@ fn identical_permission_advice_requests_share_one_authority_intent() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let action = PermissionAdviceAction::Read {
         table: "todos".to_owned(),
         row: row(1),
@@ -1566,7 +1566,7 @@ fn dropped_permission_advice_is_not_sent_and_reopened_nodes_use_fresh_ids() {
         NodeUuid::from_bytes([0x5e; 16]),
         1,
     );
-    let _first_upstream = first.connect_upstream(first_transport);
+    let _first_upstream = crate::db::block_on(first.connect_upstream(first_transport));
     let cancelled = first.request_permission_advice(PermissionAdviceAction::Insert {
         table: "todos".to_owned(),
         cells: cells("sensitive", false, author),
@@ -1594,7 +1594,7 @@ fn dropped_permission_advice_is_not_sent_and_reopened_nodes_use_fresh_ids() {
         NodeUuid::from_bytes([0x5e; 16]),
         2,
     );
-    let _reopened_upstream = reopened.connect_upstream(reopened_transport);
+    let _reopened_upstream = crate::db::block_on(reopened.connect_upstream(reopened_transport));
     let reopened_live = reopened.request_permission_advice(PermissionAdviceAction::Read {
         table: "todos".to_owned(),
         row: row(1),

@@ -201,8 +201,7 @@ fn run_rung(config: ConfigRef, table_rows: usize) -> RungReceipt {
     let seed_started = Instant::now();
     seed_rows(&db, config, table_rows);
     let seed_us = seed_started.elapsed().as_micros();
-    db.close()
-        .expect("close seeded selective-hydration database");
+    block_on(db.close()).expect("close seeded selective-hydration database");
     drop(db);
 
     let (db, storage_open_us_after_seed, db_open_us_after_seed) = open_db(temp.path(), schema);
@@ -253,8 +252,7 @@ fn run_rung(config: ConfigRef, table_rows: usize) -> RungReceipt {
     let result_digest = digest_rows(&observed);
     assert_eq!(result_digest, digest_rows(&expected));
 
-    db.close()
-        .expect("close measured selective-hydration database");
+    block_on(db.close()).expect("close measured selective-hydration database");
 
     RungReceipt {
         table_rows,

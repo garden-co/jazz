@@ -364,6 +364,9 @@ where
         versions: &[VersionRecord],
         ingest_context: Option<CommitUnitIngestContext>,
     ) -> Result<bool, Error> {
+        if ingest_context.is_some_and(|context| context.trust == CommitUnitTrust::TrustedAdmin) {
+            return Ok(true);
+        }
         let permission_subject = match ingest_context {
             Some(context) => {
                 if context.trust == CommitUnitTrust::Session && tx.made_by != context.identity {
@@ -372,6 +375,7 @@ where
                 match context.trust {
                     CommitUnitTrust::Session => context.identity,
                     CommitUnitTrust::TrustedBackend => tx.permission_subject.unwrap_or(tx.made_by),
+                    CommitUnitTrust::TrustedAdmin => unreachable!("handled above"),
                 }
             }
             None => tx.permission_subject.unwrap_or(tx.made_by),

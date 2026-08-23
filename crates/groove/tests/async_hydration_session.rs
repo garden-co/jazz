@@ -168,15 +168,20 @@ fn cancelled_hydration_publishes_no_subscription_or_partial_session() {
 
     control.take_observed();
     control.pause();
-    let mut install = Box::pin(database.subscribe_one_sink(GraphBuilder::table("albums")));
+    let subscription =
+        block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
+    assert!(subscription.try_recv().is_err());
+    let mut progress = Box::pin(database.drive_progress());
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
     assert!(matches!(
-        Pin::new(&mut install).poll(&mut context),
+        Pin::new(&mut progress).poll(&mut context),
         Poll::Pending
     ));
     assert!(control.observed().contains(&TestStorageOperation::ScanOpen));
-    drop(install);
+    drop(progress);
+    assert!(database.unsubscribe(subscription.id()));
+    drop(subscription);
 
     let after = database.runtime_stats();
     assert_eq!(after.graph_nodes, before.graph_nodes);
@@ -184,7 +189,78 @@ fn cancelled_hydration_publishes_no_subscription_or_partial_session() {
     control.resume();
     let subscription =
         block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
-    assert_eq!(subscription.recv().unwrap().deltas.len(), 1);
+    assert_eq!(
+        block_on(database.next_subscription(&subscription))
+            .unwrap()
+            .deltas
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn write_during_cold_subscription_hydration_is_delivered_exactly_once() {
+    let (storage, control) = TestStorage::controlled(&["albums"]);
+    let mut database = block_on(Database::new(schema(), storage)).unwrap();
+    let mut seed = database.open_batch();
+    seed.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("Kind of Blue".into())],
+    );
+    block_on(database.commit_batch(seed)).unwrap();
+
+    control.take_observed();
+    control.pause_on(TestStorageOperation::ScanOpen);
+    let subscription =
+        block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
+    assert!(subscription.try_recv().is_err());
+
+    let mut progress = Box::pin(database.drive_progress());
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(
+        progress.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
+    drop(progress);
+
+    let mut write = database.open_batch();
+    write.insert(
+        "albums",
+        vec![Value::U64(2), Value::String("Blue Train".into())],
+    );
+    let publication = block_on(database.apply_batch(write)).unwrap();
+
+    control.resume_operation(TestStorageOperation::ScanOpen);
+    block_on(database.drive_progress()).unwrap();
+
+    let mut cardinality: Vec<(Vec<Value>, i64)> = Vec::new();
+    let first = subscription.recv().unwrap();
+    for (row, weight) in first.to_values().unwrap() {
+        if let Some((_, current)) = cardinality.iter_mut().find(|(seen, _)| *seen == row) {
+            *current += weight;
+        } else {
+            cardinality.push((row, weight));
+        }
+    }
+    while let Ok(update) = subscription.try_recv() {
+        for (row, weight) in update.to_values().unwrap() {
+            if let Some((_, current)) = cardinality.iter_mut().find(|(seen, _)| *seen == row) {
+                *current += weight;
+            } else {
+                cardinality.push((row, weight));
+            }
+        }
+    }
+    assert_eq!(cardinality.len(), 2);
+    assert!(cardinality.contains(&(vec![Value::U64(1), Value::String("Kind of Blue".into())], 1,)));
+    assert!(
+        cardinality.contains(&(vec![Value::U64(2), Value::String("Blue Train".into())], 1,)),
+        "the hydration snapshot and queued incremental update must not overlap"
+    );
+
+    let persistence = block_on(publication.persist());
+    database.finish_persistence(persistence).unwrap();
 }
 
 #[test]
@@ -193,14 +269,14 @@ fn hash_equal_hydration_roots_share_one_in_flight_storage_request() {
     let mut database = block_on(Database::new(schema(), storage)).unwrap();
 
     control.take_observed();
-    let subscription = block_on(database.subscribe([
-        ("left", GraphBuilder::table("albums")),
-        ("right", GraphBuilder::table("albums")),
-    ]))
-    .unwrap();
+    let subscription = database
+        .subscribe([
+            ("left", GraphBuilder::table("albums")),
+            ("right", GraphBuilder::table("albums")),
+        ])
+        .unwrap();
     assert!(
-        subscription
-            .recv()
+        block_on(database.next_multisink_subscription(&subscription))
             .unwrap()
             .sinks
             .values()
@@ -229,11 +305,16 @@ fn blocked_index_source_retains_its_storage_request_across_polls() {
 
     control.take_observed();
     control.pause_on(TestStorageOperation::ScanOpen);
-    let mut install =
-        Box::pin(database.subscribe_one_sink(GraphBuilder::index("albums", "albums_by_title")));
+    let subscription =
+        block_on(database.subscribe_one_sink(GraphBuilder::index("albums", "albums_by_title")))
+            .unwrap();
+    let mut progress = Box::pin(database.drive_progress());
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
-    assert!(matches!(install.as_mut().poll(&mut context), Poll::Pending));
+    assert!(matches!(
+        progress.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
     assert_eq!(
         control
             .observed()
@@ -244,7 +325,7 @@ fn blocked_index_source_retains_its_storage_request_across_polls() {
     );
 
     control.resume_operation(TestStorageOperation::ScanOpen);
-    let subscription = block_on(install).unwrap();
+    block_on(progress).unwrap();
     assert_eq!(subscription.recv().unwrap().deltas.len(), 1);
     assert_eq!(
         control
@@ -307,16 +388,23 @@ fn projected_indexed_rows_discover_and_hydrate_referenced_rows() {
         "logical-album",
         StaticScanSpec::Prefix(vec![LiteralValue::String("Kind of Blue".into())]),
     );
-    let mut install = Box::pin(database.subscribe_one_sink(graph));
+    let subscription = block_on(database.subscribe_one_sink(graph)).unwrap();
+    let mut progress = Box::pin(database.drive_progress());
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
-    assert!(matches!(install.as_mut().poll(&mut context), Poll::Pending));
+    assert!(matches!(
+        progress.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
     assert!(control.observed().contains(&TestStorageOperation::ScanOpen));
     assert!(!control.observed().contains(&TestStorageOperation::Get));
 
     control.resume_operation(TestStorageOperation::ScanOpen);
     for _ in 0..8 {
-        assert!(matches!(install.as_mut().poll(&mut context), Poll::Pending));
+        assert!(matches!(
+            progress.as_mut().poll(&mut context),
+            Poll::Pending
+        ));
         if control.observed().contains(&TestStorageOperation::Get) {
             break;
         }
@@ -332,7 +420,7 @@ fn projected_indexed_rows_discover_and_hydrate_referenced_rows() {
     );
 
     control.resume_operation(TestStorageOperation::Get);
-    let subscription = block_on(install).unwrap();
+    block_on(progress).unwrap();
     assert_eq!(
         subscription.recv().unwrap().to_values().unwrap(),
         vec![
@@ -379,7 +467,13 @@ fn recursive_hydration_reuses_the_sessions_table_snapshot() {
 
     control.take_observed();
     let subscription = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
-    assert_eq!(subscription.recv().unwrap().deltas.len(), 3);
+    assert_eq!(
+        block_on(database.next_subscription(&subscription))
+            .unwrap()
+            .deltas
+            .len(),
+        3
+    );
     assert_eq!(
         control
             .observed()
@@ -403,10 +497,11 @@ fn blocked_recursive_index_source_retains_the_sessions_request() {
 
     control.take_observed();
     control.pause_on(TestStorageOperation::ScanOpen);
-    let mut install = Box::pin(database.subscribe_one_sink(indexed_reachability_graph()));
+    let subscription = block_on(database.subscribe_one_sink(indexed_reachability_graph())).unwrap();
+    let mut progress = Box::pin(database.drive_progress());
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
-    if let Poll::Ready(result) = install.as_mut().poll(&mut context) {
+    if let Poll::Ready(result) = progress.as_mut().poll(&mut context) {
         match result {
             Ok(_) => panic!("recursive install completed before the paused request"),
             Err(error) => panic!("recursive install failed early: {error:?}"),
@@ -422,7 +517,7 @@ fn blocked_recursive_index_source_retains_the_sessions_request() {
     );
 
     control.resume_operation(TestStorageOperation::ScanOpen);
-    let subscription = block_on(install).unwrap();
+    block_on(progress).unwrap();
     assert_eq!(subscription.recv().unwrap().deltas.len(), 2);
     assert_eq!(
         control
@@ -444,7 +539,13 @@ fn recursive_retraction_loads_before_mutating_the_tick() {
     batch.insert("edges", vec![Value::U64(2), Value::U64(2), Value::U64(3)]);
     block_on(database.commit_batch(batch)).unwrap();
     let subscription = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
-    assert_eq!(subscription.recv().unwrap().deltas.len(), 3);
+    assert_eq!(
+        block_on(database.next_subscription(&subscription))
+            .unwrap()
+            .deltas
+            .len(),
+        3
+    );
 
     storage.evict_scans("edges");
     control.take_observed();
@@ -491,9 +592,19 @@ fn resident_terminal_publishes_while_independent_recursive_terminal_is_blocked()
     database.finish_persistence(persistence).unwrap();
 
     let albums = block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
-    assert!(albums.recv().unwrap().is_empty());
+    assert!(
+        block_on(database.next_subscription(&albums))
+            .unwrap()
+            .is_empty()
+    );
     let reach = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
-    assert_eq!(reach.recv().unwrap().deltas.len(), 3);
+    assert_eq!(
+        block_on(database.next_subscription(&reach))
+            .unwrap()
+            .deltas
+            .len(),
+        3
+    );
 
     storage.evict_scans("edges");
     control.take_observed();
@@ -531,7 +642,11 @@ fn after_persistence_batch_holds_notifications_until_receipt_is_finished() {
     let mut database = block_on(Database::new(schema(), storage)).unwrap();
     let subscription =
         block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
-    assert!(subscription.recv().unwrap().is_empty());
+    assert!(
+        block_on(database.next_subscription(&subscription))
+            .unwrap()
+            .is_empty()
+    );
 
     let mut batch = database.open_batch();
     batch.deliver_notifications(NotificationTiming::AfterPersistence);
@@ -560,11 +675,27 @@ fn hydration_failure_ends_only_affected_terminal_and_releases_later_work() {
     database.finish_persistence(persistence).unwrap();
 
     let albums = block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
-    assert!(albums.recv().unwrap().is_empty());
+    assert!(
+        block_on(database.next_subscription(&albums))
+            .unwrap()
+            .is_empty()
+    );
     let failed_reach = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
-    assert_eq!(failed_reach.recv().unwrap().deltas.len(), 3);
+    assert_eq!(
+        block_on(database.next_subscription(&failed_reach))
+            .unwrap()
+            .deltas
+            .len(),
+        3
+    );
     let shared_failed_reach = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
-    assert_eq!(shared_failed_reach.recv().unwrap().deltas.len(), 3);
+    assert_eq!(
+        block_on(database.next_subscription(&shared_failed_reach))
+            .unwrap()
+            .deltas
+            .len(),
+        3
+    );
 
     storage.evict_scans("edges");
     control.pause_on(TestStorageOperation::ScanOpen);
@@ -592,7 +723,13 @@ fn hydration_failure_ends_only_affected_terminal_and_releases_later_work() {
         Err(DatabaseError::SubscriptionEnded)
     ));
     let reinstalled = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
-    assert_eq!(reinstalled.recv().unwrap().deltas.len(), 1);
+    assert_eq!(
+        block_on(database.next_subscription(&reinstalled))
+            .unwrap()
+            .deltas
+            .len(),
+        1
+    );
     let persistence = block_on(published.persist());
     database.finish_persistence(persistence).unwrap();
 
@@ -632,9 +769,19 @@ fn resident_publication_returns_before_independent_recursive_hydration() {
     block_on(database.commit_batch(seed)).unwrap();
 
     let albums = block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
-    assert!(albums.recv().unwrap().is_empty());
+    assert!(
+        block_on(database.next_subscription(&albums))
+            .unwrap()
+            .is_empty()
+    );
     let reach = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
-    assert_eq!(reach.recv().unwrap().deltas.len(), 3);
+    assert_eq!(
+        block_on(database.next_subscription(&reach))
+            .unwrap()
+            .deltas
+            .len(),
+        3
+    );
     control.take_observed();
     control.pause_on(TestStorageOperation::ScanOpen);
 
@@ -681,9 +828,19 @@ fn later_resident_tick_runs_while_earlier_recursive_tick_is_suspended() {
     block_on(database.commit_batch(seed)).unwrap();
 
     let albums = block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
-    assert!(albums.recv().unwrap().is_empty());
+    assert!(
+        block_on(database.next_subscription(&albums))
+            .unwrap()
+            .is_empty()
+    );
     let reach = block_on(database.subscribe_one_sink(reachability_graph())).unwrap();
-    assert_eq!(reach.recv().unwrap().deltas.len(), 3);
+    assert_eq!(
+        block_on(database.next_subscription(&reach))
+            .unwrap()
+            .deltas
+            .len(),
+        3
+    );
 
     storage.evict_scans("edges");
     control.take_observed();
@@ -766,10 +923,14 @@ fn completed_stateful_branch_is_not_reapplied_while_sibling_is_blocked() {
         metric_aggregate("left_metrics"),
         metric_aggregate("right_metrics"),
     ]);
-    let mut install = Box::pin(database.subscribe_one_sink(graph));
+    let subscription = block_on(database.subscribe_one_sink(graph)).unwrap();
+    let mut progress = Box::pin(database.drive_progress());
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
-    assert!(matches!(install.as_mut().poll(&mut context), Poll::Pending));
+    assert!(matches!(
+        progress.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
     assert_eq!(
         control
             .observed()
@@ -781,7 +942,10 @@ fn completed_stateful_branch_is_not_reapplied_while_sibling_is_blocked() {
     );
 
     control.release_one();
-    assert!(matches!(install.as_mut().poll(&mut context), Poll::Pending));
+    assert!(matches!(
+        progress.as_mut().poll(&mut context),
+        Poll::Pending
+    ));
     assert_eq!(
         control
             .observed()
@@ -793,7 +957,7 @@ fn completed_stateful_branch_is_not_reapplied_while_sibling_is_blocked() {
     );
 
     control.resume_operation(TestStorageOperation::ScanOpen);
-    let subscription = block_on(install).unwrap();
+    block_on(progress).unwrap();
     let initial = subscription.recv().unwrap().to_values().unwrap();
     assert_eq!(initial.len(), 2);
     assert!(initial.iter().any(|(row, weight)| {
@@ -840,20 +1004,31 @@ fn cancelled_prepared_bind_discards_binding_tick_and_subscription_state() {
 
     control.take_observed();
     control.pause();
-    let mut install = Box::pin(database.bind_shape_one_sink(shape.id(), &[Value::U64(1)]));
+    let subscription =
+        block_on(database.bind_shape_one_sink(shape.id(), &[Value::U64(1)])).unwrap();
+    assert!(subscription.try_recv().is_err());
+    let mut progress = Box::pin(database.drive_progress());
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
     assert!(matches!(
-        Pin::new(&mut install).poll(&mut context),
+        Pin::new(&mut progress).poll(&mut context),
         Poll::Pending
     ));
-    drop(install);
+    drop(progress);
+    assert!(database.unsubscribe(subscription.id()));
+    drop(subscription);
 
     assert_eq!(database.runtime_stats().active_subscriptions, 0);
     control.resume();
     let subscription =
         block_on(database.bind_shape_one_sink(shape.id(), &[Value::U64(1)])).unwrap();
-    assert_eq!(subscription.recv().unwrap().deltas.len(), 1);
+    assert_eq!(
+        block_on(database.next_subscription(&subscription))
+            .unwrap()
+            .deltas
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -893,7 +1068,11 @@ fn cancelled_persistence_does_not_undo_an_applied_batch() {
     let mut database = block_on(Database::new(schema(), storage)).unwrap();
     let subscription =
         block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
-    assert!(subscription.recv().unwrap().is_empty());
+    assert!(
+        block_on(database.next_subscription(&subscription))
+            .unwrap()
+            .is_empty()
+    );
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -998,7 +1177,11 @@ fn committed_terminal_output_carries_its_durable_publication_identity() {
     let mut database = block_on(Database::new(schema(), storage)).unwrap();
     let subscription =
         block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
-    assert!(subscription.recv().unwrap().is_empty());
+    assert!(
+        block_on(database.next_subscription(&subscription))
+            .unwrap()
+            .is_empty()
+    );
 
     let mut first = database.open_batch();
     first.insert(
@@ -1033,7 +1216,11 @@ fn resident_publication_is_queryable_and_tagged_while_persistence_is_suspended()
     let mut database = block_on(Database::new(indexed_schema(), storage)).unwrap();
     let subscription =
         block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
-    assert!(subscription.recv().unwrap().is_empty());
+    assert!(
+        block_on(database.next_subscription(&subscription))
+            .unwrap()
+            .is_empty()
+    );
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -1204,7 +1391,11 @@ fn publishing_an_insert_into_a_resident_table_does_not_wait_for_storage() {
     let mut database = block_on(Database::new(schema(), storage)).unwrap();
     let subscription =
         block_on(database.subscribe_one_sink(GraphBuilder::table("albums"))).unwrap();
-    assert!(subscription.recv().unwrap().is_empty());
+    assert!(
+        block_on(database.next_subscription(&subscription))
+            .unwrap()
+            .is_empty()
+    );
 
     let mut batch = database.open_batch();
     batch.insert(

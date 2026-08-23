@@ -4,6 +4,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::sync::Mutex;
 use std::task::{Context, Poll};
 
 use super::evaluation_session::{EvaluationInputs, StorageRequestKey, StorageRequests};
@@ -84,10 +85,41 @@ impl From<IvmRuntimeError> for EvaluationFailure {
 
 #[derive(Default)]
 struct PendingIncrementalState {
-    evaluations: BTreeMap<u64, IncrementalEvaluation<'static>>,
+    evaluations: BTreeMap<u64, PendingEvaluation>,
     order: VecDeque<u64>,
     waiters_by_node: HashMap<NodeId, VecDeque<u64>>,
     next_id: u64,
+}
+
+enum PendingEvaluation {
+    Incremental(IncrementalEvaluation<'static>),
+    SubscriptionHydration(PendingSubscriptionHydration),
+}
+
+struct PendingSubscriptionHydration {
+    subscription_id: SubscriptionId,
+    outputs: BTreeMap<String, CompiledNode>,
+    initial: Arc<Mutex<Option<MultisinkDeltas>>>,
+    session: EvaluationSession<'static>,
+    binding_snapshots: HashMap<String, RecordDeltas>,
+    hydrate_arrangements: bool,
+    metrics: TickMetrics,
+}
+
+impl PendingEvaluation {
+    fn work_queue_mut(&mut self) -> &mut EvaluationWorkQueue {
+        match self {
+            Self::Incremental(evaluation) => &mut evaluation.work_queue,
+            Self::SubscriptionHydration(evaluation) => &mut evaluation.session.work_queue,
+        }
+    }
+
+    fn work_queue(&self) -> &EvaluationWorkQueue {
+        match self {
+            Self::Incremental(evaluation) => &evaluation.work_queue,
+            Self::SubscriptionHydration(evaluation) => &evaluation.session.work_queue,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -923,6 +955,62 @@ impl<'a> EvaluationSession<'a> {
 }
 
 impl IvmRuntime {
+    pub(super) fn enqueue_subscription_hydration(
+        &mut self,
+        subscription_id: SubscriptionId,
+        outputs: BTreeMap<String, CompiledNode>,
+        storage: OwnedStorage<'static>,
+        binding_snapshots: Option<HashMap<String, RecordDeltas>>,
+        binding_frontier_advance: Option<&str>,
+        initial: Arc<Mutex<Option<MultisinkDeltas>>>,
+    ) -> Result<(), IvmRuntimeError> {
+        let mut seen_roots = HashSet::new();
+        let roots = outputs
+            .values()
+            .flat_map(|output| [output.root_ordering_node, Some(output.node)])
+            .flatten()
+            .filter(|root| seen_roots.insert(*root))
+            .collect::<VecDeque<_>>();
+        let hydrate_arrangements = roots.iter().copied().try_fold(false, |found, root| {
+            Ok::<_, IvmRuntimeError>(found || self.output_depends_on_aggregate(root)?)
+        })?;
+        let mut session = EvaluationSession::hydration(self, roots, storage)?;
+        if let Some(shape) = binding_frontier_advance {
+            session.advance_binding_input(&self.graph, shape);
+        }
+        let temporal_blockers = {
+            let pending = self.pending_incremental.0.borrow();
+            pending
+                .waiters_by_node
+                .keys()
+                .map(|node| (*node, 1))
+                .collect::<HashMap<_, _>>()
+        };
+        session.work_queue.add_temporal_blockers(&temporal_blockers);
+        let evaluation = PendingEvaluation::SubscriptionHydration(PendingSubscriptionHydration {
+            subscription_id,
+            outputs,
+            initial,
+            session,
+            binding_snapshots: binding_snapshots.unwrap_or_else(|| self.binding_snapshot_deltas()),
+            hydrate_arrangements,
+            metrics: TickMetrics::default(),
+        });
+        let mut pending = self.pending_incremental.0.borrow_mut();
+        let evaluation_id = pending.next_id;
+        pending.next_id = pending.next_id.saturating_add(1);
+        for node in evaluation.work_queue().incomplete_nodes() {
+            pending
+                .waiters_by_node
+                .entry(node)
+                .or_default()
+                .push_back(evaluation_id);
+        }
+        pending.evaluations.insert(evaluation_id, evaluation);
+        pending.order.push_back(evaluation_id);
+        Ok(())
+    }
+
     fn fail_evaluation_nodes(&mut self, failure: &EvaluationFailure) {
         self.operator_states
             .retain(|key, _| !failure.affected_nodes.contains(&key.node));
@@ -1061,7 +1149,9 @@ impl IvmRuntime {
                         .or_default()
                         .push_back(evaluation_id);
                 }
-                pending.evaluations.insert(evaluation_id, evaluation);
+                pending
+                    .evaluations
+                    .insert(evaluation_id, PendingEvaluation::Incremental(evaluation));
                 pending.order.push_back(evaluation_id);
                 Ok(metrics)
             }
@@ -1122,8 +1212,24 @@ impl IvmRuntime {
                 .evaluations
                 .remove(&evaluation_id)
                 .expect("pending evaluation order references a live session");
-            let progress = evaluation.poll(self, cx);
-            let completed = evaluation.work_queue.drain_completed_events();
+            let progress = match &mut evaluation {
+                PendingEvaluation::Incremental(incremental) => incremental.poll(self, cx),
+                PendingEvaluation::SubscriptionHydration(hydration) => hydration
+                    .session
+                    .poll(
+                        self,
+                        &hydration.binding_snapshots,
+                        hydration.hydrate_arrangements,
+                        &mut hydration.metrics,
+                        cx,
+                    )
+                    .map_err(|error| EvaluationFailure {
+                        kind: EvaluationFailureKind::Scoped,
+                        affected_nodes: hydration.session.work_queue.incomplete_nodes().collect(),
+                        error: Arc::new(error),
+                    }),
+            };
+            let completed = evaluation.work_queue_mut().drain_completed_events();
             for node in &completed {
                 let Some(waiters) = state.waiters_by_node.get_mut(node) else {
                     continue;
@@ -1137,19 +1243,61 @@ impl IvmRuntime {
                 if let Some(successor) = successor
                     && let Some(later) = state.evaluations.get_mut(&successor)
                 {
-                    later.work_queue.temporal_ready(*node);
+                    later.work_queue_mut().temporal_ready(*node);
                 }
             }
             match progress {
-                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Ok(())) => {
+                    if let PendingEvaluation::SubscriptionHydration(hydration) = evaluation {
+                        let snapshot = subscription_snapshot_from_hydrated(
+                            &hydration.outputs,
+                            &hydration.session.outputs,
+                        );
+                        hydration.session.install(self);
+                        self.record_hydration_memo_metrics(&hydration.metrics);
+                        self.evict_eval_memo();
+                        match snapshot {
+                            Ok(snapshot) => {
+                                *hydration
+                                    .initial
+                                    .lock()
+                                    .expect("subscription initial snapshot mutex poisoned") =
+                                    Some(snapshot);
+                            }
+                            Err(error) => {
+                                if let Some(subscription) =
+                                    self.multisink_subscriptions.get(&hydration.subscription_id)
+                                {
+                                    subscription
+                                        .sender
+                                        .fail(SubscriptionError::new(Arc::new(error)));
+                                }
+                                self.unsubscribe(hydration.subscription_id);
+                            }
+                        }
+                    }
+                }
                 Poll::Ready(Err(failure)) => {
+                    if let PendingEvaluation::SubscriptionHydration(hydration) = &evaluation {
+                        if let Some(subscription) =
+                            self.multisink_subscriptions.get(&hydration.subscription_id)
+                        {
+                            subscription
+                                .sender
+                                .fail(SubscriptionError::new(Arc::clone(&failure.error)));
+                        }
+                        self.unsubscribe(hydration.subscription_id);
+                    }
                     if failure.kind == EvaluationFailureKind::Fatal {
                         state.order = retained_order;
                         *slot.borrow_mut() = state;
                         return Poll::Ready(Err(failure.into_error()));
                     }
                     self.fail_evaluation_nodes(&failure);
-                    let incomplete = evaluation.work_queue.incomplete_nodes().collect::<Vec<_>>();
+                    let incomplete = evaluation
+                        .work_queue()
+                        .incomplete_nodes()
+                        .collect::<Vec<_>>();
                     for node in incomplete {
                         let Some(waiters) = state.waiters_by_node.get_mut(&node) else {
                             continue;
@@ -1162,7 +1310,7 @@ impl IvmRuntime {
                         if let Some(successor) = successor
                             && let Some(later) = state.evaluations.get_mut(&successor)
                         {
-                            later.work_queue.temporal_ready(node);
+                            later.work_queue_mut().temporal_ready(node);
                         }
                     }
                 }
@@ -1543,81 +1691,7 @@ impl IvmRuntime {
                 binding_frontier_advance,
             )
             .await?;
-        let mut sinks = BTreeMap::new();
-        for (sink, output) in outputs {
-            let ordering = match output.root_ordering_node {
-                Some(node) => Some(
-                    hydrated
-                        .get(&node)
-                        .cloned()
-                        .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?,
-                ),
-                None => None,
-            };
-            let mut records = hydrated
-                .get(&output.node)
-                .cloned()
-                .ok_or(IvmRuntimeError::GraphNodeNotFound(output.node))?;
-            if !records.descriptor.registry_compatible_with(&output.output) {
-                return Err(IvmRuntimeError::GraphOutputMismatch);
-            }
-            if let Some(ordering) = &ordering {
-                order_terminal_snapshot(&mut records, ordering)?;
-            }
-            sinks.insert(sink.clone(), records);
-        }
-        Ok(MultisinkDeltas {
-            sinks,
-            terminal_sinks: BTreeMap::new(),
-        })
-    }
-
-    pub(super) async fn hydration_snapshots_for_subscription<S>(
-        &mut self,
-        outputs: &BTreeMap<String, CompiledNode>,
-        storage: &S,
-    ) -> Result<MultisinkDeltas, IvmRuntimeError>
-    where
-        S: OrderedKvStorage,
-    {
-        self.hydration_snapshots(outputs, storage, HydrationMode::Subscription)
-            .await
-    }
-
-    pub(super) async fn hydration_snapshots_for_subscription_with_binding<S>(
-        &mut self,
-        outputs: &BTreeMap<String, CompiledNode>,
-        storage: &S,
-        binding: &BindingDelta,
-    ) -> Result<MultisinkDeltas, IvmRuntimeError>
-    where
-        S: OrderedKvStorage,
-    {
-        let mut snapshots = self.binding_snapshot_deltas();
-        let snapshot = snapshots
-            .entry(binding.shape.clone())
-            .or_insert_with(|| RecordDeltas {
-                descriptor: binding.descriptor,
-                deltas: Vec::new(),
-            });
-        for delta in &binding.deltas {
-            if delta.weight > 0
-                && !snapshot
-                    .deltas
-                    .iter()
-                    .any(|existing| existing.record == delta.record)
-            {
-                snapshot.deltas.push(delta.clone());
-            }
-        }
-        self.hydration_snapshots_with_binding_snapshots(
-            outputs,
-            storage,
-            HydrationMode::Subscription,
-            Some(snapshots),
-            (!binding.deltas.is_empty()).then_some(binding.shape.as_str()),
-        )
-        .await
+        subscription_snapshot_from_hydrated(outputs, &hydrated)
     }
 
     fn output_depends_on_aggregate(&self, output_node: NodeId) -> Result<bool, IvmRuntimeError> {
@@ -1703,4 +1777,37 @@ impl IvmRuntime {
 
         Ok(())
     }
+}
+
+fn subscription_snapshot_from_hydrated(
+    outputs: &BTreeMap<String, CompiledNode>,
+    hydrated: &HashMap<NodeId, RecordDeltas>,
+) -> Result<MultisinkDeltas, IvmRuntimeError> {
+    let mut sinks = BTreeMap::new();
+    for (sink, output) in outputs {
+        let ordering = match output.root_ordering_node {
+            Some(node) => Some(
+                hydrated
+                    .get(&node)
+                    .cloned()
+                    .ok_or(IvmRuntimeError::GraphNodeNotFound(node))?,
+            ),
+            None => None,
+        };
+        let mut records = hydrated
+            .get(&output.node)
+            .cloned()
+            .ok_or(IvmRuntimeError::GraphNodeNotFound(output.node))?;
+        if !records.descriptor.registry_compatible_with(&output.output) {
+            return Err(IvmRuntimeError::GraphOutputMismatch);
+        }
+        if let Some(ordering) = &ordering {
+            order_terminal_snapshot(&mut records, ordering)?;
+        }
+        sinks.insert(sink.clone(), records);
+    }
+    Ok(MultisinkDeltas {
+        sinks,
+        terminal_sinks: BTreeMap::new(),
+    })
 }

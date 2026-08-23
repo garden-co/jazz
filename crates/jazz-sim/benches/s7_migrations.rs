@@ -524,9 +524,9 @@ fn open_client(node_uuid: NodeUuid, edge_uuid: NodeUuid, schema: JazzSchema) -> 
         AuthorId::from_bytes([node_uuid.as_bytes()[0]; 16]),
     );
     let outbound = Rc::new(RefCell::new(Vec::new()));
-    let upstream = db.connect_upstream(Box::new(QueueTransport {
+    let upstream = jazz::db::block_on(db.connect_upstream(Box::new(QueueTransport {
         outbound: Rc::clone(&outbound),
-    }));
+    })));
     let (edge_dir, edge) = open_node(edge_uuid, schema);
     ClientHarness {
         _dir: dir,

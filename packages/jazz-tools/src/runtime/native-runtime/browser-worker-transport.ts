@@ -3,6 +3,8 @@ import type { Transport } from "./native-runtime-adapter.js";
 export interface PeerTransportRuntime {
   onPeerTransportWork(listener: () => void): () => void;
   notifyPeerTransportActivity?(): void;
+  progressPeerTransport(): Promise<void>;
+  retirePeerTransport(transport: Transport): Promise<void>;
 }
 
 export class BrowserWorkerTransportPump {
@@ -10,16 +12,23 @@ export class BrowserWorkerTransportPump {
   private running = false;
   private runAgain = false;
   private closed = false;
+  private outboundDrainScheduled = false;
+  private requestedGeneration = 0;
+  private completedGeneration = 0;
+  private readonly flushWaiters = new Set<{ target: number; resolve: () => void }>();
   private readonly removeWorkListener: () => void;
-
   constructor(
     private readonly runtime: PeerTransportRuntime,
     private readonly transport: Transport,
     private readonly sendFrames: (frames: Uint8Array[]) => void,
     private readonly onError: (error: unknown) => void,
   ) {
-    this.removeWorkListener = runtime.onPeerTransportWork(() => this.schedule());
-    this.schedule();
+    // The evaluator notifies every peer after a pass. This pump drains its
+    // transport immediately after the pass it requested, so that notification
+    // must not recursively request another identical pass.
+    this.removeWorkListener = runtime.onPeerTransportWork(() => this.schedule(false));
+    this.transport.setOutboundScheduler?.(() => this.scheduleOutboundDrain());
+    this.schedule(true);
   }
 
   receive(frames: readonly Uint8Array[]): void {
@@ -35,10 +44,11 @@ export class BrowserWorkerTransportPump {
     this.schedule();
   }
 
-  schedule(): void {
+  schedule(runAgainIfRunning = true): void {
     if (this.closed) return;
+    this.requestedGeneration += 1;
     if (this.running) {
-      this.runAgain = true;
+      this.runAgain ||= runAgainIfRunning;
       return;
     }
     if (this.scheduled) return;
@@ -55,33 +65,57 @@ export class BrowserWorkerTransportPump {
     if (this.closed) return;
     this.closed = true;
     this.removeWorkListener();
-    this.transport.close();
+    this.transport.clearOutboundScheduler?.();
+    void this.runtime.retirePeerTransport(this.transport).catch(this.onError);
+    for (const waiter of this.flushWaiters) waiter.resolve();
+    this.flushWaiters.clear();
+  }
+
+  async flush(): Promise<void> {
+    if (this.closed) return;
+    this.schedule();
+    const target = this.requestedGeneration;
+    if (this.completedGeneration >= target) return;
+    await new Promise<void>((resolve) => this.flushWaiters.add({ target, resolve }));
+  }
+
+  drainOutboundFrames(): void {
+    if (this.closed) return;
+    const frames = normalizeTransportFrames(this.transport.recvWireFrames());
+    if (frames.length > 0) this.sendFrames(frames);
+  }
+
+  private scheduleOutboundDrain(): void {
+    if (this.closed || this.outboundDrainScheduled) return;
+    this.outboundDrainScheduled = true;
+    queueMicrotask(() => {
+      this.outboundDrainScheduled = false;
+      if (!this.closed) this.drainOutboundFrames();
+    });
   }
 
   private async pump(): Promise<void> {
     if (this.closed || this.running) return;
     this.running = true;
-    let exhausted = true;
+    const generation = this.requestedGeneration;
     try {
-      for (let round = 0; round < 32; round += 1) {
-        const work = await this.transport.tick();
-        if (this.closed) return;
-        const frames = normalizeTransportFrames(this.transport.recvWireFrames());
-        if (frames.length > 0) this.sendFrames(frames);
-        if (work === 0 && frames.length === 0) {
-          exhausted = false;
-          break;
-        }
-      }
+      this.drainOutboundFrames();
+      await this.runtime.progressPeerTransport();
+      if (this.closed) return;
+      this.drainOutboundFrames();
     } finally {
       this.running = false;
+      this.completedGeneration = Math.max(this.completedGeneration, generation);
+      for (const waiter of this.flushWaiters) {
+        if (waiter.target > this.completedGeneration) continue;
+        this.flushWaiters.delete(waiter);
+        waiter.resolve();
+      }
     }
     if (this.closed) return;
     if (this.runAgain) {
       this.runAgain = false;
       this.schedule();
-    } else if (exhausted) {
-      setTimeout(() => this.schedule(), 0);
     }
   }
 }

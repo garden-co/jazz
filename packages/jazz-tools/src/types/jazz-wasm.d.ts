@@ -72,7 +72,7 @@ declare module "jazz-wasm" {
 
   export class WasmDb {
     static openMemory(schema: Uint8Array, config: Uint8Array): WasmDb;
-    static openBrowser(namespace: string, schema: Uint8Array, config: Uint8Array): Promise<WasmDb>;
+    static openBrowser(pageStore: unknown, schema: Uint8Array, config: Uint8Array): Promise<WasmDb>;
     static destroyBrowserStorage(namespace: string): Promise<void>;
 
     registerSchema(schema: Uint8Array): WasmDb;
@@ -86,8 +86,12 @@ declare module "jazz-wasm" {
     all(query: WasmPreparedQuery, opts: unknown): Uint8Array;
     one(query: WasmPreparedQuery, opts: unknown): Uint8Array;
     allForIdentity(query: WasmPreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
-    allRelationQuery(queryJson: string, opts: unknown): Uint8Array;
-    allRelationQueryForIdentity(queryJson: string, author: Uint8Array, opts: unknown): Uint8Array;
+    allRelationQuery(queryJson: string, opts: unknown): Promise<Uint8Array>;
+    allRelationQueryForIdentity(
+      queryJson: string,
+      author: Uint8Array,
+      opts: unknown,
+    ): Promise<Uint8Array>;
     attachQuery(query: WasmPreparedQuery, opts: unknown): QueryAttachment;
     attachQueryForIdentity(
       query: WasmPreparedQuery,
@@ -156,7 +160,7 @@ declare module "jazz-wasm" {
     onMutationError(callback: (event: any) => void): void;
     tick(): Promise<void>;
     setNonDurableClient(): void;
-    close(): boolean;
+    close(): Promise<boolean>;
     connectUpstream(): WasmTransport;
     connectUpstreamWithSession(
       protocolVersion: number,
@@ -165,7 +169,7 @@ declare module "jazz-wasm" {
       remoteEpoch: bigint,
       localNode: Uint8Array,
       localEpoch: bigint,
-    ): WasmTransport;
+    ): Promise<WasmTransport>;
     acceptSubscriber(identity: Uint8Array, claims: Record<string, unknown>): WasmTransport;
     mergeableTx(openBatchId: string): WasmTx;
     mergeableTxForIdentity(openBatchId: string, author: Uint8Array): WasmTx;

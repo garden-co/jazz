@@ -174,7 +174,7 @@ fn local_propagating_subscription_emits_created_by_scoped_insert_after_empty_see
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
     let client = open_db(0xa1, alice, &schema);
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, alice);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
@@ -224,7 +224,7 @@ fn local_propagating_subscription_coerces_user_id_claim_for_created_by() {
     let claims = BTreeMap::from([("user_id".to_owned(), Value::String(alice.0.to_string()))]);
     client.set_identity_claims(alice, claims.clone());
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber_with_claims(server_transport, alice, claims);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
@@ -798,7 +798,7 @@ fn seeded_membership_grant_and_revoke_propagate_incrementally() {
 
     let client = open_db(0x61, member, &schema);
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, member);
     let mut subscription =
         prepared_subscribe(&client, &Query::from("res_i"), ReadOpts::default()).unwrap();
@@ -952,7 +952,7 @@ fn same_table_seeded_membership_identity_key_update_propagates_incrementally() {
 
     let client = open_db(0x68, member, &schema);
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, member);
     let mut subscription =
         prepared_subscribe(&client, &Query::from("resources"), ReadOpts::default()).unwrap();
@@ -1092,7 +1092,7 @@ fn inherited_child_policy_parent_revocation_propagates_incrementally() {
 
     let client = open_db(0x64, member, &schema);
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, member);
     let mut subscription =
         prepared_subscribe(&client, &Query::from("res_i_child"), ReadOpts::default()).unwrap();
@@ -1171,7 +1171,7 @@ fn inherited_child_insert_uses_parent_update_where_old_only() {
         .unwrap();
 
     let (member_transport, server_member_transport) = duplex();
-    let _member_upstream = member_db.connect_upstream(member_transport);
+    let _member_upstream = crate::db::block_on(member_db.connect_upstream(member_transport));
     let _member_subscriber = server.accept_subscriber(server_member_transport, member);
     let allowed = member_db
         .insert_with_id("children", row(0xf2), child_insert_cells(parent, "allowed"))
@@ -1190,7 +1190,7 @@ fn inherited_child_insert_uses_parent_update_where_old_only() {
 
     let other_db = open_db(0x67, other, &schema);
     let (other_transport, server_other_transport) = duplex();
-    let _other_upstream = other_db.connect_upstream(other_transport);
+    let _other_upstream = crate::db::block_on(other_db.connect_upstream(other_transport));
     let _other_subscriber = server.accept_subscriber(server_other_transport, other);
     let denied = other_db
         .insert_with_id("children", row(0xf3), child_insert_cells(parent, "denied"))
@@ -1649,7 +1649,7 @@ fn served_subscription_rows_for_author(
 ) -> Vec<RowUuid> {
     let client = open_db(author.0.as_bytes()[0], author, schema);
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
     let query = Query::from(table);
     let mut subscription = prepared_subscribe(&client, &query, ReadOpts::default()).unwrap();
@@ -1692,7 +1692,7 @@ fn served_many_subscription_rows_for_author(
 ) -> BTreeMap<String, Vec<RowUuid>> {
     let client = open_db(author.0.as_bytes()[0].wrapping_add(0x40), author, schema);
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
     let mut subscriptions = Vec::new();
     for table in tables {
@@ -1725,10 +1725,10 @@ fn served_group_entry_rows_via_relay(
     let relay = open_db(0x71, AuthorId::SYSTEM, schema);
     let client = open_db(0x72, author, schema);
     let (relay_transport, core_transport) = duplex();
-    let _relay_upstream = relay.connect_upstream(relay_transport);
+    let _relay_upstream = crate::db::block_on(relay.connect_upstream(relay_transport));
     let _core_subscriber = server.accept_subscriber(core_transport, AuthorId::SYSTEM);
     let (client_transport, relay_sub_transport) = duplex();
-    let _client_upstream = client.connect_upstream(client_transport);
+    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _relay_subscriber = relay.accept_subscriber(relay_sub_transport, author);
 
     let query = Query::from("group_entry");

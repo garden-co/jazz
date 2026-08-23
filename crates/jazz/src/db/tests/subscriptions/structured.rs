@@ -275,10 +275,10 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
     // The normal connection remains live while a separately scoped invite
     // connection writes its membership. This is the production handoff.
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber_with_claims(server_transport, reader, normal_claims);
     let (invite_transport, server_invite_transport) = duplex();
-    let _invite_upstream = invite_client.connect_upstream(invite_transport);
+    let _invite_upstream = crate::db::block_on(invite_client.connect_upstream(invite_transport));
     let _invite_subscriber =
         server.accept_subscriber_with_claims(server_invite_transport, reader, invite_claims);
     let chat = row(0xc1);
@@ -651,6 +651,112 @@ fn flat_subscription_updates_with_nullable_sort_payload() {
                 | groove::ivm::TerminalEdit::Insert { .. }
         )),
         "unchanged nullable sort key must not reposition the root"
+    );
+}
+
+#[test]
+fn flat_subscription_update_respects_descending_row_id_tie_break() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("users")
+                .column("name", PublicColumnType::Text)
+                .column("rank", PublicColumnType::Integer),
+        ),
+    );
+    let db = open_db(0xd8, AuthorId::from_bytes([0xd8; 16]), &schema);
+    for (id, rank) in [(0xf0, 1), (0xe0, 1), (0x10, 2)] {
+        db.insert_with_id(
+            "users",
+            row(id),
+            BTreeMap::from([
+                ("name".to_owned(), Value::String(format!("user-{id}"))),
+                ("rank".to_owned(), Value::I32(rank)),
+            ]),
+        )
+        .unwrap();
+    }
+    let query = Query::from("users")
+        .order_by("rank", OrderDirection::Asc)
+        .order_by("id", OrderDirection::Desc);
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
+    assert_eq!(
+        row_ids(&initial.rows),
+        vec![row(0xf0), row(0xe0), row(0x10)]
+    );
+
+    db.update(
+        "users",
+        row(0x10),
+        BTreeMap::from([("rank".to_owned(), Value::I32(1))]),
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = block_on(subscription.next_raw()).unwrap()
+    else {
+        panic!("rank update must emit a terminal delta");
+    };
+    assert!(
+        !terminal_operations.iter().any(|operation| matches!(
+            operation.edit,
+            groove::ivm::TerminalEdit::Move { index: 0, .. }
+        )),
+        "the smallest descending id must not move to the front: {terminal_operations:?}"
+    );
+}
+
+#[test]
+fn flat_subscription_update_moves_largest_descending_row_id_to_front() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("users")
+                .column("name", PublicColumnType::Text)
+                .column("rank", PublicColumnType::Integer),
+        ),
+    );
+    let db = open_db(0xd9, AuthorId::from_bytes([0xd9; 16]), &schema);
+    for (id, rank) in [(0xf0, 1), (0xe0, 1), (0xff, 2)] {
+        db.insert_with_id(
+            "users",
+            row(id),
+            BTreeMap::from([
+                ("name".to_owned(), Value::String(format!("user-{id}"))),
+                ("rank".to_owned(), Value::I32(rank)),
+            ]),
+        )
+        .unwrap();
+    }
+    let query = Query::from("users")
+        .order_by("rank", OrderDirection::Asc)
+        .order_by("id", OrderDirection::Desc);
+    let prepared_query = prepared(&db, &query);
+    let mut subscription = block_on(db.subscribe(&prepared_query, ReadOpts::default())).unwrap();
+    let _initial = block_on(subscription.next_raw()).unwrap();
+
+    db.update(
+        "users",
+        row(0xff),
+        BTreeMap::from([("rank".to_owned(), Value::I32(1))]),
+    )
+    .unwrap();
+    db.tick().unwrap();
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = block_on(subscription.next_raw()).unwrap()
+    else {
+        panic!("rank update must emit a terminal delta");
+    };
+    assert!(
+        terminal_operations.iter().any(|operation| matches!(
+            operation.edit,
+            groove::ivm::TerminalEdit::Move { index: 0, .. }
+        )),
+        "the largest descending id must move to the front: {terminal_operations:?}"
     );
 }
 
@@ -1088,7 +1194,7 @@ fn array_subquery_remote_subscription_hydrates_edge_referenced_child_rows() {
     let client_author = AuthorId::from_bytes([0xc6; 16]);
     let client = open_db(0xc6, client_author, &schema);
     let (client_transport, server_transport) = byte_duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
 
     let query = Query::from("users").array_subquery(ArraySubquery::new(

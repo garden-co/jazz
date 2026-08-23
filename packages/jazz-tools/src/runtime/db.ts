@@ -87,12 +87,12 @@ export type DbConfig = {
   adminSecret?: string;
   /** Backend secret for backend-scoped sync auth with cookieSession. */
   backendSecret?: string;
-  /** Database name for OPFS persistence (browser only, default: appId) */
+  /** IndexedDB database name for browser persistence (default: appId). */
   dbName?: string;
   /**
    * Initial-sync durability boundary, in writes (default: 512 for clients).
-   * A crash can lose up to M - 1 writes since the previous boundary; older
-   * boundaries recover from the storage WAL.
+   * A crash can lose up to M - 1 writes since the previous durable IndexedDB
+   * page commit.
    */
   initialSyncFlushEvery?: number;
   /** Optional WASM tracing level for benchmark/debug scenarios (default: "warn"). */
@@ -1348,8 +1348,14 @@ export class Db {
   }
 
   getConfig(): DbConfig {
-    // Return a copy of the config to avoid editing the original config.
-    return structuredClone(this.config);
+    // Return a copy without internal live transport handles. MessagePorts are
+    // neither configuration nor cloneable unless transferred.
+    const { browserWorkerPort: _browserWorkerPort, ...runtimeSources } =
+      this.config.runtimeSources ?? {};
+    return structuredClone({
+      ...this.config,
+      runtimeSources: Object.keys(runtimeSources).length > 0 ? runtimeSources : undefined,
+    });
   }
 
   setDevMode(enabled: boolean): void {
@@ -1409,6 +1415,11 @@ export class Db {
    */
   getRuntimeSchema(): WasmSchema | null {
     return this.connection.getRuntimeSchema();
+  }
+
+  /** @internal Open a control channel for the same-origin embedded inspector. */
+  openInspectorControlPort(): Promise<MessagePort> {
+    return this.connection.openInspectorControlPort();
   }
 
   /**
@@ -1684,7 +1695,7 @@ export class Db {
   }
 
   /**
-   * Delete browser OPFS storage for this Db's active namespace.
+   * Delete browser IndexedDB storage for this Db's active namespace.
    */
   async deleteClientStorage(): Promise<void> {
     await this.connection.deleteClientStorage();

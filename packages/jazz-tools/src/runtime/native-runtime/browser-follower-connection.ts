@@ -9,15 +9,24 @@ import type {
   BrowserFollowerPortRequest,
 } from "./browser-worker-protocol.js";
 import type { NativeRuntimeAdapter } from "./native-runtime-adapter.js";
+import { IndexedDbPageStore } from "../indexeddb-page-store.js";
 
 type PendingRequest = {
+  type: BrowserFollowerPortRpcRequest["type"] | "open-inspector-control";
   resolve: () => void;
   reject: (error: Error) => void;
 };
 
 type BrowserFollowerPortRpcRequest =
   | { type: "init"; sessionClaims: Record<string, unknown> }
-  | { type: "wait-server" };
+  | { type: "wait-server" }
+  | { type: "disconnect" }
+  | { type: "flush-local" }
+  | { type: "close"; releaseContext?: boolean }
+  | { type: "prepare-storage-reset" }
+  | { type: "finish-storage-reset" }
+  | { type: "abort-storage-reset" }
+  | { type: "reconnect"; authJson: string; sessionClaims: Record<string, unknown> };
 
 /** Connects one tab's non-durable in-memory runtime to the elected worker. */
 export class MessagePortBrowserFollowerConnection implements BrowserFollowerConnection {
@@ -29,12 +38,13 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
   private failed: Error | null = null;
 
   constructor(
-    runtime: NativeRuntimeAdapter,
+    private readonly runtime: NativeRuntimeAdapter,
     private readonly port: MessagePort,
     sessionClaims: Record<string, unknown>,
+    private readonly dbName: string | null,
     private readonly callbacks: Pick<
       BrowserFollowerConnectionContext,
-      "onAuthFailure" | "onAuthRestored" | "onFailure"
+      "onAuthFailure" | "onAuthRestored" | "onFailure" | "onStorageReset" | "onStorageInvalidated"
     >,
   ) {
     port.addEventListener("message", this.onMessage);
@@ -73,6 +83,48 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     await this.request({ type: "wait-server" });
   }
 
+  async disconnect(): Promise<void> {
+    await this.ready();
+    await this.request({ type: "disconnect" });
+  }
+
+  async deleteStorage(): Promise<void> {
+    await this.ready();
+    if (!this.dbName) throw new Error("Browser storage reset requires its IndexedDB name");
+    await this.request({ type: "prepare-storage-reset" });
+    try {
+      await IndexedDbPageStore.destroy(this.dbName);
+    } catch (error) {
+      await this.request({ type: "abort-storage-reset" }).catch(() => undefined);
+      throw error;
+    }
+    await this.request({ type: "finish-storage-reset" });
+  }
+
+  async openInspectorControlPort(): Promise<MessagePort> {
+    await this.ready();
+    const channel = new MessageChannel();
+    const id = this.nextRequestId++;
+    const promise = new Promise<void>((resolve, reject) => {
+      this.pending.set(id, { type: "open-inspector-control", resolve, reject });
+    });
+    this.port.postMessage(
+      {
+        type: "open-inspector-control",
+        id,
+        port: channel.port2,
+      } satisfies BrowserFollowerPortRequest,
+      [channel.port2],
+    );
+    await promise;
+    return channel.port1;
+  }
+
+  async reconnect(authJson: string, sessionClaims: Record<string, unknown>): Promise<void> {
+    await this.ready();
+    await this.request({ type: "reconnect", authJson, sessionClaims });
+  }
+
   updateAuth(authJson: string, sessionClaims: Record<string, unknown>): void {
     if (this.closed || this.failed) return;
     void this.ready()
@@ -86,10 +138,19 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       .catch((error: unknown) => this.fail(asError(error)));
   }
 
-  async shutdown(): Promise<void> {
+  async shutdown(releaseContext = false): Promise<void> {
     if (this.closed) return;
-    this.port.postMessage({ type: "close" } satisfies BrowserFollowerPortRequest);
+    await this.request({ type: "close", releaseContext });
     this.dispose(new Error("Browser follower connection is closed"));
+  }
+
+  async flushLocal(): Promise<void> {
+    await this.ready();
+    await this.pump.flush();
+    const workerBarrier = this.request({ type: "flush-local" });
+    await this.runtime.flushLocalSettlements();
+    this.port.postMessage({ type: "flush-local-observed" } satisfies BrowserFollowerPortRequest);
+    await workerBarrier;
   }
 
   detachForReconnect(): void {
@@ -102,7 +163,7 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     const id = this.nextRequestId++;
     const message = { ...request, id };
     const promise = new Promise<void>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      this.pending.set(id, { type: request.type, resolve, reject });
     });
     this.port.postMessage(message satisfies BrowserFollowerPortRequest);
     return promise;
@@ -122,6 +183,28 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
       this.callbacks.onAuthRestored();
       return;
     }
+    if (message.type === "mutation-error") {
+      this.runtime.reportRemoteMutationError(message.event);
+      return;
+    }
+    if (message.type === "storage-reset") {
+      for (const [id, pending] of this.pending) {
+        if (pending.type !== "finish-storage-reset") continue;
+        this.pending.delete(id);
+        pending.resolve();
+      }
+      this.port.postMessage({
+        type: "storage-reset-observed",
+        resetId: message.resetId,
+      } satisfies BrowserFollowerPortRequest);
+      this.callbacks.onStorageReset?.();
+      return;
+    }
+    if (message.type === "storage-invalidated") {
+      this.callbacks.onStorageInvalidated?.();
+      this.dispose(new Error("IndexedDB storage was externally invalidated"));
+      return;
+    }
     if (message.type === "error") {
       this.fail(new Error(message.message));
       return;
@@ -129,8 +212,9 @@ export class MessagePortBrowserFollowerConnection implements BrowserFollowerConn
     const pending = this.pending.get(message.id);
     if (!pending) return;
     this.pending.delete(message.id);
-    if (message.error) pending.reject(new Error(message.error));
-    else pending.resolve();
+    if (message.error) {
+      pending.reject(new Error(`Browser worker ${pending.type} failed: ${message.error}`));
+    } else pending.resolve();
   };
 
   private readonly onMessageError = (): void => {

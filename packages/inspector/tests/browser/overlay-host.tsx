@@ -2,11 +2,11 @@
 // the test sync server, publishes the `window.__jazzInspectorHost` handle (the
 // same shape the loader's installInspectorHost builds), pushes its active
 // subscription list to the embedded inspector iframe, and the overlay opens an
-// independent browser client that joins the host's broker SharedWorker from the
-// published config. No devtools bridge.
+// independent browser client that joins a selected context through a peer port
+// minted by the host's SharedWorker. No devtools bridge.
 //
 // Exercised by overlay.spec.ts.
-import { StrictMode, useEffect, useRef } from "react";
+import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { JazzProvider, useAll, useJazzClient, useLocalFirstAuth } from "jazz-tools/react";
 import { installInspectorHost, type DbConfig } from "jazz-tools";
@@ -18,7 +18,7 @@ const TEST_ENV = "dev";
 const TEST_PORT = 19879;
 const SERVER_URL = `http://127.0.0.1:${TEST_PORT}`;
 
-function HostInner() {
+function HostInner({ secondaryReady }: { secondaryReady: boolean }) {
   const { db } = useJazzClient();
   // A real query: creates the host client (so getRuntimeSchema resolves) and
   // registers a public subscription the overlay's Subscriptions tab should display.
@@ -26,11 +26,14 @@ function HostInner() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
 
   useEffect(() => {
+    if (!secondaryReady) return;
     const iframeWindow = iframeRef.current?.contentWindow;
     if (!iframeWindow) return;
     // The real host-side installer: publishes the handle + pushes subscriptions.
     return installInspectorHost(db, iframeWindow, window.location.origin);
-  }, [db]);
+  }, [db, secondaryReady]);
+
+  if (!secondaryReady) return <p id="host-status">Starting secondary runtime...</p>;
 
   return (
     <>
@@ -46,8 +49,15 @@ function HostInner() {
   );
 }
 
+function SecondaryRuntime({ onReady }: { onReady: () => void }) {
+  useAll(app.todos);
+  useEffect(onReady, [onReady]);
+  return <p hidden>Secondary runtime ready</p>;
+}
+
 function HostApp() {
   const { secret, isLoading } = useLocalFirstAuth();
+  const [secondaryReady, setSecondaryReady] = useState(false);
 
   if (isLoading || !secret) {
     return <p id="host-status">Authenticating...</p>;
@@ -66,13 +76,31 @@ function HostApp() {
   };
 
   return (
-    <JazzProvider
-      config={config}
-      autoAttachDevTools={false}
-      fallback={<p id="host-status">Connecting...</p>}
-    >
-      <HostInner />
-    </JazzProvider>
+    <>
+      <JazzProvider
+        config={config}
+        autoAttachDevTools={false}
+        fallback={<p id="host-status">Connecting...</p>}
+      >
+        <HostInner secondaryReady={secondaryReady} />
+      </JazzProvider>
+      <JazzProvider
+        config={{
+          appId: APP_ID,
+          env: TEST_ENV,
+          cookieSession: {
+            user_id: "inspector-secondary-user",
+            claims: { role: "inspector-test" },
+            authMode: "external",
+          },
+          driver: { type: "persistent", dbName: "inspector-secondary-context" },
+          devMode: true,
+        }}
+        autoAttachDevTools={false}
+      >
+        <SecondaryRuntime onReady={() => setSecondaryReady(true)} />
+      </JazzProvider>
+    </>
   );
 }
 

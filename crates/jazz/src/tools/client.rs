@@ -243,8 +243,8 @@ impl Backend {
         self.0.set_tick_scheduler(Some(scheduler));
     }
 
-    fn connect_upstream(&self, transport: Box<dyn CoreTransport>) -> BackendConnection {
-        self.0.connect_upstream(transport)
+    async fn connect_upstream(&self, transport: Box<dyn CoreTransport>) -> BackendConnection {
+        self.0.connect_upstream(transport).await
     }
 
     fn detach_connection(&self, connection: &BackendConnection) -> bool {
@@ -1092,15 +1092,15 @@ impl ClientDbInner {
             })
             .await
             .map_err(|error| JazzError::Connection(error.to_string()))?;
-        Ok(
-            db.connect_upstream(Box::new(WireTransportAdapter::new_with_session_context(
+        Ok(db
+            .connect_upstream(Box::new(WireTransportAdapter::new_with_session_context(
                 connected.transport,
                 connected.protocol_version,
                 connected.features,
                 None,
                 connected.session_context,
-            ))),
-        )
+            )))
+            .await)
     }
 
     fn ensure_transaction_open(&self, transaction_id: OpenTransactionId) -> Result<()> {

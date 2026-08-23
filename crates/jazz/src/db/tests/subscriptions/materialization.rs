@@ -15,7 +15,7 @@ fn server_reset_subscription_materializes_without_local_snapshot_eval() {
     seed(&server, "todos", cells("second", true, owner));
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
 
     let query = Query::from("todos");
@@ -196,7 +196,7 @@ fn authoritative_reset_with_missing_payload_falls_back_to_refresh() {
     let client = open_db(0xc1, client_author, &schema);
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
 
     let query = Query::from("todos");
@@ -440,7 +440,7 @@ fn client_tier_routing_scans_local_overlay_but_uses_global_settled_members_at_ed
     );
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = db.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(db.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let attachment = db
         .attach_query_with_opts(&prepared, edge_subscribe_opts())
@@ -570,7 +570,7 @@ fn client_settled_file_member_reads_bytes_for_bound_id_read() {
     let query = Query::from("files").filter(eq(col("id"), lit(file.0)));
     let prepared = prepared(&db, &query);
     let (client_transport, server_transport) = duplex();
-    let _upstream = db.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(db.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, client_author);
     let attachment = db
         .attach_query_with_opts(&prepared, edge_subscribe_opts())

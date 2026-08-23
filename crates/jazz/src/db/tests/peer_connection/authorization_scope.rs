@@ -29,7 +29,7 @@ fn assert_delayed_duplicate_usage_reset(replacement_row: bool) {
         .unwrap();
 
     let (client_transport, server_transport, client_sent, server_sent) = duplex_with_taps();
-    let upstream = client.connect_upstream(client_transport);
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber(server_transport, client_author);
     let query = Query::from("todos").filter(eq(col("title"), lit("live")));
     let prepared = prepared(&client, &query);
@@ -37,8 +37,13 @@ fn assert_delayed_duplicate_usage_reset(replacement_row: bool) {
         .attach_query_with_opts(&prepared, global_subscribe_opts())
         .unwrap();
     client.tick().unwrap();
-    subscriber.borrow_mut().tick().unwrap();
-    upstream.borrow_mut().tick().unwrap();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        upstream.borrow_mut().tick().unwrap();
+        if row_ids(&prepared_all(&client, &query, global_subscribe_opts())) == vec![stale] {
+            break;
+        }
+    }
     assert_eq!(
         row_ids(&prepared_all(&client, &query, global_subscribe_opts())),
         vec![stale]
@@ -107,7 +112,18 @@ fn assert_delayed_duplicate_usage_reset(replacement_row: bool) {
         known_authorization_progress, 2,
         "the second usage site must exercise a stale authorization cursor"
     );
-    subscriber.borrow_mut().tick().unwrap();
+    for _ in 0..32 {
+        subscriber.borrow_mut().tick().unwrap();
+        if server_sent.borrow().iter().any(|message| {
+            matches!(
+                message,
+                SyncMessage::ViewUpdate { subscription, .. }
+                    if *subscription == second_subscription
+            )
+        }) {
+            break;
+        }
+    }
     server_sent.borrow_mut().extend(held_first_usage_updates);
 
     let second_update = server_sent
@@ -736,7 +752,7 @@ fn subscriber_cannot_spoof_authority_view_updates() {
     let schema = schema();
     let edge = open_db(0x7a, AuthorId::SYSTEM, &schema);
     let (edge_transport, mut authority_transport) = duplex();
-    let _upstream = edge.connect_upstream(edge_transport);
+    let _upstream = crate::db::block_on(edge.connect_upstream(edge_transport));
     let query = Query::from("todos");
     let _stream = prepared_subscribe(&edge, &query, global_subscribe_opts()).unwrap();
     edge.tick().unwrap();
@@ -885,7 +901,7 @@ fn resume_cursor_restores_connection_claims_before_serving_same_identity_sibling
         .unwrap();
 
     let (client_transport, server_transport) = duplex();
-    let upstream = client.connect_upstream(client_transport);
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let subscriber = server.accept_subscriber_with_claims(server_transport, reader, normal_claims);
     let cursor = subscriber.borrow_mut().take_resume_cursor().unwrap();
     assert!(server.server.detach_connection(&subscriber));
@@ -895,11 +911,11 @@ fn resume_cursor_restores_connection_claims_before_serving_same_identity_sibling
     // resumed ordinary session must restore its own empty invite context, not
     // inherit the process-local compiler cache that this sibling last bound.
     let (sibling_transport, sibling_server_transport) = duplex();
-    let _sibling_upstream = sibling.connect_upstream(sibling_transport);
+    let _sibling_upstream = crate::db::block_on(sibling.connect_upstream(sibling_transport));
     let _sibling_subscriber =
         server.accept_subscriber_with_claims(sibling_server_transport, reader, invite_claims);
     let (resumed_transport, resumed_server_transport) = duplex();
-    let _resumed_upstream = client.connect_upstream(resumed_transport);
+    let _resumed_upstream = crate::db::block_on(client.connect_upstream(resumed_transport));
     let _resumed = server.accept_subscriber_with_resume(resumed_server_transport, reader, cursor);
 
     let query = prepared(
@@ -957,7 +973,7 @@ fn subscriber_wire_claims_cannot_escalate_host_admission() {
         .unwrap();
 
     let (client_transport, server_transport) = duplex();
-    let _upstream = client.connect_upstream(client_transport);
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber_with_claims(server_transport, reader, normal_claims);
     let dropped_before = server
         .node()

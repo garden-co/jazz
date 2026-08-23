@@ -207,6 +207,8 @@ pub struct SubscriptionDeltaEvent {
     pub event_type: String,
     pub reset: bool,
     pub delta: Uint8Array,
+    #[napi(js_name = "orderedSuffixStart")]
+    pub ordered_suffix_start: Option<u32>,
     #[napi(js_name = "terminalOperations")]
     pub terminal_operations: Vec<SubscriptionTerminalOperation>,
     #[napi(js_name = "terminalLayouts")]
@@ -2310,11 +2312,11 @@ impl NapiDb {
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => NapiTransportInner::Memory {
                 db: Rc::clone(db),
-                connection: Some(db.connect_upstream(transport)),
+                connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
             },
             NapiDbInnerStorage::Persistent(db) => NapiTransportInner::Persistent {
                 db: Rc::clone(db),
-                connection: Some(db.connect_upstream(transport)),
+                connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
             },
         };
         Ok(Transport { inner, queues })
@@ -2369,11 +2371,11 @@ impl NapiDb {
         let inner = match db {
             NapiDbInnerStorage::Memory(db) => NapiTransportInner::Memory {
                 db: Rc::clone(db),
-                connection: Some(db.connect_upstream(transport)),
+                connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
             },
             NapiDbInnerStorage::Persistent(db) => NapiTransportInner::Persistent {
                 db: Rc::clone(db),
-                connection: Some(db.connect_upstream(transport)),
+                connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
             },
         };
         Ok(Transport { inner, queues })
@@ -2451,22 +2453,19 @@ impl NapiDb {
     }
 
     #[napi]
-    pub fn close(&self) -> napi::Result<()> {
+    pub fn close(&self, env: Env) -> napi::Result<PromiseRaw<'static, ()>> {
         let inner = self.inner.borrow_mut().take();
-        if !self.owns_runtime {
-            return Ok(());
-        }
-        if let Some(inner) = inner {
+        let result = if !self.owns_runtime {
+            Ok(())
+        } else if let Some(inner) = inner {
             match inner {
-                NapiDbInnerStorage::Memory(db) => db
-                    .close()
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                NapiDbInnerStorage::Persistent(db) => db
-                    .close()
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                NapiDbInnerStorage::Memory(db) => core_block_on(db.close()),
+                NapiDbInnerStorage::Persistent(db) => core_block_on(db.close()),
             }
-        }
-        Ok(())
+        } else {
+            Ok(())
+        };
+        immediate_promise(env, result)
     }
 }
 
@@ -2703,6 +2702,29 @@ fn finish_wait_promise(
     deferred: sys::napi_deferred,
     result: std::result::Result<TxId, jazz::db::Error>,
 ) {
+    finish_immediate_promise(env, deferred, result.map(|_| ()))
+}
+
+fn immediate_promise(
+    env: Env,
+    result: std::result::Result<(), jazz::db::Error>,
+) -> napi::Result<PromiseRaw<'static, ()>> {
+    let mut deferred = std::ptr::null_mut();
+    let mut promise = std::ptr::null_mut();
+    let env = env.raw();
+    let status = unsafe { sys::napi_create_promise(env, &mut deferred, &mut promise) };
+    if status != sys::Status::napi_ok {
+        return Err(napi::Error::from_reason("failed to create close promise"));
+    }
+    finish_immediate_promise(env, deferred, result);
+    Ok(PromiseRaw::new(env, promise))
+}
+
+fn finish_immediate_promise(
+    env: sys::napi_env,
+    deferred: sys::napi_deferred,
+    result: std::result::Result<(), jazz::db::Error>,
+) {
     let Err(error) = result else {
         resolve_raw_promise(env, deferred);
         return;
@@ -2922,6 +2944,7 @@ fn core_subscription_event_to_napi(
             added,
             updated,
             removed,
+            ordered_suffix_start,
             terminal_operations,
             terminal_layout,
             settled,
@@ -2976,6 +2999,8 @@ fn core_subscription_event_to_napi(
                 event_type: "delta".to_string(),
                 reset: *reset,
                 delta: Uint8Array::new(delta),
+                ordered_suffix_start: ordered_suffix_start
+                    .map(|start| u32::try_from(start).unwrap_or(u32::MAX)),
                 terminal_operations,
                 terminal_layouts,
                 settled: *settled,
@@ -3760,6 +3785,7 @@ mod tests {
                 removed: Vec::new(),
                 terminal_operations: Vec::new(),
                 terminal_layout: None,
+                ordered_suffix_start: None,
                 settled: true,
                 tier: DurabilityTier::Local,
             },
@@ -3846,6 +3872,7 @@ mod tests {
                 removed: Vec::new(),
                 terminal_operations: operations,
                 terminal_layout: Some(terminal_layout),
+                ordered_suffix_start: None,
                 settled: false,
                 tier: DurabilityTier::Edge,
             },

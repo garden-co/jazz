@@ -16,13 +16,20 @@ import {
   type RuntimeTokenOptions,
 } from "./runtime-source.js";
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
-import { DedicatedBrowserWorkerConnection } from "./native-runtime/browser-worker-connection.js";
+import { SharedBrowserWorkerConnection } from "./native-runtime/browser-shared-worker-connection.js";
+import { AttachedBrowserWorkerConnection } from "./native-runtime/attached-browser-worker-connection.js";
 import { MessagePortBrowserFollowerConnection } from "./native-runtime/browser-follower-connection.js";
 import { installWasmTelemetry } from "./sync-telemetry.js";
 import { parseJwtPayload, resolveClientSessionSync } from "./client-session.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { httpUrlToWs } from "./url.js";
 import { authorBytesForSubject, isUsableSubject } from "./author-id.js";
+import {
+  createBrowserAuthSessionKey,
+  createBrowserWorkerFingerprint,
+} from "./browser-worker-config.js";
+import { getRuntimeSchemaCacheKey } from "../drivers/schema-wire.js";
+import { bundledWasmUrl } from "jazz-wasm/wasm-url.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
@@ -71,6 +78,14 @@ function initialSyncFlushEvery(config: DbConfig): number {
     throw new Error("initialSyncFlushEvery must be a positive integer");
   }
   return value;
+}
+
+function browserWorkerRuntimeSources(config: DbConfig): DbConfig["runtimeSources"] {
+  const sources = config.runtimeSources;
+  if (sources?.wasmModule || sources?.wasmSource || sources?.wasmUrl || sources?.baseUrl) {
+    return sources;
+  }
+  return { ...sources, wasmUrl: bundledWasmUrl };
 }
 
 export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
@@ -147,12 +162,11 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     config,
     schema,
     client,
-    leadershipId,
-    workerLockName,
     onAuthFailure,
     onAuthRestored,
     onFailure,
-    onFollowerPortClosed,
+    onStorageReset,
+    onStorageInvalidated,
   }: BrowserWorkerConnectionContext<DbConfig>): BrowserWorkerConnection {
     const runtime = client.getRuntime();
     if (!(runtime instanceof NativeRuntimeAdapter)) {
@@ -164,25 +178,34 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     const author = subject
       ? authorBytesForSubject(subject)
       : deterministicBytes(`${identitySeed}:author`);
-    return new DedicatedBrowserWorkerConnection(
+    if (config.runtimeSources?.browserWorkerPort) {
+      return new AttachedBrowserWorkerConnection(
+        runtime,
+        config.runtimeSources.browserWorkerPort,
+        resolveClientSessionSync(config)?.claims ?? {},
+        dbName,
+        { onAuthFailure, onAuthRestored, onFailure, onStorageReset, onStorageInvalidated },
+      );
+    }
+    return new SharedBrowserWorkerConnection(
       runtime,
       {
-        runtimeSources: config.runtimeSources,
+        runtimeSources: browserWorkerRuntimeSources(config),
         schema,
         dbName,
         node: deterministicBytes(`${identitySeed}:${dbName}:node`),
         author,
         initialSyncFlushEvery: initialSyncFlushEvery(config),
         appId: config.appId,
+        authSessionKey: createBrowserAuthSessionKey(config),
         serverUrl: config.serverUrl ? httpUrlToWs(config.serverUrl, config.appId) : undefined,
         authJson: JSON.stringify(runtimeAuth(config)),
         sessionClaims: resolveClientSessionSync(config)?.claims ?? {},
-        leadershipId,
-        workerLockName,
         logLevel: config.logLevel,
         telemetryCollectorUrl: config.telemetryCollectorUrl,
       },
-      { onAuthFailure, onAuthRestored, onFailure, onFollowerPortClosed },
+      createBrowserWorkerFingerprint(config, dbName, getRuntimeSchemaCacheKey(schema)),
+      { onAuthFailure, onAuthRestored, onFailure, onStorageReset, onStorageInvalidated },
     );
   }
 
@@ -199,11 +222,17 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       throw new Error("Browser follower connections require the native runtime adapter");
     }
     const sessionClaims = resolveClientSessionSync(config)?.claims ?? {};
-    const connection = new MessagePortBrowserFollowerConnection(runtime, port, sessionClaims, {
-      onAuthFailure,
-      onAuthRestored,
-      onFailure,
-    });
+    const connection = new MessagePortBrowserFollowerConnection(
+      runtime,
+      port,
+      sessionClaims,
+      null,
+      {
+        onAuthFailure,
+        onAuthRestored,
+        onFailure,
+      },
+    );
     connection.updateAuth(JSON.stringify(runtimeAuth(config)), sessionClaims);
     return connection;
   }

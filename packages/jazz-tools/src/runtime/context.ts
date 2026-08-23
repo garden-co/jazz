@@ -28,6 +28,9 @@ export interface RuntimeSourcesConfig {
 
   /** Explicit compiled WASM module. Highest-precedence bootstrap input. */
   wasmModule?: WebAssembly.Module;
+
+  /** @internal Pre-attached worker peer used by the same-origin inspector. */
+  browserWorkerPort?: MessagePort;
 }
 
 /**

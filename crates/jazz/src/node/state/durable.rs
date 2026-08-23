@@ -883,11 +883,11 @@ self.database.finish_persistence(persisted)?;
     }
 
     /// Eagerly remove a Groove subscription from the runtime.
-    pub(crate) async fn unsubscribe_groove_subscription(
+    pub(crate) fn unsubscribe_groove_subscription(
         &mut self,
         subscription_id: groove::ivm::SubscriptionId,
     ) -> bool {
-        self.database.unsubscribe(subscription_id).await
+        self.database.unsubscribe(subscription_id)
     }
 
     /// Resume suspended Groove evaluation, awaiting storage until every active
@@ -895,6 +895,15 @@ self.database.finish_persistence(persisted)?;
     /// remains the sole owner of evaluation and hydration progress.
     pub(crate) async fn drive_query_runtime(&mut self) -> Result<(), Error> {
         self.database.drive_progress().await.map_err(Error::Groove)
+    }
+
+    /// Resume all query work that can make progress now, without holding the
+    /// caller open for storage-blocked nodes.
+    pub(crate) async fn drive_ready_query_runtime(&mut self) -> Result<(), Error> {
+        self.database
+            .drive_ready_progress()
+            .await
+            .map_err(Error::Groove)
     }
 
     pub(crate) async fn set_initial_sync_flush_cadence(

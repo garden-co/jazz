@@ -10,7 +10,13 @@ async fn failed_persistence_does_not_retract_an_applied_subscription_delta() {
         .subscribe_one_sink(GraphBuilder::table("albums"))
         .await
         .unwrap();
-    assert!(subscription.recv().unwrap().is_empty());
+    assert!(
+        database
+            .next_subscription(&subscription)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     control.fail_next(TestStorageOperation::WriteMany);
     let mut batch = database.open_batch();
@@ -469,7 +475,13 @@ async fn staged_batch_commit_ticks_once_for_multiple_writes() {
         .subscribe_one_sink(GraphBuilder::table("albums"))
         .await
         .unwrap();
-    assert!(subscription.recv().unwrap().is_empty());
+    assert!(
+        database
+            .next_subscription(&subscription)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     let mut staged = database.open_staged_batch();
     staged.insert(
@@ -596,7 +608,13 @@ async fn direct_record_store_stores_ordered_records_independent_of_tables() {
         .subscribe_one_sink(GraphBuilder::table("albums"))
         .await
         .unwrap();
-    assert!(subscription.recv().unwrap().is_empty());
+    assert!(
+        database
+            .next_subscription(&subscription)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     {
         let store = database.direct_record_store("streams").unwrap();
@@ -946,7 +964,7 @@ async fn commit_metrics_split_storage_and_tick_work() {
         .subscribe_one_sink(GraphBuilder::table("albums"))
         .await
         .unwrap();
-    let _initial = subscription.recv().unwrap();
+    let _initial = database.next_subscription(&subscription).await.unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -1119,6 +1137,7 @@ async fn same_key_writes_in_one_batch_emit_deltas_against_earlier_batch_writes()
         .subscribe_one_sink(GraphBuilder::table("albums"))
         .await
         .unwrap();
+    let _initial = database.next_subscription(&subscription_id).await.unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(
@@ -1251,7 +1270,7 @@ async fn same_batch_same_key_operations_emit_only_the_consolidated_final_delta()
         .subscribe_one_sink(GraphBuilder::table("albums"))
         .await
         .unwrap();
-    let _initial = subscription.recv().unwrap();
+    let _initial = database.next_subscription(&subscription).await.unwrap();
 
     let mut batch = database.open_batch();
     batch.insert(

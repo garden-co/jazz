@@ -15,6 +15,7 @@ where
     S: OrderedKvStorage,
 {
     pub(super) node: SharedNodeState<S>,
+    receives_commits_as_local: bool,
     pub(super) subscriptions: SubscriptionList,
     pub(super) outbox: Outbox,
     pub(super) pending_local_publications: PendingLocalPublications,
@@ -50,6 +51,10 @@ where
 {
     /// Wrap a node for serving subscriber links.
     pub fn new(node: NodeState<S>) -> Self {
+        // History completeness is a structural property of the opened node,
+        // not evaluator state. Cache it so connection attachment never needs
+        // to synchronously borrow storage-owning state during evaluation.
+        let receives_commits_as_local = !node.is_history_complete();
         let pending_mutation_errors = node
             .rejected_transactions()
             .into_iter()
@@ -60,6 +65,7 @@ where
             .collect();
         Self {
             node: Rc::new(futures::lock::Mutex::new(node)),
+            receives_commits_as_local,
             subscriptions: Rc::new(RefCell::new(Vec::new())),
             outbox: Rc::new(RefCell::new(Vec::new())),
             pending_local_publications: Rc::new(RefCell::new(VecDeque::new())),
@@ -110,7 +116,7 @@ where
     /// Ordinary `Db::open` nodes are Local receivers. Only the structurally
     /// separate history-complete path acts as the Core fate authority.
     fn receives_commits_as_local(&self) -> bool {
-        !self.node.borrow().is_history_complete()
+        self.receives_commits_as_local
     }
 
     /// Borrow the served node.
@@ -518,11 +524,18 @@ where
     }
 
     /// Attach this node to an upstream peer over a binding-supplied transport.
-    pub fn connect_upstream(
+    pub async fn connect_upstream(
         &self,
         transport: Box<dyn Transport>,
     ) -> Rc<LocalMutex<PeerConnection<S>>> {
-        let local_receiver = self.receives_commits_as_local();
+        // Connection installation mutates runtime metadata synchronously, but
+        // first needs a coherent view of storage-owning node state. Evaluation
+        // may temporarily own that state across an async hydration boundary,
+        // so wait for it instead of using the synchronous borrow escape hatch.
+        let node = self.node.lock().await;
+        let local_receiver = !node.is_history_complete();
+        let confirmation_floor = node.committed_global_time();
+        drop(node);
         let session_context = transport.connection_session_context();
         let connection_epoch = session_context
             .map(|context| context.local.epoch)
@@ -532,7 +545,7 @@ where
         // no settlement receipts until it sends a fresh ViewUpdate.
         *self.active_authority_view_receipts.borrow_mut() = Some(AuthorityViewReceipts {
             connection_epoch,
-            confirmation_floor: self.node.borrow().committed_global_time(),
+            confirmation_floor,
             binding_views: BTreeSet::new(),
         });
         // A replacement link invalidates the prior link's receipt before the
@@ -819,7 +832,7 @@ where
             PeerState::relay()
         } else {
             match trust {
-                CommitUnitTrust::TrustedBackend => {
+                CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => {
                     PeerState::edge_client_with_permission_identity(identity, AuthorId::SYSTEM)
                 }
                 CommitUnitTrust::Session => PeerState::client_link(identity),
@@ -1224,7 +1237,7 @@ where
         .await
         .take_pending_authoritative_reset_binding_views();
     let mut consumed_authoritative_resets = BTreeSet::new();
-    node.lock().await.drive_query_runtime().await?;
+    node.lock().await.drive_ready_query_runtime().await?;
     let live_subscriptions = subscriptions.borrow().clone();
     for weak in &live_subscriptions {
         let Some(state) = weak.upgrade() else {
@@ -1284,8 +1297,7 @@ where
             if let Some(subscription_id) = stale_subscription_id {
                 node.lock()
                     .await
-                    .unsubscribe_groove_subscription(subscription_id)
-                    .await;
+                    .unsubscribe_groove_subscription(subscription_id);
             }
             let (shape, binding, prepared_plan) = node
                 .lock()
@@ -1731,8 +1743,7 @@ where
                 let replacement_subscription_id = replacement.subscription_id();
                 node.lock()
                     .await
-                    .unsubscribe_groove_subscription(stale_subscription_id)
-                    .await;
+                    .unsubscribe_groove_subscription(stale_subscription_id);
                 *maintained = replacement;
                 refresh
                     .local_subscription_cleanup
@@ -1906,6 +1917,7 @@ where
                         added: Vec::new(),
                         updated: Vec::new(),
                         removed: Vec::new(),
+                        ordered_suffix_start: None,
                         terminal_operations: peer_terminal_operations,
                         terminal_layout,
                         settled,
@@ -1975,6 +1987,7 @@ where
                                 added: Vec::new(),
                                 updated: Vec::new(),
                                 removed: Vec::new(),
+                                ordered_suffix_start: None,
                                 terminal_operations: update.terminal_operations,
                                 terminal_layout: update.terminal_layout,
                                 settled,
