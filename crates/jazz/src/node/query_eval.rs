@@ -458,6 +458,11 @@ where
         identity: AuthorId,
         output: CurrentQueryProgramOutput,
     ) -> Result<QueryProgram, Error> {
+        let query_schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&shape.schema_version())
+            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
         let input_shape = self.normalized_row_set_shape(shape, binding)?;
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape(
@@ -477,7 +482,7 @@ where
             reads: historical_query_read_set(&input.shape, shape.schema_version(), position),
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(output, shape.query()),
+            output: current_query_output_request(output, shape.query(), &query_schema.schema),
         };
         self.compile_query_program_request(request).await
     }
@@ -490,6 +495,11 @@ where
         identity: AuthorId,
         output: CurrentQueryProgramOutput,
     ) -> Result<QueryProgram, Error> {
+        let query_schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&shape.schema_version())
+            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
         let input_shape = self.normalized_row_set_shape(shape, binding)?;
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape(
@@ -509,7 +519,7 @@ where
             reads: snapshot_query_read_set(&input.shape, shape.schema_version(), snapshot.clone()),
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(output, shape.query()),
+            output: current_query_output_request(output, shape.query(), &query_schema.schema),
         };
         self.compile_query_program_request(request).await
     }
@@ -523,6 +533,11 @@ where
         authorization_mode: QueryAuthorizationMode,
         read_view: &ReadViewSpec,
     ) -> Result<QueryProgram, Error> {
+        let query_schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&shape.schema_version())
+            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
         let input_shape = self.normalized_include_deleted_row_set_shape(shape, binding)?;
         let input = RowSetProgramInput {
             binding: self.program_binding_for_shape(
@@ -555,7 +570,11 @@ where
             )?,
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(CurrentQueryProgramOutput::AppRows, shape.query()),
+            output: current_query_output_request(
+                CurrentQueryProgramOutput::AppRows,
+                shape.query(),
+                &query_schema.schema,
+            ),
         };
         // This one-shot include-deleted source has no deletion anti-join after
         // it. The proof remains deliberately narrower than ordinary visible
@@ -584,6 +603,11 @@ where
         let lowered_shape =
             inline_snapshot_bind_filter_literals(shape, binding, &read_schema.schema)?;
         let binding = lowered_shape.bind(BTreeMap::new())?;
+        let query_schema = self
+            .catalogue
+            .catalogue_schemas
+            .get(&lowered_shape.schema_version())
+            .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?;
         let input_shape = if include_deleted {
             self.normalized_include_deleted_row_set_shape(&lowered_shape, &binding)?
         } else {
@@ -612,7 +636,11 @@ where
             ),
             policy: self.query_program_policy_context(identity),
             input,
-            output: current_query_output_request(output, lowered_shape.query()),
+            output: current_query_output_request(
+                output,
+                lowered_shape.query(),
+                &query_schema.schema,
+            ),
         };
         self.compile_query_program_request(request).await
     }
@@ -772,7 +800,7 @@ where
             )?,
             policy,
             input,
-            output: current_query_output_request(output, shape.query()),
+            output: current_query_output_request(output, shape.query(), &query_schema.schema),
         })
     }
 

@@ -23,7 +23,9 @@ pub(super) fn collect_layout(
         FieldProjection::Fields(fields) => selected_root.extend(
             fields
                 .iter()
-                .filter(|field| field.as_str() != "id")
+                .filter(|field| {
+                    !crate::query::is_implicit_row_id_alias(&root_source.table_schema, field)
+                })
                 .map(|field| collect_projection_source_field(root_source, field)),
         ),
     }
@@ -166,7 +168,9 @@ fn collect_slot_layouts(
                 FieldProjection::Fields(fields) => selected.extend(
                     fields
                         .iter()
-                        .filter(|field| field.as_str() != "id")
+                        .filter(|field| {
+                            !crate::query::is_implicit_row_id_alias(&source.table_schema, field)
+                        })
                         .map(|field| {
                             collect_projection_source_field(source, field)
                         }),

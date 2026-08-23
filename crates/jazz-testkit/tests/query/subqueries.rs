@@ -770,7 +770,7 @@ local_tokio_test! {
 /// Verifies that an array subquery can limit ordered inner rows.
 ///
 /// Actors: alice writes five posts, bob reads only the first two ordered by id.
-#[ignore = "subquery order_by id collides with the magic row id and materializes an empty child array"]
+#[ignore = "bounded array subqueries materialize an empty child array regardless of sort column"]
 async fn array_subquery_limits_ordered_inner_rows() {
     let clients = Clients::start().await;
 
@@ -812,7 +812,6 @@ local_tokio_test! {
 ///
 /// Actors: alice writes a post, bob reads Alice with a posts array containing
 /// only the selected post columns.
-#[ignore = "subquery projection treats the user column id as the magic row id and omits it"]
 async fn array_subquery_selects_inner_columns() {
     let clients = Clients::start().await;
 
@@ -848,7 +847,6 @@ local_tokio_test! {
 ///
 /// Actors: alice writes a post, bob reads Alice with post data plus created and
 /// updated timestamps.
-#[ignore = "subquery projection treats the user column id as the magic row id and omits it"]
 async fn array_subquery_selects_magic_timestamp_columns() {
     let clients = Clients::start().await;
 
