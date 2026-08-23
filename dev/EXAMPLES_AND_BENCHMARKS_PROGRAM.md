@@ -13,6 +13,11 @@ This document is the planning contract for that program. It deliberately does
 not define new product APIs: individual app work must use documented public APIs
 and turn gaps it finds into separately reviewed API/design work.
 
+Implementation lanes record adopter-facing surprises in
+[Example App Learnings](./EXAMPLE_APP_LEARNINGS.md). That inbox is periodically
+triaged; entries remain until fixed, captured by a durable test, or promoted to
+an explicit open question in a spec.
+
 ## Goals and non-goals
 
 **Goals**
@@ -39,7 +44,7 @@ and turn gaps it finds into separately reviewed API/design work.
 | **RecordPlayer**      | Personal/shared music library and playlists              | Files and durable streams, large values, partial availability, playlist sharing.                                                                                                                                             |
 | **Jamazon**           | Music-instrument storefront                              | Offline-first cart, checkout workflow, Stripe sandbox integration, idempotent external effects.                                                                                                                              |
 | **Jamazon Warehouse** | Warehouse operations console for Jamazon                 | Recognizably TPC-C-shaped warehouses, districts, customers, stock, orders, order lines, and payments; multi-row exclusive transactions, stock contention, indexed status reads, batch delivery, and stock-level aggregation. |
-| **SongBook**          | Songwriter notes and drafts                              | Rich nested documents, inherited/deep permissions, draft/suggestion and branch flows.                                                                                                                                        |
+| **BandBinder**        | Notion-style workspace for running a band                | Deeply nested pages and blocks for songs, notes, tasks, calendars, attachments, and planning; block/page-scoped roles for band members, stage managers, and collaborators; draft/suggestion and branch flows.                |
 | **Wequencer**         | Collaborative step sequencer                             | High-frequency collaborative writes, hotspot behavior, presence, synchronization/reconnect; clock-perfect playback is an app aspiration, not a benchmark assertion until its contract exists.                                |
 | **PosterShop**        | Collaborative gig-poster design canvas                   | Real-time cursors/edits, canvas-shaped fan-out, history rewind, and branches.                                                                                                                                                |
 | **BigLabel**          | Multi-tenant record-label operations                     | SaaS-scale tenant filtering, organization/team policy graphs, indexed relational reads, migrations, and large synthetic datasets.                                                                                            |
@@ -73,23 +78,23 @@ remain supported until a catalogue scenario has equivalent assertions, a
 reproducible receipt, and a migration note. Retire only duplicated harnesses;
 keep independent microbenchmarks and core canaries.
 
-| Current material                                         | Destination app(s)                     | Migration intent                                                                                                                  |
-| -------------------------------------------------------- | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `examples/chat-react` and `examples/auth-*-chat`         | BandChat                               | Preserve auth-specific teaching value as small shells; migrate product workflow, room policy, attachments, and fan-out scenarios. |
-| `examples/world-tour`                                    | WorldTour                              | Evolve it into the canonical WorldTour app rather than rebuild it elsewhere.                                                      |
-| `examples/branching-project-planner-ts`                  | SongBook and PosterShop                | Split branch/history lessons by product flow; keep any minimal branch API example needed for reference.                           |
-| Todo local-first families                                | BandChat/Jamazon plus framework shells | Retain framework-baseline starters/examples; adopt offline persistence and CRUD load shape only where it belongs.                 |
-| Realistic `W1`, `W3`, `W4`                               | BandChat, WorldTour, Jamazon           | Recast interactive, offline-reconnect, and cold-start behavior as app scenarios; retain shared runner plumbing.                   |
-| Realistic `B1`/`R1`, `B2`/`R2`, `B3`/`R3`                | BigLabel and Jamazon Warehouse         | Use for sustained CRUD, indexed reads, and cold-load scale profiles.                                                              |
-| Realistic `B4`/`R4`, `R9`                                | BandChat, PosterShop, Wequencer        | Adopt subscription fan-out and subscribed-write semantics.                                                                        |
-| Realistic `B5`/`R5`/`R6`                                 | BigLabel and SongBook                  | Adopt recursive-policy, write-heavy, and permission-filtered resume scenarios.                                                    |
-| Realistic `B6`/`R7`, `R8`                                | PosterShop, SongBook, Wequencer        | Adopt hotspot history and branch-view workloads.                                                                                  |
-| Realistic `B7`                                           | BigLabel and WorldTour                 | Adopt large relation-result hydration as an indexed relational-read profile.                                                      |
-| `jazz-sim` `s1_saas`, policy-graph, customer cold-start  | BigLabel                               | Make BigLabel the product meaning of SaaS, policy-graph, and tenant cold-load shapes.                                             |
-| `jazz-sim` `s2_canvas`, `s8_branch_views`                | PosterShop (and SongBook for branches) | Reuse canvas live/replay and branch-view workload semantics.                                                                      |
-| `jazz-sim` `s3_permissions`, `s7_migrations`             | SongBook and BigLabel                  | Exercise deep permissions and multi-version migration/reconnect.                                                                  |
-| `jazz-sim` `s4_order_processing`, `s9_durable_execution` | Jamazon Warehouse, Jamazon, MusicAgent | Keep order-processing/reference comparison and durable-workflow semantics, surfaced through their respective UIs.                 |
-| `jazz-sim` `s5_durable_stream`                           | RecordPlayer, EpicDrop, MusicAgent     | Adopt stream lifecycle, persistence, resume, and bounded-memory transfer behavior.                                                |
+| Current material                                         | Destination app(s)                       | Migration intent                                                                                                                  |
+| -------------------------------------------------------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `examples/chat-react` and `examples/auth-*-chat`         | BandChat                                 | Preserve auth-specific teaching value as small shells; migrate product workflow, room policy, attachments, and fan-out scenarios. |
+| `examples/world-tour`                                    | WorldTour                                | Evolve it into the canonical WorldTour app rather than rebuild it elsewhere.                                                      |
+| `examples/branching-project-planner-ts`                  | BandBinder and PosterShop                | Split branch/history lessons by product flow; keep any minimal branch API example needed for reference.                           |
+| Todo local-first families                                | BandChat/Jamazon plus framework shells   | Retain framework-baseline starters/examples; adopt offline persistence and CRUD load shape only where it belongs.                 |
+| Realistic `W1`, `W3`, `W4`                               | BandChat, WorldTour, Jamazon             | Recast interactive, offline-reconnect, and cold-start behavior as app scenarios; retain shared runner plumbing.                   |
+| Realistic `B1`/`R1`, `B2`/`R2`, `B3`/`R3`                | BigLabel and Jamazon Warehouse           | Use for sustained CRUD, indexed reads, and cold-load scale profiles.                                                              |
+| Realistic `B4`/`R4`, `R9`                                | BandChat, PosterShop, Wequencer          | Adopt subscription fan-out and subscribed-write semantics.                                                                        |
+| Realistic `B5`/`R5`/`R6`                                 | BigLabel and BandBinder                  | Adopt recursive-policy, write-heavy, and permission-filtered resume scenarios.                                                    |
+| Realistic `B6`/`R7`, `R8`                                | PosterShop, BandBinder, Wequencer        | Adopt hotspot history and branch-view workloads.                                                                                  |
+| Realistic `B7`                                           | BigLabel and WorldTour                   | Adopt large relation-result hydration as an indexed relational-read profile.                                                      |
+| `jazz-sim` `s1_saas`, policy-graph, customer cold-start  | BigLabel                                 | Make BigLabel the product meaning of SaaS, policy-graph, and tenant cold-load shapes.                                             |
+| `jazz-sim` `s2_canvas`, `s8_branch_views`                | PosterShop (and BandBinder for branches) | Reuse canvas live/replay and branch-view workload semantics.                                                                      |
+| `jazz-sim` `s3_permissions`, `s7_migrations`             | BandBinder and BigLabel                  | Exercise deep permissions and multi-version migration/reconnect.                                                                  |
+| `jazz-sim` `s4_order_processing`, `s9_durable_execution` | Jamazon Warehouse, Jamazon, MusicAgent   | Keep order-processing/reference comparison and durable-workflow semantics, surfaced through their respective UIs.                 |
+| `jazz-sim` `s5_durable_stream`                           | RecordPlayer, EpicDrop, MusicAgent       | Adopt stream lifecycle, persistence, resume, and bounded-memory transfer behavior.                                                |
 
 `moon-lander-react`, server/runtime examples, and framework/auth starters remain
 valuable focused references. They are out of catalogue scope unless a later
@@ -136,7 +141,7 @@ recording blockers rather than designing around them:
 1. **Program foundation and BandChat:** repository layout, fixture/scenario contract, gallery shell, and first topology harness.
 2. **BigLabel and WorldTour:** scale/policy ownership and evolution of the existing map app.
 3. **Jamazon Warehouse and Jamazon:** exclusive transaction/order flow, durable execution, and external-effect boundary.
-4. **PosterShop and SongBook:** canvas/history/branches and rich nested permission flows.
+4. **PosterShop and BandBinder:** canvas/history/branches and rich nested permission flows across pages, blocks, tasks, calendars, songs, notes, and attachments.
 5. **RecordPlayer and EpicDrop:** add after large binary values, partial chunk fulfillment, bounded-memory transfer, and native cache/VFS contracts are stable enough to test honestly.
 6. **MusicAgent:** add after large streamed text values and durable server-side agent execution have explicit recovery and secret-handling contracts.
 7. **Wequencer:** add after synchronization and high-frequency update contracts are explicit and testable.
