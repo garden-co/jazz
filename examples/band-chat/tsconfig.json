@@ -13,7 +13,16 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
-    "jsx": "react-jsx"
+    "jsx": "preserve",
+    "plugins": [{ "name": "next" }]
   },
-  "include": ["src", "tests", "schema.ts", "permissions.ts"]
+  "include": [
+    "next-env.d.ts",
+    ".next/types/**/*.ts",
+    "src",
+    "app",
+    "tests",
+    "schema.ts",
+    "permissions.ts"
+  ]
 }

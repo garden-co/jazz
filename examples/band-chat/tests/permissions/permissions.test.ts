@@ -20,31 +20,30 @@ async function expectAcceptedAtEdge<T>(write: {
 
 describe("BandChat admission and authorship boundary", () => {
   it("persists owner bootstrap/invite/send and rejects self-admission and forged authorship at edge", async () => {
-    const owner = testApp.as({ user_id: "owner", claims: {}, authMode: "local-first" });
-    const guest = testApp.as({ user_id: "guest", claims: {}, authMode: "local-first" });
+    const ownerId = "019d4349-24b0-72a9-ae86-8ed24a7e3a90";
+    const guestId = "019d4349-24b0-72a9-ae86-8ed24a7e3a91";
+    const owner = testApp.as({ user_id: ownerId, claims: {}, authMode: "external" });
+    const guest = testApp.as({ user_id: guestId, claims: {}, authMode: "external" });
     const ownerProfile = await testApp.seed((db) =>
-      db.insert(app.profiles, { userId: "owner", displayName: "Owner" }),
+      db.insert(app.profiles, { userId: ownerId, displayName: "Owner" }),
     );
     const guestProfile = await testApp.seed((db) =>
-      db.insert(app.profiles, { userId: "guest", displayName: "Guest" }),
+      db.insert(app.profiles, { userId: guestId, displayName: "Guest" }),
     );
-    const room = await expectAcceptedAtEdge(
-      owner.insert(app.rooms, { name: "Private rehearsal", createdBy: "owner" }),
-    );
+    const room = await expectAcceptedAtEdge(owner.insert(app.rooms, { name: "Private rehearsal" }));
 
-    await expectAcceptedAtEdge(owner.insert(app.roomMembers, { roomId: room.id, userId: "owner" }));
+    await expectAcceptedAtEdge(owner.insert(app.roomMembers, { roomId: room.id, userId: ownerId }));
     await guest.expectDenied((db) =>
-      db.insert(app.roomMembers, { roomId: room.id, userId: "guest" }),
+      db.insert(app.roomMembers, { roomId: room.id, userId: guestId }),
     );
     const guestMembership = await expectAcceptedAtEdge(
-      owner.insert(app.roomMembers, { roomId: room.id, userId: "guest" }),
+      owner.insert(app.roomMembers, { roomId: room.id, userId: guestId }),
     );
     await expectAcceptedAtEdge(
       guest.insert(app.messages, {
         roomId: room.id,
         senderId: guestProfile.id,
         text: "legit",
-        createdAt: new Date(),
       }),
     );
     await guest.expectDenied((db) =>
@@ -52,7 +51,6 @@ describe("BandChat admission and authorship boundary", () => {
         roomId: room.id,
         senderId: ownerProfile.id,
         text: "forged",
-        createdAt: new Date(),
       }),
     );
     await expectAcceptedAtEdge(owner.delete(app.roomMembers, guestMembership.id));
@@ -61,7 +59,6 @@ describe("BandChat admission and authorship boundary", () => {
         roomId: room.id,
         senderId: guestProfile.id,
         text: "after removal",
-        createdAt: new Date(),
       }),
     );
   });

@@ -1,9 +1,8 @@
-import { app } from "../schema.js";
-import { demoRoom } from "./fixture.js";
+import { app } from "../schema";
+import { demoRoom } from "./fixture";
+import type { Db } from "jazz-tools";
 
-type ProvisionDb = {
-  insert: (table: unknown, values: Record<string, unknown>) => { value: { id: string } };
-};
+type ProvisionDb = Pick<Db, "insert">;
 
 /** Explicit, idempotent example provisioning. Never call this from a read hook. */
 export function provisionDemo(
@@ -15,13 +14,12 @@ export function provisionDemo(
   const profileId =
     existing.profileId ??
     db.insert(app.profiles, { userId, displayName: "Local musician" }).value.id;
-  const room = db.insert(app.rooms, { name: demoRoom.name, createdBy: userId }).value;
+  const room = db.insert(app.rooms, { name: demoRoom.name }).value;
   db.insert(app.roomMembers, { roomId: room.id, userId });
   db.insert(app.messages, {
     roomId: room.id,
     senderId: profileId,
     text: demoRoom.welcome,
-    createdAt: new Date(),
   });
   return room.id;
 }

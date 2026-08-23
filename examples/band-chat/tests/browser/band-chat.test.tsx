@@ -34,16 +34,13 @@ async function mount(driver: DbConfig["driver"], config: Partial<DbConfig> = {})
   document.body.append(element);
   const root = createRoot(element);
   mounts.push({ root, element });
+  const appConfig = (
+    config.jwtToken
+      ? { appId: "band-chat-local", driver, ...config }
+      : { appId: "band-chat-local", secret, driver, ...config }
+  ) as Partial<DbConfig>;
   await act(async () => {
-    root.render(
-      <App
-        config={
-          config.jwtToken
-            ? { appId: "band-chat-local", driver, ...config }
-            : { appId: "band-chat-local", secret, driver, ...config }
-        }
-      />,
-    );
+    root.render(<App config={appConfig} />);
   });
   await waitFor(
     () => element.querySelector(".empty") !== null,

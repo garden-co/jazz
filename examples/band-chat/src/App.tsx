@@ -1,12 +1,12 @@
 import { useState, type FormEvent } from "react";
 import { JazzProvider, useAll, useDb, useLocalFirstAuth, useSession } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
-import { app } from "../schema.js";
-import { provisionDemo } from "./provisioning.js";
+import { app } from "../schema";
+import { provisionDemo } from "./provisioning";
 import "./app.css";
 
-const appId = import.meta.env.VITE_JAZZ_APP_ID,
-  serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
+const appId = process.env.NEXT_PUBLIC_JAZZ_APP_ID,
+  serverUrl = process.env.NEXT_PUBLIC_JAZZ_SERVER_URL;
 const MAX_ATTACHMENT_BYTES = 256 * 1024;
 const allowedTypes = new Set([
   "image/png",
@@ -17,10 +17,16 @@ const allowedTypes = new Set([
 ]);
 export function App({ config }: { config?: Partial<DbConfig> } = {}) {
   const auth = useLocalFirstAuth();
-  const providerConfig = config?.jwtToken
-    ? { appId, env: "dev", serverUrl, ...config }
-    : auth.secret || config?.secret
-      ? { appId, env: "dev", serverUrl, secret: config?.secret ?? auth.secret!, ...config }
+  const shared = {
+    appId: config?.appId ?? appId!,
+    env: config?.env ?? "dev",
+    serverUrl: config?.serverUrl ?? serverUrl,
+    driver: config?.driver,
+  };
+  const providerConfig: DbConfig | null = config?.jwtToken
+    ? { ...shared, jwtToken: config.jwtToken }
+    : config?.secret || auth.secret
+      ? { ...shared, secret: config?.secret ?? auth.secret! }
       : null;
   if (!providerConfig) return <p>Joining BandChat…</p>;
   return (
@@ -100,7 +106,9 @@ function RoomList({
 }
 function Conversation({ roomId, userId }: { roomId: string; userId: string }) {
   const { data: rooms = [] } = useAll(app.rooms.where({ id: roomId }));
-  const { data: messages = [] } = useAll(app.messages.where({ roomId }));
+  const { data: messages = [] } = useAll(
+    app.messages.where({ roomId }).select("*", "$createdAt").orderBy("$createdAt", "asc"),
+  );
   const room = rooms[0];
   return (
     <div className="conversation">
@@ -124,8 +132,9 @@ function MessageList({
     id: string;
     senderId: string;
     text: string;
-    attachment?: Uint8Array;
-    attachmentName?: string;
+    attachment: Uint8Array | null;
+    attachmentName: string | null;
+    $createdAt: Date;
   }>;
   userId: string;
 }) {
@@ -136,6 +145,9 @@ function MessageList({
         <li key={message.id}>
           <strong>{message.senderId === profiles[0]?.id ? "You" : "Bandmate"}</strong>
           <span>{message.text}</span>
+          <small>
+            {message.$createdAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+          </small>
           {message.attachment && (
             <small>
               📎 {message.attachmentName ?? "attachment"} ({message.attachment.byteLength} bytes)
@@ -175,7 +187,6 @@ function Composer({ roomId, userId }: { roomId: string; userId: string }) {
       text: text.trim() || "Shared an attachment",
       attachment,
       attachmentName: file?.name,
-      createdAt: new Date(),
     });
     setText("");
     setFile(null);

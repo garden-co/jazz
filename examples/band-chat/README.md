@@ -1,6 +1,6 @@
 # BandChat
 
-BandChat is the first canonical app in the examples-and-benchmarks program: a small, polished React room chat with local-first writes, identity, membership permissions, and byte attachments.
+BandChat is the first canonical app in the examples-and-benchmarks program: a small, self-contained Next.js room chat with Better Auth, local-first writes, membership permissions, and byte attachments.
 
 ```bash
 pnpm --dir examples/band-chat install
@@ -8,6 +8,14 @@ pnpm --dir examples/band-chat dev
 ```
 
 Open the demo room, send a message (or attach a small file), then briefly disconnect/reconnect: the UI writes locally and Jazz syncs when connectivity returns.
+
+The production path uses external auth end to end. Better Auth owns the cookie
+session and publishes JWT/JWKS endpoints. `/api/bootstrap` validates that session
+server-side and idempotently creates the Jazz profile through the app's sole
+backend-secret context, keyed by Better Auth's stable user id. Only after that
+request succeeds does the client obtain a JWT and mount the ordinary Jazz UI.
+Rooms remain explicit user-created state. No backend secret reaches normal UI
+reads or writes.
 
 ## Contract
 
@@ -17,6 +25,10 @@ conversation owns its room/message queries, and the composer owns the current
 profile query plus writes. Reads remain declarative and have no provisioning
 side effects. The empty-state button invokes a separate idempotent provisioning
 function; this makes normal subscription renders safe to replay or remount.
+
+Room ownership and message time are Jazz provenance metadata, not user-written
+columns: policies use `$createdBy`, and the conversation explicitly selects and
+orders by `$createdAt` for display. Writes never supply either value.
 
 - `schema.ts` and `permissions.ts` define the identity and membership boundary. A user can only read a room after becoming a member, and can write messages only in a member room.
 - `src/fixture.ts` is the versioned, deterministic, public/name-blind smoke fixture.
