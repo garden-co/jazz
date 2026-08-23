@@ -12,7 +12,7 @@ Jazz clients have two pieces of local state that are easy to confuse:
   by `BrowserAuthSecretStore` in `localStorage`; in Expo it is stored by `ExpoAuthSecretStore` in
   secure storage.
 - **Database storage**&hairsp;—&hairsp;the local relational database. Browser persistent clients store this
-  in OPFS. React Native/Expo persistence is not available in this alpha; its explicit memory path is
+  in IndexedDB. React Native/Expo persistence is not available in this alpha; its explicit memory path is
   unverified scaffolding rather than a device-supported runtime. Supported memory drivers keep data
   only for the life of the process.
 
@@ -74,7 +74,7 @@ responsible for clearing its own token or cookie, and your app should recreate `
 await db.logout();
 ```
 
-In browser persistent mode, pass `wipeData: true` to also clear the local OPFS database namespace
+In browser persistent mode, pass `wipeData: true` to also clear the local IndexedDB database namespace
 before shutdown:
 
 ```ts
@@ -94,8 +94,9 @@ logout, call:
 await db.deleteClientStorage();
 ```
 
-This API is only available for browser worker-backed persistent storage. It clears OPFS database
-files and coordinates across tabs, but intentionally leaves local-first auth secrets alone.
+This API is only available for browser persistent storage. It asks the SharedWorker to clear the
+namespace's IndexedDB database and coordinates across tabs, but intentionally leaves local-first
+auth secrets alone.
 
 Need a console-only reset while debugging? See [How do I reset browser storage?](/docs/faq#reset-browser-storage).
 
@@ -126,5 +127,5 @@ proof-token flow.
 | `db.updateAuthToken(jwt)`         | Refreshing a bearer JWT for the same principal                                     |
 | `db.updateCookieSession(session)` | Updating a mirrored cookie-backed session for the same principal                   |
 | `db.logout()`                     | Shutting down a client during logout or principal switch                           |
-| `db.logout({ wipeData: true })`   | Logout plus browser OPFS database wipe                                             |
-| `db.deleteClientStorage()`        | Development-only browser OPFS storage reset                                        |
+| `db.logout({ wipeData: true })`   | Logout plus browser IndexedDB database wipe                                        |
+| `db.deleteClientStorage()`        | Development-only browser IndexedDB storage reset                                   |

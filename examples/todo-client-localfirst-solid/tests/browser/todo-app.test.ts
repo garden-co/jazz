@@ -175,7 +175,7 @@ describe("Solid Todo App E2E", () => {
     expect(titles.sort()).toEqual(["First", "Second", "Third"]);
   });
 
-  it("persists todos across app unmount and remount (OPFS)", async () => {
+  it("persists todos across app unmount and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
 
     const el1 = await mountApp({ driver: { type: "persistent", dbName } });
@@ -199,7 +199,7 @@ describe("Solid Todo App E2E", () => {
     await waitFor(
       () => el2.querySelectorAll("#todo-list li").length === 1,
       5000,
-      "Todo should survive remount from OPFS",
+      "Todo should survive remount from IndexedDB",
     );
 
     expect(el2.querySelector("#todo-list li span")!.textContent).toBe("Survive reload");

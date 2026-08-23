@@ -4,12 +4,7 @@ use super::*;
 
 #[futures_test::test]
 async fn arg_max_by_hydrates_and_tracks_winner_changes() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["history", "rows", "blockers"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
     let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -60,12 +55,7 @@ async fn arg_max_by_hydrates_and_tracks_winner_changes() {
 
 #[futures_test::test]
 async fn arg_max_by_suppresses_non_winner_and_net_zero_deltas() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["history", "rows", "blockers"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_arg_max())
@@ -95,12 +85,7 @@ async fn arg_max_by_suppresses_non_winner_and_net_zero_deltas() {
 
 #[futures_test::test]
 async fn arg_max_by_handles_multi_delta_same_group_and_tie_by_pk_order() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["history", "rows", "blockers"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_arg_max())
@@ -121,12 +106,7 @@ async fn arg_max_by_handles_multi_delta_same_group_and_tie_by_pk_order() {
 
 #[futures_test::test]
 async fn arg_min_by_hydrates_initial_snapshot_winner() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["history", "rows", "blockers"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
     let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -155,12 +135,7 @@ async fn arg_min_by_hydrates_initial_snapshot_winner() {
 
 #[futures_test::test]
 async fn arg_min_by_tracks_lower_insert_and_current_winner_delete() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["history", "rows", "blockers"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_arg_min())
@@ -201,12 +176,7 @@ async fn arg_min_by_tracks_lower_insert_and_current_winner_delete() {
 
 #[futures_test::test]
 async fn arg_min_by_handles_same_tick_replacement_and_tie_by_pk_order() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["history", "rows", "blockers"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_arg_min())
@@ -237,12 +207,7 @@ async fn arg_min_by_handles_same_tick_replacement_and_tie_by_pk_order() {
 
 #[futures_test::test]
 async fn top_by_hydrates_limit_two() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["history", "rows", "blockers"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
     let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -271,12 +236,7 @@ async fn top_by_hydrates_limit_two() {
 
 #[futures_test::test]
 async fn top_by_finite_zero_stays_empty() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["history", "rows", "blockers"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
     let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -297,12 +257,7 @@ async fn top_by_finite_zero_stays_empty() {
 
 #[futures_test::test]
 async fn top_by_boundary_insert_and_delete_updates_window() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["history", "rows", "blockers"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_top_by_stamp_asc(2))
@@ -342,12 +297,7 @@ async fn top_by_boundary_insert_and_delete_updates_window() {
 
 #[futures_test::test]
 async fn top_by_suppresses_outside_window_changes() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["history", "rows", "blockers"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_top_by_stamp_asc(2))
@@ -374,12 +324,7 @@ async fn top_by_suppresses_outside_window_changes() {
 
 #[futures_test::test]
 async fn top_by_descending_order_keeps_largest_values() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["history", "rows", "blockers"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
     let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -408,12 +353,7 @@ async fn top_by_descending_order_keeps_largest_values() {
 
 #[futures_test::test]
 async fn top_by_offset_keeps_requested_window() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["history", "rows", "blockers"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
     let mut database = Database::new(history_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -445,9 +385,7 @@ async fn top_by_offset_keeps_requested_window() {
 
 #[futures_test::test]
 async fn top_by_orders_nullable_sort_keys_null_first() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["scores"]).unwrap();
+    let storage = MemoryStorage::new(&["scores"]);
     let mut database = Database::new(nullable_scores_schema(), storage)
         .await
         .unwrap();
@@ -500,12 +438,7 @@ async fn top_by_orders_nullable_sort_keys_null_first() {
 
 #[futures_test::test]
 async fn top_by_uses_stable_tie_field() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["history", "rows", "blockers"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["history", "rows", "blockers"]);
     let mut database = Database::new(history_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(history_top_by_stamp_asc(1))
@@ -550,12 +483,7 @@ fn union_history_top_by(offset: u64, limit: u64) -> GraphBuilder {
 
 #[futures_test::test]
 async fn top_by_counts_duplicate_multiplicity_toward_window_occupancy() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["history", "history_shadow"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["history", "history_shadow"]);
     let mut database = Database::new(two_history_tables_schema(), storage)
         .await
         .unwrap();
@@ -578,12 +506,7 @@ async fn top_by_counts_duplicate_multiplicity_toward_window_occupancy() {
 
 #[futures_test::test]
 async fn top_by_offset_splits_duplicate_copies_across_boundary() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["history", "history_shadow"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["history", "history_shadow"]);
     let mut database = Database::new(two_history_tables_schema(), storage)
         .await
         .unwrap();
@@ -614,12 +537,7 @@ async fn top_by_offset_splits_duplicate_copies_across_boundary() {
 
 #[futures_test::test]
 async fn top_by_emits_weighted_diff_when_duplicate_copy_enters_window() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["history", "history_shadow"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["history", "history_shadow"]);
     let mut database = Database::new(two_history_tables_schema(), storage)
         .await
         .unwrap();
@@ -660,12 +578,7 @@ async fn top_by_emits_weighted_diff_when_duplicate_copy_enters_window() {
 
 #[futures_test::test]
 async fn top_by_replaces_window_tie_with_distinct_record_on_delete() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["history", "history_shadow"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["history", "history_shadow"]);
     let mut database = Database::new(two_history_tables_schema(), storage)
         .await
         .unwrap();
@@ -698,12 +611,7 @@ async fn top_by_replaces_window_tie_with_distinct_record_on_delete() {
 
 #[futures_test::test]
 async fn top_by_maintains_weighted_window_across_duplicate_lifecycle() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["history", "history_shadow"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["history", "history_shadow"]);
     let mut database = Database::new(two_history_tables_schema(), storage)
         .await
         .unwrap();

@@ -27,8 +27,7 @@ use crate::schema::{
     PrimaryKey, PrimaryKeyColumn, PrimaryKeyType, TableVariant, TableVariantField,
 };
 use crate::storage::{
-    MemoryStorage, OrderedKvStorage, StorageLayout, TestBtreeStorage, TestStorage,
-    TestStorageOperation,
+    MemoryStorage, OrderedKvStorage, StorageLayout, TestStorage, TestStorageOperation,
 };
 
 use support::*;

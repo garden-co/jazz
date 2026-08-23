@@ -4,9 +4,7 @@ use super::*;
 
 #[futures_test::test]
 async fn query_returns_filtered_current_rows() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -40,12 +38,7 @@ async fn query_returns_filtered_current_rows() {
 
 #[futures_test::test]
 async fn enum_predicates_resolve_variant_names_at_plan_time() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["tasks", "indices"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["tasks", "indices"]);
     let mut database = Database::new(enum_tasks_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -86,12 +79,7 @@ async fn enum_predicates_resolve_variant_names_at_plan_time() {
 
 #[futures_test::test]
 async fn enum_index_keys_follow_declaration_order() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["tasks", "indices"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["tasks", "indices"]);
     let mut database = Database::new(enum_tasks_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -140,9 +128,7 @@ async fn enum_index_keys_follow_declaration_order() {
 
 #[futures_test::test]
 async fn nullable_comparisons_unwrap_present_values_and_skip_nulls() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["markers"]).unwrap();
+    let storage = MemoryStorage::new(&["markers"]);
     let mut database = Database::new(nullable_markers_schema(), storage)
         .await
         .unwrap();
@@ -175,9 +161,7 @@ async fn nullable_comparisons_unwrap_present_values_and_skip_nulls() {
 
 #[futures_test::test]
 async fn query_lowers_is_null_and_is_not_null_predicates() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["markers"]).unwrap();
+    let storage = MemoryStorage::new(&["markers"]);
     let mut database = Database::new(nullable_markers_schema(), storage)
         .await
         .unwrap();
@@ -222,9 +206,7 @@ async fn query_lowers_is_null_and_is_not_null_predicates() {
 
 #[futures_test::test]
 async fn is_null_matches_nested_nullable_none() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["markers"]).unwrap();
+    let storage = MemoryStorage::new(&["markers"]);
     let mut database = Database::new(nested_nullable_markers_schema(), storage)
         .await
         .unwrap();
@@ -277,12 +259,7 @@ async fn is_null_matches_nested_nullable_none() {
 
 #[futures_test::test]
 async fn unwrap_nullable_graph_drops_none_and_unwraps_present_values() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["tracks", "indices"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["tracks", "indices"]);
     let mut database = Database::new(indexed_tracks_schema(), storage)
         .await
         .unwrap();
@@ -315,12 +292,7 @@ async fn unwrap_nullable_graph_drops_none_and_unwraps_present_values() {
 async fn indexed_batch_commit_timing_receipt_20k_and_single_row() {
     jazz_benchmark_guard::refuse_contaminated_measurement();
     const ROWS: u64 = 20_000;
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["tracks", "indices"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["tracks", "indices"]);
     let mut database = Database::new(indexed_tracks_schema(), storage)
         .await
         .unwrap();
@@ -392,9 +364,7 @@ async fn indexed_batch_commit_timing_receipt_20k_and_single_row() {
 
 #[futures_test::test]
 async fn query_graphs_returns_named_one_shot_snapshots() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -431,12 +401,7 @@ async fn query_graphs_returns_named_one_shot_snapshots() {
 
 #[futures_test::test]
 async fn unwrap_nullable_retractions_flow_symmetrically() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["tracks", "indices"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["tracks", "indices"]);
     let mut database = Database::new(indexed_tracks_schema(), storage)
         .await
         .unwrap();
@@ -469,12 +434,7 @@ async fn unwrap_nullable_retractions_flow_symmetrically() {
 
 #[futures_test::test]
 async fn project_nullable_wraps_uuid_and_string_fields() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["docs", "indices"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["docs", "indices"]);
     let mut database = Database::new(uuid_docs_schema(), storage).await.unwrap();
     let id = uuid(1);
 
@@ -511,12 +471,7 @@ async fn project_nullable_wraps_uuid_and_string_fields() {
 
 #[futures_test::test]
 async fn project_nullable_can_union_with_typed_null_projection() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["docs", "indices"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["docs", "indices"]);
     let mut database = Database::new(uuid_docs_schema(), storage).await.unwrap();
     let id = uuid(2);
 
@@ -577,9 +532,7 @@ async fn project_nullable_can_union_with_typed_null_projection() {
 
 #[futures_test::test]
 async fn query_returns_empty_result_for_empty_answers() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
 
     let result = database
@@ -600,12 +553,7 @@ async fn query_returns_empty_result_for_empty_answers() {
 
 #[futures_test::test]
 async fn table_static_scan_specs_hydrate_like_full_scan_then_filter() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["docs", "indices"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["docs", "indices"]);
     let mut database = Database::new(scan_spec_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -698,12 +646,7 @@ async fn table_static_scan_specs_hydrate_like_full_scan_then_filter() {
 
 #[futures_test::test]
 async fn index_static_scan_specs_filter_index_records() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["docs", "indices"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["docs", "indices"]);
     let mut database = Database::new(scan_spec_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -757,12 +700,7 @@ async fn index_static_scan_specs_filter_index_records() {
 
 #[futures_test::test]
 async fn static_scan_specs_participate_in_node_identity() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["docs", "indices"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["docs", "indices"]);
     let mut database = Database::new(scan_spec_schema(), storage).await.unwrap();
 
     let same_a = GraphBuilder::table_scan(
@@ -793,12 +731,7 @@ async fn static_scan_specs_participate_in_node_identity() {
 
 #[futures_test::test]
 async fn one_shot_static_scan_does_not_perturb_existing_subscription() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["docs", "indices"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["docs", "indices"]);
     let mut database = Database::new(scan_spec_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(GraphBuilder::table("docs").project(["tenant", "id"]))
@@ -832,9 +765,7 @@ async fn one_shot_static_scan_does_not_perturb_existing_subscription() {
 
 #[futures_test::test]
 async fn subscribe_supports_recursive_hydration_snapshot_message() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage = MemoryStorage::new(&["edges"]);
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();

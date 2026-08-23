@@ -354,7 +354,15 @@ where
         if self.schema_view_is_fixed {
             return Ok(());
         }
-        Ok(self.node.node.lock().await.close().await?)
+        // Close finalization admission before the first await. This makes the
+        // queued retirement set and durable close one lifecycle transition:
+        // a stream dropped while storage is shutting down is either in this
+        // drain or already part of the retired terminal runtime.
+        self.node.begin_subscription_finalization_shutdown();
+        self.node.drain_subscription_finalizations().await?;
+        self.node.node.lock().await.close().await?;
+        self.node.retire_subscription_runtime_after_close();
+        Ok(())
     }
 
     /// Configure this database as the optimistic, non-durable side of a
@@ -638,12 +646,14 @@ where
     /// Service every connection once (a convenience over
     /// [`PeerConnection::tick`] for the common single-upstream client).
     pub async fn tick(&self) -> Result<(), Error> {
+        self.node.drain_subscription_finalizations().await?;
         self.node.settle_local_publications().await?;
         self.node.tick().await.map(|_| ())
     }
 
     /// Service every connection once and return binding-observable wake counts.
     pub async fn tick_stats(&self) -> Result<DbTickStats, Error> {
+        self.node.drain_subscription_finalizations().await?;
         self.node.settle_local_publications().await?;
         self.node.tick().await
     }

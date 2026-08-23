@@ -8,7 +8,7 @@ on:
         required: false
         default: "s"
       include_browser:
-        description: "Run browser/OPFS benchmark suite"
+        description: "Run browser idb-tree/IndexedDB page-store benchmark suite"
         required: false
         default: false
         type: boolean
@@ -280,7 +280,7 @@ jobs:
           if-no-files-found: error
 
   browser:
-    name: Browser Bench (TS + OPFS)
+    name: Browser Bench (TS + idb-tree / IndexedDB page store)
     if: >-
       ${{
         (github.event_name != 'push' || github.actor != 'github-actions[bot]')
@@ -340,7 +340,7 @@ jobs:
             "runner_name": "${RUNNER_NAME}",
             "runner_os": "${RUNNER_OS}",
             "runner_arch": "${RUNNER_ARCH}",
-            "storage_engine": "opfs-btree"
+            "storage_engine": "idb-tree-indexeddb-page-store"
           }
           EOF
           node -v > bench-out/browser/node.txt
@@ -410,7 +410,7 @@ jobs:
               ref: $ref,
               branch: $branch,
               profile: $profile,
-              storage_engine: "opfs-btree",
+              storage_engine: "idb-tree-indexeddb-page-store",
               files: [
                 { path: "metadata.json" },
                 { path: "node.txt" },

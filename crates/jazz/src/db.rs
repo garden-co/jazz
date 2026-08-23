@@ -330,6 +330,7 @@ impl SchemaViewId {
 /// through the same path a local write does.
 type SubscriptionList = Rc<RefCell<Vec<Weak<RefCell<SubscriptionState>>>>>;
 type PendingUpstreamCommands = Rc<RefCell<Vec<PendingUpstreamCommand>>>;
+type PendingSubscriptionFinalizations = Rc<RefCell<VecDeque<PendingSubscriptionFinalization>>>;
 type LatestCoverageSubscriptions = Rc<RefCell<BTreeMap<CoverageKey, SubscriptionKey>>>;
 type UpstreamCoverageRefCounts = Rc<RefCell<BTreeMap<CoverageKey, usize>>>;
 type AwaitingInitialAuthorityCoverage = Rc<RefCell<BTreeSet<CoverageKey>>>;
@@ -723,6 +724,22 @@ struct UpstreamCoverageHandle {
     subscription: SubscriptionKey,
 }
 
+/// A drop-safe request to retire one public subscription. It carries only
+/// stable local/runtime identities and outer ownership bookkeeping; the node
+/// runtime drains it under its ordinary async mutex before touching Groove.
+struct PendingSubscriptionFinalization {
+    /// Keep the state alive until the node has retired the *current* runtime
+    /// handles.  Capturing an ID at drop time is racy with catalogue/runtime
+    /// replacement: refresh can install a successor before the queued command
+    /// reaches the node.
+    state: Option<Rc<RefCell<SubscriptionState>>>,
+    /// The fallible opening guard can run before a public stream state exists.
+    /// It is never subject to runtime replacement, so this narrowly scoped
+    /// fallback may carry its just-created Groove handle directly.
+    opening_local: Option<(u64, groove::ivm::SubscriptionId)>,
+    acknowledgement: Option<oneshot::Sender<()>>,
+}
+
 struct OpenedUpstreamCoverage {
     handles: Vec<UpstreamCoverageHandle>,
     awaits_initial_authority_response: bool,
@@ -947,8 +964,8 @@ pub struct DbTickStats {
 }
 
 mod node_runtime;
+use node_runtime::register_upstream_subscription_owner;
 pub use node_runtime::{ConnectionSessionContext, Node, Transport};
-use node_runtime::{register_upstream_subscription_owner, unregister_upstream_subscription_owner};
 mod peer_connection;
 use peer_connection::{ConnectionLink, schedule_tick_in};
 pub use peer_connection::{PeerConnection, ResumeCursor};
@@ -2214,12 +2231,19 @@ fn materialize_result_tree(query: &Query, snapshot: RelationSnapshot) -> Result<
 }
 
 struct SubscriptionState {
+    /// Set synchronously by stream finalization, before its async cleanup is
+    /// drained. Refresh observes this independently owned cell before it can
+    /// install a replacement maintained subscription.
+    closed: Rc<Cell<bool>>,
     terminal_rows: bool,
     kind: SubscriptionKind,
     groove_runtime_token: u64,
     /// The maintained subscription currently owned by this public stream.
     /// Rehydration replaces the Groove ID, and drop must clean up that new ID.
     local_subscription_cleanup: Rc<Cell<Option<(u64, groove::ivm::SubscriptionId)>>>,
+    /// Coverage ownership belongs to the stream state rather than its initial
+    /// closure, so finalization always retires the currently live state.
+    upstream_subscription_handles: Vec<UpstreamCoverageHandle>,
     propagates_upstream: bool,
     author: AuthorId,
     authorization_mode: QueryAuthorizationMode,
@@ -2406,7 +2430,8 @@ pub enum SubscriptionEvent {
 pub struct SubscriptionStream {
     receiver: UnboundedReceiver<SubscriptionEvent>,
     _state: Rc<RefCell<SubscriptionState>>,
-    cleanup: Option<Box<dyn FnOnce()>>,
+    cleanup: Option<Box<dyn FnOnce(Option<oneshot::Sender<()>>)>>,
+    terminated: bool,
 }
 
 struct CleanupGuard {
@@ -2436,6 +2461,28 @@ impl Drop for CleanupGuard {
 }
 
 impl SubscriptionStream {
+    /// Queue cancellation and wait until the node runtime has retired the
+    /// local maintained subscription and any upstream coverage ownership.
+    /// Dropping this future is safe: the command is queued before it awaits.
+    pub async fn close(&mut self) -> Result<(), Error> {
+        let Some(cleanup) = self.cleanup.take() else {
+            return Ok(());
+        };
+        // `close` is a terminal stream operation. Do this before awaiting so
+        // callers cannot observe an old buffered delta while finalization is
+        // suspended behind storage or the node mutex.
+        self.terminated = true;
+        self.receiver.close();
+        let (sender, receiver) = oneshot::channel();
+        cleanup(Some(sender));
+        receiver.await.map_err(|_| {
+            Error::new(
+                ErrorCode::Protocol,
+                "subscription finalization acknowledgement was dropped",
+            )
+        })
+    }
+
     #[cfg(test)]
     async fn next_raw(&mut self) -> Option<SubscriptionEvent> {
         std::future::poll_fn(|cx| Pin::new(&mut self.receiver).poll_next(cx)).await
@@ -2443,6 +2490,9 @@ impl SubscriptionStream {
 
     /// Await the next materialized subscription event.
     pub async fn next_event(&mut self) -> Option<SubscriptionEvent> {
+        if self.terminated {
+            return None;
+        }
         loop {
             let event =
                 std::future::poll_fn(|cx| Pin::new(&mut self.receiver).poll_next(cx)).await?;
@@ -2454,6 +2504,9 @@ impl SubscriptionStream {
 
     /// Return the next queued materialized subscription event without waiting.
     pub fn try_next_event(&mut self) -> Option<SubscriptionEvent> {
+        if self.terminated {
+            return None;
+        }
         loop {
             let event = self.receiver.try_recv().ok()?;
             if subscription_event_is_publishable(&event) {
@@ -2490,6 +2543,9 @@ impl Stream for SubscriptionStream {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        if this.terminated {
+            return Poll::Ready(None);
+        }
         loop {
             match Pin::new(&mut this.receiver).poll_next(cx) {
                 Poll::Ready(Some(event)) if subscription_event_is_publishable(&event) => {
@@ -2506,7 +2562,7 @@ impl Stream for SubscriptionStream {
 impl Drop for SubscriptionStream {
     fn drop(&mut self) {
         if let Some(cleanup) = self.cleanup.take() {
-            cleanup();
+            cleanup(None);
         }
     }
 }

@@ -580,7 +580,7 @@ function extractBrowser(browserDir) {
       metadata?.storage_engine,
       manifest?.storage_engine,
       realistic?.storage_engine,
-    ) ?? "indexeddb-btree";
+    ) ?? "idb-tree-indexeddb-page-store";
 
   const scenarios = realistic.scenarios
     .filter((x) => x && typeof x === "object" && typeof x.scenario_id === "string")

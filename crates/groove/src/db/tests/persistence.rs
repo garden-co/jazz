@@ -4,9 +4,7 @@ use super::*;
 
 #[futures_test::test]
 async fn query_subscription_matches_one_shot_recompute_under_seeded_interleavings() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let query = select_query(
         Select::new([SelectItem::expr(col("title"))])
@@ -107,12 +105,7 @@ async fn shape_subscriptions_match_recompute_under_seeded_interleavings() {
 }
 
 async fn run_shape_subscription_oracle(mut seed: u64) {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["albums", "artists"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["albums", "artists"]);
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -268,12 +261,7 @@ async fn graph_subscriptions_match_recompute_under_seeded_interleavings() {
 }
 
 async fn run_graph_subscription_oracle(mut seed: u64) {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["edges", "blockers"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["edges", "blockers"]);
     let mut database = Database::new(edges_blockers_schema(), storage)
         .await
         .unwrap();

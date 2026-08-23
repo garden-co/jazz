@@ -124,7 +124,6 @@ const inputsFor = {
     "crates/jazz-wasm",
     "crates/jazz",
     "crates/groove",
-    "crates/opfs-btree",
     "crates/wasm-tracing",
   ],
   napi: [
@@ -141,7 +140,6 @@ const inputsFor = {
     "crates/jazz-napi",
     "crates/jazz",
     "crates/groove",
-    "crates/opfs-btree",
   ],
 };
 

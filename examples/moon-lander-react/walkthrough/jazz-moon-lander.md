@@ -19,7 +19,7 @@ Players share a moon surface: they collect fuel deposits, trade fuel with each o
 
 ## What is Jazz?
 
-Jazz is a **local-first** sync framework. Every client runs a full database in a WASM worker, persisted to disk via OPFS. Changes sync to an edge server and fan out to all connected clients in real time.
+Jazz is a **local-first** sync framework. Every client runs a full database in a WASM worker, persisted to disk via IndexedDB. Changes sync to an edge server and fan out to all connected clients in real time.
 
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 212" width="520" height="196" style="display:block;margin:0.5rem auto">
   <defs>
@@ -32,11 +32,11 @@ Jazz is a **local-first** sync framework. Every client runs a full database in a
   <rect x="8" y="130" width="170" height="74" rx="8" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
   <text x="93" y="154" text-anchor="middle" font-family="ui-sans-serif,sans-serif" font-size="13" font-weight="700" fill="#1e40af">Browser A</text>
   <text x="93" y="174" text-anchor="middle" font-family="ui-monospace,monospace" font-size="11" fill="#1e3a8a">WASM worker</text>
-  <text x="93" y="192" text-anchor="middle" font-family="ui-monospace,monospace" font-size="11" fill="#1e3a8a">OPFS (local DB)</text>
+  <text x="93" y="192" text-anchor="middle" font-family="ui-monospace,monospace" font-size="11" fill="#1e3a8a">IndexedDB (local DB)</text>
   <rect x="382" y="130" width="170" height="74" rx="8" fill="#dbeafe" stroke="#3b82f6" stroke-width="1.5"/>
   <text x="467" y="154" text-anchor="middle" font-family="ui-sans-serif,sans-serif" font-size="13" font-weight="700" fill="#1e40af">Browser B</text>
   <text x="467" y="174" text-anchor="middle" font-family="ui-monospace,monospace" font-size="11" fill="#1e3a8a">WASM worker</text>
-  <text x="467" y="192" text-anchor="middle" font-family="ui-monospace,monospace" font-size="11" fill="#1e3a8a">OPFS (local DB)</text>
+  <text x="467" y="192" text-anchor="middle" font-family="ui-monospace,monospace" font-size="11" fill="#1e3a8a">IndexedDB (local DB)</text>
   <line x1="215" y1="68" x2="93" y2="128" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="5,3" marker-start="url(#arrs)" marker-end="url(#arr)"/>
   <line x1="345" y1="68" x2="467" y2="128" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="5,3" marker-start="url(#arrs)" marker-end="url(#arr)"/>
 </svg>
@@ -102,7 +102,7 @@ const schema = {
 
 ## Client setup
 
-`JazzProvider` accepts a `config` object and handles the WASM worker, OPFS database, and sync connection internally. It makes `db` available to every component in the tree.
+`JazzProvider` accepts a `config` object and handles the WASM worker, IndexedDB database, and sync connection internally. It makes `db` available to every component in the tree.
 
 **[`src/App.tsx`](../src/App.tsx)**
 
@@ -211,7 +211,7 @@ The tier on a write controls where the promise resolves. All writes eventually p
   <text x="75"  y="34" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#1a1a2e">Client</text>
 
   <rect x="165" y="10" width="130" height="38" rx="4" fill="#f8f8fc" stroke="#e0e0f0" stroke-width="1.5"/>
-  <text x="230" y="34" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#1a1a2e">OPFS Worker</text>
+  <text x="230" y="34" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#1a1a2e">IndexedDB Worker</text>
 
   <rect x="325" y="10" width="130" height="38" rx="4" fill="#f8f8fc" stroke="#e0e0f0" stroke-width="1.5"/>
   <text x="390" y="34" text-anchor="middle" font-family="Manrope,sans-serif" font-size="13" font-weight="700" fill="#1a1a2e">Edge Node</text>
@@ -225,7 +225,7 @@ The tier on a write controls where the promise resolves. All writes eventually p
   <line x1="390" y1="48" x2="390" y2="233" stroke="#e0e0f0" stroke-width="1" stroke-dasharray="4,3"/>
   <line x1="555" y1="48" x2="555" y2="233" stroke="#e0e0f0" stroke-width="1" stroke-dasharray="4,3"/>
 
-  <!-- write "local": Client -> OPFS Worker -->
+  <!-- write "local": Client -> IndexedDB Worker -->
   <line x1="79" y1="90" x2="226" y2="90" stroke="rgba(20,106,255,0.45)" stroke-width="1.5" marker-end="url(#aw)"/>
   <circle cx="230" cy="90" r="5" fill="rgba(20,106,255,0.45)" stroke="#fff" stroke-width="1.5"/>
   <line x1="235" y1="90" x2="386" y2="90" stroke="#e0e0f0" stroke-width="1" stroke-dasharray="4,3"/>
@@ -394,7 +394,7 @@ Every other client's `useAll(app.players.where({ playerId: { ne: myId } }))` sub
 
 | API                          | Used for                                                                     |
 | ---------------------------- | ---------------------------------------------------------------------------- |
-| `JazzProvider`               | Wrap the app; handles WASM worker + OPFS + sync internally                   |
+| `JazzProvider`               | Wrap the app; handles WASM worker + IndexedDB + sync internally              |
 | `useDb()`                    | Access the db write API from any component                                   |
 | `useAll(query, options?)`    | Live subscription; re-renders on every remote or local change                |
 | `db.insert(table, data)`     | Eventually consistent insert. Instant local update, propagates in background |

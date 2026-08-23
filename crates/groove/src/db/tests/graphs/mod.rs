@@ -4,9 +4,7 @@ use super::*;
 
 #[futures_test::test]
 async fn query_subscriptions_receive_filtered_projected_messages() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_query(select_query(
@@ -40,9 +38,7 @@ async fn query_subscriptions_receive_filtered_projected_messages() {
 
 #[futures_test::test]
 async fn query_projection_aliases_drive_output_schema() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_query(select_query(
@@ -72,9 +68,7 @@ async fn query_projection_aliases_drive_output_schema() {
 
 #[futures_test::test]
 async fn query_subscriptions_can_read_from_simple_ctes() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let cte = Cte::new(
         "recent",
@@ -118,9 +112,7 @@ async fn query_subscriptions_can_read_from_simple_ctes() {
 
 #[futures_test::test]
 async fn query_subscriptions_support_literal_on_left_predicates() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_query(select_query(
@@ -154,12 +146,7 @@ async fn query_subscriptions_support_literal_on_left_predicates() {
 
 #[futures_test::test]
 async fn query_subscriptions_support_multi_key_inner_joins() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["albums", "artists"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["albums", "artists"]);
     let mut database = Database::new(tenant_albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -224,12 +211,7 @@ async fn query_subscriptions_support_multi_key_inner_joins() {
 
 #[futures_test::test]
 async fn query_subscriptions_support_qualified_wildcards_after_join() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["albums", "artists"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["albums", "artists"]);
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();

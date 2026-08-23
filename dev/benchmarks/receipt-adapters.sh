@@ -17,8 +17,6 @@ Adapters:
   realistic-native [scenario-json]      (default: w4_cold_start)
   realistic-browser [W1|W4|B1..B6]     (default: W1)
   storage-native
-  opfs-btree
-  opfs-worker
   wasm-probes
   wasm-ingest-native                    (requires JAZZ_WASM_INGEST_FIXTURE)
   wasm-ingest-wasm                      (requires JAZZ_WASM_INGEST_FIXTURE)
@@ -65,16 +63,6 @@ case "$adapter" in
     exec "${RECEIPT[@]}" --scenario storage/native-engines \
       --invocation 'cargo bench -p jazz-storage-native-bench --bench native_storage_engines' --criterion -- \
       cargo bench -p jazz-storage-native-bench --bench native_storage_engines
-    ;;
-  opfs-btree)
-    exec "${RECEIPT[@]}" --scenario opfs-btree/hot-paths \
-      --invocation 'cargo bench -p opfs-btree --bench hot_paths' --criterion -- \
-      cargo bench -p opfs-btree --bench hot_paths
-    ;;
-  opfs-worker)
-    exec "${RECEIPT[@]}" --scenario opfs-btree/wasm-worker \
-      --invocation 'pnpm --dir crates/opfs-btree run bench:wasm:opfs -- --count 1 --value-sizes 32 --json' -- \
-      pnpm --dir crates/opfs-btree run bench:wasm:opfs -- --count 1 --value-sizes 32 --json
     ;;
   wasm-probes)
     exec "${RECEIPT[@]}" --scenario wasm-ingest/runtime-probes \

@@ -211,6 +211,26 @@ bridge over the core subscription surface: it carries opened, reset, and delta
 events, rather than facade-side diffs of full result sets (`INV-API-7`, and
 `groove/SPEC/INVARIANTS.md::INV-INC-1` for the mechanism law it serves).
 
+Subscription finalization is also asynchronous ownership work. Dropping a
+stream MUST synchronously enqueue one idempotent finalization command without
+borrowing the storage-owning node; the next node tick drains it under ordinary
+async node ownership, retiring both the local maintained-view subscription and
+any upstream coverage ownership/unsubscribe. `SubscriptionStream::close()`
+enqueues that same command and awaits its drain acknowledgement; dropping the
+`close()` future cannot lose cleanup because the command was queued first, and
+the stream is terminal immediately after `close()` is invoked: later polls MUST
+return `None`. Finalization commands identify the owned subscription state, not
+a snapshot of a Groove ID, so a catalogue/runtime refresh cannot replace a
+handle between enqueue and drain. Enqueue synchronously marks that state closed;
+refresh MUST NOT rehydrate it while retirement is waiting for the node mutex.
+
+Database shutdown closes finalization admission and snapshots every live stream
+into its retirement set before its first storage await. It drains that set,
+retires the maintained runtime and connection bookkeeping, and only then closes
+storage. A finalizer arriving after admission closes may be acknowledged because
+the whole runtime it could have owned is already terminal; it cannot leave a
+Groove subscription, upstream refcount, or connection resident.
+
 **Implementation status (2026-07-27).** Local live reads currently use a named
 local materialized-row bridge while maintained-view integration continues;
 `db_facade_subscription_accepts_local_tier_for_alpha_style_live_reads`
@@ -558,7 +578,7 @@ mergeable transaction commit/abort, catalogue publish/lens/pointer
 acknowledgements, worker-thread ownership, and byte transport pumping. The
 browser harness proves worker-owned `WasmDb`/transport objects through a Web
 Worker, Record-encoded rows/cells, permission probes, write-state/wait, reads,
-subscription stream snapshots, OPFS via `WasmDb.openBrowser`, websocket byte
+subscription stream snapshots, IndexedDB via `WasmDb.openBrowser`, websocket byte
 batches, and a headless Chromium smoke gate. `db_read_at` remains
 typed/API-surface-only in the TS harness until there is a serving-node setup for
 that path.

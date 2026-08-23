@@ -130,11 +130,11 @@ the full `client↔edge↔core` path through the `Db` facade with full client `D
 conversion and describe _phase_ coverage, not topology.
 
 **Canonical alpha topology (Plan 1).** The conformance and benchmark topology is
-client main thread (**in-memory**) ↔ client worker relay (**OPFS**) ↔ edge
+client main thread (**in-memory**) ↔ client worker relay (**IndexedDB**) ↔ edge
 (**RocksDB**) ↔ core (**RocksDB**). The same sync protocol and `Db` facade are
 used at every client hop; edge/core roles are topology configuration, not a
 parallel product API. Scenario smoke runs currently exercise the client↔edge↔core
-shape in-process; browser OPFS and worker ownership remain integrability gates
+shape in-process; browser IndexedDB and worker ownership remain integrability gates
 (ch. 9 and ch. 17).
 
 **Latest Plan-1 smoke baseline (2026-07-02, ledger run

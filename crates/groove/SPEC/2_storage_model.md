@@ -137,8 +137,8 @@ clear the bound and let a backend materialize its ordinary unbounded batch.
 
 **Implementation-status note.** The shared storage conformance tests exercise
 ordering, prefix upper-bound handling, and failed-batch atomicity on the host
-memory backend. The wasm-only OPFS adapter compiles against an in-memory B-tree
-fixture; coverage of persistence across closing and reopening a real OPFS
+memory backend. The wasm-only IndexedDB adapter compiles against an in-memory B-tree
+fixture; coverage of persistence across closing and reopening a real IndexedDB
 namespace remains a browser-harness gap.
 
 ### 2.2 Records: logical fields, physical bytes
@@ -381,7 +381,7 @@ The former hybrid columnar-base proposal is rejected and is not part of Groove's
   are both possible answers. Neither should be pursued before the exclusion is
   measured and shown to bind.
 - 🔶 **Compaction rule: per backend or one portable rule?** RocksDB's observed
-  coalescing points are `m=32`/`128`/`2048` at `k=64`/`512`/`4096`; OPFS is
+  coalescing points are `m=32`/`128`/`2048` at `k=64`/`512`/`4096`; IndexedDB is
   later or absent in the matched sweep (`none through 64`, `m=512`, and only a
   marginal `m=2048` / clear `m=4096`). Decide whether the eventual scheduler
   uses backend-specific rules or one conservative portable rule, after target
@@ -406,9 +406,9 @@ The former hybrid columnar-base proposal is rejected and is not part of Groove's
   ordered byte ranges.
 - 🔶 **`reopen` normativity.** Is reopen-preserves-data (`INV-STORAGE-5`, prov)
   required of all conformant backends or only this implementation? Host coverage
-  exists for `MemoryStorage`; OPFS currently has only wasm-gated compile coverage
+  exists for `MemoryStorage`; IndexedDB currently has only wasm-gated compile coverage
   through its in-memory B-tree fixture, not a runnable browser test that closes
-  and reopens a real OPFS namespace.
+  and reopens a real IndexedDB namespace.
 - 🔶 **Warm-reopen arrangement snapshots.** A proposed warm-reopen optimization
   would persist derived arrangement snapshots in a relaxed-durability storage
   class, stamped with the storage frontier they are consistent through. A clean

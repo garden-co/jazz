@@ -398,12 +398,14 @@ where
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<SubscriptionStream, Error> {
         ensure_supported_subscription_read_opts(&opts)?;
-        self.validate_prepared_shape_for_registration(prepared)?;
+        self.validate_prepared_shape_for_registration(prepared)
+            .await?;
         let requested_read_tier = effective_read_tier(&opts);
+        let authored_commit_durability = self.node.node.lock().await.authored_commit_durability();
         let read_tier = if opts.local_updates == LocalUpdates::Immediate
             && opts.propagation == Propagation::Full
             && supports_pending_overlay_reconciliation(prepared.shape.query())
-            && self.node.node.borrow().authored_commit_durability() == DurabilityTier::None
+            && authored_commit_durability == DurabilityTier::None
         {
             DurabilityTier::Local
         } else {
@@ -411,7 +413,8 @@ where
         };
         self.node
             .node
-            .borrow_mut()
+            .lock()
+            .await
             .ensure_peer_maintained_subscription_view_supported(
                 &prepared.shape,
                 &prepared.binding,
@@ -424,7 +427,8 @@ where
         let (local_shape, local_binding, _local_plan) = self
             .node
             .node
-            .borrow_mut()
+            .lock()
+            .await
             .prepare_query_binding_for_link_in_authorization_mode(
                 &prepared.shape,
                 &prepared.binding,
@@ -436,7 +440,8 @@ where
         let (subscription, snapshot) = self
             .node
             .node
-            .borrow_mut()
+            .lock()
+            .await
             .open_maintained_view_subscription_in_authorization_mode(
                 &local_shape,
                 &local_binding,
@@ -450,19 +455,21 @@ where
         let root_occurrence_ids = subscription.root_occurrence_ids().to_vec();
         let local_subscription_id = subscription.subscription_id();
         let local_node = Rc::clone(&self.node.node);
-        let local_runtime_token = local_node.borrow().groove_runtime_token();
+        let local_runtime_token = local_node.lock().await.groove_runtime_token();
         let local_subscription_cleanup = Rc::new(Cell::new(Some((
             local_runtime_token,
             local_subscription_id,
         ))));
         let local_cleanup_handle = Rc::clone(&local_subscription_cleanup);
+        let local_cleanup_node = Rc::clone(&self.node);
         let mut local_cleanup = CleanupGuard::new(Box::new(move || {
-            let mut node = local_node.borrow_mut();
-            if let Some((runtime_token, subscription_id)) = local_cleanup_handle.get()
-                && node.groove_runtime_token() == runtime_token
-            {
-                node.unsubscribe_groove_subscription(subscription_id);
-            }
+            // Opening failed before a public state existed; this is the one
+            // intentionally ID-based cleanup path.
+            local_cleanup_node.enqueue_subscription_finalization(PendingSubscriptionFinalization {
+                state: None,
+                opening_local: local_cleanup_handle.take(),
+                acknowledgement: None,
+            });
         }));
         let mut maintained_subscription = Some(subscription);
         // A projected ordered root needs terminal patches even without nested
@@ -494,7 +501,8 @@ where
                 let (shape, binding, _) = self
                     .node
                     .node
-                    .borrow_mut()
+                    .lock()
+                    .await
                     .prepare_query_binding_for_link_in_authorization_mode(
                         &prepared.shape,
                         &prepared.binding,
@@ -545,20 +553,24 @@ where
             if let Some(maintained) = maintained_subscription.as_mut() {
                 self.node
                     .node
-                    .borrow()
+                    .lock()
+                    .await
                     .seed_local_maintained_authoritative_generation(maintained, binding_view_key);
             }
         }
-        let settled = subscription_is_settled(
-            &self.node.node.borrow(),
-            &self.node.active_authority_view_receipts,
-            &state_shape,
-            &state_binding,
-            settled_tier,
-            opts.read_view.clone(),
-            remote_propagate_upstream,
-            requires_authority_receipt,
-        );
+        let settled = {
+            let node = self.node.node.lock().await;
+            subscription_is_settled(
+                &node,
+                &self.node.active_authority_view_receipts,
+                &state_shape,
+                &state_binding,
+                settled_tier,
+                opts.read_view.clone(),
+                remote_propagate_upstream,
+                requires_authority_receipt,
+            )
+        };
         // An empty local opening carries no observable result information at
         // an Edge/Global request.  Until the authority replies, publishing it
         // would let a public subscription report a provisional empty view as
@@ -582,15 +594,18 @@ where
             .enumerate()
             .map(|(index, occurrence)| (occurrence, index))
             .collect();
+        let closed = Rc::new(Cell::new(false));
         let state = Rc::new(RefCell::new(SubscriptionState {
+            closed: Rc::clone(&closed),
             terminal_rows,
             kind: SubscriptionKind::Prepared {
                 shape: state_shape,
                 binding: state_binding,
                 maintained_subscription,
             },
-            groove_runtime_token: self.node.node.borrow().groove_runtime_token(),
-            local_subscription_cleanup,
+            groove_runtime_token: self.node.node.lock().await.groove_runtime_token(),
+            local_subscription_cleanup: Rc::clone(&local_subscription_cleanup),
+            upstream_subscription_handles,
             propagates_upstream,
             author,
             authorization_mode,
@@ -625,37 +640,42 @@ where
             .subscriptions
             .borrow_mut()
             .push(Rc::downgrade(&state));
-        let cleanup = if upstream_subscription_handles.is_empty() {
-            local_cleanup.take()
-        } else {
-            let owner = Rc::downgrade(&state);
+        // The guard covers fallible opening after the local maintained view
+        // exists. On success, replace it with one command carrying local and
+        // upstream cleanup so Drop never touches the async node mutex.
+        drop(local_cleanup.take());
+        let cleanup: Box<dyn FnOnce(Option<oneshot::Sender<()>>)> = {
             register_upstream_subscription_owner(
                 &self.node.upstream_subscription_owners,
-                &upstream_subscription_handles,
+                &state.borrow().upstream_subscription_handles,
                 &state,
             );
-            let upstream_cleanup =
-                self.upstream_subscription_cleanup(upstream_subscription_handles, owner);
-            let local_cleanup = local_cleanup.take();
-            Box::new(move || {
-                local_cleanup();
-                upstream_cleanup();
+            let node = Rc::clone(&self.node);
+            let state = Rc::clone(&state);
+            Box::new(move |acknowledgement| {
+                closed.set(true);
+                node.enqueue_subscription_finalization(PendingSubscriptionFinalization {
+                    state: Some(state),
+                    opening_local: None,
+                    acknowledgement,
+                });
             })
         };
         Ok(SubscriptionStream {
             receiver,
             _state: state,
             cleanup: Some(cleanup),
+            terminated: false,
         })
     }
 
-    fn validate_prepared_shape_for_registration(
+    async fn validate_prepared_shape_for_registration(
         &self,
         prepared: &PreparedQuery,
     ) -> Result<(), Error> {
         let ast = ShapeAst::from_validated(&prepared.shape);
         let validation = {
-            let node = self.node.node.borrow();
+            let node = self.node.node.lock().await;
             validate_shape_ast_for_registration(&node, prepared.shape.shape_id(), &ast)
         };
         validation.map(|_| ()).map_err(Error::from)
@@ -756,54 +776,6 @@ where
                 subscription,
             }],
             awaits_initial_authority_response: has_live_upstream,
-        })
-    }
-
-    fn upstream_subscription_cleanup(
-        &self,
-        upstream_subscriptions: Vec<UpstreamCoverageHandle>,
-        owner: Weak<RefCell<SubscriptionState>>,
-    ) -> Box<dyn FnOnce()> {
-        let node = Rc::clone(&self.node.node);
-        let latest_coverage_subscriptions = Rc::clone(&self.node.latest_coverage_subscriptions);
-        let upstream_coverage_refcounts = Rc::clone(&self.node.upstream_coverage_refcounts);
-        let awaiting_initial_authority_coverage =
-            Rc::clone(&self.node.awaiting_initial_authority_coverage);
-        let upstream_subscription_owners = Rc::clone(&self.node.upstream_subscription_owners);
-        let pending_upstream_subscriptions = Rc::clone(&self.node.upstream_subscriptions);
-        let scheduler = Rc::clone(&self.node.scheduler);
-        Box::new(move || {
-            for handle in upstream_subscriptions {
-                unregister_upstream_subscription_owner(
-                    &upstream_subscription_owners,
-                    handle.subscription,
-                    &owner,
-                );
-                let mut refcounts = upstream_coverage_refcounts.borrow_mut();
-                let Some(count) = refcounts.get_mut(&handle.coverage) else {
-                    continue;
-                };
-                *count = count.saturating_sub(1);
-                if *count > 0 {
-                    continue;
-                }
-                refcounts.remove(&handle.coverage);
-                awaiting_initial_authority_coverage
-                    .borrow_mut()
-                    .remove(&handle.coverage);
-                drop(refcounts);
-                let upstream_subscription = handle.subscription;
-                node.borrow_mut().apply_unsubscribe(upstream_subscription);
-                latest_coverage_subscriptions
-                    .borrow_mut()
-                    .retain(|coverage, subscription| {
-                        coverage != &handle.coverage && *subscription != upstream_subscription
-                    });
-                pending_upstream_subscriptions
-                    .borrow_mut()
-                    .push(PendingUpstreamCommand::Unsubscribe(upstream_subscription));
-            }
-            schedule_tick_in(&scheduler, TickUrgency::Immediate);
         })
     }
 }

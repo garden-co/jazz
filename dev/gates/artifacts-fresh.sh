@@ -96,7 +96,6 @@ if ! node dev/artifacts/provenance.mjs verify napi debug; then
   failed=1
 fi
 
-source_roots=(crates/jazz-wasm/src crates/jazz-wasm/Cargo.toml crates/jazz-wasm/package.json crates/jazz/src crates/groove/src crates/opfs-btree/src crates/jazz/Cargo.toml crates/groove/Cargo.toml crates/opfs-btree/Cargo.toml Cargo.toml Cargo.lock)
 check_layer \
   "crates/jazz-wasm/pkg" \
   "pnpm --filter jazz-wasm build" \

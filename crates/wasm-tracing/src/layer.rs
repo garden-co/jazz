@@ -571,7 +571,7 @@ mod trace_entry_tests {
     fn span_entry(sequence: u64) -> TraceEntry {
         TraceEntry::Span {
             sequence,
-            name: "opfs put".to_string(),
+            name: "IndexedDB put".to_string(),
             target: "jazz_storage::db".to_string(),
             level: "TRACE".to_string(),
             start_unix_nano: (1_775_000_000, 0),
@@ -597,7 +597,7 @@ mod trace_entry_tests {
         let span = tracing::span!(
             target: "jazz_storage::db",
             Level::TRACE,
-            "opfs put",
+            "IndexedDB put",
             key_len = 8
         );
         let _entered = span.enter();
@@ -653,7 +653,7 @@ mod trace_entry_tests {
                 level,
                 fields,
                 ..
-            } if name == "opfs put"
+            } if name == "IndexedDB put"
                 && target == "jazz_storage::db"
                 && level == "TRACE"
                 && fields.get("key_len") == Some(&"8".to_string())

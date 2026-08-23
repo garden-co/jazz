@@ -7,7 +7,7 @@ Shared raw key/value storage benchmark assets live here.
 - `data/` contains committed `.kv` fixtures shared by browser and native
   storage benchmarks.
 - `native/` contains Criterion benchmarks comparing native `rusqlite`, RocksDB,
-  and redb. It deliberately does not include an opfs-btree native adapter.
+  and redb. It covers native durable adapters only.
 
 Run the shared core tests:
 
@@ -21,6 +21,6 @@ Run the native storage benchmarks:
 cargo bench -p jazz-storage-native-bench --bench native_storage_engines
 ```
 
-The browser OPFS comparison remains in `crates/opfs-btree/wasm-bench`; it
+Browser persistence performance is covered by the IndexedDB browser benchmark; it
 depends on this shared core and copies fixtures from `data/` at Trunk build
 time.

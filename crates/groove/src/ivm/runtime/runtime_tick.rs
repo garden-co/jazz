@@ -1330,6 +1330,62 @@ impl IvmRuntime {
         }
     }
 
+    /// Drop an uninstalled hydration when its subscription is cancelled.
+    ///
+    /// A hydration owns cold storage futures and may be ahead of later
+    /// evaluations in the per-node temporal order. Removing only the public
+    /// subscription used to leave that private session parked until its
+    /// storage happened to resume. Besides retaining the request, that made
+    /// `drive_progress` wait for work nobody could observe. Release any
+    /// successor waiting behind the cancelled session exactly as a completed
+    /// predecessor would, but do not install the cancelled session's state.
+    pub(super) fn cancel_pending_subscription_hydration(
+        &mut self,
+        subscription_id: SubscriptionId,
+    ) {
+        let slot = Rc::clone(&self.pending_incremental.0);
+        let mut state = std::mem::take(&mut *slot.borrow_mut());
+        let cancelled = state
+            .evaluations
+            .iter()
+            .filter_map(|(evaluation_id, evaluation)| match evaluation {
+                PendingEvaluation::SubscriptionHydration(hydration)
+                    if hydration.subscription_id == subscription_id =>
+                {
+                    Some(*evaluation_id)
+                }
+                PendingEvaluation::Incremental(_) | PendingEvaluation::SubscriptionHydration(_) => {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        for evaluation_id in cancelled {
+            let Some(evaluation) = state.evaluations.remove(&evaluation_id) else {
+                continue;
+            };
+            state.order.retain(|candidate| *candidate != evaluation_id);
+            for node in evaluation.work_queue().incomplete_nodes() {
+                let Some(waiters) = state.waiters_by_node.get_mut(&node) else {
+                    continue;
+                };
+                let was_front = waiters.front() == Some(&evaluation_id);
+                waiters.retain(|waiter| *waiter != evaluation_id);
+                let successor = waiters.front().copied();
+                if waiters.is_empty() {
+                    state.waiters_by_node.remove(&node);
+                }
+                if was_front
+                    && let Some(successor) = successor
+                    && let Some(later) = state.evaluations.get_mut(&successor)
+                {
+                    later.work_queue_mut().temporal_ready(node);
+                }
+            }
+        }
+        *slot.borrow_mut() = state;
+    }
+
     pub(crate) async fn drive_pending_incremental(&mut self) -> Result<(), IvmRuntimeError> {
         std::future::poll_fn(|cx| self.poll_pending_incremental(cx)).await
     }

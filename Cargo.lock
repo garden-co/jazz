@@ -1400,7 +1400,6 @@ dependencies = [
  "internment",
  "jazz-benchmark-guard",
  "jazz-storage-rocksdb",
- "opfs-btree",
  "paste",
  "postcard",
  "rusqlite",
@@ -2118,9 +2117,12 @@ dependencies = [
 name = "jazz-storage-rocksdb"
 version = "0.1.0"
 dependencies = [
+ "futures-test",
  "groove",
+ "jazz-benchmark-guard",
  "rust-rocksdb",
  "serde",
+ "serde_json",
  "tempfile",
 ]
 
@@ -2879,25 +2881,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-stream",
-]
-
-[[package]]
-name = "opfs-btree"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "jazz-benchmark-guard",
- "js-sys",
- "rustc-hash",
- "serde",
- "serde-wasm-bindgen",
- "tempfile",
- "thiserror",
- "tracing",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
- "xxhash-rust",
 ]
 
 [[package]]

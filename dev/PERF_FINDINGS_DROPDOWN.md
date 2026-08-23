@@ -368,7 +368,7 @@ Warm `dropdown_entry` Groove subscribe/hydrate exclusive operator buckets:
 | `anti_join_apply` |     2 |  20.6 |  48,090 |   48,090 |        0.4 |
 | `table_source`    |     4 |   0.5 |       0 |   24,081 |       ~0.0 |
 
-Warm `dropdown_entry` raw snapshot table hydration is not the owner: 10 `snapshot_table_deltas` calls, 96,288 rows emitted, 51.0ms total. OPFS read time for the whole warm run was only 27.3ms. The warm retained bottleneck is therefore not browser IO; it is mostly client-side materialization outside Groove, with a smaller Groove join/project hydrate component.
+Warm `dropdown_entry` raw snapshot table hydration is not the owner: 10 `snapshot_table_deltas` calls, 96,288 rows emitted, 51.0ms total. IndexedDB read time for the whole warm run was only 27.3ms. The warm retained bottleneck is therefore not browser IO; it is mostly client-side materialization outside Groove, with a smaller Groove join/project hydrate component.
 
 Policy operators after the Phase 7 derivation-collapse fix are present but no longer dominant: `join_apply` + `semi_join_apply` + `anti_join_apply` total 170.3ms of the 5,437.9ms dominant worker request (3.1%) and 170.3ms of the 901.6ms wasm-core open (18.9%). No `arg_max_by` bucket appeared in the `dropdown_entry` warm open; the lowered semi-join reduction does not show up as a warm client hot bucket in this capture.
 
@@ -385,7 +385,7 @@ Cold big-tick exclusive operator split, all tables:
 | `anti_join_apply` |  32,712 |  60.1 |  52,226 |   52,226 |        1.2 |
 | `unwrap_nullable` |  51,156 |  36.2 |  27,541 |   27,527 |        1.3 |
 
-Cold whole-run timing: wall 22,117ms, Jazz path 15,250ms, wire ingest ticks 7,432.1ms, subscription apply chunks 6,924.0ms. The largest tick was 4,337.5ms; the exclusive Groove buckets above explain only about 1.9s of operator body time across all ticks, so the remaining cold tick time is outside the measured operator apply bodies: runtime traversal/memo/arrangement state management, record movement/clone/drop, and persistence/index write plumbing around the operators. OPFS write time was only 30.0ms, so this is CPU/object-work in wasm, not storage latency.
+Cold whole-run timing: wall 22,117ms, Jazz path 15,250ms, wire ingest ticks 7,432.1ms, subscription apply chunks 6,924.0ms. The largest tick was 4,337.5ms; the exclusive Groove buckets above explain only about 1.9s of operator body time across all ticks, so the remaining cold tick time is outside the measured operator apply bodies: runtime traversal/memo/arrangement state management, record movement/clone/drop, and persistence/index write plumbing around the operators. IndexedDB write time was only 30.0ms, so this is CPU/object-work in wasm, not storage latency.
 
 The 24,045-row apply chunk is TS-side dominated. In cold, the 24,045-row `subscription_apply_chunk` took 2,010.3ms. In warm, the same chunk took 2,085.8ms. The wasm-core maintained-view apply inside `open_seeded_maintained_subscription_view` for `dropdown_entry` was 383.6ms, so the chunk wrapper/adapter/materialization work outside that core apply accounts for roughly 1.7s of the dominant row apply in warm.
 
@@ -394,7 +394,7 @@ Ranked conclusion:
 1. CLEARLY-GOOD: optimize TS/browser subscription materialization for large same-table chunks. Measured share: ~2.09s of warm 5.44s dominant create call, and 2.01s of cold apply for the 24,045-row chunk. Owning span/function surface: `subscription_apply_chunk` around `createExecutedSubscription` result delivery, outside `open_seeded_maintained_subscription_view`'s wasm-core apply. Estimated ceiling: ~1.5-2.0s warm and cold for this workload if per-row JS object/adaptor work is reduced or chunked.
 2. CLEARLY-GOOD: reduce wasm cold tick runtime overhead around table-source hydration and persist/index maintenance. Measured share: cold `server_pump_tick` total 7.43s, with exclusive operator bodies led by `table_source` 705.5ms, `persist` 341.6ms, `map_project` 366.0ms, `index_by` 166.3ms; the unmeasured remainder is runtime traversal/memo/state-management around those bodies. Estimated ceiling: several seconds cold, especially the 4.34s largest tick.
 3. SPECULATIVE: further policy-join tuning client-side. Measured share after Phase 7 is small: warm `dropdown_entry` policy-ish join buckets are 170.3ms of a 5.44s worker call; cold join/semi/anti buckets total 304.5ms across all ticks. Ceiling is likely sub-500ms unless a hidden non-operator policy cost is found.
-4. SPECULATIVE: raw OPFS/read batching for warm reopen. Measured warm OPFS read time is 27.3ms and `snapshot_table_deltas` for `dropdown_entry` is 51.0ms total, so storage latency is ruled out for the browser warm path. Ceiling is low for this profile.
+4. SPECULATIVE: raw IndexedDB/read batching for warm reopen. Measured warm IndexedDB read time is 27.3ms and `snapshot_table_deltas` for `dropdown_entry` is 51.0ms total, so storage latency is ruled out for the browser warm path. Ceiling is low for this profile.
 
 Gate/build/capture results:
 

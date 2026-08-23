@@ -175,7 +175,7 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
 
 - ✅ **Conformance storage backends (decided 2026-07-02):** the alpha
   conformance matrix covers the canonical topology's backends — in-memory
-  (client main thread), OPFS (client worker relay), and RocksDB (edge and
+  (client main thread), IndexedDB (client worker relay), and RocksDB (edge and
   core). SQLite is conditionally in scope as the **last** alpha item, paired
   with React Native support: it is needed only if RocksDB proves unworkable in
   the RN environment. It is deliberately scheduled last because it is pure
@@ -183,7 +183,7 @@ Milestone: **integrators can adopt jazz incrementally without bespoke glue.**
   storage contract, with no design decisions attached.
 
 **Implementation status.** The alpha conformance matrix covers in-memory
-(client main thread), OPFS (client worker relay), and RocksDB (edge and core).
+(client main thread), IndexedDB (client worker relay), and RocksDB (edge and core).
 SQLite is conditionally last in scope with React Native, only if RocksDB is
 unsuitable there; this is a tooling decision rather than a semantic contract.
 

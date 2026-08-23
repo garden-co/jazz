@@ -97,8 +97,8 @@ function scenarioLabel(scenario) {
 function storageEngineLabel(storageEngine) {
   if (storageEngine === "rocksdb") return "RocksDB";
   if (storageEngine === "sqlite") return "SQLite";
-  if (storageEngine === "indexeddb-btree") return "IndexedDB B-tree";
-  if (storageEngine === "opfs-btree") return "OPFS-btree";
+  if (storageEngine === "idb-tree-indexeddb-page-store") return "idb-tree / IndexedDB page store";
+  if (storageEngine === "opfs-btree") return "OPFS B-tree (retired)";
   return storageEngine || "default";
 }
 

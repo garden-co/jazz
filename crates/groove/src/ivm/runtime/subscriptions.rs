@@ -2403,6 +2403,7 @@ impl IvmRuntime {
         if let Some(subscription) = self.multisink_subscriptions.remove(&subscription_id) {
             self.unindex_subscription_outputs(subscription_id, &subscription.outputs);
             let removed = self.remove_multisink_retainers(subscription_id, &subscription.outputs);
+            self.cancel_pending_subscription_hydration(subscription_id);
             if let MultisinkSubscriptionTarget::RoutedShape {
                 shape_id,
                 binding_key,
@@ -2430,6 +2431,7 @@ impl IvmRuntime {
         if let Some(subscription) = self.multisink_subscriptions.remove(&subscription_id) {
             self.unindex_subscription_outputs(subscription_id, &subscription.outputs);
             let removed = self.remove_multisink_retainers(subscription_id, &subscription.outputs);
+            self.cancel_pending_subscription_hydration(subscription_id);
             if let MultisinkSubscriptionTarget::RoutedShape {
                 shape_id,
                 binding_key,

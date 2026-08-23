@@ -4,12 +4,7 @@ use super::*;
 
 #[futures_test::test]
 async fn parameterized_shape_hydrates_and_routes_by_param() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["albums", "artists"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["albums", "artists"]);
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -101,12 +96,7 @@ async fn parameterized_shape_hydrates_and_routes_by_param() {
 
 #[futures_test::test]
 async fn parameterized_shape_uses_set_semantics_with_duplicate_param_refcounts() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["albums", "artists"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["albums", "artists"]);
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -188,12 +178,7 @@ async fn parameterized_shape_uses_set_semantics_with_duplicate_param_refcounts()
 
 #[futures_test::test]
 async fn prepared_subscription_lowers_parameter_predicates_to_shape_subscriptions() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["albums", "artists"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["albums", "artists"]);
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -313,9 +298,7 @@ async fn prepared_subscription_lowers_parameter_predicates_to_shape_subscription
 
 #[futures_test::test]
 async fn prepared_subscription_filters_not_equal_parameter_predicates() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();
@@ -403,12 +386,7 @@ async fn prepared_subscription_filters_not_equal_parameter_predicates() {
 
 #[futures_test::test]
 async fn prepare_query_requires_parameters_and_only_lowers_parameter_equalities() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["albums", "artists"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["albums", "artists"]);
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -470,9 +448,7 @@ async fn prepare_query_requires_parameters_and_only_lowers_parameter_equalities(
 
 #[futures_test::test]
 async fn select_literal_and_null_projections_remain_unsupported_by_query_planner() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap();
+    let storage = MemoryStorage::new(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).await.unwrap();
 
     for expr in [Expr::Null, Expr::Literal(Value::String("x".to_owned()))] {
@@ -490,12 +466,7 @@ async fn select_literal_and_null_projections_remain_unsupported_by_query_planner
 
 #[futures_test::test]
 async fn prepared_subscription_validates_named_bindings() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["albums", "artists"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["albums", "artists"]);
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -528,12 +499,7 @@ async fn prepared_subscription_validates_named_bindings() {
 
 #[futures_test::test]
 async fn graph_level_prepare_rejects_output_key_fields_not_in_output_descriptor() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["albums", "artists"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["albums", "artists"]);
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -559,12 +525,7 @@ async fn graph_level_prepare_rejects_output_key_fields_not_in_output_descriptor(
 
 #[futures_test::test]
 async fn prepared_shapes_retain_output_graph_nodes_without_subscribers() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["albums", "artists"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["albums", "artists"]);
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -721,12 +682,7 @@ async fn retiring_prepared_shape_releases_only_its_own_graph_after_unsubscribe()
 
 #[futures_test::test]
 async fn prepared_subscription_matches_literal_subscription_without_param_columns() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["albums", "artists"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["albums", "artists"]);
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -802,12 +758,7 @@ async fn prepared_subscriptions_match_literal_subscriptions_under_seeded_interle
 }
 
 async fn run_prepared_literal_oracle(mut seed: u64) {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["albums", "artists"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["albums", "artists"]);
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -928,12 +879,7 @@ fn drain_literal_album_rows(
 
 #[futures_test::test]
 async fn binding_sources_are_rejected_outside_prepared_shapes() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["albums", "artists"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["albums", "artists"]);
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();
@@ -948,12 +894,7 @@ async fn binding_sources_are_rejected_outside_prepared_shapes() {
 
 #[futures_test::test]
 async fn duplicate_join_subscriptions_share_state_without_double_applying_deltas() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["albums", "artists"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["albums", "artists"]);
     let mut database = Database::new(albums_artists_schema(), storage)
         .await
         .unwrap();

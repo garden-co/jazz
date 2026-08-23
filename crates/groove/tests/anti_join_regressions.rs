@@ -12,7 +12,7 @@ use groove::records::Value;
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
 };
-use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use groove::storage::MemoryStorage;
 
 fn schema() -> DatabaseSchema {
     DatabaseSchema::new([
@@ -35,16 +35,10 @@ fn schema() -> DatabaseSchema {
     ])
 }
 
-async fn open_db() -> (tempfile::TempDir, Database) {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open_with_durability(
-        temp_dir.path(),
-        &["albums", "blockers"],
-        Durability::WalNoSync,
-    )
-    .unwrap();
+async fn open_db() -> Database {
+    let storage = MemoryStorage::new(&["albums", "blockers"]);
     let db = Database::new(schema(), storage).await.unwrap();
-    (temp_dir, db)
+    db
 }
 
 fn anti_join() -> GraphBuilder {
@@ -58,7 +52,7 @@ fn anti_join() -> GraphBuilder {
 
 #[futures_test::test]
 async fn same_tick_left_and_blocking_right_emit_nothing() {
-    let (_dir, mut db) = open_db().await;
+    let mut db = open_db().await;
     let sub = db.subscribe_one_sink(anti_join()).await.unwrap();
     let _initial = sub.recv().unwrap();
 
@@ -86,7 +80,7 @@ async fn same_tick_left_and_blocking_right_emit_nothing() {
 
 #[futures_test::test]
 async fn same_tick_left_insert_and_last_blocker_retraction_emit_once() {
-    let (_dir, mut db) = open_db().await;
+    let mut db = open_db().await;
     let sub = db.subscribe_one_sink(anti_join()).await.unwrap();
     let _initial = sub.recv().unwrap();
 

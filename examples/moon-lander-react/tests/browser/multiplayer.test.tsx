@@ -38,7 +38,7 @@ import {
 
 /** Generous timeout: earlier test files accumulate data in the shared server,
  *  slowing edge subscriptions. Isolated BrowserContexts need extra time:
- *  fresh OPFS, new Jazz client init, full sync handshake. */
+ *  fresh IndexedDB, new Jazz client init, full sync handshake. */
 const SYNC_TIMEOUT = 20_000;
 
 const mounts: MountEntry[] = [];
@@ -174,7 +174,7 @@ describe("Moon Lander — Cross-Client Sync", () => {
      * B stays in lander mode and does not collect deposits, keeping the
      * assertion clean: only A's collections cause the count drop observed by B.
      *
-     * Both clients run in the same browser page (separate workers, separate OPFS
+     * Both clients run in the same browser page (separate workers, separate IndexedDB
      * db names). The isolated-BrowserContext approach caused stream connect timeouts
      * in headless Chromium; same-page mountApp avoids this entirely.
      */

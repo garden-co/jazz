@@ -109,7 +109,7 @@ describe("auto-join race on first message send", () => {
     }
     mounts.length = 0;
     window.location.hash = "";
-    // Allow JazzProvider's async shutdown (worker termination, OPFS lock
+    // Allow JazzProvider's async shutdown (worker termination, IndexedDB lock
     // release) to complete before the next test starts.
     await window.__jazz?.shutdown();
   });
