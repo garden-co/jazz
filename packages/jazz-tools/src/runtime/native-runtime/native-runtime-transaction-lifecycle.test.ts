@@ -48,7 +48,9 @@ function encodeRows(rows: EncodedTestRow[]): Uint8Array {
       const source = tableRows[index]!;
       row.bytes(source.rowId);
       row.bool(false);
-      row.bytes(createRecord(descriptor, [new TextEncoder().encode(source.title)]));
+      row.bytes(
+        createRecord(descriptor, [Uint8Array.from([0, ...new TextEncoder().encode(source.title)])]),
+      );
     }, tableRows.length);
   }, byTable.size);
   return writer.finish();

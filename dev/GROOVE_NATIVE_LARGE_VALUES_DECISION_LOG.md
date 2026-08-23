@@ -74,3 +74,13 @@ commit, not only the database's current write schema. Jazz projects the stored
 winner through the registered lens while retaining the descriptor arm, then
 requires exact descriptor equality. This preserves locators across historical
 schema-view writes without allowing a caller to introduce a descriptor.
+
+## 2026-08-23 — Binding codec version boundary
+
+Adding Groove's explicit `Value::Large` arm intentionally changes the unreleased
+postcard `Value` discriminants after `Bytes`. TypeScript's query-literal and
+branch-selector encoders move those tags in lockstep. Physical string, bytes,
+JSON, and public enum record fields now carry the inline/indirect scalar tag;
+binding decoders consume exactly one inline tag and reject an indirect arm at a
+logical result boundary. Tests and golden snapshots were updated rather than
+adding a compatibility decoder for the unreleased format.

@@ -1650,7 +1650,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(readPreparedFirstLiteral(preparedBytes!)).toEqual({
       column: "priority",
       opTag: 8,
-      literalTag: 14,
+      literalTag: 15,
       value: -1,
     });
   });
@@ -1663,9 +1663,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     ]);
 
     expect(readPreparedComparisonLiterals(query)).toEqual([
-      { predicateTag: 7, column: "count", literal: { tag: 14, value: -0x80000000 } },
-      { predicateTag: 3, column: "count", literal: { tag: 14, value: 0 } },
-      { predicateTag: 9, column: "count", literal: { tag: 14, value: 0x7fffffff } },
+      { predicateTag: 7, column: "count", literal: { tag: 15, value: -0x80000000 } },
+      { predicateTag: 3, column: "count", literal: { tag: 15, value: 0 } },
+      { predicateTag: 9, column: "count", literal: { tag: 15, value: 0x7fffffff } },
     ]);
     expect(() =>
       queryWithPredicates("metrics", [
@@ -1686,8 +1686,8 @@ describe("NativeRuntimeAdapter server transport", () => {
     ]);
 
     expect(readPreparedComparisonLiterals(query)).toEqual([
-      { predicateTag: 6, column: "largeCount", literal: { tag: 13, value: 9007199254740993n } },
-      { predicateTag: 8, column: "largeCount", literal: { tag: 13, value: -5n } },
+      { predicateTag: 6, column: "largeCount", literal: { tag: 14, value: 9007199254740993n } },
+      { predicateTag: 8, column: "largeCount", literal: { tag: 14, value: -5n } },
     ]);
     for (const value of [-(1n << 63n) - 1n, 1n << 63n]) {
       expect(() =>
@@ -2991,7 +2991,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       table: "todos",
       predicateTag: 3,
       column: "id",
-      literalTag: 8,
+      literalTag: 9,
       value: "00000000-0000-0000-0000-000000000001",
       limit: undefined,
     });
@@ -3272,8 +3272,8 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         column: "count",
         literals: [
-          { tag: 14, value: 5 },
-          { tag: 14, value: 10 },
+          { tag: 15, value: 5 },
+          { tag: 15, value: 10 },
         ],
       },
       {
@@ -3450,7 +3450,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       table: "todos",
       predicateTag: 3,
       column: "id",
-      literalTag: 8,
+      literalTag: 9,
       value: "00000000-0000-0000-0000-000000000001",
     });
   });
@@ -4025,7 +4025,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       table: "todos",
       predicateTag: 6,
       column: "id",
-      literalTag: 8,
+      literalTag: 9,
       value: "00000000-0000-0000-0000-000000000001",
     });
   });
@@ -4428,7 +4428,7 @@ function readPreparedUuidIn(query: Uint8Array): {
   const column = reader.string();
   const values = reader.readVec((valueReader) => {
     expect(valueReader.u64()).toBe(3);
-    expect(valueReader.u64()).toBe(8);
+    expect(valueReader.u64()).toBe(9);
     return formatUuidForTest(valueReader.bytes());
   });
   return { table, column, values };
@@ -4478,9 +4478,9 @@ function readPreparedNumericLiteral(reader: PostcardReader): {
       return { tag, value: reader.u64() };
     case 4:
       return { tag, value: reader.f64Le() };
-    case 13:
-      return { tag, value: reader.i64() };
     case 14:
+      return { tag, value: reader.i64() };
+    case 15:
       return { tag, value: Number(reader.i64()) };
     default:
       throw new Error(`expected numeric prepared literal tag, got ${tag}`);
@@ -4529,7 +4529,8 @@ function skipPreparedLiteral(reader: PostcardReader): void {
     case 4:
       reader.f64Le();
       return;
-    case 13:
+    case 14:
+    case 15:
       reader.i64();
       return;
     case 5:
@@ -4539,15 +4540,16 @@ function skipPreparedLiteral(reader: PostcardReader): void {
       reader.string();
       return;
     case 7:
-    case 8:
+    case 9:
       reader.bytes();
       return;
     case 11:
+    case 12:
       reader.readVec(() => {
         skipPreparedLiteral(reader);
       });
       return;
-    case 12:
+    case 13:
       reader.option(() => {
         skipPreparedLiteral(reader);
       });
@@ -4645,7 +4647,10 @@ function readPreparedFirstLiteral(query: Uint8Array): {
   const column = reader.string();
   expect(reader.u64()).toBe(3);
   const literalTag = reader.u64();
-  const value = literalTag === 13 || literalTag === 14 ? Number(reader.i64()) : reader.u64();
+  const value =
+    literalTag === 13 || literalTag === 14 || literalTag === 15
+      ? Number(reader.i64())
+      : reader.u64();
   return { column, opTag, literalTag, value };
 }
 
@@ -4859,7 +4864,7 @@ function encodeTerminalRelationSnapshot(schema: WasmSchema): Uint8Array {
   ];
   const childRecord = concatBytes([
     uuidBytes("00000000-0000-0000-0000-000000000002"),
-    createRecord(childDescriptor.slice(1), [new TextEncoder().encode("Ship relation reads")]),
+    createRecord(childDescriptor.slice(1), [inlineScalar("Ship relation reads")]),
   ]);
   const nestedRowsHeader = new Uint8Array(4);
   new DataView(nestedRowsHeader.buffer).setUint32(0, 1, true);
@@ -4872,7 +4877,7 @@ function encodeTerminalRelationSnapshot(schema: WasmSchema): Uint8Array {
     batch.vec((row) => {
       row.bytes(uuidBytes("00000000-0000-0000-0000-000000000001"));
       row.bool(false);
-      row.bytes(createRecord(descriptor, [new TextEncoder().encode("Ada"), nestedRows]));
+      row.bytes(createRecord(descriptor, [inlineScalar("Ada"), nestedRows]));
     }, 1);
   }, 1);
   return writer.finish();
@@ -4907,7 +4912,7 @@ function writeRowBatches(writer: PostcardWriter, rows: EncodedTestRow[]): void {
       const source = tableRows[index]!;
       row.bytes(source.rowId);
       row.bool(false);
-      const values: Uint8Array[] = [new TextEncoder().encode(source.title)];
+      const values: Uint8Array[] = [inlineScalar(source.title)];
       if (hasProvenance) {
         values.push(u64Bytes(source.createdAt ?? 0));
         values.push(u64Bytes(source.updatedAt ?? 0));
@@ -4950,7 +4955,7 @@ function encodeSubscriptionDelta(delta: {
 it("keeps same-row union occurrences distinct through apply, removal, and reopen", () => {
   const rowId = new Uint8Array(16).fill(7);
   const typedKey = (label: string) => {
-    const labelBytes = new TextEncoder().encode(label);
+    const labelBytes = inlineScalar(label);
     const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length);
     key[0] = 2;
     key.fill(7, 1, 17);
@@ -5229,8 +5234,8 @@ function encodeUserWrappedSubscriptionDelta(row: {
       encodedRow.bytes(
         createRecord(descriptor, [
           row.rowId,
-          presentBytes(new TextEncoder().encode(row.title)),
-          presentBytes(presentBytes(new TextEncoder().encode(row.note))),
+          presentBytes(inlineScalar(row.title)),
+          presentBytes(presentBytes(inlineScalar(row.note))),
           uuidBytes("00000000-0000-0000-0000-0000000000aa"),
           u64Bytes(123),
         ]),
@@ -5295,7 +5300,7 @@ function writeTeamGatherBatches(
             source.rowId,
             source.name === null
               ? encodeNativeNullValue(descriptor[1]!.valueType)
-              : presentBytes(new TextEncoder().encode(source.name)),
+              : presentBytes(inlineScalar(source.name)),
             encodeNativeNullValue(descriptor[2]!.valueType),
             encodeNativeNullValue(descriptor[3]!.valueType),
             uuidBytes("00000000-0000-0000-0000-0000000000aa"),
@@ -5311,7 +5316,7 @@ function writeTeamGatherBatches(
 }
 
 function typedOccurrenceKey(label: string): Uint8Array {
-  const labelBytes = new TextEncoder().encode(label);
+  const labelBytes = inlineScalar(label);
   const key = new Uint8Array(1 + 16 + 4 + 16 + 4 + 4 + 4 + labelBytes.length);
   key[0] = 2;
   key.fill(1, 1, 17);
@@ -5329,6 +5334,10 @@ function presentBytes(bytes: Uint8Array): Uint8Array {
   output[0] = 1;
   output.set(bytes, 1);
   return output;
+}
+
+function inlineScalar(value: string): Uint8Array {
+  return Uint8Array.from([0, ...new TextEncoder().encode(value)]);
 }
 
 function encodeArrayRows(): Uint8Array {

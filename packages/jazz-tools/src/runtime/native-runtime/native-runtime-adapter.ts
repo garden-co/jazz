@@ -4810,13 +4810,15 @@ function decodeBytes(
     case "Text":
     case "Json":
     case "Enum":
-      return { type: "Text", value: textDecoder.decode(bytes) };
+      if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
+      return { type: "Text", value: textDecoder.decode(bytes.subarray(1)) };
     case "EnumPayload":
       return decodePayloadEnumBytes(type, bytes, storageType, nestedRowCarrier);
     case "Uuid":
       return { type: "Uuid", value: formatUuid(bytes) };
     case "Bytea":
-      return { type: "Bytea", value: bytes.slice() };
+      if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
+      return { type: "Bytea", value: bytes.subarray(1).slice() };
     case "Array":
       return {
         type: "Array",

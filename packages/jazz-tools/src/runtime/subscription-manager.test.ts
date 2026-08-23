@@ -98,9 +98,10 @@ function pushU32(target: number[], value: number): void {
 
 function nativeRowData(name: string, count: number): Uint8Array {
   const text = new TextEncoder().encode(name);
-  const data = new Uint8Array(4 + text.byteLength);
+  const data = new Uint8Array(5 + text.byteLength);
   new DataView(data.buffer).setInt32(0, count, true);
-  data.set(text, 4);
+  data[4] = 0;
+  data.set(text, 5);
   return data;
 }
 
@@ -119,16 +120,16 @@ function terminalRootWithEmptyChildren(id: string, title: string): Uint8Array {
   const bytes: number[] = [...uuidBytes(id)];
   // The root uses CurrentRow's nullable carrier. The child collection stays a
   // terminal record when it is populated by a descendant operation.
-  pushU32(bytes, 21 + text.byteLength);
-  bytes.push(1, ...text, 1, 0, 0, 0, 0);
+  pushU32(bytes, 22 + text.byteLength);
+  bytes.push(1, 0, ...text, 1, 0, 0, 0, 0);
   return Uint8Array.from(bytes);
 }
 
 function nativeRootWithEmptyChildren(title: string): Uint8Array {
   const text = new TextEncoder().encode(title);
   const bytes: number[] = [];
-  pushU32(bytes, 4 + text.byteLength);
-  bytes.push(...text);
+  pushU32(bytes, 5 + text.byteLength);
+  bytes.push(0, ...text);
   pushU32(bytes, 0);
   return Uint8Array.from(bytes);
 }
@@ -175,7 +176,7 @@ function collectorTerminalDescriptor(columns: readonly ColumnDescriptor[]): numb
 }
 
 function terminalTextChild(id: string, name: string): Uint8Array {
-  return Uint8Array.from([...uuidBytes(id), ...new TextEncoder().encode(name)]);
+  return Uint8Array.from([...uuidBytes(id), 0, ...new TextEncoder().encode(name)]);
 }
 
 function nativeAddedRecord(id: string, index: number, name: string, count: number): Uint8Array {

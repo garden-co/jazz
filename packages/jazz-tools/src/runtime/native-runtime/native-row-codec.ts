@@ -1088,7 +1088,7 @@ function encodeNativeNonNullValue(type: ColumnType, value: Value): Uint8Array {
     case "Json":
     case "Enum":
       if (value.type !== "Text") throw new Error(`expected ${type.type} value`);
-      return new TextEncoder().encode(value.value);
+      return concatBytes([Uint8Array.of(0), new TextEncoder().encode(value.value)]);
     case "EnumPayload": {
       if (value.type !== "Enum") throw new Error("expected Enum payload value");
       const entry = type.cases.find((candidate) => candidate.name === value.value.case);
@@ -1104,7 +1104,7 @@ function encodeNativeNonNullValue(type: ColumnType, value: Value): Uint8Array {
       return parseUuid(value.value);
     case "Bytea":
       if (value.type !== "Bytea") throw new Error("expected Bytea value");
-      return value.value;
+      return concatBytes([Uint8Array.of(0), value.value]);
     case "Array":
       if (value.type !== "Array") throw new Error("expected Array value");
       return encodeNativeArrayValue(type.element, value.value);
@@ -1254,7 +1254,7 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
     case "Text":
     case "Json":
     case "Enum":
-      return { type: "Text", value: textDecoder.decode(bytes) };
+      return { type: "Text", value: textDecoder.decode(decodeInlineScalar(bytes)) };
     case "EnumPayload": {
       if (bytes.length < 4) throw new Error("invalid Enum payload value");
       const nameLength = view.getUint32(0, true);
@@ -1273,12 +1273,19 @@ function decodeBytes(type: ColumnType, bytes: Uint8Array): Value {
     case "Uuid":
       return { type: "Uuid", value: formatUuid(bytes) };
     case "Bytea":
-      return { type: "Bytea", value: bytes.slice() };
+      return { type: "Bytea", value: decodeInlineScalar(bytes).slice() };
     case "Array":
       return { type: "Array", value: decodeArray(type.element, bytes) };
     case "Row":
       return { type: "Row", value: decodeRowValue(type.columns, bytes) };
   }
+}
+
+function decodeInlineScalar(bytes: Uint8Array): Uint8Array {
+  if (bytes[0] !== 0) {
+    throw new Error("indirect scalar crossed a logical binding boundary");
+  }
+  return bytes.subarray(1);
 }
 
 function decodeRowValue(

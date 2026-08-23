@@ -29,7 +29,7 @@ function encodeBranchColumnValue(value: Value): Uint8Array {
       ) {
         throw new Error("branch Integer values must be signed 32-bit integers");
       }
-      writer.enumUnit(14); // groove::Value::I32
+      writer.enumUnit(15); // groove::Value::I32
       writer.i64(value.value);
       break;
     case "BigInt": {
@@ -40,12 +40,12 @@ function encodeBranchColumnValue(value: Value): Uint8Array {
       if (integer < -(1n << 63n) || integer > (1n << 63n) - 1n) {
         throw new Error("branch BigInt values must be signed 64-bit integers");
       }
-      writer.enumUnit(13); // groove::Value::I64
+      writer.enumUnit(14); // groove::Value::I64
       writer.i64(integer);
       break;
     }
     case "Uuid": {
-      writer.enumUnit(8); // groove::Value::Uuid
+      writer.enumUnit(9); // groove::Value::Uuid
       const hex = value.value.replaceAll("-", "");
       if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid branch UUID ${value.value}`);
       writer.bytes(

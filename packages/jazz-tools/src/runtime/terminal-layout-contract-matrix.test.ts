@@ -264,16 +264,19 @@ describe("TerminalRootLayout encoding contract matrix", () => {
       const descriptor = readDescriptor(new PostcardReader(Uint8Array.from(layout.rootDescriptor)));
       const raw = createRecord(descriptor, [
         uuidBytes(ROOT_ID),
-        ...columns.map((source, slot) =>
-          encodeNativeRowValues(
+        ...columns.map((source, slot) => {
+          const encoded = encodeNativeRowValues(
             [
               carriers[slot] === "CurrentRow"
                 ? { ...source, nullable: true, sparse: undefined }
                 : logicalStorageColumns([source])[0]!,
             ],
             [{ type: "Text", value: `slot-${slot}` }],
-          ),
-        ),
+          );
+          return carriers[slot] === "CurrentRow" && source.nullable
+            ? Uint8Array.from([1, ...encoded])
+            : encoded;
+        }),
         uuidBytes("00000000-0000-4000-8000-000000000099"),
       ]);
       const expectedValues = columns.map((_, slot) => `slot-${slot}`);
@@ -309,6 +312,7 @@ describe("TerminalRootLayout encoding contract matrix", () => {
           }),
           columns,
         ).all,
+        JSON.stringify(entry),
       ).toEqual([
         { id: ROOT_ID, values: expectedValues, names: columns.map((column) => column.name) },
       ]);
