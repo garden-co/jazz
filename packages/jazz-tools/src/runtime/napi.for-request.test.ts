@@ -372,6 +372,7 @@ describe("forRequest auth and policy", () => {
     const aliceSessionDb = readerContext.forSession({
       user_id: alice.userId,
       claims: {},
+      issuer: "https://issuer.example",
       authMode: "external",
     });
     const aliceRequestDb = await readerContext.forRequest({
@@ -380,6 +381,7 @@ describe("forRequest auth and policy", () => {
     const bobSessionDb = readerContext.forSession({
       user_id: bob.userId,
       claims: {},
+      issuer: "https://issuer.example",
       authMode: "external",
     });
 

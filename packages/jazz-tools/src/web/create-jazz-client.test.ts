@@ -107,6 +107,7 @@ describe("framework-agnostic/createAgnosticJazzClient", () => {
     const session: Session = {
       user_id: "local:alice",
       claims: {},
+      issuer: "urn:jazz:local-first",
       authMode: "local-first",
     };
     const db = createMockDb("test-app", session);

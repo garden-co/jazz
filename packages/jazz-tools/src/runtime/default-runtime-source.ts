@@ -20,10 +20,10 @@ import { SharedBrowserWorkerConnection } from "./native-runtime/browser-shared-w
 import { AttachedBrowserWorkerConnection } from "./native-runtime/attached-browser-worker-connection.js";
 import { MessagePortBrowserFollowerConnection } from "./native-runtime/browser-follower-connection.js";
 import { installWasmTelemetry } from "./sync-telemetry.js";
-import { parseJwtPayload, resolveClientSessionSync } from "./client-session.js";
+import { ANONYMOUS_JWT_ISSUER, resolveClientSessionSync } from "./client-session.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { httpUrlToWs } from "./url.js";
-import { authorBytesForSubject, isUsableSubject } from "./author-id.js";
+import { authorBytesForSession, canonicalAuthorSubject } from "./author-id.js";
 import {
   createBrowserAuthSessionKey,
   createBrowserWorkerFingerprint,
@@ -59,16 +59,28 @@ function randomBytes(): Uint8Array {
   return deterministicBytes(`${Date.now()}:${Math.random()}`);
 }
 
-function subjectFromConfig(config: DbConfig): string | null {
-  if (config.cookieSession?.user_id && isUsableSubject(config.cookieSession.user_id)) {
-    return config.cookieSession.user_id;
-  }
-  const payload = parseJwtPayload(config.jwtToken ?? "");
-  return typeof payload?.sub === "string" && isUsableSubject(payload.sub) ? payload.sub : null;
+function sessionFromConfig(config: DbConfig) {
+  return resolveClientSessionSync(config);
 }
 
-function persistentIdentitySeed(config: DbConfig, subject: string | null): string {
-  return `${config.appId}:${config.env ?? "dev"}:${subject ?? "anonymous"}`;
+function runtimeAuthorFromConfig(config: DbConfig) {
+  return (
+    sessionFromConfig(config) ?? {
+      issuer: ANONYMOUS_JWT_ISSUER,
+      user_id: `${config.appId}:${config.env ?? "dev"}:unauthenticated`,
+    }
+  );
+}
+
+function persistentIdentitySeed(
+  config: DbConfig,
+  session: ReturnType<typeof sessionFromConfig>,
+): string {
+  const author = canonicalAuthorSubject(
+    session?.issuer ?? ANONYMOUS_JWT_ISSUER,
+    session?.user_id ?? `${config.appId}:${config.env ?? "dev"}:unauthenticated`,
+  );
+  return `${config.appId}:${config.env ?? "dev"}:${author}`;
 }
 
 function initialSyncFlushEvery(config: DbConfig): number {
@@ -119,8 +131,8 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       onAuthFailure,
     };
 
-    const subject = subjectFromConfig(config);
-    const identitySeed = persistentIdentitySeed(config, subject);
+    const session = sessionFromConfig(config);
+    const identitySeed = persistentIdentitySeed(config, session);
     // A persistent worker may replay a main-thread-authored transaction after
     // the page has reopened. Keep that logical client's node identity stable
     // for the persistence namespace so the fresh in-memory runtime still owns
@@ -128,9 +140,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     const node = isPersistentBrowserConfig(config)
       ? deterministicBytes(`${identitySeed}:${resolveDefaultPersistentDbName(config)}:main-node`)
       : randomBytes();
-    const author = subject
-      ? authorBytesForSubject(subject)
-      : deterministicBytes(`${identitySeed}:author`);
+    const author = authorBytesForSession(runtimeAuthorFromConfig(config));
     const flushEvery = initialSyncFlushEvery(config);
     const browserMode = isPersistentBrowserConfig(config);
     const mainThreadPeerRuntime = this.nativeSchemaView(
@@ -176,12 +186,10 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     if (!(runtime instanceof NativeRuntimeAdapter)) {
       throw new Error("Browser worker connections require the native runtime adapter");
     }
-    const subject = subjectFromConfig(config);
-    const identitySeed = persistentIdentitySeed(config, subject);
+    const session = sessionFromConfig(config);
+    const identitySeed = persistentIdentitySeed(config, session);
     const dbName = resolveDefaultPersistentDbName(config);
-    const author = subject
-      ? authorBytesForSubject(subject)
-      : deterministicBytes(`${identitySeed}:author`);
+    const author = authorBytesForSession(runtimeAuthorFromConfig(config));
     if (config.runtimeSources?.browserWorkerPort) {
       return new AttachedBrowserWorkerConnection(
         runtime,

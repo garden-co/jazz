@@ -19,6 +19,10 @@ import {
   isWireMessage,
 } from "./websocket.js";
 
+function authorBytes(issuer: string, subject: string): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify([issuer, subject]));
+}
+
 describe("websocket frame carrier", () => {
   it("types close listeners with close event details", () => {
     type CloseListener = Parameters<BrowserWebSocket["addEventListener"]>[1];
@@ -87,22 +91,29 @@ describe("websocket frame carrier", () => {
 
   it("encodes the websocket auth prelude as the server AuthHandshake shape", () => {
     expect(
-      JSON.parse(encodeWebSocketPrelude('{"admin_secret":"s"}', Uint8Array.from([0, 1, 10, 255]))),
+      JSON.parse(
+        encodeWebSocketPrelude('{"admin_secret":"s"}', authorBytes("urn:jazz:system", "system")),
+      ),
     ).toEqual({
-      peer_identity: "00010aff",
-      auth: { sub: "00010aff", admin_secret: "s" },
-      sub: "00010aff",
+      peer_identity: '["urn:jazz:system","system"]',
+      auth: { sub: "system", admin_secret: "s" },
+      sub: "system",
       admin_secret: "s",
     });
   });
 
   it("uses the JWT subject for the websocket auth prelude when present", () => {
-    const token = `header.${btoa(JSON.stringify({ sub: "user-123" }))}.sig`;
+    const token = `header.${btoa(JSON.stringify({ iss: "https://issuer.example", sub: "user-123" }))}.sig`;
 
     expect(
-      JSON.parse(encodeWebSocketPrelude(JSON.stringify({ jwt_token: token }), Uint8Array.of(1))),
+      JSON.parse(
+        encodeWebSocketPrelude(
+          JSON.stringify({ jwt_token: token }),
+          authorBytes("https://issuer.example", "user-123"),
+        ),
+      ),
     ).toEqual({
-      peer_identity: "01",
+      peer_identity: '["https://issuer.example","user-123"]',
       auth: { sub: "user-123", jwt_token: token },
       sub: "user-123",
       jwt_token: token,

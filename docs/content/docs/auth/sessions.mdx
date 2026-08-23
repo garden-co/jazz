@@ -143,7 +143,9 @@ field really has one of those names, mark that one field explicitly with
 See [Queries](/docs/reading/queries#edit-metadata-columns) for how to select and filter on these
 columns.
 
-On clients, writes are automatically attributed to the current session user. On backends,
+On clients, writes are automatically attributed to the current session's canonical `[issuer,
+user_id]` pair. The pair is represented as canonical JSON at the Jazz boundary and interned only
+inside a running core. On backends,
 `await context.forRequest(...)` and `context.forSession(...)` both run as that user for permissions and
 also stamp authorship as that user.
 
@@ -152,7 +154,7 @@ also stamp authorship as that user.
 Sometimes backend code should keep backend-level permissions but still record a user's identity in
 edit metadata. Use the attribution helpers for this:
 
-- `context.withAttribution(userId)`&hairsp;—&hairsp;stamps writes as the given user ID
+- `context.withAttribution(issuer, userId)`&hairsp;—&hairsp;stamps writes as the exact issuer/user pair
 - `context.withAttributionForSession(session)`&hairsp;—&hairsp;derives authorship from a resolved session
 - `await context.withAttributionForRequest(req)`&hairsp;—&hairsp;derives authorship from an authenticated request
 

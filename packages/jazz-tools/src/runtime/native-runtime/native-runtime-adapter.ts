@@ -24,8 +24,8 @@ import type {
   TransactionKind,
 } from "../client.js";
 import type { Session } from "../context.js";
-import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
-import { authorBytesForSubject } from "../author-id.js";
+import { SYSTEM_AUTHOR_ID, SYSTEM_READ_SESSION } from "../system-identity.js";
+import { authorBytesForSession, canonicalAuthorSubject, isUsableSubject } from "../author-id.js";
 import {
   PostcardReader,
   PostcardWriter,
@@ -465,7 +465,9 @@ type ServerTransportWorkWaiter = {
 };
 
 type RuntimeSession = {
+  issuer: string;
   user_id: string;
+  authMode?: string;
   claims: Record<string, unknown>;
   identity: Uint8Array;
 };
@@ -1750,7 +1752,7 @@ export class NativeRuntimeAdapter implements Runtime {
       negotiation.features,
       authority.node,
       authority.epoch,
-      this.peerIdentity,
+      this.node,
       localEpoch,
     );
   }
@@ -3008,21 +3010,63 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
   if (!writeContext) return null;
   try {
     const parsed = JSON.parse(writeContext) as {
+      issuer?: unknown;
       user_id?: unknown;
+      claims?: unknown;
+      authMode?: unknown;
       attribution?: unknown;
-      session?: { user_id?: unknown; claims?: unknown };
+      session?: { issuer?: unknown; user_id?: unknown; claims?: unknown; authMode?: unknown };
     };
+    const attributedAuthor =
+      typeof parsed.attribution === "string" && parsed.attribution !== SYSTEM_AUTHOR_ID
+        ? parseCanonicalAuthor(parsed.attribution)
+        : null;
     const userId =
-      typeof parsed.user_id === "string"
+      attributedAuthor?.user_id ??
+      (typeof parsed.user_id === "string"
         ? parsed.user_id
         : typeof parsed.session?.user_id === "string"
           ? parsed.session.user_id
           : parsed.attribution === SYSTEM_AUTHOR_ID
             ? SYSTEM_AUTHOR_ID
-            : undefined;
+            : undefined);
     if (!userId) return null;
-    const claims = sessionClaims(userId, parsed.session?.claims);
-    return { user_id: userId, claims, identity: authorBytesForSubject(userId) };
+    const issuer =
+      parsed.attribution === SYSTEM_AUTHOR_ID
+        ? SYSTEM_READ_SESSION.issuer
+        : (attributedAuthor?.issuer ?? parsed.session?.issuer ?? parsed.issuer);
+    if (typeof issuer !== "string" || !isUsableSubject(issuer)) return null;
+    const session = {
+      issuer,
+      user_id: userId,
+      authMode:
+        typeof parsed.session?.authMode === "string"
+          ? parsed.session.authMode
+          : typeof parsed.authMode === "string"
+            ? parsed.authMode
+            : undefined,
+    };
+    const claims = sessionClaims(parsed.session?.claims ?? parsed.claims, session);
+    return { ...session, claims, identity: authorBytesForSession(session) };
+  } catch {
+    return null;
+  }
+}
+
+function parseCanonicalAuthor(value: string): { issuer: string; user_id: string } | null {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed) || parsed.length !== 2) return null;
+    const [issuer, userId] = parsed;
+    if (
+      typeof issuer !== "string" ||
+      typeof userId !== "string" ||
+      !isUsableSubject(issuer) ||
+      !isUsableSubject(userId)
+    ) {
+      return null;
+    }
+    return { issuer, user_id: userId };
   } catch {
     return null;
   }
@@ -3139,14 +3183,27 @@ function assertSupportedReadOptions(tier?: string | null, optionsJson?: string |
 
 function readSession(sessionJson?: string | null): RuntimeSession | null {
   if (sessionJson == null) return null;
-  const parsed = JSON.parse(sessionJson) as { user_id?: unknown; claims?: unknown };
+  const parsed = JSON.parse(sessionJson) as {
+    issuer?: unknown;
+    user_id?: unknown;
+    claims?: unknown;
+    authMode?: unknown;
+  };
   if (typeof parsed.user_id !== "string") {
     throw new Error("Native runtime session is missing user_id");
   }
-  return {
+  if (typeof parsed.issuer !== "string" || !isUsableSubject(parsed.issuer)) {
+    throw new Error("Native runtime session is missing issuer");
+  }
+  const session = {
+    issuer: parsed.issuer,
     user_id: parsed.user_id,
-    claims: sessionClaims(parsed.user_id, parsed.claims),
-    identity: authorBytesForSubject(parsed.user_id),
+    authMode: typeof parsed.authMode === "string" ? parsed.authMode : undefined,
+  };
+  return {
+    ...session,
+    claims: sessionClaims(parsed.claims, session),
+    identity: authorBytesForSession(session),
   };
 }
 
@@ -3154,11 +3211,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function sessionClaims(userId: string, rawClaims: unknown): Record<string, unknown> {
+function sessionClaims(
+  rawClaims: unknown,
+  session: { issuer: string; user_id: string; authMode?: string },
+): Record<string, unknown> {
+  const canonical = canonicalAuthorSubject(session.issuer, session.user_id);
   return {
     ...(isRecord(rawClaims) ? rawClaims : {}),
-    user_id: userId,
-    userId,
+    issuer: session.issuer,
+    user_id: session.user_id,
+    userId: session.user_id,
+    sub: canonical,
+    ...(session.authMode ? { authMode: session.authMode, auth_mode: session.authMode } : {}),
   };
 }
 

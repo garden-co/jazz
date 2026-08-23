@@ -348,7 +348,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       schema,
       openConfig(
         deterministicBytes("jazz-napi-native-runtime:policy-graph-perf-node"),
-        deterministicBytes("jazz-napi-native-runtime:policy-graph-perf-author"),
+        testAuthorBytes("jazz-napi-native-runtime:policy-graph-perf-author"),
         1,
         true,
       ),
@@ -387,7 +387,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       encodeSchema(TEST_SCHEMA),
       openConfig(
         deterministicBytes("jazz-napi-native-runtime:scheduler-node"),
-        deterministicBytes("jazz-napi-native-runtime:scheduler-author"),
+        testAuthorBytes("jazz-napi-native-runtime:scheduler-author"),
         1,
         true,
       ),
@@ -415,7 +415,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
       deterministicBytes("jazz-napi-native-runtime:node"),
-      deterministicBytes("jazz-napi-native-runtime:author"),
+      testAuthorBytes("jazz-napi-native-runtime:author"),
       1,
       true,
     );
@@ -539,7 +539,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       DEFAULTS_SCHEMA,
       deterministicBytes("jazz-napi-native-runtime-defaults:node"),
-      deterministicBytes("jazz-napi-native-runtime-defaults:author"),
+      testAuthorBytes("jazz-napi-native-runtime-defaults:author"),
       1,
       true,
     );
@@ -577,7 +577,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
           },
         },
         deterministicBytes("jazz-napi-native-runtime-signed-defaults:node"),
-        deterministicBytes("jazz-napi-native-runtime-signed-defaults:author"),
+        testAuthorBytes("jazz-napi-native-runtime-signed-defaults:author"),
         1,
         true,
       );
@@ -604,7 +604,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
       deterministicBytes("jazz-napi-native-runtime-subscription:node"),
-      deterministicBytes("jazz-napi-native-runtime-subscription:author"),
+      testAuthorBytes("jazz-napi-native-runtime-subscription:author"),
       21,
       true,
     );
@@ -675,7 +675,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
       deterministicBytes("jazz-napi-native-runtime-provisional-empty:node"),
-      deterministicBytes("jazz-napi-native-runtime-provisional-empty:author"),
+      testAuthorBytes("jazz-napi-native-runtime-provisional-empty:author"),
       25,
       true,
     );
@@ -707,7 +707,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
   it("returns raw NAPI subscription payloads as Uint8Array with registered terminal layouts", async () => {
     const { NapiDb } = await loadNapiModule();
     const node = deterministicBytes("jazz-napi-native-runtime-raw-subscription:node");
-    const author = deterministicBytes("jazz-napi-native-runtime-raw-subscription:author");
+    const author = testAuthorBytes("jazz-napi-native-runtime-raw-subscription:author");
     const rawEvents: NapiSubscriptionEvent[] = [];
     const expectRawBinaryPayload = (event: (typeof rawEvents)[number] | undefined) => {
       expect(event).toBeDefined();
@@ -913,7 +913,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
           },
           TEST_SCHEMA,
           deterministicBytes(`jazz-napi-native-runtime-event-variants:${label}:node`),
-          deterministicBytes(`jazz-napi-native-runtime-event-variants:${label}:author`),
+          testAuthorBytes(`jazz-napi-native-runtime-event-variants:${label}:author`),
           24,
           true,
         );
@@ -987,7 +987,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
       deterministicBytes("jazz-napi-native-runtime-transaction-delta:node"),
-      deterministicBytes("jazz-napi-native-runtime-transaction-delta:author"),
+      testAuthorBytes("jazz-napi-native-runtime-transaction-delta:author"),
       22,
       true,
     );
@@ -1050,12 +1050,12 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       OWNED_TODOS_SCHEMA,
       deterministicBytes("jazz-napi-native-runtime-policy:node"),
-      deterministicBytes("jazz-napi-native-runtime-policy:author"),
+      testAuthorBytes("jazz-napi-native-runtime-policy:author"),
       11,
       true,
     );
-    const aliceSession = JSON.stringify({ user_id: ALICE_ID });
-    const bobSession = JSON.stringify({ user_id: BOB_ID });
+    const aliceSession = JSON.stringify({ issuer: "https://issuer.example", user_id: ALICE_ID });
+    const bobSession = JSON.stringify({ issuer: "https://issuer.example", user_id: BOB_ID });
 
     const aliceTodo = runtime.insert(
       "todos",
@@ -1141,14 +1141,14 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       OWNED_TODOS_SCHEMA,
       deterministicBytes("jazz-napi-native-runtime-policy-subscription:node"),
-      deterministicBytes("jazz-napi-native-runtime-policy-subscription:author"),
+      testAuthorBytes("jazz-napi-native-runtime-policy-subscription:author"),
       14,
       true,
     );
     runtimes.push(runtime);
 
-    const aliceSession = JSON.stringify({ user_id: ALICE_ID });
-    const bobSession = JSON.stringify({ user_id: BOB_ID });
+    const aliceSession = JSON.stringify({ issuer: "https://issuer.example", user_id: ALICE_ID });
+    const bobSession = JSON.stringify({ issuer: "https://issuer.example", user_id: BOB_ID });
     const query = JSON.stringify({ table: "todos" });
     const aliceUpdates: unknown[] = [];
     // Terminal layouts are registered once at the subscription boundary and
@@ -1244,13 +1244,13 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       OWNED_TODOS_SCHEMA,
       deterministicBytes("jazz-napi-native-runtime-delete-policy:node"),
-      deterministicBytes("jazz-napi-native-runtime-delete-policy:author"),
+      testAuthorBytes("jazz-napi-native-runtime-delete-policy:author"),
       12,
       true,
       { readAuthorizationHost: "trusted-serving" },
     );
-    const aliceSession = JSON.stringify({ user_id: ALICE_ID });
-    const bobSession = JSON.stringify({ user_id: BOB_ID });
+    const aliceSession = JSON.stringify({ issuer: "https://issuer.example", user_id: ALICE_ID });
+    const bobSession = JSON.stringify({ issuer: "https://issuer.example", user_id: BOB_ID });
 
     const aliceTodo = runtime.insert(
       "todos",
@@ -1317,7 +1317,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       OWNED_TODOS_SCHEMA,
       deterministicBytes("jazz-napi-native-runtime-edge-delete-policy:node"),
-      deterministicBytes("jazz-napi-native-runtime-edge-delete-policy:author"),
+      testAuthorBytes("jazz-napi-native-runtime-edge-delete-policy:author"),
       13,
       true,
     );
@@ -1327,8 +1327,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       JSON.stringify({ backend_secret: server.backendSecret }),
     );
 
-    const aliceSession = JSON.stringify({ user_id: ALICE_ID });
-    const bobSession = JSON.stringify({ user_id: BOB_ID });
+    const aliceSession = JSON.stringify({ issuer: "https://issuer.example", user_id: ALICE_ID });
+    const bobSession = JSON.stringify({ issuer: "https://issuer.example", user_id: BOB_ID });
 
     const aliceTodo = runtime.insert(
       "todos",
@@ -1401,7 +1401,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         },
         OWNED_TODOS_SCHEMA,
         deterministicBytes("jazz-napi-native-runtime-persistent-edge-delete-policy:node"),
-        deterministicBytes("jazz-napi-native-runtime-persistent-edge-delete-policy:author"),
+        testAuthorBytes("jazz-napi-native-runtime-persistent-edge-delete-policy:author"),
         14,
         true,
         { persistentPath: join(tempDir, "db") },
@@ -1412,8 +1412,8 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         JSON.stringify({ backend_secret: server.backendSecret }),
       );
 
-      const aliceSession = JSON.stringify({ user_id: ALICE_ID });
-      const bobSession = JSON.stringify({ user_id: BOB_ID });
+      const aliceSession = JSON.stringify({ issuer: "https://issuer.example", user_id: ALICE_ID });
+      const bobSession = JSON.stringify({ issuer: "https://issuer.example", user_id: BOB_ID });
 
       const aliceTodo = runtime.insert(
         "todos",
@@ -1459,7 +1459,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
       deterministicBytes("jazz-napi-native-runtime-parity:node"),
-      deterministicBytes("jazz-napi-native-runtime-parity:author"),
+      testAuthorBytes("jazz-napi-native-runtime-parity:author"),
       2,
       true,
     );
@@ -1561,7 +1561,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
         TEST_SCHEMA,
         deterministicBytes(`jazz-napi-core-edge:${peer}:node`),
-        deterministicBytes(`jazz-napi-core-edge:${peer}:author`),
+        testAuthorBytes(`jazz-napi-core-edge:${peer}:author`),
         sourceId,
         true,
       );
@@ -1625,7 +1625,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
         TEST_SCHEMA,
         deterministicBytes(`jazz-napi-core-persistent-edge:${peer}:node`),
-        deterministicBytes(`jazz-napi-core-persistent-edge:${peer}:author`),
+        testAuthorBytes(`jazz-napi-core-persistent-edge:${peer}:author`),
         sourceId,
         true,
       );
@@ -1701,7 +1701,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
         CHAT_POLICY_SCHEMA,
         deterministicBytes(`jazz-napi-core-branch-policy:${userId}:node`),
-        uuidBytes(userId),
+        new TextEncoder().encode(JSON.stringify(["https://issuer.example", userId])),
         sourceId,
         true,
       );
@@ -1710,7 +1710,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         webSocketUrl(server!.url, appId),
         JSON.stringify({
           backend_secret: "core-napi-branch-policy-backend",
-          backend_session: { user_id: userId, claims: {} },
+          backend_session: { issuer: "https://issuer.example", user_id: userId, claims: {} },
         }),
       );
       return runtime;
@@ -1729,7 +1729,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       "writer public chat insert did not settle at edge",
     );
 
-    const bobSession = JSON.stringify({ user_id: BOB_ID, claims: {} });
+    const bobSession = JSON.stringify({
+      issuer: "https://issuer.example",
+      user_id: BOB_ID,
+      claims: {},
+    });
     const propagatedRow = await waitFor(async () => {
       const rows = (await reader.query(
         JSON.stringify({ table: "chats" }),
@@ -1790,7 +1794,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     const tempDir = mkdtempSync(join(tmpdir(), "jazz-napi-core-"));
     const dataPath = join(tempDir, "db");
     const node = deterministicBytes("jazz-napi-core-persistent:node");
-    const author = deterministicBytes("jazz-napi-core-persistent:author");
+    const author = testAuthorBytes("jazz-napi-core-persistent:author");
     let firstRuntime: NativeRuntimeAdapter | null = null;
     let secondRuntime: NativeRuntimeAdapter | null = null;
 
@@ -1851,6 +1855,10 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
   });
 });
 
+function testAuthorBytes(seed: string): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify(["urn:jazz:test", seed]));
+}
+
 function deterministicBytes(seed: string): Uint8Array {
   let hash = 0x811c9dc5;
   const bytes = new Uint8Array(16);
@@ -1861,18 +1869,6 @@ function deterministicBytes(seed: string): Uint8Array {
       hash = Math.imul(hash, 0x01000193);
     }
     view.setUint32(round * 4, hash >>> 0, true);
-  }
-  return bytes;
-}
-
-function uuidBytes(value: string): Uint8Array {
-  const hex = value.replaceAll("-", "");
-  if (!/^[0-9a-fA-F]{32}$/.test(hex)) {
-    throw new Error(`invalid UUID: ${value}`);
-  }
-  const bytes = new Uint8Array(16);
-  for (let index = 0; index < 16; index += 1) {
-    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
   }
   return bytes;
 }

@@ -169,11 +169,9 @@ describe("backend request auth", () => {
         },
       ),
     ).resolves.toEqual({
+      issuer: "urn:jazz:local-first",
       user_id: userId,
-      claims: {
-        subject: userId,
-        issuer: "urn:jazz:local-first",
-      },
+      claims: {},
       authMode: "local-first",
     });
   });
@@ -223,12 +221,9 @@ describe("backend request auth", () => {
         },
       ),
     ).resolves.toEqual({
+      issuer: "https://issuer.example",
       user_id: "user-subject",
-      claims: {
-        role: "editor",
-        subject: "user-subject",
-        issuer: "https://issuer.example",
-      },
+      claims: { role: "editor" },
       authMode: "external",
     });
   });
@@ -258,12 +253,9 @@ describe("backend request auth", () => {
         },
       ),
     ).resolves.toEqual({
+      issuer: "https://issuer.example",
       user_id: "user-subject",
-      claims: {
-        role: "editor",
-        subject: "user-subject",
-        issuer: "https://issuer.example",
-      },
+      claims: { role: "editor" },
       authMode: "external",
     });
   });

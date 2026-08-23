@@ -42,6 +42,8 @@ export type AuthMode = "external" | "local-first" | "anonymous";
  * Session context for policy evaluation.
  */
 export interface Session {
+  /** Validated JWT issuer (`iss`). */
+  issuer: string;
   /** User identifier */
   user_id: string;
   /** User-defined claims (roles, teams, etc.) */

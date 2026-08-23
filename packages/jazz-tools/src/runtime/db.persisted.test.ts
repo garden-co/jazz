@@ -208,6 +208,7 @@ describe("Db write handles", () => {
     const session: Session = {
       user_id: "alice",
       claims: { role: "writer" },
+      issuer: "https://issuer.example",
       authMode: "external",
     };
     const { handle: insertHandle, client: insertClient } = makeValueWriteResult(

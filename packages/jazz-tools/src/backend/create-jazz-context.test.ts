@@ -185,6 +185,7 @@ describe("backend/create-jazz-context", () => {
   beforeEach(() => {
     mocks.reset();
     mocks.resolveRequestSession.mockResolvedValue({
+      issuer: "https://issuer.example",
       user_id: "u1",
       claims: {},
       authMode: "external" as const,
@@ -300,13 +301,18 @@ describe("backend/create-jazz-context", () => {
       header: (name: string) =>
         name === "authorization" ? `Bearer ${makeJwt({ sub: "u1" })}` : undefined,
     };
-    const session: Session = { user_id: "u1", claims: {}, authMode: "external" };
+    const session: Session = {
+      issuer: "https://issuer.example",
+      user_id: "u1",
+      claims: {},
+      authMode: "external",
+    };
 
     const db = context.db();
     const backendDb = context.asBackend();
     const requestDb = await context.forRequest(req);
     const sessionDb = context.forSession(session);
-    const attributedDb = context.withAttribution("u2");
+    const attributedDb = context.withAttribution("https://issuer.example", "u2");
     const attributedSessionDb = context.withAttributionForSession(session);
     const attributedRequestDb = await context.withAttributionForRequest(req);
 
@@ -351,11 +357,16 @@ describe("backend/create-jazz-context", () => {
       header: (name: string) =>
         name === "authorization" ? `Bearer ${makeJwt({ sub: "u1" })}` : undefined,
     };
-    const session: Session = { user_id: "u1", claims: {}, authMode: "external" };
+    const session: Session = {
+      issuer: "https://issuer.example",
+      user_id: "u1",
+      claims: {},
+      authMode: "external",
+    };
 
     await expect(context.forRequest(req)).resolves.toBeDefined();
     expect(() => context.forSession(session)).not.toThrow();
-    expect(() => context.withAttribution("u2")).not.toThrow();
+    expect(() => context.withAttribution("https://issuer.example", "u2")).not.toThrow();
     expect(() => context.withAttributionForSession(session)).not.toThrow();
     await expect(context.withAttributionForRequest(req)).resolves.toBeDefined();
     expect(mocks.clients[0]!.asBackend).not.toHaveBeenCalled();
