@@ -13,6 +13,11 @@ This document is the planning contract for that program. It deliberately does
 not define new product APIs: individual app work must use documented public APIs
 and turn gaps it finds into separately reviewed API/design work.
 
+Implementation lanes record adopter-facing surprises in
+[Example App Learnings](./EXAMPLE_APP_LEARNINGS.md). That inbox is periodically
+triaged; entries remain until fixed, captured by a durable test, or promoted to
+an explicit open question in a spec.
+
 ## Goals and non-goals
 
 **Goals**
