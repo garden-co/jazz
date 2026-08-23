@@ -4697,7 +4697,7 @@ mod tests {
             .begin_transaction(
                 bound.to_string(),
                 "exclusive".to_owned(),
-                Some(Uint8Array::new(alice.0.as_bytes().to_vec())),
+                Some(Uint8Array::new(alice.canonical().as_bytes().to_vec())),
             )
             .unwrap();
         let tx = binding.attach_exclusive_tx(bound.to_string()).unwrap();
@@ -4745,7 +4745,7 @@ mod tests {
             .begin_transaction(
                 bound.to_string(),
                 "exclusive".to_owned(),
-                Some(Uint8Array::new(alice.0.as_bytes().to_vec())),
+                Some(Uint8Array::new(alice.canonical().as_bytes().to_vec())),
             )
             .unwrap();
         core_block_on(other_owner.exclusive_tx_ref(bound).insert_with_id(
