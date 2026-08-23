@@ -681,6 +681,17 @@ mod tests {
 
     #[test]
     fn validates_order_by_columns_and_preserves_key_order() {
+        let err = Query::from("issues")
+            .order_by("$createdBy", OrderDirection::Asc)
+            .validate_runtime(&schema())
+            .unwrap_err();
+        assert_eq!(
+            err,
+            QueryError::UnsupportedAuthorOrdering {
+                column: "$createdBy".to_owned()
+            }
+        );
+
         let validated = Query::from("issues")
             .order_by("state", OrderDirection::Asc)
             .order_by("priority", OrderDirection::Desc)

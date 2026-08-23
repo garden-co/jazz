@@ -608,7 +608,7 @@ fn commit_parts(unit: &SyncMessage) -> (Transaction, Vec<VersionRecord>) {
 fn cells(title: &str, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
-        ("owner".to_owned(), Value::Uuid(owner.0)),
+        ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
     ])
 }
 

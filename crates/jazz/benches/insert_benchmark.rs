@@ -25,10 +25,16 @@ use jazz::tx::DurabilityTier;
 
 type BenchDb = Db<MemoryStorage>;
 
-const AUTHOR: AuthorSubject =
-    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
-const OTHER_AUTHOR: AuthorSubject =
-    AuthorSubject::for_test_uuid(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
+const AUTHOR_UUID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-0000000000a1");
+const OTHER_AUTHOR_UUID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-0000000000b2");
+
+fn author() -> AuthorSubject {
+    AuthorSubject::for_test_uuid(AUTHOR_UUID)
+}
+
+fn other_author() -> AuthorSubject {
+    AuthorSubject::for_test_uuid(OTHER_AUTHOR_UUID)
+}
 
 fn public_schema_convert() -> JazzSchema {
     let folder_owner = schema_fixture::session_user_id_column("owner");
@@ -89,7 +95,7 @@ fn open_db(seed: u64) -> BenchDb {
             MemoryStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([seed as u8; 16]),
-                author: AUTHOR,
+                author: author(),
             },
         )
         .with_id_source(SeededRowIdSource::new(seed)),
@@ -111,7 +117,7 @@ fn current_timestamp() -> u64 {
 fn folder_cells(index: usize, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("name".to_owned(), Value::String(format!("Folder {index}"))),
-        ("owner".to_owned(), Value::Uuid(owner.0)),
+        ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
         ("created_at".to_owned(), Value::U64(index as u64)),
     ])
 }
@@ -119,7 +125,7 @@ fn folder_cells(index: usize, owner: AuthorSubject) -> BTreeMap<String, Value> {
 fn access_cells(folder: RowUuid, user: AuthorSubject, role: &str) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("folder".to_owned(), Value::Uuid(folder.0)),
-        ("user".to_owned(), Value::Uuid(user.0)),
+        ("user".to_owned(), Value::Uuid(user.test_uuid())),
         ("role".to_owned(), Value::String(role.to_owned())),
     ])
 }
@@ -135,7 +141,7 @@ fn document_cells(
         ("folder".to_owned(), Value::Uuid(folder.0)),
         ("title".to_owned(), Value::String(title)),
         ("content".to_owned(), Value::String(content.to_owned())),
-        ("author".to_owned(), Value::Uuid(author.0)),
+        ("author".to_owned(), Value::Uuid(author.test_uuid())),
         ("created_at".to_owned(), Value::U64(created_at)),
     ])
 }
@@ -163,7 +169,7 @@ fn seed_data(db: &BenchDb, scale: usize) -> BenchmarkData {
         let is_owned = index < owned_folder_count;
         let is_team_accessible =
             index >= owned_folder_count && index < owned_folder_count + team_folder_count;
-        let owner = if is_owned { AUTHOR } else { OTHER_AUTHOR };
+        let owner = if is_owned { author() } else { other_author() };
 
         let write = db
             .insert_with_id("folders", folder, folder_cells(index, owner))
@@ -173,7 +179,7 @@ fn seed_data(db: &BenchDb, scale: usize) -> BenchmarkData {
         if is_owned || is_team_accessible {
             let role = if is_owned { "owner" } else { "member" };
             let write = db
-                .insert("folder_access", access_cells(folder, AUTHOR, role))
+                .insert("folder_access", access_cells(folder, author(), role))
                 .expect("seed folder access");
             wait_local(write);
         }
@@ -192,9 +198,9 @@ fn seed_data(db: &BenchDb, scale: usize) -> BenchmarkData {
             team_folders[(index / 2) % team_folders.len()]
         };
         let author = if index.is_multiple_of(2) {
-            AUTHOR
+            author()
         } else {
-            OTHER_AUTHOR
+            other_author()
         };
         let write = db
             .insert(
@@ -237,7 +243,7 @@ fn insert_own_folder(c: &mut Criterion) {
                             folder,
                             format!("Bench Doc {doc_counter}"),
                             "Benchmark content",
-                            AUTHOR,
+                            author(),
                             current_timestamp(),
                         ),
                     )
@@ -270,7 +276,7 @@ fn insert_team_folder(c: &mut Criterion) {
                             folder,
                             format!("Team Doc {doc_counter}"),
                             "Team benchmark content",
-                            OTHER_AUTHOR,
+                            other_author(),
                             current_timestamp(),
                         ),
                     )
@@ -316,7 +322,7 @@ fn insert_batch(c: &mut Criterion) {
                                     folder,
                                     format!("Batch {batch_counter} Doc {index}"),
                                     "Batch content",
-                                    AUTHOR,
+                                    author(),
                                     timestamp + index as u64,
                                 ),
                             )

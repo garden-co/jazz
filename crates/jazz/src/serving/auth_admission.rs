@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::groove::records::Value;
-use crate::ids::AuthorSubject;
+use crate::ids::{AuthorSubject, AuthorSubjectError};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 
@@ -187,6 +187,8 @@ pub enum AuthAdmissionError {
     InvalidJwt(String),
     /// The first-frame handshake was malformed.
     InvalidHandshake(String),
+    /// The credential attempted to claim an invalid or Jazz-reserved author identity.
+    InvalidAuthorSubject(AuthorSubjectError),
 }
 
 impl fmt::Display for AuthAdmissionError {
@@ -196,11 +198,18 @@ impl fmt::Display for AuthAdmissionError {
             Self::InvalidBearer => write!(f, "invalid bearer auth"),
             Self::InvalidJwt(error) => write!(f, "invalid bearer JWT: {error}"),
             Self::InvalidHandshake(error) => write!(f, "invalid auth handshake: {error}"),
+            Self::InvalidAuthorSubject(error) => write!(f, "invalid author subject: {error}"),
         }
     }
 }
 
 impl std::error::Error for AuthAdmissionError {}
+
+impl From<AuthorSubjectError> for AuthAdmissionError {
+    fn from(error: AuthorSubjectError) -> Self {
+        Self::InvalidAuthorSubject(error)
+    }
+}
 
 /// Admit a static bearer credential.
 pub fn admit_static_bearer(
@@ -233,13 +242,13 @@ pub fn admit_static_bearer_with_claims(
         ));
     }
     Ok(AdmittedSession {
-        author: author_subject_from_issuer_and_subject(
+        author: AuthorSubject::reserved(
             match source {
                 AdmissionSource::Anonymous => ANONYMOUS_ISSUER,
                 _ => STATIC_BEARER_ISSUER,
             },
             &subject,
-        ),
+        )?,
         subject,
         claims,
         source,
@@ -271,7 +280,7 @@ pub fn admit_bearer_jwt(
     let mut claims = jwt_json_claims_to_policy_claims(decoded.claims.extra)?;
     claims.insert("sub".to_owned(), Value::String(subject.clone()));
     Ok(AdmittedSession {
-        author: author_subject_from_issuer_and_subject(&issuer, &subject),
+        author: author_subject_from_issuer_and_subject(&issuer, &subject)?,
         subject,
         claims,
         source,
@@ -279,11 +288,11 @@ pub fn admit_bearer_jwt(
 }
 
 /// Issuer required for local-first admission tokens.
-pub const LOCAL_FIRST_JWT_ISSUER: &str = "urn:jazz:local-first";
+pub const LOCAL_FIRST_JWT_ISSUER: &str = AuthorSubject::LOCAL_FIRST_ISSUER;
 /// Reserved issuer for subjects admitted by the process-local static bearer gate.
-pub const STATIC_BEARER_ISSUER: &str = "urn:jazz:static-bearer";
+pub const STATIC_BEARER_ISSUER: &str = AuthorSubject::STATIC_BEARER_ISSUER;
 /// Reserved issuer for sessions admitted without an external credential.
-pub const ANONYMOUS_ISSUER: &str = "urn:jazz:anonymous";
+pub const ANONYMOUS_ISSUER: &str = AuthorSubject::ANONYMOUS_ISSUER;
 
 /// Admit a signed local-first JWT.
 ///
@@ -342,7 +351,7 @@ pub fn admit_local_first_jwt(
         Value::String(LOCAL_FIRST_JWT_ISSUER.to_owned()),
     );
     Ok(AdmittedSession {
-        author: author_subject_from_issuer_and_subject(LOCAL_FIRST_JWT_ISSUER, &subject),
+        author: AuthorSubject::reserved(LOCAL_FIRST_JWT_ISSUER, &subject)?,
         subject,
         claims,
         source: AdmissionSource::LocalFirstJwt,
@@ -458,8 +467,11 @@ fn json_claim_to_policy_claim(
 }
 
 /// Bind an exact issuer/subject pair into the logical Jazz author identity.
-pub fn author_subject_from_issuer_and_subject(issuer: &str, subject: &str) -> AuthorSubject {
-    AuthorSubject::authenticated(issuer, subject)
+pub fn author_subject_from_issuer_and_subject(
+    issuer: &str,
+    subject: &str,
+) -> Result<AuthorSubject, AuthAdmissionError> {
+    AuthorSubject::authenticated(issuer, subject).map_err(AuthAdmissionError::InvalidAuthorSubject)
 }
 
 /// Extract a bearer token from an `Authorization` header value.
@@ -478,9 +490,32 @@ mod tests {
     fn issuer_and_subject_define_author_identity() {
         let subject = "00000000-0000-4000-8000-0000000000b2";
         assert_eq!(
-            author_subject_from_issuer_and_subject("https://issuer.example", subject),
-            AuthorSubject::authenticated("https://issuer.example", subject)
+            author_subject_from_issuer_and_subject("https://issuer.example", subject).unwrap(),
+            AuthorSubject::authenticated("https://issuer.example", subject).unwrap()
         );
+    }
+
+    #[test]
+    fn external_author_admission_rejects_missing_and_reserved_issuers_with_typed_errors() {
+        assert_eq!(
+            author_subject_from_issuer_and_subject("", "user"),
+            Err(AuthAdmissionError::InvalidAuthorSubject(
+                AuthorSubjectError::MissingIssuer
+            ))
+        );
+        for issuer in [
+            AuthorSubject::SYSTEM_ISSUER,
+            LOCAL_FIRST_JWT_ISSUER,
+            STATIC_BEARER_ISSUER,
+            ANONYMOUS_ISSUER,
+        ] {
+            assert_eq!(
+                author_subject_from_issuer_and_subject(issuer, "user"),
+                Err(AuthAdmissionError::InvalidAuthorSubject(
+                    AuthorSubjectError::ReservedIssuer(issuer.to_owned())
+                ))
+            );
+        }
     }
 
     #[test]

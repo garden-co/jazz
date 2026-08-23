@@ -15,8 +15,10 @@ use crate::protocol_limits::{validate_logical_message_len, validate_wire_frame_l
 
 /// Current Jazz wire protocol version.
 /// Version 12 changes postcard discriminants for large-value-bearing semantic
-/// payloads. This is an intentional breaking baseline: version 11 peers could
-/// otherwise decode a changed ordinal as a different valid variant.
+/// payloads and carries author identities as exact canonical `[iss,sub]` JSON
+/// strings. This is an intentional breaking baseline: version 11 peers could
+/// decode changed ordinals incorrectly and UUID authors have no compatibility
+/// decoder, so negotiation rejects them.
 pub const WIRE_PROTOCOL_VERSION: u16 = 12;
 
 /// No optional features.
@@ -1392,10 +1394,11 @@ mod tests {
     }
 
     #[test]
-    fn current_wire_version_rejects_previous_release_peer() {
+    fn wire_v12_rejects_v11_without_compatibility_negotiation() {
+        assert_eq!(WIRE_PROTOCOL_VERSION, 12);
         let remote = WireHello {
-            min_protocol_version: WIRE_PROTOCOL_VERSION - 1,
-            max_protocol_version: WIRE_PROTOCOL_VERSION - 1,
+            min_protocol_version: 11,
+            max_protocol_version: 11,
             features: FEATURE_SYNC_MESSAGE_PAYLOAD,
             role: WirePeerRole::Core,
             authority: None,

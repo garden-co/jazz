@@ -36,15 +36,15 @@ const GROUP_EDGES: &str = "group_edges";
 const CYCLE_A: &str = "cycle_a";
 const CYCLE_B: &str = "cycle_b";
 fn writer() -> AuthorSubject {
-    AuthorSubject::authenticated("urn:jazz:test", "writer")
+    AuthorSubject::authenticated("urn:jazz:test", "writer").unwrap()
 }
 
 fn user_a() -> AuthorSubject {
-    AuthorSubject::authenticated("urn:jazz:test", "user-a")
+    AuthorSubject::authenticated("urn:jazz:test", "user-a").unwrap()
 }
 
 fn user_b() -> AuthorSubject {
-    AuthorSubject::authenticated("urn:jazz:test", "user-b")
+    AuthorSubject::authenticated("urn:jazz:test", "user-b").unwrap()
 }
 
 type BenchDb = Db<TestStorage>;

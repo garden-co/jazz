@@ -1577,6 +1577,15 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
         return None;
     }
 
+    let auth_mode = match claims.iss.as_str() {
+        CoreAuthorSubject::LOCAL_FIRST_ISSUER => {
+            crate::tools::public_api::session::AuthMode::LocalFirst
+        }
+        CoreAuthorSubject::ANONYMOUS_ISSUER => {
+            crate::tools::public_api::session::AuthMode::Anonymous
+        }
+        _ => crate::tools::public_api::session::AuthMode::External,
+    };
     Some(Session {
         issuer: claims.iss.clone(),
         user_id: user_id.to_string(),
@@ -1584,7 +1593,7 @@ fn session_from_unverified_jwt(token: &str) -> Option<Session> {
             JwtClaimsPayload::Absent => serde_json::Value::Object(serde_json::Map::new()),
             JwtClaimsPayload::Present(claims) => claims,
         },
-        ..Session::new(claims.iss, user_id)
+        auth_mode,
     })
 }
 
@@ -1599,24 +1608,47 @@ fn default_session_from_context(context: &AppContext) -> Option<Session> {
         .and_then(session_from_unverified_jwt)
 }
 
-fn core_identity(context: &AppContext, default_session: Option<&Session>) -> CoreDbIdentity {
+fn core_identity(
+    context: &AppContext,
+    default_session: Option<&Session>,
+) -> Result<CoreDbIdentity> {
     let node_uuid = context
         .client_id
         .map(|id| id.0)
         .unwrap_or_else(Uuid::now_v7);
-    let author = default_session
-        .map(|session| CoreAuthorSubject::authenticated(&session.issuer, &session.user_id))
-        .unwrap_or_else(|| {
-            CoreAuthorSubject::authenticated("urn:jazz:anonymous-node", &node_uuid.to_string())
-        });
-    CoreDbIdentity {
+    let author = match default_session {
+        Some(session) => core_author_from_session(session)?,
+        None => CoreAuthorSubject::reserved(
+            CoreAuthorSubject::ANONYMOUS_ISSUER,
+            &node_uuid.to_string(),
+        )?,
+    };
+    Ok(CoreDbIdentity {
         node: CoreNodeUuid(node_uuid),
         author,
-    }
+    })
 }
 
-fn core_author_from_session(session: &Session) -> CoreAuthorSubject {
-    CoreAuthorSubject::authenticated(&session.issuer, session.get_user_id())
+fn core_author_from_session(session: &Session) -> Result<CoreAuthorSubject> {
+    use crate::tools::public_api::session::AuthMode;
+
+    let author = match session.auth_mode {
+        AuthMode::External => {
+            CoreAuthorSubject::authenticated(&session.issuer, session.get_user_id())?
+        }
+        AuthMode::LocalFirst if session.issuer == CoreAuthorSubject::LOCAL_FIRST_ISSUER => {
+            CoreAuthorSubject::reserved(&session.issuer, session.get_user_id())?
+        }
+        AuthMode::Anonymous if session.issuer == CoreAuthorSubject::ANONYMOUS_ISSUER => {
+            CoreAuthorSubject::reserved(&session.issuer, session.get_user_id())?
+        }
+        _ => {
+            return Err(
+                crate::ids::AuthorSubjectError::ReservedIssuer(session.issuer.clone()).into(),
+            );
+        }
+    };
+    Ok(author)
 }
 
 fn core_storage(schema: &crate::schema::JazzSchema, context: &AppContext) -> Result<StorageBundle> {
@@ -2094,12 +2126,13 @@ fn transaction_rejected_before_tier_message(
 }
 
 impl JazzClient {
-    fn write_identity(&self) -> Option<CoreAuthorSubject> {
+    fn write_identity(&self) -> Result<Option<CoreAuthorSubject>> {
         self.write_context
             .as_ref()
             .and_then(|context| context.session())
             .or(self.default_session.as_ref())
             .map(core_author_from_session)
+            .transpose()
     }
 
     fn check_core_write_not_rejected(db: &Backend, tx_id: CoreTxId) -> Result<()> {
@@ -2771,7 +2804,7 @@ impl JazzClient {
         {
             let public_schema_convert = crate::schema::JazzSchema::new(&context.schema)
                 .map_err(|error| JazzError::Schema(error.to_string()))?;
-            let identity = core_identity(&context, default_session.as_ref());
+            let identity = core_identity(&context, default_session.as_ref())?;
             let storage = core_storage(&public_schema_convert, &context)?;
             let auth = has_server.then(|| WsAuthConfig {
                 jwt_token: if context.backend_secret.is_some() {
@@ -2899,7 +2932,7 @@ impl JazzClient {
             .and_then(|ctx| ctx.transaction_id)
         {
             let author = self
-                .write_identity()
+                .write_identity()?
                 .unwrap_or_else(|| self.db.inner.borrow().identity.author);
             self.db
                 .query_transaction_rows(query.clone(), opts, transaction_id, table, author)?
@@ -2951,7 +2984,7 @@ impl JazzClient {
                     table.to_string(),
                     object_id.into(),
                     cells,
-                    self.write_identity(),
+                    self.write_identity()?,
                 )?;
                 let transaction_id = core_batch_id(tx_id);
                 Ok((row_id, row_values, Some(transaction_id)))
@@ -2979,7 +3012,7 @@ impl JazzClient {
             } else {
                 let tx_id =
                     self.db
-                        .upsert(table.to_string(), object_id, cells, self.write_identity())?;
+                        .upsert(table.to_string(), object_id, cells, self.write_identity()?)?;
                 Ok(Some(core_batch_id(tx_id)))
             }
         }
@@ -3013,7 +3046,7 @@ impl JazzClient {
                 self.db.stage_update(transaction_id, object_id, cells)?;
                 Ok(None)
             } else {
-                let tx_id = self.db.update(object_id, cells, self.write_identity())?;
+                let tx_id = self.db.update(object_id, cells, self.write_identity()?)?;
                 Ok(Some(core_batch_id(tx_id)))
             }
         }
@@ -3030,7 +3063,7 @@ impl JazzClient {
                 self.db.stage_delete(transaction_id, object_id)?;
                 Ok(None)
             } else {
-                let tx_id = self.db.delete(object_id, self.write_identity())?;
+                let tx_id = self.db.delete(object_id, self.write_identity()?)?;
                 Ok(Some(core_batch_id(tx_id)))
             }
         }

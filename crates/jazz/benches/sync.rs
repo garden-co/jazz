@@ -315,7 +315,7 @@ impl SyncBench {
         assert!(
             ui_rows
                 .iter()
-                .all(|row| row.cell(table, "owner") == Some(Value::Uuid(self.ui_owner.0)))
+                .all(|row| row.cell(table, "owner") == Some(Value::Uuid(self.ui_owner.test_uuid())))
         );
         assert!(!ui_expected_rows.contains_key(&row(250)));
         assert_eq!(
@@ -493,7 +493,7 @@ fn rows_owned_by(
     owner: AuthorSubject,
 ) -> BTreeMap<RowUuid, BTreeMap<String, Value>> {
     rows.iter()
-        .filter(|(_row_uuid, cells)| cells.get("owner") == Some(&Value::Uuid(owner.0)))
+        .filter(|(_row_uuid, cells)| cells.get("owner") == Some(&Value::Uuid(owner.test_uuid())))
         .map(|(row_uuid, cells)| (*row_uuid, cells.clone()))
         .collect()
 }
@@ -536,7 +536,7 @@ fn open_node(
 fn cells(title: impl Into<String>, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.into())),
-        ("owner".to_owned(), Value::Uuid(owner.0)),
+        ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
     ])
 }
 

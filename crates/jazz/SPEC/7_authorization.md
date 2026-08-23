@@ -76,6 +76,31 @@ operand is the authenticated `AuthorSubject`, not a caller-supplied parameter
 it (`INV-RLS-4`), and `AuthorSubject::SYSTEM` bypasses both read and write checks
 (`INV-RLS-2`).
 
+#### Authenticated subjects and provenance
+
+Jazz does not define an application user. The authenticated identity and the
+author recorded in `$createdBy` / `$updatedBy` are instead one opaque,
+issuer-scoped subject. External JWT authentication retains the exact validated
+`iss` and `sub`; self-signed Jazz identities use a reserved Jazz issuer and
+their key-derived subject. The portable `AuthorSubject` is the canonical JSON
+encoding of the two-string array `[iss,sub]`, with no whitespace or
+normalization. The same `sub` from two issuers therefore denotes two authors.
+
+That canonical string is the logical value in transactions, provenance, policy
+claims, storage, and sync. Implementations may intern it in memory, but the
+intern handle is process-local and has no observable meaning. Provenance
+supports equality, inequality, grouping, and equality-index lookup. It is not
+orderable: applications sort authors by joining the subject through their own
+identity/user rows and ordering an application field such as display name.
+
+The Jazz-owned issuers `urn:jazz:system`, `urn:jazz:local-first`,
+`urn:jazz:static-bearer`, and `urn:jazz:anonymous` are reserved. External JWTs
+must carry a non-empty issuer and cannot claim any reserved issuer. Internal
+admission paths select the latter three only for their named authentication
+modes. The distinguished system subject bypasses policy for
+internal authority work; it is not a JWT identity and cannot be forged by
+supplying claims (`INV-RLS-23`).
+
 Policy evaluation is **fail-closed**: it denies whenever it cannot determine that
 a policy predicate is satisfied (`INV-RLS-14`). With the interpreter removed,
 this is enforced during policy compilation and claim binding: unsupported

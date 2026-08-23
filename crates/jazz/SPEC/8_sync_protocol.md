@@ -76,16 +76,12 @@ replace row encoding. The same split applies at the binding ABI (ch. 13):
 commands, acks, and event metadata are postcard envelopes, while row-shaped
 payloads are descriptor/raw `Record` bytes at the hot boundary.
 
-**Decision, 2026-08-04 — wire v4 is a breaking cut.** Structured query output
-changes the semantic/postcard layout. Rust and TypeScript protocol constants
-MUST move together from v3 to v4, and Rust, WASM, N-API, and TypeScript fixtures
-MUST be refreshed together. The current wire advertises exactly v3 in Rust
-(`crates/jazz/src/wire.rs:24-25`, `:83-92`) and TypeScript
-(`packages/jazz-tools/src/runtime/native-runtime/websocket.ts:40-47`); no older
-negotiated version or version-specific compatibility shim exists. v4 therefore
-MUST NOT negotiate v3 or retain a compatibility decoder. At the cut,
-`RelationSnapshot` and `RelationEdge` are deleted rather than carried as a
-parallel result representation.
+**Decision, 2026-08-23 — wire v12 is a breaking authorship cut.** Transaction,
+row-version, session, and claim authors use the exact canonical `[iss,sub]` JSON
+string. Wire v11 UUID/hash/subject-only author encodings are rejected, not
+decoded or migrated. Every endpoint advertises exactly v12 and negotiation with
+v11 fails with `UnsupportedProtocolVersion`; the `jazz-wire-message-frames-v12`
+golden fixture set is the only supported message layout.
 
 Inside Rust, `Db` and `PeerConnection` keep the semantic `Transport` surface over
 `SyncMessage`. Binding/server byte transports use `WireFrame` and are bridged at

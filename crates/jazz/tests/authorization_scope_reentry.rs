@@ -23,15 +23,15 @@ const TEAMS: &str = "teams";
 const MEMBERSHIPS: &str = "team_memberships";
 const DOCUMENTS: &str = "documents";
 fn writer() -> AuthorSubject {
-    AuthorSubject::authenticated("urn:jazz:test", "writer")
+    AuthorSubject::authenticated("urn:jazz:test", "writer").unwrap()
 }
 
 fn reader() -> AuthorSubject {
-    AuthorSubject::authenticated("urn:jazz:test", "reader")
+    AuthorSubject::authenticated("urn:jazz:test", "reader").unwrap()
 }
 
 fn maintainer() -> AuthorSubject {
-    AuthorSubject::authenticated("urn:jazz:test", "maintainer")
+    AuthorSubject::authenticated("urn:jazz:test", "maintainer").unwrap()
 }
 
 fn row(seed: u8) -> RowUuid {
