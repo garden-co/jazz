@@ -103,6 +103,14 @@ where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
     Box::pin(async move {
+        if let SyncMessage::CommitUnit { versions, .. } = &message
+            && matches!(peer.role(), PeerRole::ClientLink { .. })
+        {
+            node.lock()
+                .await
+                .require_staged_large_values_for_versions(versions)
+                .await?;
+        }
         match message {
             SyncMessage::CommitUnit { tx, versions } if local_receiver => {
                 let tx_id = tx.tx_id;
@@ -294,11 +302,68 @@ pub(super) struct UpstreamConnectionState {
     pub(super) sent_session_claim_revisions: BTreeMap<AuthorId, u64>,
     pub(super) outbox: Outbox,
     pub(super) uploaded: BTreeSet<TxId>,
+    pub(super) large_value_uploads: BTreeMap<TxId, VecDeque<PendingLargeValueUpload>>,
+    pub(super) awaiting_large_value_uploads: BTreeMap<crate::protocol::ChunkUploadId, TxId>,
+    pub(super) failed_large_value_uploads: BTreeSet<TxId>,
     pub(super) pending_row_version_repairs: VecDeque<PendingRowVersionRepair>,
     pub(super) scope_view_cuts: BTreeMap<SubscriptionKey, crate::time::GlobalTime>,
     pub(super) scope_receipts: BTreeMap<SubscriptionKey, AuthorizationScopeReceipt>,
     pub(super) expected_scope_authority: Option<AuthorityContext>,
     pub(super) scope_lease_manager: AuthorizationScopeLeaseManager,
+}
+
+pub(super) struct PendingLargeValueUpload {
+    upload_id: crate::protocol::ChunkUploadId,
+    value_ref: groove::large_values::LargeValueRef,
+    cursor: groove::large_values::LargeValueUploadCursor,
+    buffered: Option<Vec<groove::large_values::StagedChunk>>,
+    finished: bool,
+}
+
+fn collect_large_value_refs(value: &Value, refs: &mut Vec<groove::large_values::LargeValueRef>) {
+    match value {
+        Value::Large(value_ref) => {
+            if !refs.contains(value_ref) {
+                refs.push(value_ref.clone());
+            }
+        }
+        Value::Tuple(values) | Value::Array(values) => {
+            for value in values {
+                collect_large_value_refs(value, refs);
+            }
+        }
+        Value::Nullable(Some(value)) => collect_large_value_refs(value, refs),
+        Value::Record(record) => {
+            if let Ok(values) = record.to_values() {
+                for value in values {
+                    collect_large_value_refs(&value, refs);
+                }
+            }
+        }
+        Value::Enum(value) => {
+            if let Ok(values) = value.record().to_values() {
+                for value in values {
+                    collect_large_value_refs(&value, refs);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn commit_unit_large_value_refs(unit: &SyncMessage) -> Vec<groove::large_values::LargeValueRef> {
+    let SyncMessage::CommitUnit { versions, .. } = unit else {
+        return Vec::new();
+    };
+    let mut refs = Vec::new();
+    for version in versions {
+        for position in 0..version.application_cell_count() {
+            if let Some(value) = version.cell_at(position) {
+                collect_large_value_refs(&value, &mut refs);
+            }
+        }
+    }
+    refs
 }
 
 pub(super) struct SubscriberConnectionState {
@@ -745,6 +810,9 @@ where
                 sent_session_claim_revisions,
                 outbox,
                 uploaded,
+                large_value_uploads,
+                awaiting_large_value_uploads,
+                failed_large_value_uploads,
                 pending_row_version_repairs,
                 scope_view_cuts,
                 scope_receipts,
@@ -958,6 +1026,13 @@ where
                             .filter(|tx_id| !uploaded.contains(tx_id))
                             .collect();
                         for tx_id in to_upload {
+                            if failed_large_value_uploads.contains(&tx_id)
+                                || awaiting_large_value_uploads
+                                    .values()
+                                    .any(|pending_tx| *pending_tx == tx_id)
+                            {
+                                continue;
+                            }
                             let staged = outbox
                                 .borrow()
                                 .iter()
@@ -968,6 +1043,77 @@ where
                             } else {
                                 self.node.lock().await.commit_unit_for(tx_id).await?
                             };
+                            if let std::collections::btree_map::Entry::Vacant(entry) =
+                                large_value_uploads.entry(tx_id)
+                            {
+                                let refs = commit_unit_large_value_refs(&unit);
+                                let mut uploads = VecDeque::new();
+                                let node = self.node.lock().await;
+                                for value_ref in refs {
+                                    uploads.push_back(PendingLargeValueUpload {
+                                        upload_id: crate::protocol::ChunkUploadId(
+                                            *uuid::Uuid::new_v4().as_bytes(),
+                                        ),
+                                        cursor: node.large_value_upload_cursor(&value_ref)?,
+                                        value_ref,
+                                        buffered: None,
+                                        finished: false,
+                                    });
+                                }
+                                entry.insert(uploads);
+                            }
+                            let uploads = large_value_uploads
+                                .get_mut(&tx_id)
+                                .expect("initialized above");
+                            while let Some(upload) = uploads.front_mut() {
+                                if upload.buffered.is_none() && !upload.finished {
+                                    let batch = upload
+                                        .cursor
+                                        .next_batch(1)
+                                        .await
+                                        .map_err(crate::node::Error::from)?;
+                                    if batch.is_empty() {
+                                        upload.finished = true;
+                                    } else {
+                                        upload.buffered = Some(batch);
+                                    }
+                                }
+                                let message = if let Some(chunks) = upload.buffered.clone() {
+                                    SyncMessage::ChunkUploadBatch(
+                                        crate::protocol::ChunkUploadBatch {
+                                            upload_id: upload.upload_id,
+                                            chunks,
+                                        },
+                                    )
+                                } else {
+                                    SyncMessage::ChunkUploadFinish(
+                                        crate::protocol::ChunkUploadFinish {
+                                            upload_id: upload.upload_id,
+                                            value_ref: upload.value_ref.clone(),
+                                        },
+                                    )
+                                };
+                                if let Err(error) = self.transport.send(message) {
+                                    if handle_transport_backpressure(
+                                        &self.node,
+                                        &self.scheduler,
+                                        &error,
+                                    ) {
+                                        return Ok(true);
+                                    }
+                                    return Err(transport_error(error));
+                                }
+                                if upload.buffered.take().is_none() {
+                                    awaiting_large_value_uploads.insert(upload.upload_id, tx_id);
+                                    uploads.pop_front();
+                                }
+                            }
+                            if awaiting_large_value_uploads
+                                .values()
+                                .any(|pending_tx| *pending_tx == tx_id)
+                            {
+                                continue;
+                            }
                             if let Err(error) = send_with_local_sync_context(
                                 &self.node,
                                 self.transport.as_mut(),
@@ -978,6 +1124,7 @@ where
                                 }
                                 return Err(error);
                             }
+                            large_value_uploads.remove(&tx_id);
                             uploaded.insert(tx_id);
                         }
                         Ok::<bool, Error>(false)
@@ -1016,6 +1163,49 @@ where
                             }
                             SyncMessage::ChunkRequestBatch(_) => {
                                 drop_peer_request(&self.node);
+                                continue;
+                            }
+                            SyncMessage::ChunkUploadResult(result) => {
+                                match result.status {
+                                    crate::protocol::ChunkUploadStatus::BatchAccepted => {}
+                                    crate::protocol::ChunkUploadStatus::Staged => {
+                                        awaiting_large_value_uploads.remove(&result.upload_id);
+                                    }
+                                    crate::protocol::ChunkUploadStatus::RateLimited
+                                    | crate::protocol::ChunkUploadStatus::Rejected => {
+                                        if let Some(tx_id) =
+                                            awaiting_large_value_uploads.remove(&result.upload_id)
+                                        {
+                                            failed_large_value_uploads.insert(tx_id);
+                                            large_value_uploads.remove(&tx_id);
+                                            outbox
+                                                .borrow_mut()
+                                                .retain(|pending| pending.tx_id != tx_id);
+                                            let reason = match result.status {
+                                                crate::protocol::ChunkUploadStatus::RateLimited => {
+                                                    "large-value upload rate limited; upload again"
+                                                }
+                                                _ => {
+                                                    "large-value upload was not staged; upload again"
+                                                }
+                                            };
+                                            self.staged_inbound.push_front(StagedInboundMessage {
+                                                message: SyncMessage::FateUpdate {
+                                                    tx_id,
+                                                    fate: Fate::Rejected(
+                                                        RejectionReason::MalformedCommit(
+                                                            reason.to_owned(),
+                                                        ),
+                                                    ),
+                                                    global_time: None,
+                                                    durability: None,
+                                                },
+                                                authority_receipt_eligible: false,
+                                            });
+                                        }
+                                    }
+                                }
+                                schedule_tick_in(&self.scheduler, TickUrgency::Immediate);
                                 continue;
                             }
                             SyncMessage::CatalogueSnapshot(snapshot) => {

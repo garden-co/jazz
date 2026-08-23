@@ -5,12 +5,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::rc::Weak;
 use std::task::{Poll, Waker};
 
 use bytes::Bytes;
 use thiserror::Error;
 
 use crate::large_values::{ContentHash, StagedChunk, object_hash};
+use crate::storage::{LayoutStorage, OrderedKvStorage, OwnedWriteOperation};
 
 /// Opaque retrieval identity paired with the hash Groove must verify.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -22,6 +24,101 @@ pub struct ChunkRequest {
 /// Executor-local future returned by a chunk capability.
 pub type ChunkFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
+/// Policy-blind async immutable byte-KV implemented by host storage adapters.
+/// Groove, not the backend, validates object hashes and orchestrates staging.
+pub trait ChunkKvStorage {
+    fn get_exact(
+        &self,
+        locator: Vec<u8>,
+    ) -> ChunkFuture<'_, Result<Option<(ContentHash, Bytes)>, ChunkStorageError>>;
+
+    /// Install one immutable mapping or return the mapping already present.
+    fn put_if_absent(
+        &self,
+        locator: Vec<u8>,
+        hash: ContentHash,
+        bytes: Bytes,
+    ) -> ChunkFuture<'_, Result<Option<(ContentHash, Bytes)>, ChunkStorageError>>;
+
+    fn delete_exact(
+        &self,
+        locator: Vec<u8>,
+        expected_hash: ContentHash,
+    ) -> ChunkFuture<'_, Result<(), ChunkStorageError>>;
+}
+
+/// Groove-owned integrity and staging layer over a policy-blind byte KV.
+pub struct ManagedChunkStorage {
+    backend: Rc<dyn ChunkKvStorage>,
+}
+
+impl ManagedChunkStorage {
+    pub fn new(backend: Rc<dyn ChunkKvStorage>) -> Self {
+        Self { backend }
+    }
+}
+
+impl ChunkStorage for ManagedChunkStorage {
+    fn get(
+        &self,
+        locator: Vec<u8>,
+        expected_hash: ContentHash,
+    ) -> ChunkFuture<'_, Result<Bytes, ChunkStorageError>> {
+        Box::pin(async move {
+            let Some((hash, bytes)) = self.backend.get_exact(locator).await? else {
+                return Err(ChunkStorageError::Unavailable);
+            };
+            if hash != expected_hash || object_hash(&bytes) != expected_hash {
+                return Err(ChunkStorageError::Integrity);
+            }
+            Ok(bytes)
+        })
+    }
+
+    fn stage(
+        &self,
+        chunks: Vec<StagedChunk>,
+    ) -> ChunkFuture<'_, Result<crate::large_values::StagedLargeValueAccounting, ChunkStorageError>>
+    {
+        Box::pin(async move {
+            let mut accounting = crate::large_values::StagedLargeValueAccounting::default();
+            for chunk in chunks {
+                if object_hash(&chunk.encoded) != chunk.node_ref.object_hash {
+                    return Err(ChunkStorageError::Integrity);
+                }
+                let encoded_len = chunk.encoded.len() as u64;
+                let existing = self
+                    .backend
+                    .put_if_absent(
+                        chunk.node_ref.locator.0,
+                        chunk.node_ref.object_hash,
+                        Bytes::from(chunk.encoded),
+                    )
+                    .await?;
+                if let Some((hash, ref bytes)) = existing
+                    && (hash != chunk.node_ref.object_hash
+                        || object_hash(bytes) != chunk.node_ref.object_hash)
+                {
+                    return Err(ChunkStorageError::LocatorConflict);
+                }
+                if existing.is_none() {
+                    accounting.encoded_bytes = accounting.encoded_bytes.saturating_add(encoded_len);
+                    accounting.node_count = accounting.node_count.saturating_add(1);
+                }
+            }
+            Ok(accounting)
+        })
+    }
+
+    fn delete(
+        &self,
+        locator: Vec<u8>,
+        expected_hash: ContentHash,
+    ) -> ChunkFuture<'_, Result<(), ChunkStorageError>> {
+        self.backend.delete_exact(locator, expected_hash)
+    }
+}
+
 /// Policy-blind immutable byte storage owned and orchestrated by Groove.
 pub trait ChunkStorage {
     fn get(
@@ -31,7 +128,10 @@ pub trait ChunkStorage {
     ) -> ChunkFuture<'_, Result<Bytes, ChunkStorageError>>;
 
     /// Atomically install immutable mappings. Equal restaging is idempotent.
-    fn stage(&self, chunks: Vec<StagedChunk>) -> ChunkFuture<'_, Result<(), ChunkStorageError>>;
+    fn stage(
+        &self,
+        chunks: Vec<StagedChunk>,
+    ) -> ChunkFuture<'_, Result<crate::large_values::StagedLargeValueAccounting, ChunkStorageError>>;
 
     /// Delete one exact immutable mapping after Groove has durably proven it
     /// orphaned. A mismatched hash must not delete a reused locator.
@@ -120,7 +220,11 @@ where
         (**self).get(locator, expected_hash)
     }
 
-    fn stage(&self, chunks: Vec<StagedChunk>) -> ChunkFuture<'_, Result<(), ChunkStorageError>> {
+    fn stage(
+        &self,
+        chunks: Vec<StagedChunk>,
+    ) -> ChunkFuture<'_, Result<crate::large_values::StagedLargeValueAccounting, ChunkStorageError>>
+    {
         (**self).stage(chunks)
     }
 
@@ -183,7 +287,11 @@ impl ChunkStorage for MemoryChunkStorage {
         })
     }
 
-    fn stage(&self, chunks: Vec<StagedChunk>) -> ChunkFuture<'_, Result<(), ChunkStorageError>> {
+    fn stage(
+        &self,
+        chunks: Vec<StagedChunk>,
+    ) -> ChunkFuture<'_, Result<crate::large_values::StagedLargeValueAccounting, ChunkStorageError>>
+    {
         Box::pin(async move {
             let existing = self.chunks.borrow();
             for chunk in &chunks {
@@ -202,12 +310,19 @@ impl ChunkStorage for MemoryChunkStorage {
             }
             drop(existing);
             let mut stored = self.chunks.borrow_mut();
+            let mut accounting = crate::large_values::StagedLargeValueAccounting::default();
             for chunk in chunks {
-                stored
-                    .entry(chunk.node_ref.locator.0)
-                    .or_insert((chunk.node_ref.object_hash, Bytes::from(chunk.encoded)));
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    stored.entry(chunk.node_ref.locator.0)
+                {
+                    accounting.encoded_bytes = accounting
+                        .encoded_bytes
+                        .saturating_add(chunk.encoded.len() as u64);
+                    accounting.node_count = accounting.node_count.saturating_add(1);
+                    entry.insert((chunk.node_ref.object_hash, Bytes::from(chunk.encoded)));
+                }
             }
-            Ok(())
+            Ok(accounting)
         })
     }
 
@@ -226,6 +341,156 @@ impl ChunkStorage for MemoryChunkStorage {
                 Some(_) => Err(ChunkStorageError::Integrity),
                 None => Ok(()),
             }
+        })
+    }
+}
+
+impl ChunkKvStorage for MemoryChunkStorage {
+    fn get_exact(
+        &self,
+        locator: Vec<u8>,
+    ) -> ChunkFuture<'_, Result<Option<(ContentHash, Bytes)>, ChunkStorageError>> {
+        Box::pin(async move { Ok(self.chunks.borrow().get(&locator).cloned()) })
+    }
+
+    fn put_if_absent(
+        &self,
+        locator: Vec<u8>,
+        hash: ContentHash,
+        bytes: Bytes,
+    ) -> ChunkFuture<'_, Result<Option<(ContentHash, Bytes)>, ChunkStorageError>> {
+        Box::pin(async move {
+            let mut chunks = self.chunks.borrow_mut();
+            if let Some(existing) = chunks.get(&locator) {
+                return Ok(Some(existing.clone()));
+            }
+            chunks.insert(locator, (hash, bytes));
+            Ok(None)
+        })
+    }
+
+    fn delete_exact(
+        &self,
+        locator: Vec<u8>,
+        expected_hash: ContentHash,
+    ) -> ChunkFuture<'_, Result<(), ChunkStorageError>> {
+        <Self as ChunkStorage>::delete(self, locator, expected_hash)
+    }
+}
+
+/// Groove's default durable byte plane, colocated with its ordered metadata
+/// store. The weak handle avoids extending the database storage lifecycle;
+/// all chunk operations fail safely once the owning database is closed.
+pub(crate) struct OrderedChunkStorage {
+    storage: Weak<LayoutStorage>,
+}
+
+impl OrderedChunkStorage {
+    pub(crate) fn new(storage: Weak<LayoutStorage>) -> Self {
+        Self { storage }
+    }
+
+    fn key(locator: &[u8]) -> Vec<u8> {
+        let mut key = b"chunk/".to_vec();
+        key.extend_from_slice(locator);
+        key
+    }
+
+    fn encode(hash: ContentHash, bytes: &[u8]) -> Vec<u8> {
+        let mut value = Vec::with_capacity(32 + bytes.len());
+        value.extend_from_slice(&hash.0);
+        value.extend_from_slice(bytes);
+        value
+    }
+
+    fn decode(value: Vec<u8>) -> Result<(ContentHash, Bytes), ChunkStorageError> {
+        let (hash, bytes) = value
+            .split_at_checked(32)
+            .ok_or(ChunkStorageError::Integrity)?;
+        let mut expected = [0_u8; 32];
+        expected.copy_from_slice(hash);
+        Ok((ContentHash(expected), Bytes::copy_from_slice(bytes)))
+    }
+
+    fn storage(&self) -> Result<Rc<LayoutStorage>, ChunkStorageError> {
+        self.storage
+            .upgrade()
+            .ok_or_else(|| ChunkStorageError::Backend("owning Groove storage is closed".to_owned()))
+    }
+}
+
+impl ChunkKvStorage for OrderedChunkStorage {
+    fn get_exact(
+        &self,
+        locator: Vec<u8>,
+    ) -> ChunkFuture<'_, Result<Option<(ContentHash, Bytes)>, ChunkStorageError>> {
+        Box::pin(async move {
+            let storage = self.storage()?;
+            let Some(value) = storage
+                .get(
+                    crate::db::LARGE_VALUE_METADATA_CF.to_owned(),
+                    Self::key(&locator),
+                )
+                .await
+                .map_err(|error| ChunkStorageError::Backend(error.to_string()))?
+            else {
+                return Ok(None);
+            };
+            Self::decode(value).map(Some)
+        })
+    }
+
+    fn put_if_absent(
+        &self,
+        locator: Vec<u8>,
+        hash: ContentHash,
+        bytes: Bytes,
+    ) -> ChunkFuture<'_, Result<Option<(ContentHash, Bytes)>, ChunkStorageError>> {
+        Box::pin(async move {
+            let storage = self.storage()?;
+            let key = Self::key(&locator);
+            if let Some(existing) = storage
+                .get(crate::db::LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
+                .await
+                .map_err(|error| ChunkStorageError::Backend(error.to_string()))?
+            {
+                return Self::decode(existing).map(Some);
+            }
+            storage
+                .write_many(vec![OwnedWriteOperation::Set {
+                    cf: crate::db::LARGE_VALUE_METADATA_CF.to_owned(),
+                    key,
+                    value: Self::encode(hash, &bytes),
+                }])
+                .await
+                .map_err(|error| ChunkStorageError::Backend(error.to_string()))?;
+            Ok(None)
+        })
+    }
+
+    fn delete_exact(
+        &self,
+        locator: Vec<u8>,
+        expected_hash: ContentHash,
+    ) -> ChunkFuture<'_, Result<(), ChunkStorageError>> {
+        Box::pin(async move {
+            let storage = self.storage()?;
+            let key = Self::key(&locator);
+            let Some(existing) = storage
+                .get(crate::db::LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
+                .await
+                .map_err(|error| ChunkStorageError::Backend(error.to_string()))?
+            else {
+                return Ok(());
+            };
+            let (hash, bytes) = Self::decode(existing)?;
+            if hash != expected_hash || object_hash(&bytes) != expected_hash {
+                return Err(ChunkStorageError::Integrity);
+            }
+            storage
+                .delete(crate::db::LARGE_VALUE_METADATA_CF.to_owned(), key)
+                .await
+                .map_err(|error| ChunkStorageError::Backend(error.to_string()))
         })
     }
 }
@@ -723,5 +988,38 @@ mod tests {
         drop(live);
         assert_eq!(chunks.cache_stats().active_leases, 0);
         assert_eq!(chunks.cache_stats().leased_bytes, 0);
+    }
+
+    #[test]
+    fn managed_storage_keeps_integrity_out_of_the_byte_kv_backend() {
+        let backend = Rc::new(MemoryChunkStorage::new());
+        let managed = ManagedChunkStorage::new(backend.clone());
+        let bytes = Bytes::from_static(b"managed immutable bytes");
+        let hash = object_hash(&bytes);
+        let locator = b"opaque-locator".to_vec();
+        let installed = block_on(managed.stage(vec![StagedChunk {
+            node_ref: crate::large_values::NodeRef {
+                object_hash: hash,
+                locator: crate::large_values::Locator(locator.clone()),
+            },
+            encoded: bytes.to_vec(),
+        }]))
+        .unwrap();
+        let restaged = block_on(managed.stage(vec![StagedChunk {
+            node_ref: crate::large_values::NodeRef {
+                object_hash: hash,
+                locator: crate::large_values::Locator(locator.clone()),
+            },
+            encoded: bytes.to_vec(),
+        }]))
+        .unwrap();
+
+        assert!(installed.encoded_bytes > 0);
+        assert_eq!(restaged, Default::default());
+        assert_eq!(block_on(managed.get(locator.clone(), hash)).unwrap(), bytes);
+        assert_eq!(
+            block_on(managed.get(locator, ContentHash([7; 32]))),
+            Err(ChunkStorageError::Integrity)
+        );
     }
 }

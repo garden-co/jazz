@@ -3,8 +3,6 @@ fn ordinary_oversized_scalar_write_is_staged_indirect_and_reads_logically_inline
     let schema = two_column_schema();
     let node_uuid = node(0x71);
     let (temp_dir, mut node) = open_node_with_schema(node_uuid, schema.clone());
-    let backend = std::rc::Rc::new(groove::chunks::MemoryChunkStorage::new());
-    node.set_chunk_storage(backend.clone());
     let body = "large logical body/".repeat(20_000);
     node.commit_mergeable_settled(
         MergeableCommit::new("todos", row(0x71), 10).cells(BTreeMap::from([
@@ -24,15 +22,12 @@ fn ordinary_oversized_scalar_write_is_staged_indirect_and_reads_logically_inline
         current[0].cell(node.table("todos").unwrap(), "body"),
         Some(Value::String(body.clone()))
     );
-    assert!(!backend.is_empty());
-
     node.database.close().unwrap();
     drop(node);
     let cfs = schema.column_families();
     let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
     let storage = RocksDbStorage::open(temp_dir.path(), &refs).unwrap();
     let mut reopened = NodeState::new(node_uuid, schema, storage).unwrap();
-    reopened.set_chunk_storage(backend);
     assert_eq!(
         reopened.current_rows("todos", DurabilityTier::Local).unwrap()[0]
             .cell(reopened.table("todos").unwrap(), "body"),
@@ -56,7 +51,13 @@ fn failed_large_scalar_staging_publishes_no_row() {
         fn stage(
             &self,
             _chunks: Vec<groove::large_values::StagedChunk>,
-        ) -> groove::chunks::ChunkFuture<'_, Result<(), groove::chunks::ChunkStorageError>> {
+        ) -> groove::chunks::ChunkFuture<
+            '_,
+            Result<
+                groove::large_values::StagedLargeValueAccounting,
+                groove::chunks::ChunkStorageError,
+            >,
+        > {
             Box::pin(async { Err(groove::chunks::ChunkStorageError::Backend("planted".to_owned())) })
         }
     }
@@ -83,6 +84,146 @@ fn failed_large_scalar_staging_publishes_no_row() {
         .current_rows("todos", DurabilityTier::Local)
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn jazz_incoming_data_rate_limit_evicts_the_rejected_root_and_publishes_no_row() {
+    let schema = two_column_schema();
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x7a), schema);
+    node.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: 1,
+        window_ms: 60_000,
+        max_age_ms: None,
+    });
+    let result = node.commit_mergeable_settled(
+        MergeableCommit::new("todos", row(0x7a), 10).cells(BTreeMap::from([
+            ("title".to_owned(), Value::String("title".to_owned())),
+            ("body".to_owned(), Value::String("x".repeat(70_000))),
+        ])),
+    );
+
+    assert!(matches!(result, Err(Error::LargeValueIngressRateLimited)));
+    assert!(node
+        .current_rows("todos", DurabilityTier::Local)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn expired_staged_tree_requires_reupload_before_row_publication() {
+    let schema = two_column_schema();
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x7b), schema);
+    node.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: u64::MAX,
+        window_ms: 1_000,
+        max_age_ms: Some(1),
+    });
+    let logical = "expired staged body/".repeat(8_000);
+    let prepared = groove::large_values::prepare(
+        groove::large_values::LargeValueKind::String,
+        logical.as_bytes(),
+        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
+    )
+    .unwrap();
+    let commit = crate::db::block_on(node.attach_prepared_large_cell(
+        MergeableCommit::new("todos", row(0x7b), 10).cells(BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("title".to_owned()),
+        )])),
+        "body",
+        &prepared,
+    ))
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(3));
+
+    assert!(matches!(
+        node.commit_mergeable_settled(commit),
+        Err(Error::LargeValueStageExpired)
+    ));
+    assert!(node
+        .current_rows("todos", DurabilityTier::Local)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn pushed_chunks_must_be_staged_before_the_referencing_authority_commit() {
+    let schema = two_column_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0x7c), schema.clone());
+    let (_receiver_dir, mut receiver) = open_node_with_schema(node(0x7d), schema.clone());
+    let (_missing_dir, mut missing) = open_node_with_schema(node(0x7e), schema);
+    let prepared = groove::large_values::prepare(
+        groove::large_values::LargeValueKind::String,
+        "pushed body/".repeat(8_000).as_bytes(),
+        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
+    )
+    .unwrap();
+    let commit = crate::db::block_on(writer.attach_prepared_large_cell(
+        MergeableCommit::new("todos", row(0x7c), 10).cells(BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("title".to_owned()),
+        )])),
+        "body",
+        &prepared,
+    ))
+    .unwrap();
+    let (_, unit) = writer.commit_mergeable_unit_settled(commit).unwrap();
+    let context = Some(CommitUnitIngestContext {
+        identity: AuthorId::SYSTEM,
+        trust: CommitUnitTrust::Session,
+        edge_authority: false,
+    });
+    assert!(matches!(
+        missing
+            .apply_sync_message_with_ingest_context(unit.clone(), context)
+            .resolve(),
+        Err(Error::LargeValueStageExpired)
+    ));
+
+    let upload_id = crate::protocol::ChunkUploadId([0x7c; 16]);
+    let batch_result = receiver
+        .apply_sync_message_with_ingest_context(
+            SyncMessage::ChunkUploadBatch(crate::protocol::ChunkUploadBatch {
+                upload_id,
+                chunks: prepared.staged_chunks.clone(),
+            }),
+            context,
+        )
+        .resolve()
+        .unwrap()
+        .value;
+    assert_eq!(
+        batch_result,
+        vec![SyncMessage::ChunkUploadResult(
+            crate::protocol::ChunkUploadResult {
+                upload_id,
+                status: crate::protocol::ChunkUploadStatus::BatchAccepted,
+            }
+        )]
+    );
+    let finish_result = receiver
+        .apply_sync_message_with_ingest_context(
+            SyncMessage::ChunkUploadFinish(crate::protocol::ChunkUploadFinish {
+                upload_id,
+                value_ref: prepared.value_ref,
+            }),
+            context,
+        )
+        .resolve()
+        .unwrap()
+        .value;
+    assert!(matches!(
+        finish_result.as_slice(),
+        [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+            status: crate::protocol::ChunkUploadStatus::Staged,
+            ..
+        })]
+    ));
+    let outcome = receiver
+        .apply_sync_message_with_ingest_context(unit, context)
+        .resolve()
+        .unwrap();
+    settle_outcome(&mut receiver, outcome).unwrap();
 }
 
 #[test]

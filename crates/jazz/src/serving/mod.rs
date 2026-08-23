@@ -168,6 +168,7 @@ pub struct InMemoryServerShell {
     db: ShellDb,
     role: NodeRole,
     sessions: Vec<Option<ServerSessionState>>,
+    upstream_connections: Vec<ShellPeerConnection>,
     resume_cursors: BTreeMap<u64, (AuthorId, ResumeCursor)>,
     next_resume_token: u64,
     runtime_schema_state: RuntimeSchemaState,
@@ -240,6 +241,8 @@ enum ShellDb {
 struct ServerSessionState {
     connection: ShellPeerConnection,
     transport: SharedWireTransport,
+    auxiliary_pump: crate::db::PeerIoPump,
+    negotiated_features: crate::wire::WireFeatures,
     identity: AuthorId,
     epoch: u64,
     resume_status: ServerResumeStatus,
@@ -250,8 +253,14 @@ enum ShellPeerConnection {
     Durable(Rc<LocalMutex<PeerConnection<BoxedStorage>>>),
 }
 
+impl fmt::Debug for ShellPeerConnection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ShellPeerConnection(..)")
+    }
+}
+
 #[derive(Clone, Debug, Default)]
-struct SharedWireTransport {
+pub(super) struct SharedWireTransport {
     queues: Rc<RefCell<WireQueues>>,
 }
 
@@ -259,6 +268,13 @@ struct SharedWireTransport {
 struct WireQueues {
     inbound: VecDeque<Vec<u8>>,
     outbound: VecDeque<Vec<u8>>,
+}
+
+pub(super) struct ServerUpstreamIo {
+    pub(super) transport: SharedWireTransport,
+    pub(super) pump: crate::db::PeerIoPump,
+    pub(super) protocol_version: u16,
+    pub(super) features: crate::wire::WireFeatures,
 }
 
 impl WireTransport for SharedWireTransport {
@@ -561,10 +577,10 @@ impl ShellDb {
         }
     }
 
-    fn tick_stats(&self) -> ShellResult<crate::db::DbTickStats> {
+    async fn tick_stats_async(&self) -> ShellResult<crate::db::DbTickStats> {
         match self {
-            Self::Memory(db) => crate::db::block_on(db.tick_stats()).map_err(Into::into),
-            Self::Durable(db) => crate::db::block_on(db.tick_stats()).map_err(Into::into),
+            Self::Memory(db) => db.tick_stats().await.map_err(Into::into),
+            Self::Durable(db) => db.tick_stats().await.map_err(Into::into),
         }
     }
 
@@ -589,6 +605,13 @@ impl ShellDb {
 }
 
 impl ShellPeerConnection {
+    fn io_pump(&self) -> crate::db::PeerIoPump {
+        match self {
+            Self::Memory(connection) => crate::db::block_on(connection.lock()).io_pump(),
+            Self::Durable(connection) => crate::db::block_on(connection.lock()).io_pump(),
+        }
+    }
+
     fn take_resume_cursor(&self) -> Option<ResumeCursor> {
         match self {
             Self::Memory(connection) => crate::db::block_on(connection.lock()).take_resume_cursor(),
@@ -666,6 +689,7 @@ impl InMemoryServerShell {
             db,
             role,
             sessions: Vec::new(),
+            upstream_connections: Vec::new(),
             resume_cursors: BTreeMap::new(),
             next_resume_token: 1,
             runtime_schema_state: RuntimeSchemaState::default(),
@@ -709,6 +733,7 @@ impl InMemoryServerShell {
             db,
             role: NodeRole::Edge,
             sessions: Vec::new(),
+            upstream_connections: Vec::new(),
             resume_cursors: BTreeMap::new(),
             next_resume_token: 1,
             runtime_schema_state: RuntimeSchemaState::default(),
@@ -744,6 +769,7 @@ impl InMemoryServerShell {
             db,
             role: NodeRole::Edge,
             sessions: Vec::new(),
+            upstream_connections: Vec::new(),
             resume_cursors: BTreeMap::new(),
             next_resume_token: 1,
             runtime_schema_state: RuntimeSchemaState::default(),
@@ -1082,9 +1108,12 @@ impl InMemoryServerShell {
             )
         };
         let session_id = self.sessions.len();
+        let auxiliary_pump = connection.io_pump();
         self.sessions.push(Some(ServerSessionState {
             connection,
             transport,
+            auxiliary_pump,
+            negotiated_features,
             identity,
             epoch: 1,
             resume_status: ServerResumeStatus::Fresh,
@@ -1098,9 +1127,35 @@ impl InMemoryServerShell {
 
     /// Attach this edge shell to an upstream core transport.
     pub fn connect_upstream(&mut self, transport: Box<dyn Transport>) -> ShellResult<()> {
-        let _connection = self.db.connect_upstream(transport);
+        let connection = self.db.connect_upstream(transport);
+        self.upstream_connections.push(connection);
         self.tick()?;
         Ok(())
+    }
+
+    pub(super) fn connect_upstream_wire_io(
+        &mut self,
+        protocol_version: u16,
+        features: crate::wire::WireFeatures,
+        session_context: Option<ConnectionSessionContext>,
+    ) -> ServerUpstreamIo {
+        let transport = SharedWireTransport::default();
+        let adapter = Box::new(WireTransportAdapter::new_with_session_context(
+            transport.clone(),
+            protocol_version,
+            features,
+            None,
+            session_context,
+        ));
+        let connection = self.db.connect_upstream(adapter);
+        let pump = connection.io_pump();
+        self.upstream_connections.push(connection);
+        ServerUpstreamIo {
+            transport,
+            pump,
+            protocol_version,
+            features,
+        }
     }
 
     /// Disconnect a subscriber session while preserving an in-process cursor.
@@ -1159,9 +1214,12 @@ impl InMemoryServerShell {
             Some(cursor),
         );
         let session_id = self.sessions.len();
+        let auxiliary_pump = connection.io_pump();
         self.sessions.push(Some(ServerSessionState {
             connection,
             transport,
+            auxiliary_pump,
+            negotiated_features: crate::wire::current_wire_features(),
             identity: resume.identity,
             epoch: resume.resume_token.saturating_add(1),
             resume_status: ServerResumeStatus::Resumed,
@@ -1249,19 +1307,54 @@ impl InMemoryServerShell {
         for frame in frames {
             self.metrics.frames_received += 1;
             self.metrics.bytes_received += frame.len() as u64;
-            self.session_state(session)?
-                .transport
-                .queues
-                .borrow_mut()
-                .inbound
-                .push_back(frame);
+            let state = self.session_state(session)?;
+            let canonical = crate::db::block_on(
+                state
+                    .auxiliary_pump
+                    .route_incoming_wire_frame(frame, state.negotiated_features),
+            )
+            .map_err(ShellError::Transport)?;
+            if let Some(frame) = canonical {
+                state.transport.queues.borrow_mut().inbound.push_back(frame);
+            }
+        }
+        Ok(())
+    }
+
+    /// Async owner-thread variant used by native runtimes. It yields while
+    /// Groove checks local chunk storage, allowing other local executor tasks
+    /// (notably the upstream chunk pump) to make progress.
+    pub async fn receive_frames_async(
+        &mut self,
+        session: ServerSession,
+        frames: impl IntoIterator<Item = AbiBytes>,
+    ) -> ShellResult<()> {
+        for frame in frames {
+            self.metrics.frames_received += 1;
+            self.metrics.bytes_received += frame.len() as u64;
+            let state = self.session_state(session)?;
+            let canonical = state
+                .auxiliary_pump
+                .route_incoming_wire_frame(frame, state.negotiated_features)
+                .await
+                .map_err(ShellError::Transport)?;
+            if let Some(frame) = canonical {
+                state.transport.queues.borrow_mut().inbound.push_back(frame);
+            }
         }
         Ok(())
     }
 
     /// Service the shell database's accepted subscriber connections once.
     pub fn tick(&mut self) -> ShellResult<()> {
-        let stats = self.db.tick_stats()?;
+        crate::db::block_on(self.tick_async())
+    }
+
+    /// Poll database evaluation without blocking the owner thread's local
+    /// executor. Auxiliary peer I/O can therefore satisfy suspended Groove
+    /// chunk reads before this future resumes.
+    pub async fn tick_async(&mut self) -> ShellResult<()> {
+        let stats = self.db.tick_stats_async().await?;
         self.metrics.ticks += 1;
         let stats = ShellTickStats {
             inbound: 0,
@@ -1279,9 +1372,25 @@ impl InMemoryServerShell {
 
     /// Drain encoded wire frames ready to send to the host for a session.
     pub fn take_frames(&mut self, session: ServerSession) -> ShellResult<Vec<AbiBytes>> {
-        let mut queues = self.session_state(session)?.transport.queues.borrow_mut();
-        let frames = queues.outbound.drain(..).collect::<Vec<_>>();
-        drop(queues);
+        let state = self.session_state(session)?;
+        let mut frames = state
+            .transport
+            .queues
+            .borrow_mut()
+            .outbound
+            .drain(..)
+            .collect::<Vec<_>>();
+        while let Some(frame) = state
+            .auxiliary_pump
+            .take_outbound_wire_frame(
+                crate::wire::WIRE_PROTOCOL_VERSION,
+                state.negotiated_features,
+                None,
+            )
+            .map_err(ShellError::Transport)?
+        {
+            frames.push(frame);
+        }
         self.metrics.frames_sent += frames.len() as u64;
         self.metrics.bytes_sent += frames.iter().map(Vec::len).sum::<usize>() as u64;
         Ok(frames)

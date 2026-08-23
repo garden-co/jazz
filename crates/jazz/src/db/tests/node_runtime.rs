@@ -2,6 +2,79 @@
 
 use super::*;
 
+#[test]
+fn large_write_pushes_staging_before_syncing_its_referencing_row() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xc1; 16]);
+    let core = open_core(0xc0, AuthorId::SYSTEM, &schema);
+    let writer = open_db(0xc1, author, &schema);
+    let (writer_transport, core_transport) = duplex();
+    let _upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
+    let _subscriber = core.accept_subscriber(core_transport, author);
+    let title = "push-before-row/".repeat(8_000);
+    writer
+        .insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String(title.clone())),
+                ("done".to_owned(), Value::Bool(false)),
+                ("owner".to_owned(), Value::Uuid(author.0)),
+            ]),
+        )
+        .unwrap();
+
+    for _ in 0..16 {
+        writer.tick().unwrap();
+        core.tick().unwrap();
+        if !core.read(&core.table("todos")).unwrap().is_empty() {
+            break;
+        }
+    }
+    let rows = core.read(&core.table("todos")).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].cell_at(0), Some(Value::String(title)));
+}
+
+#[test]
+fn rate_limited_push_rejects_locally_without_sending_the_referencing_row() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xc2; 16]);
+    let core = open_core(0xc3, AuthorId::SYSTEM, &schema);
+    core.node()
+        .borrow_mut()
+        .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
+            incoming_bytes_per_window: 1,
+            window_ms: 60_000,
+            max_age_ms: None,
+        });
+    let writer = open_db(0xc2, author, &schema);
+    let (writer_transport, core_transport) = duplex();
+    let _upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
+    let _subscriber = core.accept_subscriber(core_transport, author);
+    let write = writer
+        .insert(
+            "todos",
+            BTreeMap::from([
+                (
+                    "title".to_owned(),
+                    Value::String("rate-limited/".repeat(8_000)),
+                ),
+                ("done".to_owned(), Value::Bool(false)),
+                ("owner".to_owned(), Value::Uuid(author.0)),
+            ]),
+        )
+        .unwrap();
+    for _ in 0..6 {
+        writer.tick().unwrap();
+        core.tick().unwrap();
+    }
+
+    let error = crate::db::block_on(write.wait(DurabilityTier::Global)).unwrap_err();
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+    assert!(error.message.contains("large-value upload rate limited"));
+    assert!(core.read(&core.table("todos")).unwrap().is_empty());
+}
+
 /// A Core immediately refreshes a peer-edge subscriber that was visited before
 /// a later client upload in the same service pass, so Bob receives Alice's
 /// later canonical row without needing an unrelated next websocket frame.

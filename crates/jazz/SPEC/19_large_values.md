@@ -35,16 +35,16 @@ Invariant digest:
 
 The ownership split is:
 
-| Groove owns                               | Jazz owns                          |
-| ----------------------------------------- | ---------------------------------- |
-| inline/indirect encoding and locators     | high-level access/write APIs       |
-| chunk storage and backend composition     | row/version authorization          |
-| staging persistence and mechanics         | locator disclosure after auth      |
-| immutable format, integrity and traversal | owner-row publication semantics    |
-| edit tails and consolidation              | canonical row/version sync         |
-| byte/text/JSON interpretation             | view lifecycle and settlement      |
-| cache, leases and evaluator suspension    | policy-sensitive public errors     |
-| durable refcounts and reclamation         | staging quotas/accept/evict policy |
+| Groove owns                               | Jazz owns                         |
+| ----------------------------------------- | --------------------------------- |
+| inline/indirect encoding and locators     | high-level access/write APIs      |
+| chunk storage and backend composition     | row/version authorization         |
+| staging persistence and mechanics         | locator disclosure after auth     |
+| immutable format, integrity and traversal | owner-row publication semantics   |
+| edit tails and consolidation              | canonical row/version sync        |
+| byte/text/JSON interpretation             | view lifecycle and settlement     |
+| cache, leases and evaluator suspension    | policy-sensitive public errors    |
+| durable refcounts and reclamation         | ingress rate/expiry/accept policy |
 
 Jazz's existing row/view authorization controls locator discovery: an authorized
 descriptor reveals its root and authenticated Groove nodes reveal descendants.
@@ -124,7 +124,8 @@ logical format.
 ## 19.4 Upload, staging, and publication
 
 Groove prepares a logical write, allocates locators, and stores immutable chunks
-in its own unreachable staging generation. Jazz owns quota, expiry, acceptance,
+in its own unreachable staging generation. Jazz owns ingress rate limiting,
+expiry, acceptance,
 and eviction policy through Groove's staging API. Staging does not require or
 imply permission to mutate a Jazz row.
 
@@ -152,6 +153,25 @@ the descriptor match, consumes staging ownership and installs durable root
 references. Jazz rejection calls Groove's idempotent staging eviction API.
 Acceptance is never a separate transaction before or after row publication.
 
+Sync is intentionally asymmetric. Upload is push-before-row: the writer sends
+bounded `ChunkUploadBatch` messages, finalizes the upload into a persisted
+Groove staging receipt, waits for `Staged`, and only then sends the ordinary
+referencing `CommitUnit`. The receiving authority requires a live matching
+receipt and consumes it in the same Groove physical-record batch as the row.
+Download remains locator-driven pull with `ChunkRequestBatch` and
+`ChunkResponseBatch`; download bytes are not upload ingress and do not consume
+the upload rate limit. Edges terminate or forward push uploads before forwarding
+the referencing row, just as missing pull requests may be relayed independently.
+
+Groove persists each opaque staging receipt's creation time and incoming
+byte/node accounting. Jazz charges every upload against a simple incoming-byte
+rate limit, including an idempotent upload whose immutable mappings already
+exist. This bounds ingress work rather than retained physical storage. Jazz
+queries opaque receipts to evict expired roots and never enumerates locators or
+chunks. Expiry is checked again when accepting the referencing row and may also
+be driven periodically by a host scheduler. If the receipt is missing or too
+old, the row write fails safely and the client must upload the value again.
+
 Node/leaf uploads are immutable. Reusing a locator with different bytes is a
 hard integrity failure. The backend may deduplicate equal bytes internally.
 
@@ -177,9 +197,9 @@ get(locator)
 delete(locator, expected_hash)
 ```
 
-Groove owns locator allocation, integrity verification, quotas, staging,
-refcounts and deletion scheduling. Jazz owns the policy decision that grants
-descriptor roots and public error shaping. The storage implementation receives
+Groove owns locator allocation, integrity verification, staging, refcounts and
+deletion scheduling. Jazz owns ingress/expiry policy, the decision that grants
+descriptor roots, and public error shaping. The storage implementation receives
 no Jazz policy context and may privately deduplicate by content hash.
 
 Crash-consistent metadata—child edges, durable counts, staging generations and
@@ -266,11 +286,14 @@ the chunk response that the pump must deliver.
 
 Bindings retain the pump beside their socket. Browser/WASM websocket callbacks
 route inbound frames and use a microtask awakened by outbound readiness to drain
-frames. NAPI uses the same readiness future through an async-safe notification
-to the Node event loop; a Rust-owned native socket may instead drive it from a
-Tokio task. No environment must create a Rust thread, busy-poll, or re-enter a
-locked `PeerConnection`. Disconnect completes outstanding hop-local requests
-safely and discards late responses.
+frames. NAPI polls database work without blocking the JavaScript thread and
+routes auxiliary frames independently. A native server keeps Groove and its
+non-`Send` storage capabilities on the dedicated shell thread; that thread runs
+a local async executor whose wire-demultiplexer task continues while a semantic
+tick is suspended. The Tokio socket remains a byte carrier and wakes that local
+task when it stages inbound data. No environment busy-polls, moves Groove's
+backend across threads, or re-enters a locked `PeerConnection`. Disconnect
+completes outstanding hop-local requests safely and discards late responses.
 
 ## 19.7 History, retention, and collection
 

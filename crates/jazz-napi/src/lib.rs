@@ -35,8 +35,10 @@ use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::future::Future;
 use std::rc::Rc;
 use std::sync::Mutex;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use base64::Engine;
@@ -191,6 +193,9 @@ pub struct Write {
 pub struct Transport {
     inner: NapiTransportInner,
     queues: WireQueues,
+    auxiliary_pump: jazz::db::PeerIoPump,
+    protocol_version: u16,
+    features: u64,
 }
 
 #[napi(js_name = "Subscription")]
@@ -388,6 +393,30 @@ enum NapiTransportInner {
     Closed,
 }
 
+impl NapiTransportInner {
+    fn auxiliary_pump(&self) -> jazz::db::PeerIoPump {
+        match self {
+            Self::Memory { connection, .. } => core_block_on(async {
+                connection
+                    .as_ref()
+                    .expect("new transport has a connection")
+                    .lock()
+                    .await
+                    .io_pump()
+            }),
+            Self::Persistent { connection, .. } => core_block_on(async {
+                connection
+                    .as_ref()
+                    .expect("new transport has a connection")
+                    .lock()
+                    .await
+                    .io_pump()
+            }),
+            Self::Closed => panic!("closed transport has no auxiliary pump"),
+        }
+    }
+}
+
 enum NapiSubscription {
     Memory(SubscriptionStream),
     Persistent(SubscriptionStream),
@@ -521,6 +550,37 @@ impl Write {
 
 #[napi]
 impl Transport {
+    #[napi(js_name = "routeAuxiliaryWireFrame")]
+    pub fn route_auxiliary_wire_frame(
+        &self,
+        frame: Uint8Array,
+    ) -> napi::Result<Option<Uint8Array>> {
+        core_block_on(
+            self.auxiliary_pump
+                .route_incoming_wire_frame(frame.to_vec(), self.features),
+        )
+        .map(|frame| frame.map(Uint8Array::new))
+        .map_err(napi::Error::from_reason)
+    }
+
+    #[napi(js_name = "recvAuxiliaryWireFrames")]
+    pub fn recv_auxiliary_wire_frames(&self) -> napi::Result<Vec<Uint8Array>> {
+        let mut frames = Vec::new();
+        while let Some(frame) = self
+            .auxiliary_pump
+            .take_outbound_wire_frame(self.protocol_version, self.features, None)
+            .map_err(napi::Error::from_reason)?
+        {
+            frames.push(Uint8Array::new(frame));
+        }
+        Ok(frames)
+    }
+
+    #[napi(js_name = "auxiliaryOutboundReady")]
+    pub fn auxiliary_outbound_ready(&self) -> bool {
+        self.auxiliary_pump.outbound_is_ready()
+    }
+
     #[napi(js_name = "sendWireFrame")]
     pub fn send_wire_frame(&self, frame: Uint8Array) {
         self.queues.inbound.borrow_mut().push_back(frame.to_vec());
@@ -555,6 +615,7 @@ impl Transport {
 
     #[napi]
     pub fn close(&mut self) -> bool {
+        self.auxiliary_pump.disconnect();
         match std::mem::replace(&mut self.inner, NapiTransportInner::Closed) {
             NapiTransportInner::Memory { db, connection } => {
                 let Some(connection) = connection else {
@@ -2269,11 +2330,13 @@ impl NapiDb {
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        match db {
-            NapiDbInnerStorage::Memory(db) => core_block_on(db.tick()),
-            NapiDbInnerStorage::Persistent(db) => core_block_on(db.tick()),
-        }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))
+        let completed = match db {
+            NapiDbInnerStorage::Memory(db) => core_poll_once(db.tick()),
+            NapiDbInnerStorage::Persistent(db) => core_poll_once(db.tick()),
+        };
+        completed
+            .unwrap_or(Ok(()))
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     #[napi(js_name = "setNonDurableClient")]
@@ -2319,7 +2382,16 @@ impl NapiDb {
                 connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
             },
         };
-        Ok(Transport { inner, queues })
+        let auxiliary_pump = inner.auxiliary_pump();
+        Ok(Transport {
+            inner,
+            queues,
+            auxiliary_pump,
+            protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
+            features: jazz::wire::current_wire_features()
+                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
+        })
     }
 
     #[napi(js_name = "connectUpstreamWithSession")]
@@ -2378,7 +2450,14 @@ impl NapiDb {
                 connection: Some(jazz::db::block_on(db.connect_upstream(transport))),
             },
         };
-        Ok(Transport { inner, queues })
+        let auxiliary_pump = inner.auxiliary_pump();
+        Ok(Transport {
+            inner,
+            queues,
+            auxiliary_pump,
+            protocol_version,
+            features: features as u64,
+        })
     }
 
     #[napi(js_name = "mergeableTx")]
@@ -2691,9 +2770,22 @@ where
     let Some(connection) = connection else {
         return Ok(0);
     };
-    let stats = core_block_on(async { connection.lock().await.tick().await })
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+    let mut connection = core_block_on(connection.lock());
+    let Some(stats) = core_poll_once(connection.tick()) else {
+        return Ok(0);
+    };
+    let stats = stats.map_err(|error| napi::Error::from_reason(error.to_string()))?;
     Ok(stats.subscription_events as u32)
+}
+
+fn core_poll_once<F: Future>(future: F) -> Option<F::Output> {
+    let mut future = Box::pin(future);
+    let waker = futures::task::noop_waker();
+    let mut context = Context::from_waker(&waker);
+    match future.as_mut().poll(&mut context) {
+        Poll::Ready(output) => Some(output),
+        Poll::Pending => None,
+    }
 }
 
 fn core_write_state_to_json(state: &jazz::db::WriteState) -> serde_json::Value {

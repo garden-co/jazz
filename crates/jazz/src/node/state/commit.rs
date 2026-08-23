@@ -256,6 +256,11 @@ where
         contribution_merge: Option<ContributionMergeProvenance>,
     ) -> Result<PublishedTransaction, Error> {
         self.prepare_and_stage_large_commit_values(&mut commits).await?;
+        let staged_ids = commits
+            .iter()
+            .flat_map(|(_, commit)| commit.staged_large_values.iter().copied())
+            .collect::<BTreeSet<_>>();
+        self.ensure_large_value_stages_current(&staged_ids).await?;
         let tx_id = TxId::new(made_at, self.node_uuid);
         let made_by = commits[0].1.made_by;
         let permission_subject = commits[0].1.effective_permission_subject();
@@ -501,6 +506,7 @@ where
                     .database
                     .prepare_and_stage_large_value(kind, &bytes)
                     .await?;
+                self.enforce_large_value_staging_policy(&staged).await?;
                 *value = Value::Large(staged.value_ref);
                 commit.staged_large_values.push(staged.id);
             }

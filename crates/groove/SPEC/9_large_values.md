@@ -74,6 +74,13 @@ plane may be implemented by a small policy-blind async KV interface with exact
 random locators and performs integrity checks. Implementations may be memory,
 filesystem, OPFS, RocksDB, or a remote blob adapter.
 
+The reference implementation names this backend seam `ChunkKvStorage` and
+wraps it in Groove's `ManagedChunkStorage`. The wrapper, rather than each
+backend, authenticates bytes and enforces immutable locator semantics. The
+default persistent adapter stores byte mappings in Groove's reserved ordered
+storage family, so RocksDB, OPFS/IDB and memory inherit their normal reopen and
+durability lifecycle without Jazz retaining a backend handle.
+
 Child edges, durable refcounts, staging generations and reclamation work require
 atomic metadata updates with physical row mutations. The default composition
 stores that metadata in Groove's transactional ordered storage and uses the
@@ -358,12 +365,21 @@ persisted inbound reference to each child; additional root/parent references to
 an already-active immutable node do not duplicate its child edges. The inverse
 zero transition recursively removes those contributions and queues the node for
 bounded, restartable reclamation. Idempotently restaging identical content is
-edge-neutral. Locator mappings independently retain any deduplicated physical
-blob.
+edge-neutral and installs zero new physical bytes/nodes. Its staging receipt
+still reports the full incoming upload size so Jazz can rate-limit ingress work
+independently of physical deduplication. Locator mappings independently retain
+any deduplicated physical blob.
 
 Prepared chunks not yet present in a physical record use a separate persisted,
 expiring staging generation. Active reads use temporary leases. Neither is a
 durable record reference.
+
+Remote uploads append bounded node batches directly to that staging generation;
+Jazz does not buffer a whole tree. Finalization attaches the descriptor and
+produces the opaque receipt consumed by the later row batch. Partial and
+finalized upload generations carry persisted creation/accounting metadata so a
+restartable expiry worker can reclaim abandoned uploads without consulting Jazz
+row history.
 
 The initial metadata layout reserves Groove's `__groove_large_values` logical
 storage family. Staging returns an opaque persisted `StagedLargeValueId` plus an

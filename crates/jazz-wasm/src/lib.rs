@@ -297,6 +297,9 @@ impl Clone for WasmDbInner {
 pub struct WasmTransport {
     inner: WasmTransportInner,
     queues: WasmWireQueues,
+    auxiliary_pump: jazz::db::PeerIoPump,
+    protocol_version: u16,
+    features: u64,
     subscriber_identity: Option<AuthorId>,
 }
 
@@ -329,6 +332,28 @@ impl Clone for WasmTransportInner {
 }
 
 impl WasmTransportInner {
+    fn auxiliary_pump(&self) -> jazz::db::PeerIoPump {
+        match self {
+            Self::Memory { connection, .. } => jazz::db::block_on(async {
+                connection
+                    .as_ref()
+                    .expect("new transport has a connection")
+                    .lock()
+                    .await
+                    .io_pump()
+            }),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser { connection, .. } => jazz::db::block_on(async {
+                connection
+                    .as_ref()
+                    .expect("new transport has a connection")
+                    .lock()
+                    .await
+                    .io_pump()
+            }),
+        }
+    }
+
     async fn tick(self) -> Result<u32, JsValue> {
         match self {
             Self::Memory { connection, .. } => tick_connection(&connection).await,
@@ -2542,9 +2567,15 @@ impl WasmDb {
             },
             WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         };
+        let auxiliary_pump = inner.auxiliary_pump();
         Ok(WasmTransport {
             inner,
             queues,
+            auxiliary_pump,
+            protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
+            features: jazz::wire::current_wire_features()
+                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
             subscriber_identity: None,
         })
     }
@@ -2604,9 +2635,13 @@ impl WasmDb {
                 },
                 WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
             };
+            let auxiliary_pump = inner.auxiliary_pump();
             Ok(WasmTransport {
                 inner,
                 queues,
+                auxiliary_pump,
+                protocol_version,
+                features: features as u64,
                 subscriber_identity: None,
             }
             .into())
@@ -2650,9 +2685,15 @@ impl WasmDb {
             },
             WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         };
+        let auxiliary_pump = inner.auxiliary_pump();
         Ok(WasmTransport {
             inner,
             queues,
+            auxiliary_pump,
+            protocol_version: jazz::wire::WIRE_PROTOCOL_VERSION,
+            features: jazz::wire::current_wire_features()
+                & !(jazz::wire::FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
+                    | jazz::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS),
             subscriber_identity: Some(identity),
         })
     }
@@ -2750,6 +2791,48 @@ impl WasmTransport {
         }))
     }
 
+    /// Route one socket frame through the chunk lane before semantic delivery.
+    /// Returns the original frame when it belongs to the ordinary Jazz lane.
+    #[wasm_bindgen(js_name = routeAuxiliaryWireFrame)]
+    pub fn route_auxiliary_wire_frame(&self, frame: Vec<u8>) -> js_sys::Promise {
+        let pump = self.auxiliary_pump.clone();
+        let features = self.features;
+        future_to_promise(async move {
+            match pump
+                .route_incoming_wire_frame(frame, features)
+                .await
+                .map_err(|error| JsValue::from_str(&error))?
+            {
+                Some(frame) => Ok(js_sys::Uint8Array::from(frame.as_slice()).into()),
+                None => Ok(JsValue::UNDEFINED),
+            }
+        })
+    }
+
+    /// Drain complete auxiliary wire frames independently of semantic ticks.
+    #[wasm_bindgen(js_name = recvAuxiliaryWireFrames)]
+    pub fn recv_auxiliary_wire_frames(&self) -> Result<js_sys::Array, JsValue> {
+        let frames = js_sys::Array::new();
+        while let Some(frame) = self
+            .auxiliary_pump
+            .take_outbound_wire_frame(self.protocol_version, self.features, None)
+            .map_err(|error| JsValue::from_str(&error))?
+        {
+            frames.push(&js_sys::Uint8Array::from(frame.as_slice()).into());
+        }
+        Ok(frames)
+    }
+
+    /// Resolve when the independently driven chunk lane has socket output.
+    #[wasm_bindgen(js_name = auxiliaryOutboundReady)]
+    pub fn auxiliary_outbound_ready(&self) -> js_sys::Promise {
+        let pump = self.auxiliary_pump.clone();
+        future_to_promise(async move {
+            pump.outbound_ready().await;
+            Ok(JsValue::UNDEFINED)
+        })
+    }
+
     #[wasm_bindgen(js_name = sendWireFrame)]
     pub fn send_wire_frame(&self, frame: Vec<u8>) {
         self.queues.inbound.borrow_mut().push_back(frame);
@@ -2794,6 +2877,7 @@ impl WasmTransport {
 
     #[wasm_bindgen(js_name = close)]
     pub fn close(&mut self) -> bool {
+        self.auxiliary_pump.disconnect();
         self.inner.close()
     }
 }

@@ -364,6 +364,9 @@ export type Transport = {
   sendWireFrames?(frames: readonly Uint8Array[]): void;
   setOutboundScheduler?(callback: () => void): void;
   clearOutboundScheduler?(): void;
+  routeAuxiliaryWireFrame?(frame: Uint8Array): unknown | Promise<unknown>;
+  recvAuxiliaryWireFrames?(): unknown[];
+  auxiliaryOutboundReady?(): boolean | Promise<void>;
   tick(): number | Promise<number>;
   updateAuthenticatedClaims?(claims: Record<string, unknown>): void | Promise<void>;
   free?(): void;
@@ -515,6 +518,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverEndpointUrl: string | null = null;
   private readonly queuedServerFrames: Uint8Array[] = [];
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
+  private serverInboundRouting: Promise<void> = Promise.resolve();
+  private serverInboundProcessed = false;
   private readonly peerTransportWorkListeners = new Set<() => void>();
   private peerTransportActivityEpoch = 0;
   private coreTickScheduled = false;
@@ -1429,6 +1434,17 @@ export class NativeRuntimeAdapter implements Runtime {
         this.pendingInboundServerFrames.push(frame);
         this.notifyServerTransportWork();
         this.scheduleServerPump();
+        // A normal idle connection lets the debounced pump coalesce frames.
+        // If the pump is already suspended in a core tick waiting for a chunk,
+        // route the frame independently so the response can wake that tick.
+        if (this.serverPumpRunning) {
+          queueMicrotask(() => {
+            if (!this.serverPumpRunning || this.pendingInboundServerFrames.length === 0) return;
+            void this.routePendingInboundServerFrames().catch((error) =>
+              this.handleServerTransportError(error, generation),
+            );
+          });
+        }
       },
       onError: (error) => {
         this.handleServerTransportError(error, generation);
@@ -1449,6 +1465,7 @@ export class NativeRuntimeAdapter implements Runtime {
         throw contextualError("connecting the negotiated upstream transport", error);
       }
       this.serverTransport = transport;
+      void this.watchAuxiliaryOutbound(transport, carrier, generation);
       this.flushQueuedServerFrames(carrier);
       await this.pumpServerTransport();
       this.pumpSubscriptions();
@@ -2404,15 +2421,26 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     this.serverPumpRunning = true;
     try {
-      let processedInbound = this.drainPendingInboundServerFrames(transport);
+      let processedInbound =
+        this.pendingInboundServerFrames.length > 0
+          ? await this.routePendingInboundServerFrames()
+          : false;
+      processedInbound ||= this.serverInboundProcessed;
+      this.serverInboundProcessed = false;
       for (let round = 0; round < 32; round += 1) {
         await this.runCoreTick();
-        if (processedInbound) {
+        this.flushAuxiliaryOutbound(transport, carrier, generation);
+        if (processedInbound || this.serverInboundProcessed) {
           // Frame arrival wakes waiters promptly, but the observable write or
           // coverage state changes only after the evaluator consumes it.
           // Publish that second edge so waiters re-read settled state.
           processedInbound = false;
+          this.serverInboundProcessed = false;
           this.notifyServerTransportWork();
+          // A frame can be routed by the auxiliary path while the waiter is
+          // still consuming the arrival edge. Publish once more after those
+          // promise continuations have had a chance to re-arm.
+          queueMicrotask(() => this.notifyServerTransportWork());
         }
         if (
           this.closed ||
@@ -2441,15 +2469,66 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
-  private drainPendingInboundServerFrames(transport: Transport): boolean {
-    if (this.pendingInboundServerFrames.length === 0) return false;
-    const frames = this.pendingInboundServerFrames.splice(0);
-    if (transport.sendWireFrames) {
-      transport.sendWireFrames(frames);
-      return true;
+  private async routePendingInboundServerFrames(): Promise<boolean> {
+    let processedInbound = false;
+    const operation = this.serverInboundRouting.then(async () => {
+      const transport = this.serverTransport;
+      if (!transport || this.pendingInboundServerFrames.length === 0) return;
+      const frames = this.pendingInboundServerFrames.splice(0);
+      processedInbound = true;
+      this.serverInboundProcessed = true;
+      const canonical: Uint8Array[] = [];
+      for (const frame of frames) {
+        const routed = transport.routeAuxiliaryWireFrame
+          ? await transport.routeAuxiliaryWireFrame(frame)
+          : frame;
+        if (routed != null) canonical.push(normalizeTransportFrame(routed));
+      }
+      if (canonical.length > 0) {
+        if (transport.sendWireFrames) transport.sendWireFrames(canonical);
+        else for (const frame of canonical) transport.sendWireFrame(frame);
+      }
+      const carrier = this.serverCarrier;
+      if (carrier) {
+        this.flushAuxiliaryOutbound(transport, carrier, this.serverConnectionGeneration);
+      }
+    });
+    this.serverInboundRouting = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    await operation;
+    return processedInbound;
+  }
+
+  private flushAuxiliaryOutbound(
+    transport: Transport,
+    carrier: WebSocketCarrier,
+    generation: number,
+  ): void {
+    const receive = transport.recvAuxiliaryWireFrames;
+    if (!receive) return;
+    const frames = normalizeTransportFrames(receive.call(transport));
+    if (frames.length > 0) this.sendServerFrames(frames, carrier, generation);
+  }
+
+  private async watchAuxiliaryOutbound(
+    transport: Transport,
+    carrier: WebSocketCarrier,
+    generation: number,
+  ): Promise<void> {
+    while (
+      !this.closed &&
+      transport === this.serverTransport &&
+      carrier === this.serverCarrier &&
+      generation === this.serverConnectionGeneration
+    ) {
+      const readiness = transport.auxiliaryOutboundReady?.();
+      if (!readiness || typeof readiness === "boolean") return;
+      await readiness;
+      if (transport !== this.serverTransport || carrier !== this.serverCarrier) return;
+      this.flushAuxiliaryOutbound(transport, carrier, generation);
     }
-    for (const frame of frames) transport.sendWireFrame(frame);
-    return true;
   }
 
   private sendServerFrames(
@@ -2624,6 +2703,12 @@ function normalizeTransportFrames(frames: unknown[]): Uint8Array[] {
     (frame): frame is Uint8Array =>
       ArrayBuffer.isView(frame) && frame.constructor.name === "Uint8Array",
   );
+}
+
+function normalizeTransportFrame(frame: unknown): Uint8Array {
+  const normalized = normalizeTransportFrames([frame])[0];
+  if (!normalized) throw new Error("native transport returned a non-byte wire frame");
+  return normalized;
 }
 
 function recordWrite(write: Write, writes: Map<string, Write>): BatchId {

@@ -253,6 +253,13 @@ pub enum SyncMessage {
         /// Final authority result for the zero-support action.
         advice: PermissionAdvice,
     },
+    /// One bounded push-upload batch. Unlike chunk download traffic, uploads
+    /// enter Groove staging and therefore travel through semantic ingestion.
+    ChunkUploadBatch(ChunkUploadBatch),
+    /// Finish a push upload and create its persisted Groove staging receipt.
+    ChunkUploadFinish(ChunkUploadFinish),
+    /// Receiver acknowledgement for a pushed upload.
+    ChunkUploadResult(ChunkUploadResult),
 }
 
 /// Bounded batch of exact immutable-chunk requests on one peer link.
@@ -303,6 +310,53 @@ pub enum ChunkResponse {
         /// Minimum suggested retry delay.
         retry_after_ms: u32,
     },
+}
+
+/// Sender-chosen identity for one hop-local push upload.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
+)]
+pub struct ChunkUploadId(pub [u8; 16]);
+
+/// A bounded collection of immutable Groove nodes pushed before its row.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ChunkUploadBatch {
+    /// Sender-chosen hop-local upload identity.
+    pub upload_id: ChunkUploadId,
+    /// Immutable authenticated nodes in this bounded frame.
+    pub chunks: Vec<groove::large_values::StagedChunk>,
+}
+
+/// Complete one upload after all of its bounded batches were acknowledged.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ChunkUploadFinish {
+    /// Upload whose acknowledged batches are now complete.
+    pub upload_id: ChunkUploadId,
+    /// Descriptor the subsequent row version will contain.
+    pub value_ref: groove::large_values::LargeValueRef,
+}
+
+/// Hop-local upload outcome. A rejected upload must be retried from its first
+/// batch; no referencing row may be sent before `Staged`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ChunkUploadResult {
+    /// Upload being acknowledged.
+    pub upload_id: ChunkUploadId,
+    /// Current receiver outcome.
+    pub status: ChunkUploadStatus,
+}
+
+/// Receiver outcome for one push-upload step.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum ChunkUploadStatus {
+    /// This bounded batch was durably installed.
+    BatchAccepted,
+    /// Finalization created the persisted staging receipt.
+    Staged,
+    /// Jazz rejected incoming bytes under its deployment policy.
+    RateLimited,
+    /// Finalization did not name a live upload session.
+    Rejected,
 }
 
 /// Opaque identity for one permission-advice exchange.
@@ -460,6 +514,11 @@ impl SyncMessage {
             | Self::AuthorizationScopeDecision { .. } => {
                 crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
             }
+            Self::ChunkRequestBatch(_)
+            | Self::ChunkResponseBatch(_)
+            | Self::ChunkUploadBatch(_)
+            | Self::ChunkUploadFinish(_)
+            | Self::ChunkUploadResult(_) => crate::wire::FEATURE_AUXILIARY_CHUNKS,
             _ => crate::wire::FEATURE_NONE,
         }
     }
@@ -796,6 +855,14 @@ impl VersionRecord {
             .nullable_value()
             .ok()
             .flatten()
+    }
+
+    pub(crate) fn application_cell_count(&self) -> usize {
+        self.record
+            .descriptor()
+            .fields()
+            .len()
+            .saturating_sub(WireRowRecord::USER_CELLS)
     }
 }
 

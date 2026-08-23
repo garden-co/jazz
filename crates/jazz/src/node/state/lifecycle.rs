@@ -312,9 +312,7 @@ where
             catalogue,
             catalogue_bootstrap_state,
             database,
-            chunk_storage,
             chunk_resolver,
-            content_provider,
             history_complete,
             ..
         } = self;
@@ -331,14 +329,11 @@ where
             )
             .await?,
         };
-        reopened.database.set_chunk_storage(chunk_storage.clone());
         reopened
             .database
             .set_missing_chunk_resolver(chunk_resolver.clone());
-        reopened.chunk_storage = chunk_storage;
         reopened.local_chunk_reader = reopened.database.local_chunk_reader();
         reopened.chunk_resolver = chunk_resolver;
-        reopened.content_provider = content_provider;
         reopened.content_runtime_provider = reopened.database.owned_chunk_provider();
         Ok(reopened)
     }
@@ -513,13 +508,8 @@ database.finish_persistence(persisted)?;
             .unwrap_or_else(|| schema.clone());
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| Instant::now());
-        let chunk_storage: Rc<dyn groove::chunks::ChunkStorage> =
-            Rc::new(groove::chunks::MemoryChunkStorage::new());
         let chunk_resolver: Rc<dyn groove::chunks::MissingChunkResolver> =
             Rc::new(groove::chunks::UnavailableChunkResolver);
-        let content_provider =
-            groove::chunks::StorageChunkProvider::new(chunk_storage.clone());
-        database.set_chunk_storage(chunk_storage.clone());
         database.set_missing_chunk_resolver(chunk_resolver.clone());
         let content_runtime_provider = database.owned_chunk_provider();
         let local_chunk_reader = database.local_chunk_reader();
@@ -587,10 +577,10 @@ database.finish_persistence(persisted)?;
             },
             rejections: RejectionTracking::default(),
             database: DatabaseSlot::new(database),
-            chunk_storage,
             local_chunk_reader,
             chunk_resolver,
-            content_provider,
+            large_value_staging_policy: LargeValueStagingPolicy::default(),
+            large_value_ingress: RefCell::new(LargeValueIngressState::default()),
             content_runtime_provider,
             storage_type: std::marker::PhantomData,
             groove_runtime_token: next_groove_runtime_token(),
@@ -774,14 +764,11 @@ database.finish_persistence(persisted)?;
         &mut self,
         storage: Rc<dyn groove::chunks::ChunkStorage>,
     ) {
-        let provider = groove::chunks::StorageChunkProvider::new(storage.clone());
-        self.database.set_chunk_storage(storage.clone());
+        self.database.set_chunk_storage(storage);
         self.database
             .set_missing_chunk_resolver(self.chunk_resolver.clone());
         let runtime_provider = self.database.owned_chunk_provider();
-        self.chunk_storage = storage;
         self.local_chunk_reader = self.database.local_chunk_reader();
-        self.content_provider = provider;
         self.content_runtime_provider = runtime_provider;
     }
 
@@ -812,6 +799,13 @@ database.finish_persistence(persisted)?;
         self.local_chunk_reader.clone()
     }
 
+    pub(crate) fn large_value_upload_cursor(
+        &self,
+        value: &groove::large_values::LargeValueRef,
+    ) -> Result<groove::large_values::LargeValueUploadCursor, Error> {
+        Ok(self.database.large_value_upload_cursor(value)?)
+    }
+
     /// Stage the immutable chunks from a Groove preparation. This does not
     /// publish an owning Jazz row; normal commit authorization and publication
     /// remain a separate boundary.
@@ -819,15 +813,187 @@ database.finish_persistence(persisted)?;
         &self,
         prepared: &groove::large_values::PreparedLargeValue,
     ) -> Result<groove::large_values::StagedLargeValue, Error> {
-        Ok(self
+        let staged = self
             .database
             .stage_large_value_preparation(prepared.clone())
-            .await?)
+            .await?;
+        self.enforce_large_value_staging_policy(&staged).await?;
+        Ok(staged)
     }
 
-    /// Apply Jazz staging policy by evicting an opaque Groove staging root.
-    /// Quota/expiry selection stays in Jazz; all persisted mechanics remain in
-    /// Groove and repeated eviction is harmless.
+    /// Replace Jazz's policy for unpublished Groove staging receipts.
+    pub fn set_large_value_staging_policy(&mut self, policy: LargeValueStagingPolicy) {
+        self.large_value_staging_policy = policy;
+    }
+
+    pub(super) async fn enforce_large_value_staging_policy(
+        &self,
+        newest: &groove::large_values::StagedLargeValue,
+    ) -> Result<(), Error> {
+        if !self.admit_large_value_ingress(newest.accounting.encoded_bytes) {
+            self.database.evict_staged_large_value(newest.id).await?;
+            return Err(Error::LargeValueIngressRateLimited);
+        }
+        let now_ms: u64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        for staged in self.database.staged_large_values().await? {
+            let expired = self.large_value_staging_policy.max_age_ms.is_some_and(|max_age| {
+                now_ms.saturating_sub(staged.created_at_ms) > max_age
+            });
+            if expired && staged.id != newest.id {
+                self.database.evict_staged_large_value(staged.id).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn admit_large_value_ingress(&self, encoded_bytes: u64) -> bool {
+        let now_ms: u64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let mut ingress = self.large_value_ingress.borrow_mut();
+        if ingress.window_started_ms == 0
+            || now_ms.saturating_sub(ingress.window_started_ms)
+                >= self.large_value_staging_policy.window_ms.max(1)
+        {
+            ingress.window_started_ms = now_ms;
+            ingress.admitted_bytes = 0;
+        }
+        let next = ingress.admitted_bytes.saturating_add(encoded_bytes);
+        if next > self.large_value_staging_policy.incoming_bytes_per_window {
+            return false;
+        }
+        ingress.admitted_bytes = next;
+        true
+    }
+
+    pub(super) async fn ensure_large_value_stages_current(
+        &self,
+        ids: &BTreeSet<groove::large_values::StagedLargeValueId>,
+    ) -> Result<(), Error> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let now_ms: u64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let staged = self
+            .database
+            .staged_large_values()
+            .await?
+            .into_iter()
+            .map(|staged| (staged.id, staged))
+            .collect::<BTreeMap<_, _>>();
+        for id in ids {
+            let Some(receipt) = staged.get(id) else {
+                return Err(Error::LargeValueStageExpired);
+            };
+            if self.large_value_staging_policy.max_age_ms.is_some_and(|max_age| {
+                now_ms.saturating_sub(receipt.created_at_ms) > max_age
+            }) {
+                self.database.evict_staged_large_value(*id).await?;
+                return Err(Error::LargeValueStageExpired);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn current_staged_ids_for_descriptors(
+        &self,
+        descriptors: &[groove::large_values::LargeValueRef],
+        require_every_descriptor: bool,
+    ) -> Result<Vec<groove::large_values::StagedLargeValueId>, Error> {
+        if descriptors.is_empty() {
+            return Ok(Vec::new());
+        }
+        let now_ms: u64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let staged = self.database.staged_large_values().await?;
+        let mut ids = Vec::new();
+        for descriptor in descriptors {
+            if let Some(expired) = staged.iter().find(|receipt| {
+                &receipt.value_ref == descriptor
+                    && self.large_value_staging_policy.max_age_ms.is_some_and(|max_age| {
+                        now_ms.saturating_sub(receipt.created_at_ms) > max_age
+                    })
+            }) {
+                self.database.evict_staged_large_value(expired.id).await?;
+            }
+            let receipt = staged.iter().find(|receipt| {
+                &receipt.value_ref == descriptor
+                    && !self.large_value_staging_policy.max_age_ms.is_some_and(|max_age| {
+                        now_ms.saturating_sub(receipt.created_at_ms) > max_age
+                    })
+            });
+            if let Some(receipt) = receipt {
+                ids.push(receipt.id);
+            } else if require_every_descriptor {
+                return Err(Error::LargeValueStageExpired);
+            }
+        }
+        Ok(ids)
+    }
+
+    pub(crate) async fn require_staged_large_values_for_versions(
+        &self,
+        versions: &[VersionRecord],
+    ) -> Result<(), Error> {
+        let descriptors = version_indirect_descriptors(versions);
+        self.current_staged_ids_for_descriptors(&descriptors, true)
+            .await
+            .map(|_| ())
+    }
+
+    /// Evict unpublished Groove staging roots older than the configured Jazz
+    /// policy. Hosts may call this from their ordinary maintenance cadence;
+    /// row acceptance independently performs the same freshness check.
+    pub async fn evict_expired_staged_large_values(&self) -> Result<usize, Error> {
+        let Some(max_age_ms) = self.large_value_staging_policy.max_age_ms else {
+            return Ok(0);
+        };
+        let now_ms: u64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let mut evicted = 0;
+        for staged in self.database.staged_large_values().await? {
+            if now_ms.saturating_sub(staged.created_at_ms) > max_age_ms
+                && self.database.evict_staged_large_value(staged.id).await?
+            {
+                evicted += 1;
+            }
+        }
+        for upload in self.database.pending_large_value_uploads().await? {
+            if now_ms.saturating_sub(upload.created_at_ms) > max_age_ms
+                && self
+                    .database
+                    .evict_pending_large_value_upload(upload.id)
+                    .await?
+            {
+                evicted += 1;
+            }
+        }
+        Ok(evicted)
+    }
+
+    /// Evict an opaque Groove staging root selected by Jazz policy. All
+    /// persisted mechanics remain in Groove and repeated eviction is harmless.
     pub async fn evict_staged_large_value(
         &self,
         id: groove::large_values::StagedLargeValueId,
@@ -854,10 +1020,12 @@ database.finish_persistence(persisted)?;
     where
         R: std::io::Read + Send + 'static,
     {
-        Ok(self
+        let (staged, stats) = self
             .database
             .prepare_and_stage_large_value_streaming(kind, reader)
-            .await?)
+            .await?;
+        self.enforce_large_value_staging_policy(&staged).await?;
+        Ok((staged, stats))
     }
 
     /// Stage one Groove-owned preparation and attach its physical descriptor
@@ -933,7 +1101,6 @@ database.finish_persistence(persisted)?;
             storage,
         )
         .await?;
-        database.set_chunk_storage(self.chunk_storage.clone());
         database.set_missing_chunk_resolver(self.chunk_resolver.clone());
         self.content_runtime_provider = database.owned_chunk_provider();
         self.database.replace(database);

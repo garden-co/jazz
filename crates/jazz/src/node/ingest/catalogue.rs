@@ -66,6 +66,77 @@ where
             .expand_version_carriers_for_receive()
             .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
         match message {
+            SyncMessage::ChunkUploadBatch(batch) => {
+                let accounting = batch.chunks.iter().try_fold(
+                    groove::large_values::StagedLargeValueAccounting::default(),
+                    |mut total, chunk| {
+                        total.encoded_bytes = total
+                            .encoded_bytes
+                            .checked_add(u64::try_from(chunk.encoded.len()).map_err(|_| {
+                                Error::UnsupportedSyncMessage("chunk upload batch is too large")
+                            })?)
+                            .ok_or(Error::UnsupportedSyncMessage(
+                                "chunk upload accounting overflow",
+                            ))?;
+                        total.node_count = total.node_count.checked_add(1).ok_or(
+                            Error::UnsupportedSyncMessage("chunk upload accounting overflow"),
+                        )?;
+                        Ok::<_, Error>(total)
+                    },
+                )?;
+                if !self.admit_large_value_ingress(accounting.encoded_bytes) {
+                    return Ok(PublicationOutcome::settled(vec![
+                        SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                            upload_id: batch.upload_id,
+                            status: crate::protocol::ChunkUploadStatus::RateLimited,
+                        }),
+                    ]));
+                }
+                self.database
+                    .stage_large_value_chunk_batch(
+                        groove::large_values::StagedLargeValueId(batch.upload_id.0),
+                        batch.chunks,
+                    )
+                    .await?;
+                Ok(PublicationOutcome::settled(vec![
+                    SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                        upload_id: batch.upload_id,
+                        status: crate::protocol::ChunkUploadStatus::BatchAccepted,
+                    }),
+                ]))
+            }
+            SyncMessage::ChunkUploadFinish(finish) => {
+                let finalized = self
+                    .database
+                    .finalize_large_value_upload(
+                        groove::large_values::StagedLargeValueId(finish.upload_id.0),
+                        finish.value_ref,
+                    )
+                    .await;
+                match finalized {
+                    Ok(_) => {}
+                    Err(GrooveDbError::InvalidLargeValueMetadata(message))
+                        if message == "pending upload is missing" =>
+                    {
+                        return Ok(PublicationOutcome::settled(vec![
+                            SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                                upload_id: finish.upload_id,
+                                status: crate::protocol::ChunkUploadStatus::Rejected,
+                            }),
+                        ]));
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+                Ok(PublicationOutcome::settled(vec![
+                    SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                        upload_id: finish.upload_id,
+                        status: crate::protocol::ChunkUploadStatus::Staged,
+                    }),
+                ]))
+            }
+            SyncMessage::ChunkUploadResult(_) => Err(Error::UnsupportedSyncMessage(
+                "chunk upload result requires peer link context",
+            )),
             SyncMessage::SessionClaims { identity, claims } => {
                 if let Some(context) = ingest_context
                     && context.trust == CommitUnitTrust::TrustedBackend
@@ -75,6 +146,11 @@ where
                 Ok(PublicationOutcome::settled(Vec::new()))
             }
             SyncMessage::CommitUnit { tx, versions } => {
+                if ingest_context.is_some() {
+                    let descriptors = version_indirect_descriptors(&versions);
+                    self.current_staged_ids_for_descriptors(&descriptors, true)
+                        .await?;
+                }
                 let now_ms = if ingest_context.is_some() {
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)

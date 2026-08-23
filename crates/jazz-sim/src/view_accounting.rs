@@ -31,6 +31,9 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
         SyncMessage::RegisterShape { .. }
         | SyncMessage::ChunkRequestBatch(_)
         | SyncMessage::ChunkResponseBatch(_)
+        | SyncMessage::ChunkUploadBatch(_)
+        | SyncMessage::ChunkUploadFinish(_)
+        | SyncMessage::ChunkUploadResult(_)
         | SyncMessage::Subscribe(_)
         | SyncMessage::PublishSchema { .. }
         | SyncMessage::PublishSchemaWithLens { .. }

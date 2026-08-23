@@ -91,13 +91,13 @@ pub struct LargeValueRef {
     pub edit_tail: Vec<ReplaceEdit>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StagedChunk {
     pub node_ref: NodeRef,
     pub encoded: Vec<u8>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreparedLargeValue {
     pub value_ref: LargeValueRef,
     pub staged_chunks: Vec<StagedChunk>,
@@ -107,7 +107,7 @@ pub struct PreparedLargeValue {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct StagedLargeValueId(pub [u8; 16]);
 
-/// Storage accounting returned to Jazz for quota and eviction policy.
+/// Incoming-upload accounting returned to Jazz for rate and eviction policy.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StagedLargeValueAccounting {
     pub encoded_bytes: u64,
@@ -121,6 +121,19 @@ pub struct StagedLargeValue {
     pub id: StagedLargeValueId,
     pub value_ref: LargeValueRef,
     pub accounting: StagedLargeValueAccounting,
+    /// Persisted mechanical creation time used by host staging policy.
+    pub created_at_ms: u64,
+}
+
+/// Persisted metadata for a push upload that has not yet produced a root
+/// receipt. Chunk identities stay Groove-owned and are used only for safe
+/// expiry/reclamation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingLargeValueUpload {
+    pub id: StagedLargeValueId,
+    pub accounting: StagedLargeValueAccounting,
+    pub created_at_ms: u64,
+    pub chunks: Vec<NodeRef>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1284,6 +1297,94 @@ pub async fn visit_reachable_chunks(
         }
     }
     Ok(visited)
+}
+
+/// Bounded-memory exporter for the push-before-row sync path.
+pub struct LargeValueUploadCursor {
+    kind: LargeValueKind,
+    provider: crate::chunks::OwnedChunkProvider,
+    pending: Vec<(NodeRef, usize, Option<NodeMetrics>, ContentHash)>,
+}
+
+impl LargeValueUploadCursor {
+    pub(crate) fn new(
+        value: &LargeValueRef,
+        provider: crate::chunks::OwnedChunkProvider,
+    ) -> Result<Self, Error> {
+        check_format(value.format_version)?;
+        let root_metrics = value.edit_tail.is_empty().then_some(NodeMetrics {
+            byte_length: value.byte_length,
+            utf16_length: value.utf16_length,
+        });
+        Ok(Self {
+            kind: value.kind,
+            provider,
+            pending: vec![(value.root.clone(), 0, root_metrics, value.logical_hash)],
+        })
+    }
+
+    /// Read and authenticate at most `limit` nodes. An empty result means the
+    /// tree is complete; the cursor retains only the branch frontier.
+    pub async fn next_batch(
+        &mut self,
+        limit: usize,
+    ) -> Result<Vec<StagedChunk>, ReachabilityError> {
+        let mut batch = Vec::new();
+        while batch.len() < limit.max(1) {
+            let Some((node_ref, depth, expected_metrics, expected_logical_hash)) =
+                self.pending.pop()
+            else {
+                break;
+            };
+            if depth > MAX_TREE_DEPTH {
+                return Err(Error::InvalidTree.into());
+            }
+            let request = ChunkRequest {
+                object_hash: node_ref.object_hash.0,
+                locator: node_ref.locator.0.clone(),
+            };
+            let encoded = self.provider.get(request).await?;
+            let node = decode_node(self.kind, node_ref.object_hash, encoded.bytes())?;
+            if node_logical_hash(&node) != expected_logical_hash {
+                return Err(Error::DescriptorMismatch.into());
+            }
+            match &node {
+                ChunkNode::Leaf { bytes, .. } => {
+                    if expected_metrics
+                        .is_some_and(|expected| metrics(self.kind, bytes).ok() != Some(expected))
+                    {
+                        return Err(Error::DescriptorMismatch.into());
+                    }
+                }
+                ChunkNode::Branch { children, .. } => {
+                    if let Some(expected) = expected_metrics {
+                        let mut child_metrics = children.iter().map(|child| child.metrics);
+                        let Some(first) = child_metrics.next() else {
+                            return Err(Error::MalformedNode.into());
+                        };
+                        if child_metrics.try_fold(first, add_metrics)? != expected {
+                            return Err(Error::DescriptorMismatch.into());
+                        }
+                    }
+                }
+            }
+            if let ChunkNode::Branch { children, .. } = node {
+                for child in children.into_iter().rev() {
+                    self.pending.push((
+                        child.node_ref,
+                        depth + 1,
+                        Some(child.metrics),
+                        child.logical_hash,
+                    ));
+                }
+            }
+            batch.push(StagedChunk {
+                node_ref,
+                encoded: encoded.bytes().to_vec(),
+            });
+        }
+        Ok(batch)
+    }
 }
 
 #[derive(Clone)]

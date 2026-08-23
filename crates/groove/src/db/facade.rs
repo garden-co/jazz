@@ -51,11 +51,13 @@ impl Database {
     {
         validate_durable_key_schema(&schema)?;
         let mut ivm_runtime = IvmRuntime::new(schema)?;
+        let storage = Rc::new(LayoutStorage::new(storage, storage_layout).await?);
         let chunk_storage: Rc<dyn crate::chunks::ChunkStorage> =
-            Rc::new(crate::chunks::MemoryChunkStorage::new());
+            Rc::new(crate::chunks::ManagedChunkStorage::new(Rc::new(
+                crate::chunks::OrderedChunkStorage::new(Rc::downgrade(&storage)),
+            )));
         let chunk_resolver: Rc<dyn crate::chunks::MissingChunkResolver> =
             Rc::new(crate::chunks::UnavailableChunkResolver);
-        let storage = Rc::new(LayoutStorage::new(storage, storage_layout).await?);
         ivm_runtime.set_chunk_provider(Rc::new(
             crate::chunks::StorageChunkProvider::with_resolver_and_observer(
                 chunk_storage.clone(),
@@ -153,6 +155,13 @@ impl Database {
         crate::chunks::LocalChunkReader::new(self.chunk_storage.clone())
     }
 
+    pub fn large_value_upload_cursor(
+        &self,
+        value: &crate::large_values::LargeValueRef,
+    ) -> Result<crate::large_values::LargeValueUploadCursor, crate::large_values::Error> {
+        crate::large_values::LargeValueUploadCursor::new(value, self.owned_chunk_provider())
+    }
+
     /// Install Groove's policy-blind immutable chunk storage and route future
     /// evaluation reads directly through it.
     pub fn set_chunk_storage(&mut self, storage: Rc<dyn crate::chunks::ChunkStorage>) {
@@ -205,18 +214,13 @@ impl Database {
         prepared: crate::large_values::PreparedLargeValue,
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
         let accounting = crate::large_values::StagedLargeValueAccounting {
-            encoded_bytes: prepared
-                .staged_chunks
-                .iter()
-                .try_fold(0_u64, |total, chunk| {
-                    total.checked_add(chunk.encoded.len() as u64)
-                })
-                .ok_or_else(|| {
-                    Error::InvalidLargeValueMetadata("staged byte count overflow".to_owned())
-                })?,
+            encoded_bytes: prepared.staged_chunks.iter().fold(0_u64, |total, chunk| {
+                total.saturating_add(chunk.encoded.len() as u64)
+            }),
             node_count: prepared.staged_chunks.len() as u64,
         };
-        self.chunk_storage
+        let _installed = self
+            .chunk_storage
             .stage(prepared.staged_chunks)
             .await
             .map_err(crate::chunks::ChunkError::from)
@@ -225,16 +229,337 @@ impl Database {
             .await
     }
 
+    /// Install one bounded batch belonging to a remote push upload. Receipt
+    /// creation remains a separate finalize operation so Groove never buffers
+    /// the complete tree in memory.
+    pub async fn stage_large_value_chunk_batch(
+        &self,
+        upload_id: crate::large_values::StagedLargeValueId,
+        chunks: Vec<crate::large_values::StagedChunk>,
+    ) -> Result<(), Error> {
+        let key = pending_large_value_upload_key(upload_id);
+        let mut upload: crate::large_values::PendingLargeValueUpload = if let Some(encoded) = self
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
+            .await?
+        {
+            postcard::from_bytes(&encoded).map_err(|error| {
+                Error::InvalidLargeValueMetadata(format!(
+                    "cannot decode pending large-value upload: {error}"
+                ))
+            })?
+        } else {
+            crate::large_values::PendingLargeValueUpload {
+                id: upload_id,
+                accounting: crate::large_values::StagedLargeValueAccounting::default(),
+                created_at_ms: web_time::SystemTime::now()
+                    .duration_since(web_time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX),
+                chunks: Vec::new(),
+            }
+        };
+        let mut new_members = BTreeSet::new();
+        for chunk in &chunks {
+            upload.accounting.encoded_bytes = upload
+                .accounting
+                .encoded_bytes
+                .checked_add(chunk.encoded.len() as u64)
+                .ok_or_else(|| {
+                    Error::InvalidLargeValueMetadata("upload byte count overflow".to_owned())
+                })?;
+            upload.accounting.node_count =
+                upload.accounting.node_count.checked_add(1).ok_or_else(|| {
+                    Error::InvalidLargeValueMetadata("upload node count overflow".to_owned())
+                })?;
+            if !upload.chunks.contains(&chunk.node_ref) {
+                upload.chunks.push(chunk.node_ref.clone());
+                new_members.insert(chunk.node_ref.clone());
+            }
+        }
+        self.chunk_storage
+            .stage(chunks.clone())
+            .await
+            .map_err(crate::chunks::ChunkError::from)
+            .map_err(crate::ivm::runtime::IvmRuntimeError::from)
+            .map_err(Error::from)?;
+        let mut operations = vec![OwnedWriteOperation::Set {
+            cf: LARGE_VALUE_METADATA_CF.to_owned(),
+            key,
+            value: postcard::to_allocvec(&upload).map_err(|error| {
+                Error::InvalidLargeValueMetadata(format!(
+                    "cannot encode pending large-value upload: {error}"
+                ))
+            })?,
+        }];
+        for chunk in chunks {
+            if !new_members.contains(&chunk.node_ref) {
+                continue;
+            }
+            let node_key = large_value_node_key(&chunk.node_ref)?;
+            let metadata = if let Some(encoded) = self
+                .storage
+                .get(LARGE_VALUE_METADATA_CF.to_owned(), node_key.clone())
+                .await?
+            {
+                let mut metadata: LargeValueNodeReferences = postcard::from_bytes(&encoded)
+                    .map_err(|error| {
+                        Error::InvalidLargeValueMetadata(format!(
+                            "cannot decode pushed chunk metadata: {error}"
+                        ))
+                    })?;
+                metadata.upload_references =
+                    metadata.upload_references.checked_add(1).ok_or_else(|| {
+                        Error::InvalidLargeValueMetadata(
+                            "upload reference count overflow".to_owned(),
+                        )
+                    })?;
+                metadata
+            } else {
+                let node: crate::large_values::ChunkNode = postcard::from_bytes(&chunk.encoded)
+                    .map_err(|error| {
+                        Error::InvalidLargeValueMetadata(format!(
+                            "cannot decode pushed chunk metadata: {error}"
+                        ))
+                    })?;
+                let children = match node {
+                    crate::large_values::ChunkNode::Leaf { .. } => Vec::new(),
+                    crate::large_values::ChunkNode::Branch { children, .. } => {
+                        children.into_iter().map(|child| child.node_ref).collect()
+                    }
+                };
+                LargeValueNodeReferences {
+                    references: 0,
+                    upload_references: 1,
+                    children,
+                }
+            };
+            operations.push(OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: node_key,
+                value: postcard::to_allocvec(&metadata).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot encode pushed chunk metadata: {error}"
+                    ))
+                })?,
+            });
+        }
+        self.storage.write_many(operations).await?;
+        Ok(())
+    }
+
+    /// Finalize a streamed push upload into an opaque persisted staging
+    /// receipt. The later physical-record batch still validates reachability
+    /// and consumes this receipt atomically.
+    pub async fn finalize_large_value_upload(
+        &self,
+        upload_id: crate::large_values::StagedLargeValueId,
+        value_ref: crate::large_values::LargeValueRef,
+    ) -> Result<crate::large_values::StagedLargeValue, Error> {
+        let key = pending_large_value_upload_key(upload_id);
+        if let Some(encoded) = self
+            .storage
+            .get(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                staged_large_value_key(upload_id),
+            )
+            .await?
+        {
+            let staged = postcard::from_bytes(&encoded).map_err(|error| {
+                Error::InvalidLargeValueMetadata(format!(
+                    "cannot decode finalized large-value upload: {error}"
+                ))
+            })?;
+            if let Some(pending) = self
+                .storage
+                .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
+                .await?
+            {
+                let upload = postcard::from_bytes(&pending).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot decode pending large-value upload: {error}"
+                    ))
+                })?;
+                self.release_pending_large_value_upload(key, upload).await?;
+            }
+            return Ok(staged);
+        }
+        let encoded = self
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
+            .await?
+            .ok_or_else(|| {
+                Error::InvalidLargeValueMetadata("pending upload is missing".to_owned())
+            })?;
+        let upload: crate::large_values::PendingLargeValueUpload = postcard::from_bytes(&encoded)
+            .map_err(|error| {
+            Error::InvalidLargeValueMetadata(format!(
+                "cannot decode pending large-value upload: {error}"
+            ))
+        })?;
+        let mut cursor = self
+            .large_value_upload_cursor(&value_ref)
+            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+        loop {
+            let reachable = cursor.next_batch(64).await.map_err(|error| match error {
+                crate::large_values::ReachabilityError::LargeValue(error) => {
+                    crate::ivm::runtime::IvmRuntimeError::from(error)
+                }
+                crate::large_values::ReachabilityError::Chunk(error) => {
+                    crate::ivm::runtime::IvmRuntimeError::from(error)
+                }
+            })?;
+            if reachable.is_empty() {
+                break;
+            }
+            if reachable
+                .iter()
+                .any(|chunk| !upload.chunks.contains(&chunk.node_ref))
+            {
+                return Err(Error::InvalidLargeValueMetadata(
+                    "finalized upload omitted a reachable chunk".to_owned(),
+                ));
+            }
+        }
+        let staged = self
+            .register_staged_large_value_with_id(upload_id, value_ref, upload.accounting)
+            .await?;
+        self.release_pending_large_value_upload(key, upload).await?;
+        Ok(staged)
+    }
+
+    async fn release_pending_large_value_upload(
+        &self,
+        key: Vec<u8>,
+        upload: crate::large_values::PendingLargeValueUpload,
+    ) -> Result<(), Error> {
+        let mut operations = vec![OwnedWriteOperation::Delete {
+            cf: LARGE_VALUE_METADATA_CF.to_owned(),
+            key,
+        }];
+        for node_ref in upload.chunks {
+            let node_key = large_value_node_key(&node_ref)?;
+            let Some(encoded) = self
+                .storage
+                .get(LARGE_VALUE_METADATA_CF.to_owned(), node_key.clone())
+                .await?
+            else {
+                continue;
+            };
+            let mut metadata: LargeValueNodeReferences =
+                postcard::from_bytes(&encoded).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot decode upload node metadata: {error}"
+                    ))
+                })?;
+            metadata.upload_references =
+                metadata.upload_references.checked_sub(1).ok_or_else(|| {
+                    Error::InvalidLargeValueMetadata("upload reference count underflow".to_owned())
+                })?;
+            operations.push(OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: node_key,
+                value: postcard::to_allocvec(&metadata).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot encode upload node metadata: {error}"
+                    ))
+                })?,
+            });
+            if metadata.references == 0 && metadata.upload_references == 0 {
+                operations.push(OwnedWriteOperation::Set {
+                    cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                    key: large_value_reclaim_key(&node_ref)?,
+                    value: postcard::to_allocvec(&node_ref).map_err(|error| {
+                        Error::InvalidLargeValueMetadata(format!(
+                            "cannot encode reclaim entry: {error}"
+                        ))
+                    })?,
+                });
+            }
+        }
+        self.storage.write_many(operations).await?;
+        Ok(())
+    }
+
+    /// Return restart-persistent incomplete push uploads for host expiry policy.
+    pub async fn pending_large_value_uploads(
+        &self,
+    ) -> Result<Vec<crate::large_values::PendingLargeValueUpload>, Error> {
+        let mut cursor = self
+            .storage
+            .scan(crate::storage::ScanRequest::prefix(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                b"upload/".to_vec(),
+            ))
+            .await?;
+        let mut uploads = Vec::new();
+        while let Some(batch) = cursor.next_batch().await? {
+            for (_, encoded) in batch {
+                uploads.push(postcard::from_bytes(&encoded).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot decode pending large-value upload: {error}"
+                    ))
+                })?);
+            }
+        }
+        Ok(uploads)
+    }
+
+    /// Idempotently expire one incomplete push upload and queue unreferenced
+    /// chunks for the ordinary Groove reclaimer.
+    pub async fn evict_pending_large_value_upload(
+        &self,
+        id: crate::large_values::StagedLargeValueId,
+    ) -> Result<bool, Error> {
+        let key = pending_large_value_upload_key(id);
+        let Some(encoded) = self
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
+            .await?
+        else {
+            return Ok(false);
+        };
+        let upload = postcard::from_bytes(&encoded).map_err(|error| {
+            Error::InvalidLargeValueMetadata(format!(
+                "cannot decode pending large-value upload: {error}"
+            ))
+        })?;
+        self.release_pending_large_value_upload(key, upload).await?;
+        Ok(true)
+    }
+
     async fn register_staged_large_value(
         &self,
         value_ref: crate::large_values::LargeValueRef,
         accounting: crate::large_values::StagedLargeValueAccounting,
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
-        let kind = value_ref.kind;
-        let staged = crate::large_values::StagedLargeValue {
-            id: crate::large_values::StagedLargeValueId(*uuid::Uuid::new_v4().as_bytes()),
+        self.register_staged_large_value_with_id(
+            crate::large_values::StagedLargeValueId(*uuid::Uuid::new_v4().as_bytes()),
             value_ref,
             accounting,
+        )
+        .await
+    }
+
+    async fn register_staged_large_value_with_id(
+        &self,
+        id: crate::large_values::StagedLargeValueId,
+        value_ref: crate::large_values::LargeValueRef,
+        accounting: crate::large_values::StagedLargeValueAccounting,
+    ) -> Result<crate::large_values::StagedLargeValue, Error> {
+        let kind = value_ref.kind;
+        let staged = crate::large_values::StagedLargeValue {
+            id,
+            value_ref,
+            accounting,
+            created_at_ms: web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX),
         };
         let encoded = postcard::to_allocvec(&staged).map_err(|error| {
             Error::InvalidLargeValueMetadata(format!("cannot encode staged root: {error}"))
@@ -313,6 +638,7 @@ impl Database {
                     };
                 LargeValueNodeReferences {
                     references: 0,
+                    upload_references: 0,
                     children,
                 }
             };
@@ -340,9 +666,33 @@ impl Database {
         Ok(staged)
     }
 
+    /// Return persisted opaque staging receipts for host rate/expiry policy.
+    pub async fn staged_large_values(
+        &self,
+    ) -> Result<Vec<crate::large_values::StagedLargeValue>, Error> {
+        let mut cursor = self
+            .storage
+            .scan(crate::storage::ScanRequest::prefix(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                b"staged/".to_vec(),
+            ))
+            .await?;
+        let mut staged = Vec::new();
+        while let Some(batch) = cursor.next_batch().await? {
+            for (_, encoded) in batch {
+                staged.push(postcard::from_bytes(&encoded).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot decode staged root receipt: {error}"
+                    ))
+                })?);
+            }
+        }
+        Ok(staged)
+    }
+
     /// Idempotently evict one unaccepted staging root. Jazz uses this mechanism
-    /// to enforce its own quota/expiry policy; Groove owns the persisted count
-    /// transition and eventual orphan reclamation.
+    /// to enforce its own expiry/admission policy; Groove owns the persisted
+    /// count transition and eventual orphan reclamation.
     pub async fn evict_staged_large_value(
         &self,
         id: crate::large_values::StagedLargeValueId,
@@ -491,7 +841,7 @@ impl Database {
                             "cannot decode reclaim node references: {error}"
                         ))
                     })?;
-                if metadata.references != 0 {
+                if metadata.references != 0 || metadata.upload_references != 0 {
                     self.storage
                         .delete(LARGE_VALUE_METADATA_CF.to_owned(), queue_key)
                         .await?;

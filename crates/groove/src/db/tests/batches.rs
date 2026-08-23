@@ -74,6 +74,94 @@ async fn staged_large_value_is_consumed_atomically_with_its_referencing_row() {
 }
 
 #[futures_test::test]
+async fn idempotent_restaging_reports_incoming_bytes_for_each_upload() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let database = Database::new(schema, storage).await.unwrap();
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![4; crate::large_values::INLINE_VALUE_MAX_BYTES + 1],
+        |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
+    )
+    .unwrap();
+
+    let first = database
+        .stage_large_value_preparation(prepared.clone())
+        .await
+        .unwrap();
+    let second = database
+        .stage_large_value_preparation(prepared)
+        .await
+        .unwrap();
+
+    assert!(first.accounting.encoded_bytes > 0);
+    assert!(first.accounting.node_count > 0);
+    assert_eq!(second.accounting, first.accounting);
+}
+
+#[futures_test::test]
+async fn incomplete_push_upload_is_restart_persistent_and_reclaimable() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema.clone(), storage.clone())
+        .await
+        .unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![5; crate::large_values::INLINE_VALUE_MAX_BYTES + 1],
+        |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
+    )
+    .unwrap();
+    let upload_id = crate::large_values::StagedLargeValueId([0x55; 16]);
+    database
+        .stage_large_value_chunk_batch(upload_id, prepared.staged_chunks)
+        .await
+        .unwrap();
+    assert_eq!(
+        database.pending_large_value_uploads().await.unwrap().len(),
+        1
+    );
+    drop(database);
+
+    let mut reopened = Database::new(schema, storage).await.unwrap();
+    reopened.set_chunk_storage(chunks.clone());
+    assert_eq!(
+        reopened.pending_large_value_uploads().await.unwrap().len(),
+        1
+    );
+    assert!(
+        reopened
+            .evict_pending_large_value_upload(upload_id)
+            .await
+            .unwrap()
+    );
+    assert!(
+        reopened
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap()
+            > 0
+    );
+    assert_eq!(chunks.len(), 0);
+}
+
+#[futures_test::test]
 async fn failed_persistence_does_not_retract_an_applied_subscription_delta() {
     let (storage, control) = TestStorage::controlled(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).await.unwrap();

@@ -64,16 +64,37 @@ fn auxiliary_pump_completes_a_suspended_groove_chunk_read_without_a_semantic_tic
             Poll::Pending
         ));
 
+        let features = crate::wire::current_wire_features();
         assert!(
             upstream
-                .route_incoming_payload(downstream.take_outbound_payload(64).unwrap().unwrap())
+                .route_incoming_wire_frame(
+                    downstream
+                        .take_outbound_wire_frame(
+                            crate::wire::WIRE_PROTOCOL_VERSION,
+                            features,
+                            None,
+                        )
+                        .unwrap()
+                        .unwrap(),
+                    features,
+                )
                 .await
                 .unwrap()
                 .is_none()
         );
         assert!(
             downstream
-                .route_incoming_payload(upstream.take_outbound_payload(64).unwrap().unwrap())
+                .route_incoming_wire_frame(
+                    upstream
+                        .take_outbound_wire_frame(
+                            crate::wire::WIRE_PROTOCOL_VERSION,
+                            features,
+                            None,
+                        )
+                        .unwrap()
+                        .unwrap(),
+                    features,
+                )
                 .await
                 .unwrap()
                 .is_none()

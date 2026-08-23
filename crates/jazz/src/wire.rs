@@ -42,6 +42,8 @@ pub const FEATURE_AUTHORIZATION_SCOPE_RECEIPTS: WireFeatures = 1 << 6;
 /// Authority-owned authorization scope hydration.  Unlike the first receipt
 /// experiment this never accepts caller supplied support query identities.
 pub const FEATURE_AUTHORIZATION_SCOPE_VIEWS: WireFeatures = 1 << 7;
+/// Peers support Groove chunk misses on the independently driven auxiliary lane.
+pub const FEATURE_AUXILIARY_CHUNKS: WireFeatures = 1 << 8;
 
 const FEATURE_PAYLOAD_COMPRESSION_MASK: WireFeatures = FEATURE_PAYLOAD_LZ4 | FEATURE_PAYLOAD_ZSTD;
 
@@ -463,6 +465,7 @@ pub fn current_wire_features() -> WireFeatures {
         | FEATURE_MESSAGE_FRAGMENTATION
         | FEATURE_AUTHORIZATION_SCOPE_RECEIPTS
         | FEATURE_AUTHORIZATION_SCOPE_VIEWS
+        | FEATURE_AUXILIARY_CHUNKS
         | runtime_transport_compression_features()
 }
 

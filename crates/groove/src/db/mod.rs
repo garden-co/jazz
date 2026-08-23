@@ -47,6 +47,12 @@ fn staged_large_value_key(id: crate::large_values::StagedLargeValueId) -> Vec<u8
     key
 }
 
+fn pending_large_value_upload_key(id: crate::large_values::StagedLargeValueId) -> Vec<u8> {
+    let mut key = b"upload/".to_vec();
+    key.extend_from_slice(&id.0);
+    key
+}
+
 fn large_value_root_key(node_ref: &crate::large_values::NodeRef) -> Result<Vec<u8>, Error> {
     let mut key = b"root/".to_vec();
     key.extend(postcard::to_allocvec(node_ref).map_err(|error| {
@@ -81,6 +87,8 @@ fn large_value_reclaim_key(node_ref: &crate::large_values::NodeRef) -> Result<Ve
 #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
 struct LargeValueNodeReferences {
     references: u64,
+    #[serde(default)]
+    upload_references: u64,
     children: Vec<crate::large_values::NodeRef>,
 }
 

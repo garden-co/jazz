@@ -6,6 +6,7 @@
 //! [`views`] for sync view payloads. In the layer map it is the core between the
 //! `Db` facade and groove storage/IVM.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -541,12 +542,10 @@ pub struct NodeState<S> {
     rejections: RejectionTracking,
     /// Groove database slot over this node's storage.
     database: DatabaseSlot,
-    /// Policy-blind immutable chunk storage owned by Groove and retained across rebuilds.
-    chunk_storage: Rc<dyn groove::chunks::ChunkStorage>,
     local_chunk_reader: groove::chunks::LocalChunkReader,
     chunk_resolver: Rc<dyn groove::chunks::MissingChunkResolver>,
-    /// Stateless direct adapter from Groove evaluation to its chunk storage.
-    content_provider: groove::chunks::StorageChunkProvider<Rc<dyn groove::chunks::ChunkStorage>>,
+    large_value_staging_policy: LargeValueStagingPolicy,
+    large_value_ingress: RefCell<LargeValueIngressState>,
     /// Groove-owned verified cache retained across internal database rebuilds.
     content_runtime_provider: groove::chunks::OwnedChunkProvider,
     storage_type: std::marker::PhantomData<fn() -> S>,
@@ -594,6 +593,33 @@ pub struct NodeState<S> {
     /// Once the initial snapshot has completed, ordinary writes return to their
     /// existing per-write durability boundaries.
     initial_sync_flush_completed: bool,
+}
+
+/// Jazz-owned limits for unpublished Groove staging roots.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LargeValueStagingPolicy {
+    /// Incoming upload bytes admitted during one fixed window.
+    pub incoming_bytes_per_window: u64,
+    /// Fixed rate-limit window duration.
+    pub window_ms: u64,
+    /// Optional maximum staging age; expired roots are evicted on policy checks.
+    pub max_age_ms: Option<u64>,
+}
+
+impl Default for LargeValueStagingPolicy {
+    fn default() -> Self {
+        Self {
+            incoming_bytes_per_window: u64::MAX,
+            window_ms: 1_000,
+            max_age_ms: None,
+        }
+    }
+}
+
+#[derive(Default)]
+struct LargeValueIngressState {
+    window_started_ms: u64,
+    admitted_bytes: u64,
 }
 
 /// Schema catalogue and schema-version storage layout known by the node.
@@ -1558,6 +1584,54 @@ fn value_contains_indirect_descriptor(value: &Value) -> bool {
     }
 }
 
+fn collect_indirect_descriptors(
+    value: &Value,
+    descriptors: &mut Vec<groove::large_values::LargeValueRef>,
+) {
+    match value {
+        Value::Large(value_ref) => {
+            if !descriptors.contains(value_ref) {
+                descriptors.push(value_ref.clone());
+            }
+        }
+        Value::Tuple(values) | Value::Array(values) => {
+            for value in values {
+                collect_indirect_descriptors(value, descriptors);
+            }
+        }
+        Value::Nullable(Some(value)) => collect_indirect_descriptors(value, descriptors),
+        Value::Record(record) => {
+            if let Ok(values) = record.to_values() {
+                for value in values {
+                    collect_indirect_descriptors(&value, descriptors);
+                }
+            }
+        }
+        Value::Enum(value) => {
+            if let Ok(values) = value.record().to_values() {
+                for value in values {
+                    collect_indirect_descriptors(&value, descriptors);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn version_indirect_descriptors(
+    versions: &[VersionRecord],
+) -> Vec<groove::large_values::LargeValueRef> {
+    let mut descriptors = Vec::new();
+    for version in versions {
+        for position in 0..version.application_cell_count() {
+            if let Some(value) = version.cell_at(position) {
+                collect_indirect_descriptors(&value, &mut descriptors);
+            }
+        }
+    }
+    descriptors
+}
+
 pub(crate) struct ViewUpdateParts {
     pub(crate) subscription: SubscriptionKey,
     pub(crate) settled_through: GlobalTime,
@@ -1849,6 +1923,15 @@ pub enum Error {
     /// Groove rejected a malformed logical value or indirect descriptor.
     #[error(transparent)]
     LargeValue(#[from] groove::large_values::Error),
+    /// Groove could not authenticate/export a locally referenced tree.
+    #[error(transparent)]
+    LargeValueReachability(#[from] groove::large_values::ReachabilityError),
+    /// Jazz staging policy rejected an otherwise valid Groove preparation.
+    #[error("large-value upload rate limit exceeded")]
+    LargeValueIngressRateLimited,
+    /// The row write arrived after its Groove staging root expired.
+    #[error("large-value staging root expired; upload again")]
+    LargeValueStageExpired,
     /// Error returned by groove records.
     #[error(transparent)]
     Record(#[from] records::Error),

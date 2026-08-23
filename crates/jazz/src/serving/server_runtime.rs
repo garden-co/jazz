@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
-use std::sync::mpsc;
+use std::collections::VecDeque;
+use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -14,7 +15,11 @@ use crate::serving::{
     AbiBytes, InMemoryServerShell, InMemoryServerShellConfig, NodeRole, ServerSession,
     StorageConfig,
 };
-use crate::wire::{WireFrame, decode_frame, decode_sync_message};
+use crate::wire::{WireFrame, WireTransport, decode_frame, decode_sync_message};
+use futures::StreamExt;
+use futures::channel::mpsc;
+use futures::future::LocalBoxFuture;
+use futures::task::LocalSpawnExt;
 use tokio::sync::{mpsc as tokio_mpsc, oneshot, watch};
 
 /// Sendable handle for the thread that owns the in-memory server shell.
@@ -58,9 +63,10 @@ impl ServerRuntimeFrameStream {
 }
 
 struct ServerShellInner {
-    jobs: Mutex<Option<mpsc::Sender<ServerShellCommand>>>,
+    jobs: Mutex<Option<mpsc::UnboundedSender<ServerShellCommand>>>,
     join: Mutex<Option<thread::JoinHandle<()>>>,
     activity_tx: watch::Sender<u64>,
+    io_wakers: Arc<Mutex<Vec<mpsc::UnboundedSender<()>>>>,
 }
 
 impl Drop for ServerShellInner {
@@ -77,10 +83,155 @@ impl Drop for ServerShellInner {
 }
 
 type ServerShellJob = Box<dyn FnOnce(&mut InMemoryServerShell) + Send + 'static>;
+type AsyncServerShellJob =
+    Box<dyn for<'a> FnOnce(&'a mut InMemoryServerShell) -> LocalBoxFuture<'a, ()> + Send + 'static>;
 
 enum ServerShellCommand {
     Run(ServerShellJob),
-    Shutdown(mpsc::Sender<()>),
+    RunAsync(AsyncServerShellJob),
+    AttachUpstreamWire {
+        transport: Box<dyn WireTransport + Send>,
+        protocol_version: u16,
+        features: crate::wire::WireFeatures,
+        session_context: Option<ConnectionSessionContext>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    Shutdown(std_mpsc::Sender<()>),
+}
+
+fn run_server_shell_owner(
+    mut shell: InMemoryServerShell,
+    mut receiver: mpsc::UnboundedReceiver<ServerShellCommand>,
+    io_wakers: Arc<Mutex<Vec<mpsc::UnboundedSender<()>>>>,
+) {
+    let mut executor = futures::executor::LocalPool::new();
+    let spawner = executor.spawner();
+    executor.run_until(async move {
+        let mut pending = VecDeque::new();
+        loop {
+            let command = match pending.pop_front() {
+                Some(command) => command,
+                None => match receiver.next().await {
+                    Some(command) => command,
+                    None => return,
+                },
+            };
+            match command {
+                ServerShellCommand::Run(job) => job(&mut shell),
+                ServerShellCommand::RunAsync(job) => {
+                    let mut operation = job(&mut shell);
+                    loop {
+                        match futures::future::select(operation.as_mut(), receiver.next()).await {
+                            futures::future::Either::Left(((), _)) => break,
+                            futures::future::Either::Right((
+                                Some(ServerShellCommand::Shutdown(stopped)),
+                                _,
+                            )) => {
+                                // Dropping the suspended operation releases all
+                                // evaluator leases before storage destruction.
+                                drop(operation);
+                                drop(shell);
+                                let _ = stopped.send(());
+                                return;
+                            }
+                            futures::future::Either::Right((Some(command), _)) => {
+                                pending.push_back(command);
+                            }
+                            futures::future::Either::Right((None, _)) => return,
+                        }
+                    }
+                }
+                ServerShellCommand::AttachUpstreamWire {
+                    transport,
+                    protocol_version,
+                    features,
+                    session_context,
+                    reply,
+                } => {
+                    let io =
+                        shell.connect_upstream_wire_io(protocol_version, features, session_context);
+                    let (wake_tx, wake_rx) = mpsc::unbounded();
+                    if let Ok(mut wakers) = io_wakers.lock() {
+                        wakers.push(wake_tx);
+                    }
+                    let spawn_result =
+                        spawner.spawn_local(drive_upstream_wire(transport, io, wake_rx));
+                    let _ = reply.send(spawn_result.map_err(|error| {
+                        format!("failed to spawn local upstream wire pump: {error}")
+                    }));
+                }
+                ServerShellCommand::Shutdown(stopped) => {
+                    // Native storage is destroyed on its owner thread before
+                    // shutdown is acknowledged.
+                    drop(shell);
+                    let _ = stopped.send(());
+                    return;
+                }
+            }
+        }
+    });
+}
+
+async fn drive_upstream_wire(
+    mut wire: Box<dyn WireTransport + Send>,
+    io: super::ServerUpstreamIo,
+    mut wake_rx: mpsc::UnboundedReceiver<()>,
+) {
+    loop {
+        while let Some(frame) = wire.try_recv_frame() {
+            match io.pump.route_incoming_wire_frame(frame, io.features).await {
+                Ok(Some(canonical)) => io
+                    .transport
+                    .queues
+                    .borrow_mut()
+                    .inbound
+                    .push_back(canonical),
+                Ok(None) => {}
+                Err(_) => {
+                    io.pump.disconnect();
+                    return;
+                }
+            }
+        }
+        loop {
+            let frame = io.transport.queues.borrow_mut().outbound.pop_front();
+            let Some(frame) = frame else { break };
+            if wire.send_frame(frame).is_err() {
+                io.pump.disconnect();
+                return;
+            }
+        }
+        loop {
+            let frame =
+                match io
+                    .pump
+                    .take_outbound_wire_frame(io.protocol_version, io.features, None)
+                {
+                    Ok(frame) => frame,
+                    Err(_) => {
+                        io.pump.disconnect();
+                        return;
+                    }
+                };
+            let Some(frame) = frame else { break };
+            if wire.send_frame(frame).is_err() {
+                io.pump.disconnect();
+                return;
+            }
+        }
+
+        let external_wake = wake_rx.next();
+        let auxiliary_wake = io.pump.outbound_ready();
+        futures::pin_mut!(external_wake, auxiliary_wake);
+        match futures::future::select(external_wake, auxiliary_wake).await {
+            futures::future::Either::Left((Some(()), _))
+            | futures::future::Either::Right(((), _)) => {}
+            futures::future::Either::Left((None, _)) => {
+                io.pump.disconnect();
+                return;
+            }
+        }
+    }
 }
 
 impl ServerRuntimeHandle {
@@ -91,9 +242,11 @@ impl ServerRuntimeHandle {
         storage_factory: Option<Arc<dyn StorageFactory>>,
         edge_cache_budget: Option<EdgeCacheBudget>,
     ) -> Result<Option<Self>, String> {
-        let (jobs, receiver) = mpsc::channel::<ServerShellCommand>();
-        let (started_tx, started_rx) = mpsc::channel();
+        let (jobs, receiver) = mpsc::unbounded::<ServerShellCommand>();
+        let (started_tx, started_rx) = std_mpsc::channel();
         let (activity_tx, _) = watch::channel(0_u64);
+        let io_wakers = Arc::new(Mutex::new(Vec::new()));
+        let owner_io_wakers = Arc::clone(&io_wakers);
         let join = thread::Builder::new()
             .name("jazz-server-shell".to_owned())
             .spawn(move || {
@@ -119,17 +272,7 @@ impl ServerRuntimeHandle {
                         return;
                     }
                 };
-                let mut shell = shell;
-                while let Ok(command) = receiver.recv() {
-                    match command {
-                        ServerShellCommand::Run(job) => job(&mut shell),
-                        ServerShellCommand::Shutdown(stopped) => {
-                            drop(shell);
-                            let _ = stopped.send(());
-                            return;
-                        }
-                    }
-                }
+                run_server_shell_owner(shell, receiver, owner_io_wakers);
             })
             .map_err(|error| format!("failed to spawn server shell thread: {error}"))?;
         let started = started_rx
@@ -140,6 +283,7 @@ impl ServerRuntimeHandle {
                 jobs: Mutex::new(Some(jobs)),
                 join: Mutex::new(Some(join)),
                 activity_tx,
+                io_wakers,
             }),
         }))
     }
@@ -153,9 +297,11 @@ impl ServerRuntimeHandle {
         edge_cache_budget: Option<EdgeCacheBudget>,
         snapshot: crate::protocol::CatalogueSnapshot,
     ) -> Result<Self, String> {
-        let (jobs, receiver) = mpsc::channel::<ServerShellCommand>();
-        let (started_tx, started_rx) = mpsc::channel();
+        let (jobs, receiver) = mpsc::unbounded::<ServerShellCommand>();
+        let (started_tx, started_rx) = std_mpsc::channel();
         let (activity_tx, _) = watch::channel(0_u64);
+        let io_wakers = Arc::new(Mutex::new(Vec::new()));
+        let owner_io_wakers = Arc::clone(&io_wakers);
 
         let join = thread::Builder::new()
             .name("jazz-server-shell".to_owned())
@@ -179,17 +325,7 @@ impl ServerRuntimeHandle {
                         return;
                     }
                 };
-                let mut shell = shell;
-                while let Ok(command) = receiver.recv() {
-                    match command {
-                        ServerShellCommand::Run(job) => job(&mut shell),
-                        ServerShellCommand::Shutdown(stopped) => {
-                            drop(shell);
-                            let _ = stopped.send(());
-                            return;
-                        }
-                    }
-                }
+                run_server_shell_owner(shell, receiver, owner_io_wakers);
             })
             .map_err(|error| format!("failed to spawn server shell thread: {error}"))?;
 
@@ -201,6 +337,7 @@ impl ServerRuntimeHandle {
                 jobs: Mutex::new(Some(jobs)),
                 join: Mutex::new(Some(join)),
                 activity_tx,
+                io_wakers,
             }),
         })
     }
@@ -312,9 +449,11 @@ impl ServerRuntimeHandle {
         edge_cache_budget: Option<EdgeCacheBudget>,
         permissions_ready: bool,
     ) -> Result<Self, String> {
-        let (jobs, receiver) = mpsc::channel::<ServerShellCommand>();
-        let (started_tx, started_rx) = mpsc::channel();
+        let (jobs, receiver) = mpsc::unbounded::<ServerShellCommand>();
+        let (started_tx, started_rx) = std_mpsc::channel();
         let (activity_tx, _) = watch::channel(0_u64);
+        let io_wakers = Arc::new(Mutex::new(Vec::new()));
+        let owner_io_wakers = Arc::clone(&io_wakers);
 
         let join = thread::Builder::new()
             .name("jazz-server-shell".to_owned())
@@ -353,19 +492,7 @@ impl ServerRuntimeHandle {
                     }
                 };
 
-                let mut shell = shell;
-                while let Ok(command) = receiver.recv() {
-                    match command {
-                        ServerShellCommand::Run(job) => job(&mut shell),
-                        ServerShellCommand::Shutdown(stopped) => {
-                            // The shell owns the native storage, so complete
-                            // its destruction before acknowledging shutdown.
-                            drop(shell);
-                            let _ = stopped.send(());
-                            return;
-                        }
-                    }
-                }
+                run_server_shell_owner(shell, receiver, owner_io_wakers);
             })
             .map_err(|error| format!("failed to spawn server shell thread: {error}"))?;
 
@@ -377,6 +504,7 @@ impl ServerRuntimeHandle {
                 jobs: Mutex::new(Some(jobs)),
                 join: Mutex::new(Some(join)),
                 activity_tx,
+                io_wakers,
             }),
         })
     }
@@ -470,31 +598,26 @@ impl ServerRuntimeHandle {
     ) -> Result<ServerRuntimeFrameStream, String> {
         let activity_tx = self.inner.activity_tx.clone();
         let (outbound_tx, outbound_rx) = tokio_mpsc::unbounded_channel();
-        self.send(ServerShellCommand::Run(Box::new(move |shell| {
-            for frame in frames {
-                let phase = inbound_frame_phase(&frame);
-                let result = shell
-                    .receive_frames(session, [frame])
-                    .map_err(|error| format!("server receive {phase}: {error}"))
-                    .and_then(|()| {
-                        shell
-                            .tick()
-                            .map_err(|error| format!("server tick after {phase}: {error}"))
-                    })
-                    .and_then(|()| {
-                        shell
-                            .take_frames(session)
-                            .map_err(|error| format!("server drain after {phase}: {error}"))
-                    });
-                let keep_streaming = result.is_ok();
-                if outbound_tx.send(result).is_err() {
-                    return;
+        self.send(ServerShellCommand::RunAsync(Box::new(move |shell| {
+            Box::pin(async move {
+                for frame in frames {
+                    let phase = inbound_frame_phase(&frame);
+                    let result = match shell.receive_frames_async(session, [frame]).await {
+                        Err(error) => Err(format!("server receive {phase}: {error}")),
+                        Ok(()) => match shell.tick_async().await {
+                            Err(error) => Err(format!("server tick after {phase}: {error}")),
+                            Ok(()) => shell
+                                .take_frames(session)
+                                .map_err(|error| format!("server drain after {phase}: {error}")),
+                        },
+                    };
+                    let keep_streaming = result.is_ok();
+                    if outbound_tx.send(result).is_err() || !keep_streaming {
+                        return;
+                    }
+                    notify_shell_activity(&activity_tx);
                 }
-                if !keep_streaming {
-                    return;
-                }
-                notify_shell_activity(&activity_tx);
-            }
+            })
         })))?;
         Ok(ServerRuntimeFrameStream {
             receiver: outbound_rx,
@@ -504,23 +627,27 @@ impl ServerRuntimeHandle {
     /// Tick the runtime once and return pending frames for one session.
     pub async fn tick_take(&self, session: ServerSession) -> Result<Vec<AbiBytes>, String> {
         let activity_tx = self.inner.activity_tx.clone();
-        self.run(move |shell| {
-            let result = shell
-                .tick()
-                .and_then(|()| shell.take_frames(session))
-                .map_err(|error| error.to_string());
-            // Progress-based re-arm: a tick that yielded frames may have more
-            // behind it (large resets span many ticks), so schedule another.
-            // Empty ticks do NOT re-arm — that unconditional re-arm was the
-            // consolidation-spin feeder. One notification must never buy an
-            // unbounded loop, and delivery must never stall mid-reset; frames
-            // produced is exactly the signal that separates the two.
-            if let Ok(frames) = &result
-                && !frames.is_empty()
-            {
-                notify_shell_activity(&activity_tx);
-            }
-            result
+        self.run_async(move |shell| {
+            Box::pin(async move {
+                let result = match shell.tick_async().await {
+                    Ok(()) => shell
+                        .take_frames(session)
+                        .map_err(|error| error.to_string()),
+                    Err(error) => Err(error.to_string()),
+                };
+                // Progress-based re-arm: a tick that yielded frames may have more
+                // behind it (large resets span many ticks), so schedule another.
+                // Empty ticks do NOT re-arm — that unconditional re-arm was the
+                // consolidation-spin feeder. One notification must never buy an
+                // unbounded loop, and delivery must never stall mid-reset; frames
+                // produced is exactly the signal that separates the two.
+                if let Ok(frames) = &result
+                    && !frames.is_empty()
+                {
+                    notify_shell_activity(&activity_tx);
+                }
+                result
+            })
         })
         .await
     }
@@ -543,9 +670,38 @@ impl ServerRuntimeHandle {
         .await
     }
 
+    /// Attach a negotiated native wire transport and drive its semantic and
+    /// auxiliary channels on the shell's local executor.
+    pub async fn connect_upstream_wire(
+        &self,
+        transport: Box<dyn WireTransport + Send>,
+        protocol_version: u16,
+        features: crate::wire::WireFeatures,
+        session_context: Option<ConnectionSessionContext>,
+    ) -> Result<(), String> {
+        let (reply, response) = oneshot::channel();
+        self.send(ServerShellCommand::AttachUpstreamWire {
+            transport,
+            protocol_version,
+            features,
+            session_context,
+            reply,
+        })?;
+        let result = response
+            .await
+            .map_err(|_| "server shell dropped upstream wire attachment".to_owned())?;
+        if result.is_ok() {
+            self.notify_activity();
+        }
+        result
+    }
+
     /// Wake shell tasks after an adapter stages inbound work.
     pub fn notify_activity(&self) {
         notify_shell_activity(&self.inner.activity_tx);
+        if let Ok(mut wakers) = self.inner.io_wakers.lock() {
+            wakers.retain(|wake| wake.unbounded_send(()).is_ok());
+        }
     }
 
     /// Close a semantic session without exposing runtime storage or peer state.
@@ -572,7 +728,7 @@ impl ServerRuntimeHandle {
             .map_err(|_| "server shell jobs mutex poisoned".to_owned())?
             .as_ref()
             .ok_or_else(|| "server shell is shut down".to_owned())?
-            .send(command)
+            .unbounded_send(command)
             .map_err(|_| "server shell thread is not running".to_owned())
     }
 
@@ -591,6 +747,29 @@ impl ServerRuntimeHandle {
             .await
             .map_err(|_| "server shell thread dropped response".to_owned())?
     }
+
+    async fn run_async<T>(
+        &self,
+        run_on_shell: impl for<'a> FnOnce(
+            &'a mut InMemoryServerShell,
+        ) -> LocalBoxFuture<'a, Result<T, String>>
+        + Send
+        + 'static,
+    ) -> Result<T, String>
+    where
+        T: Send + 'static,
+    {
+        let (reply, response) = oneshot::channel();
+        self.send(ServerShellCommand::RunAsync(Box::new(move |shell| {
+            Box::pin(async move {
+                let result = run_on_shell(shell).await;
+                let _ = reply.send(result);
+            })
+        })))?;
+        response
+            .await
+            .map_err(|_| "server shell thread dropped async response".to_owned())?
+    }
 }
 
 fn shutdown_blocking(inner: &ServerShellInner) -> Result<(), String> {
@@ -603,9 +782,9 @@ fn shutdown_blocking(inner: &ServerShellInner) -> Result<(), String> {
         return Ok(());
     };
 
-    let (stopped_tx, stopped_rx) = mpsc::channel();
+    let (stopped_tx, stopped_rx) = std_mpsc::channel();
     sender
-        .send(ServerShellCommand::Shutdown(stopped_tx))
+        .unbounded_send(ServerShellCommand::Shutdown(stopped_tx))
         .map_err(|_| "server shell thread is not running".to_owned())?;
     drop(sender);
     stopped_rx
@@ -649,6 +828,9 @@ fn sync_message_name(message: &SyncMessage) -> &'static str {
     match message {
         SyncMessage::ChunkRequestBatch(_) => "ChunkRequestBatch",
         SyncMessage::ChunkResponseBatch(_) => "ChunkResponseBatch",
+        SyncMessage::ChunkUploadBatch(_) => "ChunkUploadBatch",
+        SyncMessage::ChunkUploadFinish(_) => "ChunkUploadFinish",
+        SyncMessage::ChunkUploadResult(_) => "ChunkUploadResult",
         SyncMessage::SessionClaims { .. } => "SessionClaims",
         SyncMessage::CommitUnit { .. } => "CommitUnit",
         SyncMessage::FateUpdate { .. } => "FateUpdate",
@@ -690,7 +872,9 @@ mod tests {
     use super::*;
     use crate::protocol::{ReadViewKey, Subscribe, SubscriptionKey};
     use crate::query::{BindingId, ShapeId};
+    use crate::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
     use crate::wire::{WireEnvelope, encode_frame, encode_sync_message};
+    use std::time::Duration;
 
     fn encode_message(message: SyncMessage) -> Vec<u8> {
         let payload = encode_sync_message(&message).unwrap();
@@ -718,5 +902,30 @@ mod tests {
         }));
         assert_eq!(inbound_frame_phase(&subscribe), "Subscribe");
         assert_eq!(inbound_frame_phase(&[0xff]), "malformed wire frame");
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_a_suspended_local_shell_operation() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let runtime =
+            ServerRuntimeHandle::start_with_storage(schema, StorageConfig::InMemory, None).unwrap();
+        let suspended_runtime = runtime.clone();
+        let suspended = tokio::spawn(async move {
+            suspended_runtime
+                .run_async(|_| Box::pin(futures::future::pending::<Result<(), String>>()))
+                .await
+        });
+        tokio::task::yield_now().await;
+
+        tokio::time::timeout(Duration::from_secs(1), runtime.shutdown())
+            .await
+            .expect("shutdown must not wait for suspended Groove work")
+            .unwrap();
+        assert!(suspended.await.unwrap().is_err());
     }
 }

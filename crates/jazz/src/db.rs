@@ -119,6 +119,7 @@ struct ChunkDemandState {
     outbound: VecDeque<ChunkRequestEntry>,
     relay_responses: BTreeMap<u64, Vec<ChunkResponseEntry>>,
     outbound_wakers: BTreeMap<u64, Waker>,
+    disconnected_connections: BTreeSet<u64>,
     upstream_connection: Option<u64>,
     upstream_connections: BTreeSet<u64>,
 }
@@ -130,8 +131,9 @@ struct PeerChunkResolver {
 
 impl PeerChunkResolver {
     fn register_connection(&self, connection: u64, upstream: bool) {
+        let mut state = self.state.borrow_mut();
+        state.disconnected_connections.remove(&connection);
         if upstream {
-            let mut state = self.state.borrow_mut();
             state.upstream_connections.insert(connection);
             state.upstream_connection.get_or_insert(connection);
         }
@@ -300,7 +302,8 @@ impl PeerChunkResolver {
 
     fn disconnect(&self, connection: u64, upstream: bool) {
         let mut state = self.state.borrow_mut();
-        state.outbound_wakers.remove(&connection);
+        state.disconnected_connections.insert(connection);
+        let disconnected_waker = state.outbound_wakers.remove(&connection);
         state.relay_responses.remove(&connection);
         if upstream {
             state.upstream_connections.remove(&connection);
@@ -327,6 +330,10 @@ impl PeerChunkResolver {
                     Self::wake_connection(&mut state, successor);
                 }
             }
+            drop(state);
+            if let Some(waker) = disconnected_waker {
+                waker.wake();
+            }
             return;
         }
         let requests = state.pending_by_chunk.keys().cloned().collect::<Vec<_>>();
@@ -345,6 +352,10 @@ impl PeerChunkResolver {
                     .outbound
                     .retain(|entry| entry.request_id != upstream_id);
             }
+        }
+        drop(state);
+        if let Some(waker) = disconnected_waker {
+            waker.wake();
         }
     }
 }
@@ -486,6 +497,55 @@ impl PeerIoPump {
         }
     }
 
+    /// Demultiplex one complete wire frame without taking the Jazz node lock.
+    /// Auxiliary messages are consumed; canonical and fragmented frames are
+    /// returned byte-for-byte for the ordinary semantic transport.
+    pub async fn route_incoming_wire_frame(
+        &self,
+        frame: Vec<u8>,
+        negotiated_features: crate::wire::WireFeatures,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let decoded = crate::wire::decode_frame(&frame)
+            .map_err(|error| format!("malformed auxiliary wire frame: {error}"))?;
+        let crate::wire::WireFrame::Message(envelope) = decoded else {
+            return Ok(Some(frame));
+        };
+        let payload = crate::wire::decompress_sync_payload(&envelope.payload, envelope.features)
+            .map_err(|error| format!("malformed auxiliary wire payload: {error}"))?;
+        let message = crate::wire::decode_sync_message_for_features(&payload, negotiated_features)
+            .map_err(|error| format!("malformed auxiliary sync payload: {error:?}"))?;
+        match self.route_incoming(message).await {
+            Ok(()) => Ok(None),
+            Err(_) => Ok(Some(frame)),
+        }
+    }
+
+    /// Encode one bounded auxiliary batch as an ordinary complete wire frame.
+    /// Bindings request one chunk per frame, keeping the maximum 256 KiB node
+    /// response below the non-fragmented wire-frame bound.
+    pub fn take_outbound_wire_frame(
+        &self,
+        protocol_version: u16,
+        negotiated_features: crate::wire::WireFeatures,
+        session: Option<crate::wire::WireSession>,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let Some(message) = self.take_outbound(1) else {
+            return Ok(None);
+        };
+        let payload = crate::wire::encode_sync_message_for_features(&message, negotiated_features)
+            .map_err(|error| format!("cannot encode auxiliary sync payload: {error:?}"))?;
+        let active_features = negotiated_features
+            & !(crate::wire::FEATURE_PAYLOAD_LZ4 | crate::wire::FEATURE_PAYLOAD_ZSTD);
+        let mut envelope =
+            crate::wire::WireEnvelope::new(protocol_version, active_features, payload);
+        if let Some(session) = session {
+            envelope = envelope.with_session(session);
+        }
+        crate::wire::encode_frame(&crate::wire::WireFrame::Message(envelope))
+            .map(Some)
+            .map_err(|error| format!("cannot encode auxiliary wire frame: {error}"))
+    }
+
     /// Drain one bounded auxiliary batch for immediate transmission.
     pub fn take_outbound(&self, limit: usize) -> Option<SyncMessage> {
         match self.role {
@@ -521,6 +581,12 @@ impl PeerIoPump {
         PeerIoOutboundReady { pump: self.clone() }
     }
 
+    /// Non-blocking readiness probe for hosts that drive local futures by
+    /// repeated callbacks rather than awaiting a Rust future directly.
+    pub fn outbound_is_ready(&self) -> bool {
+        self.has_outbound()
+    }
+
     /// Detach this link's hop-local routing state. Bindings call this when the
     /// socket closes; another registered upstream inherits unsent demand.
     pub fn disconnect(&self) {
@@ -540,6 +606,14 @@ impl PeerIoPump {
                 .is_some_and(|responses| !responses.is_empty()),
         }
     }
+
+    fn is_disconnected(&self) -> bool {
+        self.resolver
+            .state
+            .borrow()
+            .disconnected_connections
+            .contains(&self.connection)
+    }
 }
 
 /// Future completed when a [`PeerIoPump`] has outbound auxiliary traffic.
@@ -551,7 +625,7 @@ impl Future for PeerIoOutboundReady {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.pump.has_outbound() {
+        if self.pump.has_outbound() || self.pump.is_disconnected() {
             Poll::Ready(())
         } else {
             self.pump

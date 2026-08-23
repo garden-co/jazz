@@ -4,7 +4,6 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use axum::Router;
-use jazz::db::WireTransportAdapter;
 use jazz::groove::storage::StorageFactory;
 use jazz::ids::AuthorId;
 use jazz::node::EdgeCacheBudget;
@@ -471,13 +470,12 @@ fn spawn_edge_upstream_connector(
             {
                 Ok(transport) => {
                     if shell
-                        .connect_upstream(Box::new(WireTransportAdapter::new_with_session_context(
+                        .connect_upstream_wire(
                             transport.transport,
                             transport.protocol_version,
                             transport.features,
-                            None,
                             transport.session_context,
-                        )))
+                        )
                         .await
                         .is_ok()
                     {
