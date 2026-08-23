@@ -3,6 +3,47 @@
 use super::*;
 
 #[test]
+fn shared_row_set_dag_reaches_owned_plan_and_groove_lowering() {
+    let mut input = row_set_input(0xd9);
+    let shared_source = input.shape.root.clone();
+    let union = RowSetNodeId("shared-diamond".to_owned());
+    input.shape.nodes.insert(
+        union.clone(),
+        RowSetExpr::Union {
+            inputs: vec![
+                UnionInput {
+                    node: shared_source.clone(),
+                    label: "left".to_owned(),
+                },
+                UnionInput {
+                    node: shared_source,
+                    label: "right".to_owned(),
+                },
+            ],
+        },
+    );
+    input.shape.root = union;
+    let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
+        reads: QueryReadSet::primary(current_read_view()),
+        policy: system_policy_context(),
+        input,
+        output: RowSetOutputRequest {
+            app_rows: None,
+            facts: BTreeSet::from([ProgramFactKey::ResultMembership]),
+        },
+    };
+
+    let program = lower_query_program(request, &mut FakeSourceResolver::default())
+        .expect("shared child should become owned occurrences and lower");
+    assert!(program.lowered.terminals.iter().any(|terminal| {
+        graph_any(&terminal.graph, &|graph| {
+            matches!(graph, GraphBuilder::Union { .. })
+        })
+    }));
+}
+
+#[test]
 fn simple_current_table_root_query_lowers_for_local_edge_and_global_sync_outputs() {
     for tier in [
         DurabilityTier::Local,
