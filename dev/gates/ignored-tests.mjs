@@ -21,7 +21,8 @@ function walk(directory, predicate) {
 
 function rustSourceIgnores(source, file) {
   const found = [];
-  const marker = /#\[ignore = "((?:\\.|[^"\\])*)"\]([\s\S]{0,240}?)\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\b/g;
+  const marker =
+    /#\[ignore = "((?:\\.|[^"\\])*)"\]([\s\S]{0,240}?)\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\b/g;
   for (const match of source.matchAll(marker)) {
     const reason = match[1].match(issueReason);
     if (!reason) fail(`${file}:${match.index} ignore needs "#NNNN: reason"`);
@@ -66,7 +67,9 @@ function compiledRustIgnores() {
 
 function verifyRust(source, compiled) {
   if (source.length !== compiled.length)
-    fail(`source/compiled ignored count differs: ${source.length} source, ${compiled.length} compiled`);
+    fail(
+      `source/compiled ignored count differs: ${source.length} source, ${compiled.length} compiled`,
+    );
   const used = new Set();
   for (const test of compiled) {
     const name = test.split("::").at(-1);
@@ -77,7 +80,8 @@ function verifyRust(source, compiled) {
     if (used.has(key)) fail(`${test} reuses source ignore annotation ${key}`);
     used.add(key);
   }
-  if (used.size !== source.length) fail("a source ignore annotation is not compiled into the inventory");
+  if (used.size !== source.length)
+    fail("a source ignore annotation is not compiled into the inventory");
 }
 
 function typeScriptIgnoresInSource(source, file) {
@@ -88,7 +92,9 @@ function typeScriptIgnoresInSource(source, file) {
   ];
   const directSkips = [...source.matchAll(/^\s*(?:it|test|describe)\.skip\(/gm)];
   if (directSkips.length !== markers.length)
-    fail(`${file} has ${directSkips.length} direct skip calls but ${markers.length} issue annotations`);
+    fail(
+      `${file} has ${directSkips.length} direct skip calls but ${markers.length} issue annotations`,
+    );
   if ([...source.matchAll(/@jazz-ignore/g)].length !== markers.length)
     fail(`${file} has a malformed @jazz-ignore marker`);
   return markers.map((match) => ({ file, issue: match[1], reason: match[2] }));
@@ -98,7 +104,9 @@ function sourceTypeScriptIgnores() {
   const roots = [path.join(root, "packages"), path.join(root, "examples")].filter(fs.existsSync);
   const found = [];
   for (const directory of roots)
-    for (const file of walk(directory, (candidate) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(candidate))) {
+    for (const file of walk(directory, (candidate) =>
+      /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(candidate),
+    )) {
       const source = fs.readFileSync(file, "utf8");
       found.push(...typeScriptIgnoresInSource(source, path.relative(root, file)));
     }
@@ -139,5 +147,7 @@ else {
   const rust = sourceRustIgnores();
   verifyRust(rust, compiledRustIgnores());
   const ts = sourceTypeScriptIgnores();
-  console.log(`ignored-tests: exact ${rust.length} Rust and ${ts.length} TypeScript issue-annotated ignores.`);
+  console.log(
+    `ignored-tests: exact ${rust.length} Rust and ${ts.length} TypeScript issue-annotated ignores.`,
+  );
 }

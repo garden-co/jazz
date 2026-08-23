@@ -25,7 +25,9 @@ function check(text, file) {
       fail(`${file}:${offset + 1} unresolved question lacks a GitHub issue link`);
     for (const match of links)
       if (match[1] !== match[2])
-        fail(`${file}:${offset + 1} issue label #${match[1]} does not match issue URL #${match[2]}`);
+        fail(
+          `${file}:${offset + 1} issue label #${match[1]} does not match issue URL #${match[2]}`,
+        );
   }
 }
 
@@ -49,6 +51,7 @@ function selfTest() {
 if (process.argv.includes("--self-test")) selfTest();
 else {
   for (const directory of specs)
-    for (const file of files(directory)) check(fs.readFileSync(path.join(root, file), "utf8"), file);
+    for (const file of files(directory))
+      check(fs.readFileSync(path.join(root, file), "utf8"), file);
   console.log("spec-open-questions: every unresolved question has an offline issue link");
 }
