@@ -19,7 +19,7 @@ use jazz::groove::storage::MemoryStorage;
 use jazz::protocol::SyncMessage;
 use jazz::protocol_limits::validate_logical_message_len;
 use jazz::schema::JazzSchema;
-use jazz::wire::TransportError;
+use jazz::wire::{TransportError, decode_sync_message, encode_sync_message};
 use jazz_storage_sqlite::SqliteStorage;
 use thiserror::Error;
 
@@ -106,12 +106,23 @@ impl RelayScope {
 /// Immutable configuration used to start a relay owner thread.
 #[derive(Clone, Debug)]
 pub struct RelayOpenConfig {
+    /// Inclusive ABI range implemented by the calling platform wrapper. This
+    /// is mandatory: opening a scope must reject an OTA/native mismatch before
+    /// allocating an owner thread or touching SQLite.
+    pub supported_abi: NativeRelayAbiRange,
     pub scope: RelayScope,
     /// Exact owned path chosen by the platform wrapper. The native relay never
     /// interpolates auth tokens or untrusted strings into a filesystem path.
     pub sqlite_path: PathBuf,
     pub schema: JazzSchema,
     pub identity: DbIdentity,
+}
+
+impl RelayOpenConfig {
+    fn validate(&self) -> Result<(), RelayError> {
+        ensure_native_relay_abi_compatible(self.supported_abi)?;
+        self.scope.validate()
+    }
 }
 
 /// Stable handle for one process-local UI peer.
@@ -222,27 +233,33 @@ impl NativeRelayWire {
     /// object API. The caller supplies one complete logical message; network
     /// framing and fragmentation remain the responsibility of its transport.
     pub fn push_inbound_encoded(&self, bytes: &[u8]) -> Result<(), RelayError> {
-        validate_logical_message_len(bytes.len()).map_err(RelayError::PeerMessageTooLarge)?;
-        let message = postcard::from_bytes(bytes).map_err(RelayError::DecodePeerMessage)?;
+        let message = decode_sync_message(bytes).map_err(RelayError::DecodePeerMessage)?;
         self.push_inbound(message)
     }
 
     /// Drain ordinary peer messages as postcard payloads for a binding.
     ///
-    /// The encoded payload is deliberately the same representation consumed by
-    /// the WASM and NAPI command surfaces. A future TurboModule transports
-    /// these bytes as `ArrayBuffer`/`Uint8Array`, keeping it thin and shared.
+    /// The encoded payload uses the canonical Jazz sync-message codec. A
+    /// future TurboModule transports these bytes as `ArrayBuffer`/`Uint8Array`,
+    /// keeping it thin and shared.
     pub fn take_outbound_encoded(&self) -> Result<Vec<Vec<u8>>, RelayError> {
-        self.take_outbound()?
-            .into_iter()
+        let mut outbound = self
+            .outbound
+            .lock()
+            .map_err(|_| RelayError::Poisoned("upstream outbound queue"))?;
+        // Encode while the batch remains queued. A failed codec/size check
+        // leaves every message intact for retry and diagnostics.
+        let encoded = outbound
+            .iter()
             .map(|message| {
-                let bytes =
-                    postcard::to_allocvec(&message).map_err(RelayError::EncodePeerMessage)?;
+                let bytes = encode_sync_message(message).map_err(RelayError::EncodePeerMessage)?;
                 validate_logical_message_len(bytes.len())
                     .map_err(RelayError::PeerMessageTooLarge)?;
                 Ok(bytes)
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        outbound.clear();
+        Ok(encoded)
     }
 }
 
@@ -406,7 +423,8 @@ enum RelayCommand {
 
 impl NativeRelay {
     pub fn spawn(config: RelayOpenConfig) -> Result<Self, RelayError> {
-        config.scope.validate()?;
+        // This is before channel/thread creation and the worker's SQLite open.
+        config.validate()?;
         let sqlite_path = config.sqlite_path.clone();
         let schema_version = config.schema.version_id();
         let wire = NativeRelayWire::default();
@@ -514,7 +532,7 @@ pub struct NativeRelayRegistry {
 
 impl NativeRelayRegistry {
     pub fn open(&self, config: RelayOpenConfig) -> Result<NativeRelay, RelayError> {
-        config.scope.validate()?;
+        config.validate()?;
         let mut relays = self
             .relays
             .lock()
@@ -602,6 +620,10 @@ mod tests {
 
     fn config(path: PathBuf, auth_scope: Option<&str>) -> RelayOpenConfig {
         RelayOpenConfig {
+            supported_abi: NativeRelayAbiRange {
+                minimum: NATIVE_RELAY_ABI_VERSION,
+                maximum: NATIVE_RELAY_ABI_VERSION,
+            },
             scope: RelayScope {
                 app_namespace: "native-relay-test".to_owned(),
                 storage_namespace: "default".to_owned(),
@@ -713,13 +735,38 @@ mod tests {
     }
 
     #[test]
+    fn incompatible_open_creates_no_relay_or_sqlite_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let sqlite_path = directory.path().join("must-not-exist.sqlite");
+        let mut open = config(sqlite_path.clone(), Some("alice"));
+        open.supported_abi = NativeRelayAbiRange {
+            minimum: NATIVE_RELAY_ABI_VERSION.saturating_add(1),
+            maximum: u16::MAX,
+        };
+        let registry = NativeRelayRegistry::default();
+
+        assert!(matches!(
+            registry.open(open),
+            Err(RelayError::IncompatibleAbi { native, .. }) if native == NATIVE_RELAY_ABI_VERSION
+        ));
+        assert!(
+            !sqlite_path.exists(),
+            "ABI rejection must happen before SQLite creates a database"
+        );
+        assert!(
+            registry.relays.lock().unwrap().is_empty(),
+            "ABI rejection must not register a partially-open relay"
+        );
+    }
+
+    #[test]
     fn encoded_peer_messages_use_the_shared_postcard_contract() {
         let wire = NativeRelayWire::default();
         let message = SyncMessage::SessionClaims {
             identity: AuthorId::SYSTEM,
             claims: BTreeMap::from([("role".to_owned(), Value::String("member".to_owned()))]),
         };
-        let bytes = postcard::to_allocvec(&message).unwrap();
+        let bytes = encode_sync_message(&message).unwrap();
 
         wire.push_inbound_encoded(&bytes).unwrap();
         assert_eq!(
@@ -731,7 +778,7 @@ mod tests {
         let encoded = wire.take_outbound_encoded().unwrap();
         assert_eq!(encoded.len(), 1);
         assert_eq!(
-            postcard::from_bytes::<SyncMessage>(&encoded[0]).unwrap(),
+            decode_sync_message(&encoded[0]).unwrap(),
             SyncMessage::SessionClaims {
                 identity: AuthorId::SYSTEM,
                 claims: BTreeMap::from([("role".to_owned(), Value::String("member".to_owned()))]),
