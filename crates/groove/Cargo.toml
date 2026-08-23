@@ -22,7 +22,6 @@ uuid = { version = "1.18.1", features = ["serde", "v4", "v5"] }
 web-time = "1.1.0"
 rustc-hash.workspace = true
 idb-tree = { path = "../idb-tree" }
-opfs-btree = { path = "../opfs-btree" }
 futures = "0.3"
 
 [dev-dependencies]

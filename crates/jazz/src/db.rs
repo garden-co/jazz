@@ -122,6 +122,7 @@ struct ChunkDemandState {
     disconnected_connections: BTreeSet<u64>,
     upstream_connection: Option<u64>,
     upstream_connections: BTreeSet<u64>,
+    completion_generation: u64,
 }
 
 #[derive(Clone, Default)]
@@ -130,6 +131,23 @@ struct PeerChunkResolver {
 }
 
 impl PeerChunkResolver {
+    fn has_pending_local_demand(&self) -> bool {
+        self.state
+            .borrow()
+            .pending_by_chunk
+            .values()
+            .any(|pending| {
+                pending
+                    .waiters
+                    .iter()
+                    .any(|waiter| matches!(waiter, ChunkDemandWaiter::Local { .. }))
+            })
+    }
+
+    fn completion_generation(&self) -> u64 {
+        self.state.borrow().completion_generation
+    }
+
     fn register_connection(&self, connection: u64, upstream: bool) {
         let mut state = self.state.borrow_mut();
         state.disconnected_connections.remove(&connection);
@@ -251,6 +269,7 @@ impl PeerChunkResolver {
         let Some(pending) = state.pending_by_chunk.remove(&request) else {
             return;
         };
+        state.completion_generation = state.completion_generation.wrapping_add(1);
         debug_assert_eq!(pending.upstream_id, response.request_id);
         for waiter in pending.waiters {
             match waiter {
@@ -561,6 +580,22 @@ impl PeerIoPump {
                     ChunkResponseBatch { responses },
                 ))
             }
+        }
+    }
+
+    fn restore_outbound(&self, message: SyncMessage) {
+        let mut state = self.resolver.state.borrow_mut();
+        match (self.role, message) {
+            (PeerIoPumpRole::Upstream, SyncMessage::ChunkRequestBatch(batch)) => {
+                for request in batch.requests.into_iter().rev() {
+                    state.outbound.push_front(request);
+                }
+            }
+            (PeerIoPumpRole::Subscriber, SyncMessage::ChunkResponseBatch(batch)) => {
+                let queued = state.relay_responses.entry(self.connection).or_default();
+                queued.splice(0..0, batch.responses);
+            }
+            _ => {}
         }
     }
 

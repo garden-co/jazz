@@ -35,6 +35,143 @@ fn large_write_pushes_staging_before_syncing_its_referencing_row() {
     assert_eq!(rows[0].cell_at(0), Some(Value::String(title)));
 }
 
+/// Internal topology canary: exact push-before-row ordering on both relay legs
+/// and pull forwarding after edge chunk eviction are protocol/runtime
+/// properties that are not observable through the public client API alone.
+/// The accepted write and reconstructed value are still asserted through that
+/// API. Every node is opened with its own storage directory.
+#[test]
+fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_eviction() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xc4; 16]);
+    let core = open_core(0xc5, AuthorId::SYSTEM, &schema);
+    let upload_edge = open_db(0xc6, AuthorId::SYSTEM, &schema);
+    let writer = open_db(0xc7, author, &schema);
+
+    let (upload_edge_transport, core_upload_transport, upload_edge_to_core) =
+        duplex_with_client_outbound_tap();
+    let _upload_edge_upstream =
+        crate::db::block_on(upload_edge.connect_upstream(upload_edge_transport));
+    let _core_upload_edge = core.accept_subscriber_with_trust(
+        core_upload_transport,
+        AuthorId::SYSTEM,
+        CommitUnitTrust::TrustedBackend,
+    );
+    let (writer_transport, upload_edge_client_transport, writer_to_upload_edge) =
+        duplex_with_client_outbound_tap();
+    let _writer_upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
+    let _upload_edge_writer = upload_edge.accept_subscriber(upload_edge_client_transport, author);
+
+    let title = "multi-hop-large-value/".repeat(8_000);
+    let write = writer
+        .insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String(title.clone())),
+                ("done".to_owned(), Value::Bool(false)),
+                ("owner".to_owned(), Value::Uuid(author.0)),
+            ]),
+        )
+        .unwrap();
+
+    let mut writer_messages = Vec::new();
+    let mut upload_edge_messages = Vec::new();
+    for _ in 0..64 {
+        writer.tick().unwrap();
+        writer_messages.extend(writer_to_upload_edge.borrow().iter().cloned());
+        upload_edge.tick().unwrap();
+        upload_edge_messages.extend(upload_edge_to_core.borrow().iter().cloned());
+        core.tick().unwrap();
+        upload_edge.tick().unwrap();
+        writer.tick().unwrap();
+        if writer.write_state(write.tx_id).unwrap().durability == DurabilityTier::Global {
+            break;
+        }
+    }
+    assert_eq!(
+        writer.write_state(write.tx_id).unwrap().durability,
+        DurabilityTier::Global
+    );
+    assert_eq!(
+        core.read(&core.table("todos")).unwrap()[0].cell_at(0),
+        Some(Value::String(title.clone()))
+    );
+
+    for (leg, messages) in [
+        ("writer-to-upload-edge", writer_messages),
+        ("upload-edge-to-core", upload_edge_messages),
+    ] {
+        let finish = messages
+            .iter()
+            .position(|message| matches!(message, SyncMessage::ChunkUploadFinish(_)))
+            .unwrap_or_else(|| panic!("{leg} sends a chunk upload finish"));
+        let row = messages
+            .iter()
+            .position(|message| {
+                matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == write.tx_id)
+            })
+            .unwrap_or_else(|| panic!("{leg} sends the referencing row"));
+        assert!(finish < row, "{leg} stages the chunks before the row");
+    }
+    assert_eq!(
+        prepared_read(&upload_edge, &upload_edge.table("todos")).len(),
+        1,
+        "the upload edge retained the accepted row"
+    );
+
+    // Retain the accepted row and its disclosed locator, but replace only the
+    // edge's Groove chunk backend with an empty independent store. Its only
+    // route to the value bytes is now to forward this edge-local access to Core.
+    upload_edge
+        .node
+        .node
+        .borrow_mut()
+        .set_chunk_storage(Rc::new(groove::chunks::MemoryChunkStorage::new()));
+    let query = upload_edge.table("todos");
+    let mut subscription = prepared_subscribe(
+        &upload_edge,
+        &query,
+        ReadOpts {
+            tier: DurabilityTier::Local,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+    )
+    .unwrap();
+    let mut received = None;
+    let mut snapshot = RelationSnapshot::default();
+    let mut pull_messages = Vec::new();
+    for _ in 0..128 {
+        upload_edge.tick().unwrap();
+        pull_messages.extend(upload_edge_to_core.borrow().iter().cloned());
+        core.tick().unwrap();
+        upload_edge.tick().unwrap();
+        while let Some(event) = subscription.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+        received = snapshot.rows.first().and_then(|row| row.cell_at(0));
+        if received == Some(Value::String(title.clone())) {
+            break;
+        }
+    }
+    assert_eq!(
+        snapshot.rows.len(),
+        1,
+        "the empty edge delivers the referencing row",
+    );
+    assert!(
+        pull_messages
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ChunkRequestBatch(_))),
+        "the empty edge requests missing chunks from Core"
+    );
+    assert_eq!(
+        received,
+        Some(Value::String(title)),
+        "the empty edge forwards the missing chunk pull to Core"
+    );
+}
+
 #[test]
 fn rate_limited_push_rejects_locally_without_sending_the_referencing_row() {
     let schema = schema();

@@ -295,6 +295,15 @@ task when it stages inbound data. No environment busy-polls, moves Groove's
 backend across threads, or re-enters a locked `PeerConnection`. Disconnect
 completes outstanding hop-local requests safely and discards late responses.
 
+In-process semantic transports use the same pump: upstream and subscriber
+`PeerConnection::tick` calls drain its bounded queues as part of their normal
+non-blocking service pass. A shared resolver exposes only whether local chunk
+demand is pending and a monotonic completion generation. Jazz uses those cheap
+signals to poll retained Groove query work and refresh affected subscriptions;
+quiescent semantic ticks do not scan unrelated subscriptions. Binding-owned
+socket drivers may drain the same queue concurrently because taking a batch is
+atomic, and transport backpressure restores the batch before retry.
+
 ## 19.7 History, retention, and collection
 
 Jazz has no large-value-specific durable root registry. A Jazz version is an

@@ -821,6 +821,19 @@ where
             }) => {
                 let stop = Box::pin(async {
                     let outbound_stop = Box::pin(async {
+                        if let Some(message) = self.auxiliary_pump.take_outbound(64) {
+                            if let Err(error) = self.transport.send(message.clone()) {
+                                self.auxiliary_pump.restore_outbound(message);
+                                if handle_transport_backpressure(
+                                    &self.node,
+                                    &self.scheduler,
+                                    &error,
+                                ) {
+                                    return Ok(true);
+                                }
+                                return Err(transport_error(error));
+                            }
+                        }
                         pending.extend(upstream_subscriptions.borrow_mut().drain(..));
                         let claims = self.node.borrow().session_claims_with_revisions();
                         for (identity, claims, revision) in claims {
@@ -1869,7 +1882,10 @@ where
                     send_with_sync_context(&self.node, peer, self.transport.as_mut(), fate)?;
                 }
                 if let Some(message) = self.auxiliary_pump.take_outbound(64) {
-                    self.transport.send(message).map_err(transport_error)?;
+                    if let Err(error) = self.transport.send(message.clone()) {
+                        self.auxiliary_pump.restore_outbound(message);
+                        return Err(transport_error(error));
+                    }
                 }
                 while let Some(message) = self.transport.try_recv() {
                     // Authorization support is authority-owned in Phase 3.

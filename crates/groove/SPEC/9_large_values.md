@@ -456,8 +456,9 @@ Chunk failure is scoped like chapter 8's node-evaluation failure:
   outside the current design; it would require explicit host finalizers,
   external-memory accounting and lease-aware backpressure.
 - Exact JSON formatting policy after semantic merges.
-- Exact persisted staging-expiry policy and reclamation-worker cadence for each
-  storage backend.
+- Exact Jazz ingress limits and host maintenance cadence for staging expiry.
+  Groove persists receipt timestamps and performs requested eviction, but does
+  not choose policy or run a backend-specific expiry worker.
 - Any future history truncation/thinning implementation MUST delete physical
   versions through Groove's refcount-aware record mutation path. Direct storage
   deletion would leak or prematurely reclaim large-value trees.

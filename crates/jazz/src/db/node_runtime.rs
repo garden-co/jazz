@@ -47,6 +47,7 @@ where
     pub(super) defer_local_persistence: Cell<bool>,
     pub(super) chunk_resolver: PeerChunkResolver,
     pub(super) local_chunk_reader: groove::chunks::LocalChunkReader,
+    pub(super) observed_chunk_completion_generation: Cell<u64>,
 }
 
 impl<S> Node<S>
@@ -107,6 +108,7 @@ where
             defer_local_persistence: Cell::new(false),
             chunk_resolver,
             local_chunk_reader,
+            observed_chunk_completion_generation: Cell::new(0),
         }
     }
 
@@ -1235,6 +1237,19 @@ where
         self.drain_subscription_finalizations().await?;
         self.deliver_pending_mutation_errors();
         let mut stats = DbTickStats::default();
+        let chunk_completion_generation = self.chunk_resolver.completion_generation();
+        if self.chunk_resolver.has_pending_local_demand()
+            || chunk_completion_generation != self.observed_chunk_completion_generation.get()
+        {
+            stats.subscription_events += Box::pin(refresh_subscriptions_in(
+                &self.node,
+                &self.subscriptions,
+                &self.active_authority_view_receipts,
+            ))
+            .await?;
+            self.observed_chunk_completion_generation
+                .set(chunk_completion_generation);
+        }
         let mut remote_sync_applied = false;
         // A later subscriber can mutate Core state after an earlier peer link
         // has already had its turn in this pass.  Remember that generation so
