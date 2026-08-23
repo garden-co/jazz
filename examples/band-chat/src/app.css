@@ -1,1 +1,155 @@
-:root { font-family: Inter, ui-sans-serif, system-ui; color: #f5f2ff; background: #12101c; } * { box-sizing: border-box; } body { margin: 0; } button, input { font: inherit; } button { cursor: pointer; border: 0; border-radius: .6rem; padding: .65rem .85rem; background: #a78bfa; color: #160f2c; font-weight: 700; } .shell { max-width: 980px; min-height: 100vh; margin: auto; padding: 5rem 2rem; } header { max-width: 650px; } .eyebrow { color: #f0abfc; font-size: .75rem; font-weight: 800; letter-spacing: .16em; } h1 { font-size: clamp(3rem, 9vw, 6rem); line-height: .9; margin: .35rem 0 1rem; } p { color: #c9c3d9; line-height: 1.5; } .empty { margin-top: 4rem; padding: 2rem; border: 1px solid #4c3b6e; border-radius: 1rem; background: #1e1930; } .chat { display: grid; grid-template-columns: 220px 1fr; min-height: 530px; margin-top: 3rem; border: 1px solid #4c3b6e; border-radius: 1rem; overflow: hidden; background: #1a1628; } aside { padding: 1rem; background: #211a34; } .room { display: block; width: 100%; text-align: left; margin: .45rem 0; background: transparent; color: #d9d1ea; } .room.active { background: #a78bfa; color: #160f2c; } .conversation { display: flex; flex-direction: column; padding: 1.25rem; } ol { list-style: none; padding: 0; flex: 1; } li { margin: .8rem 0; } li strong, li span, li small { display: block; } li strong { color: #f0abfc; font-size: .8rem; } li small { color: #a9a1b9; margin-top: .25rem; } form { display: flex; gap: .5rem; } form > input { flex: 1; min-width: 0; border: 1px solid #675783; border-radius: .6rem; padding: .65rem; background: #120f1c; color: inherit; } .file { display: grid; place-items: center; padding: 0 .6rem; border: 1px dashed #78639d; border-radius: .6rem; color: #d9d1ea; font-size: .8rem; } .file input { display: none; } @media (max-width: 640px) { .shell { padding: 2rem 1rem; } .chat { grid-template-columns: 1fr; } aside { display: flex; gap: .4rem; overflow: auto; } aside h2 { display:none; } .room { width: auto; white-space: nowrap; } form { flex-wrap: wrap; } }
+:root {
+  font-family: Inter, ui-sans-serif, system-ui;
+  color: #f5f2ff;
+  background: #12101c;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+button,
+input {
+  font: inherit;
+}
+button {
+  cursor: pointer;
+  border: 0;
+  border-radius: 0.6rem;
+  padding: 0.65rem 0.85rem;
+  background: #a78bfa;
+  color: #160f2c;
+  font-weight: 700;
+}
+.shell {
+  max-width: 980px;
+  min-height: 100vh;
+  margin: auto;
+  padding: 5rem 2rem;
+}
+header {
+  max-width: 650px;
+}
+.eyebrow {
+  color: #f0abfc;
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+}
+h1 {
+  font-size: clamp(3rem, 9vw, 6rem);
+  line-height: 0.9;
+  margin: 0.35rem 0 1rem;
+}
+p {
+  color: #c9c3d9;
+  line-height: 1.5;
+}
+.empty {
+  margin-top: 4rem;
+  padding: 2rem;
+  border: 1px solid #4c3b6e;
+  border-radius: 1rem;
+  background: #1e1930;
+}
+.chat {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  min-height: 530px;
+  margin-top: 3rem;
+  border: 1px solid #4c3b6e;
+  border-radius: 1rem;
+  overflow: hidden;
+  background: #1a1628;
+}
+aside {
+  padding: 1rem;
+  background: #211a34;
+}
+.room {
+  display: block;
+  width: 100%;
+  text-align: left;
+  margin: 0.45rem 0;
+  background: transparent;
+  color: #d9d1ea;
+}
+.room.active {
+  background: #a78bfa;
+  color: #160f2c;
+}
+.conversation {
+  display: flex;
+  flex-direction: column;
+  padding: 1.25rem;
+}
+ol {
+  list-style: none;
+  padding: 0;
+  flex: 1;
+}
+li {
+  margin: 0.8rem 0;
+}
+li strong,
+li span,
+li small {
+  display: block;
+}
+li strong {
+  color: #f0abfc;
+  font-size: 0.8rem;
+}
+li small {
+  color: #a9a1b9;
+  margin-top: 0.25rem;
+}
+form {
+  display: flex;
+  gap: 0.5rem;
+}
+form > input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid #675783;
+  border-radius: 0.6rem;
+  padding: 0.65rem;
+  background: #120f1c;
+  color: inherit;
+}
+.file {
+  display: grid;
+  place-items: center;
+  padding: 0 0.6rem;
+  border: 1px dashed #78639d;
+  border-radius: 0.6rem;
+  color: #d9d1ea;
+  font-size: 0.8rem;
+}
+.file input {
+  display: none;
+}
+@media (max-width: 640px) {
+  .shell {
+    padding: 2rem 1rem;
+  }
+  .chat {
+    grid-template-columns: 1fr;
+  }
+  aside {
+    display: flex;
+    gap: 0.4rem;
+    overflow: auto;
+  }
+  aside h2 {
+    display: none;
+  }
+  .room {
+    width: auto;
+    white-space: nowrap;
+  }
+  form {
+    flex-wrap: wrap;
+  }
+}
