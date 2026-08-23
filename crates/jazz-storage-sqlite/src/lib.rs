@@ -11,8 +11,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use groove::storage::{
-    Error, KeyValue, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, StorageCursor,
-    StorageFactory, StorageFuture, StorageScan, Value, apply_storage_delta,
+    Error, KeyValue, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanBounds,
+    ScanDirection, ScanRequest, StorageCursor, StorageFactory, StorageFuture, StorageScan, Value,
+    apply_storage_delta,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -301,34 +302,43 @@ impl SqliteStorage {
         Ok(())
     }
 
-    fn scan(
+    fn scan_rows(
         &self,
         cf: String,
         start: Vec<u8>,
         end: Option<Vec<u8>>,
         reverse: bool,
+        max_items: Option<usize>,
     ) -> Result<Vec<KeyValue>, Error> {
         let cf = self.cf_id(&cf)?;
+        if max_items == Some(0) {
+            return Ok(Vec::new());
+        }
         self.with_connection(|connection| {
             let order = if reverse { "DESC" } else { "ASC" };
+            let limit = max_items
+                .map(|limit| i64::try_from(limit).unwrap_or(i64::MAX))
+                .unwrap_or(-1);
             let sql = if end.is_some() {
                 format!(
-                    "SELECT k, v FROM kv WHERE cf = ?1 AND k >= ?2 AND k < ?3 ORDER BY k {order}"
+                    "SELECT k, v FROM kv WHERE cf = ?1 AND k >= ?2 AND k < ?3 ORDER BY k {order} LIMIT ?4"
                 )
             } else {
-                format!("SELECT k, v FROM kv WHERE cf = ?1 AND k >= ?2 ORDER BY k {order}")
+                format!(
+                    "SELECT k, v FROM kv WHERE cf = ?1 AND k >= ?2 ORDER BY k {order} LIMIT ?3"
+                )
             };
             let mut statement = connection.prepare(&sql).map_err(backend)?;
             match end.as_deref() {
                 Some(end) => statement
-                    .query_map(params![cf, start, end], |row| {
+                    .query_map(params![cf, start, end, limit], |row| {
                         Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
                     })
                     .map_err(backend)?
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(backend),
                 None => statement
-                    .query_map(params![cf, start], |row| {
+                    .query_map(params![cf, start, limit], |row| {
                         Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
                     })
                     .map_err(backend)?
@@ -499,44 +509,28 @@ impl OrderedKvStorage for SqliteStorage {
         })
     }
 
-    fn scan_range(
-        &self,
-        cf: String,
-        start: Vec<u8>,
-        end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+    fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         Box::pin(async move {
-            let values = self.scan(cf, start, Some(end), false)?;
-            Ok(Box::new(SqliteCursor::new(values)) as StorageScan<'_>)
-        })
-    }
-
-    fn scan_prefix(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        Box::pin(async move {
-            let upper = prefix_upper_bound(&prefix);
-            let mut values = self.scan(cf, prefix.clone(), upper, false)?;
-            if prefix_upper_bound(&prefix).is_none() {
-                values.retain(|(key, _)| key.starts_with(&prefix));
-            }
-            Ok(Box::new(SqliteCursor::new(values)) as StorageScan<'_>)
-        })
-    }
-
-    fn scan_prefix_reverse(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        Box::pin(async move {
-            let upper = prefix_upper_bound(&prefix);
-            let mut values = self.scan(cf, prefix.clone(), upper, true)?;
-            if prefix_upper_bound(&prefix).is_none() {
-                values.retain(|(key, _)| key.starts_with(&prefix));
-            }
+            let ScanRequest {
+                cf,
+                bounds,
+                direction,
+                max_items,
+            } = request;
+            let (start, end) = match bounds {
+                ScanBounds::Prefix(prefix) => {
+                    let end = prefix_upper_bound(&prefix);
+                    (prefix, end)
+                }
+                ScanBounds::Range { start, end } => (start, Some(end)),
+            };
+            let values = self.scan_rows(
+                cf,
+                start,
+                end,
+                direction == ScanDirection::Reverse,
+                max_items,
+            )?;
             Ok(Box::new(SqliteCursor::new(values)) as StorageScan<'_>)
         })
     }
@@ -547,7 +541,9 @@ impl OrderedKvStorage for SqliteStorage {
         prefix: Vec<u8>,
     ) -> StorageFuture<'_, Result<Option<KeyValue>, Error>> {
         Box::pin(async move {
-            let mut scan = self.scan_prefix_reverse(cf, prefix).await?;
+            let mut scan = self
+                .scan(ScanRequest::prefix(cf, prefix).reversed().with_max_items(1))
+                .await?;
             Ok(scan
                 .next_batch()
                 .await?

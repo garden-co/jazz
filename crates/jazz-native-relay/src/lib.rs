@@ -252,10 +252,10 @@ impl RelayWorker {
             id_source: None,
         }))
         .map_err(RelayError::Db)?;
-        let upstream = persistent.connect_upstream(Box::new(QueueTransport {
+        let upstream = block_on(persistent.connect_upstream(Box::new(QueueTransport {
             inbound: wire.inbound,
             outbound: wire.outbound,
-        }));
+        })));
         Ok(Self {
             persistent,
             _upstream: upstream,
@@ -283,7 +283,7 @@ impl RelayWorker {
         }))
         .map_err(RelayError::Db)?;
         let (client_transport, relay_transport) = duplex();
-        let upstream = db.connect_upstream(client_transport);
+        let upstream = block_on(db.connect_upstream(client_transport));
         let served =
             self.persistent
                 .accept_subscriber_with_claims(relay_transport, identity.author, claims);

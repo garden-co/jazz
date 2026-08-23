@@ -1,9 +1,96 @@
 use futures::executor::block_on;
-use groove::storage::{Error, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage};
+use groove::storage::{
+    Error, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage, ScanRequest, collect_scan,
+};
 use jazz_storage_sqlite::SqliteStorage;
 
 fn open(dir: &tempfile::TempDir) -> SqliteStorage {
     SqliteStorage::open(dir.path().join("jazz.sqlite"), &["records"]).unwrap()
+}
+
+#[test]
+fn scan_request_conforms_for_prefix_range_direction_and_limits() {
+    block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = open(&dir);
+        for (key, value) in [
+            (b"a:0".as_slice(), b"zero".as_slice()),
+            (b"a:1".as_slice(), b"one".as_slice()),
+            (b"a:2".as_slice(), b"two".as_slice()),
+            (b"b:0".as_slice(), b"other".as_slice()),
+            (&[0xff], b"ff".as_slice()),
+            (&[0xff, 0x00], b"ff-zero".as_slice()),
+        ] {
+            storage
+                .set("records".into(), key.to_vec(), value.to_vec())
+                .await
+                .unwrap();
+        }
+
+        let scan = |request| async {
+            collect_scan(storage.scan(request).await.unwrap())
+                .await
+                .unwrap()
+        };
+
+        assert_eq!(
+            scan(ScanRequest::prefix("records".into(), b"a:".to_vec()).with_max_items(2)).await,
+            vec![
+                (b"a:0".to_vec(), b"zero".to_vec()),
+                (b"a:1".to_vec(), b"one".to_vec()),
+            ]
+        );
+        assert_eq!(
+            scan(
+                ScanRequest::prefix("records".into(), b"a:".to_vec())
+                    .reversed()
+                    .with_max_items(2),
+            )
+            .await,
+            vec![
+                (b"a:2".to_vec(), b"two".to_vec()),
+                (b"a:1".to_vec(), b"one".to_vec()),
+            ]
+        );
+        assert_eq!(
+            scan(
+                ScanRequest::range("records".into(), b"a:1".to_vec(), b"b:0".to_vec())
+                    .with_max_items(2),
+            )
+            .await,
+            vec![
+                (b"a:1".to_vec(), b"one".to_vec()),
+                (b"a:2".to_vec(), b"two".to_vec()),
+            ]
+        );
+        assert_eq!(
+            scan(
+                ScanRequest::range("records".into(), b"a:1".to_vec(), b"b:0".to_vec())
+                    .reversed()
+                    .with_max_items(1),
+            )
+            .await,
+            vec![(b"a:2".to_vec(), b"two".to_vec())]
+        );
+        assert_eq!(
+            scan(ScanRequest::prefix("records".into(), vec![0xff])).await,
+            vec![
+                (vec![0xff], b"ff".to_vec()),
+                (vec![0xff, 0x00], b"ff-zero".to_vec()),
+            ]
+        );
+        assert!(
+            scan(ScanRequest::prefix("records".into(), Vec::new()).with_max_items(0))
+                .await
+                .is_empty()
+        );
+        assert!(matches!(
+            storage
+                .scan(ScanRequest::prefix("missing".into(), Vec::new()).with_max_items(0))
+                .await,
+            Err(Error::ColumnFamilyNotFound(name)) if name == "missing"
+        ));
+    });
 }
 
 #[test]
