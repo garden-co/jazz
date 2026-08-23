@@ -994,11 +994,6 @@ impl NapiDb {
                 &kind,
             )));
         }
-        if kind == "exclusive" && author.is_some() {
-            return Err(napi::Error::from_reason(
-                "exclusive transactions do not accept an identity override",
-            ));
-        }
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1015,7 +1010,13 @@ impl NapiDb {
                             None => $db.begin_mergeable(open_batch_id).await,
                         }
                     } else {
-                        $db.begin_exclusive(open_batch_id).await
+                        match author {
+                            Some(author) => {
+                                $db.begin_exclusive_for_identity(open_batch_id, author)
+                                    .await
+                            }
+                            None => $db.begin_exclusive(open_batch_id).await,
+                        }
                     }
                 })
             };

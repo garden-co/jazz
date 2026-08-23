@@ -512,8 +512,15 @@ impl WasmDbInner {
         ))
     }
 
-    fn begin_exclusive(&self, id: OpenTransactionId) -> Result<(), jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(db.begin_exclusive(id)))
+    fn begin_exclusive(
+        &self,
+        id: OpenTransactionId,
+        author: Option<AuthorId>,
+    ) -> Result<(), jazz::db::Error> {
+        with_wasm_db!(self, |db| match author {
+            Some(author) => block_on(db.begin_exclusive_for_identity(id, author)),
+            None => block_on(db.begin_exclusive(id)),
+        })
     }
 
     fn begin_mergeable(
@@ -1641,13 +1648,10 @@ impl WasmDb {
                 .inner
                 .begin_mergeable(open_batch_id, author)
                 .map_err(to_js_error),
-            "exclusive" if author.is_none() => self
+            "exclusive" => self
                 .inner
-                .begin_exclusive(open_batch_id)
+                .begin_exclusive(open_batch_id, author)
                 .map_err(to_js_error),
-            "exclusive" => Err(JsValue::from_str(
-                "exclusive transactions do not accept an identity override",
-            )),
             _ => Err(JsValue::from_str(&unknown_transaction_kind_message(&kind))),
         }
     }
@@ -2700,7 +2704,7 @@ impl WasmDb {
             .parse::<OpenTransactionId>()
             .map_err(|error| JsValue::from_str(&error))?;
         self.inner
-            .begin_exclusive(open_batch_id)
+            .begin_exclusive(open_batch_id, None)
             .map_err(to_js_error)?;
         Ok(WasmTx {
             db: self.inner.clone(),

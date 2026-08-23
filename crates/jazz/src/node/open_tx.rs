@@ -681,6 +681,9 @@ where
                 "open transaction is not exclusive",
             ));
         }
+        if self.open_tx(open_batch_id)?.provisional_author != made_by {
+            return Err(Error::OpenTransactionIdentityMismatch);
+        }
         if !self
             .open_exclusive_is_locally_serializable(open_batch_id)
             .await?
@@ -759,6 +762,16 @@ where
         self.open_tx.open_transactions.remove(&open_batch_id);
         self.open_tx.closed_batches.insert(open_batch_id);
         Ok((publication, SyncMessage::CommitUnit { tx, versions }))
+    }
+
+    /// Commit an exclusive transaction using the identity bound when it opened.
+    pub async fn commit_exclusive_bound(
+        &mut self,
+        open_batch_id: OpenTransactionId,
+        now_ms: u64,
+    ) -> Result<(PublishedTransaction, SyncMessage), Error> {
+        let author = self.open_tx(open_batch_id)?.provisional_author;
+        self.commit_exclusive(open_batch_id, author, now_ms).await
     }
 
     async fn open_exclusive_is_locally_serializable(

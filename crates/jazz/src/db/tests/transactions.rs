@@ -840,6 +840,45 @@ fn exclusive_tx_ref_survives_handle_reconstruction_until_explicit_commit() {
     assert_eq!(current.cell(table, "done"), Some(Value::Bool(true)));
 }
 
+/// An exclusive transaction binds alice at begin: its staged read cannot be
+/// re-authorized as bob, while the handle commit consumes that bound identity.
+#[test]
+fn identity_bound_exclusive_transaction_rejects_cross_identity_reads_and_commits_as_bound_author() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let open = OpenTransactionId::new();
+    let row = row(0xa1);
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+
+    db.begin_exclusive_for_identity(open, alice).unwrap();
+    db.exclusive_tx_ref(open)
+        .insert_with_id("todos", row, doctest_support::todo_cells("alice", false))
+        .unwrap();
+
+    // Planted positive: the bound identity can read the transaction overlay.
+    assert_eq!(
+        db.exclusive_tx_ref(open)
+            .all_prepared_for_identity(&prepared, alice)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(matches!(
+        doctest_support::block_on(
+            db.exclusive_tx_ref(open)
+                .all_prepared_for_identity(&prepared, bob),
+        ),
+        Err(error) if error.code == ErrorCode::Protocol
+    ));
+
+    db.commit_exclusive_handle(open).unwrap();
+    assert_eq!(
+        prepared_one(&db, &db.table("todos")).unwrap().row_uuid(),
+        row
+    );
+}
+
 #[test]
 fn exclusive_tx_rejects_conflicting_concurrent_update() {
     let schema = schema();

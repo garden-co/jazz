@@ -466,6 +466,24 @@ where
         self.open_exclusive_handle(id).await
     }
 
+    /// Open an exclusive transaction whose identity is fixed for its lifetime.
+    ///
+    /// Transaction-local reads, authorization, provenance, and commit
+    /// attribution all use `author`; subsequent calls cannot replace it.
+    pub async fn begin_exclusive_for_identity(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorId,
+    ) -> Result<(), Error> {
+        self.node
+            .node
+            .lock()
+            .await
+            .open_exclusive_for_identity(id, author)
+            .await
+            .map_err(Into::into)
+    }
+
     /// Return a non-owning operations handle for an already-open exclusive transaction.
     ///
     /// This handle never closes the transaction when dropped, so it is suitable
@@ -654,7 +672,7 @@ where
             .node
             .lock()
             .await
-            .commit_exclusive(open_tx_id, self.identity.author, self.next_now_ms())
+            .commit_exclusive_bound(open_tx_id, self.next_now_ms())
             .await?;
         let tx_id = published.tx_id;
         if self.node.defer_local_persistence.get() {

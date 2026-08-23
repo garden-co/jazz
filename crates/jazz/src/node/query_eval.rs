@@ -2540,6 +2540,16 @@ where
         include_deleted: bool,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
+        let bound_identity = self.open_tx(tx_id)?.provisional_author;
+        if matches!(authorization_mode, QueryAuthorizationMode::TrustedServing)
+            && identity != bound_identity
+        {
+            return Err(Error::OpenTransactionIdentityMismatch);
+        }
+        // An open transaction is an identity capability: both ordinary binding
+        // reads and serving reads must authorize against the identity fixed at
+        // begin, never an identity supplied by a later call.
+        let identity = bound_identity;
         let query = shape.query();
         let predicate_len = self.open_tx(tx_id)?.predicate_reads.len();
         let table = self.table_in_schema(&query.table, shape.schema_version())?;
