@@ -306,6 +306,14 @@ fn browser_worker_initial_view_preserves_newer_optimistic_membership() {
             .any(|event| matches!(event, SubscriptionEvent::Delta { reset: true, .. })),
         "the worker's internal hydration must not reset the main subscription: {after_ack:?}"
     );
+    assert_eq!(
+        main_thread
+            .read(&open_todos)
+            .expect("read after stale worker view")
+            .len(),
+        1,
+        "the stale worker view must not retract the optimistic row"
+    );
 
     main_thread
         .update(
