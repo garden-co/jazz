@@ -474,8 +474,10 @@ where
         self.open_exclusive_handle(id).await
     }
 
-    /// Open an exclusive transaction with an explicit session policy identity.
-    #[cfg(feature = "runtime")]
+    /// Open an exclusive transaction whose identity is fixed for its lifetime.
+    ///
+    /// Transaction-local reads, authorization, provenance, and commit
+    /// attribution all use `author`; subsequent calls cannot replace it.
     #[doc(hidden)]
     pub async fn begin_exclusive_for_identity(
         &self,
