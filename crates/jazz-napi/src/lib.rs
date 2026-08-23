@@ -3853,7 +3853,10 @@ impl TestJwtIssuer {
             claims,
             TestJwtOptions {
                 expires_in: Duration::from_secs(expires_in_seconds),
-                issuer: options.issuer,
+                // Keep the server test helper's ordinary external-session
+                // default. `None` is reserved for tests that explicitly
+                // exercise an issuer-less bearer, not the NAPI omission case.
+                issuer: options.issuer.or_else(|| Some("urn:jazz:test".to_owned())),
             },
         ))
     }
