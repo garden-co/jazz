@@ -475,6 +475,7 @@ where
     }
 
     /// Open an exclusive transaction with an explicit session policy identity.
+    #[cfg(feature = "runtime")]
     pub(crate) async fn begin_exclusive_for_identity(
         &self,
         id: OpenTransactionId,
