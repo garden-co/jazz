@@ -152,5 +152,9 @@ name = "authorization_scope_reentry"
 required-features = ["testing"]
 
 [[test]]
+name = "async_open"
+required-features = ["testing"]
+
+[[test]]
 name = "edge_fate_authority"
 required-features = ["runtime"]
