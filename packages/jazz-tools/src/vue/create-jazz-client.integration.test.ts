@@ -54,7 +54,9 @@ describe("vue/create-jazz-client integration", () => {
     let client: JazzClient | null = null;
 
     try {
-      client = await createJazzClient({ appId: makeAppId("mutation-query") });
+      client = await createJazzClient({
+        appId: makeAppId("mutation-query"),
+      });
 
       const { value: inserted } = await client.db.insert(todosTable, {
         title: "buy milk",
@@ -78,7 +80,9 @@ describe("vue/create-jazz-client integration", () => {
     let client: JazzClient | null = null;
 
     try {
-      client = await createJazzClient({ appId: makeAppId("shutdown") });
+      client = await createJazzClient({
+        appId: makeAppId("shutdown"),
+      });
       await client.db.insert(todosTable, { title: "shutdown-check", done: false });
       await client.db.all(allTodosQuery);
 

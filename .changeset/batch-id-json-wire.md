@@ -2,7 +2,6 @@
 "jazz-tools": patch
 "jazz-wasm": patch
 "jazz-napi": patch
-"jazz-rn": patch
 ---
 
 Standardize BatchId JSON values on hex strings across Jazz write-context bindings.

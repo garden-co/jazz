@@ -68,18 +68,15 @@ function App() {
   const betterAuth = useBetterAuthJWT();
   const { secret: localFirstSecret, isLoading: localFirstLoading } = useLocalFirstAuth();
 
-  // Only mint a local-first secret when there's no BetterAuth session.
-  const secret = !betterAuth.jwt ? (localFirstSecret ?? undefined) : undefined;
-
-  const config = useMemo<DbConfig>(
-    () => ({
+  const config = useMemo<DbConfig>(() => {
+    const shared = {
       appId: process.env.NEXT_PUBLIC_JAZZ_APP_ID!,
       serverUrl: process.env.NEXT_PUBLIC_JAZZ_SERVER_URL!,
-      jwtToken: betterAuth.jwt ?? undefined,
-      secret,
-    }),
-    [betterAuth.jwt, secret],
-  );
+    };
+    return betterAuth.jwt
+      ? { ...shared, jwtToken: betterAuth.jwt }
+      : { ...shared, secret: localFirstSecret ?? undefined };
+  }, [betterAuth.jwt, localFirstSecret]);
 
   if (betterAuth.isLoading || (!betterAuth.jwt && localFirstLoading)) return <p>Loading auth…</p>;
 

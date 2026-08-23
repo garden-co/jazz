@@ -528,6 +528,10 @@ function tableDefinitionToAst(
     definition instanceof DefinedTable && definition.indexedColumns
       ? [...definition.indexedColumns]
       : undefined;
+  const branchBy =
+    definition instanceof DefinedTable && definition.branchColumns
+      ? [...definition.branchColumns]
+      : undefined;
   return {
     name: tableName,
     columns: Object.entries(columnsDefinition).map(([columnName, builder]) => {
@@ -535,6 +539,7 @@ function tableDefinitionToAst(
       return builder._build(columnName);
     }),
     ...(indexedColumns ? { indexedColumns } : {}),
+    ...(branchBy ? { branchBy } : {}),
   };
 }
 

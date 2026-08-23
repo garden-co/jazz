@@ -1,6 +1,3 @@
-// Ambient declarations for React-Native / Expo internals used by the polyfills
-// module. These APIs exist at runtime but don't ship public type definitions.
-
 declare module "react-native/Libraries/Utilities/PolyfillFunctions" {
   export function polyfillGlobal(name: string, getValue: () => unknown): void;
 }

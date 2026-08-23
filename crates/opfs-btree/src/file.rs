@@ -4,6 +4,8 @@ use std::rc::Rc;
 use crate::BTreeError;
 
 #[cfg(target_arch = "wasm32")]
+use serde::Serialize;
+#[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -198,10 +200,69 @@ struct OpfsFileInner {
 }
 
 #[cfg(target_arch = "wasm32")]
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub(crate) struct OpfsIoCounters {
+    pub read_calls: u64,
+    pub read_bytes: u64,
+    pub write_calls: u64,
+    pub write_bytes: u64,
+    pub len_calls: u64,
+    pub truncate_calls: u64,
+    pub flush_calls: u64,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl OpfsIoCounters {
+    pub(crate) fn delta_since(self, before: Self) -> Self {
+        Self {
+            read_calls: self.read_calls.saturating_sub(before.read_calls),
+            read_bytes: self.read_bytes.saturating_sub(before.read_bytes),
+            write_calls: self.write_calls.saturating_sub(before.write_calls),
+            write_bytes: self.write_bytes.saturating_sub(before.write_bytes),
+            len_calls: self.len_calls.saturating_sub(before.len_calls),
+            truncate_calls: self.truncate_calls.saturating_sub(before.truncate_calls),
+            flush_calls: self.flush_calls.saturating_sub(before.flush_calls),
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 impl Drop for OpfsFileInner {
     fn drop(&mut self) {
         self.handle.close();
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    static OPFS_IO_COUNTERS: std::cell::Cell<OpfsIoCounters> = const { std::cell::Cell::new(OpfsIoCounters {
+        read_calls: 0,
+        read_bytes: 0,
+        write_calls: 0,
+        write_bytes: 0,
+        len_calls: 0,
+        truncate_calls: 0,
+        flush_calls: 0,
+    }) };
+}
+
+#[cfg(target_arch = "wasm32")]
+fn update_opfs_io_counters(f: impl FnOnce(&mut OpfsIoCounters)) {
+    OPFS_IO_COUNTERS.with(|cell| {
+        let mut counters = cell.get();
+        f(&mut counters);
+        cell.set(counters);
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn opfs_io_counters_snapshot() -> OpfsIoCounters {
+    OPFS_IO_COUNTERS.with(|cell| cell.get())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn opfs_io_counters_reset() {
+    OPFS_IO_COUNTERS.with(|cell| cell.set(OpfsIoCounters::default()));
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -292,15 +353,40 @@ impl OpfsFile {
             .map_err(|_| BTreeError::Io("OPFS removeEntry is unavailable".to_string()))?;
         let opts = js_sys::Object::new();
         let _ = js_sys::Reflect::set(&opts, &"recursive".into(), &false.into());
-        let promise = remove_fn.call2(&root, &name.into(), &opts.into());
-        if let Ok(promise) = promise {
-            let promise: js_sys::Promise = promise
-                .dyn_into()
-                .map_err(|_| BTreeError::Io("failed to cast removeEntry promise".to_string()))?;
-            let _ = JsFuture::from(promise).await;
+        const MAX_RETRIES: u32 = 6;
+        const BASE_DELAY_MS: u32 = 25;
+
+        let mut last_error = None;
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                let delay = BASE_DELAY_MS * (1 << (attempt - 1));
+                sleep_ms(delay).await;
+            }
+
+            let promise = remove_fn.call2(&root, &name.clone().into(), &opts.clone().into());
+            match promise {
+                Ok(promise) => {
+                    let promise: js_sys::Promise = promise.dyn_into().map_err(|_| {
+                        BTreeError::Io("failed to cast removeEntry promise".to_string())
+                    })?;
+                    match JsFuture::from(promise).await {
+                        Ok(_) => return Ok(()),
+                        Err(error) if is_not_found_error(&error) => return Ok(()),
+                        Err(error) if is_retryable_remove_error(&error) => {
+                            last_error = Some(error);
+                        }
+                        Err(error) => return Err(map_js_error(error)),
+                    }
+                }
+                Err(error) if is_not_found_error(&error) => return Ok(()),
+                Err(error) if is_retryable_remove_error(&error) => {
+                    last_error = Some(error);
+                }
+                Err(error) => return Err(map_js_error(error)),
+            }
         }
 
-        Ok(())
+        Err(map_js_error(last_error.unwrap()))
     }
 
     fn file_name(namespace: &str) -> String {
@@ -311,6 +397,9 @@ impl OpfsFile {
 #[cfg(target_arch = "wasm32")]
 impl SyncFile for OpfsFile {
     fn len(&self) -> Result<u64, BTreeError> {
+        update_opfs_io_counters(|stats| {
+            stats.len_calls = stats.len_calls.saturating_add(1);
+        });
         Ok(self.inner.handle.get_size().map_err(map_js_error)? as u64)
     }
 
@@ -328,6 +417,10 @@ impl SyncFile for OpfsFile {
                 buf.len()
             )));
         }
+        update_opfs_io_counters(|stats| {
+            stats.read_calls = stats.read_calls.saturating_add(1);
+            stats.read_bytes = stats.read_bytes.saturating_add(read as u64);
+        });
         Ok(())
     }
 
@@ -345,14 +438,24 @@ impl SyncFile for OpfsFile {
                 buf.len()
             )));
         }
+        update_opfs_io_counters(|stats| {
+            stats.write_calls = stats.write_calls.saturating_add(1);
+            stats.write_bytes = stats.write_bytes.saturating_add(written as u64);
+        });
         Ok(())
     }
 
     fn truncate(&self, len: u64) -> Result<(), BTreeError> {
+        update_opfs_io_counters(|stats| {
+            stats.truncate_calls = stats.truncate_calls.saturating_add(1);
+        });
         truncate_handle(&self.inner.handle, len)
     }
 
     fn flush(&self) -> Result<(), BTreeError> {
+        update_opfs_io_counters(|stats| {
+            stats.flush_calls = stats.flush_calls.saturating_add(1);
+        });
         self.inner.handle.flush().map_err(map_js_error)
     }
 }
@@ -394,6 +497,24 @@ fn is_retryable_handle_conflict(value: &wasm_bindgen::JsValue) -> bool {
     if value.is_instance_of::<web_sys::DomException>() {
         let ex: &web_sys::DomException = value.unchecked_ref();
         return ex.name() != "SecurityError";
+    }
+    false
+}
+
+#[cfg(target_arch = "wasm32")]
+fn is_not_found_error(value: &wasm_bindgen::JsValue) -> bool {
+    if value.is_instance_of::<web_sys::DomException>() {
+        let ex: &web_sys::DomException = value.unchecked_ref();
+        return ex.name() == "NotFoundError";
+    }
+    false
+}
+
+#[cfg(target_arch = "wasm32")]
+fn is_retryable_remove_error(value: &wasm_bindgen::JsValue) -> bool {
+    if value.is_instance_of::<web_sys::DomException>() {
+        let ex: &web_sys::DomException = value.unchecked_ref();
+        return ex.name() == "NoModificationAllowedError";
     }
     false
 }

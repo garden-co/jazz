@@ -24,7 +24,7 @@ docker compose up -d
 ## Build the server with OTel
 
 ```sh
-cargo build -p jazz-tools --features otel
+cargo build -p jazz-cli --features otel
 ```
 
 ## Run an instrumented server
@@ -32,7 +32,7 @@ cargo build -p jazz-tools --features otel
 ```sh
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
 RUST_LOG=jazz_tools=debug,groove=debug \
-cargo run -p jazz-tools --features otel -- server <APP_ID>
+cargo run -p jazz-cli --features otel --bin jazz-tools -- server <APP_ID>
 ```
 
 ## View traces

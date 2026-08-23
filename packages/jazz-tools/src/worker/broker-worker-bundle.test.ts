@@ -1,40 +1,34 @@
 import { describe, expect, it } from "vitest";
-import { build } from "esbuild";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { execFile } from "node:child_process";
+import { readFile, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 describe("broker worker packaging", () => {
-  it("bundles into self-contained ESM with no bare runtime imports", async () => {
-    const entry = fileURLToPath(new URL("./jazz-broker-worker.ts", import.meta.url));
-    const dir = await mkdtemp(join(tmpdir(), "jazz-broker-bundle-"));
-    const outfile = join(dir, "jazz-broker-worker.js");
-    try {
-      await build({
-        entryPoints: [entry],
-        outfile,
-        bundle: true,
-        format: "esm",
-        platform: "browser",
-        target: "es2022",
-        legalComments: "none",
-      });
-      const source = await readFile(outfile, "utf8");
-      // Turbopack, webpack and Vite copy this worker verbatim — its SharedWorker
-      // URL is indirected past their worker detection — so bare ../runtime/*.js
-      // imports would 404 in the worker context. The shipped build must inline them.
-      expect(source).not.toMatch(/from\s*["']\.\.\/runtime\//);
-      expect(source).not.toMatch(/import\s*\(\s*["']\.\.\//);
-      expect(source).toMatch(/onconnect/);
-    } finally {
-      await rm(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("ships a bundled broker worker via build:runtime", async () => {
+  it("the package bundling script emits a self-contained shipped worker", async () => {
+    const packageRoot = fileURLToPath(new URL("../..", import.meta.url));
+    const bundleScript = fileURLToPath(
+      new URL("../../scripts/bundle-broker-worker.mjs", import.meta.url),
+    );
+    const outfile = fileURLToPath(
+      new URL("../../dist/worker/jazz-broker-worker.js", import.meta.url),
+    );
     const pkgPath = fileURLToPath(new URL("../../package.json", import.meta.url));
     const pkg = JSON.parse(await readFile(pkgPath, "utf8"));
     expect(pkg.scripts["build:runtime"]).toContain("bundle-broker-worker");
+
+    // Delete the pre-existing build output so a no-op or broken script cannot
+    // false-green by inspecting an artifact produced by an earlier command.
+    await rm(outfile, { force: true });
+    await execFileAsync(process.execPath, [bundleScript], { cwd: packageRoot });
+
+    const source = await readFile(outfile, "utf8");
+    // Consumer bundlers copy this indirectly constructed SharedWorker URL
+    // verbatim, so any remaining relative import would 404 in production.
+    expect(source).not.toMatch(/\bfrom\s*["']\.\.?\//);
+    expect(source).not.toMatch(/\bimport\s*\(\s*["']\.\.?\//);
+    expect(source).toMatch(/onconnect/);
   });
 });

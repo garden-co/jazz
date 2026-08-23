@@ -10,6 +10,7 @@ import {
   DropdownMenuSubTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { fireAndReport } from "@/lib/db-write";
 import { app } from "../../../schema.js";
 
 interface ReactionPickerProps {
@@ -27,11 +28,14 @@ export const ReactionPicker = ({ onPick, messageId }: ReactionPickerProps) => {
 
   const addReaction = (emoji: string) => {
     if (!session?.user_id) return;
-    db.insert(app.reactions, {
-      messageId,
-      userId: session.user_id,
-      emoji,
-    });
+    fireAndReport(
+      db.insert(app.reactions, {
+        messageId,
+        userId: session.user_id,
+        emoji,
+      }),
+      "failed to add reaction",
+    );
     onPick(emoji);
   };
 

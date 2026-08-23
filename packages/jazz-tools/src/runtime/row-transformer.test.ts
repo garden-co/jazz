@@ -37,9 +37,9 @@ describe("unwrapValue", () => {
     expect(unwrapValue(v)).toBe(42);
   });
 
-  it("unwraps BigInt to number", () => {
-    const v: WasmValue = { type: "BigInt", value: 9007199254740991 };
-    expect(unwrapValue(v)).toBe(9007199254740991);
+  it("unwraps BigInt to bigint", () => {
+    const v: WasmValue = { type: "BigInt", value: 9007199254740993n };
+    expect(unwrapValue(v)).toBe(9007199254740993n);
   });
 
   it("unwraps Timestamp to Date", () => {
@@ -360,7 +360,7 @@ describe("transformRows", () => {
     expect(result).toEqual([{ id: "uuid-1", title: "Buy milk" }]);
   });
 
-  it("applies magic column projections while preserving id", () => {
+  it("applies supported magic column projections while preserving id", () => {
     const rows: WasmRow[] = [
       {
         id: "uuid-1",
@@ -375,16 +375,14 @@ describe("transformRows", () => {
     const result = transformRows<{
       id: string;
       title: string;
-      $canEdit: boolean;
-      $canDelete: boolean | null;
-    }>(rows, schema, "todos", {}, ["title", "$canEdit", "$canDelete"]);
+      $canRead: boolean;
+    }>(rows, schema, "todos", {}, ["title", "$canRead"]);
 
     expect(result).toEqual([
       {
         id: "uuid-1",
         title: "Buy milk",
-        $canEdit: true,
-        $canDelete: null,
+        $canRead: true,
       },
     ]);
   });
@@ -396,7 +394,7 @@ describe("transformRows", () => {
         values: [
           { type: "Text", value: "Buy milk" },
           { type: "Uuid", value: "user-1" },
-          { type: "Boolean", value: true },
+          { type: "Uuid", value: "user-1" },
           {
             type: "Array",
             value: [
@@ -415,7 +413,7 @@ describe("transformRows", () => {
 
     const result = transformRows(rows, relationSchema, "todos", { owner: true }, [
       "*",
-      "$canDelete",
+      "$createdBy",
     ]);
 
     expect(result).toEqual([
@@ -423,7 +421,7 @@ describe("transformRows", () => {
         id: "todo-1",
         title: "Buy milk",
         owner_id: "user-1",
-        $canDelete: true,
+        $createdBy: "user-1",
         owner: {
           id: "user-1",
           name: "Alice",
@@ -455,6 +453,53 @@ describe("transformRows", () => {
         ],
       },
     ];
+
+    const result = transformRows(rows, relationSchema, "todos", { owner: true });
+
+    expect(result).toEqual([
+      {
+        id: "todo-1",
+        title: "Buy milk",
+        owner_id: "user-1",
+        owner: {
+          id: "user-1",
+          name: "Alice",
+          manager_id: null,
+        },
+      },
+    ]);
+  });
+
+  it("uses included row valuesByColumn when positional values are descriptor-ordered", () => {
+    const rows: WasmRow[] = [
+      {
+        id: "todo-1",
+        values: [
+          { type: "Text", value: "Buy milk" },
+          { type: "Uuid", value: "user-1" },
+          {
+            type: "Array",
+            value: [
+              {
+                type: "Row",
+                value: {
+                  id: "user-1",
+                  values: [
+                    { type: "Timestamp", value: 0 },
+                    { type: "Text", value: "Alice" },
+                    { type: "Null" },
+                  ],
+                  valuesByColumn: new Map<string, WasmValue>([
+                    ["name", { type: "Text", value: "Alice" }],
+                    ["manager_id", { type: "Null" }],
+                  ]),
+                },
+              },
+            ],
+          },
+        ],
+      },
+    ] as unknown as WasmRow[];
 
     const result = transformRows(rows, relationSchema, "todos", { owner: true });
 

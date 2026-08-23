@@ -4,6 +4,7 @@
 
 import type {
   Schema,
+  Column,
   ScalarSqlType,
   SqlType,
   TablePolicies as DslTablePolicies,
@@ -28,6 +29,7 @@ const map: Record<ScalarSqlType, ColumnType> = {
   TEXT: { type: "Text" },
   BOOLEAN: { type: "Boolean" },
   INTEGER: { type: "Integer" },
+  BIGINT: { type: "BigInt" },
   REAL: { type: "Double" },
   TIMESTAMP: { type: "Timestamp" },
   UUID: { type: "Uuid" },
@@ -40,6 +42,25 @@ const map: Record<ScalarSqlType, ColumnType> = {
 function sqlTypeToWasm(sqlType: SqlType): ColumnType {
   if (typeof sqlType !== "string") {
     if (sqlType.kind === "ENUM") {
+      if (sqlType.cases) {
+        return {
+          type: "EnumPayload",
+          cases: sqlType.cases.map((entry) => ({
+            name: entry.name,
+            fields: entry.fields.map((field) => ({
+              name: field.name,
+              column_type: sqlTypeToWasm(field.sqlType),
+              nullable: field.nullable,
+              ...(field.default === undefined
+                ? {}
+                : { default: toValue(field.default, sqlTypeToWasm(field.sqlType)) }),
+            })),
+          })),
+        };
+      }
+      if (!sqlType.variants) {
+        throw new Error("Enum columns must declare variants or payload cases.");
+      }
       return { type: "Enum", variants: [...sqlType.variants] };
     }
     if (sqlType.kind === "JSON") {
@@ -73,6 +94,9 @@ function literalToWasmValue(value: unknown): Value {
     if (value >= -2147483648 && value <= 2147483647) {
       return { type: "Integer", value };
     }
+    return { type: "BigInt", value: BigInt(value) };
+  }
+  if (typeof value === "bigint") {
     return { type: "BigInt", value };
   }
   if (Array.isArray(value)) {
@@ -268,6 +292,7 @@ export function schemaToWasm(schema: Schema): WasmSchema {
     tables[table.name] = {
       columns,
       ...(table.indexedColumns ? { indexed_columns: [...table.indexedColumns] } : {}),
+      ...(table.branchBy ? { branchBy: [...table.branchBy] } : {}),
       policies: table.policies ? clonePolicies(table.policies) : undefined,
     };
   }

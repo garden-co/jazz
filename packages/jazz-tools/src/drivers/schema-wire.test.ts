@@ -39,6 +39,33 @@ describe("serializeRuntimeSchema", () => {
     });
   });
 
+  it("serializes BigInt defaults as decimal strings", () => {
+    const schema: WasmSchema = {
+      counters: {
+        columns: [
+          {
+            name: "largeCount",
+            column_type: { type: "BigInt" },
+            nullable: false,
+            default: { type: "BigInt", value: 9007199254740993n },
+          },
+        ],
+      },
+    };
+
+    expect(JSON.parse(serializeRuntimeSchema(schema))).toMatchObject({
+      schema: {
+        counters: {
+          columns: [
+            {
+              default: { type: "BigInt", value: "9007199254740993" },
+            },
+          ],
+        },
+      },
+    });
+  });
+
   it("marks loaded policy bundles explicitly", () => {
     const schema: WasmSchema = {};
 

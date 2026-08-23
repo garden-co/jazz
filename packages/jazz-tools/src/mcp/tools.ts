@@ -13,7 +13,7 @@ export const toolDefinitions = [
       properties: {
         query: {
           type: "string",
-          description: "Search query (FTS5 syntax when available, plain keywords in fallback)",
+          description: "Search query (plain keywords or SQLite FTS5 syntax)",
         },
         limit: {
           type: "number",

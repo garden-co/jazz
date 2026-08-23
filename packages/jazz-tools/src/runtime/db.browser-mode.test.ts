@@ -1,38 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { JazzClient } from "./client.js";
-import {
-  IncompatibleBrowserBrokerConfigurationError,
-  type IncompatibleBrowserBrokerConfigurationHandler,
-} from "./browser-broker-errors.js";
-import { Db, createDb, createDbWithRuntimeModule, type DbConfig } from "./db.js";
-import { DbRuntimeModule, type DbRuntimeClientContext } from "./db-runtime-module.js";
+import { Db, createDb } from "./db.js";
 
 const originalWindow = (globalThis as Record<string, unknown>).window;
 const originalWorker = (globalThis as Record<string, unknown>).Worker;
-
-class TestRuntimeModule extends DbRuntimeModule<DbConfig> {
-  protected override async loadRuntime(): Promise<void> {
-    return;
-  }
-
-  override createClient(_context: DbRuntimeClientContext<DbConfig>): JazzClient {
-    throw new Error("createClient should not be called by driver mode tests");
-  }
-}
-
-function installFakeBrowserWindow(confirm: (message?: string) => boolean): {
-  confirm: ReturnType<typeof vi.fn<(message?: string) => boolean>>;
-  reload: ReturnType<typeof vi.fn<() => void>>;
-} {
-  const confirmMock = vi.fn(confirm);
-  const reload = vi.fn<() => void>();
-  (globalThis as Record<string, unknown>).window = {
-    confirm: confirmMock,
-    location: { reload },
-  };
-  (globalThis as Record<string, unknown>).Worker = class {};
-  return { confirm: confirmMock, reload };
-}
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -49,85 +19,35 @@ afterEach(() => {
 });
 
 describe("createDb browser mode", () => {
-  it("uses worker-backed path in browser when driver is persistent", async () => {
+  it("uses the dedicated-worker connection path in browser when driver is persistent", async () => {
     (globalThis as Record<string, unknown>).window = {};
     (globalThis as Record<string, unknown>).Worker = class {};
 
-    const workerDb = {} as Db;
-    const createWithWorkerSpy = vi.spyOn(Db, "createWithWorker").mockResolvedValue(workerDb);
-    const createSpy = vi.spyOn(Db, "create").mockResolvedValue({} as Db);
+    const createdDb = {} as Db;
+    const createSpy = vi.spyOn(Db, "createWithBrowserWorker").mockResolvedValue(createdDb);
 
     const result = await createDb({
       appId: "driver-mode-persistent",
       driver: { type: "persistent", dbName: "driver-mode-db" },
     });
 
-    expect(result).toBe(workerDb);
-    expect(createWithWorkerSpy).toHaveBeenCalledTimes(1);
-    expect(createSpy).not.toHaveBeenCalled();
+    expect(result).toBe(createdDb);
+    expect(createSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("uses direct in-memory path in browser when driver is memory", async () => {
+  it("uses the in-memory native runtime path in browser when driver is memory", async () => {
     (globalThis as Record<string, unknown>).window = {};
     (globalThis as Record<string, unknown>).Worker = class {};
 
-    const directDb = {} as Db;
-    const createWithWorkerSpy = vi.spyOn(Db, "createWithWorker").mockResolvedValue({} as Db);
-    const createSpy = vi.spyOn(Db, "create").mockResolvedValue(directDb);
+    const createdDb = {} as Db;
+    const createSpy = vi.spyOn(Db, "create").mockReturnValue(createdDb);
 
     const result = await createDb({
       appId: "driver-mode-memory",
       driver: { type: "memory" },
     });
 
-    expect(result).toBe(directDb);
+    expect(result).toBe(createdDb);
     expect(createSpy).toHaveBeenCalledTimes(1);
-    expect(createWithWorkerSpy).not.toHaveBeenCalled();
-  });
-
-  it("shows the default browser broker compatibility prompt and reloads when confirmed", async () => {
-    const { confirm, reload } = installFakeBrowserWindow(() => true);
-    const error = new IncompatibleBrowserBrokerConfigurationError();
-    vi.spyOn(Db, "createWithWorker").mockRejectedValue(error);
-
-    await expect(
-      createDbWithRuntimeModule(
-        {
-          appId: "driver-mode-incompatible-broker",
-          driver: { type: "persistent", dbName: "driver-mode-db" },
-          jwtToken: "jwt",
-        },
-        new TestRuntimeModule(),
-      ),
-    ).rejects.toBe(error);
-
-    expect(confirm).toHaveBeenCalledTimes(1);
-    expect(confirm.mock.calls[0]?.[0]).toContain("different version of this app");
-    expect(reload).toHaveBeenCalledTimes(1);
-  });
-
-  it("lets apps override the browser broker compatibility prompt", async () => {
-    const { confirm, reload } = installFakeBrowserWindow(() => true);
-    const error = new IncompatibleBrowserBrokerConfigurationError();
-    const onIncompatibleBrowserBrokerConfiguration =
-      vi.fn<IncompatibleBrowserBrokerConfigurationHandler>();
-    vi.spyOn(Db, "createWithWorker").mockRejectedValue(error);
-
-    await expect(
-      createDbWithRuntimeModule(
-        {
-          appId: "driver-mode-incompatible-broker-override",
-          driver: { type: "persistent", dbName: "driver-mode-db" },
-          jwtToken: "jwt",
-          onIncompatibleBrowserBrokerConfiguration,
-        },
-        new TestRuntimeModule(),
-      ),
-    ).rejects.toBe(error);
-
-    expect(onIncompatibleBrowserBrokerConfiguration).toHaveBeenCalledTimes(1);
-    expect(onIncompatibleBrowserBrokerConfiguration).toHaveBeenCalledWith(error);
-    expect(confirm).not.toHaveBeenCalled();
-    expect(reload).not.toHaveBeenCalled();
   });
 });

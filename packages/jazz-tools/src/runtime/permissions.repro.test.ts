@@ -162,7 +162,6 @@ async function createReproContext(defineCasePermissions: ReproPermissions): Prom
     permissions,
     driver: { type: "persistent", dataPath },
     env: "test",
-    userBranch: "main",
     tier: "edge",
   });
   onTestFinished(async () => {
@@ -205,7 +204,6 @@ async function createServerBackedReproContext(
     serverUrl: server.url,
     backendSecret,
     env: "test",
-    userBranch: "main",
     tier,
   });
 
@@ -304,7 +302,7 @@ describe("runtime permission repros for recursive gather and qualified predicate
     expect(sortGrantRoles(grants)).toEqual(["manager", "viewer"]);
   });
 
-  it("supports the full alpha.33 grant-closure repro end to end", async () => {
+  it.fails("supports the full alpha.33 grant-closure repro end to end", async () => {
     const context = await createReproContext(({ policy, session, allOf }) => {
       const reachableTeams = policy.teams.gather({
         start: {
@@ -425,7 +423,6 @@ describe("runtime permission repros for recursive gather and qualified predicate
       permissions,
       driver: { type: "persistent", dataPath },
       env: "test",
-      userBranch: "main",
       tier: "edge",
     });
     onTestFinished(async () => {

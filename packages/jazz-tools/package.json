@@ -27,9 +27,18 @@
       "types": "./dist/better-auth-adapter/index.d.ts",
       "default": "./dist/better-auth-adapter/index.js"
     },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "default": "./dist/client/index.js"
+    },
     "./react": {
       "types": "./dist/react/index.d.ts",
       "default": "./dist/react/index.js"
+    },
+    "./react-native": {
+      "types": "./dist/react-native/index.d.ts",
+      "react-native": "./dist/react-native/index.js",
+      "default": "./dist/react-native/index.js"
     },
     "./solid": {
       "types": "./dist/solid/index.d.ts",
@@ -43,7 +52,6 @@
     },
     "./react-core": {
       "types": "./dist/react-core/index.d.ts",
-      "react-native": "./dist/react-native/react-core.js",
       "default": "./dist/react-core/index.js"
     },
     "./shared": {
@@ -82,11 +90,6 @@
       "types": "./dist/dev/sveltekit.d.ts",
       "default": "./dist/dev/sveltekit.js"
     },
-    "./react-native": {
-      "types": "./dist/react-native/index.d.ts",
-      "react-native": "./dist/react-native/index.js",
-      "default": "./dist/react-native/index.js"
-    },
     "./svelte": {
       "types": "./dist/svelte/index.d.ts",
       "svelte": "./dist/svelte/index.js",
@@ -110,10 +113,6 @@
       "types": "./dist/passkey-backup.d.ts",
       "default": "./dist/passkey-backup.js"
     },
-    "./reconcile-array": {
-      "types": "./dist/reconcile-array.d.ts",
-      "default": "./dist/reconcile-array.js"
-    },
     "./package.json": "./package.json"
   },
   "publishConfig": {
@@ -122,16 +121,21 @@
   },
   "scripts": {
     "build": "pnpm build:runtime && pnpm build:test && pnpm build:svelte && pnpm build:solid",
-    "build:docs-index": "node --import tsx src/mcp/build-index.ts",
-    "build:runtime": "tsc && node scripts/bundle-broker-worker.mjs && cp src/worker/jazz-worker.ts dist/worker/jazz-worker.ts",
+    "build:runtime": "node scripts/clean-dist.mjs && tsc && node scripts/bundle-broker-worker.mjs",
     "build:svelte": "svelte-package -i src/svelte -o dist/svelte --tsconfig tsconfig.svelte.json && node scripts/cleanup-generated-src-types.mjs",
     "build:solid": "vite build --config vite.config.solid.ts --mode solid-dom && vite build --config vite.config.solid.ts --mode solid-ssr && tsc --project tsconfig.solid.json --emitDeclarationOnly",
     "check": "tsc --noEmit",
-    "test": "vitest run --config vitest.config.ts && vitest run --config vitest.config.react.ts && vitest run --config vitest.config.svelte.ts && vitest run --config vitest.config.solid.ts",
+    "test": "pnpm test:browser:contract || status=1; pnpm test:node || status=1; pnpm test:react || status=1; pnpm test:svelte || status=1; pnpm test:solid || status=1; pnpm typecheck:react-native || status=1; exit ${status:-0}",
+    "test:node": "vitest run --config vitest.config.ts",
+    "test:react": "vitest run --config vitest.config.react.ts",
     "test:solid": "vitest run --config vitest.config.solid.ts",
     "test:svelte": "vitest run --config vitest.config.svelte.ts",
-    "build:test": "node dist/cli.js validate --schema-dir tests/ts-dsl/fixtures/basic && tsc --project tsconfig.tests.json",
-    "test:browser": "vitest run --config vitest.config.browser.ts",
+    "build:test": "node dist/cli.js validate --schema-dir tests/ts-dsl/fixtures/basic && tsc --project tsconfig.tests.json && pnpm typecheck:react-native",
+    "typecheck:react-native": "tsc --project tsconfig.react-native-tests.json",
+    "test:browser": "node ../../dev/artifacts/verify-correctness-test-artifacts.mjs && vitest run --config vitest.config.browser.ts",
+    "test:browser:focused": "node scripts/test-browser-focused.mjs",
+    "test:browser:contract": "node scripts/test-browser-focused.test.mjs",
+    "test:terminal-layout-contract": "vitest run --config vitest.config.ts src/runtime/terminal-layout-contract-matrix.test.ts --reporter=verbose --passWithNoTests=false",
     "bench:abstract:node": "JAZZ_ABSTRACT_BENCH=1 vitest run --config vitest.config.ts src/runtime/schema-marshalling.abstract-bench.test.ts",
     "bench:abstract:browser": "JAZZ_ABSTRACT_BENCH=1 vitest run --config vitest.config.browser.ts tests/browser/schema-marshalling.abstract-bench.test.ts",
     "bench:realistic:browser": "vitest run --config vitest.config.browser.ts tests/browser/realistic-bench.test.ts",
@@ -140,6 +144,7 @@
     "pack:dry-run": "npm pack --dry-run"
   },
   "dependencies": {
+    "@noble/hashes": "2.0.1",
     "@opentelemetry/api": "^1.9.1",
     "@opentelemetry/exporter-logs-otlp-http": "^0.216.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.216.0",
@@ -166,15 +171,15 @@
     "@vitejs/plugin-react": "catalog:default",
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
+    "@vue/server-renderer": "^3.5.22",
     "better-auth": "1.6.24",
     "fake-indexeddb": "^5.0.2",
-    "jazz-rn": "workspace:*",
     "jsdom": "^26.0.0",
     "react-dom": "^19.0.0",
     "solid-js": "^1.9.13",
     "svelte": "^5.0.0",
-    "tsx": "^4.21.0",
     "typescript": "catalog:default",
+    "undici": "^7.24.4",
     "vite": "catalog:default",
     "vite-plugin-solid": "catalog:default",
     "vite-plugin-top-level-await": "catalog:default",

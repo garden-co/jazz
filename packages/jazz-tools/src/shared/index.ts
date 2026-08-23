@@ -9,21 +9,12 @@
  *
  * **Support level: advanced — use at your own risk.** These are the internals
  * our own framework bindings are built on, surfaced for reuse. They are not
- * covered by semver: the orchestrator/cache-entry/delta shapes may change
- * between releases. If you depend on them, pin a version.
- *
- * The orchestrator *instance* is reached via the existing framework client
- * (`useJazzClient().manager`, the Svelte/Vue context equivalents, …) — this
- * entry point exposes the framework-agnostic types and functions, not a new way
- * to construct a client.
+ * covered by semver: cache-entry/delta shapes may change between releases. If
+ * you depend on them, pin a version.
  */
 
 export { applyDelta, reconcileArray } from "../reconcile-array.js";
-export { RowChangeKind } from "../runtime/subscription-manager.js";
+export { RowChangeKind, applySubscriptionDelta } from "../runtime/subscription-manager.js";
 export type { RowDelta, SubscriptionDelta } from "../runtime/subscription-manager.js";
-export type {
-  CacheEntryHandle,
-  SubscriptionsOrchestrator,
-  UseAllState,
-} from "../subscriptions-orchestrator.js";
+export type { CacheEntryHandle, UseAllState } from "../subscriptions-orchestrator.js";
 export type { QueryBuilder, QueryOptions } from "../runtime/db.js";

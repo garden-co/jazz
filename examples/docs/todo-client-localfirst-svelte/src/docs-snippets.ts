@@ -14,7 +14,7 @@ export function subscribeTodos(db: Db, onUpdate: (results: unknown[]) => void) {
   const unsubscribe = db.subscribeAll(app.todos.where({ done: false }), (delta) => {
     // delta.all       — Todo[] full current result set
     // delta.delta     — RowDelta<Todo>[] granular row-level changes
-    onUpdate(delta.all);
+    onUpdate(delta.all ?? []);
   });
 
   return unsubscribe;

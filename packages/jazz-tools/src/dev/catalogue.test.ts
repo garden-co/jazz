@@ -2,6 +2,8 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { schema as s } from "../index.js";
+import { serializeRuntimeSchema } from "../drivers/schema-wire.js";
+import { createNapiNativeRuntimeAdapter } from "../runtime/testing/napi-runtime-test-utils.js";
 
 const tempRoots: string[] = [];
 const APP_ID = "test-app";
@@ -60,11 +62,43 @@ describe("dev catalogue API exports", () => {
     expect(typeof dev.deploy).toBe("function");
   });
 
+  // These public entrypoints load the native dev-server module transitively.
+  // The assertion is import identity, so give that one-time native module
+  // initialization a lifecycle budget without relaxing catalogue operations.
   it("keeps deploy compatible across dev and testing entrypoints", async () => {
     const dev = await import("./index.js");
     const testing = await import("../testing/index.js");
 
     expect(testing.deploy).toBe(dev.deploy);
+  }, 15_000);
+});
+
+describe("dev catalogue runtime schema identity", () => {
+  it("opens a NativeRuntimeAdapter for representative public schema shapes", async () => {
+    const schema = {
+      users: s.table({
+        name: s.string(),
+      }),
+      files: s.table({
+        ownerId: s.ref("users"),
+        contents: s.bytes().default(new Uint8Array([0, 1, 127, 255])),
+        mediaType: s.enum("image/png", "text/plain").default("text/plain"),
+        tags: s.array(s.string()).default(["draft", "review"]),
+      }),
+      comments: s
+        .table({
+          fileId: s.ref("files"),
+          authorId: s.ref("users").optional().default(null),
+          body: s.string(),
+          attachmentIds: s.array(s.ref("files")).default([]),
+          status: s.enum("open", "resolved").default("open"),
+        })
+        .indexOnly(["fileId", "status"]),
+    };
+    const app = s.defineApp(schema);
+    await createNapiNativeRuntimeAdapter(app.wasmSchema);
+
+    expect(serializeRuntimeSchema(app.wasmSchema)).toContain("__jazzRuntimeSchema");
   });
 });
 
@@ -136,10 +170,9 @@ describe("dev catalogue push behavior", () => {
     expect(result.warnings).toContain(
       'Warning: table "todos" has no explicit insert policy in permissions.ts; enforcing runtimes default to deny.',
     );
-    expect(schemaPublishBody.schema.todos.columns.map((column: any) => column.name)).toEqual([
-      "title",
-      "ownerId",
-    ]);
+    expect(schemaPublishBody.schema.tables.todos.columns.map((column: any) => column.name)).toEqual(
+      ["title", "ownerId"],
+    );
     expect(permissionsPublishBody.schemaHash).toBe(SCHEMA_HASH);
     expect(permissionsPublishBody.expectedParentBundleObjectId).toBeNull();
     expect(Object.keys(permissionsPublishBody.permissions)).toContain("todos");
@@ -184,9 +217,12 @@ describe("dev catalogue push behavior", () => {
           return new Response(JSON.stringify({ hashes: [storedHash] }), { status: 200 });
         }
         if (input.endsWith(`/apps/${APP_ID}/schema/${storedHash}`)) {
-          return new Response(JSON.stringify({ schema: storedSchema, publishedAt: 0 }), {
-            status: 200,
-          });
+          return new Response(
+            JSON.stringify({ schema: { tables: storedSchema }, publishedAt: 0 }),
+            {
+              status: 200,
+            },
+          );
         }
         if (input.includes(`/admin/permissions`) || input.endsWith(`/admin/schemas`)) {
           throw new Error("deploy() should not publish when schema is already stored.");
@@ -262,9 +298,12 @@ describe("dev catalogue push behavior", () => {
           return new Response(JSON.stringify({ hashes: [nextSchemaHash] }), { status: 200 });
         }
         if (input.endsWith(`/apps/${APP_ID}/schema/${nextSchemaHash}`)) {
-          return new Response(JSON.stringify({ schema: storedSchema, publishedAt: 0 }), {
-            status: 200,
-          });
+          return new Response(
+            JSON.stringify({ schema: { tables: storedSchema }, publishedAt: 0 }),
+            {
+              status: 200,
+            },
+          );
         }
         if (input.endsWith(`/apps/${APP_ID}/admin/permissions/head`)) {
           return new Response(JSON.stringify({ head: previousHead }), { status: 200 });
@@ -342,12 +381,12 @@ describe("dev catalogue push behavior", () => {
           return new Response(JSON.stringify({ hashes: [fromHash, toHash] }), { status: 200 });
         }
         if (input.endsWith(`/apps/${APP_ID}/schema/${fromHash}`)) {
-          return new Response(JSON.stringify({ schema: fromSchema, publishedAt: 0 }), {
+          return new Response(JSON.stringify({ schema: { tables: fromSchema }, publishedAt: 0 }), {
             status: 200,
           });
         }
         if (input.endsWith(`/apps/${APP_ID}/schema/${toHash}`)) {
-          return new Response(JSON.stringify({ schema: toSchema, publishedAt: 0 }), {
+          return new Response(JSON.stringify({ schema: { tables: toSchema }, publishedAt: 0 }), {
             status: 200,
           });
         }
@@ -514,7 +553,7 @@ export default s.defineMigration({
       status: "published",
       objectId: SCHEMA_OBJECT_ID,
     });
-    expect(publishBody.schema.todos.columns.map((column: any) => column.name)).toEqual([
+    expect(publishBody.schema.tables.todos.columns.map((column: any) => column.name)).toEqual([
       "title",
       "ownerId",
     ]);
@@ -621,7 +660,7 @@ export default s.defineMigration({
       status: "published",
       objectId: SCHEMA_OBJECT_ID,
     });
-    expect(schemaBody.schema.todos.columns.map((column: any) => column.name)).toEqual([
+    expect(schemaBody.schema.tables.todos.columns.map((column: any) => column.name)).toEqual([
       "title",
       "ownerId",
     ]);
@@ -708,7 +747,7 @@ export default s.defineMigration({
       status: "published",
       objectId: SCHEMA_OBJECT_ID,
     });
-    expect(schemaBody.schema.todos.columns.map((column: any) => column.name)).toEqual([
+    expect(schemaBody.schema.tables.todos.columns.map((column: any) => column.name)).toEqual([
       "title",
       "ownerId",
     ]);

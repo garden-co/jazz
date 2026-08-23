@@ -9,7 +9,7 @@ import {
   View,
   type ListRenderItem,
 } from "react-native";
-import { useAll, useDb, useSession } from "jazz-tools/react-native";
+import { useAll, useDb, useSession } from "jazz-tools/react";
 import { app, type Todo } from "../schema";
 
 function normalizeText(value: string | null | undefined): string {

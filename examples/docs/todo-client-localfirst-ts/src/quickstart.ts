@@ -1,10 +1,13 @@
 // #region setup-ts
-import { createDb } from "jazz-tools";
+import { BrowserAuthSecretStore, createDb } from "jazz-tools";
 import { app } from "../schema.js";
 import { renderTodoItem } from "./TodoItem.js";
 
+const appId = "<your-app-id>";
+const secret = await BrowserAuthSecretStore.getOrCreateSecret({ appId });
 const db = await createDb({
-  appId: "<your-app-id>",
+  appId,
+  secret,
 });
 // use db.shutdown() to clean up when finished
 // #endregion setup-ts
@@ -12,7 +15,8 @@ const db = await createDb({
 // #region list-ts
 const list = document.getElementById("todos")!;
 
-db.subscribeAll(app.todos, ({ all: todos }) => {
+db.subscribeAll(app.todos, ({ all }) => {
+  const todos = all ?? [];
   list.replaceChildren(...todos.map((todo) => renderTodoItem(todo, db, app)));
 });
 // #endregion list-ts

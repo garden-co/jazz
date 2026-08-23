@@ -4,6 +4,7 @@ import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { loadWasmModule } from "../../src/runtime/client.js";
+import { schema as s } from "../../src/index.js";
 import { getJazzServerInfo, getJazzServerJwtForUser } from "./testing-server.js";
 
 import schemaJson from "../../../../dev/benchmarks/realistic/schema/project_board.schema.json";
@@ -17,6 +18,7 @@ import b3Json from "../../../../dev/benchmarks/realistic/scenarios/b3_server_col
 import b4Json from "../../../../dev/benchmarks/realistic/scenarios/b4_server_fanout_updates.json";
 import b5Json from "../../../../dev/benchmarks/realistic/scenarios/b5_server_permission_recursive.json";
 import b6Json from "../../../../dev/benchmarks/realistic/scenarios/b6_server_hotspot_history.json";
+import b7Json from "../../../../dev/benchmarks/realistic/scenarios/b7_server_relation_hydration.json";
 
 declare const __JAZZ_REALISTIC_BROWSER_SCENARIOS__: string;
 declare const __JAZZ_REALISTIC_BROWSER_RUN_ID__: string;
@@ -116,6 +118,15 @@ interface B6Scenario {
   seed: number;
   hot_task_count: number;
   update_count: number;
+}
+
+interface B7Scenario {
+  id: string;
+  name: string;
+  seed: number;
+  read_cycles: number;
+  large_multiplier: number;
+  root_task_limit: number;
 }
 
 interface UserRow {
@@ -242,8 +253,52 @@ const DEFAULT_CI_BROWSER_LIMITS = {
   b5ReadRequests: 160,
   b5UpdateAttempts: 120,
   b6UpdateCount: 6000,
+  b7ReadCycles: 6,
+  b7LargeMultiplier: 4,
+  b7RootTaskLimit: 400,
 } as const;
 type BrowserLimitOverrides = Partial<Record<keyof typeof DEFAULT_CI_BROWSER_LIMITS, number>>;
+
+const projectBoardSchema = {
+  users: s.table({ display_name: s.string(), email: s.string() }),
+  organizations: s.table({ name: s.string(), created_at: s.timestamp() }),
+  memberships: s.table({
+    organization_id: s.ref("organizations"),
+    user_id: s.ref("users"),
+    role: s.string(),
+  }),
+  projects: s.table({
+    organization_id: s.ref("organizations"),
+    name: s.string(),
+    archived: s.boolean(),
+    updated_at: s.timestamp(),
+  }),
+  tasks: s.table({
+    project_id: s.ref("projects"),
+    title: s.string(),
+    status: s.string(),
+    priority: s.int(),
+    assignee_id: s.ref("users"),
+    updated_at: s.timestamp(),
+    due_at: s.timestamp().optional(),
+  }),
+  task_comments: s.table({
+    task_id: s.ref("tasks"),
+    author_id: s.ref("users"),
+    body: s.string(),
+    created_at: s.timestamp(),
+  }),
+  task_watchers: s.table({ task_id: s.ref("tasks"), user_id: s.ref("users") }),
+  activity_events: s.table({
+    project_id: s.ref("projects"),
+    task_id: s.ref("tasks").optional(),
+    actor_id: s.ref("users"),
+    kind: s.string(),
+    created_at: s.timestamp(),
+    payload: s.string(),
+  }),
+};
+const projectBoardApp = s.defineApp(projectBoardSchema);
 
 function resolveBrowserLimitOverrides(): BrowserLimitOverrides {
   const raw = (__JAZZ_REALISTIC_BROWSER_LIMIT_OVERRIDES_JSON__ ?? "").trim();
@@ -281,6 +336,7 @@ const b3 = b3Json as unknown as B3Scenario;
 const b4 = b4Json as unknown as B4Scenario;
 const b5 = b5Json as unknown as B5Scenario;
 const b6 = b6Json as unknown as B6Scenario;
+const b7 = b7Json as unknown as B7Scenario;
 const browserScenarioSelection = new Set(
   (__JAZZ_REALISTIC_BROWSER_SCENARIOS__ ?? "")
     .split(",")
@@ -1751,9 +1807,9 @@ async function runB5(config: ProfileConfig): Promise<ScenarioResult> {
     const deniedLocalSecret = generateAuthSecret();
     const intermediateLocalSecret = generateAuthSecret();
     const wasmModule = await loadWasmModule();
-    const allowedPrincipalId = wasmModule.WasmRuntime.deriveUserId(allowedLocalSecret);
-    const deniedPrincipalId = wasmModule.WasmRuntime.deriveUserId(deniedLocalSecret);
-    const intermediatePrincipalId = wasmModule.WasmRuntime.deriveUserId(intermediateLocalSecret);
+    const allowedPrincipalId = wasmModule.deriveUserId(allowedLocalSecret);
+    const deniedPrincipalId = wasmModule.deriveUserId(deniedLocalSecret);
+    const intermediatePrincipalId = wasmModule.deriveUserId(intermediateLocalSecret);
     const allowedSession = {
       user_id: allowedPrincipalId,
       claims: {
@@ -2126,6 +2182,81 @@ async function runB6(config: ProfileConfig): Promise<ScenarioResult> {
   }
 }
 
+async function runB7(config: ProfileConfig): Promise<ScenarioResult> {
+  progressLog("B7 start");
+  const appId = await benchmarkAppId("b7");
+  const dbName = uniqueDbName("b7");
+  const cycles = Math.min(b7.read_cycles, CI_BROWSER_LIMITS.b7ReadCycles);
+  const largeConfig = {
+    ...scaledLargeProfile(
+      config,
+      Math.min(b7.large_multiplier, CI_BROWSER_LIMITS.b7LargeMultiplier),
+    ),
+    seed: b7.seed,
+  };
+  const rootTaskLimit = Math.min(
+    largeConfig.tasks,
+    b7.root_task_limit,
+    CI_BROWSER_LIMITS.b7RootTaskLimit,
+  );
+  const hydrationQuery = projectBoardApp.tasks
+    .include({ task_commentsViaTask: true })
+    .limit(rootTaskLimit);
+  const latencies: number[] = [];
+  let rootRows = 0;
+  let commentRows = 0;
+  let db: Db | null = null;
+
+  try {
+    db = await createServerDb(appId, dbName, "realistic-b7");
+    await seedDataset(db, largeConfig);
+    const warmRows = await db.all(hydrationQuery, { tier: "local" });
+    rootRows = warmRows.length;
+    commentRows = warmRows.reduce(
+      (total, row) => total + (row.task_commentsViaTask?.length ?? 0),
+      0,
+    );
+
+    const wallStart = performance.now();
+    for (let cycle = 0; cycle < cycles; cycle += 1) {
+      const startedAt = performance.now();
+      const rows = await db.all(hydrationQuery, { tier: "local" });
+      latencies.push(performance.now() - startedAt);
+      expect(rows.length).toBe(rootRows);
+    }
+    const wallMs = performance.now() - wallStart;
+    const validationRows = await db.all(hydrationQuery, { tier: "local" });
+    const relationIdentity = (rows: typeof warmRows) =>
+      rows.map((row) => [row.id, (row.task_commentsViaTask ?? []).map((comment) => comment.id)]);
+    expect(relationIdentity(validationRows)).toEqual(relationIdentity(warmRows));
+    expect(
+      validationRows.reduce((total, row) => total + (row.task_commentsViaTask?.length ?? 0), 0),
+    ).toBe(commentRows);
+
+    return {
+      scenario_id: b7.id,
+      scenario_name: b7.name,
+      profile_id: largeConfig.id,
+      topology: "single_hop_browser",
+      total_operations: cycles,
+      wall_time_ms: wallMs,
+      throughput_ops_per_sec: cycles / Math.max(0.001, wallMs / 1000),
+      operation_summaries: {
+        relation_hydration: summarizeLatencies(latencies),
+      },
+      extra: {
+        cycles,
+        root_rows: rootRows,
+        leaf_rows: commentRows,
+        comment_rows: commentRows,
+        root_task_limit: rootTaskLimit,
+      },
+    };
+  } finally {
+    if (db) await db.shutdown();
+  }
+}
+
 describe("realistic browser benchmark harness", () => {
   it("delivers an initial scoped snapshot for a seeded server-backed project board query", async () => {
     const cfg = scaledProfile(profile);
@@ -2238,50 +2369,15 @@ describe("realistic browser benchmark harness", () => {
 
       const anyDb = db as any;
       const client = anyDb.getClient(schema);
-      const runtime = client.getRuntime();
       const phases: Array<{ phase: string; ms: number }> = [];
 
-      const originalEnsureQueryReady = anyDb.ensureQueryReady.bind(anyDb);
-      anyDb.ensureQueryReady = async (...args: unknown[]) => {
+      const originalQuery = client.query.bind(client);
+      client.query = async (...args: unknown[]) => {
         const startedAt = performance.now();
         try {
-          return await originalEnsureQueryReady(...args);
+          return await originalQuery(...args);
         } finally {
-          phases.push({ phase: "db.ensureQueryReady", ms: performance.now() - startedAt });
-        }
-      };
-
-      const originalWaitForRemoteReadAvailability =
-        client.waitForRemoteReadAvailability.bind(client);
-      client.waitForRemoteReadAvailability = async (...args: unknown[]) => {
-        const startedAt = performance.now();
-        try {
-          return await originalWaitForRemoteReadAvailability(...args);
-        } finally {
-          phases.push({
-            phase: "client.waitForRemoteReadAvailability",
-            ms: performance.now() - startedAt,
-          });
-        }
-      };
-
-      const originalQueryInternal = client.queryInternal.bind(client);
-      client.queryInternal = async (...args: unknown[]) => {
-        const startedAt = performance.now();
-        try {
-          return await originalQueryInternal(...args);
-        } finally {
-          phases.push({ phase: "client.queryInternal", ms: performance.now() - startedAt });
-        }
-      };
-
-      const originalRuntimeQuery = runtime.query.bind(runtime);
-      runtime.query = async (...args: unknown[]) => {
-        const startedAt = performance.now();
-        try {
-          return await originalRuntimeQuery(...args);
-        } finally {
-          phases.push({ phase: "runtime.query", ms: performance.now() - startedAt });
+          phases.push({ phase: "client.query", ms: performance.now() - startedAt });
         }
       };
 
@@ -2289,7 +2385,7 @@ describe("realistic browser benchmark harness", () => {
       const rows = await db.all(workQuery);
       const totalMs = performance.now() - startedAt;
       await commands.writeRealisticBrowserReport("profile-query-my-work", {
-        runner: "jazz-ts-browser-opfs-profile",
+        runner: "jazz-ts-browser-indexeddb-profile",
         generated_at: new Date().toISOString(),
         profile: cfg.id,
         scenarios: [
@@ -2333,9 +2429,9 @@ describe("realistic browser benchmark harness", () => {
       const deniedLocalSecret = generateAuthSecret();
       const intermediateLocalSecret = generateAuthSecret();
       const wasmModule = await loadWasmModule();
-      const allowedPrincipalId = wasmModule.WasmRuntime.deriveUserId(allowedLocalSecret);
-      const deniedPrincipalId = wasmModule.WasmRuntime.deriveUserId(deniedLocalSecret);
-      const intermediatePrincipalId = wasmModule.WasmRuntime.deriveUserId(intermediateLocalSecret);
+      const allowedPrincipalId = wasmModule.deriveUserId(allowedLocalSecret);
+      const deniedPrincipalId = wasmModule.deriveUserId(deniedLocalSecret);
+      const intermediatePrincipalId = wasmModule.deriveUserId(intermediateLocalSecret);
 
       seedDb = await createServerDb(
         appId,
@@ -2420,50 +2516,15 @@ describe("realistic browser benchmark harness", () => {
 
       const anyDb = allowedDb as any;
       const client = anyDb.getClient(permissionSchema);
-      const runtime = client.getRuntime();
       const phases: Array<{ phase: string; ms: number }> = [];
 
-      const originalEnsureQueryReady = anyDb.ensureQueryReady.bind(anyDb);
-      anyDb.ensureQueryReady = async (...args: unknown[]) => {
+      const originalQuery = client.query.bind(client);
+      client.query = async (...args: unknown[]) => {
         const startedAt = performance.now();
         try {
-          return await originalEnsureQueryReady(...args);
+          return await originalQuery(...args);
         } finally {
-          phases.push({ phase: "db.ensureQueryReady", ms: performance.now() - startedAt });
-        }
-      };
-
-      const originalWaitForRemoteReadAvailability =
-        client.waitForRemoteReadAvailability.bind(client);
-      client.waitForRemoteReadAvailability = async (...args: unknown[]) => {
-        const startedAt = performance.now();
-        try {
-          return await originalWaitForRemoteReadAvailability(...args);
-        } finally {
-          phases.push({
-            phase: "client.waitForRemoteReadAvailability",
-            ms: performance.now() - startedAt,
-          });
-        }
-      };
-
-      const originalQueryInternal = client.queryInternal.bind(client);
-      client.queryInternal = async (...args: unknown[]) => {
-        const startedAt = performance.now();
-        try {
-          return await originalQueryInternal(...args);
-        } finally {
-          phases.push({ phase: "client.queryInternal", ms: performance.now() - startedAt });
-        }
-      };
-
-      const originalRuntimeQuery = runtime.query.bind(runtime);
-      runtime.query = async (...args: unknown[]) => {
-        const startedAt = performance.now();
-        try {
-          return await originalRuntimeQuery(...args);
-        } finally {
-          phases.push({ phase: "runtime.query", ms: performance.now() - startedAt });
+          phases.push({ phase: "client.query", ms: performance.now() - startedAt });
         }
       };
 
@@ -2472,7 +2533,7 @@ describe("realistic browser benchmark harness", () => {
       const totalMs = performance.now() - startedAt;
 
       await commands.writeRealisticBrowserReport("profile-permission-read", {
-        runner: "jazz-ts-browser-opfs-profile",
+        runner: "jazz-ts-browser-indexeddb-profile",
         generated_at: new Date().toISOString(),
         profile: cfg.id,
         scenarios: [
@@ -2505,7 +2566,7 @@ describe("realistic browser benchmark harness", () => {
     }
   }, 180_000);
 
-  it("runs local and server-backed realistic scenarios against worker OPFS runtime", async () => {
+  it("runs local and server-backed realistic scenarios against the browser IndexedDB runtime", async () => {
     const restoreLogs = elevateBenchLogLevel();
     const cfg = scaledProfile(profile);
     progressLog(`bench start profile=${cfg.id}`);
@@ -2534,6 +2595,9 @@ describe("realistic browser benchmark harness", () => {
         { id: "B4", run: async (): Promise<ScenarioResult> => runB4(cfg) },
         { id: "B5", run: async (): Promise<ScenarioResult> => runB5(cfg) },
         { id: "B6", run: async (): Promise<ScenarioResult> => runB6(cfg) },
+        // B7 applies browser scaling inside scaledLargeProfile; passing cfg would scale twice
+        // and erase the relation density this scenario is intended to measure.
+        { id: "B7", run: async (): Promise<ScenarioResult> => runB7(profile) },
       ];
       const knownIds = new Set(runners.map((runner) => runner.id));
       for (const requestedId of browserScenarioSelection) {
@@ -2553,7 +2617,7 @@ describe("realistic browser benchmark harness", () => {
       const resultsById = new Map(scenarioResults.map((result) => [result.scenario_id, result]));
 
       const report = {
-        runner: "jazz-ts-browser-opfs",
+        runner: "jazz-ts-browser-indexeddb",
         generated_at: new Date().toISOString(),
         profile: cfg.id,
         scenarios: scenarioResults,
@@ -2611,6 +2675,14 @@ describe("realistic browser benchmark harness", () => {
       const b6Result = resultsById.get("B6");
       if (b6Result) {
         expect(b6Result.operation_summaries.hotspot_update_sync.count).toBeGreaterThan(0);
+      }
+
+      const b7Result = resultsById.get("B7");
+      if (b7Result) {
+        expect(b7Result.operation_summaries.relation_hydration.count).toBeGreaterThan(0);
+        expect(Number(b7Result.extra.root_rows)).toBeGreaterThan(0);
+        expect(Number(b7Result.extra.leaf_rows)).toBeGreaterThan(0);
+        expect(Number(b7Result.extra.comment_rows)).toBeGreaterThan(0);
       }
     } finally {
       restoreLogs();

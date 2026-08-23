@@ -15,7 +15,8 @@ use axum::{
 };
 use futures_util::StreamExt as FuturesStreamExt;
 use futures_util::stream::Stream;
-use jazz_tools::{ObjectId, QueryBuilder, Value};
+use jazz::query::Query;
+use jazz::tools::{ObjectId, Value};
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::BroadcastStream;
 use uuid::Uuid;
@@ -61,7 +62,7 @@ pub fn create_router() -> Router<Arc<AppState>> {
 
 /// Broadcast current todos to all SSE connections.
 async fn broadcast_todos(state: &AppState) {
-    let query = QueryBuilder::new("todos").build();
+    let query = Query::from("todos");
     if let Ok(rows) = state.client.query(query, None).await {
         let todos: Vec<Todo> = rows
             .iter()
@@ -98,12 +99,12 @@ fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
 }
 
 fn todo_values(title: String, description: String) -> std::collections::HashMap<String, Value> {
-    jazz_tools::row_input!("title" => title, "done" => false, "description" => description)
+    jazz::row_input!("title" => title, "done" => false, "description" => description)
 }
 
 /// List all todos.
 async fn list_todos(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let query = QueryBuilder::new("todos").build();
+    let query = Query::from("todos");
     match state.client.query(query, None).await {
         Ok(rows) => {
             let todos: Vec<Todo> = rows
@@ -128,7 +129,7 @@ async fn create_todo(
     let description = request.description.clone().unwrap_or_default();
     let values = todo_values(request.title.clone(), description.clone());
 
-    match state.client.insert("todos", values) {
+    match state.client.insert("todos", values).await {
         Ok((row_id, row_values, _batch_id)) => {
             let todo = row_to_todo(row_id, &row_values);
 
@@ -147,7 +148,7 @@ async fn create_todo(
 
 /// Get a single todo.
 async fn get_todo(State(state): State<Arc<AppState>>, Path(id): Path<Uuid>) -> impl IntoResponse {
-    let query = QueryBuilder::new("todos").build();
+    let query = Query::from("todos");
 
     match state.client.query(query, None).await {
         Ok(rows) => {
@@ -196,7 +197,7 @@ async fn update_todo(
 
     if updates.is_empty() {
         // No changes, fetch and return current
-        let query = QueryBuilder::new("todos").build();
+        let query = Query::from("todos");
         if let Ok(rows) = state.client.query(query, None).await {
             for (oid, values) in &rows {
                 if *oid.uuid() != id {
@@ -214,13 +215,13 @@ async fn update_todo(
             .into_response();
     }
 
-    match state.client.update(object_id, updates) {
+    match state.client.update(object_id, updates).await {
         Ok(_batch_id) => {
             // Broadcast to SSE connections
             broadcast_todos(&state).await;
 
             // Re-fetch the updated todo
-            let query = QueryBuilder::new("todos").build();
+            let query = Query::from("todos");
             match state.client.query(query, None).await {
                 Ok(rows) => {
                     for (oid, values) in &rows {
@@ -259,7 +260,7 @@ async fn delete_todo(
 ) -> impl IntoResponse {
     let object_id = ObjectId::from_uuid(id);
 
-    match state.client.delete(object_id) {
+    match state.client.delete(object_id).await {
         Ok(_batch_id) => {
             // Broadcast to SSE connections
             broadcast_todos(&state).await;
@@ -297,7 +298,7 @@ async fn todos_live(
     let rx = state.sse_tx.subscribe();
 
     // Get initial state
-    let query = QueryBuilder::new("todos").build();
+    let query = Query::from("todos");
     let initial_todos: Vec<Todo> = state
         .client
         .query(query, None)

@@ -1,6 +1,6 @@
 # Chat
 
-Real-time, permission-aware chat app. Public rooms, private chats with invite links, emoji reactions, file attachments, and collaborative drawing canvases. Jazz handles sync and row-level security; React renders the UI.
+Real-time, permission-aware chat app. Public rooms, private chats with invite links, emoji reactions, and collaborative drawing canvases. Jazz handles sync and row-level security; React renders the UI.
 
 ## Getting started
 
@@ -9,17 +9,9 @@ pnpm install
 pnpm dev        # starts the Jazz server, pushes the schema, and opens Vite
 ```
 
-To understand how the app uses Jazz, run the walkthrough:
-
-```bash
-pnpm walkthrough
-```
-
 ## Commands
 
 ```bash
-pnpm walkthrough        # Marp slideshow — Jazz patterns used in this app
-pnpm walkthrough:shots  # Re-capture screenshots for the slideshow
 pnpm test               # Vitest browser tests
 pnpm build              # Optional schema validation + production build
 ```
@@ -34,8 +26,6 @@ pnpm build              # Optional schema validation + production build
 
 **The invite flow** works in two steps: `InviteHandler` subscribes to the chat with `{ claims: { join_code: code } }` as a session override. The server matches `chat.joinCode = @session.claims.join_code` and syncs the chat row locally. Once the row is present (FK constraint satisfied), the handler inserts the `chatMembers` row and navigates to the chat.
 
-**Attachments** chunk binary data into `file_parts` rows referenced from a `files` row, with the `attachments` row carrying the message linkage and metadata. They inherit their read policy from the parent message via `allowedTo.read("message")` — no separate asset server required.
-
 **Collaborative canvases** attach to a chat. Strokes are rows, synced in real time. Delete access is scoped to `{ ownerId: session.user_id }`; the canvas component has no explicit access checks.
 
 ## Schema
@@ -49,4 +39,3 @@ Defined in `schema.ts` using the Jazz typed schema DSL. Running `pnpm build` val
 - **reactions** — message (ref), userId, emoji
 - **canvases** — chat (ref), createdAt
 - **strokes** — canvas (ref), ownerId, color, width, pointsJson, createdAt
-- **attachments** — message (ref), type, name, file (ref), size

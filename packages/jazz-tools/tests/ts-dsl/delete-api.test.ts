@@ -17,7 +17,7 @@ describe("TS Delete API", () => {
     await db.shutdown();
   });
 
-  it("deletes rows synchronously and returns a write handle", async () => {
+  it("deletes rows synchronously and returns a mutation result", async () => {
     const { value: project } = db.insert(app.projects, { name: "Test Project" });
     const owner = insertUser(db);
     const { value: todo } = db.insert(app.todos, {
@@ -31,6 +31,7 @@ describe("TS Delete API", () => {
 
     const result = db.delete(app.todos, todo.id);
     expect(result).toMatchObject({
+      value: undefined,
       wait: expect.any(Function),
     });
 

@@ -1,0 +1,10 @@
+[package]
+name = "call-indirect-count"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+wasmparser = "0.244.0"

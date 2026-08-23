@@ -2,7 +2,6 @@
 "jazz-tools": patch
 "jazz-napi": patch
 "jazz-wasm": patch
-"jazz-rn": patch
 ---
 
 Bound oversized index keys by keeping as much real value prefix as fits in the durable key and appending a length plus hash overflow trailer.

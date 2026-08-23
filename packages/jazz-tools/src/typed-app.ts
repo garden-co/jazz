@@ -10,9 +10,7 @@ import type {
 import { schemaToWasm } from "./codegen/schema-reader.js";
 import type { WasmSchema } from "./drivers/types.js";
 import {
-  PERMISSION_INTROSPECTION_COLUMNS,
   PROVENANCE_MAGIC_COLUMNS,
-  type PermissionIntrospectionColumn,
   type ProvenanceMagicColumn,
   assertUserColumnNameAllowed,
 } from "./magic-columns.js";
@@ -29,6 +27,7 @@ export class DefinedTable<TColumns extends TableDefinition = TableDefinition> {
   constructor(
     public readonly columns: TColumns,
     public readonly indexedColumns?: readonly Extract<keyof TColumns, string>[],
+    public readonly branchColumns?: readonly Extract<keyof TColumns, string>[],
   ) {}
 
   indexOnly<
@@ -44,7 +43,34 @@ export class DefinedTable<TColumns extends TableDefinition = TableDefinition> {
       }
     }
 
-    return new DefinedTable(this.columns, normalizedColumns);
+    return new DefinedTable(this.columns, normalizedColumns, this.branchColumns);
+  }
+
+  branchBy<const TBranchColumn extends Extract<keyof TColumns, string>>(
+    column: TBranchColumn,
+  ): DefinedTable<TColumns>;
+  branchBy<
+    const TBranchColumns extends readonly [
+      Extract<keyof TColumns, string>,
+      ...Extract<keyof TColumns, string>[],
+    ],
+  >(columns: TBranchColumns): DefinedTable<TColumns>;
+  branchBy(
+    columns:
+      | Extract<keyof TColumns, string>
+      | readonly [Extract<keyof TColumns, string>, ...Extract<keyof TColumns, string>[]],
+  ): DefinedTable<TColumns> {
+    const normalizedColumns = (Array.isArray(columns) ? [...columns] : [columns]) as Extract<
+      keyof TColumns,
+      string
+    >[];
+    for (const column of normalizedColumns) {
+      if (!(column in this.columns)) {
+        throw new Error(`table.branchBy(...) references unknown column "${column}".`);
+      }
+    }
+
+    return new DefinedTable(this.columns, this.indexedColumns, normalizedColumns);
   }
 }
 
@@ -243,6 +269,9 @@ type UuidWhere<TOptional extends boolean> = WhereEqNe<
   TOptional,
   TOptional extends true ? { in?: string[]; isNull?: boolean } : { in?: string[] }
 >;
+type PayloadEnumMatch<T> = T extends { type: infer Case extends string }
+  ? { type: Case; where?: Partial<Omit<T, "type">> }
+  : never;
 
 type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
   ColumnBuilderSqlType<TBuilder> extends "TEXT"
@@ -273,18 +302,23 @@ type WhereInputForBuilder<TBuilder extends AnyTypedColumnBuilder> =
                     }
                   ? WhereEqNe<TVariant, ColumnBuilderOptional<TBuilder>, { in?: TVariant[] }>
                   : ColumnBuilderSqlType<TBuilder> extends {
-                        kind: "ARRAY";
-                        element: infer TElementSql extends SqlType;
+                        kind: "ENUM";
+                        cases: readonly unknown[];
                       }
-                    ? WhereEqNe<
-                        StoredColumnValue<TBuilder>,
-                        ColumnBuilderOptional<TBuilder>,
-                        {
-                          contains?: TSTypeFromSqlType<TElementSql>;
-                          in?: StoredColumnValue<TBuilder>[];
+                    ? { match?: PayloadEnumMatch<StoredColumnValue<TBuilder>> }
+                    : ColumnBuilderSqlType<TBuilder> extends {
+                          kind: "ARRAY";
+                          element: infer TElementSql extends SqlType;
                         }
-                      >
-                    : never;
+                      ? WhereEqNe<
+                          StoredColumnValue<TBuilder>,
+                          ColumnBuilderOptional<TBuilder>,
+                          {
+                            contains?: TSTypeFromSqlType<TElementSql>;
+                            in?: StoredColumnValue<TBuilder>[];
+                          }
+                        >
+                      : never;
 
 export type TableWhereInput<
   TSchema extends SchemaLike,
@@ -296,8 +330,6 @@ export type TableWhereInput<
     [TColumn in ColumnName<TSchema, TTable>]?: WhereInputForBuilder<
       BuilderForColumn<TSchema, TTable, TColumn>
     >;
-  } & {
-    [TColumn in PermissionIntrospectionColumn]?: boolean;
   } & {
     [TColumn in ProvenanceMagicColumn]?:
       | string
@@ -448,12 +480,6 @@ type RelationSeedQuery<TTable extends string = string> = QueryBuilder<unknown> &
   _serializeRelation(): unknown;
 };
 
-type PermissionIntrospectionColumns = {
-  $canRead: boolean | null;
-  $canEdit: boolean | null;
-  $canDelete: boolean | null;
-};
-
 type ProvenanceMagicColumns = {
   $createdBy: string;
   $createdAt: Date;
@@ -463,13 +489,11 @@ type ProvenanceMagicColumns = {
 
 export type TableSelectableColumn<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
   | BaseColumnName<TSchema, TTable>
-  | PermissionIntrospectionColumn
   | ProvenanceMagicColumn
   | "*";
 
 export type TableOrderableColumn<TSchema extends SchemaLike, TTable extends TableName<TSchema>> =
   | BaseColumnName<TSchema, TTable>
-  | PermissionIntrospectionColumn
   | ProvenanceMagicColumn;
 
 export type TableSelected<
@@ -483,7 +507,6 @@ export type TableSelected<
         TableRow<TSchema, TTable>,
         Extract<TSelection | "id", keyof TableRow<TSchema, TTable>>
       >) &
-    Pick<PermissionIntrospectionColumns, Extract<TSelection, PermissionIntrospectionColumn>> &
     Pick<ProvenanceMagicColumns, Extract<TSelection, ProvenanceMagicColumn>>
 >;
 
@@ -642,12 +665,10 @@ type BaseColumnNameFromMeta<TMeta extends AnyTableMeta> = Extract<
 >;
 type TableSelectableFromMeta<TMeta extends AnyTableMeta> =
   | BaseColumnNameFromMeta<TMeta>
-  | PermissionIntrospectionColumn
   | ProvenanceMagicColumn
   | "*";
 type TableOrderableFromMeta<TMeta extends AnyTableMeta> =
   | BaseColumnNameFromMeta<TMeta>
-  | PermissionIntrospectionColumn
   | ProvenanceMagicColumn;
 type DefaultTableSelection<TMeta extends AnyTableMeta> = BaseColumnNameFromMeta<TMeta>;
 
@@ -694,7 +715,6 @@ type SelectedFromMeta<
   ("*" extends TSelection
     ? TableRowFromMeta<TMeta>
     : Pick<TableRowFromMeta<TMeta>, Extract<TSelection | "id", keyof TableRowFromMeta<TMeta>>>) &
-    Pick<PermissionIntrospectionColumns, Extract<TSelection, PermissionIntrospectionColumn>> &
     Pick<ProvenanceMagicColumns, Extract<TSelection, ProvenanceMagicColumn>>
 >;
 
@@ -1237,6 +1257,26 @@ function tableIndexedColumns(
   return undefined;
 }
 
+function tableBranchColumns(
+  definition: TableDefinition | DefinedTable<TableDefinition>,
+): string[] | undefined {
+  if (definition instanceof DefinedTable) {
+    return definition.branchColumns ? [...definition.branchColumns] : undefined;
+  }
+
+  if (typeof definition === "object" && definition !== null) {
+    const maybeDefinedTable = definition as {
+      __jazzTableDefinition?: unknown;
+      branchColumns?: readonly string[];
+    };
+    if (maybeDefinedTable.__jazzTableDefinition === true) {
+      return maybeDefinedTable.branchColumns ? [...maybeDefinedTable.branchColumns] : undefined;
+    }
+  }
+
+  return undefined;
+}
+
 function definitionToColumns(
   definition: TableDefinition | DefinedTable<TableDefinition>,
 ): Column[] {
@@ -1270,10 +1310,12 @@ function definitionToSchema<TSchema extends SchemaDefinition>(definition: TSchem
   return {
     tables: Object.entries(definition).map(([tableName, tableDefinition]) => {
       const indexedColumns = tableIndexedColumns(tableDefinition);
+      const branchColumns = tableBranchColumns(tableDefinition);
       return {
         name: tableName,
         columns: definitionToColumns(tableDefinition),
         ...(indexedColumns ? { indexedColumns } : {}),
+        ...(branchColumns ? { branchBy: branchColumns } : {}),
       };
     }),
   };
@@ -1357,10 +1399,11 @@ export function defineSliceableApp(
   } as SliceableApp<Schema<SchemaDefinition>>;
 }
 
-// The most recently defined app's WasmSchema. The inspector overlay reads this
-// to render the schema before any query has created a runtime client — e.g. on
-// a page that only writes data (useDb/insert, no useAll). It's known statically
+// The statically-registered app schema: the inspector host handle falls back to
+// it before any client exists (e.g. a write-only page with no query yet). Set
 // at defineApp time, so it does not depend on a connection being established.
+// Last-defineApp-wins by design: a dev-only fallback, not a multi-app registry —
+// pages defining several apps get the most recent one until a client exists.
 let registeredWasmSchema: WasmSchema | undefined;
 
 /** The most recently defined app's WasmSchema, if any (used by the inspector). */
@@ -1404,5 +1447,4 @@ function createAppForTables(
   } as App<Schema<SchemaDefinition>>;
 }
 
-export const permissionIntrospectionColumns = [...PERMISSION_INTROSPECTION_COLUMNS];
 export const provenanceMagicColumns = [...PROVENANCE_MAGIC_COLUMNS];

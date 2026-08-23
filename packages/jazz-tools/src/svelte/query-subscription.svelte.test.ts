@@ -1,0 +1,322 @@
+import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
+import { flushSync } from "svelte";
+import type { QueryBuilder } from "../shared/index.js";
+import "./test-helpers.svelte.js";
+
+const mocks = vi.hoisted(() => {
+  const unsubscribe = vi.fn();
+  const subscribe = vi.fn(() => unsubscribe);
+  const makeQueryKey = vi.fn((q: any) => `key:${q?._marker ?? "?"}`);
+  const getCacheEntry = vi.fn(() => ({
+    state: { status: "fulfilled", data: [] },
+    subscribe,
+  }));
+
+  return {
+    makeQueryKey,
+    getCacheEntry,
+    subscribe,
+    unsubscribe,
+    reset() {
+      unsubscribe.mockReset();
+      subscribe.mockReset().mockReturnValue(unsubscribe);
+      makeQueryKey.mockReset().mockImplementation((q: any) => `key:${q?._marker ?? "?"}`);
+      getCacheEntry.mockReset().mockReturnValue({
+        state: { status: "fulfilled", data: [] },
+        subscribe,
+      });
+    },
+  };
+});
+
+vi.mock("./context.svelte.js", () => ({
+  getJazzContext: () => ({
+    db: null,
+    session: null,
+    subscriptionStore: {
+      makeQueryKey: mocks.makeQueryKey,
+      getCacheEntry: mocks.getCacheEntry,
+    },
+  }),
+}));
+
+const { QuerySubscription, QuerySubscriptionOne } = await import("./query-subscription.svelte.js");
+
+function makeQuery(marker = "todos") {
+  return {
+    _marker: marker,
+    _table: marker,
+    _schema: {},
+    _rowType: {},
+    _build: () => JSON.stringify({ table: marker, limit: 10 }),
+  } as any;
+}
+
+async function settle() {
+  await Promise.resolve();
+  flushSync();
+}
+
+describe("svelte/QuerySubscription", () => {
+  beforeEach(() => {
+    mocks.reset();
+  });
+
+  it("subscribes when given a plain QueryBuilder", async () => {
+    const query = makeQuery("inbox");
+    const cleanup = $effect.root(() => {
+      new QuerySubscription(query);
+    });
+    await settle();
+
+    expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, undefined);
+    expect(mocks.subscribe).toHaveBeenCalledTimes(1);
+
+    cleanup();
+  });
+
+  it("does not subscribe when given undefined", async () => {
+    const cleanup = $effect.root(() => {
+      new QuerySubscription(undefined);
+    });
+    await settle();
+
+    expect(mocks.makeQueryKey).not.toHaveBeenCalled();
+    expect(mocks.subscribe).not.toHaveBeenCalled();
+
+    cleanup();
+  });
+
+  it("accepts a getter and subscribes with the resolved query", async () => {
+    const query = makeQuery("inbox");
+    const cleanup = $effect.root(() => {
+      new QuerySubscription(() => query);
+    });
+    await settle();
+
+    expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, undefined);
+    expect(mocks.subscribe).toHaveBeenCalledTimes(1);
+
+    cleanup();
+  });
+
+  it("getter returning undefined does not subscribe", async () => {
+    const cleanup = $effect.root(() => {
+      new QuerySubscription(() => undefined);
+    });
+    await settle();
+
+    expect(mocks.makeQueryKey).not.toHaveBeenCalled();
+    expect(mocks.subscribe).not.toHaveBeenCalled();
+
+    cleanup();
+  });
+
+  it("getter reading $state re-subscribes when state changes", async () => {
+    let filter = $state<string | null>(null);
+    const inboxQuery = makeQuery("inbox");
+    const filteredQuery = makeQuery("filtered");
+
+    const cleanup = $effect.root(() => {
+      new QuerySubscription(() => (filter ? filteredQuery : inboxQuery));
+    });
+    await settle();
+
+    expect(mocks.makeQueryKey).toHaveBeenLastCalledWith(inboxQuery, undefined);
+    expect(mocks.subscribe).toHaveBeenCalledTimes(1);
+
+    filter = "alice";
+    await settle();
+
+    expect(mocks.unsubscribe).toHaveBeenCalledTimes(1);
+    expect(mocks.makeQueryKey).toHaveBeenLastCalledWith(filteredQuery, undefined);
+    expect(mocks.subscribe).toHaveBeenCalledTimes(2);
+
+    cleanup();
+  });
+
+  it("getter flipping undefined → query subscribes only after the flip", async () => {
+    let filter = $state<string | null>(null);
+    const filteredQuery = makeQuery("filtered");
+
+    const cleanup = $effect.root(() => {
+      new QuerySubscription(() => (filter ? filteredQuery : undefined));
+    });
+    await settle();
+
+    expect(mocks.makeQueryKey).not.toHaveBeenCalled();
+    expect(mocks.subscribe).not.toHaveBeenCalled();
+
+    filter = "alice";
+    await settle();
+
+    expect(mocks.makeQueryKey).toHaveBeenCalledWith(filteredQuery, undefined);
+    expect(mocks.subscribe).toHaveBeenCalledTimes(1);
+
+    cleanup();
+  });
+
+  it("getter flipping query → undefined unsubscribes", async () => {
+    let active = $state(true);
+    const query = makeQuery("inbox");
+
+    const cleanup = $effect.root(() => {
+      new QuerySubscription(() => (active ? query : undefined));
+    });
+    await settle();
+
+    expect(mocks.subscribe).toHaveBeenCalledTimes(1);
+
+    active = false;
+    await settle();
+
+    expect(mocks.unsubscribe).toHaveBeenCalledTimes(1);
+
+    cleanup();
+  });
+
+  it("clears a stale error when the getter flips back to undefined", async () => {
+    let active = $state(true);
+    const query = makeQuery("inbox");
+
+    let capturedOnError: ((err: unknown) => void) | undefined;
+    mocks.getCacheEntry.mockReturnValue({
+      state: { status: "fulfilled" as const, data: [] },
+      subscribe: (callbacks: any) => {
+        capturedOnError = callbacks.onError;
+        return mocks.unsubscribe;
+      },
+    } as any);
+
+    const sub = (() => {
+      let ref!: InstanceType<typeof QuerySubscription<{ id: string }>>;
+      const cleanup = $effect.root(() => {
+        ref = new QuerySubscription(() => (active ? query : undefined));
+      });
+      return { ref, cleanup };
+    })();
+    await settle();
+
+    capturedOnError!(new Error("boom"));
+    await settle();
+    expect(sub.ref.error).toBeInstanceOf(Error);
+
+    active = false;
+    await settle();
+
+    expect(sub.ref.error).toBeNull();
+
+    sub.cleanup();
+  });
+
+  it("options accepts a getter and forwards the resolved value", async () => {
+    const query = makeQuery("inbox");
+
+    const cleanup = $effect.root(() => {
+      new QuerySubscription(query, () => ({ tier: "edge" as const }));
+    });
+    await settle();
+
+    expect(mocks.makeQueryKey).toHaveBeenCalledWith(query, { tier: "edge" });
+
+    cleanup();
+  });
+
+  it("starts with current undefined regardless of options.tier", () => {
+    let withoutTier!: InstanceType<typeof QuerySubscription<{ id: string }>>;
+    let withTier!: InstanceType<typeof QuerySubscription<{ id: string }>>;
+    const cleanup = $effect.root(() => {
+      withoutTier = new QuerySubscription(makeQuery());
+      withTier = new QuerySubscription(makeQuery(), { tier: "edge" as const });
+    });
+
+    expect(withoutTier.current).toBeUndefined();
+    expect(withTier.current).toBeUndefined();
+
+    cleanup();
+  });
+
+  it("QuerySubscriptionOne exposes a nullable row and reacts", async () => {
+    type Todo = { id: string; title: string };
+    let onDelta!: (delta: { all: Todo[]; delta: never[] }) => void;
+    mocks.getCacheEntry.mockReturnValue({
+      state: { status: "fulfilled" as const, data: [] },
+      subscribe: (callbacks: any) => {
+        onDelta = callbacks.onDelta;
+        return mocks.unsubscribe;
+      },
+    } as any);
+
+    const query = makeQuery("one") as QueryBuilder<Todo>;
+    const createSubscription = () => new QuerySubscriptionOne(query, { tier: "edge" });
+    let subscription!: ReturnType<typeof createSubscription>;
+    const cleanup = $effect.root(() => {
+      subscription = createSubscription();
+    });
+    await settle();
+
+    expectTypeOf(subscription.current).toEqualTypeOf<Todo | null | undefined>();
+    expect(subscription.current).toBeNull();
+    const [limitedQuery, queryOptions] = mocks.makeQueryKey.mock.calls.at(-1)!;
+    expect(JSON.parse(limitedQuery._build()).limit).toBe(1);
+    expect(queryOptions).toEqual({ tier: "edge" });
+
+    onDelta({ all: [{ id: "1", title: "first" }], delta: [] });
+    expect(subscription.current).toEqual({ id: "1", title: "first" });
+
+    onDelta({ all: [], delta: [] });
+    expect(subscription.current).toBeNull();
+    cleanup();
+  });
+
+  it("QuerySubscriptionOne accepts reactive query options", async () => {
+    const query = makeQuery("one") as QueryBuilder<{ id: string }>;
+    const cleanup = $effect.root(() => {
+      new QuerySubscriptionOne(query, () => ({ tier: "edge" as const }));
+    });
+    await settle();
+
+    expect(mocks.makeQueryKey).toHaveBeenCalledWith(expect.anything(), { tier: "edge" });
+    cleanup();
+  });
+
+  it("exposes reactive isLoading state while preserving current", async () => {
+    const query = makeQuery();
+    let callbacks!: {
+      onfulfilled: (data: { id: string }[]) => void;
+      onError: (error: unknown) => void;
+      onReset: () => void;
+    };
+    mocks.getCacheEntry.mockReturnValue({
+      state: { status: "pending" },
+      subscribe: (next: typeof callbacks) => {
+        callbacks = next;
+        return mocks.unsubscribe;
+      },
+    } as any);
+
+    let ref!: InstanceType<typeof QuerySubscription<{ id: string }>>;
+    const cleanup = $effect.root(() => {
+      ref = new QuerySubscription(query);
+    });
+
+    await settle();
+    expect(ref.isLoading).toBe(true);
+
+    const rows = [{ id: "1" }];
+    callbacks.onfulfilled(rows);
+    await settle();
+    expect(ref.current).toEqual(rows);
+    expect(ref.isLoading).toBe(false);
+
+    callbacks.onReset();
+    await settle();
+    expect(ref.isLoading).toBe(true);
+
+    callbacks.onError("subscription failed");
+    await settle();
+    expect(ref.isLoading).toBe(false);
+
+    cleanup();
+  });
+});

@@ -1,7 +1,7 @@
 ---
 title: Local-First Data Model
 description: An overview of how Jazz manages local state, row histories, conflicts, and loading behavior.
-reviewedAt: "6027cae2"
+reviewedAt: "b29b48d1a"
 ---
 
 Jazz embeds a database on each device and syncs to the server in the background.
@@ -23,9 +23,10 @@ client that has received the same row-history updates converges on the same curr
 
 ### The only loading moment
 
-Devices cannot show data they do not have. On the very first load from the server, there will be a
-loading moment while data starts to populate the local embedded database. From that point on, data
-for that query is available locally and can be read again even while offline.
+Devices cannot show data they do not have. Each newly run query has an initial loading period until
+its first result settles. If the matching data is already stored locally, that result can be
+available immediately. Otherwise, Jazz needs to wait until the server sends the data to the local embedded
+database. Once stored, that data can be read while offline in future.
 
 <Callout type="info" title="Durability Tiers">
   If you need to ensure data is fully up-to-date before displaying it, you can opt in to waiting for
@@ -109,8 +110,9 @@ enough row history to converge deterministically after peers reconnect.
 ## Conflict resolution
 
 When concurrent writes touch the same field of the same row, Jazz resolves the visible result with
-[last-writer-wins (LWW)](/docs/concepts/how-sync-works#consistency-model). The later row version
-wins for the conflicting field.
+[last-writer-wins (LWW)](/docs/concepts/how-sync-works#consistency-model). Jazz uses a deterministic
+[hybrid logical clock](/docs/concepts/how-sync-works#hybrid-logical-clock) ordering to choose the
+winning row version for the conflicting field.
 
 If two peers update different fields, both changes can still be preserved in the resulting visible
 row state. Even row versions that lose out in the current visible result remain in row history, so

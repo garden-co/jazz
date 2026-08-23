@@ -2,7 +2,7 @@ import { createEffect, onCleanup, type Accessor } from "solid-js";
 import { createStore, reconcile } from "solid-js/store";
 import type { AuthState } from "../runtime/auth-state.js";
 import type { Session } from "../runtime/context.js";
-import { JazzClient } from "../web/create-jazz-client.js";
+import type { JazzClient } from "../web/create-jazz-client.js";
 
 interface StoreState {
   authState: AuthState | null;

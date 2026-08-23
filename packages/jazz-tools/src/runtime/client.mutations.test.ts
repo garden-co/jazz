@@ -1,18 +1,37 @@
 import { describe, expect, it, vi } from "vitest";
-import { JazzClient, type Runtime } from "./client.js";
+import {
+  JazzClient,
+  type BatchId,
+  type OpenBatchId,
+  type Runtime,
+  type TransactionalRuntime,
+  type WriteReceipt,
+} from "./client.js";
 import type { AppContext, Session } from "./context.js";
 
-function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
+function makeClient(runtimeOverrides: Partial<TransactionalRuntime> = {}) {
+  const receipt = (
+    writeContextJson: string | null | undefined,
+    committedId: string,
+  ): WriteReceipt => {
+    const openBatchId = writeContextJson
+      ? (JSON.parse(writeContextJson).batch_id as OpenBatchId | undefined)
+      : undefined;
+    return openBatchId
+      ? { kind: "staged", openBatchId }
+      : { kind: "committed", batchId: committedId as BatchId };
+  };
   const insertCalls: Array<
     [string, Record<string, unknown>, string | undefined, string | undefined]
   > = [];
   const restoreCalls: Array<[string, string, Record<string, unknown>, string | undefined]> = [];
-  const updateCalls: Array<[string, Record<string, unknown>, string | undefined]> = [];
+  const updateCalls: Array<[string, string, Record<string, unknown>, string | undefined]> = [];
   const upsertCalls: Array<[string, string, Record<string, unknown>, string | undefined]> = [];
-  const deleteCalls: Array<[string, string | undefined]> = [];
+  const deleteCalls: Array<[string, string, string | undefined]> = [];
+  const dryRunCalls: Array<[string, ...unknown[]]> = [];
 
-  const runtimeBase: Runtime = {
-    beginBatch: (batchMode) => `batch-${batchMode}`,
+  const runtimeBase: TransactionalRuntime = {
+    beginTransaction: (_mode, id) => id,
     insert: (
       table: string,
       values: Record<string, unknown>,
@@ -23,7 +42,7 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       return {
         id: objectId ?? "00000000-0000-0000-0000-000000000001",
         values: [],
-        batchId: writeContextJson ? "insert-with-context-batch-id" : "insert-batch-id",
+        ...receipt(writeContextJson, "insert-transaction-id"),
       };
     },
     restore: (
@@ -36,16 +55,17 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       return {
         id: objectId,
         values: [],
-        batchId: writeContextJson ? "restore-with-context-batch-id" : "restore-batch-id",
+        ...receipt(writeContextJson, "restore-transaction-id"),
       };
     },
     update: (
+      table: string,
       objectId: string,
       updates: Record<string, unknown>,
       writeContextJson?: string | null,
     ) => {
-      updateCalls.push([objectId, updates, writeContextJson ?? undefined]);
-      return { batchId: writeContextJson ? "update-with-context-batch-id" : "update-batch-id" };
+      updateCalls.push([table, objectId, updates, writeContextJson ?? undefined]);
+      return receipt(writeContextJson, "update-transaction-id");
     },
     upsert: (
       table: string,
@@ -54,28 +74,42 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
       writeContextJson?: string | null,
     ) => {
       upsertCalls.push([table, objectId, values, writeContextJson ?? undefined]);
-      return { batchId: writeContextJson ? "upsert-with-context-batch-id" : "upsert-batch-id" };
+      return receipt(writeContextJson, "upsert-transaction-id");
     },
-    delete: (objectId: string, writeContextJson?: string | null) => {
-      deleteCalls.push([objectId, writeContextJson ?? undefined]);
-      return { batchId: writeContextJson ? "delete-with-context-batch-id" : "delete-batch-id" };
+    delete: (table: string, objectId: string, writeContextJson?: string | null) => {
+      deleteCalls.push([table, objectId, writeContextJson ?? undefined]);
+      return receipt(writeContextJson, "delete-transaction-id");
+    },
+    canInsertLocally: (table, values, session) => {
+      dryRunCalls.push(["canInsertLocally", table, values, session]);
+      return "allowed";
+    },
+    canReadLocally: (table, objectId, session) => {
+      dryRunCalls.push(["canReadLocally", table, objectId, session]);
+      return "allowed";
+    },
+    canUpdateLocally: (table, objectId, values, session) => {
+      dryRunCalls.push(["canUpdateLocally", table, objectId, values, session]);
+      return "allowed";
+    },
+    canDeleteLocally: (table, objectId, session) => {
+      dryRunCalls.push(["canDeleteLocally", table, objectId, session]);
+      return "allowed";
     },
     query: async () => [],
-    waitForBatch: async () => {},
-    onMutationError: () => {},
+    waitForTransaction: async () => {},
     connect: () => {},
-    disconnect: () => {},
+    disconnect: async () => {},
     updateAuth: () => {},
     onAuthFailure: () => {},
+    onMutationError: () => {},
     createSubscription: () => 0,
     executeSubscription: () => {},
     unsubscribe: () => {},
-    commitBatch: vi.fn(),
-    rollbackBatch: () => false,
-    getSchema: () => ({}),
-    getSchemaHash: () => "schema-hash",
+    commitTransaction: vi.fn(() => "committed-batch" as BatchId),
+    rollbackTransaction: async () => false,
   };
-  const runtime: Runtime = { ...runtimeBase, ...runtimeOverrides };
+  const runtime: TransactionalRuntime = { ...runtimeBase, ...runtimeOverrides };
 
   const context: AppContext = {
     appId: "test-app",
@@ -100,10 +134,34 @@ function makeClient(runtimeOverrides: Partial<Runtime> = {}) {
     updateCalls,
     upsertCalls,
     deleteCalls,
+    dryRunCalls,
   };
 }
 
 describe("JazzClient write attribution", () => {
+  it("routes dry-run permission checks through runtime methods", () => {
+    const { client, dryRunCalls } = makeClient();
+    const insertValues = { title: { type: "Text" as const, value: "Draft" } };
+    const updates = { done: { type: "Boolean" as const, value: true } };
+    const session: Session = {
+      user_id: "backend-user",
+      claims: { role: "admin" },
+      authMode: "external",
+    };
+
+    expect(client.canInsertLocally("todos", insertValues, session)).toBe("allowed");
+    expect(client.canReadLocally("todos", "row-1", session)).toBe("allowed");
+    expect(client.canUpdateLocally("todos", "row-1", updates, session)).toBe("allowed");
+    expect(client.canDeleteLocally("todos", "row-1", session)).toBe("allowed");
+
+    expect(dryRunCalls).toEqual([
+      ["canInsertLocally", "todos", insertValues, session],
+      ["canReadLocally", "todos", "row-1", session],
+      ["canUpdateLocally", "todos", "row-1", updates, session],
+      ["canDeleteLocally", "todos", "row-1", session],
+    ]);
+  });
+
   it("routes attributed writes through runtime methods with write context", async () => {
     const { client, insertCalls, updateCalls, deleteCalls } = makeClient();
     const insertValues = { title: { type: "Text" as const, value: "Draft" } };
@@ -111,12 +169,12 @@ describe("JazzClient write attribution", () => {
     const attributedContext = JSON.stringify({ attribution: "alice" });
 
     client.insert("todos", insertValues, undefined, undefined, "alice");
-    client.update("row-1", updates, undefined, undefined, "alice");
-    client.delete("row-1", undefined, undefined, "alice");
+    client.update("todos", "row-1", updates, undefined, undefined, "alice");
+    client.delete("todos", "row-1", undefined, undefined, "alice");
 
     expect(insertCalls).toEqual([["todos", insertValues, attributedContext, undefined]]);
-    expect(updateCalls).toEqual([["row-1", updates, attributedContext]]);
-    expect(deleteCalls).toEqual([["row-1", attributedContext]]);
+    expect(updateCalls).toEqual([["todos", "row-1", updates, attributedContext]]);
+    expect(deleteCalls).toEqual([["todos", "row-1", attributedContext]]);
   });
 
   it("encodes session and attribution together when both are provided", () => {

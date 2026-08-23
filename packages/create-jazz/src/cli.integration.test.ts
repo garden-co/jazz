@@ -10,6 +10,8 @@ const packageRoot = path.resolve(srcDir, "..");
 const repoRoot = path.resolve(packageRoot, "../..");
 const cliEntry = path.join(srcDir, "index.ts");
 const tsxBin = path.join(packageRoot, "node_modules/.bin/tsx");
+const hostedE2E = process.env.CREATE_JAZZ_HOSTED_E2E === "1";
+const hostedIt = hostedE2E ? it : it.skip;
 
 describe("create-jazz CLI end-to-end", () => {
   let tmpDir: string;
@@ -19,7 +21,7 @@ describe("create-jazz CLI end-to-end", () => {
   });
 
   it(
-    "scaffolds a project via `tsx src/index.ts <name> --starter next-betterauth`",
+    "scaffolds a self-hosted project via `tsx src/index.ts <name> --starter next-betterauth`",
     { timeout: 60_000 },
     () => {
       tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "create-jazz-cli-e2e-"));
@@ -40,12 +42,16 @@ describe("create-jazz CLI end-to-end", () => {
       // the CLI wiring, not a real pm install.
       delete env.npm_config_user_agent;
 
-      const result = spawnSync(tsxBin, [cliEntry, "my-e2e-app", "--starter", "next-betterauth"], {
-        cwd: tmpDir,
-        env,
-        encoding: "utf-8",
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      const result = spawnSync(
+        tsxBin,
+        [cliEntry, "my-e2e-app", "--starter", "next-betterauth", "--hosting", "selfhosted"],
+        {
+          cwd: tmpDir,
+          env,
+          encoding: "utf-8",
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
 
       expect(
         result.status,
@@ -69,6 +75,46 @@ describe("create-jazz CLI end-to-end", () => {
         expect(value).not.toMatch(/^workspace:/);
         expect(value).not.toMatch(/^catalog:/);
       }
+    },
+  );
+
+  hostedIt(
+    "scaffolds a hosted project and provisions Jazz Cloud when CREATE_JAZZ_HOSTED_E2E=1",
+    { timeout: 120_000 },
+    () => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "create-jazz-cli-hosted-e2e-"));
+
+      const starterPath = path.join(repoRoot, "starters/next-betterauth");
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        JAZZ_STARTER_PATH: starterPath,
+        GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME ?? "create-jazz tests",
+        GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL ?? "tests@create-jazz.invalid",
+        GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME ?? "create-jazz tests",
+        GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL ?? "tests@create-jazz.invalid",
+      };
+      delete env.npm_config_user_agent;
+
+      const result = spawnSync(
+        tsxBin,
+        [cliEntry, "my-hosted-e2e-app", "--starter", "next-betterauth"],
+        {
+          cwd: tmpDir,
+          env,
+          encoding: "utf-8",
+          stdio: ["ignore", "pipe", "pipe"],
+          timeout: 120_000,
+        },
+      );
+
+      expect(
+        result.status,
+        `CLI exited non-zero. stdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+      ).toBe(0);
+      expect(
+        fs.existsSync(path.join(tmpDir, "my-hosted-e2e-app", ".env")),
+        "hosted provisioning should write .env",
+      ).toBe(true);
     },
   );
 

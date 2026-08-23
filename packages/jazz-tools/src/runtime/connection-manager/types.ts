@@ -1,12 +1,11 @@
 import { getRuntimeSchemaCacheKey } from "../../drivers/schema-wire.js";
 import type { WasmSchema } from "../../drivers/types.js";
-import type { JazzClient, DurabilityTier, MutationErrorEvent } from "../client.js";
+import type { DurabilityTier, JazzClient, MutationErrorEvent } from "../client.js";
 import type { Session } from "../context.js";
-import type { DbRuntimeModule } from "../db-runtime-module.js";
 import type { DbConfig } from "../db.js";
+import type { RuntimeSource } from "../runtime-source.js";
 import { resolveTelemetryCollectorUrlFromEnv } from "../sync-telemetry.js";
-import type { AuthFailureReason } from "../sync-transport.js";
-import type { WorkerLifecycleEvent } from "../worker-bridge.js";
+import type { AuthFailureReason } from "../auth-state.js";
 
 function shouldBypassLocalPolicies(config: DbConfig): boolean {
   return !!config.adminSecret;
@@ -28,9 +27,7 @@ const policyStrippedSchemaCache = new WeakMap<WasmSchema, WasmSchema>();
 
 function getPolicyStrippedSchema(schema: WasmSchema): WasmSchema {
   const cached = policyStrippedSchemaCache.get(schema);
-  if (cached) {
-    return cached;
-  }
+  if (cached) return cached;
 
   const strippedSchema = stripSchemaPolicies(schema);
   policyStrippedSchemaCache.set(schema, strippedSchema);
@@ -43,45 +40,41 @@ export interface ConnectionManagerClientInput {
   client: JazzClient;
 }
 
-/**
- * Part of the {@link Db} API used by the {@link ConnectionManager}
- */
+/** The narrow part of Db needed by connection managers. */
 export interface DbForConnection {
   readonly config: DbConfig;
-  readonly runtimeModule: DbRuntimeModule<any> | null;
+  readonly runtimeSource: RuntimeSource<any>;
   readonly isShuttingDown: boolean;
   markUnauthenticated(reason: AuthFailureReason): void;
+  clearAuthError(): void;
   onMutationError(event: MutationErrorEvent): void;
 }
 
+/**
+ * Owns the single runtime client and schema associated with a Db.
+ *
+ * Platform-specific managers extend this boundary with their connection and
+ * durability topology; Db remains responsible for the public typed API.
+ */
 export abstract class ConnectionManager {
   private client: JazzClient | null = null;
-  private disposeWasmTelemetry: (() => void) | null = null;
-  /**
-   * Db schema, cached for performance.
-   */
   private clientSchema: WasmSchema | null = null;
-  protected abstract readonly hasDurablePeer: boolean;
+  private disposeRuntimeTelemetry: (() => void) | null = null;
 
   protected constructor(protected readonly host: DbForConnection) {}
 
   abstract start(): Promise<void>;
 
   getClient(schema: WasmSchema): JazzClient {
-    const { runtimeModule } = this.host;
-    if (!runtimeModule) {
-      throw new Error("Db runtime module is not initialized for this Db implementation");
-    }
-
+    const { config, runtimeSource } = this.host;
     const runtimeSchema =
-      runtimeModule.supportsPolicyBypass && shouldBypassLocalPolicies(this.host.config)
+      runtimeSource.supportsPolicyBypass && shouldBypassLocalPolicies(config)
         ? getPolicyStrippedSchema(schema)
         : schema;
-
-    const key = getRuntimeSchemaCacheKey(runtimeSchema);
+    const schemaKey = getRuntimeSchemaCacheKey(runtimeSchema);
 
     if (this.client) {
-      if (!this.clientSchema || getRuntimeSchemaCacheKey(this.clientSchema) !== key) {
+      if (!this.clientSchema || getRuntimeSchemaCacheKey(this.clientSchema) !== schemaKey) {
         throw new Error(
           "Db is already initialized with a different schema. Create a separate Db for each schema/app.",
         );
@@ -89,40 +82,24 @@ export abstract class ConnectionManager {
       return this.client;
     }
 
-    this.installMainThreadWasmTelemetry(runtimeModule);
-
-    const client = runtimeModule.createClient({
-      config: { ...this.host.config },
+    this.installRuntimeTelemetry();
+    const client = runtimeSource.createClient({
+      config: { ...config },
       schema: runtimeSchema,
-      hasWorker: this.hasDurablePeer,
-      useBinaryEncoding: this.hasDurablePeer,
-      bufferOutboxWithoutSyncSender: this.hasDurablePeer,
-      onAuthFailure: (reason) => {
-        this.host.markUnauthenticated(reason);
-      },
+      onAuthFailure: (reason) => this.host.markUnauthenticated(reason),
     });
-
-    client.onMutationError((event) => {
-      this.host.onMutationError(event);
-    });
+    client.onMutationError((event) => this.host.onMutationError(event));
 
     this.client = client;
     this.clientSchema = runtimeSchema;
-    this.onClientCreated({
-      schemaKey: key,
-      schema: runtimeSchema,
-      client,
-    });
-
+    this.onClientCreated({ schemaKey, schema: runtimeSchema, client });
     return client;
   }
 
-  /**
-   * The current runtime client's schema, or null if no client has been created
-   * yet (no query/subscription run). Used by `Db.getRuntimeSchema()` so the
-   * inspector overlay can render columns and build queries without reaching into
-   * private fields.
-   */
+  getCurrentClient(): JazzClient | null {
+    return this.client;
+  }
+
   getRuntimeSchema(): WasmSchema | null {
     return this.client?.getSchema() ?? null;
   }
@@ -138,58 +115,63 @@ export abstract class ConnectionManager {
 
   protected onClientCreated(_input: ConnectionManagerClientInput): void {}
 
-  abstract ensureReady(tier?: DurabilityTier): Promise<void>;
+  abstract ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void>;
+
+  abstract shouldDeferSubscriptionStart(tier?: DurabilityTier): boolean;
+
+  openInspectorControlPort(): Promise<MessagePort> {
+    return Promise.reject(new Error("This runtime has no shared browser worker"));
+  }
 
   abstract disconnect(): Promise<void>;
 
   abstract reconnect(): Promise<void>;
 
   updateAuth(auth: { jwtToken?: string; cookieSession?: Session }): void {
-    if ("jwtToken" in auth) {
-      this.client?.updateAuthToken(auth.jwtToken);
-    }
-    if ("cookieSession" in auth) {
-      this.client?.updateCookieSession(auth.cookieSession);
-    }
+    if ("jwtToken" in auth) this.client?.updateAuthToken(auth.jwtToken);
+    if ("cookieSession" in auth) this.client?.updateCookieSession(auth.cookieSession);
   }
-
-  abstract sendLifecycleHint(event: WorkerLifecycleEvent): void;
-
-  abstract shouldDeferSubscriptionStart(): boolean;
 
   abstract deleteClientStorage(): Promise<void>;
 
   protected async shutdownClient(): Promise<void> {
-    await this.client?.shutdown();
+    try {
+      await this.client?.shutdown();
+    } finally {
+      this.clearClient();
+    }
+  }
+
+  protected clearClient(): void {
     this.client = null;
     this.clientSchema = null;
+  }
+
+  protected detachClient(): JazzClient | null {
+    const client = this.client;
+    this.clearClient();
+    return client;
   }
 
   protected telemetryCollectorUrl(): string | undefined {
     return resolveTelemetryCollectorUrlFromEnv() ?? this.host.config.telemetryCollectorUrl;
   }
 
-  private installMainThreadWasmTelemetry(runtimeModule: DbRuntimeModule<any>): void {
+  private installRuntimeTelemetry(): void {
     const collectorUrl = this.telemetryCollectorUrl();
-    if (!collectorUrl || this.disposeWasmTelemetry) {
-      return;
-    }
+    if (!collectorUrl || this.disposeRuntimeTelemetry) return;
 
-    this.disposeWasmTelemetry =
-      runtimeModule.installTelemetry?.({
+    this.disposeRuntimeTelemetry =
+      this.host.runtimeSource.installTelemetry?.({
         config: this.host.config,
         collectorUrl,
         runtimeThread: "main",
       }) ?? null;
   }
 
-  private disposeMainThreadWasmTelemetry(): void {
-    this.disposeWasmTelemetry?.();
-    this.disposeWasmTelemetry = null;
-  }
-
   async shutdown(): Promise<void> {
-    this.disposeMainThreadWasmTelemetry();
+    this.disposeRuntimeTelemetry?.();
+    this.disposeRuntimeTelemetry = null;
     await this.shutdownClient();
   }
 }

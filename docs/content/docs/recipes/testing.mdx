@@ -13,7 +13,7 @@ exposed by the `jazz-tools` package.
 Databases created this way are easy to set up and pretty lightweight. You can even create an in-memory Db (with `driver: { type: "memory" }`)
 so that results do not persist across test runs.
 
-Keep in mind this approach is pretty limitated, though. Db instances that are not connected to a server cannot enforce permissions.
+Keep in mind this approach is limited, though. Db instances that are not connected to a server cannot enforce permissions.
 
 For UI tests you can also use a simple in-memory DB configuration without a server, but it's generally more useful to spin up
 a test server for your app (see the [next section](/docs/recipes/testing#testing-jazz-dbs-connected-to-a-sync-server)).
@@ -42,8 +42,8 @@ afterEach(async () => {
 });
 
 describe("todo permissions", () => {
-  it("allows owners to update their own todos", () => {
-    const todo = testApp.seed((db) => {
+  it("allows owners to update their own todos", async () => {
+    const todo = await testApp.seed((db) => {
       const { value } = db.insert(app.todos, {
         title: "Buy milk",
         ownerId: "alice",
@@ -62,13 +62,13 @@ describe("todo permissions", () => {
       authMode: "local-first",
     });
 
-    alice.expectAllowed((db) =>
-      db.update(app.todos, todo.id, {
+    await alice
+      .update(app.todos, todo.id, {
         title: "Buy oat milk",
-      }),
-    );
+      })
+      .wait({ tier: "edge" });
 
-    bob.expectDenied((db) =>
+    await bob.expectDenied((db) =>
       db.update(app.todos, todo.id, {
         title: "Buy orange juice",
       }),
@@ -82,11 +82,11 @@ permissions object created with `definePermissions(...)`, and your test runner's
 
 The returned `PolicyTestApp` provides:
 
-- `testApp.seed(fn)` — run setup writes as an admin, bypassing policy checks
-- `testApp.as(session)` — create a `TestDb` client scoped to a specific session
-- `testDb.expectAllowed(fn)` — assert that a write does not throw a policy error
-- `testDb.expectDenied(fn)` — assert that a write is rejected by a policy
-- `testApp.shutdown()` — stop the local client and server
+- `testApp.seed(fn)`&hairsp;—&hairsp;run setup writes as an admin, bypassing policy checks, and wait for them to reach the server
+- `testApp.as(session)`&hairsp;—&hairsp;create a `TestDb` client scoped to a specific session
+- `testDb.expectAllowed(fn)`&hairsp;—&hairsp;check that a write can be staged locally, then roll it back; this does not prove that the server will accept it
+- `testDb.expectDenied(fn)`&hairsp;—&hairsp;wait for the server to reject a write because of a policy
+- `testApp.shutdown()`&hairsp;—&hairsp;stop the local client and server
 
 For read policies, assert on returned rows directly. Denied reads are filtered out rather than
 throwing.
@@ -210,18 +210,35 @@ export async function teardown(): Promise<void> {
 ```
 
 If you need to isolate data across tests, you can use different `dbName`s when creating the client database.
-For local-first auth in browser tests, also use a separate auth storage key for each logical user.
+For local-first auth in React browser tests, also use a separate auth storage key for each logical
+user. The key belongs to `useLocalFirstAuth`, then its returned secret is forwarded into the
+client configuration:
 
-```typescript
-await mountApp({
-  appId: APP_ID,
-  serverUrl: `http://127.0.0.1:${TEST_PORT}`,
-  driver: {
-    type: "persistent",
-    dbName: crypto.randomUUID(),
-  },
-  authSecretStorageKey: crypto.randomUUID(),
-});
+```tsx
+import { JazzProvider, useLocalFirstAuth } from "jazz-tools/react";
+import type { ReactNode } from "react";
+
+const authKey = crypto.randomUUID();
+const dbName = crypto.randomUUID();
+
+function TestApp({ children }: { children: ReactNode }) {
+  const { secret, isLoading } = useLocalFirstAuth({ key: authKey });
+
+  if (isLoading || !secret) return null;
+
+  return (
+    <JazzProvider
+      config={{
+        appId: APP_ID,
+        serverUrl: `http://127.0.0.1:${TEST_PORT}`,
+        secret,
+        driver: { type: "persistent", dbName },
+      }}
+    >
+      {children}
+    </JazzProvider>
+  );
+}
 ```
 
 ### Testing sync

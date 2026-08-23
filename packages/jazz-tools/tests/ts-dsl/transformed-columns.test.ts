@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it } from "vitest";
-import { schema as s } from "../../src/index.js";
+import { schema as s, schemaToWasm, TypedTableQueryBuilder } from "../../src/index.js";
+import { schemaDefinitionToAst } from "../../src/migrations.js";
+import type { CompiledPermissions } from "../../src/permissions/index.js";
 import { createDb, type Db } from "../../src/runtime/db.js";
+import { applySubscriptionDelta } from "../../src/runtime/subscription-manager.js";
+import { mergePermissionsIntoSchema } from "../../src/schema-permissions.js";
 import { uniqueDbName } from "./factories";
 
 type Priority = "low" | "medium" | "high";
@@ -17,6 +21,27 @@ const prioritySchema = {
 
 type PriorityAppSchema = s.Schema<typeof prioritySchema>;
 const priorityApp: s.App<PriorityAppSchema> = s.defineApp(prioritySchema);
+const priorityPermissions = s.definePermissions(priorityApp, ({ policy }) => {
+  policy.priorities.allowRead.where({});
+  policy.priorities.allowInsert.where({});
+  policy.priorities.allowUpdate.where({});
+});
+const priorityAppWithPermissions: s.App<PriorityAppSchema> = applyPermissions(priorityPermissions);
+
+function applyPermissions(permissions: CompiledPermissions): s.App<PriorityAppSchema> {
+  const wasmSchema = schemaToWasm(
+    mergePermissionsIntoSchema(schemaDefinitionToAst(prioritySchema), permissions),
+  );
+
+  return {
+    priorities: new TypedTableQueryBuilder(
+      "priorities",
+      wasmSchema,
+      priorityApp.priorities._columnTransforms,
+    ),
+    wasmSchema,
+  } as s.App<PriorityAppSchema>;
+}
 
 describe("TS transformed columns", () => {
   let db: Db | undefined;
@@ -35,7 +60,7 @@ describe("TS transformed columns", () => {
   it("transforms individual columns on reads, inserts, updates, and subscriptions", async () => {
     const activeDb = db!;
 
-    const { value: inserted } = activeDb.insert(priorityApp.priorities, {
+    const { value: inserted } = activeDb.insert(priorityAppWithPermissions.priorities, {
       label: "Upgrade docs",
       score: "high",
     });
@@ -43,9 +68,11 @@ describe("TS transformed columns", () => {
     expectTypeOf(inserted.score).toEqualTypeOf<Priority>();
     expect(inserted.score).toBe("high");
 
-    activeDb.update(priorityApp.priorities, inserted.id, { score: "low" });
+    activeDb.update(priorityAppWithPermissions.priorities, inserted.id, { score: "low" });
 
-    const byRawStoredValue = await activeDb.one(priorityApp.priorities.where({ score: 1 }));
+    const byRawStoredValue = await activeDb.one(
+      priorityAppWithPermissions.priorities.where({ score: 1 }),
+    );
     expect(byRawStoredValue).toMatchObject({
       id: inserted.id,
       label: "Upgrade docs",
@@ -56,14 +83,19 @@ describe("TS transformed columns", () => {
     const nextUpdate = new Promise<s.RowOf<typeof priorityApp.priorities>[]>((resolve) => {
       resolveUpdate = resolve;
     });
+    const current: s.RowOf<typeof priorityApp.priorities>[] = [];
 
-    const unsubscribe = activeDb.subscribeAll(priorityApp.priorities.where({}), ({ all }) => {
-      if (all.some((row) => row.id === inserted.id && row.score === "medium")) {
-        resolveUpdate(all);
-      }
-    });
+    const unsubscribe = activeDb.subscribeAll(
+      priorityAppWithPermissions.priorities.where({}),
+      (delta) => {
+        const all = applySubscriptionDelta(current, delta);
+        if (all.some((row) => row.id === inserted.id && row.score === "medium")) {
+          resolveUpdate([...all]);
+        }
+      },
+    );
 
-    activeDb.update(priorityApp.priorities, inserted.id, { score: "medium" });
+    activeDb.update(priorityAppWithPermissions.priorities, inserted.id, { score: "medium" });
 
     await expect(nextUpdate).resolves.toContainEqual(
       expect.objectContaining({

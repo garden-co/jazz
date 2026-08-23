@@ -4,14 +4,38 @@
 
   const db = getDb();
   const todos = new QuerySubscription(app.todos);
+  let localSaveState = "Ready to save locally";
+  let latestSaveGeneration = 0;
+  let pendingSaveCount = 0;
+  let latestSaveFailed = false;
 
-  function add(e: SubmitEvent) {
+  function renderLocalSaveState() {
+    localSaveState = latestSaveFailed
+      ? "Save failed locally"
+      : pendingSaveCount > 0
+        ? "Saving locally…"
+        : "Saved locally";
+  }
+
+  async function add(e: SubmitEvent) {
     e.preventDefault();
     const form = e.currentTarget as HTMLFormElement;
     const title = (new FormData(form).get("title") as string).trim();
     if (!title) return;
-    db.insert(app.todos, { title, done: false });
-    form.reset();
+    const generation = ++latestSaveGeneration;
+    pendingSaveCount += 1;
+    latestSaveFailed = false;
+    renderLocalSaveState();
+    try {
+      const write = db.insert(app.todos, { title, done: false });
+      await write.wait({ tier: "local" });
+      if (generation === latestSaveGeneration) form.reset();
+    } catch {
+      if (generation === latestSaveGeneration) latestSaveFailed = true;
+    } finally {
+      pendingSaveCount -= 1;
+      if (generation === latestSaveGeneration || pendingSaveCount === 0) renderLocalSaveState();
+    }
   }
 </script>
 
@@ -26,6 +50,7 @@
     />
     <button type="submit">Add</button>
   </form>
+  <p role="status" aria-live="polite">{localSaveState}</p>
   <ul>
     {#each todos.current ?? [] as todo (todo.id)}
       <li class={todo.done ? "done" : ""}>

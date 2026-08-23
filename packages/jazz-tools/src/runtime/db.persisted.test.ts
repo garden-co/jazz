@@ -1,22 +1,47 @@
 import { describe, expect, it, vi } from "vitest";
-import { Db, createDbFromClient, type TableProxy } from "./db.js";
+import { Db, type DbConfig, type TableProxy } from "./db.js";
 import type { WasmSchema } from "../drivers/types.js";
 import {
-  WriteResult,
   WriteHandle,
+  WriteResult,
   type JazzClient,
-  type LocalBatchRecord,
+  type BatchId,
+  type LocalTransactionRecord,
+  type MutationErrorEvent,
   type Row,
 } from "./client.js";
 import type { Session } from "./context.js";
+import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
+
+type WaitForTransaction = (batchId: BatchId | Promise<BatchId>, tier: string) => Promise<void>;
+
+class TestRuntimeSource extends RuntimeSource<DbConfig> {
+  constructor(private readonly client: JazzClient) {
+    super();
+  }
+
+  override createClient(_context: RuntimeClientContext<DbConfig>): JazzClient {
+    return this.client;
+  }
+}
 
 class TestDb extends Db {
-  constructor(private readonly testClient: JazzClient) {
-    super({ appId: "persisted-db-test" }, null);
+  constructor(
+    private readonly testClient: JazzClient,
+    private readonly context: { session?: Session; attribution?: string } | null = null,
+  ) {
+    super({ appId: "persisted-db-test" }, new TestRuntimeSource(testClient));
   }
 
   protected override getClient(_schema: WasmSchema): JazzClient {
     return this.testClient;
+  }
+
+  protected override getRuntimeOperationContext(): {
+    session?: Session;
+    attribution?: string;
+  } | null {
+    return this.context;
   }
 }
 
@@ -44,38 +69,45 @@ function todoTable() {
   >;
 }
 
-function makeLocalBatchRecord(batchId: string): LocalBatchRecord {
+function makeLocalTransactionRecord(transactionId: string): LocalTransactionRecord {
   return {
-    batchId,
-    mode: "direct",
+    transactionId: transactionId as BatchId,
+    kind: "mergeable",
     sealed: true,
-    latestSettlement: null,
+    latestSettlement: {
+      kind: "accepted",
+      transactionId: transactionId as BatchId,
+      confirmedTier: "local",
+    },
   };
 }
 
-function makeHandleClient(localBatchRecord: LocalBatchRecord) {
+function makeHandleClient(localTransactionRecord: LocalTransactionRecord) {
   return {
-    waitForBatch: vi.fn(async () => undefined),
-    localBatchRecord: vi.fn(() => localBatchRecord),
+    waitForTransaction: vi.fn<WaitForTransaction>(async () => undefined),
+    localTransactionRecord: vi.fn(() => localTransactionRecord),
   };
 }
 
-function makeWriteResult(
+function makeValueWriteResult(
   value: Row,
-  batchId: string,
-  localBatchRecord = makeLocalBatchRecord(batchId),
+  transactionId: string,
+  localTransactionRecord = makeLocalTransactionRecord(transactionId),
 ) {
-  const client = makeHandleClient(localBatchRecord);
+  const client = makeHandleClient(localTransactionRecord);
   return {
-    handle: new WriteResult(value, batchId, client as unknown as JazzClient),
+    handle: new WriteResult(value, transactionId as BatchId, client as unknown as JazzClient),
     client,
   };
 }
 
-function makeWriteHandle(batchId: string, localBatchRecord = makeLocalBatchRecord(batchId)) {
-  const client = makeHandleClient(localBatchRecord);
+function makeVoidWriteHandle(
+  transactionId: string,
+  localTransactionRecord = makeLocalTransactionRecord(transactionId),
+) {
+  const client = makeHandleClient(localTransactionRecord);
   return {
-    handle: new WriteHandle(batchId, client as unknown as JazzClient),
+    handle: new WriteHandle(transactionId as BatchId, client as unknown as JazzClient),
     client,
   };
 }
@@ -90,9 +122,9 @@ describe("Db write handles", () => {
         { type: "Boolean", value: false },
       ],
     };
-    const { handle: writeResult, client: handleClient } = makeWriteResult(
+    const { handle: writeResult, client: handleClient } = makeValueWriteResult(
       runtimeRow,
-      "batch-insert",
+      "transaction-insert",
     );
     const insert = vi.fn(() => writeResult);
     const client = {
@@ -113,7 +145,7 @@ describe("Db write handles", () => {
       undefined,
       undefined,
     );
-    expect(pending.batchId).toBe("batch-insert");
+    await expect(pending.batchId).resolves.toBe("transaction-insert");
     expect(pending.value).toEqual({
       id: "todo-1",
       title: "Buy milk",
@@ -124,13 +156,18 @@ describe("Db write handles", () => {
       title: "Buy milk",
       done: false,
     });
-    expect(handleClient.waitForBatch).toHaveBeenCalledWith("batch-insert", "global");
+    await expect(handleClient.waitForTransaction.mock.calls[0]?.[0]).resolves.toBe(
+      "transaction-insert",
+    );
+    expect(handleClient.waitForTransaction.mock.calls[0]?.[1]).toBe("global");
   });
 
   it("keeps update and delete handles waitable by durability tier", async () => {
     const table = todoTable();
-    const { handle: updateHandle, client: updateClient } = makeWriteHandle("batch-update");
-    const { handle: deleteHandle, client: deleteClient } = makeWriteHandle("batch-delete");
+    const { handle: updateHandle, client: updateClient } =
+      makeVoidWriteHandle("transaction-update");
+    const { handle: deleteHandle, client: deleteClient } =
+      makeVoidWriteHandle("transaction-delete");
     const update = vi.fn(() => updateHandle);
     const remove = vi.fn(() => deleteHandle);
     const client = {
@@ -144,6 +181,7 @@ describe("Db write handles", () => {
     const deleted = db.delete(table, "todo-1");
 
     expect(update).toHaveBeenCalledWith(
+      "todos",
       "todo-1",
       {
         done: { type: "Boolean", value: true },
@@ -152,11 +190,17 @@ describe("Db write handles", () => {
       undefined,
       undefined,
     );
-    expect(remove).toHaveBeenCalledWith("todo-1", undefined, undefined, undefined);
+    expect(remove).toHaveBeenCalledWith("todos", "todo-1", undefined, undefined, undefined);
     await expect(updated.wait({ tier: "edge" })).resolves.toBeUndefined();
     await expect(deleted.wait({ tier: "global" })).resolves.toBeUndefined();
-    expect(updateClient.waitForBatch).toHaveBeenCalledWith("batch-update", "edge");
-    expect(deleteClient.waitForBatch).toHaveBeenCalledWith("batch-delete", "global");
+    await expect(updateClient.waitForTransaction.mock.calls[0]?.[0]).resolves.toBe(
+      "transaction-update",
+    );
+    expect(updateClient.waitForTransaction.mock.calls[0]?.[1]).toBe("edge");
+    await expect(deleteClient.waitForTransaction.mock.calls[0]?.[0]).resolves.toBe(
+      "transaction-delete",
+    );
+    expect(deleteClient.waitForTransaction.mock.calls[0]?.[1]).toBe("global");
   });
 
   it("routes write handles through the session-aware client-backed db path", async () => {
@@ -166,7 +210,7 @@ describe("Db write handles", () => {
       claims: { role: "writer" },
       authMode: "external",
     };
-    const { handle: insertHandle, client: insertClient } = makeWriteResult(
+    const { handle: insertHandle, client: insertClient } = makeValueWriteResult(
       {
         id: "todo-2",
         values: [
@@ -174,10 +218,14 @@ describe("Db write handles", () => {
           { type: "Boolean", value: true },
         ],
       },
-      "batch-session-insert",
+      "transaction-session-insert",
     );
-    const { handle: updateHandle, client: updateClient } = makeWriteHandle("batch-session-update");
-    const { handle: deleteHandle, client: deleteClient } = makeWriteHandle("batch-session-delete");
+    const { handle: updateHandle, client: updateClient } = makeVoidWriteHandle(
+      "transaction-session-update",
+    );
+    const { handle: deleteHandle, client: deleteClient } = makeVoidWriteHandle(
+      "transaction-session-delete",
+    );
     const insert = vi.fn(() => insertHandle);
     const update = vi.fn(() => updateHandle);
     const deleteRow = vi.fn(() => deleteHandle);
@@ -188,12 +236,10 @@ describe("Db write handles", () => {
       delete: deleteRow,
     };
 
-    const db = createDbFromClient(
-      { appId: "client-backed-persisted" },
-      runtimeClient as unknown as JazzClient,
+    const db = new TestDb(runtimeClient as unknown as JazzClient, {
       session,
-      "alice@writer",
-    );
+      attribution: "alice@writer",
+    });
 
     const inserted = db.insert(table, { title: "With session", done: true });
     const updated = db.update(table, "todo-2", { done: false });
@@ -210,6 +256,7 @@ describe("Db write handles", () => {
       "alice@writer",
     );
     expect(update).toHaveBeenCalledWith(
+      "todos",
       "todo-2",
       {
         done: { type: "Boolean", value: false },
@@ -218,7 +265,7 @@ describe("Db write handles", () => {
       session,
       "alice@writer",
     );
-    expect(deleteRow).toHaveBeenCalledWith("todo-2", undefined, session, "alice@writer");
+    expect(deleteRow).toHaveBeenCalledWith("todos", "todo-2", undefined, session, "alice@writer");
     expect(inserted.value).toEqual({
       id: "todo-2",
       title: "With session",
@@ -231,8 +278,84 @@ describe("Db write handles", () => {
     });
     await expect(updated.wait({ tier: "edge" })).resolves.toBeUndefined();
     await expect(deleted.wait({ tier: "local" })).resolves.toBeUndefined();
-    expect(insertClient.waitForBatch).toHaveBeenCalledWith("batch-session-insert", "global");
-    expect(updateClient.waitForBatch).toHaveBeenCalledWith("batch-session-update", "edge");
-    expect(deleteClient.waitForBatch).toHaveBeenCalledWith("batch-session-delete", "local");
+    await expect(insertClient.waitForTransaction.mock.calls[0]?.[0]).resolves.toBe(
+      "transaction-session-insert",
+    );
+    expect(insertClient.waitForTransaction.mock.calls[0]?.[1]).toBe("global");
+    await expect(updateClient.waitForTransaction.mock.calls[0]?.[0]).resolves.toBe(
+      "transaction-session-update",
+    );
+    expect(updateClient.waitForTransaction.mock.calls[0]?.[1]).toBe("edge");
+    await expect(deleteClient.waitForTransaction.mock.calls[0]?.[0]).resolves.toBe(
+      "transaction-session-delete",
+    );
+    expect(deleteClient.waitForTransaction.mock.calls[0]?.[1]).toBe("local");
+  });
+});
+
+describe("Db mutation error handling", () => {
+  function makeRejectedEvent(batchId: BatchId): MutationErrorEvent {
+    return {
+      code: "permission_denied",
+      reason: "write rejected by policy",
+      transaction: {
+        transactionId: batchId,
+        kind: "mergeable",
+        sealed: true,
+        latestSettlement: {
+          kind: "rejected",
+          transactionId: batchId,
+          code: "permission_denied",
+          reason: "write rejected by policy",
+        },
+      },
+    };
+  }
+
+  it("replays an unhandled client rejection to the first Db listener and supports unsubscribe", () => {
+    let runtimeListener: ((event: MutationErrorEvent) => void) | undefined;
+    const batchId = "mutation-error-batch" as BatchId;
+    let client!: JazzClient;
+    const clientImpl = {
+      onMutationError: vi.fn((listener: (event: MutationErrorEvent) => void) => {
+        runtimeListener = listener;
+      }),
+      insert: vi.fn(
+        () =>
+          new WriteResult(
+            {
+              id: "todo-1",
+              values: [
+                { type: "Text", value: "Buy milk" },
+                { type: "Boolean", value: false },
+              ],
+            },
+            batchId,
+            client,
+          ),
+      ),
+      waitForTransaction: vi.fn(async () => undefined),
+    };
+    client = clientImpl as unknown as JazzClient;
+    class MutationErrorDb extends Db {
+      constructor() {
+        super({ appId: "mutation-error-db" }, new TestRuntimeSource(client));
+      }
+    }
+    const db = new MutationErrorDb();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    db.insert(todoTable(), { title: "Buy milk", done: false });
+    const event = makeRejectedEvent(batchId);
+    runtimeListener?.(event);
+
+    const listener = vi.fn();
+    const unsubscribe = db.onMutationError(listener);
+    expect(listener).toHaveBeenCalledWith(event);
+    expect(consoleError).toHaveBeenCalledWith("Unhandled Jazz mutation error", event);
+
+    unsubscribe();
+    runtimeListener?.(makeRejectedEvent("later-batch" as BatchId));
+    expect(listener).toHaveBeenCalledTimes(1);
   });
 });

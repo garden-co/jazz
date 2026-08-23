@@ -18,9 +18,6 @@ on:
       napi_artifact:
         description: Artifact name for the assembled jazz-napi package (loader + npm/ platform packages).
         value: pkg-jazz-napi
-      rn_artifact:
-        description: Artifact name for the assembled jazz-rn package (with iOS xcframework + Android jniLibs).
-        value: pkg-jazz-rn
       create_jazz_artifact:
         description: Artifact name for the assembled create-jazz package.
         value: pkg-create-jazz
@@ -60,12 +57,12 @@ jobs:
           version: 0.14.0
           cache-key: ${{ env.CACHE_SCOPE_REPOSITORY_ID }}-${{ matrix.target }}
 
-      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+      - uses: ./.github/actions/install-rust-tool
         with:
           tool: cargo-zigbuild
 
       - name: Build CLI binary
-        run: cargo zigbuild -p jazz-tools --bin jazz-tools --features cli,otel --release --target ${{ matrix.target }}
+        run: cargo zigbuild -p jazz-cli --bin jazz-tools --features otel --release --target ${{ matrix.target }}
 
       - name: Stage artifact
         run: |
@@ -103,7 +100,7 @@ jobs:
           setup-node: "false"
 
       - name: Build CLI binary
-        run: cargo build -p jazz-tools --bin jazz-tools --features cli,otel --release --target ${{ matrix.target }}
+        run: cargo build -p jazz-cli --bin jazz-tools --features otel --release --target ${{ matrix.target }}
 
       - name: Stage artifact
         run: |
@@ -131,7 +128,7 @@ jobs:
           sccache: "true"
           sccache-key: release-wasm-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-v1
 
-      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
+      - uses: ./.github/actions/install-rust-tool
         with:
           tool: wasm-pack@0.13.1
 
@@ -185,13 +182,33 @@ jobs:
           sccache: ${{ matrix.use_sccache && 'true' || 'false' }}
           sccache-key: release-napi-sccache-${{ github.event.pull_request.head.repo.id || github.repository_id }}-${{ matrix.platform }}-v1
 
+      # The Windows runner image supplies the MSVC toolchain but not libclang.
+      # RocksDB's zstd-sys build uses bindgen, which must be pointed at the DLL
+      # before napi invokes Cargo.
+      - name: Install libclang for Windows bindgen
+        if: matrix.platform == 'win32-x64-msvc'
+        shell: pwsh
+        run: |
+          choco install llvm --version=21.1.8 --yes --no-progress --limit-output
+          $libclangPath = Join-Path $env:ProgramFiles "LLVM\bin"
+          if (-not (Test-Path (Join-Path $libclangPath "libclang.dll"))) {
+            throw "LLVM installation did not provide libclang.dll at $libclangPath"
+          }
+          "LIBCLANG_PATH=$libclangPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $libclangPath | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
       - name: Build jazz-napi binding
-        run: pnpm --filter jazz-napi exec napi build --platform --release --target ${{ matrix.target }}
+        run: |
+          node dev/artifacts/build.mjs napi release --target ${{ matrix.target }}
+          node dev/artifacts/provenance.mjs verify napi release --target ${{ matrix.target }}
+          cp crates/jazz-napi/.jazz-artifact-manifest.json crates/jazz-napi/jazz-napi.${{ matrix.platform }}.manifest.json
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: jazz-napi-binding-${{ matrix.platform }}
-          path: crates/jazz-napi/jazz-napi.${{ matrix.platform }}.node
+          path: |
+            crates/jazz-napi/jazz-napi.${{ matrix.platform }}.node
+            crates/jazz-napi/jazz-napi.${{ matrix.platform }}.manifest.json
           if-no-files-found: error
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -203,96 +220,6 @@ jobs:
             crates/jazz-napi/index.d.ts
           if-no-files-found: error
 
-  build-rn-ios:
-    name: Build jazz-rn iOS payload
-    runs-on: blacksmith-6vcpu-macos-15
-    env:
-      HOMEBREW_NO_AUTO_UPDATE: 1
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ inputs.ref }}
-
-      - uses: ./.github/actions/setup-build
-        with:
-          rust-targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
-
-      - name: Install/build React Native iOS prerequisites
-        env:
-          JAZZ_RN_PLATFORM: ios
-        run: pnpm run ensure:rust-toolchain
-
-      - name: Build jazz-rn iOS native payload
-        run: pnpm --filter jazz-rn build:rn:ios
-
-      - name: Verify built jazz-rn iOS native payload
-        run: |
-          test -d crates/jazz-rn/JazzRnFramework.xcframework
-          test -f crates/jazz-rn/JazzRnFramework.xcframework/Info.plist
-
-      - name: Stage jazz-rn iOS payload artifact
-        run: |
-          mkdir -p dist/rn-ios
-          cp -R crates/jazz-rn/JazzRnFramework.xcframework dist/rn-ios/
-          cp -R crates/jazz-rn/cpp/generated dist/rn-ios/cpp-generated
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: jazz-rn-ios-payload
-          path: dist/rn-ios
-          if-no-files-found: error
-
-  build-rn-android:
-    name: Build jazz-rn Android payload (${{ matrix.abi }})
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: aarch64-linux-android
-            abi: arm64-v8a
-          - target: armv7-linux-androideabi
-            abi: armeabi-v7a
-          - target: i686-linux-android
-            abi: x86
-          - target: x86_64-linux-android
-            abi: x86_64
-
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ inputs.ref }}
-
-      - uses: ./.github/actions/setup-build
-
-      - uses: taiki-e/install-action@3235f8901fd37ffed0052b276cec25a362fb82e9 # v2
-        with:
-          tool: cargo-ndk
-
-      - name: Install/build React Native Android prerequisites
-        env:
-          JAZZ_RN_PLATFORM: android
-          JAZZ_RN_ANDROID_TARGETS: ${{ matrix.target }}
-        run: pnpm run ensure:rust-toolchain
-
-      - name: Build jazz-rn Android native payload
-        run: pnpm --filter jazz-rn exec ubrn build android --targets ${{ matrix.target }} --and-generate --release
-
-      - name: Verify built jazz-rn Android native payload
-        run: test -f crates/jazz-rn/android/src/main/jniLibs/${{ matrix.abi }}/libjazz_rn.a
-
-      - name: Stage jazz-rn Android payload artifact
-        run: |
-          mkdir -p dist/rn-android/jniLibs
-          cp -R crates/jazz-rn/android/src/main/jniLibs/${{ matrix.abi }} dist/rn-android/jniLibs/
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: jazz-rn-android-payload-${{ matrix.abi }}
-          path: dist/rn-android
-          if-no-files-found: error
-
   assemble-packages:
     name: Assemble npm packages
     runs-on: blacksmith-4vcpu-ubuntu-2404
@@ -301,8 +228,6 @@ jobs:
       - build-macos
       - build-wasm
       - build-napi
-      - build-rn-ios
-      - build-rn-android
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -335,28 +260,6 @@ jobs:
           path: crates/jazz-napi/artifacts
           merge-multiple: true
 
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          name: jazz-rn-ios-payload
-          path: dist/rn-ios
-
-      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
-        with:
-          pattern: jazz-rn-android-payload-*
-          path: dist/rn-android
-          merge-multiple: true
-
-      - name: Stage jazz-rn native payload into npm package sources
-        run: |
-          rm -rf crates/jazz-rn/JazzRnFramework.xcframework
-          rm -rf crates/jazz-rn/android/src/main/jniLibs
-          rm -rf crates/jazz-rn/cpp/generated
-          mkdir -p crates/jazz-rn/android/src/main
-          mkdir -p crates/jazz-rn/cpp
-          cp -R dist/rn-ios/JazzRnFramework.xcframework crates/jazz-rn/
-          cp -R dist/rn-ios/cpp-generated crates/jazz-rn/cpp/generated
-          cp -R dist/rn-android/jniLibs crates/jazz-rn/android/src/main/
-
       - name: Stage jazz-napi platform package artifacts
         run: |
           cd crates/jazz-napi
@@ -375,6 +278,9 @@ jobs:
           cd crates/jazz-napi
           pnpm exec napi version --npm-dir npm
           node -e 'const fs=require("fs");const rootPath="package.json";const pkg=JSON.parse(fs.readFileSync(rootPath,"utf8"));const deps=[];for(const entry of fs.readdirSync("npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const child=JSON.parse(fs.readFileSync(`npm/${entry.name}/package.json`,"utf8"));deps.push([child.name,pkg.version]);}deps.sort((a,b)=>a[0].localeCompare(b[0]));pkg.optionalDependencies=Object.fromEntries(deps);fs.writeFileSync(rootPath,`${JSON.stringify(pkg,null,2)}\n`);'
+
+      - name: Stage and verify jazz-napi provenance manifests
+        run: node dev/artifacts/stage-napi-manifests.mjs
 
       - name: Build jazz-tools TypeScript package
         run: pnpm --filter jazz-tools build
@@ -435,16 +341,7 @@ jobs:
             !crates/jazz-napi/node_modules
             !crates/jazz-napi/target
             !crates/jazz-napi/artifacts
-          include-hidden-files: true
-          if-no-files-found: error
-
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: pkg-jazz-rn
-          path: |
-            crates/jazz-rn
-            !crates/jazz-rn/node_modules
-            !crates/jazz-rn/target
+            !crates/jazz-napi/*.manifest.json
           include-hidden-files: true
           if-no-files-found: error
 

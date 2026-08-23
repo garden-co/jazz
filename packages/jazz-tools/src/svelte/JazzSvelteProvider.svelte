@@ -1,57 +1,48 @@
 <!--
 Makes a Jazz client available to descendant Svelte components through context.
-Pass a pre-created client or a promise that resolves to one.
+Pass a reactive database configuration. The provider creates the client and
+serialises shutdown before starting a replacement.
 -->
 <script lang="ts">
-	import type { Db } from '../runtime/db.js';
-	import { initJazzContext } from './context.svelte.js';
-	import type { JazzClient } from './create-jazz-client.js';
-	import { startInspectorOnce } from '../dev-tools/auto-attach.js';
+	import type { Db, DbConfig } from '../runtime/db.js';
+	import JazzSvelteClientProvider from './JazzSvelteClientProvider.svelte';
+	import { createJazzClient, type JazzClient } from './create-jazz-client.js';
 
 	interface Props {
-		client: JazzClient | Promise<JazzClient>;
+		config: DbConfig;
 		children: import('svelte').Snippet<[{ db: Db }]>;
 		fallback?: import('svelte').Snippet;
 		autoAttachDevTools?: boolean;
 	}
 
-	let { client, children, fallback, autoAttachDevTools = true }: Props = $props();
+	let { config, children, fallback, autoAttachDevTools = true }: Props = $props();
 
-	const ctx = initJazzContext();
 	let error = $state<Error | null>(null);
+	let client = $state<JazzClient | null>(null);
+	let activeClient: JazzClient | null = null;
+	let handover = Promise.resolve();
 
 	$effect(() => {
 		let cancelled = false;
-		let resolvedClient: JazzClient | null = null;
-		let stopSessionSync: (() => void) | null = null;
+		const nextConfig = config;
 
 		error = null;
-		ctx.db = null;
-		ctx.session = null;
-		ctx.manager = null;
+		client = null;
 
-		Promise.resolve(client)
-			.then((resolved) => {
+		handover = handover
+			.then(async () => {
 				if (cancelled) {
-					void resolved.shutdown();
 					return;
 				}
 
-				resolvedClient = resolved;
-				ctx.db = resolved.db;
-				ctx.session = resolved.session ?? null;
-				ctx.manager = resolved.manager;
-				stopSessionSync = resolved.db.onAuthChanged(({ session }) => {
-					if (cancelled) {
-						return;
-					}
-
-					ctx.session = session ?? null;
-				});
-
-				if (process.env.NODE_ENV !== 'production' && autoAttachDevTools) {
-					startInspectorOnce(resolved.db);
+				const createdClient = await createJazzClient(nextConfig);
+				if (cancelled) {
+					await createdClient.shutdown();
+					return;
 				}
+
+				activeClient = createdClient;
+				client = createdClient;
 			})
 			.catch((reason) => {
 				if (cancelled) {
@@ -63,10 +54,12 @@ Pass a pre-created client or a promise that resolves to one.
 
 		return () => {
 			cancelled = true;
-			stopSessionSync?.();
-			if (resolvedClient) {
-				void resolvedClient.shutdown();
-			}
+			client = null;
+			const clientToShutdown = activeClient;
+			activeClient = null;
+			const shuttingDown = handover.then(() => clientToShutdown?.shutdown());
+			shuttingDown.catch(() => {});
+			handover = shuttingDown;
 		};
 	});
 </script>
@@ -74,8 +67,12 @@ Pass a pre-created client or a promise that resolves to one.
 {#if error}
 	<!-- Re-throw so an error boundary can catch it -->
 	{(() => { throw error; })()}
-{:else if ctx.db}
-	{@render children({ db: ctx.db })}
+{:else if client}
+	<JazzSvelteClientProvider {client} {fallback} {autoAttachDevTools}>
+		{#snippet children({ db })}
+			{@render children({ db })}
+		{/snippet}
+	</JazzSvelteClientProvider>
 {:else if fallback}
 	{@render fallback()}
 {/if}

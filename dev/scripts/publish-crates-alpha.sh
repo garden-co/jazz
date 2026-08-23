@@ -14,10 +14,7 @@ if [[ "$MODE" == "publish" && -z "${CARGO_REGISTRY_TOKEN:-}" ]]; then
 fi
 
 # Workspace publish order based on dependency graph.
-# opfs-btree -> jazz-tools
-# jazz-wasm-tracing is independent and can be published in either position.
 crates=(
-  "opfs-btree:0.1.0"
   "jazz-wasm-tracing:3.0.0-alpha.0"
   "jazz-tools:2.0.0-alpha.0"
 )
@@ -27,13 +24,8 @@ for crate_spec in "${crates[@]}"; do
   version="${crate_spec##*:}"
 
   if [[ "$MODE" == "dry-run" ]]; then
-    if [[ "$name" == "opfs-btree" ]]; then
-      echo "==> cargo publish -p ${name} --dry-run"
-      cargo publish -p "$name" --allow-dirty --dry-run
-    else
-      echo "==> cargo check -p ${name} (registry dry-run not possible until dependencies are published)"
-      cargo check -p "$name"
-    fi
+    echo "==> cargo check -p ${name} (registry dry-run not possible until dependencies are published)"
+    cargo check -p "$name"
     continue
   fi
 

@@ -74,7 +74,8 @@ function ChatShell(): React.JSX.Element {
           chatId={process.env.NEXT_PUBLIC_ANNOUNCEMENTS_CHAT_ID!}
           title="Announcements"
           canSend={canPostAnnouncements}
-          authorName={userId} // TODO: This should come from better auth (email, name/surname)
+          // Caveat: this demo shows the stable Jazz user id until profile fields are wired from Better Auth.
+          authorName={userId}
           readOnlyNotice="Only admins can post announcements."
         />
 
@@ -144,19 +145,16 @@ export default function Page(): React.JSX.Element {
   const betterAuth = useBetterAuthJWT();
   const { secret: localFirstSecret, isLoading: localFirstLoading } = useLocalFirstAuth();
 
-  const secret = !betterAuth.jwt ? (localFirstSecret ?? undefined) : undefined;
-
-  const config = React.useMemo(
-    (): DbConfig => ({
+  const config = React.useMemo((): DbConfig => {
+    const shared = {
       appId,
-      env: "dev" as const, // TODO: detect from process.env
-      userBranch: "main" as const, // TODO: should be the default
+      env: "dev" as const,
       serverUrl,
-      jwtToken: betterAuth.jwt ?? undefined,
-      secret,
-    }),
-    [betterAuth.jwt, secret],
-  );
+    };
+    return betterAuth.jwt
+      ? { ...shared, jwtToken: betterAuth.jwt }
+      : { ...shared, secret: localFirstSecret ?? undefined };
+  }, [betterAuth.jwt, localFirstSecret]);
 
   if (betterAuth.isLoading || (!betterAuth.jwt && localFirstLoading)) {
     return <p className="loading-state">Loading auth credentials...</p>;

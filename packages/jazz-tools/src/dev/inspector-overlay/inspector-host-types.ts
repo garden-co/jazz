@@ -7,29 +7,23 @@ export type InspectorSubscription = Omit<ActiveQuerySubscriptionTrace, "stack">;
 /** Read-once handle the host publishes on `window` for the same-origin overlay. */
 export interface JazzInspectorHost {
   /**
-   * A ready-to-use config for the overlay's own worker client: the host's
-   * identity plus the resolved store coordinates (OPFS namespace + broker
-   * worker URL), so the overlay joins the host's store. Built entirely on the
-   * host side — the overlay passes it to its provider verbatim. No schemaHash:
-   * the host injects its runtime schema directly (plain data), so the overlay
-   * skips the server schema fetch.
+   * A ready-to-use config for the overlay's own browser client: the host's
+   * identity and persistent store coordinates. The inspector obtains its
+   * actual worker peer from {@link openControlPort}; it never constructs a
+   * second SharedWorker.
    */
   getConnectionConfig(): DbConfig;
+  /** Open a session-scoped channel for discovering and attaching to worker contexts. */
+  openControlPort(): Promise<MessagePort>;
   /** The host's runtime schema (plain serializable data — safe across realms). */
   getWasmSchema(): WasmSchema;
-  /**
-   * Current active subscriptions (stack-less) — read once on overlay mount so
-   * the initial state isn't lost to the push race (the iframe's message
-   * listener may not be ready when the first push fires). Live updates still
-   * arrive via the `INSPECTOR_SUBSCRIPTIONS_MESSAGE` push.
-   */
+  /** Current active subscriptions, without JS stacks. */
   getActiveSubscriptions(): InspectorSubscription[];
 }
 
 export const INSPECTOR_HOST_GLOBAL = "__jazzInspectorHost" as const;
 export const INSPECTOR_SUBSCRIPTIONS_MESSAGE = "jazz-inspector:subscriptions" as const;
 
-/** One-way host→overlay push carrying the active subscription list (no stacks). */
 export interface InspectorSubscriptionsMessage {
   type: typeof INSPECTOR_SUBSCRIPTIONS_MESSAGE;
   list: InspectorSubscription[];

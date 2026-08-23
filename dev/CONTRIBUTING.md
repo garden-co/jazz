@@ -24,14 +24,94 @@ This requires a working C/C++ toolchain and `libclang` for `bindgen`:
 - macOS: `xcode-select --install` is enough.
 - Linux: install `libclang-dev` (Debian/Ubuntu) or `clang-devel` (Fedora).
 
+## API documentation
+
+Keep API documentation attached to an authoritative, maintained source rather
+than committing a point-in-time export catalogue. The public application guide
+is in `docs/content/docs/`; its runnable examples are the adjacent
+`examples/docs/` projects. The new-core Rust contract is
+`crates/jazz/SPEC/13_db_api.md`, with the engine and incremental-maintenance
+contracts in `crates/jazz/SPEC/` and `crates/groove/SPEC/`.
+
+For a package's exact TypeScript surface, use its `package.json` export map and
+the emitted declaration files for the release being consumed. For Rust, use the
+crate's public documentation and its specification. Do not add a manually
+maintained or generated-in-place API snapshot: it has no executable source of
+truth and will drift as the API evolves.
+
 ## Testing
+
+### Pre-commit hooks in restricted shells
+
+The staged Rust hook receives its file list directly from Lefthook and invokes
+Cargo through `dev/scripts/clippy-staged.sh`. It asks Cargo for authoritative
+workspace metadata once, then invokes Cargo directly; this avoids Node
+child-process invocations of `git` and `cargo`, which can be denied by
+sandboxed shells while ordinary Git commands still work. Run
+`pnpm test:tooling` to exercise workspace-member, standalone, excluded, and
+failure paths. Nonmember/auxiliary crates deliberately fall back to the root
+workspace guard; maintained standalone crates should have their
+own explicit gates. Run `pnpm test:tooling:real` for the slower real-Cargo
+probe of that fallback. Direct invocations of
+`node dev/scripts/clippy-staged.mjs` remain available for local debugging.
 
 ### Running tests
 
 ```sh
 pnpm test          # everything (via turbo)
-cargo test -p jazz-tools --features test   # rust core only
+cargo test -p jazz --no-default-features --features testing,transport-compression-zstd   # rust core only
 ```
+
+### Focus one Rust test safely
+
+`dev/t` first asks Cargo for the test inventory using the same target and
+features it will run. A filter must resolve to exactly one inventory entry; the
+wrapper then invokes that canonical name with Cargo's `--exact`. It refuses an
+empty or ambiguous selection before a test runs, prints the selected binary,
+feature and cache context, and separately reports inventory/compile and test-run
+elapsed time. This is useful for files under `src/node/tests/`: their test names
+are wrapped as `node::tests::harness::…` (rather than retaining their source
+file in the module path), but a distinctive test-name suffix is enough for
+`dev/t` to discover and run the canonical name.
+
+```sh
+# Default: Jazz library tests, substring matching.
+dev/t subscription::tests::reopens
+
+# Fully-qualified exact library test.
+dev/t --exact db::tests::round_trips
+
+# A node test: resolve its canonical harness path from the unique suffix.
+dev/t query_rows_at_lowers_filters_against_historical_current_rows
+
+# An integration target is explicit, so Cargo cannot search an unintended bin.
+dev/t --test incremental_delivery_canary maintained_relation -- --nocapture
+```
+
+Run `pnpm test:focused-rust` to test the wrapper with a mocked Cargo inventory.
+
+### Bounded Rust runs and receipts
+
+Use the repository launcher when a test could hang or when comparing local and
+CI run time. It writes a machine-readable JSON receipt containing the exact
+command, exact dirty-tree fingerprint (without source contents), toolchain,
+cache configuration, shard, timing, and direct exit status.
+
+```sh
+# Recommended: per-test slow timeout, named hung-test output, deterministic shard.
+cargo install cargo-nextest --locked
+node dev/gates/run-rust-tests.mjs --shard-index 1 --shard-count 2 -- \
+  --workspace --lib --bins --tests \
+  --features jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test
+
+# No Devbox or Nextest required: preserves Cargo selection and adds an overall
+# timeout, but cannot attribute a hang to an individual test.
+node dev/gates/run-rust-tests.mjs --timeout-seconds 900 -- -p jazz
+```
+
+The Nextest `jazz` profile reports a test slow after 60 seconds and terminates
+it one minute later. Hash partitions are deterministic and do not overlap for a
+fixed test inventory; keep the shard count identical across all CI shards.
 
 ### Snapshot testing with insta in rust
 
@@ -51,7 +131,7 @@ When a snapshot doesn't match, the test fails and insta records the new value. T
 cargo install cargo-insta
 
 # Run the failing tests
-cargo test -p jazz-tools --features test
+cargo test -p jazz --no-default-features --features testing,transport-compression-zstd
 
 # Review each pending change interactively — shows a diff, asks accept/reject
 cargo insta review

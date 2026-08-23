@@ -7,6 +7,7 @@ import {
   isPendingSolidJazzClientReady,
   type SolidJazzClient,
 } from "./create-solid-jazz-client.js";
+import { getSubscriptionStore } from "../subscription-store-internal.js";
 
 const app = s.defineApp({
   todos: s.table({
@@ -48,6 +49,7 @@ describe("solid/create-jazz-client integration", () => {
         }));
       });
       client = await waitForReady(result);
+      expect(() => getSubscriptionStore(client!)).not.toThrow();
 
       const inserted = await client.db
         .insert(app.todos, {

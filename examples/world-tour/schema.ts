@@ -1,18 +1,8 @@
 import { schema as s } from "jazz-tools";
 
 const schema = {
-  file_parts: s.table({
-    data: s.bytes(),
-  }),
-  files: s.table({
-    name: s.string(),
-    mimeType: s.string(),
-    partIds: s.array(s.ref("file_parts")),
-    partSizes: s.array(s.int()),
-  }),
   bands: s.table({
     name: s.string(),
-    logoFileId: s.ref("files").optional(),
   }),
   venues: s.table({
     name: s.string(),

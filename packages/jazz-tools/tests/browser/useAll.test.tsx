@@ -443,7 +443,7 @@ describe("useAll browser integration", () => {
     await waitForCondition(() => getText("rows") === "p2", 5000, "expected p2 in paginated useAll");
   });
 
-  it("accepts QueryOptions for component subscriptions", async () => {
+  it("accepts core-supported QueryOptions for component subscriptions", async () => {
     const client = track(
       await createJazzClient({
         appId: uniqueId("options"),
@@ -455,7 +455,7 @@ describe("useAll browser integration", () => {
       <JazzProvider client={client}>
         <UseAllProbe
           query={makeQuery<Todo>("todos", {})}
-          options={{ localUpdates: "deferred", propagation: "local-only" }}
+          options={{ localUpdates: "deferred", propagation: "full" }}
           pick={(row) => row.title}
         />
       </JazzProvider>,
@@ -474,6 +474,27 @@ describe("useAll browser integration", () => {
       5000,
       "expected useAll with QueryOptions to receive rows",
     );
+  });
+
+  it("supports local-only read propagation", async () => {
+    const client = track(
+      await createJazzClient({
+        appId: uniqueId("local-only"),
+        driver: { type: "persistent", dbName: uniqueId("local-only") },
+      }),
+    );
+
+    await client.db.insert(todos, {
+      title: "local-only-task",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: ["local"],
+    });
+
+    await expect(
+      client.db.all(makeQuery<Todo>("todos", {}), { propagation: "local-only" }),
+    ).resolves.toEqual([expect.objectContaining({ title: "local-only-task" })]);
   });
 
   it("does not include rows for non-matching text contains", async () => {

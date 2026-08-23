@@ -1,7 +1,8 @@
-import { createDb, type Db } from "../../src/runtime/db.js";
+import { createDb, type Db, type QueryBuilder, type QueryOptions } from "../../src/runtime/db.js";
+import { applySubscriptionDelta } from "../../src/runtime/subscription-manager.js";
 import { afterEach, beforeEach, describe, it, expect, assert, expectTypeOf } from "vitest";
 import { app, type Project, type Todo, type User } from "./fixtures/basic/schema";
-import { insertProject, insertTodo, insertUser, uniqueDbName } from "./factories";
+import { insertProject, insertTodo, insertUser } from "./factories";
 
 function makeFriends(db: Db, user1: User, user2: User) {
   const user1Friends = [...user1.friendsIds, user2.id];
@@ -15,7 +16,16 @@ function makeFriends(db: Db, user1: User, user2: User) {
   user2.friendsIds = user2Friends;
 }
 
-describe("TS Query API", () => {
+const readModes = ["direct", "mergeable-tx", "exclusive-tx"] as const;
+type ReadMode = (typeof readModes)[number];
+
+const orderedIds = {
+  low: "00000000-0000-4000-8000-000000000101",
+  middle: "00000000-0000-4000-8000-000000000102",
+  high: "00000000-0000-4000-8000-000000000103",
+} as const;
+
+describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
   let db: Db;
 
   beforeEach(async () => {
@@ -29,11 +39,115 @@ describe("TS Query API", () => {
     await db.shutdown();
   });
 
+  async function readAll<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
+    if (readMode === "direct") {
+      return db.all(query, options);
+    }
+
+    const tx = readMode === "mergeable-tx" ? db.beginTransaction() : db.beginExclusiveTransaction();
+    try {
+      return await tx.all(query, options);
+    } finally {
+      tx.rollback();
+    }
+  }
+
+  async function readOne<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
+    if (readMode === "direct") {
+      return db.one(query, options);
+    }
+
+    const tx = readMode === "mergeable-tx" ? db.beginTransaction() : db.beginExclusiveTransaction();
+    try {
+      return await tx.one(query, options);
+    } finally {
+      tx.rollback();
+    }
+  }
+
+  describe("default ordering", () => {
+    it("orders one-shot roots and pagination by canonical row id, not insertion order", async () => {
+      db.upsert(app.projects, orderedIds.high, { name: "High" });
+      db.upsert(app.projects, orderedIds.low, { name: "Low" });
+      db.upsert(app.projects, orderedIds.middle, { name: "Middle" });
+
+      const all = await readAll(app.projects);
+      expect(all.map((project) => project.id)).toEqual([
+        orderedIds.low,
+        orderedIds.middle,
+        orderedIds.high,
+      ]);
+
+      const window = await readAll(app.projects.offset(1).limit(1));
+      expect(window.map((project) => project.id)).toEqual([orderedIds.middle]);
+    });
+
+    it("uses canonical row id as the implicit tie-break for explicit ordering", async () => {
+      db.upsert(app.projects, orderedIds.high, { name: "Same" });
+      db.upsert(app.projects, orderedIds.low, { name: "Same" });
+      db.upsert(app.projects, orderedIds.middle, { name: "Same" });
+
+      const results = await readAll(app.projects.orderBy("name", "asc"));
+      expect(results.map((project) => project.id)).toEqual([
+        orderedIds.low,
+        orderedIds.middle,
+        orderedIds.high,
+      ]);
+    });
+
+    it("orders forward-array and reverse-relation payloads by child row id", async () => {
+      db.upsert(app.users, orderedIds.high, { name: "High", friendsIds: [] });
+      db.upsert(app.users, orderedIds.low, { name: "Low", friendsIds: [] });
+      db.upsert(app.users, orderedIds.middle, { name: "Middle", friendsIds: [] });
+      const project = insertProject(db, "Relations");
+      const todoIds = {
+        low: "00000000-0000-4000-8000-000000000201",
+        high: "00000000-0000-4000-8000-000000000203",
+      } as const;
+      db.upsert(app.todos, todoIds.high, {
+        title: "High",
+        done: false,
+        tags: [],
+        projectId: project.id,
+        ownerId: null,
+        assigneesIds: [orderedIds.high, orderedIds.low, orderedIds.middle],
+      });
+      db.upsert(app.todos, todoIds.low, {
+        title: "Low",
+        done: false,
+        tags: [],
+        projectId: project.id,
+        ownerId: null,
+        assigneesIds: [],
+      });
+
+      const todo = await readOne(
+        app.todos
+          .where({ id: { eq: todoIds.high } })
+          .include({ assignees: app.users.select("id") }),
+      );
+      assert(todo, "Todo is not defined");
+      expect(todo.assignees.map((user) => user.id)).toEqual([
+        orderedIds.low,
+        orderedIds.middle,
+        orderedIds.high,
+      ]);
+
+      const parent = await readOne(
+        app.projects
+          .where({ id: { eq: project.id } })
+          .include({ todosViaProject: app.todos.select("id") }),
+      );
+      assert(parent, "Project is not defined");
+      expect(parent.todosViaProject.map((child) => child.id)).toEqual([todoIds.low, todoIds.high]);
+    });
+  });
+
   describe("filtering", () => {
     it("queries by id", async () => {
       const { id } = insertProject(db, "Project A");
 
-      const results = await db.all(app.projects.where({ id: { eq: id } }));
+      const results = await readAll(app.projects.where({ id: { eq: id } }));
       expect(results.length).toBe(1);
 
       expectTypeOf(results[0]!).branded.toEqualTypeOf<Project>();
@@ -45,10 +159,10 @@ describe("TS Query API", () => {
       const project = insertProject(db, "Deleted Project");
       db.delete(app.projects, project.id);
 
-      const defaultResult = await db.one(app.projects.where({ id: { eq: project.id } }));
+      const defaultResult = await readOne(app.projects.where({ id: { eq: project.id } }));
       expect(defaultResult).toBeNull();
 
-      const deletedResult = await db.one(
+      const deletedResult = await readOne(
         app.projects.includeDeleted().where({ id: { eq: project.id } }),
       );
 
@@ -67,7 +181,7 @@ describe("TS Query API", () => {
         ownerId: insertUser(db).id,
       });
 
-      const results = await db.all(app.todos.where({ ownerId: { isNull: true } }));
+      const results = await readAll(app.todos.where({ ownerId: { isNull: true } }));
 
       expect(results.map((todo) => todo.id)).toEqual([todoWithoutOwner.id]);
     });
@@ -82,7 +196,7 @@ describe("TS Query API", () => {
         ownerId: insertUser(db).id,
       });
 
-      const results = await db.all(app.todos.where({ ownerId: { isNull: false } }));
+      const results = await readAll(app.todos.where({ ownerId: { isNull: false } }));
 
       expect(results.map((todo) => todo.id)).toEqual([todoWithOwner.id]);
     });
@@ -98,9 +212,9 @@ describe("TS Query API", () => {
         ownerId: insertUser(db).id,
       });
 
-      const resultsDirectNull = await db.all(app.todos.where({ ownerId: null }));
-      const resultsEqNull = await db.all(app.todos.where({ ownerId: { eq: null } }));
-      expect(resultsDirectNull.map((todo) => todo.id)).toEqual([todoWithoutOwner.id]);
+      const resultsNullMatch = await readAll(app.todos.where({ ownerId: null }));
+      const resultsEqNull = await readAll(app.todos.where({ ownerId: { eq: null } }));
+      expect(resultsNullMatch.map((todo) => todo.id)).toEqual([todoWithoutOwner.id]);
       expect(resultsEqNull.map((todo) => todo.id)).toEqual([todoWithoutOwner.id]);
     });
 
@@ -114,8 +228,10 @@ describe("TS Query API", () => {
         ownerId: insertUser(db).id,
       });
 
-      const results = await db.all(app.todos.where({ ownerId: undefined }));
-      expect(results.map((todo) => todo.id)).toEqual([todoWithoutOwner.id, todoWithOwner.id]);
+      const results = await readAll(app.todos.where({ ownerId: undefined }));
+      expect(results.map((todo) => todo.id)).toEqual(
+        [todoWithoutOwner.id, todoWithOwner.id].sort(),
+      );
     });
 
     describe("in operator", () => {
@@ -124,7 +240,7 @@ describe("TS Query API", () => {
         const projectB = insertProject(db, "Project B");
         const _projectC = insertProject(db, "Project C");
 
-        const results = await db.all(
+        const results = await readAll(
           app.projects.where({ id: { in: [projectA.id, projectB.id] } }),
         );
 
@@ -136,7 +252,7 @@ describe("TS Query API", () => {
       it("returns no rows for an empty in list", async () => {
         insertProject(db, "Project A");
 
-        const results = await db.all(app.projects.where({ id: { in: [] } }));
+        const results = await readAll(app.projects.where({ id: { in: [] } }));
 
         expect(results).toEqual([]);
       });
@@ -146,7 +262,7 @@ describe("TS Query API", () => {
         const { value: rowB } = db.insert(app.table_with_defaults, { enum: "b" });
         db.insert(app.table_with_defaults, { enum: "c" });
 
-        const results = await db.all(app.table_with_defaults.where({ enum: { in: ["a", "b"] } }));
+        const results = await readAll(app.table_with_defaults.where({ enum: { in: ["a", "b"] } }));
 
         expect(results.map((row) => row.id).sort()).toEqual([rowA.id, rowB.id].sort());
       });
@@ -159,7 +275,7 @@ describe("TS Query API", () => {
         const todoB = insertTodo(db, { title: "B", projectId: projectB.id });
         const _todoC = insertTodo(db, { title: "C", projectId: projectC.id });
 
-        const results = await db.all(
+        const results = await readAll(
           app.todos.where({ projectId: { in: [projectA.id, projectB.id] } }),
         );
 
@@ -171,7 +287,7 @@ describe("TS Query API", () => {
         const todoWithOwner = insertTodo(db, { title: "Owned", ownerId: owner.id });
         const _todoWithoutOwner = insertTodo(db, { title: "Unowned", ownerId: null });
 
-        const results = await db.all(app.todos.where({ ownerId: { in: [owner.id] } }));
+        const results = await readAll(app.todos.where({ ownerId: { in: [owner.id] } }));
 
         expect(results.map((todo) => todo.id)).toEqual([todoWithOwner.id]);
       });
@@ -181,7 +297,7 @@ describe("TS Query API", () => {
         const todoB = insertTodo(db, { title: "Walk dog" });
         const _todoC = insertTodo(db, { title: "Write code" });
 
-        const results = await db.all(app.todos.where({ title: { in: ["Buy milk", "Walk dog"] } }));
+        const results = await readAll(app.todos.where({ title: { in: ["Buy milk", "Walk dog"] } }));
 
         expect(results.map((todo) => todo.id).sort()).toEqual([todoA.id, todoB.id].sort());
       });
@@ -190,7 +306,7 @@ describe("TS Query API", () => {
         const { value: rowA } = db.insert(app.table_with_defaults, { boolean: true });
         db.insert(app.table_with_defaults, { boolean: false });
 
-        const results = await db.all(app.table_with_defaults.where({ boolean: { in: [true] } }));
+        const results = await readAll(app.table_with_defaults.where({ boolean: { in: [true] } }));
 
         expect(results.map((row) => row.id)).toEqual([rowA.id]);
       });
@@ -200,7 +316,7 @@ describe("TS Query API", () => {
         const { value: rowB } = db.insert(app.table_with_defaults, { integer: 10, float: 2.5 });
         db.insert(app.table_with_defaults, { integer: 15, float: 3.5 });
 
-        const results = await db.all(
+        const results = await readAll(
           app.table_with_defaults.where({ integer: { in: [5, 10] }, float: { in: [1.5, 2.5] } }),
         );
 
@@ -215,7 +331,7 @@ describe("TS Query API", () => {
         const { value: rowB } = db.insert(app.table_with_defaults, { timestampDate: second });
         db.insert(app.table_with_defaults, { timestampDate: third });
 
-        const results = await db.all(
+        const results = await readAll(
           app.table_with_defaults.where({ timestampDate: { in: [first, second] } }),
         );
 
@@ -228,7 +344,7 @@ describe("TS Query API", () => {
         });
         db.insert(app.table_with_defaults, { bytes: new Uint8Array([4, 5, 6]) });
 
-        const results = await db.all(
+        const results = await readAll(
           app.table_with_defaults.where({ bytes: { in: [new Uint8Array([1, 2, 3])] } }),
         );
 
@@ -240,7 +356,7 @@ describe("TS Query API", () => {
         db.insert(app.table_with_defaults, { array: ["a"] });
         db.insert(app.table_with_defaults, { array: ["b", "a"] });
 
-        const results = await db.all(
+        const results = await readAll(
           app.table_with_defaults.where({ array: { in: [["a", "b"]] } }),
         );
 
@@ -254,7 +370,7 @@ describe("TS Query API", () => {
       const { value: bobTask } = db.insert(app.table_with_defaults, { integer: 15 });
       db.insert(app.table_with_defaults, { integer: 20 });
 
-      const results = await db.all(
+      const results = await readAll(
         app.table_with_defaults
           .where({ integer: { gt: 5, lt: 20 } })
           .select("integer")
@@ -273,7 +389,7 @@ describe("TS Query API", () => {
       db.insert(app.table_with_defaults, { nullableInteger: 10 });
       db.insert(app.table_with_defaults, { nullableInteger: 15 });
 
-      const results = await db.all(
+      const results = await readAll(
         app.table_with_defaults
           .where({ nullableInteger: { lt: 10, ne: null } })
           .select("nullableInteger")
@@ -289,7 +405,7 @@ describe("TS Query API", () => {
       db.insert(app.table_with_defaults, { nullableInteger: 10 });
       db.insert(app.table_with_defaults, { nullableInteger: 15 });
 
-      const results = await db.all(
+      const results = await readAll(
         app.table_with_defaults
           .where({ nullableInteger: { lt: 10, eq: null } })
           .select("nullableInteger")
@@ -305,7 +421,7 @@ describe("TS Query API", () => {
       const { value: bobTask } = db.insert(app.table_with_defaults, { float: 3.5 });
       db.insert(app.table_with_defaults, { float: 4.5 });
 
-      const results = await db.all(
+      const results = await readAll(
         app.table_with_defaults
           .where({ float: { gt: 1.5, lt: 4.5 } })
           .select("float")
@@ -331,7 +447,7 @@ describe("TS Query API", () => {
       const { value: bobTask } = db.insert(app.table_with_defaults, { timestampDate: bobDueAt });
       db.insert(app.table_with_defaults, { timestampDate: upperBound });
 
-      const results = await db.all(
+      const results = await readAll(
         app.table_with_defaults
           .where({ timestampDate: { gt: lowerBound, lt: upperBound } })
           .select("timestampDate")
@@ -350,7 +466,7 @@ describe("TS Query API", () => {
       const { value: bobTask } = db.insert(app.table_with_defaults, { integer: 15 });
       const { value: carolTask } = db.insert(app.table_with_defaults, { integer: 20 });
 
-      const duplicateLowerBoundResults = await db.all(
+      const duplicateLowerBoundResults = await readAll(
         app.table_with_defaults
           .where({ integer: { gt: 10, gte: 5 } })
           .select("integer")
@@ -362,7 +478,7 @@ describe("TS Query API", () => {
         { id: carolTask.id, integer: 20 },
       ]);
 
-      const duplicateUpperBoundResults = await db.all(
+      const duplicateUpperBoundResults = await readAll(
         app.table_with_defaults
           .where({ integer: { lt: 20, lte: 15 } })
           .select("integer")
@@ -375,7 +491,7 @@ describe("TS Query API", () => {
         { id: bobTask.id, integer: 15 },
       ]);
 
-      const eqInsideRangeResults = await db.all(
+      const eqInsideRangeResults = await readAll(
         app.table_with_defaults
           .where({ integer: { eq: 15, gte: 5, lt: 20 } })
           .select("integer")
@@ -384,7 +500,7 @@ describe("TS Query API", () => {
 
       expect(eqInsideRangeResults).toEqual([{ id: bobTask.id, integer: 15 }]);
 
-      const impossibleRangeResults = await db.all(
+      const impossibleRangeResults = await readAll(
         app.table_with_defaults
           .where({ integer: { eq: 10, lt: 10 } })
           .select("integer")
@@ -409,7 +525,7 @@ describe("TS Query API", () => {
           tags: ["tag1", "tag2"],
         });
 
-        const todosWithTags = await db.all(app.todos.where({ tags: { eq: ["tag1"] } }));
+        const todosWithTags = await readAll(app.todos.where({ tags: { eq: ["tag1"] } }));
         expect(todosWithTags.length).toBe(1);
         expect(todosWithTags[0]!.id).toEqual(id1);
       });
@@ -428,7 +544,7 @@ describe("TS Query API", () => {
           tags: ["tag1", "tag2"],
         });
 
-        const todosWithTags = await db.all(app.todos.where({ tags: { contains: "tag1" } }));
+        const todosWithTags = await readAll(app.todos.where({ tags: { contains: "tag1" } }));
         expect(todosWithTags.length).toBe(2);
         expect(todosWithTags).toContainEqual(expect.objectContaining({ id: id1 }));
         expect(todosWithTags).toContainEqual(expect.objectContaining({ id: id3 }));
@@ -446,7 +562,7 @@ describe("TS Query API", () => {
         ownerId: ownerId,
       });
 
-      const results = await db.all(
+      const results = await readAll(
         app.todos.where({ id: { eq: todoId } }).include({ project: true }),
       );
 
@@ -467,7 +583,7 @@ describe("TS Query API", () => {
         ownerId: ownerId,
       });
 
-      const result = await db.one(
+      const result = await readOne(
         app.todos
           .select("ownerId")
           .where({ id: { eq: todoId } })
@@ -487,7 +603,9 @@ describe("TS Query API", () => {
         ownerId: undefined,
       });
 
-      const result = await db.one(app.todos.where({ id: { eq: todoId } }).include({ owner: true }));
+      const result = await readOne(
+        app.todos.where({ id: { eq: todoId } }).include({ owner: true }),
+      );
 
       assert(result, "Result is not defined");
       expectTypeOf(result.owner).toEqualTypeOf<User | null>();
@@ -504,10 +622,10 @@ describe("TS Query API", () => {
         ownerId: ownerId,
       });
 
-      const baseline = await db.all(app.todos.where({ id: { eq: todoId } }));
+      const baseline = await readAll(app.todos.where({ id: { eq: todoId } }));
       expect(baseline[0]!.title).toBe("Hello world");
 
-      const withInclude = await db.all(
+      const withInclude = await readAll(
         app.todos.where({ id: { eq: todoId } }).include({ project: true }),
       );
 
@@ -525,7 +643,7 @@ describe("TS Query API", () => {
 
       await db.delete(app.projects, project.id);
 
-      const result = await db.one(
+      const result = await readOne(
         app.todos.where({ id: { eq: todo.id } }).include({ project: true }),
       );
       assert(result, "Result is not defined");
@@ -542,7 +660,7 @@ describe("TS Query API", () => {
 
       await db.delete(app.users, assignee1.id);
 
-      const result = await db.one(
+      const result = await readOne(
         app.todos.where({ id: { eq: todo.id } }).include({ assignees: app.users.select("id") }),
       );
       assert(result, "Result is not defined");
@@ -561,7 +679,7 @@ describe("TS Query API", () => {
 
       await db.delete(app.todos, todoId);
 
-      const result = await db.one(
+      const result = await readOne(
         app.users
           .where({ id: { eq: owner.id } })
           .include({ todosViaOwner: app.todos.select("id") }),
@@ -580,7 +698,7 @@ describe("TS Query API", () => {
 
         await db.delete(app.projects, project.id);
 
-        const result = await db.one(
+        const result = await readOne(
           app.todos
             .where({ id: { eq: todo.id } })
             .include({ project: true })
@@ -598,7 +716,7 @@ describe("TS Query API", () => {
           ownerId: undefined,
         });
 
-        const result = await db.one(
+        const result = await readOne(
           app.todos
             .where({ id: { eq: todo.id } })
             .include({ owner: true })
@@ -620,7 +738,7 @@ describe("TS Query API", () => {
 
         await db.delete(app.users, assignee1.id);
 
-        const result = await db.one(
+        const result = await readOne(
           app.todos
             .where({ id: { eq: todo.id } })
             .include({ assignees: app.users.select("id") })
@@ -641,7 +759,7 @@ describe("TS Query API", () => {
 
         await db.delete(app.todos, todoId);
 
-        const result = await db.one(
+        const result = await readOne(
           app.users
             .where({ id: { eq: owner.id } })
             .include({ todosViaOwner: app.todos.select("id") })
@@ -661,10 +779,10 @@ describe("TS Query API", () => {
 
         db.delete(app.users, deletedUser.id);
 
-        const result = await db.one(
-          app.users
-            .where({ id: { eq: alice.id } })
-            .include({ friends: app.users.include({ friends: true }).requireIncludes() }),
+        const result = await readOne(
+          app.users.where({ id: { eq: alice.id } }).include({
+            friends: app.users.include({ friends: true }).requireIncludes(),
+          }),
         );
 
         assert(result, "Result is not defined");
@@ -683,7 +801,7 @@ describe("TS Query API", () => {
 
         db.delete(app.users, deletedUser.id);
 
-        const result = await db.one(
+        const result = await readOne(
           app.users
             .where({ id: { eq: alice.id } })
             .include({ friends: { friends: true } })
@@ -706,14 +824,14 @@ describe("TS Query API", () => {
         makeFriends(db, alice, bob);
         makeFriends(db, bob, deletedUser);
 
-        const results = await db.all(
+        const results = await readAll(
           app.users.include({ friends: true }).requireIncludes().limit(1).offset(1),
         );
-        expect(results.map((u) => u.id)).toEqual([bob.id]);
+        expect(results.map((u) => u.id)).toEqual([[alice.id, bob.id, deletedUser.id].sort()[1]]);
 
         await db.delete(app.users, deletedUser.id);
 
-        const results2 = await db.all(
+        const results2 = await readAll(
           app.users.include({ friends: true }).requireIncludes().limit(1).offset(1),
         );
         expect(results2).toHaveLength(0);
@@ -731,7 +849,7 @@ describe("TS Query API", () => {
         projectId: projectId,
       });
 
-      const result = await db.one(
+      const result = await readOne(
         app.todos
           .select("title")
           .where({ id: { eq: todoId } })
@@ -766,7 +884,7 @@ describe("TS Query API", () => {
         assigneesIds: [],
       });
 
-      const result = await db.one(app.todos.select("*").where({ id: { eq: todoId } }));
+      const result = await readOne(app.todos.select("*").where({ id: { eq: todoId } }));
 
       assert(result, "Result is not defined");
       expectTypeOf(result).branded.toEqualTypeOf<Todo>();
@@ -781,111 +899,6 @@ describe("TS Query API", () => {
       });
     });
 
-    it("selects and filters permission magic columns end to end", async () => {
-      const db = await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName: uniqueDbName("select-magic-columns") },
-        secret: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
-      });
-
-      const { id: projectId } = insertProject(db, "Announcements");
-      const { id: editableId } = insertTodo(db, {
-        title: "Draft docs",
-        done: false,
-        tags: ["dev"],
-        projectId,
-        assigneesIds: [],
-      });
-      const { id: lockedId } = insertTodo(db, {
-        title: "Shipped docs",
-        done: true,
-        tags: ["docs"],
-        projectId,
-        assigneesIds: [],
-      });
-
-      const projected = await db.all(
-        app.todos.select("title", "$canRead", "$canEdit", "$canDelete").orderBy("title", "asc"),
-      );
-
-      expect(projected).toEqual([
-        {
-          id: editableId,
-          title: "Draft docs",
-          $canRead: true,
-          $canEdit: true,
-          $canDelete: true,
-        },
-        {
-          id: lockedId,
-          title: "Shipped docs",
-          $canRead: true,
-          $canEdit: false,
-          $canDelete: false,
-        },
-      ]);
-
-      const editableOnly = await db.all(
-        app.todos.where({ $canEdit: true }).select("title", "$canEdit").orderBy("title", "asc"),
-      );
-
-      expect(editableOnly).toEqual([
-        {
-          id: editableId,
-          title: "Draft docs",
-          $canEdit: true,
-        },
-      ]);
-
-      const readableOnly = await db.all(
-        app.todos.where({ $canRead: true }).select("title", "$canRead").orderBy("title", "asc"),
-      );
-
-      expect(readableOnly).toEqual([
-        {
-          id: editableId,
-          title: "Draft docs",
-          $canRead: true,
-        },
-        {
-          id: lockedId,
-          title: "Shipped docs",
-          $canRead: true,
-        },
-      ]);
-
-      const deletableOnly = await db.all(
-        app.todos.where({ $canDelete: true }).select("title", "$canDelete").orderBy("title", "asc"),
-      );
-
-      expect(deletableOnly).toEqual([
-        {
-          id: editableId,
-          title: "Draft docs",
-          $canDelete: true,
-        },
-      ]);
-
-      const fullRowWithDeletePermission = await db.one(
-        app.todos.select("*", "$canDelete").where({ id: { eq: editableId } }),
-      );
-
-      assert(fullRowWithDeletePermission, "Result is not defined");
-      expectTypeOf(fullRowWithDeletePermission.$canDelete).toEqualTypeOf<boolean | null>();
-      expect(fullRowWithDeletePermission).toEqual({
-        id: editableId,
-        title: "Draft docs",
-        done: false,
-        tags: ["dev"],
-        projectId,
-        ownerId: null,
-        assigneesIds: [],
-        $canDelete: true,
-      });
-
-      await db.shutdown();
-    });
-
     it("selects and filters provenance magic timestamp columns as JS dates", async () => {
       const startedAt = Date.now();
       const { id: projectId } = insertProject(db, "Announcements");
@@ -897,7 +910,7 @@ describe("TS Query API", () => {
         assigneesIds: [],
       });
 
-      const projected = await db.one(
+      const projected = await readOne(
         app.todos.select("title", "$createdAt", "$updatedAt").where({ id: { eq: todoId } }),
       );
 
@@ -913,7 +926,7 @@ describe("TS Query API", () => {
       expect(projected.$updatedAt.getTime()).toBeLessThanOrEqual(Date.now() + 60_000);
 
       const upperBound = new Date(Date.now() + 60_000);
-      const withinUpperBound = await db.all(
+      const withinUpperBound = await readAll(
         app.todos
           .where({ $updatedAt: { lte: upperBound } })
           .select("title", "$updatedAt")
@@ -941,7 +954,7 @@ describe("TS Query API", () => {
         assigneesIds: [],
       });
 
-      const result = await db.one(
+      const result = await readOne(
         app.projects
           .where({ id: { eq: projectId } })
           .include({ todosViaProject: app.todos.select("title") }),
@@ -976,7 +989,7 @@ describe("TS Query API", () => {
         assigneesIds: [],
       });
 
-      const result = await db.one(
+      const result = await readOne(
         app.projects
           .where({ id: { eq: projectId } })
           .include({
@@ -1009,7 +1022,7 @@ describe("TS Query API", () => {
         assigneesIds: [assigneeId],
       });
 
-      const result = await db.one(
+      const result = await readOne(
         app.projects
           .where({ id: { eq: projectId } })
           .include({
@@ -1036,114 +1049,6 @@ describe("TS Query API", () => {
       expect(assignee.$updatedAt.getTime()).toBeGreaterThanOrEqual(startedAt - 60_000);
     });
 
-    it("include builders resolve permission magic columns on reverse relations", async () => {
-      const { id: projectId } = insertProject(db, "Announcements");
-      const { id: todoId } = insertTodo(db, {
-        title: "Draft docs",
-        done: false,
-        tags: ["dev"],
-        projectId,
-        assigneesIds: [],
-      });
-      const { id: lockedTodoId } = insertTodo(db, {
-        title: "Shipped docs",
-        done: true,
-        tags: ["docs"],
-        projectId,
-        assigneesIds: [],
-      });
-
-      const result = await db.one(
-        app.projects.where({ id: { eq: projectId } }).include({
-          todosViaProject: app.todos
-            .select("title", "$canRead", "$canEdit", "$canDelete")
-            .orderBy("title", "asc"),
-        }),
-      );
-
-      assert(result, "Result is not defined");
-      expect(result.todosViaProject).toHaveLength(2);
-      const todo = result.todosViaProject[0];
-      assert(todo, "Included todo is not defined");
-      expectTypeOf(todo.$canRead).toEqualTypeOf<boolean | null>();
-      expect(result.todosViaProject).toEqual([
-        {
-          id: todoId,
-          title: "Draft docs",
-          $canRead: true,
-          $canEdit: true,
-          $canDelete: true,
-        },
-        {
-          id: lockedTodoId,
-          title: "Shipped docs",
-          $canRead: true,
-          $canEdit: false,
-          $canDelete: false,
-        },
-      ]);
-    });
-
-    it("include builders resolve permission magic columns on nested array relations", async () => {
-      const alice = insertUser(db, "Alice");
-      const bob = insertUser(db, "Bob");
-      makeFriends(db, alice, bob);
-      const { id: projectId } = insertProject(db, "Announcements");
-      const { id: todoId } = insertTodo(db, {
-        title: "Draft docs",
-        done: false,
-        tags: ["dev"],
-        projectId,
-        ownerId: bob.id,
-        assigneesIds: [],
-      });
-      const { id: lockedTodoId } = insertTodo(db, {
-        title: "Shipped docs",
-        done: true,
-        tags: ["docs"],
-        projectId,
-        ownerId: bob.id,
-        assigneesIds: [],
-      });
-
-      const result = await db.one(
-        app.users.where({ id: { eq: alice.id } }).include({
-          friends: app.users.include({
-            todosViaOwner: app.todos
-              .select("title", "$canRead", "$canEdit", "$canDelete")
-              .orderBy("title", "asc"),
-          }),
-        }),
-      );
-
-      assert(result, "Result is not defined");
-      expect(result.friends).toHaveLength(1);
-      const friend = result.friends[0];
-      assert(friend, "Friend is not defined");
-      expect(friend.id).toBe(bob.id);
-      expect(friend.todosViaOwner).toHaveLength(2);
-      const todo = friend.todosViaOwner[0];
-      assert(todo, "Nested todo is not defined");
-      expectTypeOf(todo.$canRead).toEqualTypeOf<boolean | null>();
-      expectTypeOf(todo.$canEdit).toEqualTypeOf<boolean | null>();
-      expect(friend.todosViaOwner).toEqual([
-        {
-          id: todoId,
-          title: "Draft docs",
-          $canRead: true,
-          $canEdit: true,
-          $canDelete: true,
-        },
-        {
-          id: lockedTodoId,
-          title: "Shipped docs",
-          $canRead: true,
-          $canEdit: false,
-          $canDelete: false,
-        },
-      ]);
-    });
-
     it("subscribeAll preserves projected root columns with includes", async () => {
       const { id: projectId } = insertProject(db, "Announcements");
       const { id: ownerId } = insertUser(db);
@@ -1159,7 +1064,8 @@ describe("TS Query API", () => {
 
       let unsubscribe = () => {};
       let timeout: ReturnType<typeof setTimeout> | undefined;
-      const deltaPromise = new Promise<{ all: SubscribedTodo[] }>((resolve, reject) => {
+      const current: SubscribedTodo[] = [];
+      const deltaPromise = new Promise<SubscribedTodo[]>((resolve, reject) => {
         timeout = setTimeout(() => {
           unsubscribe();
           reject(new Error("Timed out waiting for subscribeAll projection update"));
@@ -1168,11 +1074,12 @@ describe("TS Query API", () => {
         unsubscribe = db.subscribeAll(
           app.todos.select("title").include({ project: true }),
           (delta) => {
-            if (delta.all.length !== 1) {
+            const all = applySubscriptionDelta(current, delta as any);
+            if (all.length !== 1) {
               return;
             }
 
-            resolve(delta as { all: SubscribedTodo[] });
+            resolve([...all]);
           },
         );
       });
@@ -1188,13 +1095,13 @@ describe("TS Query API", () => {
         assigneesIds: [],
       });
 
-      const delta = await deltaPromise;
+      const all = await deltaPromise;
       if (timeout) {
         clearTimeout(timeout);
       }
       unsubscribe();
 
-      expect(delta.all).toEqual([
+      expect(all).toEqual([
         {
           id: todoId,
           title: "Watch subscription",
@@ -1204,75 +1111,9 @@ describe("TS Query API", () => {
           },
         },
       ]);
-      assert(delta.all[0]);
-      expect("done" in delta.all[0]).toBe(false);
-      expect("tags" in delta.all[0]).toBe(false);
-    });
-
-    it("subscribeAll preserves permission magic columns with the default auth context", async () => {
-      const { id: projectId } = insertProject(db, "Announcements");
-      const { id: editableId } = insertTodo(db, {
-        title: "Draft docs",
-        done: false,
-        tags: ["dev"],
-        projectId,
-        assigneesIds: [],
-      });
-      const { id: lockedId } = insertTodo(db, {
-        title: "Shipped docs",
-        done: true,
-        tags: ["docs"],
-        projectId,
-        assigneesIds: [],
-      });
-
-      type SubscribedTodo = {
-        id: string;
-        title: string;
-        $canEdit: boolean | null;
-        $canDelete: boolean | null;
-      };
-
-      let unsubscribe = () => {};
-      let timeout: ReturnType<typeof setTimeout> | undefined;
-      const deltaPromise = new Promise<{ all: SubscribedTodo[] }>((resolve, reject) => {
-        timeout = setTimeout(() => {
-          unsubscribe();
-          reject(new Error("Timed out waiting for subscribeAll permission update"));
-        }, 10_000);
-
-        unsubscribe = db.subscribeAll(
-          app.todos.select("title", "$canEdit", "$canDelete").orderBy("title", "asc"),
-          (delta) => {
-            if (delta.all.length !== 2) {
-              return;
-            }
-
-            resolve(delta as { all: SubscribedTodo[] });
-          },
-        );
-      });
-
-      const delta = await deltaPromise;
-      if (timeout) {
-        clearTimeout(timeout);
-      }
-      unsubscribe();
-
-      expect(delta.all).toEqual([
-        {
-          id: editableId,
-          title: "Draft docs",
-          $canEdit: true,
-          $canDelete: true,
-        },
-        {
-          id: lockedId,
-          title: "Shipped docs",
-          $canEdit: false,
-          $canDelete: false,
-        },
-      ]);
+      assert(all[0]);
+      expect("done" in all[0]).toBe(false);
+      expect("tags" in all[0]).toBe(false);
     });
 
     it("subscribeAll returns null for selected nullable columns while omitting unselected columns", async () => {
@@ -1286,18 +1127,20 @@ describe("TS Query API", () => {
 
       let unsubscribe = () => {};
       let timeout: ReturnType<typeof setTimeout> | undefined;
-      const deltaPromise = new Promise<{ all: SubscribedTodo[] }>((resolve, reject) => {
+      const current: SubscribedTodo[] = [];
+      const deltaPromise = new Promise<SubscribedTodo[]>((resolve, reject) => {
         timeout = setTimeout(() => {
           unsubscribe();
           reject(new Error("Timed out waiting for subscribeAll nullable update"));
         }, 10_000);
 
         unsubscribe = db.subscribeAll(app.todos.select("title", "ownerId"), (delta) => {
-          if (delta.all.length !== 1) {
+          const all = applySubscriptionDelta(current, delta as any);
+          if (all.length !== 1) {
             return;
           }
 
-          resolve(delta as { all: SubscribedTodo[] });
+          resolve([...all]);
         });
       });
 
@@ -1312,22 +1155,22 @@ describe("TS Query API", () => {
         assigneesIds: [],
       });
 
-      const delta = await deltaPromise;
+      const all = await deltaPromise;
       if (timeout) {
         clearTimeout(timeout);
       }
       unsubscribe();
 
-      expect(delta.all).toEqual([
+      expect(all).toEqual([
         {
           id: todoId,
           title: "Watch nullable subscription",
           ownerId: null,
         },
       ]);
-      assert(delta.all[0]);
-      expect("done" in delta.all[0]).toBe(false);
-      expect("tags" in delta.all[0]).toBe(false);
+      assert(all[0]);
+      expect("done" in all[0]).toBe(false);
+      expect("tags" in all[0]).toBe(false);
     });
   });
 });

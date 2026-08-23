@@ -7,11 +7,15 @@ export interface RemoteBrowserDbCreateInput {
   appId: string;
   dbName: string;
   table: string;
+  queryJson?: string;
   schemaJson: string;
   serverUrl?: string;
   adminSecret?: string;
   localFirstSecret?: string;
   logLevel?: DbConfig["logLevel"];
+  initialize?: boolean;
+  tabCount?: number;
+  initialRow?: Record<string, unknown>;
 }
 
 export interface RemoteBrowserDbWaitForTitleInput {
@@ -23,7 +27,9 @@ export interface RemoteBrowserDbWaitForTitleInput {
 
 interface RemoteBrowserDbState {
   db: Db;
+  schema: WasmSchema;
   query: QueryBuilder<Record<string, unknown>>;
+  table: QueryBuilder<Record<string, unknown>>;
 }
 
 declare global {
@@ -37,28 +43,6 @@ function getRemoteStateStore(): Map<string, RemoteBrowserDbState> {
     window.__jazzRemoteBrowserDbs__ = new Map();
   }
   return window.__jazzRemoteBrowserDbs__;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
-  let timeoutId: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_, reject) => {
-        timeoutId = setTimeout(() => {
-          reject(new Error(`${label} after ${timeoutMs}ms`));
-        }, timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timeoutId) {
-      clearTimeout(timeoutId);
-    }
-  }
 }
 
 function makeAllRowsQuery(
@@ -93,15 +77,85 @@ export async function createRemoteBrowserDb(input: RemoteBrowserDbCreateInput): 
     appId: input.appId,
     driver: { type: "persistent", dbName: input.dbName },
     serverUrl: input.serverUrl,
-    ...(input.localFirstSecret ? { secret: input.localFirstSecret } : {}),
-    adminSecret: input.adminSecret,
+    ...(input.localFirstSecret
+      ? { secret: input.localFirstSecret }
+      : { adminSecret: input.adminSecret }),
     logLevel: input.logLevel,
   });
 
+  const query = input.queryJson
+    ? {
+        _table: input.table,
+        _schema: schema,
+        _rowType: {} as Record<string, unknown>,
+        _build: () => input.queryJson!,
+      }
+    : makeAllRowsQuery(input.table, schema);
+  const table = {
+    _table: input.table,
+    _schema: schema,
+    _rowType: {} as Record<string, unknown>,
+    _initType: {} as Record<string, unknown>,
+  };
+  if (input.initialize) await db.all(query, { tier: "local" });
+  if (input.initialRow) {
+    await db.insert(table, input.initialRow).wait({ tier: "local" });
+  }
+
   store.set(input.id, {
     db,
-    query: makeAllRowsQuery(input.table, schema),
+    schema,
+    query,
+    table,
   });
+}
+
+export async function insertRemoteBrowserDbRow(input: {
+  id: string;
+  row: Record<string, unknown>;
+  table?: string;
+}): Promise<string> {
+  const state = getRemoteStateStore().get(input.id);
+  if (!state) throw new Error(`Remote browser db "${input.id}" was not initialized`);
+  const table = input.table
+    ? {
+        _table: input.table,
+        _schema: state.schema,
+        _rowType: {} as Record<string, unknown>,
+        _initType: {} as Record<string, unknown>,
+      }
+    : state.table;
+  const result = state.db.insert(table, input.row);
+  await result.wait({ tier: "local" });
+  return result.value.id;
+}
+
+export async function updateRemoteBrowserDbRow(input: {
+  id: string;
+  rowId: string;
+  patch: Record<string, unknown>;
+  table?: string;
+}): Promise<void> {
+  const state = getRemoteStateStore().get(input.id);
+  if (!state) throw new Error(`Remote browser db "${input.id}" was not initialized`);
+  const table = input.table
+    ? {
+        _table: input.table,
+        _schema: state.schema,
+        _rowType: {} as Record<string, unknown>,
+        _initType: {} as Record<string, unknown>,
+      }
+    : state.table;
+  await state.db.update(table, input.rowId, input.patch).wait({ tier: "local" });
+}
+
+export async function queryRemoteBrowserDbRows(input: {
+  id: string;
+  tier?: "local" | "edge";
+}): Promise<Record<string, unknown>[]> {
+  const state = getRemoteStateStore().get(input.id);
+  if (!state) throw new Error(`Remote browser db "${input.id}" was not initialized`);
+  return state.db.all(state.query, { tier: input.tier ?? "local" });
 }
 
 export async function waitForRemoteBrowserDbTitle(
@@ -113,35 +167,31 @@ export async function waitForRemoteBrowserDbTitle(
     throw new Error(`Remote browser db "${input.id}" was not initialized`);
   }
 
-  const deadline = Date.now() + input.timeoutMs;
-  let lastRows: Record<string, unknown>[] = [];
-  let lastError: unknown = undefined;
-
-  while (Date.now() < deadline) {
-    try {
-      const remainingMs = Math.max(1, deadline - Date.now());
-      const queryTimeoutMs = Math.min(5000, remainingMs);
-      const rows = await withTimeout(
-        state.db.all(state.query, { tier: input.tier }),
-        queryTimeoutMs,
-        `Remote browser db "${input.id}" query did not resolve`,
+  return await new Promise<Record<string, unknown>[]>((resolve, reject) => {
+    let lastRows: Record<string, unknown>[] = [];
+    let unsubscribe: () => void = () => {};
+    const timeout = setTimeout(() => {
+      unsubscribe();
+      reject(
+        new Error(
+          `Remote browser db "${input.id}" did not observe title "${input.title}" within ${input.timeoutMs}ms; ` +
+            `lastRows=${JSON.stringify(lastRows.slice(0, 10))}`,
+        ),
       );
-      if (rows.some((row) => row.title === input.title)) {
-        return rows;
-      }
-      lastRows = rows;
-    } catch (error) {
-      lastError = error;
-    }
-    await sleep(100);
-  }
-
-  const lastErrorMessage =
-    lastError instanceof Error ? lastError.message : lastError ? String(lastError) : "none";
-  throw new Error(
-    `Remote browser db "${input.id}" did not observe title "${input.title}" within ${input.timeoutMs}ms; ` +
-      `lastRows=${JSON.stringify(lastRows.slice(0, 10))}; lastError=${lastErrorMessage}`,
-  );
+    }, input.timeoutMs);
+    unsubscribe = state.db.subscribeAll(
+      state.query,
+      (delta) => {
+        lastRows = [...delta.all];
+        if (lastRows.some((row) => row.title === input.title)) {
+          clearTimeout(timeout);
+          unsubscribe();
+          resolve(lastRows);
+        }
+      },
+      input.tier ? { tier: input.tier } : undefined,
+    );
+  });
 }
 
 export async function closeRemoteBrowserDb(id: string): Promise<void> {

@@ -1,7 +1,9 @@
 import {
   JazzClient,
-  type DirectInsertResult,
-  type DirectMutationResult,
+  type BatchId,
+  type InsertResult,
+  type MutationResult,
+  type OpenBatchId,
   type Runtime,
 } from "../client.js";
 import type { AppContext } from "../context.js";
@@ -35,25 +37,33 @@ export async function flushMicrotasks(): Promise<void> {
   await Promise.resolve();
 }
 
-export function mockRow(id = "todo-1"): DirectInsertResult {
-  return { id, values: [], batchId: `batch-${id}` };
+export const testBatchId = (value: string): BatchId => value as BatchId;
+export const testOpenBatchId = (value: string): OpenBatchId => value as OpenBatchId;
+
+const committed = (value: string): MutationResult => ({
+  kind: "committed",
+  batchId: testBatchId(value),
+});
+
+export function mockRow(id = "todo-1"): InsertResult {
+  return { id, values: [], ...committed(`transaction-${id}`) };
 }
 
-export function mockMutation(batchId = "batch-id"): DirectMutationResult {
-  return { batchId };
+export function mockMutation(batchId = "00000000000070008000000000000001"): MutationResult {
+  return committed(batchId);
 }
 
-export const runtimeBatchRecordStubs = {
-  beginBatch: (batchMode: "direct" | "transactional") => `batch-${batchMode}`,
-  upsert: () => mockMutation("upsert-batch-id"),
-  commitBatch: () => {},
-  waitForBatch: async () => {},
-  rollbackBatch: () => false,
-  onMutationError: () => {},
+export const runtimeTransactionRecordStubs = {
+  beginTransaction: (_kind: "mergeable" | "exclusive", id: OpenBatchId) => id,
+  upsert: () => mockMutation("upsert-transaction-id"),
+  commitTransaction: () => testBatchId("committed-batch"),
+  waitForTransaction: async () => {},
+  rollbackTransaction: async () => false,
   connect: () => {},
-  disconnect: () => {},
+  disconnect: async () => {},
   updateAuth: () => {},
   onAuthFailure: () => {},
+  onMutationError: () => {},
 };
 
 export function makeClient() {
@@ -67,23 +77,19 @@ export function makeClient() {
   let nextHandle = 0;
 
   const runtime: Runtime = {
-    ...runtimeBatchRecordStubs,
+    ...runtimeTransactionRecordStubs,
     insert: () => ({
       id: "00000000-0000-0000-0000-000000000001",
       values: [],
-      batchId: "plain-insert-batch",
+      ...committed("plain-insert-transaction"),
     }),
     restore: () => ({
       id: "00000000-0000-0000-0000-000000000001",
       values: [],
-      batchId: "plain-restore-batch",
+      ...committed("plain-restore-transaction"),
     }),
-    update: () => ({
-      batchId: "batch-id",
-    }),
-    delete: () => ({
-      batchId: "batch-id",
-    }),
+    update: () => committed("transaction-id"),
+    delete: () => committed("transaction-id"),
     query: async (
       queryJson: string,
       sessionJson?: string | null,
@@ -118,8 +124,6 @@ export function makeClient() {
     unsubscribe: (handle: number) => {
       unsubscribeCalls.push(handle);
     },
-    getSchema: () => ({}),
-    getSchemaHash: () => "schema-hash",
   };
 
   const context: AppContext = {
@@ -148,29 +152,23 @@ export function makeClient() {
 export function makeClientWithContext(context: AppContext): JazzClient {
   let nextHandle = 0;
   const runtime: Runtime = {
-    ...runtimeBatchRecordStubs,
+    ...runtimeTransactionRecordStubs,
     insert: () => ({
       id: "00000000-0000-0000-0000-000000000001",
       values: [],
-      batchId: "plain-insert-batch",
+      ...committed("plain-insert-transaction"),
     }),
     restore: () => ({
       id: "00000000-0000-0000-0000-000000000001",
       values: [],
-      batchId: "plain-restore-batch",
+      ...committed("plain-restore-transaction"),
     }),
-    update: () => ({
-      batchId: "batch-id",
-    }),
-    delete: () => ({
-      batchId: "batch-id",
-    }),
+    update: () => committed("transaction-id"),
+    delete: () => committed("transaction-id"),
     query: async () => [],
     createSubscription: () => nextHandle++,
     executeSubscription: () => {},
     unsubscribe: () => {},
-    getSchema: () => ({}),
-    getSchemaHash: () => "schema-hash",
   };
 
   const JazzClientCtor = JazzClient as unknown as {

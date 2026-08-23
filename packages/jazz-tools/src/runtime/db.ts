@@ -5,7 +5,7 @@
  * Handles query translation, execution, and result transformation.
  *
  * Key design:
- * - createDb() is async (pre-loads the runtime module)
+ * - createDb() is async (pre-loads the runtime source)
  * - insert/update/delete are sync (local-first immediate writes, no durability wait)
  * - all/one are async (need storage I/O for queries)
  */
@@ -17,45 +17,38 @@ import type {
   WasmRow,
   StorageDriver,
 } from "../drivers/types.js";
-import { normalizeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { RuntimeSourcesConfig, Session } from "./context.js";
 import {
+  ExclusiveWriteHandle,
+  ExclusiveWriteResult,
   WriteResult,
   JazzClient,
   type MutationErrorEvent,
   WriteHandle,
-  type BatchMode,
-  type CreateOptions,
-  type RestoreOptions,
-  type UpdateOptions,
-  type UpsertOptions,
+  type TransactionKind,
+  type InsertOptions as InternalInsertOptions,
+  type RestoreOptions as InternalRestoreOptions,
+  type UpdateOptions as InternalUpdateOptions,
   type DurabilityTier,
-  type QueryExecutionOptions,
+  type QueryExecutionOptions as InternalQueryExecutionOptions,
   type QueryPropagation,
   type QueryVisibility,
   resolveEffectiveQueryExecutionOptions,
-  runInBatch,
-  Scoped,
-  type DeleteOptions,
+  type BranchSelector,
+  type BranchView,
+  type OpenBatchId,
+  type BatchId,
+  type PermissionAdvice,
 } from "./client.js";
-import { type DbRuntimeModule, type RuntimeTokenOptions } from "./db-runtime-module.js";
-import { WasmRuntimeModule } from "./wasm-runtime-module.js";
-import {
-  isIncompatibleBrowserBrokerConfigurationError,
-  type IncompatibleBrowserBrokerConfigurationHandler,
-} from "./browser-broker-errors.js";
-import type { AuthFailureReason } from "./sync-transport.js";
+import { type RuntimeSource, type RuntimeTokenOptions } from "./runtime-source.js";
+import { DefaultRuntimeSource } from "./default-runtime-source.js";
+import type { AuthFailureReason } from "./auth-state.js";
 import { translateQuery } from "./query-adapter.js";
 import { transformRow, transformRows } from "./row-transformer.js";
-import { toWriteRecord } from "./value-converter.js";
+import { toValue, toWriteRecord } from "./value-converter.js";
 import { SubscriptionManager, type SubscriptionDelta } from "./subscription-manager.js";
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
-import {
-  createConventionalFileStorage,
-  type ConventionalFileApp,
-  type FileReadOptions,
-  type FileWriteOptions,
-} from "./file-storage.js";
+import { resolveClientSessionSync } from "./client-session.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
 import { isPermissionIntrospectionColumn, magicColumnType } from "../magic-columns.js";
 import {
@@ -72,53 +65,97 @@ import {
   type DbForConnection,
 } from "./connection-manager/index.js";
 
-export { resolveDefaultPersistentDbName } from "./connection-manager/browser-broker-utils.js";
-
 type WasmLogLevel = "error" | "warn" | "info" | "debug" | "trace";
-type AnyDbRuntimeModule = DbRuntimeModule<any>;
+type AnyRuntimeSource = RuntimeSource<any>;
+type WriteOperationName = "Insert" | "Update" | "Upsert" | "Restore";
 
 /**
  * Configuration for creating a Db instance.
  */
-export interface DbConfig {
+export type DbConfig = {
   /** Application identifier (used for isolation) */
   appId: string;
   /** Storage driver mode (defaults to persistent). */
   driver?: StorageDriver;
   /** Optional server URL for sync */
   serverUrl?: string;
-  /** Optional runtime source overrides for WASM and worker loading. */
+  /** Optional runtime source overrides for WASM loading. */
   runtimeSources?: RuntimeSourcesConfig;
-  /**
-   * Called when this tab cannot join the persistent browser broker because
-   * another tab is already connected with an incompatible app/runtime version.
-   * The default browser behavior shows a reload prompt.
-   */
-  onIncompatibleBrowserBrokerConfiguration?: IncompatibleBrowserBrokerConfigurationHandler;
   /** Environment (e.g., "dev", "prod") */
   env?: string;
-  /** User branch name (default: "main") */
-  userBranch?: string;
-  /** JWT token for server authentication */
-  jwtToken?: string;
-  /** Mirrored session for local permission evaluation when sync auth uses cookies. */
-  cookieSession?: Session;
   /** Admin secret for catalogue sync */
   adminSecret?: string;
-  /** Database name for OPFS persistence (browser only, default: appId) */
+  /** Backend secret for backend-scoped sync auth with cookieSession. */
+  backendSecret?: string;
+  /** IndexedDB database name for browser persistence (default: appId). */
   dbName?: string;
+  /**
+   * Initial-sync durability boundary, in writes (default: 512 for clients).
+   * A crash can lose up to M - 1 writes since the previous durable IndexedDB
+   * page commit.
+   */
+  initialSyncFlushEvery?: number;
   /** Optional WASM tracing level for benchmark/debug scenarios (default: "warn"). */
   logLevel?: WasmLogLevel;
   /** Optional OTLP/HTTP collector URL for WASM trace telemetry. */
   telemetryCollectorUrl?: string;
   /** Enable runtime tracing for DevTools-only diagnostics. */
   devMode?: boolean;
-  /** Local-first auth via a local seed. Mutually exclusive with jwtToken. */
-  secret?: string;
-}
+} & (
+  | {
+      /** Local-first auth via a local seed. */
+      secret?: string;
+      jwtToken?: never;
+      cookieSession?: never;
+    }
+  | {
+      secret?: never;
+      /** JWT token for server authentication. */
+      jwtToken?: string;
+      cookieSession?: never;
+    }
+  | {
+      secret?: never;
+      jwtToken?: never;
+      /** Mirrored session for local permission evaluation when sync auth uses cookies. */
+      cookieSession?: Session;
+    }
+);
 
 function resolveStorageDriver(driver?: StorageDriver): StorageDriver {
   return driver ?? { type: "persistent" };
+}
+
+function trimOptionalString(value?: string | null): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+/** @internal Derive the default browser persistence namespace for this Db config. */
+export function resolveDefaultPersistentDbName(config: DbConfig): string {
+  const driver = resolveStorageDriver(config.driver);
+  const explicitDbName = trimOptionalString(
+    (driver.type === "persistent" ? driver.dbName : undefined) ?? config.dbName,
+  );
+  if (explicitDbName) {
+    return explicitDbName;
+  }
+
+  const session = resolveClientSessionSync({
+    appId: config.appId,
+    jwtToken: config.jwtToken,
+    cookieSession: config.cookieSession,
+  });
+
+  if (!session?.user_id || session.authMode === "anonymous") {
+    return config.appId;
+  }
+
+  return `${config.appId}::${encodeURIComponent(session.user_id)}`;
 }
 
 /**
@@ -138,18 +175,175 @@ export interface QueryBuilder<T> {
   readonly _rowType: T;
 }
 
-export type QueryOptions = QueryExecutionOptions;
+export type BranchValue = string | number | bigint;
+export type QualifiedBranch = Record<string, BranchValue>;
+export type Branch = BranchValue | QualifiedBranch;
+export type BranchBase = Branch | readonly [branch: Branch, snapshot: unknown];
+
+export type QueryOptions = Omit<InternalQueryExecutionOptions, "branch"> & {
+  /** Current branch coordinate. A scalar selects a table with one `branchBy` column. */
+  branch?: Branch;
+  /** Optional live base, or `[base, snapshotRef]` for a frozen base. */
+  base?: BranchBase;
+};
+
+interface TimestampOverrideOptions {
+  updatedAt?: number;
+}
+
+export interface InsertOptions extends TimestampOverrideOptions {
+  id?: string;
+  branch?: Branch;
+}
+
+export interface RestoreOptions extends TimestampOverrideOptions {
+  branch?: Branch;
+}
+
+export interface UpdateOptions extends TimestampOverrideOptions {
+  branch?: Branch;
+  base?: BranchBase;
+}
+
+export interface DeleteOptions extends TimestampOverrideOptions {
+  branch?: Branch;
+  base?: BranchBase;
+}
 
 type DbRuntimeOperationContext = {
   session?: Session;
   attribution?: string;
+  readSession?: Session;
 };
 
-function ordinaryDbQueryOptions(options?: QueryOptions): QueryOptions {
-  return { localUpdates: "deferred", ...options };
+function branchColumn(schema: WasmSchema, name: string): ColumnDescriptor {
+  const matches = Object.values(schema)
+    .flatMap((table) => table.columns)
+    .filter((column) => column.name === name);
+  const column = matches[0];
+  if (!column) throw new Error(`Unknown branch column "${name}".`);
+  return column;
 }
 
-function limitQueryToOne<T>(query: QueryBuilder<T>): QueryBuilder<T> {
+function normalizeBranchSelector(
+  schema: WasmSchema,
+  tableName: string,
+  input: Branch,
+  scope: "table" | "schema",
+): BranchSelector {
+  const table = schema[tableName];
+  if (!table) throw new Error(`Unknown table "${tableName}".`);
+  const tableColumns = table.branchBy ?? [];
+  const expected =
+    scope === "table"
+      ? new Set(tableColumns)
+      : new Set(Object.values(schema).flatMap((candidate) => candidate.branchBy ?? []));
+  const qualified: QualifiedBranch =
+    typeof input === "object" && input !== null && !Array.isArray(input)
+      ? (input as QualifiedBranch)
+      : expected.size === 1
+        ? { [[...expected][0]!]: input as BranchValue }
+        : (() => {
+            throw new Error(
+              `A scalar branch selector requires exactly one ${scope === "table" ? "table" : "schema"} branch column.`,
+            );
+          })();
+  const actual = Object.keys(qualified);
+  if (actual.length !== expected.size || actual.some((name) => !expected.has(name))) {
+    throw new Error(
+      `Branch selector must provide exactly: ${[...expected].sort().join(", ") || "no columns"}.`,
+    );
+  }
+  return {
+    values: Object.fromEntries(
+      actual.map((name) => [
+        name,
+        toValue(qualified[name], branchColumn(schema, name).column_type),
+      ]),
+    ),
+  };
+}
+
+function normalizeBranchView(
+  schema: WasmSchema,
+  tableName: string,
+  branch: Branch,
+  base?: BranchBase,
+): BranchView {
+  const head = normalizeBranchSelector(schema, tableName, branch, "schema");
+  if (base === undefined) return { head };
+  if (Array.isArray(base)) {
+    return {
+      head,
+      base: {
+        kind: "snapshot",
+        branch: normalizeBranchSelector(schema, tableName, base[0], "schema"),
+        snapshot: base[1],
+      },
+    };
+  }
+  return {
+    head,
+    base: {
+      kind: "current",
+      branch: normalizeBranchSelector(schema, tableName, base as Branch, "schema"),
+    },
+  };
+}
+
+function nativeDbQueryOptions(
+  schema: WasmSchema,
+  tableName: string,
+  options?: QueryOptions,
+): InternalQueryExecutionOptions {
+  if (!options) return {};
+  const { branch, base, ...rest } = options;
+  if (branch === undefined) {
+    if (base !== undefined) throw new Error("A branch base requires a branch head.");
+    return rest;
+  }
+  return { ...rest, branch: normalizeBranchView(schema, tableName, branch, base) };
+}
+
+function normalizeInsertOptions(
+  schema: WasmSchema,
+  tableName: string,
+  options?: InsertOptions,
+): InternalInsertOptions | undefined {
+  if (!options) return undefined;
+  const { branch, ...rest } = options;
+  return branch === undefined
+    ? rest
+    : { ...rest, branch: normalizeBranchSelector(schema, tableName, branch, "table") };
+}
+
+function normalizeRestoreOptions(
+  schema: WasmSchema,
+  tableName: string,
+  options?: RestoreOptions,
+): InternalRestoreOptions | undefined {
+  if (!options) return undefined;
+  const { branch, ...rest } = options;
+  return branch === undefined
+    ? rest
+    : { ...rest, branch: normalizeBranchSelector(schema, tableName, branch, "table") };
+}
+
+function normalizeUpdateOptions(
+  schema: WasmSchema,
+  tableName: string,
+  options?: UpdateOptions,
+): InternalUpdateOptions | undefined {
+  if (!options) return undefined;
+  const { branch, base, ...rest } = options;
+  if (branch === undefined) {
+    if (base !== undefined) throw new Error("A branch base requires a branch head.");
+    return rest;
+  }
+  return { ...rest, branch: normalizeBranchView(schema, tableName, branch, base) };
+}
+
+export function limitQueryToOne<T>(query: QueryBuilder<T>): QueryBuilder<T> {
   return {
     get _table() {
       return query._table;
@@ -172,7 +366,11 @@ function limitQueryToOne<T>(query: QueryBuilder<T>): QueryBuilder<T> {
 }
 
 function queryUsesRelationTraversal(builtQuery: NormalizedBuiltQuery): boolean {
-  return builtQuery.hops.length > 0 || builtQuery.gather !== undefined;
+  return (
+    builtQuery.hops.length > 0 ||
+    builtQuery.gather !== undefined ||
+    Object.keys(builtQuery.includes).length > 0
+  );
 }
 
 export interface ActiveQuerySubscriptionTrace {
@@ -305,16 +503,12 @@ function resolveBuiltQueryOutputTable(
     : builtQuery.table;
 }
 
-function resolveSchemaWithTable(
-  preferredSchema: WasmSchema,
-  fallbackSchema: WasmSchema | (() => WasmSchema),
-  tableName: string,
-): WasmSchema {
+function requireSchemaWithTable(preferredSchema: WasmSchema, tableName: string): WasmSchema {
   if (preferredSchema[tableName]) {
     return preferredSchema;
   }
 
-  return typeof fallbackSchema === "function" ? fallbackSchema() : fallbackSchema;
+  throw new Error(`Query schema is missing table "${tableName}".`);
 }
 
 function resolveOutputColumnDescriptor(
@@ -334,14 +528,37 @@ function resolveOutputColumnDescriptor(
   return schema[tableName]?.columns.find((column) => column.name === columnName);
 }
 
+function toWriteRecordForOperation(
+  operation: WriteOperationName,
+  data: Record<string, unknown>,
+  schema: WasmSchema,
+  tableName: string,
+) {
+  try {
+    return toWriteRecord(data, schema, tableName);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${operation} failed: WriteError("${escapeWriteErrorReason(message)}")`);
+  }
+}
+
+function escapeWriteErrorReason(message: string): string {
+  return message.replaceAll('"', '\\"');
+}
+
 function resolveNativeSubscriptionColumns(
   tableName: string,
   schema: WasmSchema,
   includes: NormalizedIncludeSpec,
   projection?: readonly string[],
+  rootTerminal = true,
 ): ColumnDescriptor[] {
+  const wildcard = projection === undefined || projection.length === 0;
   const columns = resolveSelectedColumns(tableName, schema, projection)
-    .map((columnName) => resolveOutputColumnDescriptor(tableName, schema, columnName))
+    .map((columnName) => {
+      const column = resolveOutputColumnDescriptor(tableName, schema, columnName);
+      return column && wildcard && rootTerminal ? { ...column, sparse: true } : column;
+    })
     .filter((column): column is ColumnDescriptor => column !== undefined);
 
   if (Object.keys(includes).length === 0) {
@@ -362,6 +579,7 @@ function resolveNativeSubscriptionColumns(
       schema,
       include.includes,
       include.select.length > 0 ? include.select : undefined,
+      false,
     );
     const columnType: ColumnType = {
       type: "Array",
@@ -376,35 +594,6 @@ function resolveNativeSubscriptionColumns(
   }
 
   return columns;
-}
-
-function createRuntimeSchemaResolver(getRuntimeSchema: () => WasmSchema): {
-  get: () => WasmSchema;
-} {
-  let cachedRuntimeSchema: WasmSchema | undefined;
-
-  return {
-    get: () => {
-      if (!cachedRuntimeSchema) {
-        cachedRuntimeSchema = getRuntimeSchema();
-      }
-      return cachedRuntimeSchema;
-    },
-  };
-}
-
-function assertTableBelongsToClient<T, Init>(
-  table: TableProxy<T, Init>,
-  expectedClient: JazzClient,
-  resolveClient: (schema: WasmSchema) => JazzClient,
-  operation: string,
-): void {
-  if (resolveClient(table._schema) === expectedClient) {
-    return;
-  }
-  throw new Error(
-    `${operation} is bound to the schema chosen by the first table used and cannot be used with table "${table._table}" from a different schema.`,
-  );
 }
 
 /**
@@ -434,24 +623,19 @@ export interface ColumnTransform {
 
 export type ColumnTransformMap = Record<string, ColumnTransform>;
 
-type DbBatchHandleBinding = {
-  client: JazzClient;
-  batchId: string;
+type DbTransactionHandleBinding = {
+  ownerClient: JazzClient;
+  openBatchId: OpenBatchId;
   session?: Session;
   attribution?: string;
 };
-type AnyDbBatchHandle = DbBatchHandleBase;
 
-const dbBatchHandleBindings = new WeakMap<AnyDbBatchHandle, DbBatchHandleBinding>();
+const dbTxHandleBindings = new WeakMap<Transaction, DbTransactionHandleBinding>();
 
-function getDbBatchHandleBinding(
-  handle: AnyDbBatchHandle,
-  operation: string,
-  bindingName: "DbTransaction" | "DbDirectBatch",
-): DbBatchHandleBinding {
-  const binding = dbBatchHandleBindings.get(handle);
+function getDbTxHandleBinding(handle: Transaction, operation: string): DbTransactionHandleBinding {
+  const binding = dbTxHandleBindings.get(handle);
   if (!binding) {
-    throw new Error(`${bindingName}.${operation}() requires at least one table operation first`);
+    throw new Error(`DbTransaction.${operation}() requires at least one table operation first`);
   }
   return binding;
 }
@@ -498,89 +682,213 @@ function transformInputColumns(
   return transformed;
 }
 
+export type { TransactionKind } from "./client.js";
+
+type TransactionCommitHandle<TKind extends TransactionKind> = TKind extends "exclusive"
+  ? ExclusiveWriteHandle
+  : WriteHandle;
+
+type TransactionWriteResult<TResult, TKind extends TransactionKind> = TKind extends "exclusive"
+  ? ExclusiveWriteResult<TResult>
+  : WriteResult<TResult>;
+
+type RunInTransactionResult<TResult, TKind extends TransactionKind> = Promise<
+  TransactionWriteResult<Awaited<TResult>, TKind>
+>;
+
+export type Scoped<TTransaction> = Omit<TTransaction, "commit" | "rollback">;
+
+function createTransactionScope<TTransaction extends object>(
+  transaction: TTransaction,
+): Scoped<TTransaction> {
+  return new Proxy(transaction, {
+    get(target, property) {
+      if (property === "commit" || property === "rollback") {
+        return undefined;
+      }
+
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+    has(target, property) {
+      if (property === "commit" || property === "rollback") {
+        return false;
+      }
+
+      return Reflect.has(target, property);
+    },
+    set(target, property, value) {
+      return Reflect.set(target, property, value, target);
+    },
+  }) as Scoped<TTransaction>;
+}
+
+function createTransactionWriteResult<TResult, TKind extends TransactionKind>(
+  transaction: Transaction<TKind>,
+  value: TResult,
+  batchId: BatchId,
+  client: JazzClient,
+): TransactionWriteResult<TResult, TKind> {
+  if (transaction.kind === "exclusive") {
+    return new ExclusiveWriteResult(value, batchId, client) as TransactionWriteResult<
+      TResult,
+      TKind
+    >;
+  }
+
+  return new WriteResult(value, batchId, client) as TransactionWriteResult<TResult, TKind>;
+}
+
+export async function runInTransaction<TResult, TKind extends TransactionKind>(
+  transaction: Transaction<TKind>,
+  callback: (target: Scoped<Transaction<TKind>>) => TResult,
+  client: JazzClient | (() => JazzClient),
+): RunInTransactionResult<TResult, TKind> {
+  let value: TResult;
+  try {
+    const scope = createTransactionScope(transaction);
+    value = callback(scope);
+  } catch (error) {
+    try {
+      await transaction.rollback();
+    } catch {
+      // Preserve the original callback error.
+    }
+    throw error;
+  }
+  const resultClient = typeof client === "function" ? client : () => client;
+  let resolvedValue: Awaited<TResult>;
+  try {
+    resolvedValue = await value;
+  } catch (error) {
+    try {
+      await transaction.rollback();
+    } catch {
+      // Preserve the original callback error.
+    }
+    throw error;
+  }
+  let committed: TransactionCommitHandle<TKind>;
+  try {
+    committed = await transaction.commit();
+  } catch (error) {
+    try {
+      await transaction.rollback();
+    } catch {
+      // Preserve the commit error while ensuring an empty mergeable batch is
+      // consumed when the callback helper has no handle to return to callers.
+    }
+    throw error;
+  }
+  return createTransactionWriteResult(
+    transaction,
+    resolvedValue,
+    await committed.batchId,
+    resultClient(),
+  );
+}
+
 /**
- * Shared implementation for batches and transactions.
+ * Groups a set of writes as either a mergeable or exclusive transaction (see {@link TransactionKind}).
  */
-abstract class DbBatchHandleBase {
+export class Transaction<TKind extends TransactionKind = TransactionKind> {
   constructor(
-    private readonly bindingName: "DbTransaction" | "DbDirectBatch",
-    private readonly batchMode: BatchMode,
+    readonly kind: TKind,
     private readonly resolveClient: (schema: WasmSchema) => JazzClient,
     private readonly session?: Session,
     private readonly attribution?: string,
-  ) {}
+    ownerClient?: JazzClient,
+  ) {
+    if (ownerClient) this.bindOwnerClient(ownerClient);
+  }
 
-  private bindTable<T, Init>(table: TableProxy<T, Init>, operation: string): DbBatchHandleBinding {
-    const existingBinding = dbBatchHandleBindings.get(this);
-    if (existingBinding) {
-      assertTableBelongsToClient(table, existingBinding.client, this.resolveClient, operation);
-      return existingBinding;
-    }
-
+  private bindTable<T, Init>(table: TableProxy<T, Init>): DbTransactionHandleBinding {
     const client = this.resolveClient(table._schema);
-    const batchId = client.beginBatch(this.batchMode);
-    const binding = {
-      client,
-      batchId,
+    if (!dbTxHandleBindings.has(this)) this.bindOwnerClient(client);
+    return this.requireBinding("table operation");
+  }
+
+  private bindQuery<T>(query: QueryBuilder<T>): DbTransactionHandleBinding {
+    return this.bindTable(query as unknown as TableProxy<T, never>);
+  }
+
+  private requireBinding(operation: string): DbTransactionHandleBinding {
+    return getDbTxHandleBinding(this, operation);
+  }
+
+  private bindOwnerClient(ownerClient: JazzClient): void {
+    dbTxHandleBindings.set(this, {
+      ownerClient,
+      openBatchId: ownerClient.beginTransaction(this.kind, this.session, this.attribution),
       session: this.session,
       attribution: this.attribution,
-    };
-    dbBatchHandleBindings.set(this, binding);
-    return binding;
+    });
   }
 
-  private bindQuery<T>(query: QueryBuilder<T>): DbBatchHandleBinding {
-    return this.bindTable(query as unknown as TableProxy<T, never>, this.bindingName);
-  }
-
-  private requireBinding(operation: string): DbBatchHandleBinding {
-    return getDbBatchHandleBinding(this, operation, this.bindingName);
-  }
-
-  batchId(): string {
-    return this.requireBinding("batchId").batchId;
+  openBatchId(): OpenBatchId {
+    return this.requireBinding("openBatchId").openBatchId;
   }
 
   /**
-   * Commit this batch.
+   * Commit this transaction.
    */
-  commit(): WriteHandle {
-    const { client, batchId } = this.requireBinding("commit");
-    return client.commitBatch(batchId);
+  commit(): TransactionCommitHandle<TKind> {
+    const { ownerClient, openBatchId } = this.requireBinding("commit");
+    const committed = ownerClient.commitTransaction(openBatchId);
+    if (this.kind === "exclusive") {
+      return new ExclusiveWriteHandle(
+        committed.batchId,
+        ownerClient,
+      ) as TransactionCommitHandle<TKind>;
+    }
+    return committed as TransactionCommitHandle<TKind>;
   }
 
   /**
-   * Roll back this batch locally.
+   * Roll back this transaction locally.
    *
-   * Pending rows remain pending, but this batch can no longer be committed.
+   * Pending rows remain pending, but this transaction can no longer be committed.
    *
-   * Only available on batches/transactions created with {@link Db.beginBatch}/{@link Db.beginTransaction}.
-   * When using {@link Db.batch}/{@link Db.transaction}, throw an error inside the callback to roll back.
+   * Only available on transactions created with {@link Db.beginTransaction}.
+   * When using {@link Db.transaction}, throw an error inside the callback to roll back.
    */
-  rollback(): void {
-    const { client, batchId } = this.requireBinding("rollback");
-    client.rollbackBatch(batchId);
+  rollback(): Promise<boolean> {
+    const { ownerClient, openBatchId } = this.requireBinding("rollback");
+    return ownerClient.rollbackTransaction(openBatchId);
   }
 
   /**
    * Insert a new row into a table.
    *
-   * The insert is scoped to this batch, and will only be globally visible
+   * The insert is scoped to this transaction, and will only be globally visible
    * once it's committed.
    */
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): T {
-    this.bindTable(table, this.bindingName);
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: InsertOptions): T {
+    this.bindTable(table);
     const transformedData = transformInputColumns(table, data);
-    const values = toWriteRecord(transformedData, table._schema, table._table);
-    const { client, batchId, session, attribution } = this.requireBinding("insert");
-    const row = client.insertInternal(table._table, values, options, session, attribution, batchId);
+    const values = toWriteRecordForOperation(
+      "Insert",
+      transformedData,
+      table._schema,
+      table._table,
+    );
+    const client = this.resolveClient(table._schema);
+    const { openBatchId, session, attribution } = this.requireBinding("insert");
+    const row = client.insertInternal(
+      table._table,
+      values,
+      normalizeInsertOptions(table._schema, table._table, options),
+      session,
+      attribution,
+      openBatchId,
+    );
     return transformOutputRow(table, transformRow(row, table._schema, table._table));
   }
 
   /**
    * Restore a soft-deleted row.
    *
-   * The restore is scoped to this batch, and will only be globally visible
+   * The restore is scoped to this transaction, and will only be globally visible
    * once it's committed.
    */
   restore<T, Init>(
@@ -589,18 +897,24 @@ abstract class DbBatchHandleBase {
     data: Init,
     options?: RestoreOptions,
   ): T {
-    this.bindTable(table, this.bindingName);
+    this.bindTable(table);
     const transformedData = transformInputColumns(table, data);
-    const values = toWriteRecord(transformedData, table._schema, table._table);
-    const { client, batchId, session, attribution } = this.requireBinding("restore");
+    const values = toWriteRecordForOperation(
+      "Restore",
+      transformedData,
+      table._schema,
+      table._table,
+    );
+    const client = this.resolveClient(table._schema);
+    const { openBatchId, session, attribution } = this.requireBinding("restore");
     const row = client.restoreInternal(
       table._table,
       id,
       values,
-      options,
+      normalizeRestoreOptions(table._schema, table._table, options),
       session,
       attribution,
-      batchId,
+      openBatchId,
     );
     return transformOutputRow(table, transformRow(row, table._schema, table._table));
   }
@@ -608,61 +922,114 @@ abstract class DbBatchHandleBase {
   /**
    * Create or update a row with a caller-supplied id.
    *
-   * The upsert is scoped to this batch, and will only be globally visible
+   * The upsert is scoped to this transaction, and will only be globally visible
    * once it's committed.
    */
-  upsert<T, Init>(table: TableProxy<T, Init>, data: Partial<Init>, options: UpsertOptions): void {
-    this.bindTable(table, this.bindingName);
+  upsert<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: UpdateOptions,
+  ): void {
+    this.bindTable(table);
     const transformedData = transformInputColumns(table, data);
-    const values = toWriteRecord(transformedData, table._schema, table._table);
-    const { client, batchId, session, attribution } = this.requireBinding("upsert");
-    client.upsertInternal(table._table, values, options, session, attribution, batchId);
+    const values = toWriteRecordForOperation(
+      "Upsert",
+      transformedData,
+      table._schema,
+      table._table,
+    );
+    const client = this.resolveClient(table._schema);
+    const { openBatchId, session, attribution } = this.requireBinding("upsert");
+    client.upsertInternal(
+      table._table,
+      id,
+      values,
+      normalizeUpdateOptions(table._schema, table._table, options),
+      session,
+      attribution,
+      openBatchId,
+    );
   }
 
   /**
    * Update an existing row in a table.
    *
-   * The update is scoped to this batch, and will only be globally visible
+   * The update is scoped to this transaction, and will only be globally visible
    * once it's committed.
    */
-  update<T, Init>(table: TableProxy<T, Init>, id: string, data: Partial<Init>): void {
-    this.bindTable(table, this.bindingName);
+  update<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+    options?: UpdateOptions,
+  ): void {
+    this.bindTable(table);
     const transformedData = transformInputColumns(table, data);
-    const updates = toWriteRecord(transformedData, table._schema, table._table);
-    const { client, batchId, session, attribution } = this.requireBinding("update");
-    client.updateInternal(id, updates, undefined, session, attribution, batchId);
+    const updates = toWriteRecordForOperation(
+      "Update",
+      transformedData,
+      table._schema,
+      table._table,
+    );
+    const client = this.resolveClient(table._schema);
+    const { openBatchId, session, attribution } = this.requireBinding("update");
+    const normalizedOptions = normalizeUpdateOptions(table._schema, table._table, options);
+    client.updateInternal(
+      table._table,
+      id,
+      updates,
+      normalizedOptions?.updatedAt,
+      session,
+      attribution,
+      openBatchId,
+      normalizedOptions?.branch,
+    );
   }
 
   /**
    * Delete an existing row from a table.
    *
-   * The delete is scoped to this batch, and will only be globally visible
+   * The delete is scoped to this transaction, and will only be globally visible
    * once it's committed.
    */
-  delete<T, Init>(table: TableProxy<T, Init>, id: string): void {
-    const { client, batchId, session, attribution } = this.bindTable(table, this.bindingName);
-    client.deleteInternal(id, undefined, session, attribution, batchId);
+  delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: DeleteOptions): void {
+    this.bindTable(table);
+    const client = this.resolveClient(table._schema);
+    const { openBatchId, session, attribution } = this.requireBinding("delete");
+    const normalizedOptions = normalizeUpdateOptions(table._schema, table._table, options);
+    client.deleteInternal(
+      table._table,
+      id,
+      normalizedOptions?.updatedAt,
+      session,
+      attribution,
+      openBatchId,
+      normalizedOptions?.branch,
+    );
   }
 
   /**
    * Execute a query and return all matching rows.
    *
-   * Read data is scoped to this batch.
+   * Read data is scoped to this transaction.
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
-    const { client, batchId, session } = this.bindQuery(query);
-    const runtimeSchema = normalizeRuntimeSchema(client.getSchema());
+    this.bindQuery(query);
+    const client = this.resolveClient(query._schema);
+    const { openBatchId, session } = this.requireBinding("query");
     const builderJson = query._build();
-    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
-    const planningSchema = resolveSchemaWithTable(query._schema, runtimeSchema, builtQuery.table);
+    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
+    const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
-    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema, outputTable);
+    const outputSchema = requireSchemaWithTable(query._schema, outputTable);
+    const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
     const rows = await client.query(
       translateQuery(builderJson, planningSchema),
       {
-        ...options,
+        ...queryOptions,
         localUpdates: "deferred",
-        transactionBatchId: batchId,
+        openBatchId,
       },
       session,
     );
@@ -682,7 +1049,7 @@ abstract class DbBatchHandleBase {
   /**
    * Execute a query with a limit of one and return the first matching row, or null.
    *
-   * Read data is scoped to this batch.
+   * Read data is scoped to this transaction.
    */
   async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
     const results = await this.all(limitQueryToOne(query), options);
@@ -691,45 +1058,11 @@ abstract class DbBatchHandleBase {
 }
 
 /**
- * Transactions group a set of writes that should settle together after an authority validates them.
- *
- * Data read and written through this transaction is scoped to it, and will only be
- * globally visible once it's committed using {@link DbTransaction.commit} and
- * accepted by the authority.
- */
-export class DbTransaction extends DbBatchHandleBase {
-  constructor(
-    resolveClient: (schema: WasmSchema) => JazzClient,
-    session?: Session,
-    attribution?: string,
-  ) {
-    super("DbTransaction", "transactional", resolveClient, session, attribution);
-  }
-}
-
-/**
  * Transaction object available inside {@link Db.transaction}'s callback.
  */
-export type TransactionScope = Scoped<DbTransaction>;
-
-/**
- * Direct batches group a set of writes that should become visible together on batch commit,
- * without waiting for an authority approval.
- */
-export class DbDirectBatch extends DbBatchHandleBase {
-  constructor(
-    resolveClient: (schema: WasmSchema) => JazzClient,
-    session?: Session,
-    attribution?: string,
-  ) {
-    super("DbDirectBatch", "direct", resolveClient, session, attribution);
-  }
-}
-
-/**
- * Batch object available inside {@link Db.batch}'s callback.
- */
-export type BatchScope = Scoped<DbDirectBatch>;
+export type TransactionScope<TKind extends TransactionKind = TransactionKind> = Scoped<
+  Transaction<TKind>
+>;
 
 /**
  * High-level database interface for typed queries and mutations.
@@ -756,29 +1089,21 @@ export type BatchScope = Scoped<DbDirectBatch>;
  */
 export class Db {
   private config: DbConfig;
-  private readonly runtimeModule: AnyDbRuntimeModule | null;
+  private readonly runtimeSource: AnyRuntimeSource;
   private readonly authStateStore;
   private connection: ConnectionManager;
   private _localFirstSecret: string | null = null;
   private localFirstRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private isShuttingDown = false;
   private shutdownPromise: Promise<void> | null = null;
+  private runtimeOperationContextOverride: DbRuntimeOperationContext | null = null;
   private readonly activeQuerySubscriptionTraces = new Map<
     string,
     StoredActiveQuerySubscriptionTrace
   >();
   private readonly activeQuerySubscriptionTraceListeners =
     new Set<ActiveQuerySubscriptionTraceListener>();
-  /**
-   * Listeners attached with {@link Db.onMutationError} that are notified when a write operation
-   * (insert, update, delete) is rejected. Errors from the Db's client are forwarded to all Db
-   * listeners.
-   */
   private readonly mutationErrorListeners = new Set<(event: MutationErrorEvent) => void>();
-  /**
-   * Persists mutation errors thrown before an {@link onMutationError} listener was attached.
-   * Those mutation errors are replayed when `onMutationError` is called.
-   */
   private readonly pendingMutationErrorEvents: MutationErrorEvent[] = [];
   private nextActiveQuerySubscriptionTraceId = 1;
 
@@ -787,11 +1112,11 @@ export class Db {
    */
   protected constructor(
     config: DbConfig,
-    runtimeModule: AnyDbRuntimeModule | null,
+    runtimeSource: AnyRuntimeSource,
     authStateOptions?: AuthStateStoreOptions,
   ) {
     this.config = config;
-    this.runtimeModule = runtimeModule;
+    this.runtimeSource = runtimeSource;
     this.authStateStore = createAuthStateStore(config, authStateOptions);
     this.connection = new DirectConnectionManager(this.dbForConnection());
   }
@@ -803,21 +1128,24 @@ export class Db {
       get config() {
         return thisDb.config;
       },
-      get runtimeModule() {
-        return thisDb.runtimeModule;
+      get runtimeSource() {
+        return thisDb.runtimeSource;
       },
       get isShuttingDown() {
         return thisDb.isShuttingDown;
       },
       markUnauthenticated: (reason) => this.markUnauthenticated(reason),
+      clearAuthError: () => this.authStateStore.clearError(),
       onMutationError: (event) => this.handleMutationError(event),
     };
   }
 
-  /** @internal Store the seed used for local-first auth and schedule token refresh. */
-  initLocalFirstAuth(seed: string, ttlSeconds: number): void {
+  /** @internal Store the seed used for local-first auth and optionally schedule token refresh. */
+  initLocalFirstAuth(seed: string, ttlSeconds: number, refresh = true): void {
     this._localFirstSecret = seed;
-    this.scheduleLocalFirstRefresh(ttlSeconds);
+    if (refresh) {
+      this.scheduleLocalFirstRefresh(ttlSeconds);
+    }
   }
 
   private scheduleLocalFirstRefresh(ttlSeconds: number): void {
@@ -849,11 +1177,7 @@ export class Db {
   }
 
   private mintLocalFirstToken(secret: string, audience: string, ttlSeconds: number): string {
-    if (!this.runtimeModule) {
-      throw new Error("Db runtime module is not initialized for this Db implementation");
-    }
-
-    return this.runtimeModule.mintLocalFirstToken({
+    return this.runtimeSource.mintLocalFirstToken({
       secret,
       audience,
       ttlSeconds,
@@ -902,49 +1226,55 @@ export class Db {
   }
 
   /**
-   * Create a Db instance with a loaded runtime module.
+   * Create a Db instance with a loaded runtime source.
    * @internal Use {@link createDb()} instead.
    */
-  static create(config: DbConfig, runtimeModule: AnyDbRuntimeModule): Db {
-    return new Db(config, runtimeModule);
+  static create(config: DbConfig, runtimeSource: AnyRuntimeSource): Db {
+    return new Db(config, runtimeSource);
   }
 
-  /**
-   * Create a Db instance backed by a dedicated worker with OPFS persistence.
-   *
-   * The main thread runs an in-memory WASM runtime.
-   * The worker runs a persistent WASM runtime (OPFS).
-   * WorkerBridge wires them together via postMessage.
-   *
-   * @internal Use {@link createDb} instead — it auto-detects browser.
-   */
-  static async createWithWorker(config: DbConfig, runtimeModule: AnyDbRuntimeModule): Promise<Db> {
-    const db = new Db(config, runtimeModule);
-    const connectionManager = new BrowserConnectionManager(db.dbForConnection());
-    db.connection = connectionManager;
-    await connectionManager.start();
+  /** @internal Create a Db whose durable peer lives in a dedicated browser worker. */
+  static async createWithBrowserWorker(
+    config: DbConfig,
+    runtimeSource: AnyRuntimeSource,
+  ): Promise<Db> {
+    const db = new Db(config, runtimeSource);
+    const connection = new BrowserConnectionManager(db.dbForConnection());
+    db.connection = connection;
+    await connection.start();
     return db;
   }
 
   /**
    * Get or create a JazzClient for the given schema.
-   * Synchronous because the runtime module is loaded before Db is created.
+   * Synchronous because the runtime source is loaded before Db is created.
    *
-   * In worker mode, the first call per schema also initializes the
-   * WorkerBridge (async). Subsequent calls are sync.
    */
   protected getClient(schema: WasmSchema): JazzClient {
     return this.connection.getClient(schema);
   }
 
-  protected getRuntimeOperationContext(): DbRuntimeOperationContext | null {
-    return null;
+  protected getCurrentClient(): JazzClient | null {
+    return this.connection.getCurrentClient();
   }
 
-  /**
-   * Ensures all listeners in {@link Db.mutationErrorListeners} are notified when
-   * the active client reports a mutation error.
-   */
+  protected async ensureReady(tier?: DurabilityTier, signal?: AbortSignal): Promise<void> {
+    await this.connection.ensureReady(tier, signal);
+  }
+
+  private wrapWriteWait<THandle extends WriteHandle<unknown>>(handle: THandle): THandle {
+    const wait = handle.wait.bind(handle);
+    handle.wait = (async (options: { tier: DurabilityTier }) => {
+      await this.ensureReady(options.tier);
+      return wait(options);
+    }) as THandle["wait"];
+    return handle;
+  }
+
+  protected getRuntimeOperationContext(): DbRuntimeOperationContext | null {
+    return this.runtimeOperationContextOverride;
+  }
+
   private handleMutationError(event: MutationErrorEvent): void {
     if (this.mutationErrorListeners.size === 0) {
       console.error("Unhandled Jazz mutation error", event);
@@ -956,43 +1286,17 @@ export class Db {
     }
   }
 
-  protected async ensureReady(tier?: DurabilityTier): Promise<void> {
-    await this.connection.ensureReady(tier);
-  }
-
-  /**
-   * Temporarily disconnect this Db from its configured Jazz sync server.
-   *
-   * Local reads and writes can continue while disconnected. Call
-   * {@link reconnect} to resume sync using the same Db instance.
-   */
-  async disconnect(): Promise<void> {
-    if (this.isShuttingDown || this.shutdownPromise) {
-      throw new Error("Cannot disconnect a Db that is shutting down.");
+  private withRuntimeOperationContext<TResult>(
+    context: DbRuntimeOperationContext,
+    operation: () => TResult,
+  ): TResult {
+    const previous = this.runtimeOperationContextOverride;
+    this.runtimeOperationContextOverride = context;
+    try {
+      return operation();
+    } finally {
+      this.runtimeOperationContextOverride = previous;
     }
-
-    await this.connection.disconnect();
-  }
-
-  /**
-   * Reconnect this Db to its configured Jazz sync server after
-   * {@link disconnect}.
-   */
-  async reconnect(): Promise<void> {
-    if (this.isShuttingDown || this.shutdownPromise) {
-      throw new Error("Cannot reconnect a Db that is shutting down.");
-    }
-
-    await this.connection.reconnect();
-  }
-
-  private wrapWriteWait<THandle extends WriteHandle<unknown>>(handle: THandle): THandle {
-    const wait = handle.wait.bind(handle);
-    handle.wait = (async (options: { tier: DurabilityTier }) => {
-      await this.ensureReady(options.tier);
-      return wait(options);
-    }) as THandle["wait"];
-    return handle;
   }
 
   updateAuthToken(jwtToken: string | null): void {
@@ -1028,19 +1332,15 @@ export class Db {
   }
 
   /**
-   * Attach a fallback listener to be notified when a write operation
-   * (insert, update, delete) is rejected.
-   * This callback is only called if the write error is not surfaced by
-   * {@link WriteHandle.wait}.
-   * This callback is called even after app restarts (which does not
-   * happen with {@link WriteHandle.wait}).
+   * Attach a fallback listener for write rejections that are not handled by an
+   * active {@link WriteHandle.wait} call.
+   *
    * @returns an unsubscribe callback
    */
   onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
     this.mutationErrorListeners.add(listener);
     while (this.pendingMutationErrorEvents.length > 0) {
-      const event = this.pendingMutationErrorEvents.shift()!;
-      listener(event);
+      listener(this.pendingMutationErrorEvents.shift()!);
     }
     return () => {
       this.mutationErrorListeners.delete(listener);
@@ -1048,25 +1348,44 @@ export class Db {
   }
 
   getConfig(): DbConfig {
-    // Return a copy of the config to avoid editing the original config.
-    return structuredClone(this.config);
-  }
-
-  /**
-   * The runtime schema of this Db's live client, normalized. Used by the
-   * inspector overlay (a same-origin iframe) to render columns and build queries
-   * against this connection without bridging or private-field access. Null if
-   * no client exists yet — run a query/subscription (or wait for connection)
-   * first.
-   * @internal
-   */
-  getRuntimeSchema(): WasmSchema | null {
-    const schema = this.connection.getRuntimeSchema();
-    return schema ? normalizeRuntimeSchema(schema) : null;
+    // Return a copy without internal live transport handles. MessagePorts are
+    // neither configuration nor cloneable unless transferred.
+    const { browserWorkerPort: _browserWorkerPort, ...runtimeSources } =
+      this.config.runtimeSources ?? {};
+    return structuredClone({
+      ...this.config,
+      runtimeSources: Object.keys(runtimeSources).length > 0 ? runtimeSources : undefined,
+    });
   }
 
   setDevMode(enabled: boolean): void {
     this.config.devMode = enabled;
+  }
+
+  /**
+   * Temporarily disconnect this Db from its configured Jazz sync server.
+   *
+   * Local reads and writes can continue while disconnected. Call
+   * {@link reconnect} to resume sync using the same Db instance.
+   */
+  async disconnect(): Promise<void> {
+    if (this.isShuttingDown || this.shutdownPromise) {
+      throw new Error("Cannot disconnect a Db that is shutting down.");
+    }
+
+    await this.connection.disconnect();
+  }
+
+  /**
+   * Reconnect this Db to its configured Jazz sync server after
+   * {@link disconnect}.
+   */
+  async reconnect(): Promise<void> {
+    if (this.isShuttingDown || this.shutdownPromise) {
+      throw new Error("Cannot reconnect a Db that is shutting down.");
+    }
+
+    await this.connection.reconnect();
   }
 
   /**
@@ -1090,6 +1409,20 @@ export class Db {
   }
 
   /**
+   * The engine-normalized runtime schema of this Db's live client, or null
+   * before the client exists. This is a dev-introspection accessor (inspector
+   * host handle, devtools bridge), not a general schema API.
+   */
+  getRuntimeSchema(): WasmSchema | null {
+    return this.connection.getRuntimeSchema();
+  }
+
+  /** @internal Open a control channel for the same-origin embedded inspector. */
+  openInspectorControlPort(): Promise<MessagePort> {
+    return this.connection.openInspectorControlPort();
+  }
+
+  /**
    * Insert a new row into a table without waiting for durability.
    *
    * Use {@link WriteResult.wait} to wait for durable confirmation.
@@ -1098,17 +1431,20 @@ export class Db {
    * @param data Init object with column values
    * @returns Write result containing the inserted row
    */
-  insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: CreateOptions): WriteResult<T> {
+  insert<T, Init>(table: TableProxy<T, Init>, data: Init, options?: InsertOptions): WriteResult<T> {
     const client = this.getClient(table._schema);
-    // Don't wait for bridge to be ready in worker mode. Inserts will be propagated once the bridge is ready.
-    // If the bridge fails to initialize, the insert will be lost on restart.
     const transformedData = transformInputColumns(table, data);
-    const values = toWriteRecord(transformedData, table._schema, table._table);
+    const values = toWriteRecordForOperation(
+      "Insert",
+      transformedData,
+      table._schema,
+      table._table,
+    );
     const context = this.getRuntimeOperationContext();
     const inserted = client.insert(
       table._table,
       values,
-      options,
+      normalizeInsertOptions(table._schema, table._table, options),
       context?.session,
       context?.attribution,
     );
@@ -1132,13 +1468,18 @@ export class Db {
   ): WriteResult<T> {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
-    const values = toWriteRecord(transformedData, table._schema, table._table);
+    const values = toWriteRecordForOperation(
+      "Restore",
+      transformedData,
+      table._schema,
+      table._table,
+    );
     const context = this.getRuntimeOperationContext();
     const restored = client.restore(
       table._table,
       id,
       values,
-      options,
+      normalizeRestoreOptions(table._schema, table._table, options),
       context?.session,
       context?.attribution,
     );
@@ -1156,15 +1497,28 @@ export class Db {
    */
   upsert<T, Init>(
     table: TableProxy<T, Init>,
+    id: string,
     data: Partial<Init>,
-    options: UpsertOptions,
+    options?: UpdateOptions,
   ): WriteHandle {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
-    const values = toWriteRecord(transformedData, table._schema, table._table);
+    const values = toWriteRecordForOperation(
+      "Upsert",
+      transformedData,
+      table._schema,
+      table._table,
+    );
     const context = this.getRuntimeOperationContext();
     return this.wrapWriteWait(
-      client.upsert(table._table, values, options, context?.session, context?.attribution),
+      client.upsert(
+        table._table,
+        id,
+        values,
+        normalizeUpdateOptions(table._schema, table._table, options),
+        context?.session,
+        context?.attribution,
+      ),
     );
   }
 
@@ -1181,10 +1535,22 @@ export class Db {
   ): WriteHandle {
     const client = this.getClient(table._schema);
     const transformedData = transformInputColumns(table, data);
-    const updates = toWriteRecord(transformedData, table._schema, table._table);
+    const updates = toWriteRecordForOperation(
+      "Update",
+      transformedData,
+      table._schema,
+      table._table,
+    );
     const context = this.getRuntimeOperationContext();
     return this.wrapWriteWait(
-      client.update(id, updates, options, context?.session, context?.attribution),
+      client.update(
+        table._table,
+        id,
+        updates,
+        normalizeUpdateOptions(table._schema, table._table, options),
+        context?.session,
+        context?.attribution,
+      ),
     );
   }
 
@@ -1196,112 +1562,151 @@ export class Db {
   delete<T, Init>(table: TableProxy<T, Init>, id: string, options?: DeleteOptions): WriteHandle {
     const client = this.getClient(table._schema);
     const context = this.getRuntimeOperationContext();
-    return this.wrapWriteWait(client.delete(id, options, context?.session, context?.attribution));
+    return this.wrapWriteWait(
+      client.delete(
+        table._table,
+        id,
+        normalizeUpdateOptions(table._schema, table._table, options),
+        context?.session,
+        context?.attribution,
+      ),
+    );
+  }
+
+  /** Request authoritative permission advice for inserting a row. */
+  async canInsert<T, Init>(table: TableProxy<T, Init>, data: Init): Promise<PermissionAdvice> {
+    const client = this.getClient(table._schema);
+    const transformedData = transformInputColumns(table, data);
+    const values = toWriteRecordForOperation(
+      "Insert",
+      transformedData,
+      table._schema,
+      table._table,
+    );
+    const context = this.getRuntimeOperationContext();
+    return client.requestInsertPermissionAdvice(table._table, values, context?.session);
+  }
+
+  /** Request authoritative permission advice for reading a row. */
+  async canRead<T, Init>(table: TableProxy<T, Init>, id: string): Promise<PermissionAdvice> {
+    const client = this.getClient(table._schema);
+    const context = this.getRuntimeOperationContext();
+    return client.requestReadPermissionAdvice(
+      table._table,
+      id,
+      context?.readSession ?? context?.session,
+    );
+  }
+
+  /** Request authoritative permission advice for updating a row. */
+  async canUpdate<T, Init>(
+    table: TableProxy<T, Init>,
+    id: string,
+    data: Partial<Init>,
+  ): Promise<PermissionAdvice> {
+    const client = this.getClient(table._schema);
+    const transformedData = transformInputColumns(table, data);
+    const updates = toWriteRecordForOperation(
+      "Update",
+      transformedData,
+      table._schema,
+      table._table,
+    );
+    const context = this.getRuntimeOperationContext();
+    return client.requestUpdatePermissionAdvice(table._table, id, updates, context?.session);
+  }
+
+  /** Request authoritative permission advice for deleting a row. */
+  async canDelete<T, Init>(table: TableProxy<T, Init>, id: string): Promise<PermissionAdvice> {
+    const client = this.getClient(table._schema);
+    const context = this.getRuntimeOperationContext();
+    return client.requestDeletePermissionAdvice(table._table, id, context?.session);
+  }
+
+  private createTransaction<TKind extends TransactionKind>(kind: TKind): Transaction<TKind> {
+    const context = this.getRuntimeOperationContext();
+    const ownerClient = this.getCurrentClient();
+    if (kind === "exclusive" && !ownerClient) {
+      throw new Error(
+        "Cannot begin an exclusive transaction before the JazzClient has been created. Run a query or mutation first.",
+      );
+    }
+    return new Transaction(
+      kind,
+      (schema) => this.getClient(schema),
+      context?.session,
+      context?.attribution,
+      ownerClient ?? undefined,
+    );
   }
 
   /**
-   * Begin a new transaction.
+   * Begin a mergeable transaction.
    *
-   * Use transactions when several writes should settle together after an authority validates them.
-   *
-   * Use {@link DbTransaction.commit} to commit the transaction.
+   * Use {@link Transaction.commit} to commit the transaction.
    *
    * Prefer using {@link Db.transaction} when an explicit commit is not required.
    */
-  beginTransaction(): DbTransaction {
-    const context = this.getRuntimeOperationContext();
-    return new DbTransaction(
-      (schema) => this.getClient(schema),
-      context?.session,
-      context?.attribution,
-    );
+  beginTransaction(): Transaction<"mergeable"> {
+    return this.createTransaction("mergeable");
   }
 
   /**
-   * Run {@link callback} inside a transaction and commit it once the callback returns.
+   * Begin an exclusive transaction for writes that need serializable validation by the authority.
    *
-   * Use transactions when several writes should settle together after an authority validates them.
+   * Use {@link Transaction.commit} to commit the transaction.
+   *
+   * Prefer using {@link Db.exclusiveTransaction} when an explicit commit is not required.
+   */
+  beginExclusiveTransaction(): Transaction<"exclusive"> {
+    return this.createTransaction("exclusive");
+  }
+
+  /**
+   * Run {@link callback} inside a mergeable transaction and commit it once the callback returns.
    *
    * @returns a write result containing the result of the callback
    */
   transaction<TResult>(
-    callback: (tx: TransactionScope) => Promise<TResult>,
-  ): Promise<WriteResult<Awaited<TResult>>>;
-  transaction<TResult>(callback: (tx: TransactionScope) => TResult): WriteResult<TResult>;
-  transaction<TResult>(
-    callback: (tx: TransactionScope) => TResult | Promise<TResult>,
-  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
+    callback: (tx: TransactionScope<"mergeable">) => TResult | Promise<TResult>,
+  ): Promise<WriteResult<Awaited<TResult>>> {
     const transaction = this.beginTransaction();
-    return runInBatch(
+    return runInTransaction(
       transaction,
       callback,
-      () => getDbBatchHandleBinding(transaction, "result", "DbTransaction").client,
+      () => getDbTxHandleBinding(transaction, "result").ownerClient,
     );
   }
 
   /**
-   * Begin a new batch.
-   *
-   * Use a batch when several visible writes should settle together.
-   * Call {@link DbDirectBatch.commit} to freeze the batch, then wait on the
-   * returned handle if you need durable confirmation.
-   *
-   * Prefer using {@link Db.batch} when an explicit commit is not required.
-   */
-  beginBatch(): DbDirectBatch {
-    const context = this.getRuntimeOperationContext();
-    return new DbDirectBatch(
-      (schema) => this.getClient(schema),
-      context?.session,
-      context?.attribution,
-    );
-  }
-
-  /**
-   * Run {@link callback} inside a batch and commit it once the callback returns.
-   *
-   * Use a batch when several visible writes should settle together.
+   * Run {@link callback} inside an exclusive transaction and commit it once the callback returns.
    *
    * @returns a write result containing the result of the callback
    */
-  batch<TResult>(
-    callback: (batch: BatchScope) => Promise<TResult>,
-  ): Promise<WriteResult<Awaited<TResult>>>;
-  batch<TResult>(callback: (batch: BatchScope) => TResult): WriteResult<TResult>;
-  batch<TResult>(
-    callback: (batch: BatchScope) => TResult | Promise<TResult>,
-  ): WriteResult<TResult> | Promise<WriteResult<Awaited<TResult>>> {
-    const batch = this.beginBatch();
-    return runInBatch(
-      batch,
+  exclusiveTransaction<TResult>(
+    callback: (tx: TransactionScope<"exclusive">) => TResult | Promise<TResult>,
+  ): Promise<ExclusiveWriteResult<Awaited<TResult>>> {
+    const transaction = this.beginExclusiveTransaction();
+    return runInTransaction(
+      transaction,
       callback,
-      () => getDbBatchHandleBinding(batch, "result", "DbDirectBatch").client,
+      () => getDbTxHandleBinding(transaction, "result").ownerClient,
     );
   }
 
   /**
-   * Delete browser OPFS storage for this Db's active namespace and reopen a clean worker.
-   *
-   * This clears the brokered primary namespace for the same browser app/database. It does not touch
-   * localStorage-based local-first auth state.
-   *
-   * Behavior:
-   * - Browser worker-backed Db only (throws in non-browser/non-worker runtimes)
-   * - Can be initiated from either leader or follower tabs
-   * - Coordinates worker shutdown through the SharedWorker broker before deleting OPFS files
-   * - Serializes with worker reconfigure operations
-   * - Tears down worker + client, deletes OPFS files, and reconnects participating tabs
+   * Delete browser IndexedDB storage for this Db's active namespace.
    */
   async deleteClientStorage(): Promise<void> {
-    return this.connection.deleteClientStorage();
+    await this.connection.deleteClientStorage();
   }
 
   /**
    * Release the current Db instance for logout flows.
    *
-   * When `wipeData` is enabled in browser persistent mode, Jazz first coordinates a cross-tab OPFS
-   * wipe and then shuts this Db down. Callers should still sign out of their external auth provider
-   * separately and recreate `JazzProvider` / `Db` after logout.
+   * When `wipeData` is enabled, Jazz clears local client storage before shutting this Db down.
+   * Callers should still sign out of their external auth provider separately and recreate
+   * `JazzProvider` / `Db` after logout.
    */
   async logout(options: LogoutOptions = {}): Promise<void> {
     if (options.wipeData) {
@@ -1319,29 +1724,20 @@ export class Db {
    */
   async all<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T[]> {
     const client = this.getClient(query._schema);
-    const runtimeSchema = createRuntimeSchemaResolver(() =>
-      normalizeRuntimeSchema(client.getSchema()),
-    );
     const builderJson = query._build();
-    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
-    const planningSchema = resolveSchemaWithTable(
-      query._schema,
-      runtimeSchema.get,
-      builtQuery.table,
-    );
+    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
+    const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
-    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
-    const queryOptions = ordinaryDbQueryOptions(options);
-    await this.ensureReady(queryOptions.tier);
+    const outputSchema = requireSchemaWithTable(query._schema, outputTable);
+    const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
-    const runtimeQueryOptions = usesRelationTraversal
-      ? { ...queryOptions, runtimeSettledTier: null }
-      : queryOptions;
     const context = this.getRuntimeOperationContext();
+    const effectiveTier = resolveEffectiveQueryExecutionOptions(this.config, queryOptions).tier;
+    await this.ensureReady(effectiveTier);
     const rows =
       context || usesRelationTraversal
-        ? await client.query(wasmQuery, runtimeQueryOptions, context?.session)
+        ? await client.query(wasmQuery, queryOptions, context?.readSession ?? context?.session)
         : await client.query(wasmQuery, queryOptions);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const transformedRows = transformRows(
@@ -1366,55 +1762,6 @@ export class Db {
   async one<T>(query: QueryBuilder<T>, options?: QueryOptions): Promise<T | null> {
     const results = await this.all(limitQueryToOne(query), options);
     return results[0] ?? null;
-  }
-
-  /**
-   * Create a conventional `files` row by chunking a browser Blob into `file_parts`.
-   *
-   * Expects `app.files` and `app.file_parts` to follow the built-in file-storage conventions.
-   */
-  async createFileFromBlob<FileRow extends { id: string }, FileInit, FilePartRow, FilePartInit>(
-    app: ConventionalFileApp<FileRow, FileInit, FilePartRow, FilePartInit>,
-    blob: Blob,
-    options?: FileWriteOptions,
-  ): Promise<FileRow> {
-    return createConventionalFileStorage(this, app).fromBlob(blob, options);
-  }
-
-  /**
-   * Create a conventional `files` row by chunking a browser ReadableStream into `file_parts`.
-   *
-   * Expects `app.files` and `app.file_parts` to follow the built-in file-storage conventions.
-   */
-  async createFileFromStream<FileRow extends { id: string }, FileInit, FilePartRow, FilePartInit>(
-    app: ConventionalFileApp<FileRow, FileInit, FilePartRow, FilePartInit>,
-    stream: ReadableStream<unknown>,
-    options?: FileWriteOptions,
-  ): Promise<FileRow> {
-    return createConventionalFileStorage(this, app).fromStream(stream, options);
-  }
-
-  /**
-   * Load a conventional file as a browser ReadableStream by querying the file row first
-   * and then reading each referenced `file_parts` row sequentially.
-   */
-  async loadFileAsStream<FileRow extends { id: string }, FileInit, FilePartRow, FilePartInit>(
-    app: ConventionalFileApp<FileRow, FileInit, FilePartRow, FilePartInit>,
-    fileOrId: string | FileRow,
-    options?: FileReadOptions,
-  ): Promise<ReadableStream<Uint8Array>> {
-    return createConventionalFileStorage(this, app).toStream(fileOrId, options);
-  }
-
-  /**
-   * Load a conventional file as a Blob using the same sequential part-query path as `loadFileAsStream`.
-   */
-  async loadFileAsBlob<FileRow extends { id: string }, FileInit, FilePartRow, FilePartInit>(
-    app: ConventionalFileApp<FileRow, FileInit, FilePartRow, FilePartInit>,
-    fileOrId: string | FileRow,
-    options?: FileReadOptions,
-  ): Promise<Blob> {
-    return createConventionalFileStorage(this, app).toBlob(fileOrId, options);
   }
 
   /**
@@ -1457,18 +1804,11 @@ export class Db {
   ): () => void {
     const manager = new SubscriptionManager<T>();
     const client = this.getClient(query._schema);
-    const runtimeSchema = createRuntimeSchemaResolver(() =>
-      normalizeRuntimeSchema(client.getSchema()),
-    );
     const builderJson = query._build();
-    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson), query._table);
-    const planningSchema = resolveSchemaWithTable(
-      query._schema,
-      runtimeSchema.get,
-      builtQuery.table,
-    );
+    const builtQuery = normalizeBuiltQuery(JSON.parse(builderJson));
+    const planningSchema = requireSchemaWithTable(query._schema, builtQuery.table);
     const outputTable = resolveBuiltQueryOutputTable(planningSchema, builtQuery);
-    const outputSchema = resolveSchemaWithTable(query._schema, runtimeSchema.get, outputTable);
+    const outputSchema = requireSchemaWithTable(query._schema, outputTable);
     const outputIncludes = outputTable !== builtQuery.table ? {} : builtQuery.includes;
     const nativeOutputColumns = resolveNativeSubscriptionColumns(
       outputTable,
@@ -1483,52 +1823,86 @@ export class Db {
         outputTable === builtQuery.table ? query : {},
         transformRow(row, outputSchema, outputTable, outputIncludes, builtQuery.select),
       );
-    const nativeTransform =
-      Object.keys(outputIncludes).length === 0 && builtQuery.select.length === 0
-        ? (row: Record<string, unknown>): T =>
-            transformOutputRow(outputTable === builtQuery.table ? query : {}, row)
-        : undefined;
-
     const handleDelta = (delta: Parameters<SubscriptionManager<T>["handleDelta"]>[0]) => {
-      const typedDelta = manager.handleDelta(
-        delta,
-        transform,
-        nativeOutputColumns,
-        nativeTransform,
-      );
+      const typedDelta = manager.handleDelta(delta, transform, nativeOutputColumns);
       callback(typedDelta);
     };
 
-    const queryOptions = ordinaryDbQueryOptions(options);
+    const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
     const context = this.getRuntimeOperationContext();
-    let unsubscribed = false;
     let subId: number | null = null;
-    let traceId: string | null = null;
-
-    const startSubscription = () => {
-      if (unsubscribed) return;
-      subId = client.subscribe(wasmQuery, handleDelta, queryOptions, context?.session ?? session);
-      traceId = this.registerActiveQuerySubscriptionTrace(
+    let unsubscribed = false;
+    const readyAbort = new AbortController();
+    const startNativeSubscription = () => {
+      if (unsubscribed || subId !== null) return;
+      subId = client.subscribe(
         wasmQuery,
-        builtQuery.table,
+        handleDelta,
         queryOptions,
+        context?.readSession ?? context?.session ?? session,
       );
+      if (unsubscribed) {
+        client.unsubscribe(subId);
+        subId = null;
+      }
     };
-
-    if (this.connection.shouldDeferSubscriptionStart()) {
-      void this.ensureReady(queryOptions.tier)
-        .then(startSubscription)
-        .catch((error) => {
-          if (unsubscribed) return;
-          console.error("Failed to start Jazz subscription", error);
+    const traceId = this.registerActiveQuerySubscriptionTrace(
+      wasmQuery,
+      builtQuery.table,
+      queryOptions,
+    );
+    if (queryOptions.tier == null || queryOptions.tier === "local") {
+      callback(manager.seed([]));
+    }
+    if (this.connection.shouldDeferSubscriptionStart(queryOptions.tier)) {
+      // The worker can only classify the initial authority-tier snapshot as
+      // settled after its own server transport is attached. Delay native
+      // subscription creation until that topology is ready; the native stream
+      // then owns the settled-snapshot gate and remains the sole data source.
+      void this.ensureReady(queryOptions.tier, readyAbort.signal)
+        .then(startNativeSubscription)
+        .catch((error: unknown) => {
+          if (unsubscribed || readyAbort.signal.aborted || this.isShuttingDown) return;
+          setTimeout(() => {
+            throw error;
+          }, 0);
         });
     } else {
-      startSubscription();
+      startNativeSubscription();
+    }
+    if (
+      this.config.serverUrl &&
+      // `edge` and `global` promise that their first callback is the worker's
+      // authority-tier snapshot.  A browser worker cannot establish that
+      // snapshot until its server transport is ready, so never race it with a
+      // main-thread local-storage seed (including after Db.disconnect()).
+      !this.connection.shouldDeferSubscriptionStart(queryOptions.tier) &&
+      queryOptions.propagation !== "local-only" &&
+      queryOptions.tier !== "global" &&
+      !queryUsesRelationTraversal(builtQuery)
+    ) {
+      const seedQuery = () =>
+        this.all(query, { ...options, tier: "local", propagation: "local-only" });
+      const seedRows =
+        session == null
+          ? seedQuery()
+          : this.withRuntimeOperationContext({ session }, () => seedQuery());
+      void seedRows
+        .then((rows) => {
+          if (unsubscribed) return;
+          callback(manager.seed(rows));
+        })
+        .catch((error: unknown) => {
+          setTimeout(() => {
+            throw error;
+          }, 0);
+        });
     }
 
     // Return unsubscribe function
     return () => {
       unsubscribed = true;
+      readyAbort.abort();
       this.unregisterActiveQuerySubscriptionTrace(traceId);
       if (subId !== null) {
         client.unsubscribe(subId);
@@ -1539,7 +1913,7 @@ export class Db {
 
   /**
    * Shutdown the Db and release all resources.
-   * Closes the JazzClient and the worker.
+   * Closes the Db's runtime client.
    *
    * Idempotent: concurrent or repeated calls share the same in-flight promise.
    */
@@ -1556,20 +1930,9 @@ export class Db {
       this.localFirstRefreshTimer = null;
     }
     this.clearActiveQuerySubscriptionTraces();
-
-    let shutdownError: unknown = null;
-
-    try {
-      await this.connection.shutdown();
-    } catch (error) {
-      shutdownError = error;
-    }
-
     this.mutationErrorListeners.clear();
 
-    if (shutdownError) {
-      throw shutdownError;
-    }
+    await this.connection.shutdown();
   }
 
   private notifyActiveQuerySubscriptionTraceListeners(): void {
@@ -1585,15 +1948,15 @@ export class Db {
 
   private registerActiveQuerySubscriptionTrace(
     queryJson: string,
-    fallbackTable: string,
-    options?: QueryOptions,
+    _queryTable: string,
+    options?: InternalQueryExecutionOptions,
   ): string | null {
     if (!this.config.devMode) {
       return null;
     }
 
     const resolvedOptions = resolveEffectiveQueryExecutionOptions(this.config, options);
-    const payload = this.parseRuntimeQueryTracePayload(queryJson, fallbackTable);
+    const payload = this.parseRuntimeQueryTracePayload(queryJson);
     const traceId = `sub-${this.nextActiveQuerySubscriptionTraceId++}`;
 
     this.activeQuerySubscriptionTraces.set(traceId, {
@@ -1630,117 +1993,25 @@ export class Db {
     this.notifyActiveQuerySubscriptionTraceListeners();
   }
 
-  private parseRuntimeQueryTracePayload(
-    queryJson: string,
-    fallbackTable: string,
-  ): RuntimeQueryTracePayload {
+  private parseRuntimeQueryTracePayload(queryJson: string): RuntimeQueryTracePayload {
     try {
       const parsed = JSON.parse(queryJson) as { table?: unknown; branches?: unknown };
-      const table = typeof parsed.table === "string" ? parsed.table : fallbackTable;
+      const table = typeof parsed.table === "string" ? parsed.table : "unknown";
       const branches = Array.isArray(parsed.branches)
         ? parsed.branches.filter((branch): branch is string => typeof branch === "string")
         : [];
 
       return {
         table,
-        branches: branches.length > 0 ? branches : [this.config.userBranch ?? "main"],
+        branches,
       };
     } catch {
       return {
-        table: fallbackTable,
-        branches: [this.config.userBranch ?? "main"],
+        table: "unknown",
+        branches: [],
       };
     }
   }
-}
-
-/**
- * A Db implementation that delegates all operations to an existing {@link JazzClient}.
- * Used only for tests.
- */
-class ClientBackedDb extends Db {
-  private readonly hasScopedAuthState: boolean;
-
-  constructor(
-    config: DbConfig,
-    private readonly runtimeClient: JazzClient,
-    private readonly session?: Session,
-    private readonly attribution?: string,
-    scopedAuthState?: AuthState,
-  ) {
-    super(
-      config,
-      null,
-      scopedAuthState
-        ? {
-            initialState: scopedAuthState,
-            lockAuthenticatedState: true,
-          }
-        : undefined,
-    );
-    this.hasScopedAuthState = scopedAuthState !== undefined;
-  }
-
-  protected override getClient(_schema: WasmSchema): JazzClient {
-    return this.runtimeClient;
-  }
-
-  override updateAuthToken(jwtToken: string | null): void {
-    if (this.hasScopedAuthState) {
-      return;
-    }
-
-    if (!this.applyAuthUpdate(jwtToken)) {
-      return;
-    }
-
-    this.runtimeClient.updateAuthToken(jwtToken ?? undefined);
-  }
-
-  override onMutationError(listener: (event: MutationErrorEvent) => void): () => void {
-    this.runtimeClient.onMutationError(listener);
-    return () => {
-      /* Do nothing */
-    };
-  }
-
-  override updateCookieSession(cookieSession: Session | null): void {
-    if (this.hasScopedAuthState) {
-      return;
-    }
-
-    if (!this.applyCookieSessionUpdate(cookieSession)) {
-      return;
-    }
-
-    this.runtimeClient.updateCookieSession(cookieSession ?? undefined);
-  }
-
-  protected override getRuntimeOperationContext(): DbRuntimeOperationContext {
-    return {
-      session: this.session,
-      attribution: this.attribution,
-    };
-  }
-
-  override async disconnect(): Promise<void> {
-    throw new Error("Db.disconnect() is not supported on scoped Db handles.");
-  }
-
-  override async reconnect(): Promise<void> {
-    throw new Error("Db.reconnect() is not supported on scoped Db handles.");
-  }
-
-  override async shutdown(): Promise<void> {
-    // The owning JazzContext owns the runtime lifecycle.
-  }
-}
-
-/**
- * Check if running in a browser environment with Worker support.
- */
-function isBrowser(): boolean {
-  return typeof Worker !== "undefined" && typeof window !== "undefined";
 }
 
 /**
@@ -1760,12 +2031,11 @@ function generateEphemeralSeedBase64Url(): string {
 /**
  * Create a new Db instance with the given configuration.
  *
- * This is an **async** factory function that pre-loads the runtime module.
+ * This is an **async** factory function that pre-loads the runtime source.
  * After creation, local-first mutations (`insert`/`update`/`delete`) are synchronous.
  * Use the `wait` method when you need a Promise that resolves at a durability tier.
  *
- * In browser environments, automatically uses a dedicated worker for
- * OPFS persistence. In Node.js, uses in-memory storage.
+ * Browser and backend runtimes open the native runtime in-process.
  *
  * @param config Database configuration
  * @returns Promise resolving to Db instance ready for queries and mutations
@@ -1791,45 +2061,28 @@ function createRuntimeTokenOptions(
   };
 }
 
-const DEFAULT_BROWSER_BROKER_COMPATIBILITY_MESSAGE =
-  "Another tab is using a different version of this app. Close the other tabs, then reload this page.\n\nReload now?";
-
-function handleIncompatibleBrowserBrokerConfiguration(error: unknown, config: DbConfig): void {
-  if (!isIncompatibleBrowserBrokerConfigurationError(error)) {
-    return;
-  }
-
-  if (config.onIncompatibleBrowserBrokerConfiguration) {
-    config.onIncompatibleBrowserBrokerConfiguration(error);
-    return;
-  }
-
-  showDefaultIncompatibleBrowserBrokerConfigurationPrompt();
-}
-
-function showDefaultIncompatibleBrowserBrokerConfigurationPrompt(): void {
-  if (typeof window === "undefined" || typeof window.confirm !== "function") {
-    return;
-  }
-
-  if (window.confirm(DEFAULT_BROWSER_BROKER_COMPATIBILITY_MESSAGE)) {
-    window.location.reload();
-  }
-}
-
-export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
+export async function createDbWithRuntimeSource<RuntimeConfig extends DbConfig>(
   config: RuntimeConfig,
-  runtimeModule: DbRuntimeModule<RuntimeConfig>,
+  runtimeSource: RuntimeSource<RuntimeConfig>,
 ): Promise<Db> {
-  if (config.secret && (config.jwtToken || config.cookieSession)) {
-    throw new Error("DbConfig error: secret, jwtToken, and cookieSession are mutually exclusive");
+  if (config.secret && config.cookieSession) {
+    throw new Error("DbConfig error: secret and cookieSession are mutually exclusive");
+  }
+  if (config.secret && config.jwtToken) {
+    throw new Error("DbConfig error: secret and jwtToken are mutually exclusive");
   }
   if (config.jwtToken && config.cookieSession) {
     throw new Error("DbConfig error: jwtToken and cookieSession are mutually exclusive");
   }
 
-  let resolvedConfig = { ...config };
-  await runtimeModule.load(config);
+  let resolvedConfig: DbConfig = { ...config };
+  await runtimeSource.load(config);
+  const {
+    secret: _secret,
+    jwtToken: _jwtToken,
+    cookieSession: _cookieSession,
+    ...configWithoutAuth
+  } = config;
 
   // Local-first auth: resolve seed and mint a JWT
   let localFirstSecret: string | null = null;
@@ -1837,65 +2090,40 @@ export async function createDbWithRuntimeModule<RuntimeConfig extends DbConfig>(
     const secret = config.secret;
     localFirstSecret = secret;
 
-    const jwtToken = runtimeModule.mintLocalFirstToken(
-      createRuntimeTokenOptions(secret, config.appId, 3600),
-    );
-    resolvedConfig = { ...resolvedConfig, jwtToken };
+    if (!config.jwtToken) {
+      const jwtToken = runtimeSource.mintLocalFirstToken(
+        createRuntimeTokenOptions(secret, config.appId, 3600),
+      );
+      resolvedConfig = { ...configWithoutAuth, jwtToken };
+    }
   } else if (!config.jwtToken && !config.cookieSession && !config.adminSecret) {
     // Anonymous: mint an ephemeral keypair + anonymous JWT.
     // Admin-secret clients intentionally stay sessionless so local policy
     // evaluation does not preempt backend-authorized transport writes.
     const ephemeralSeed = generateEphemeralSeedBase64Url();
-    const jwtToken = runtimeModule.mintAnonymousToken(
+    const jwtToken = runtimeSource.mintAnonymousToken(
       createRuntimeTokenOptions(ephemeralSeed, config.appId, 3600),
     );
-    resolvedConfig = { ...resolvedConfig, jwtToken };
+    resolvedConfig = { ...configWithoutAuth, jwtToken };
   }
 
   const driver = resolveStorageDriver(resolvedConfig.driver);
-
-  let db: Db;
-  if (
-    runtimeModule.supportsBrowserWorker !== false &&
-    isBrowser() &&
-    driver.type === "persistent"
-  ) {
-    try {
-      db = await Db.createWithWorker(resolvedConfig, runtimeModule as AnyDbRuntimeModule);
-    } catch (error) {
-      handleIncompatibleBrowserBrokerConfiguration(error, resolvedConfig);
-      throw error;
-    }
-  } else {
-    db = Db.create(resolvedConfig, runtimeModule as AnyDbRuntimeModule);
-  }
+  const db =
+    runtimeSource.supportsBrowserWorker && isBrowserRuntime() && driver.type === "persistent"
+      ? await Db.createWithBrowserWorker(resolvedConfig, runtimeSource as AnyRuntimeSource)
+      : Db.create(resolvedConfig, runtimeSource as AnyRuntimeSource);
 
   if (localFirstSecret) {
-    db.initLocalFirstAuth(localFirstSecret, 3600);
+    db.initLocalFirstAuth(localFirstSecret, 3600, !config.jwtToken);
   }
 
   return db;
 }
 
 export async function createDb(config: DbConfig): Promise<Db> {
-  return await createDbWithRuntimeModule(config, new WasmRuntimeModule());
+  return await createDbWithRuntimeSource(config, new DefaultRuntimeSource());
 }
 
-export function createDbFromClient(
-  config: DbConfig,
-  client: JazzClient,
-  session?: Session,
-  attribution?: string,
-  scopedAuthState?: AuthState,
-): Db {
-  return new ClientBackedDb(
-    config,
-    client,
-    session,
-    attribution,
-    scopedAuthState ??
-      (session || attribution
-        ? { authMode: session?.authMode ?? "external", session: session ?? null }
-        : undefined),
-  );
+function isBrowserRuntime(): boolean {
+  return typeof window !== "undefined" && typeof Worker !== "undefined";
 }

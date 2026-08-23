@@ -7,8 +7,8 @@ import {
 } from "./index.js";
 import type { PolicyExpr } from "../schema.js";
 import {
-  toLegacyPolicyExprWithRelForTest,
-  toLegacyRelExprForTest,
+  toAssertionPolicyExprWithRelForTest,
+  toAssertionRelExprForTest,
 } from "../testing/relation-ir-test-helpers.js";
 
 interface Todo {
@@ -767,7 +767,7 @@ describe("permissions DSL", () => {
       if (branch.type !== "ExistsRel") {
         throw new Error("Expected OR branch to be ExistsRel.");
       }
-      const rel = toLegacyRelExprForTest(branch.rel);
+      const rel = toAssertionRelExprForTest(branch.rel);
       expect(rel.type).toBe("Filter");
       if (rel.type !== "Filter") {
         throw new Error("Expected ExistsRel relation to be Filter.");
@@ -814,7 +814,7 @@ describe("permissions DSL", () => {
       if (branch.type !== "ExistsRel") {
         throw new Error("Expected OR branch to be ExistsRel.");
       }
-      const rel = toLegacyRelExprForTest(branch.rel);
+      const rel = toAssertionRelExprForTest(branch.rel);
       expect(rel.type).toBe("Project");
       if (rel.type !== "Project") {
         throw new Error("Expected ExistsRel relation to be Project.");
@@ -878,7 +878,7 @@ describe("permissions DSL", () => {
       return [policy.todos.allowRead.where((todo) => hasResourceRole(todo.id, "viewer"))];
     });
 
-    const using = toLegacyPolicyExprWithRelForTest(compiled.todos!.select?.using);
+    const using = toAssertionPolicyExprWithRelForTest(compiled.todos!.select?.using);
     expect(using?.type).toBe("ExistsRel");
     if (!using || using.type !== "ExistsRel") {
       throw new Error("Expected compiled recursive expression to be ExistsRel.");
@@ -908,7 +908,7 @@ describe("permissions DSL", () => {
       throw new Error("Expected relation to be initialized.");
     }
 
-    const ir = toLegacyRelExprForTest(relationToIr(relation));
+    const ir = toAssertionRelExprForTest(relationToIr(relation));
     expect(ir.type).toBe("Project");
     if (ir.type !== "Project") {
       throw new Error("Expected relation IR project.");
@@ -960,7 +960,7 @@ describe("permissions DSL", () => {
       throw new Error("Expected recursive relation to be initialized.");
     }
 
-    const ir = toLegacyRelExprForTest(relationToIr(relation));
+    const ir = toAssertionRelExprForTest(relationToIr(relation));
     expect(ir.type).toBe("Project");
     if (ir.type !== "Project") {
       throw new Error("Expected projected recursive relation IR.");
@@ -975,7 +975,7 @@ describe("permissions DSL", () => {
     }
     expect(ir.input.input.left.type).toBe("Gather");
 
-    const existsExpr = toLegacyPolicyExprWithRelForTest(relationExistsToPolicy(relation));
+    const existsExpr = toAssertionPolicyExprWithRelForTest(relationExistsToPolicy(relation));
     expect(existsExpr).toMatchObject({
       type: "ExistsRel",
       rel: {
@@ -1001,7 +1001,7 @@ describe("permissions DSL", () => {
       throw new Error("Expected recursive relation to be initialized.");
     }
 
-    const ir = toLegacyRelExprForTest(relationToIr(relation));
+    const ir = toAssertionRelExprForTest(relationToIr(relation));
     expect(ir.type).toBe("Gather");
     if (ir.type !== "Gather") {
       throw new Error("Expected gather relation IR.");
@@ -1040,7 +1040,7 @@ describe("permissions DSL", () => {
       throw new Error("Expected recursive relation to be initialized.");
     }
 
-    const ir = toLegacyRelExprForTest(relationToIr(relation));
+    const ir = toAssertionRelExprForTest(relationToIr(relation));
     expect(ir.type).toBe("Gather");
     if (ir.type !== "Gather") {
       throw new Error("Expected gather relation IR.");
@@ -1086,7 +1086,7 @@ describe("permissions DSL", () => {
       throw new Error("Expected recursive relation to be initialized.");
     }
 
-    const ir = toLegacyRelExprForTest(relationToIr(relation));
+    const ir = toAssertionRelExprForTest(relationToIr(relation));
     expect(ir.type).toBe("Gather");
     if (ir.type !== "Gather") {
       throw new Error("Expected gather relation IR.");
@@ -1115,7 +1115,7 @@ describe("permissions DSL", () => {
       throw new Error("Expected recursive relation to be initialized.");
     }
 
-    const ir = toLegacyRelExprForTest(relationToIr(relation));
+    const ir = toAssertionRelExprForTest(relationToIr(relation));
     expect(ir.type).toBe("Gather");
     if (ir.type !== "Gather") {
       throw new Error("Expected gather relation IR.");
@@ -1151,7 +1151,7 @@ describe("permissions DSL", () => {
       throw new Error("Expected qualified rule predicate to compile to ExistsRel.");
     }
 
-    const rel = toLegacyRelExprForTest(using.rel);
+    const rel = toAssertionRelExprForTest(using.rel);
     expect(rel.type).toBe("Filter");
     if (rel.type !== "Filter") {
       throw new Error("Expected outer correlation filter.");
@@ -1195,7 +1195,7 @@ describe("permissions DSL", () => {
       throw new Error("Expected qualified exists.where(...) to compile to ExistsRel.");
     }
 
-    const rel = toLegacyRelExprForTest(using.rel);
+    const rel = toAssertionRelExprForTest(using.rel);
     expect(rel.type).toBe("Filter");
     if (rel.type !== "Filter") {
       throw new Error("Expected qualified exists relation filter.");
@@ -1237,7 +1237,7 @@ describe("permissions DSL", () => {
       ];
     });
 
-    const using = toLegacyPolicyExprWithRelForTest(compiled.todos!.select?.using);
+    const using = toAssertionPolicyExprWithRelForTest(compiled.todos!.select?.using);
     expect(using).toMatchObject({
       type: "ExistsRel",
       rel: {
@@ -1276,7 +1276,7 @@ describe("permissions DSL", () => {
       throw new Error("Expected correlated relation to be initialized.");
     }
 
-    const rel = toLegacyRelExprForTest(relationToIr(relation));
+    const rel = toAssertionRelExprForTest(relationToIr(relation));
     expect(rel.type).toBe("Project");
     if (rel.type !== "Project") {
       throw new Error("Expected gathered-hop relation to project hop rows.");

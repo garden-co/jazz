@@ -55,6 +55,49 @@ describe("client-registry", () => {
     expect(reacquired).toBe(client);
   });
 
+  it("shares the pending release promise across repeated releases", async () => {
+    const client = fakeClient();
+    const holder = {};
+    await acquireClient("k", async () => client, holder);
+
+    const firstRelease = releaseClient("k", holder);
+    const repeatedRelease = releaseClient("k", holder);
+    let repeatedSettled = false;
+    void repeatedRelease.then(() => {
+      repeatedSettled = true;
+    });
+
+    await Promise.resolve();
+    expect(repeatedSettled).toBe(false);
+
+    await firstRelease;
+    await repeatedRelease;
+    expect(client.shutdown).toHaveBeenCalledOnce();
+  });
+
+  it("waits for a started teardown before creating a replacement", async () => {
+    let finishShutdown!: () => void;
+    const shutdownFinished = new Promise<void>((resolve) => {
+      finishShutdown = resolve;
+    });
+    const first = { shutdown: vi.fn(() => shutdownFinished) };
+    const second = fakeClient();
+    const create = vi.fn(async () => (create.mock.calls.length === 1 ? first : second));
+    const holder = {};
+    await acquireClient("k", create, holder);
+
+    const releasing = releaseClient("k", holder);
+    await vi.waitFor(() => expect(first.shutdown).toHaveBeenCalledOnce());
+
+    const replacement = acquireClient("k", create, {});
+    expect(create).toHaveBeenCalledTimes(1);
+
+    finishShutdown();
+    await expect(replacement).resolves.toBe(second);
+    await releasing;
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+
   it("evicts a failed creation so the next acquire retries", async () => {
     const err = new Error("create failed");
     const create = vi

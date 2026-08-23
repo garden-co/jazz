@@ -2,7 +2,9 @@
 //!
 //! Tests the full HTTP API end-to-end.
 
-#[path = "../../../crates/jazz-tools/tests/support/permissions.rs"]
+#[path = "../src/client_worker.rs"]
+mod client_worker;
+#[path = "../../../crates/jazz-testkit/src/permissions.rs"]
 mod permissions_support;
 
 use std::convert::Infallible;
@@ -19,10 +21,18 @@ use base64::Engine;
 use futures_util::StreamExt as _;
 use futures_util::stream::Stream;
 use http_body_util::BodyExt;
-use jazz_tools::{
+use jazz::tools::{
     AppContext, AppId, ClientStorage, ColumnType, DurabilityTier, JazzClient, SchemaBuilder,
     TableSchema,
 };
+
+async fn connect_native(context: AppContext) -> jazz::tools::Result<JazzClient> {
+    JazzClient::connect_with_native_transport(
+        context,
+        std::sync::Arc::new(jazz_native_transport::NativeWebSocketConnector),
+    )
+    .await
+}
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 use tokio::sync::broadcast;
@@ -30,6 +40,8 @@ use tokio_stream::wrappers::BroadcastStream;
 use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
+
+use client_worker::TodoClient;
 
 /// Todo item.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,11 +69,11 @@ pub struct UpdateTodoRequest {
 
 /// Application state.
 pub struct AppState {
-    pub client: JazzClient,
+    pub client: TodoClient,
     pub sse_tx: broadcast::Sender<Vec<Todo>>,
 }
 
-fn test_schema() -> jazz_tools::Schema {
+fn test_schema() -> jazz::tools::Schema {
     SchemaBuilder::new()
         .table(TableSchema::builder("projects").column("name", ColumnType::Text))
         .table(
@@ -87,13 +99,15 @@ async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
         server_url: String::new(),
         data_dir,
         storage: ClientStorage::Persistent,
+        storage_factory: Some(std::sync::Arc::new(
+            jazz_storage_rocksdb::RocksDbStorageFactory,
+        )),
         jwt_token: None,
         backend_secret: None,
         admin_secret: None,
-        sync_tracer: None,
     };
 
-    let client = JazzClient::connect(context).await.unwrap();
+    let client = TodoClient::connect(context).await.unwrap();
     let (sse_tx, _) = broadcast::channel::<Vec<Todo>>(16);
     let state = Arc::new(AppState { client, sse_tx });
 
@@ -113,7 +127,8 @@ async fn setup_test_app_with_path(data_dir: PathBuf) -> Router {
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::response::IntoResponse;
-use jazz_tools::{ObjectId, QueryBuilder, Value};
+use jazz::query::Query;
+use jazz::tools::{ObjectId, Value};
 
 fn row_to_todo(object_id: ObjectId, values: &[Value]) -> Option<Todo> {
     if values.len() < 2 {
@@ -143,12 +158,12 @@ fn todo_values(
     title: impl Into<String>,
     description: impl Into<String>,
 ) -> std::collections::HashMap<String, Value> {
-    jazz_tools::row_input!("title" => title.into(), "done" => false, "description" => description.into())
+    jazz::row_input!("title" => title.into(), "done" => false, "description" => description.into())
 }
 
 /// Broadcast current todos to all SSE connections.
 async fn broadcast_todos(state: &AppState) {
-    let query = QueryBuilder::new("todos").build();
+    let query = Query::from("todos");
     if let Ok(rows) = state.client.query(query, None).await {
         let todos: Vec<Todo> = rows
             .iter()
@@ -164,7 +179,7 @@ async fn todos_live(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = state.sse_tx.subscribe();
 
-    let query = QueryBuilder::new("todos").build();
+    let query = Query::from("todos");
     let initial_todos: Vec<Todo> = state
         .client
         .query(query, None)
@@ -195,7 +210,7 @@ async fn todos_live(
 }
 
 async fn list_todos(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let query = QueryBuilder::new("todos").build();
+    let query = Query::from("todos");
     match state.client.query(query, None).await {
         Ok(rows) => {
             let todos: Vec<Todo> = rows
@@ -218,7 +233,7 @@ async fn create_todo(
 ) -> impl IntoResponse {
     let description = request.description.clone().unwrap_or_default();
     let values = todo_values(request.title.clone(), description.clone());
-    match state.client.insert("todos", values) {
+    match state.client.insert("todos", values).await {
         Ok((row_id, row_values, _batch_id)) => {
             let todo = row_to_todo(row_id, &row_values);
             broadcast_todos(&state).await;
@@ -249,17 +264,17 @@ async fn update_todo(
         updates.push(("description".to_string(), Value::Text(description)));
     }
 
-    match state.client.update(object_id, updates) {
+    match state.client.update(object_id, updates).await {
         Ok(_batch_id) => {
             broadcast_todos(&state).await;
-            let query = QueryBuilder::new("todos").build();
+            let query = Query::from("todos");
             match state.client.query(query, None).await {
                 Ok(rows) => {
                     for (oid, values) in &rows {
-                        if *oid.uuid() == id {
-                            if let Some(todo) = row_to_todo(*oid, values) {
-                                return Json(todo).into_response();
-                            }
+                        if *oid.uuid() == id
+                            && let Some(todo) = row_to_todo(*oid, values)
+                        {
+                            return Json(todo).into_response();
                         }
                     }
                     (
@@ -288,7 +303,7 @@ async fn delete_todo(
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
     let object_id = ObjectId::from_uuid(id);
-    match state.client.delete(object_id) {
+    match state.client.delete(object_id).await {
         Ok(_batch_id) => {
             broadcast_todos(&state).await;
             StatusCode::NO_CONTENT.into_response()
@@ -454,19 +469,21 @@ async fn test_local_persistence() {
             server_url: String::new(),
             data_dir: data_path.clone(),
             storage: ClientStorage::Persistent,
+            storage_factory: Some(std::sync::Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory,
+            )),
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
-            sync_tracer: None,
         };
-        let client = JazzClient::connect(context).await.unwrap();
+        let client = connect_native(context).await.unwrap();
 
         // Create a todo
         let values = todo_values("Persist me", "");
         let (row_id, _row_values, _batch_id) = client.insert("todos", values).unwrap();
 
         // Verify it exists
-        let query = QueryBuilder::new("todos").build();
+        let query = Query::from("todos");
         let results = client.query(query, None).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1[0], Value::Text("Persist me".to_string()));
@@ -485,15 +502,17 @@ async fn test_local_persistence() {
             server_url: String::new(),
             data_dir: data_path,
             storage: ClientStorage::Persistent,
+            storage_factory: Some(std::sync::Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory,
+            )),
             jwt_token: None,
             backend_secret: None,
             admin_secret: None,
-            sync_tracer: None,
         };
-        let client = JazzClient::connect(context).await.unwrap();
+        let client = connect_native(context).await.unwrap();
 
         // Query todos - should have the one we created
-        let query = QueryBuilder::new("todos").build();
+        let query = Query::from("todos");
         let results = client.query(query, None).await.unwrap();
 
         assert_eq!(
@@ -673,7 +692,7 @@ impl TestServer {
 
         // Try building if not found (useful for first run)
         panic!(
-            "jazz binary not found at {:?}. Run `cargo build -p jazz-tools --bin jazz-tools --features cli` first.",
+            "jazz binary not found at {:?}. Run `cargo build -p jazz-cli --bin jazz-tools` first.",
             jazz_path
         );
     }
@@ -739,7 +758,7 @@ async fn jwks_handler(
 ///
 /// NOTE: This tests "subscribe triggers sync, data eventually arrives" behavior.
 /// We do NOT currently have upstream confirmation - "complete" means local graph
-/// settled, not that we've received all server data. See specs/sync_manager.md
+/// settled, not that we've received all server data. See crates/jazz/SPEC/8_sync_protocol.md
 /// Future Work section.
 ///
 /// NOTE: The core lazy schema activation is tested in jazz's
@@ -768,12 +787,14 @@ async fn test_server_resync() {
             server_url: server.base_url(),
             data_dir: data_path.clone(),
             storage: ClientStorage::Persistent,
+            storage_factory: Some(std::sync::Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory,
+            )),
             jwt_token: Some(make_test_jwt("client1-user")),
             backend_secret: None,
             admin_secret: None,
-            sync_tracer: None,
         };
-        let client = JazzClient::connect(context).await.unwrap();
+        let client = connect_native(context).await.unwrap();
         let permissions_schema = test_schema();
         publish_test_schema(&server.base_url(), test_app_id).await;
         permissions_support::publish_allow_all_permissions(
@@ -789,7 +810,7 @@ async fn test_server_resync() {
         let (_row_id, _row_values, _batch_id) = client.insert("todos", values).unwrap();
 
         // Verify it exists locally
-        let query = QueryBuilder::new("todos").build();
+        let query = Query::from("todos");
         let results = client.query(query.clone(), None).await.unwrap();
         assert_eq!(results.len(), 1, "Todo should exist locally");
 
@@ -829,16 +850,18 @@ async fn test_server_resync() {
             server_url: server.base_url(),
             data_dir: data_path,
             storage: ClientStorage::Persistent,
+            storage_factory: Some(std::sync::Arc::new(
+                jazz_storage_rocksdb::RocksDbStorageFactory,
+            )),
             jwt_token: Some(make_test_jwt("client2-user")),
             backend_secret: None,
             admin_secret: None, // Intentionally no admin - server already has schema
-            sync_tracer: None,
         };
-        let client = JazzClient::connect(context).await.unwrap();
+        let client = connect_native(context).await.unwrap();
 
         // One-shot query with EdgeServer settled tier — waits for the server's
         // QuerySettled response before resolving, ensuring synced data arrives.
-        let query = QueryBuilder::new("todos").build();
+        let query = Query::from("todos");
         let results = tokio::time::timeout(
             Duration::from_secs(10),
             client.query(query, Some(DurabilityTier::EdgeServer)),

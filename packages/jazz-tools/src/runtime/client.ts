@@ -7,16 +7,89 @@
 
 import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
 import type { InsertValues, Value, SubscriptionWireDelta, WasmSchema } from "../drivers/types.js";
-import { normalizeRuntimeSchema, serializeRuntimeSchema } from "../drivers/schema-wire.js";
-import type { AuthFailureReason } from "./sync-transport.js";
+import { normalizeRuntimeSchema } from "../drivers/schema-wire.js";
+import type { AuthFailureReason } from "./auth-state.js";
 import { resolveClientSessionStateSync } from "./client-session.js";
 import { mapAuthReason } from "./auth-state.js";
-import { translateQuery } from "./query-adapter.js";
 import {
   resolveRuntimeConfigSyncInitInput,
   resolveRuntimeConfigWasmUrl,
 } from "./runtime-config.js";
 import { httpUrlToWs } from "./url.js";
+import { PostcardWriter } from "./native-runtime/native-codec.js";
+
+function encodeBranchColumnValue(value: Value): Uint8Array {
+  const writer = new PostcardWriter();
+  switch (value.type) {
+    case "Integer":
+      if (
+        !Number.isSafeInteger(value.value) ||
+        value.value < -0x80000000 ||
+        value.value > 0x7fffffff
+      ) {
+        throw new Error("branch Integer values must be signed 32-bit integers");
+      }
+      writer.enumUnit(14); // groove::Value::I32
+      writer.i64(value.value);
+      break;
+    case "BigInt": {
+      if (typeof value.value === "number" && !Number.isSafeInteger(value.value)) {
+        throw new Error("branch BigInt values supplied as numbers must be safe integers");
+      }
+      const integer = BigInt(value.value);
+      if (integer < -(1n << 63n) || integer > (1n << 63n) - 1n) {
+        throw new Error("branch BigInt values must be signed 64-bit integers");
+      }
+      writer.enumUnit(13); // groove::Value::I64
+      writer.i64(integer);
+      break;
+    }
+    case "Uuid": {
+      writer.enumUnit(8); // groove::Value::Uuid
+      const hex = value.value.replaceAll("-", "");
+      if (!/^[0-9a-fA-F]{32}$/.test(hex)) throw new Error(`invalid branch UUID ${value.value}`);
+      writer.bytes(
+        Uint8Array.from({ length: 16 }, (_, index) =>
+          Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16),
+        ),
+      );
+      break;
+    }
+    case "Text":
+      writer.enumUnit(6); // groove::Value::String
+      writer.string(value.value);
+      break;
+    default:
+      throw new Error(
+        `branch columns currently require Integer, BigInt, Text, or Uuid values; got ${value.type}`,
+      );
+  }
+  return writer.finish();
+}
+
+type WireBranchSelector = { values: Record<string, number[]> };
+type WireBranchViewBase =
+  | { Current: WireBranchSelector }
+  | { Snapshot: { branch: WireBranchSelector; snapshot: unknown } };
+
+function encodeBranchSelector(value: BranchSelector): WireBranchSelector {
+  return {
+    values: Object.fromEntries(
+      Object.entries(value.values).map(([name, branchValue]) => [
+        name,
+        Array.from(encodeBranchColumnValue(branchValue)),
+      ]),
+    ),
+  };
+}
+
+function encodeBranchViewBase(base: BranchViewBase | undefined): WireBranchViewBase | undefined {
+  return base?.kind === "current"
+    ? { Current: encodeBranchSelector(base.branch) }
+    : base?.kind === "snapshot"
+      ? { Snapshot: { branch: encodeBranchSelector(base.branch), snapshot: base.snapshot } }
+      : undefined;
+}
 
 /**
  * Minimal request shape supported by backend request helpers.
@@ -30,10 +103,7 @@ export interface RequestLike {
 }
 
 /**
- * Common interface for WASM and NAPI runtimes.
- *
- * Both `WasmRuntime` (from jazz-wasm) and `NapiRuntime` (from jazz-napi)
- * satisfy this interface, allowing `JazzClient` to work with either backend.
+ * Common interface for the runtime backing `JazzClient`.
  */
 export interface Runtime {
   insert(
@@ -41,30 +111,58 @@ export interface Runtime {
     values: InsertValues,
     write_context_json?: string | null,
     object_id?: string | null,
-  ): DirectInsertResult;
+  ): InsertResult;
   restore(
     table: string,
     object_id: string,
     values: InsertValues,
     write_context_json?: string | null,
-  ): DirectInsertResult;
+  ): InsertResult;
   update(
+    table: string,
     object_id: string,
     values: Record<string, Value>,
     write_context_json?: string | null,
-  ): DirectMutationResult;
+  ): MutationResult;
   upsert(
     table: string,
     object_id: string,
     values: InsertValues,
     write_context_json?: string | null,
-  ): DirectMutationResult;
-  delete(object_id: string, write_context_json?: string | null): DirectMutationResult;
+  ): MutationResult;
+  delete(table: string, object_id: string, write_context_json?: string | null): MutationResult;
+  canInsertLocally?(table: string, values: InsertValues, session?: Session): PermissionAdvice;
+  canReadLocally?(table: string, objectId: string, session?: Session): PermissionAdvice;
+  canUpdateLocally?(
+    table: string,
+    objectId: string,
+    values: Record<string, Value>,
+    session?: Session,
+  ): PermissionAdvice;
+  canDeleteLocally?(table: string, objectId: string, session?: Session): PermissionAdvice;
+  requestInsertPermissionAdvice?(
+    table: string,
+    values: InsertValues,
+    session?: Session,
+  ): Promise<PermissionAdvice>;
+  requestReadPermissionAdvice?(
+    table: string,
+    objectId: string,
+    session?: Session,
+  ): Promise<PermissionAdvice>;
+  requestUpdatePermissionAdvice?(
+    table: string,
+    objectId: string,
+    values: Record<string, Value>,
+    session?: Session,
+  ): Promise<PermissionAdvice>;
+  requestDeletePermissionAdvice?(
+    table: string,
+    objectId: string,
+    session?: Session,
+  ): Promise<PermissionAdvice>;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
-  beginBatch(batch_mode: BatchMode): string;
-  commitBatch(batch_id: string): void;
-  waitForBatch(batch_id: string, tier: string): Promise<void>;
-  rollbackBatch(batch_id: string): boolean;
+  waitForTransaction(batchId: BatchId | Promise<BatchId>, tier: string): Promise<void>;
   query(
     query_json: string,
     session_json?: string | null,
@@ -79,31 +177,71 @@ export interface Runtime {
   ): number;
   executeSubscription(handle: number, on_update: Function): void;
   unsubscribe(handle: number): void;
-  /**
-   * Construct a Rust-owned worker bridge attached to this runtime. Returns
-   * an opaque handle that the TS `WorkerBridge` adapter wraps. WASM-only.
-   * Options are parsed at attach time; `bridge.init()` is parameter-less.
-   */
-  createWorkerBridge?(worker: Worker, options: object): unknown;
-  getSchema(): any;
-  getSchemaHash(): string;
   close?(): void | Promise<void>;
+  /** Abandon a runtime whose backing persistence epoch was invalidated. */
+  discard?(): void;
+  clearClientStorage?(): Promise<void>;
   /** Connect to a Jazz server over WebSocket (Rust transport). */
   connect(url: string, auth_json: string): void;
-  /** Disconnect from the Jazz server and drop the transport handle. */
-  disconnect(): void;
+  /**
+   * Disconnect from the Jazz server and drop the transport handle.
+   *
+   * Resolves once the runtime has completed the disconnect. For worker-backed
+   * runtimes, this includes a round-trip in which the worker performs the
+   * disconnect before replying.
+   */
+  disconnect(options?: { rejectWaiters?: boolean }): Promise<void>;
   /** Push updated auth credentials into the live Rust transport. */
   updateAuth(auth_json: string): void;
   /** Register a callback invoked when the Rust transport rejects the JWT. */
   onAuthFailure(callback: (reason: string) => void): void;
-  /** @internal Enable senderless outbox buffering for brokered browser-tab runtimes. */
-  enableOutboxBufferingWithoutSyncSender?(): void;
+}
+
+/**
+ * Advisory result for a permission preflight. `allowed` and `denied` are
+ * final only when a trusted-serving authority evaluated the request;
+ * `unknown` means that a local replica or unavailable authority cannot decide.
+ */
+export type PermissionAdvice = "allowed" | "denied" | "unknown";
+
+export interface TransactionalRuntime extends Runtime {
+  beginTransaction(
+    transactionKind: TransactionKind,
+    id: OpenBatchId,
+    sessionJson?: string | null,
+  ): OpenBatchId;
+  commitTransaction(id: OpenBatchId): BatchId;
+  rollbackTransaction(id: OpenBatchId): Promise<boolean>;
+}
+
+declare const openBatchIdBrand: unique symbol;
+declare const batchIdBrand: unique symbol;
+
+/** Identity of a mutable batch. Invalid after commit or rollback. */
+export type OpenBatchId = string & { readonly [openBatchIdBrand]: true };
+/** Immutable identity assigned to a successfully committed batch. */
+export type BatchId = string & { readonly [batchIdBrand]: true };
+
+/** Generate a coordination-free UUIDv7 identity for a new mutable batch. */
+export function createOpenBatchId(): OpenBatchId {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  const timestamp = Date.now();
+  bytes[0] = Math.floor(timestamp / 2 ** 40) & 0xff;
+  bytes[1] = Math.floor(timestamp / 2 ** 32) & 0xff;
+  bytes[2] = Math.floor(timestamp / 2 ** 24) & 0xff;
+  bytes[3] = Math.floor(timestamp / 2 ** 16) & 0xff;
+  bytes[4] = Math.floor(timestamp / 2 ** 8) & 0xff;
+  bytes[5] = timestamp & 0xff;
+  bytes[6] = (bytes[6]! & 0x0f) | 0x70;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return hex as OpenBatchId;
 }
 
 /**
  * Authentication configuration for connecting to a Jazz server.
  *
- * Maps directly to the Rust `AuthConfig` struct in `jazz-tools/src/transport_manager.rs`.
+ * Maps directly to the Rust `AuthConfig` struct in `jazz-tools/src/websocket_prelude_auth.rs`.
  * All fields are optional; supply only the ones relevant to your auth mode.
  */
 export interface AuthConfig {
@@ -148,15 +286,34 @@ export type QueryPropagation = "full" | "local-only";
  * Defaults to `"public"`.
  */
 export type QueryVisibility = "public" | "hidden_from_live_query_list";
+
+/** Named values selecting one exact branch-local row coordinate. */
+export interface BranchSelector {
+  values: Record<string, Value>;
+}
+
+/** A live or application-resolved frozen base underneath a branch head. */
+export type BranchViewBase =
+  | { kind: "current"; branch: BranchSelector }
+  | { kind: "snapshot"; branch: BranchSelector; snapshot: unknown };
+
+/** User-facing head-over-base branch view. */
+export interface BranchView {
+  head: BranchSelector;
+  base?: BranchViewBase;
+}
+
 export interface QueryExecutionOptions {
   tier?: DurabilityTier;
   localUpdates?: LocalUpdatesMode;
   propagation?: QueryPropagation;
   visibility?: QueryVisibility;
+  /** Admit exact-head history, falling back to an optional live or frozen base. */
+  branch?: BranchView;
 }
 
 type InternalQueryExecutionOptions = QueryExecutionOptions & {
-  transactionBatchId?: string;
+  openBatchId?: OpenBatchId;
   runtimeSettledTier?: DurabilityTier | null;
 };
 
@@ -165,71 +322,77 @@ export interface ResolvedQueryExecutionOptions {
   localUpdates: LocalUpdatesMode;
   propagation: QueryPropagation;
   visibility: QueryVisibility;
+  branch?: BranchView;
 }
 
 type ResolvedInternalQueryExecutionOptions = ResolvedQueryExecutionOptions & {
-  transactionBatchId?: string;
+  openBatchId?: OpenBatchId;
 };
 
 interface TimestampOverrideOptions {
   updatedAt?: number;
 }
 
-export type BatchMode = "direct" | "transactional";
+/**
+ * Selects the transaction semantics used for grouped writes.
+ *
+ * - `mergeable`: eventually-consistent writes that merge with concurrent writes.
+ * - `exclusive`: serializable writes that are validated as one unit by the authority.
+ */
+export type TransactionKind = "mergeable" | "exclusive";
 
-export type BatchFate =
+export type TransactionFate =
   | {
       kind: "missing";
-      batchId: BatchId;
+      transactionId: BatchId;
     }
   | {
       kind: "rejected";
-      batchId: BatchId;
+      transactionId: BatchId;
       code: string;
       reason: string;
     }
   | {
-      kind: "durableDirect";
-      batchId: BatchId;
-      confirmedTier: DurabilityTier;
-    }
-  | {
-      kind: "acceptedTransaction";
-      batchId: BatchId;
+      kind: "accepted";
+      transactionId: BatchId;
       confirmedTier: DurabilityTier;
     };
 
-export interface LocalBatchRecord {
-  batchId: BatchId;
-  mode: BatchMode;
+export interface LocalTransactionRecord {
+  transactionId: BatchId;
+  kind: TransactionKind;
   sealed: boolean;
-  latestSettlement: BatchFate | null;
+  latestSettlement: TransactionFate;
   encodedRecord?: Uint8Array;
 }
 
-export interface CreateOptions extends TimestampOverrideOptions {
-  id?: string;
-}
-
-export interface UpsertOptions extends TimestampOverrideOptions {
-  id: string;
-}
-
-export interface UpdateOptions extends TimestampOverrideOptions {}
-
-export interface DeleteOptions extends TimestampOverrideOptions {}
-
-export interface RestoreOptions extends TimestampOverrideOptions {}
-
 /**
- * A mutation error event emitted by {@link JazzClient.onMutationError}.
- * Contains enough information to understand the cause of the error and
- * correlate it with a specific mutation.
+ * A rejected write emitted by {@link JazzClient.onMutationError}.
+ *
+ * The event is a fallback for writes whose rejection was not handled by an
+ * active {@link WriteHandle.wait} call.
  */
 export interface MutationErrorEvent {
   code: string;
   reason: string;
-  batch: LocalBatchRecord;
+  transaction: LocalTransactionRecord;
+}
+
+export interface InsertOptions extends TimestampOverrideOptions {
+  id?: string;
+  branch?: BranchSelector;
+}
+
+export interface UpdateOptions extends TimestampOverrideOptions {
+  branch?: BranchView;
+}
+
+export interface DeleteOptions extends TimestampOverrideOptions {
+  branch?: BranchView;
+}
+
+export interface RestoreOptions extends TimestampOverrideOptions {
+  branch?: BranchSelector;
 }
 
 /**
@@ -240,21 +403,20 @@ export interface Row {
   values: Value[];
 }
 
-export interface DirectInsertResult extends Row {
-  batchId: BatchId;
-}
+export type WriteReceipt =
+  | { readonly kind: "committed"; readonly batchId: BatchId | Promise<BatchId> }
+  | { readonly kind: "staged"; readonly openBatchId: OpenBatchId };
 
-export interface DirectMutationResult {
-  batchId: BatchId;
-}
+export type InsertResult = Row & WriteReceipt;
+export type MutationResult = WriteReceipt;
 
 interface WriteContextPayload {
   session?: Session;
   attribution?: string;
   updated_at?: number;
-  batch_mode?: BatchMode;
   batch_id?: string;
   target_branch_name?: string;
+  branch_view?: { head: WireBranchSelector; base?: WireBranchViewBase };
 }
 
 /**
@@ -262,19 +424,8 @@ interface WriteContextPayload {
  */
 export type SubscriptionCallback = (delta: SubscriptionWireDelta) => void;
 
-export interface ConnectSyncRuntimeOptions {
-  useBinaryEncoding?: boolean;
+export interface ConnectRuntimeOptions {
   onAuthFailure?: (reason: AuthFailureReason) => void;
-  nonDurableClientRuntime?: boolean;
-}
-
-/**
- * QueryBuilder-compatible input accepted by query and subscribe APIs.
- */
-export interface QueryInput {
-  _build(): string;
-  /** Optional schema metadata available on generated QueryBuilder objects. */
-  _schema?: WasmSchema;
 }
 
 type QueryExecutionDefaultsContext = {
@@ -307,39 +458,8 @@ export function resolveEffectiveQueryExecutionOptions(
     localUpdates: options?.localUpdates ?? "immediate",
     propagation: options?.propagation ?? "full",
     visibility: options?.visibility ?? "public",
+    branch: options?.branch,
   };
-}
-
-function resolveQueryJson(query: string | QueryInput): string {
-  if (typeof query === "string") {
-    return query;
-  }
-
-  const builtQuery = query._build();
-  const schema = query._schema;
-  if (!schema || typeof schema !== "object" || Array.isArray(schema)) {
-    return builtQuery;
-  }
-
-  // Query payloads already in runtime form include relation_ir and should pass through unchanged.
-  try {
-    const parsed = JSON.parse(builtQuery) as Record<string, unknown>;
-    if (parsed && typeof parsed === "object" && "relation_ir" in parsed) {
-      return builtQuery;
-    }
-  } catch {
-    return builtQuery;
-  }
-
-  return translateQuery(builtQuery, schema);
-}
-
-function resolveNodeTier(tier: AppContext["tier"]): string | undefined {
-  if (!tier) return undefined;
-  if (Array.isArray(tier)) {
-    return tier[0];
-  }
-  return tier;
 }
 
 function isBrowserRuntime(): boolean {
@@ -365,6 +485,16 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
     propagation?: QueryPropagation;
     local_updates?: LocalUpdatesMode;
     transaction_batch_id?: string;
+    read_view?: {
+      source: {
+        BranchView: {
+          head: WireBranchSelector;
+          base?:
+            | { Current: WireBranchSelector }
+            | { Snapshot: { branch: WireBranchSelector; snapshot: unknown } };
+        };
+      };
+    };
   } = {};
   if ((options.propagation ?? "full") !== "full") {
     payload.propagation = options.propagation;
@@ -372,11 +502,27 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
   if ((options.localUpdates ?? "immediate") !== "immediate") {
     payload.local_updates = options.localUpdates;
   }
-  if (options.transactionBatchId) {
-    payload.transaction_batch_id = options.transactionBatchId;
+  if (options.openBatchId) {
+    payload.transaction_batch_id = options.openBatchId;
+  }
+  if (options.branch) {
+    const base = options.branch.base;
+    payload.read_view = {
+      source: {
+        BranchView: {
+          head: encodeBranchSelector(options.branch.head),
+          base: encodeBranchViewBase(base),
+        },
+      },
+    };
   }
 
-  if (!payload.propagation && !payload.local_updates && !payload.transaction_batch_id) {
+  if (
+    !payload.propagation &&
+    !payload.local_updates &&
+    !payload.transaction_batch_id &&
+    !payload.read_view
+  ) {
     return undefined;
   }
 
@@ -385,7 +531,11 @@ function encodeQueryExecutionOptions(options: InternalQueryExecutionOptions): st
 
 function normalizeSubscriptionCallbackArgs(
   args: unknown[],
-): SubscriptionWireDelta | string | undefined {
+): Error | SubscriptionWireDelta | string | undefined {
+  if (args.length === 2 && args[0] instanceof Error) {
+    return args[0];
+  }
+
   if (args.length === 1) {
     return args[0] as SubscriptionWireDelta | string;
   }
@@ -398,7 +548,24 @@ function normalizeSubscriptionCallbackArgs(
   return undefined;
 }
 
-type BatchId = string;
+function requireTransactionalRuntime(runtime: Runtime): TransactionalRuntime {
+  if (
+    typeof (runtime as Partial<TransactionalRuntime>).beginTransaction === "function" &&
+    typeof (runtime as Partial<TransactionalRuntime>).commitTransaction === "function" &&
+    typeof (runtime as Partial<TransactionalRuntime>).rollbackTransaction === "function"
+  ) {
+    return runtime as TransactionalRuntime;
+  }
+
+  throw new Error("This Jazz runtime does not support transactions");
+}
+
+function committedBatchId(result: WriteReceipt): BatchId | Promise<BatchId> {
+  if (result.kind !== "committed") {
+    throw new Error(`Runtime returned staged batch ${result.openBatchId} for an ordinary write`);
+  }
+  return result.batchId;
+}
 
 function normalizeUpdatedAt(updatedAt?: number): number | undefined {
   if (updatedAt === undefined) {
@@ -416,7 +583,7 @@ function rejectionFromRuntimeWaitError(error: unknown): PersistedWriteRejectedEr
   }
   const candidate = error as {
     kind?: unknown;
-    batchId?: unknown;
+    transactionId?: unknown;
     code?: unknown;
     reason?: unknown;
   };
@@ -426,11 +593,15 @@ function rejectionFromRuntimeWaitError(error: unknown): PersistedWriteRejectedEr
   if (
     typeof candidate.code !== "string" ||
     typeof candidate.reason !== "string" ||
-    typeof candidate.batchId !== "string"
+    typeof candidate.transactionId !== "string"
   ) {
     return null;
   }
-  return new PersistedWriteRejectedError(candidate.batchId, candidate.code, candidate.reason);
+  return new PersistedWriteRejectedError(
+    candidate.transactionId as BatchId,
+    candidate.code,
+    candidate.reason,
+  );
 }
 
 /**
@@ -440,25 +611,29 @@ export class PersistedWriteRejectedError extends Error {
   readonly name = "PersistedWriteRejectedError";
 
   constructor(
-    readonly batchId: BatchId,
+    readonly transactionId: BatchId,
     readonly code: string,
     readonly reason: string,
   ) {
-    super(`Persisted batch ${batchId} was rejected (${code}): ${reason}`);
+    super(`Persisted transaction ${transactionId} was rejected (${code}): ${reason}`);
   }
 }
 
 /**
- * Returned by upsert, update, and delete operations, and explicitly-committed transactions.
+ * Returned by upsert, update, delete, and transaction operations.
  * Allows waiting for the write to be persisted at a given durability tier.
  */
 export class WriteHandle<T = void> {
   readonly #client: JazzClient;
+  readonly value: T;
+  readonly batchId: Promise<BatchId>;
+  /** @deprecated Use {@link batchId}. */
+  readonly transactionId: Promise<BatchId>;
 
-  constructor(
-    readonly batchId: BatchId,
-    client: JazzClient,
-  ) {
+  constructor(batchId: BatchId | Promise<BatchId>, client: JazzClient, value = undefined as T) {
+    this.value = value;
+    this.batchId = Promise.resolve(batchId);
+    this.transactionId = this.batchId;
     this.#client = client;
   }
 
@@ -468,7 +643,7 @@ export class WriteHandle<T = void> {
    * Rejects with a {@link PersistedWriteRejectedError} if the write is rejected.
    */
   async wait(options: { tier: DurabilityTier }): Promise<T> {
-    return this.#client.waitForBatch(this.batchId, options.tier) as Promise<T>;
+    return this.#client.waitForTransaction(this.batchId, options.tier) as Promise<T>;
   }
 
   protected client(): JazzClient {
@@ -482,12 +657,8 @@ export class WriteHandle<T = void> {
  * to be persisted at a given durability tier.
  */
 export class WriteResult<T> extends WriteHandle<T> {
-  constructor(
-    readonly value: T,
-    batchId: BatchId,
-    client: JazzClient,
-  ) {
-    super(batchId, client);
+  constructor(value: T, batchId: BatchId | Promise<BatchId>, client: JazzClient) {
+    super(batchId, client, value);
   }
 
   /**
@@ -506,87 +677,41 @@ export class WriteResult<T> extends WriteHandle<T> {
   }
 }
 
-function isPromiseLike<T>(value: T | PromiseLike<T>): value is PromiseLike<T> {
-  return (
-    value !== null &&
-    (typeof value === "object" || typeof value === "function") &&
-    typeof (value as PromiseLike<T>).then === "function"
-  );
-}
-
-type RunInBatchResult<TResult> =
-  TResult extends PromiseLike<unknown>
-    ? Promise<WriteResult<Awaited<TResult>>>
-    : WriteResult<TResult>;
-
-export type Scoped<TBatchOrTx> = Omit<TBatchOrTx, "commit" | "rollback">;
-
-function createBatchScope<TBatchOrTx extends object>(batchOrTx: TBatchOrTx): Scoped<TBatchOrTx> {
-  return new Proxy(batchOrTx, {
-    get(target, property) {
-      if (property === "commit" || property === "rollback") {
-        return undefined;
-      }
-
-      const value = Reflect.get(target, property, target);
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-    has(target, property) {
-      if (property === "commit" || property === "rollback") {
-        return false;
-      }
-
-      return Reflect.has(target, property);
-    },
-    set(target, property, value) {
-      return Reflect.set(target, property, value, target);
-    },
-  }) as Scoped<TBatchOrTx>;
-}
-
-function rollback(batchOrTx: { rollback: () => void }): void {
-  try {
-    batchOrTx.rollback();
-  } catch {
-    // Preserve the original callback error.
+/**
+ * Returned by explicitly-committed exclusive transactions.
+ *
+ * Exclusive transactions are accepted or rejected by the global authority, so
+ * callers do not choose a durability tier when waiting for confirmation.
+ */
+export class ExclusiveWriteHandle extends WriteHandle<void> {
+  /**
+   * Wait for the exclusive transaction to be accepted or rejected by the authority.
+   *
+   * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected.
+   */
+  override async wait(): Promise<void> {
+    await this.client().waitForExclusiveTransaction(await this.batchId);
   }
 }
 
-export function runInBatch<
-  TBatchOrTx extends { commit(): WriteHandle; rollback: () => void },
-  TResult,
->(
-  batchOrTx: TBatchOrTx,
-  callback: (target: Scoped<TBatchOrTx>) => TResult,
-  client: JazzClient | (() => JazzClient),
-): RunInBatchResult<TResult> {
-  let value: TResult;
-  try {
-    const scope = createBatchScope(batchOrTx);
-    value = callback(scope);
-  } catch (error) {
-    rollback(batchOrTx);
-    throw error;
+/**
+ * Returned by auto-committed exclusive transactions.
+ */
+export class ExclusiveWriteResult<T> extends WriteResult<T> {
+  /**
+   * Wait for the exclusive transaction to be accepted or rejected by the authority.
+   *
+   * Rejects with a {@link PersistedWriteRejectedError} if the transaction is rejected.
+   * @returns the callback result.
+   */
+  override async wait(): Promise<T> {
+    await this.client().waitForExclusiveTransaction(await this.batchId);
+    return this.value;
   }
-  const resultClient = typeof client === "function" ? client : () => client;
-  if (isPromiseLike(value)) {
-    return value.then(
-      (resolvedValue) => {
-        const committed = batchOrTx.commit();
-        return new WriteResult(
-          resolvedValue as Awaited<TResult>,
-          committed.batchId,
-          resultClient(),
-        );
-      },
-      (error) => {
-        rollback(batchOrTx);
-        throw error;
-      },
-    ) as RunInBatchResult<TResult>;
+
+  override mapValue<U>(transformValue: (value: T) => U): ExclusiveWriteResult<U> {
+    return new ExclusiveWriteResult(transformValue(this.value), this.batchId, this.client());
   }
-  const committed = batchOrTx.commit();
-  return new WriteResult(value, committed.batchId, resultClient()) as RunInBatchResult<TResult>;
 }
 
 /**
@@ -599,8 +724,6 @@ export class JazzClient {
   private resolvedSession: Session | null;
   private defaultDurabilityTier: DurabilityTier;
   private shutdownPromise: Promise<void> | null = null;
-  private cachedRuntimeSchemaHash: string | null = null;
-  private cachedRuntimeSchema: WasmSchema | null = null;
 
   private resolveSessionFromContext(): Session | null {
     return resolveClientSessionStateSync({
@@ -614,17 +737,22 @@ export class JazzClient {
     jwt_token: string | null;
     admin_secret?: string;
     backend_secret?: string;
+    backend_session?: Session;
   } {
     const payload: {
       jwt_token: string | null;
       admin_secret?: string;
       backend_secret?: string;
+      backend_session?: Session;
     } = { jwt_token: this.context.jwtToken ?? null };
     if (this.context.adminSecret) {
       payload.admin_secret = this.context.adminSecret;
     }
     if (this.context.backendSecret) {
       payload.backend_secret = this.context.backendSecret;
+      if (this.context.cookieSession) {
+        payload.backend_session = this.context.cookieSession;
+      }
     }
     return payload;
   }
@@ -633,7 +761,7 @@ export class JazzClient {
     runtime: Runtime,
     context: AppContext,
     defaultDurabilityTier: DurabilityTier,
-    runtimeOptions?: ConnectSyncRuntimeOptions,
+    runtimeOptions?: ConnectRuntimeOptions,
   ) {
     this.runtime = runtime;
     this.scheduler = getScheduler();
@@ -654,40 +782,9 @@ export class JazzClient {
   }
 
   /**
-   * Create client synchronously with a pre-loaded WASM module.
+   * Create client from a pre-constructed runtime.
    *
-   * Use this after loading WASM via `loadWasmModule()` to avoid
-   * async client creation. This enables sync mutations in the Db class.
-   *
-   * @param wasmModule Pre-loaded WASM module from loadWasmModule()
-   * @param context Application context with driver and schema
-   * @returns Connected JazzClient instance (created synchronously)
-   */
-  static connectSync(
-    wasmModule: WasmModule,
-    context: AppContext,
-    runtimeOptions?: ConnectSyncRuntimeOptions,
-  ): JazzClient {
-    // Create WASM runtime (storage is now synchronous in-memory)
-    const schemaJson = serializeRuntimeSchema(context.schema);
-    const runtime = new wasmModule.WasmRuntime(
-      schemaJson,
-      context.appId,
-      context.env ?? "dev",
-      context.userBranch ?? "main",
-      resolveNodeTier(context.tier),
-      runtimeOptions?.useBinaryEncoding ?? false,
-      runtimeOptions?.nonDurableClientRuntime ?? false,
-    );
-
-    return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
-  }
-
-  /**
-   * Create client from a pre-constructed runtime (e.g., NapiRuntime).
-   *
-   * This allows server-side apps to use the native NAPI backend directly
-   * without WASM loading.
+   * RuntimeSource implementations use this after selecting the platform runtime.
    *
    * @param runtime A runtime implementing the Runtime interface
    * @param context Application context
@@ -696,26 +793,32 @@ export class JazzClient {
   static connectWithRuntime(
     runtime: Runtime,
     context: AppContext,
-    runtimeOptions?: ConnectSyncRuntimeOptions,
+    runtimeOptions?: ConnectRuntimeOptions,
   ): JazzClient {
     return new JazzClient(runtime, context, resolveDefaultDurabilityTier(context), runtimeOptions);
   }
 
-  beginBatch(batchMode: BatchMode): BatchId {
-    return this.runtime.beginBatch(batchMode);
+  beginTransaction(kind: TransactionKind, session?: Session, attribution?: string): OpenBatchId {
+    const id = createOpenBatchId();
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    return requireTransactionalRuntime(this.runtime).beginTransaction(
+      kind,
+      id,
+      this.encodeWriteContext(effectiveSession, attribution),
+    );
   }
 
   onMutationError(listener: (event: MutationErrorEvent) => void): void {
     this.runtime.onMutationError(listener);
   }
 
-  commitBatch(batchId: BatchId): WriteHandle {
-    this.runtime.commitBatch(batchId);
+  commitTransaction(id: OpenBatchId): WriteHandle {
+    const batchId = requireTransactionalRuntime(this.runtime).commitTransaction(id);
     return new WriteHandle(batchId, this);
   }
 
-  rollbackBatch(batchId: BatchId): void {
-    this.runtime.rollbackBatch(batchId);
+  rollbackTransaction(id: OpenBatchId): Promise<boolean> {
+    return requireTransactionalRuntime(this.runtime).rollbackTransaction(id);
   }
 
   /**
@@ -757,25 +860,38 @@ export class JazzClient {
       { ...this.context, defaultDurabilityTier: this.defaultDurabilityTier },
       options,
     );
-    if (!options?.transactionBatchId) {
+    if (!options?.openBatchId) {
       return resolved;
     }
     return {
       ...resolved,
-      transactionBatchId: options.transactionBatchId,
+      openBatchId: options.openBatchId,
     };
   }
 
   private encodeWriteContext(
     session?: Session,
     attribution?: string,
-    batchId?: BatchId,
+    openBatchId?: OpenBatchId,
     updatedAt?: number,
+    branch?: BranchView,
   ): string | undefined {
-    if (!session && attribution === undefined && !batchId && updatedAt === undefined) {
+    if (
+      !session &&
+      attribution === undefined &&
+      !openBatchId &&
+      updatedAt === undefined &&
+      !branch
+    ) {
       return undefined;
     }
-    if (attribution === undefined && session && !batchId && updatedAt === undefined) {
+    if (
+      attribution === undefined &&
+      session &&
+      !openBatchId &&
+      updatedAt === undefined &&
+      !branch
+    ) {
       return JSON.stringify(session);
     }
 
@@ -789,8 +905,14 @@ export class JazzClient {
     if (updatedAt !== undefined) {
       payload.updated_at = normalizeUpdatedAt(updatedAt);
     }
-    if (batchId) {
-      payload.batch_id = batchId;
+    if (openBatchId) {
+      payload.batch_id = openBatchId;
+    }
+    if (branch) {
+      payload.branch_view = {
+        head: encodeBranchSelector(branch.head),
+        base: encodeBranchViewBase(branch.base),
+      };
     }
     return JSON.stringify(payload);
   }
@@ -811,12 +933,12 @@ export class JazzClient {
   insert(
     table: string,
     values: InsertValues,
-    options?: CreateOptions,
+    options?: InsertOptions,
     session?: Session,
     attribution?: string,
   ): WriteResult<Row> {
     const row = this.insertInternal(table, values, options, session, attribution);
-    return new WriteResult(row, row.batchId, this);
+    return new WriteResult(row, committedBatchId(row), this);
   }
 
   /**
@@ -825,17 +947,18 @@ export class JazzClient {
   insertInternal(
     table: string,
     values: InsertValues,
-    options?: CreateOptions,
+    options?: InsertOptions,
     session?: Session,
     attribution?: string,
-    batchId?: BatchId,
-  ): DirectInsertResult {
+    openBatchId?: OpenBatchId,
+  ): InsertResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
       effectiveSession,
       attribution,
-      batchId,
+      openBatchId,
       options?.updatedAt,
+      options?.branch ? { head: options.branch } : undefined,
     );
     const row = this.runtime.insert(table, values, writeContext, options?.id);
     return {
@@ -856,7 +979,7 @@ export class JazzClient {
     attribution?: string,
   ): WriteResult<Row> {
     const row = this.restoreInternal(table, objectId, values, options, session, attribution);
-    return new WriteResult(row, row.batchId, this);
+    return new WriteResult(row, committedBatchId(row), this);
   }
 
   /**
@@ -869,14 +992,15 @@ export class JazzClient {
     options?: RestoreOptions,
     session?: Session,
     attribution?: string,
-    batchId?: BatchId,
-  ): DirectInsertResult {
+    openBatchId?: OpenBatchId,
+  ): InsertResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
       effectiveSession,
       attribution,
-      batchId,
+      openBatchId,
       options?.updatedAt,
+      options?.branch ? { head: options.branch } : undefined,
     );
     const row = this.runtime.restore(table, objectId, values, writeContext);
     return {
@@ -890,13 +1014,14 @@ export class JazzClient {
    */
   upsert(
     table: string,
+    objectId: string,
     values: InsertValues,
-    options: UpsertOptions,
+    options?: TimestampOverrideOptions,
     session?: Session,
     attribution?: string,
   ): WriteHandle {
-    const result = this.upsertInternal(table, values, options, session, attribution);
-    return new WriteHandle(result.batchId, this);
+    const result = this.upsertInternal(table, objectId, values, options, session, attribution);
+    return new WriteHandle(committedBatchId(result), this);
   }
 
   /**
@@ -904,41 +1029,41 @@ export class JazzClient {
    */
   upsertInternal(
     table: string,
+    objectId: string,
     values: InsertValues,
-    options: UpsertOptions,
+    options?: TimestampOverrideOptions,
     session?: Session,
     attribution?: string,
-    batchId?: BatchId,
-  ): DirectMutationResult {
+    openBatchId?: OpenBatchId,
+  ): MutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
     const writeContext = this.encodeWriteContext(
       effectiveSession,
       attribution,
-      batchId,
-      options.updatedAt,
+      openBatchId,
+      options?.updatedAt,
     );
-    return this.runtime.upsert(table, options.id, values, writeContext);
+    return this.runtime.upsert(table, objectId, values, writeContext);
   }
 
   /**
    * Execute a query and return all matching rows.
    *
-   * @param query Query builder or JSON-encoded query specification
+   * @param query JSON-encoded runtime query specification
    * @param options Optional read durability options
    * @returns Array of matching rows
    */
   async query(
-    query: string | QueryInput,
+    query: string,
     options?: InternalQueryExecutionOptions,
     session?: Session,
   ): Promise<Row[]> {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
-    const queryJson = resolveQueryJson(query);
     const effectiveSession = session ?? this.resolvedSession;
     const sessionJson = effectiveSession ? JSON.stringify(effectiveSession) : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
     const results = await this.runtime.query(
-      queryJson,
+      query,
       sessionJson,
       options?.runtimeSettledTier === null
         ? undefined
@@ -952,6 +1077,7 @@ export class JazzClient {
    * Update a row by ID without waiting for durability.
    */
   update(
+    table: string,
     objectId: string,
     updates: Record<string, Value>,
     options?: UpdateOptions,
@@ -959,70 +1085,205 @@ export class JazzClient {
     attribution?: string,
   ): WriteHandle {
     const result = this.updateInternal(
+      table,
       objectId,
       updates,
       options?.updatedAt,
       session,
       attribution,
       undefined,
+      options?.branch,
     );
-    return new WriteHandle(result.batchId, this);
+    return new WriteHandle(committedBatchId(result), this);
   }
 
   /**
    * @internal
    */
   updateInternal(
+    table: string,
     objectId: string,
     updates: Record<string, Value>,
     updatedAt?: number,
     session?: Session,
     attribution?: string,
-    batchId?: BatchId,
-  ): DirectMutationResult {
+    openBatchId?: OpenBatchId,
+    branch?: BranchView,
+  ): MutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    const writeContext = this.encodeWriteContext(effectiveSession, attribution, batchId, updatedAt);
-    return this.runtime.update(objectId, updates, writeContext);
+    const writeContext = this.encodeWriteContext(
+      effectiveSession,
+      attribution,
+      openBatchId,
+      updatedAt,
+      branch,
+    );
+    return this.runtime.update(table, objectId, updates, writeContext);
   }
 
   /**
    * Delete a row by ID without waiting for durability.
    */
   delete(
+    table: string,
     objectId: string,
     options?: DeleteOptions,
     session?: Session,
     attribution?: string,
   ): WriteHandle {
-    const result = this.deleteInternal(objectId, options?.updatedAt, session, attribution);
-    return new WriteHandle(result.batchId, this);
+    const result = this.deleteInternal(
+      table,
+      objectId,
+      options?.updatedAt,
+      session,
+      attribution,
+      undefined,
+      options?.branch,
+    );
+    return new WriteHandle(committedBatchId(result), this);
+  }
+
+  canInsertLocally(table: string, values: InsertValues, session?: Session): PermissionAdvice {
+    if (!this.runtime.canInsertLocally) {
+      throw new Error("Runtime does not support write-policy dry-run insert checks.");
+    }
+    return this.runtime.canInsertLocally(
+      table,
+      values,
+      session ?? this.resolvedSession ?? undefined,
+    );
+  }
+
+  canReadLocally(table: string, objectId: string, session?: Session): PermissionAdvice {
+    if (!this.runtime.canReadLocally) {
+      throw new Error("Runtime does not support read-policy dry-run checks.");
+    }
+    return this.runtime.canReadLocally(
+      table,
+      objectId,
+      session ?? this.resolvedSession ?? undefined,
+    );
+  }
+
+  canUpdateLocally(
+    table: string,
+    objectId: string,
+    values: Record<string, Value>,
+    session?: Session,
+  ): PermissionAdvice {
+    if (!this.runtime.canUpdateLocally) {
+      throw new Error("Runtime does not support write-policy dry-run update checks.");
+    }
+    return this.runtime.canUpdateLocally(
+      table,
+      objectId,
+      values,
+      session ?? this.resolvedSession ?? undefined,
+    );
+  }
+
+  canDeleteLocally(table: string, objectId: string, session?: Session): PermissionAdvice {
+    if (!this.runtime.canDeleteLocally) {
+      throw new Error("Runtime does not support write-policy dry-run delete checks.");
+    }
+    return this.runtime.canDeleteLocally(
+      table,
+      objectId,
+      session ?? this.resolvedSession ?? undefined,
+    );
+  }
+
+  requestInsertPermissionAdvice(
+    table: string,
+    values: InsertValues,
+    session?: Session,
+  ): Promise<PermissionAdvice> {
+    return (
+      this.runtime.requestInsertPermissionAdvice?.(
+        table,
+        values,
+        session ?? this.resolvedSession ?? undefined,
+      ) ?? Promise.resolve("unknown")
+    );
+  }
+
+  requestReadPermissionAdvice(
+    table: string,
+    objectId: string,
+    session?: Session,
+  ): Promise<PermissionAdvice> {
+    return (
+      this.runtime.requestReadPermissionAdvice?.(
+        table,
+        objectId,
+        session ?? this.resolvedSession ?? undefined,
+      ) ?? Promise.resolve("unknown")
+    );
+  }
+
+  requestUpdatePermissionAdvice(
+    table: string,
+    objectId: string,
+    values: Record<string, Value>,
+    session?: Session,
+  ): Promise<PermissionAdvice> {
+    return (
+      this.runtime.requestUpdatePermissionAdvice?.(
+        table,
+        objectId,
+        values,
+        session ?? this.resolvedSession ?? undefined,
+      ) ?? Promise.resolve("unknown")
+    );
+  }
+
+  requestDeletePermissionAdvice(
+    table: string,
+    objectId: string,
+    session?: Session,
+  ): Promise<PermissionAdvice> {
+    return (
+      this.runtime.requestDeletePermissionAdvice?.(
+        table,
+        objectId,
+        session ?? this.resolvedSession ?? undefined,
+      ) ?? Promise.resolve("unknown")
+    );
   }
 
   /**
    * @internal
    */
   deleteInternal(
+    table: string,
     objectId: string,
     updatedAt?: number,
     session?: Session,
     attribution?: string,
-    batchId?: BatchId,
-  ): DirectMutationResult {
+    openBatchId?: OpenBatchId,
+    branch?: BranchView,
+  ): MutationResult {
     const effectiveSession = this.resolveWriteSession(session, attribution);
-    const writeContext = this.encodeWriteContext(effectiveSession, attribution, batchId, updatedAt);
-    return this.runtime.delete(objectId, writeContext);
+    const writeContext = this.encodeWriteContext(
+      effectiveSession,
+      attribution,
+      openBatchId,
+      updatedAt,
+      branch,
+    );
+    return this.runtime.delete(table, objectId, writeContext);
   }
 
   /**
    * Subscribe to a query and receive updates when results change.
    *
-   * @param query Query builder or JSON-encoded query specification
+   * @param query JSON-encoded runtime query specification
    * @param callback Called with delta whenever results change
    * @param options Optional read durability options
    * @returns Subscription ID for unsubscribing
    */
   subscribe(
-    query: string | QueryInput,
+    query: string,
     callback: SubscriptionCallback,
     options?: QueryExecutionOptions,
     session?: Session,
@@ -1030,31 +1291,27 @@ export class JazzClient {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const effectiveSession = session ?? this.resolvedSession;
     const sessionJson = effectiveSession ? JSON.stringify(effectiveSession) : undefined;
-    const queryJson = resolveQueryJson(query);
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
 
-    // Uses the runtime's 2-phase subscribe API: `createSubscription` allocates
-    // a handle synchronously (zero work), then `executeSubscription` is deferred
-    // via the scheduler so compilation + first tick run outside the caller's
-    // synchronous stack (e.g. outside a React render).
     const handle = this.runtime.createSubscription(
-      queryJson,
+      query,
       sessionJson,
       normalizedOptions.tier,
       optionsJson,
     );
 
-    this.scheduler(() => {
-      this.runtime.executeSubscription(handle, (...args: unknown[]) => {
-        const deltaJsonOrObject = normalizeSubscriptionCallbackArgs(args);
-        if (deltaJsonOrObject === undefined) {
-          return;
-        }
+    this.runtime.executeSubscription(handle, (...args: unknown[]) => {
+      const deltaJsonOrObject = normalizeSubscriptionCallbackArgs(args);
+      if (deltaJsonOrObject === undefined) {
+        return;
+      }
+      if (deltaJsonOrObject instanceof Error) {
+        throw deltaJsonOrObject;
+      }
 
-        const delta: SubscriptionWireDelta =
-          typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
-        callback(delta);
-      });
+      const delta: SubscriptionWireDelta =
+        typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
+      callback(delta);
     });
 
     return handle;
@@ -1085,47 +1342,41 @@ export class JazzClient {
   }
 
   /**
-   * Disconnect from the Jazz server without shutting down the local runtime.
-   *
-   * Local reads and writes can continue. Call {@link connectTransport} to
-   * reconnect the same runtime to a server later.
+   * Temporarily disconnect from the Jazz server without closing local runtime state.
    */
-  disconnectTransport(): void {
-    this.runtime.disconnect();
+  async disconnectTransport(): Promise<void> {
+    await this.runtime.disconnect({ rejectWaiters: false });
   }
 
   /**
    * Get the current schema.
    */
   getSchema(): WasmSchema {
-    const schemaHash = this.runtime.getSchemaHash();
-    if (this.cachedRuntimeSchemaHash === schemaHash && this.cachedRuntimeSchema) {
-      return this.cachedRuntimeSchema;
-    }
-
-    const schema = normalizeRuntimeSchema(this.runtime.getSchema());
-    this.cachedRuntimeSchemaHash = schemaHash;
-    this.cachedRuntimeSchema = schema;
-    return schema;
+    return normalizeRuntimeSchema(this.context.schema);
   }
 
-  /**
-   * Get the underlying runtime (for WorkerBridge).
-   * @internal
-   */
+  /** @internal Connection managers use this to attach native peer transports. */
   getRuntime(): Runtime {
     return this.runtime;
   }
 
-  async waitForBatch(batchId: BatchId, tier: DurabilityTier): Promise<void> {
+  async waitForTransaction(
+    batchId: BatchId | Promise<BatchId>,
+    tier: DurabilityTier,
+  ): Promise<void> {
     try {
-      await this.runtime.waitForBatch(batchId, tier);
+      await this.runtime.waitForTransaction(batchId, tier);
     } catch (error) {
-      throw this.normalizeBatchWaitError(error);
+      throw this.normalizeTransactionWaitError(error);
     }
   }
 
-  private normalizeBatchWaitError(error: unknown): Error {
+  /** @internal */
+  async waitForExclusiveTransaction(batchId: BatchId): Promise<void> {
+    await this.waitForTransaction(batchId, this.context.serverUrl ? "global" : "local");
+  }
+
+  private normalizeTransactionWaitError(error: unknown): Error {
     return (
       rejectionFromRuntimeWaitError(error) ??
       (error instanceof Error ? error : new Error(String(error)))
@@ -1141,15 +1392,28 @@ export class JazzClient {
     }
 
     this.shutdownPromise = (async () => {
-      this.runtime.disconnect();
-
-      // Close runtime if it supports explicit shutdown (e.g., NapiRuntime).
+      // Close runtime if it supports explicit shutdown.
       if (this.runtime.close) {
         await this.runtime.close();
+      } else {
+        this.runtime.disconnect({ rejectWaiters: false });
       }
     })();
 
     return await this.shutdownPromise;
+  }
+
+  /** @internal Abandon runtime work after external storage invalidation/reset. */
+  discard(): void {
+    this.runtime.discard?.();
+  }
+
+  async clearClientStorage(): Promise<void> {
+    if (!this.runtime.clearClientStorage) {
+      throw new Error("Runtime does not support client storage reset.");
+    }
+
+    await this.runtime.clearClientStorage();
   }
 }
 
@@ -1189,7 +1453,18 @@ async function tryLoadNodePackagedWasmBinary(): Promise<Uint8Array | null> {
  *
  * Exported so that `createDb()` can pre-load the module for sync mutations.
  */
-export async function loadWasmModule(runtime?: RuntimeSourcesConfig): Promise<WasmModule> {
+let wasmInitializationTail: Promise<void> = Promise.resolve();
+
+export function loadWasmModule(runtime?: RuntimeSourcesConfig): Promise<WasmModule> {
+  const initialization = wasmInitializationTail.then(() => initializeWasmModule(runtime));
+  wasmInitializationTail = initialization.then(
+    () => undefined,
+    () => undefined,
+  );
+  return initialization;
+}
+
+async function initializeWasmModule(runtime?: RuntimeSourcesConfig): Promise<WasmModule> {
   // Cast to any — wasm-bindgen glue exports (default, initSync) aren't in .d.ts
   const wasmModule: any = await import("jazz-wasm");
   const syncInitInput = resolveRuntimeConfigSyncInitInput(runtime);

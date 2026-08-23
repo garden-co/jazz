@@ -49,6 +49,7 @@ export function mountApp(root: HTMLElement, initialDb: Db | null): AppHandle {
       return;
     }
 
+    const todoDb = db;
     const name = session.data.user?.name ?? "";
     root.innerHTML = `
       <main class="dashboard">
@@ -63,7 +64,11 @@ export function mountApp(root: HTMLElement, initialDb: Db | null): AppHandle {
       </main>
     `;
     root.querySelector('[data-action="signout"]')?.addEventListener("click", handleSignOut);
-    unsubscribeTodos = mountTodoWidget(root.querySelector<HTMLElement>('[data-slot="todo"]')!, db);
+    unsubscribeTodos = mountTodoWidget(
+      root.querySelector<HTMLElement>('[data-slot="todo"]')!,
+      todoDb,
+      (query, callback, options) => todoDb.subscribeAll(query, callback, options),
+    );
   }
 
   render();

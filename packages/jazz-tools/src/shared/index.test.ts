@@ -12,7 +12,6 @@ import type {
   QueryOptions,
   RowDelta,
   SubscriptionDelta,
-  SubscriptionsOrchestrator as Orchestrator,
   UseAllState,
 } from "./index.js";
 
@@ -30,7 +29,10 @@ interface VanillaResult<T extends { id: string }> {
 }
 
 function useAllVanilla<T extends { id: string }>(
-  manager: Orchestrator,
+  manager: Pick<
+    SubscriptionsOrchestrator,
+    "computeKey" | "getCacheEntry" | "makeQueryKey" | "peekState"
+  >,
   query: QueryBuilder<T>,
   options?: QueryOptions,
 ): VanillaResult<T> {

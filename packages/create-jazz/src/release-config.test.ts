@@ -16,7 +16,7 @@ describe("release config", () => {
       fs.readFileSync(path.join(repoRoot, "packages", "create-jazz", "package.json"), "utf8"),
     ) as { version?: string };
 
-    const jazzFixedGroup = ["jazz-tools", "jazz-wasm", "jazz-napi", "jazz-rn", "create-jazz"];
+    const jazzFixedGroup = ["jazz-tools", "jazz-wasm", "jazz-napi", "create-jazz"];
 
     expect(config.fixed).toContainEqual(jazzFixedGroup);
     expect(createJazzPackage.version).toMatch(/^2\.0\.0-alpha\./);

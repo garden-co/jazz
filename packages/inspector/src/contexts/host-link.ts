@@ -9,6 +9,20 @@ import {
   type WasmSchema,
 } from "jazz-tools";
 
+export interface InspectorRuntimeContext {
+  key: string;
+  appId: string;
+  dbName: string;
+  schema: WasmSchema;
+}
+
+export interface InspectorRuntimeSession {
+  contexts: InspectorRuntimeContext[];
+  listContexts(): Promise<InspectorRuntimeContext[]>;
+  attach(contextKey: string): Promise<MessagePort>;
+  close(): void;
+}
+
 /**
  * Reads the host handle the overlay loader publishes on the parent window
  * (`window.__jazzInspectorHost`). Same-origin only; returns null in the
@@ -38,6 +52,56 @@ export function readInspectorHostSchema(): WasmSchema | null {
     // no defineApp) — treat that as "not ready" and let the poll retry.
     return null;
   }
+}
+
+export async function openInspectorRuntimeSession(): Promise<InspectorRuntimeSession | null> {
+  const host = readHost();
+  if (!host) return null;
+  const control = await host.openControlPort();
+  control.start();
+  let nextId = 1;
+
+  const request = <T>(message: Record<string, unknown>, transfer: Transferable[] = []) =>
+    new Promise<T>((resolve, reject) => {
+      const id = nextId++;
+      const onMessage = (event: MessageEvent) => {
+        if (event.data?.id !== id) return;
+        control.removeEventListener("message", onMessage);
+        if (event.data.error) reject(new Error(event.data.error));
+        else resolve(event.data);
+      };
+      control.addEventListener("message", onMessage);
+      control.postMessage({ ...message, id }, transfer);
+    });
+
+  const listContexts = async () =>
+    (
+      await request<{ contexts: InspectorRuntimeContext[] }>({
+        type: "list-contexts",
+      })
+    ).contexts;
+  const contexts = await listContexts();
+  return {
+    contexts,
+    listContexts,
+    async attach(contextKey) {
+      const channel = new MessageChannel();
+      await request(
+        {
+          type: "attach-context",
+          contextKey,
+          tabId: crypto.randomUUID(),
+          port: channel.port2,
+        },
+        [channel.port2],
+      );
+      return channel.port1;
+    },
+    close() {
+      control.postMessage({ type: "close" });
+      control.close();
+    },
+  };
 }
 
 /**

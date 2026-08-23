@@ -1,0 +1,18 @@
+[package]
+name = "jazz-compression"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+lz4 = ["dep:lz4_flex"]
+zstd = ["dep:zstd"]
+ruzstd = ["dep:ruzstd"]
+
+[dependencies]
+lz4_flex = { version = "0.11.5", default-features = false, features = ["frame"], optional = true }
+ruzstd = { version = "0.8.2", default-features = false, optional = true }
+zstd = { version = "0.13.3", optional = true }
+
+[dev-dependencies]
+zstd = "0.13.3"

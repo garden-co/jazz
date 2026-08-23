@@ -1,0 +1,3208 @@
+//! High-level thread-affine database facade described by `jazz/API.md`. This
+//! module owns application-facing handles, read/write options, and facade-level
+//! sync plumbing; durable version storage, validation, policy checks, and view
+//! construction live in [`crate::node`], while link-local shipped state lives in
+//! [`crate::peer`]. In the layer map this is the top `Db` facade over the node.
+
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::future::Future;
+use std::num::NonZeroUsize;
+use std::pin::{Pin, pin};
+use std::rc::{Rc, Weak};
+#[cfg(feature = "sync-autopsy")]
+use std::sync::{
+    LazyLock, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+use std::task::{Context, Poll, Waker};
+
+use futures::lock::Mutex as LocalMutex;
+use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use futures_channel::oneshot;
+use futures_core::Stream;
+use groove::records::{OwnedRecord, RecordDescriptor, Value};
+use groove::schema::ColumnType as GrooveColumnType;
+use groove::storage::{OrderedKvStorage, ReopenableStorage};
+use thiserror::Error;
+#[cfg(feature = "cold-settle-attribution")]
+use web_time::Instant;
+
+use crate::authorization_scope::{
+    AuthorityContext, AuthorityScopeAggregate, AuthorizationScopeAcquisition,
+    AuthorizationScopeInstall, AuthorizationScopeLease, AuthorizationScopeOwnerToken,
+    AuthorizationScopeReadiness, AuthorizationScopeRegistry, MAX_AUTHORIZATION_SCOPES,
+};
+use crate::ids::{AuthorId, NodeUuid, RowUuid, SchemaVersionId};
+pub use crate::node::CommitUnitTrust;
+#[cfg(feature = "testing")]
+pub use crate::node::NodeOpenReceipt as DbOpenReceipt;
+use crate::node::query_engine::QueryAuthorizationMode;
+use crate::node::{
+    CommitUnitIngestContext, CurrentRow, EdgeCacheBudget, LocalMaintainedViewSubscription,
+    LocalMaintainedViewSubscriptionUpdate, MergeableCommit, NodeState, PreparedQueryPlanHandle,
+    PublicationOutcome, PublishedTransaction, QueryReadProfile, RelationEdge, RelationSnapshot,
+    RowProvenance, ViewUpdateParts,
+};
+use crate::peer::{PeerRole, PeerState};
+pub use crate::protocol::PermissionAdvice;
+#[cfg(feature = "sync-autopsy")]
+use crate::protocol::expand_version_carriers;
+use crate::protocol::{
+    AuthorizationScopeReceipt, BindingViewKey, BranchSelector, BranchViewBase, CoverageKey,
+    CurrentWriteSchema, LensOp, MigrationLens, PermissionAdviceAction, PermissionAdviceRequestId,
+    ReadViewKey, ReadViewSourceSpec, ReadViewSpec, RegisterShapeOptions, SchemaLineagePublication,
+    SchemaVersion, ShapeAst, Subscribe, SubscribeRejectReason, SubscribeServerFailureCode,
+    SubscriptionKey, SyncMessage, TableLens,
+};
+use crate::protocol_limits::{
+    validate_fetch_row_versions, validate_known_state_declaration, validate_shape_ast_size,
+};
+use crate::query::{
+    Binding, BindingId, Operand, Predicate, Query, QueryError, RelationQuery, ShapeId,
+    ValidatedQuery, relation_query_to_query,
+};
+#[cfg(test)]
+use crate::query::{
+    RelationCmpOp, RelationColumnRef, RelationExpr, RelationJoinKind, RelationPredicate,
+    RelationProjectExpr, RelationRowIdRef, RelationValueRef,
+};
+pub use crate::result_tree::{ResultNode, ResultRelation, ResultTree, ResultTreeReplacement};
+use crate::schema::{JazzSchema, TableSchema};
+use crate::time::GlobalTime;
+use crate::tools::OpenTransactionId;
+use crate::tools::{ObjectId, OutputOccurrenceId, ResultKey, TransactionId};
+use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKind};
+use crate::wire::{TransportError, WireAuthorityEndpoint, WireFeatures, encode_sync_message};
+
+mod wire_transport;
+#[cfg(test)]
+use wire_transport::LogicalMessageReassembler;
+pub use wire_transport::WireTransportAdapter;
+
+/// Pragmatic single-threaded serialization boundary for canonical Jazz state.
+///
+/// Storage-facing operations may suspend, so a `RefCell` borrow cannot safely
+/// represent exclusive ownership for their full lifetime. This local mutex is
+/// intentionally part of the existing `Node` owner rather than a parallel
+/// async facade. A future operation scheduler may replace it with finer-grained
+/// owned sessions once the async lifecycle has settled.
+pub(crate) type SharedNodeState<S> = Rc<LocalMutex<NodeState<S>>>;
+pub(crate) type WeakNodeState<S> = Weak<LocalMutex<NodeState<S>>>;
+
+/// Temporary source-compatibility for node operations that are still wholly
+/// synchronous. Storage-facing call sites must use `lock().await` instead.
+/// Remove this trait as the remaining domains become suspendable.
+trait LocalMutexBorrow<T> {
+    #[track_caller]
+    fn borrow(&self) -> futures::lock::MutexGuard<'_, T>;
+    #[track_caller]
+    fn borrow_mut(&self) -> futures::lock::MutexGuard<'_, T>;
+}
+
+impl<T> LocalMutexBorrow<T> for Rc<LocalMutex<T>> {
+    #[track_caller]
+    fn borrow(&self) -> futures::lock::MutexGuard<'_, T> {
+        self.try_lock().unwrap_or_else(|| {
+            panic!(
+                "synchronous node operation at {} reentered a suspended operation",
+                std::panic::Location::caller()
+            )
+        })
+    }
+
+    #[track_caller]
+    fn borrow_mut(&self) -> futures::lock::MutexGuard<'_, T> {
+        self.try_lock().unwrap_or_else(|| {
+            panic!(
+                "synchronous node operation at {} reentered a suspended operation",
+                std::panic::Location::caller()
+            )
+        })
+    }
+}
+
+/// How urgently a runtime should service pending peer-connection work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TickUrgency {
+    /// Run as soon as the runtime can do so without re-entering the current
+    /// mutable operation. Used when a query/subscription/transport event needs
+    /// prompt coverage or inbound draining.
+    Immediate,
+    /// Coalesce bursty local work before ticking. Used for uploads created by
+    /// local writes.
+    Deferred,
+}
+
+/// Runtime-neutral wake hook for thread-affine [`Node`] sync work.
+pub trait TickScheduler {
+    /// Schedule a future [`Db::tick`] for pending peer-connection work.
+    fn schedule_tick(&self, urgency: TickUrgency);
+}
+
+/// A locally-originated transaction rejection that was not consumed by an
+/// active write waiter.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MutationErrorEvent {
+    /// Stable machine-readable rejection code.
+    pub code: String,
+    /// Human-readable rejection reason.
+    pub reason: String,
+    /// The rejected local transaction.
+    pub transaction: LocalTransactionRecord,
+}
+
+/// Binding-facing record for one locally committed transaction.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalTransactionRecord {
+    /// Stable public identity derived from the core transaction id.
+    pub transaction_id: TransactionId,
+    /// Transaction semantics used by the commit.
+    pub kind: TransactionKind,
+    /// Committed transaction records are immutable.
+    pub sealed: bool,
+    /// Latest authority settlement observed for the transaction.
+    pub latest_settlement: TransactionFate,
+}
+
+/// Binding-facing transaction kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransactionKind {
+    /// CRDT-style mergeable transaction.
+    Mergeable,
+    /// Authority-validated exclusive transaction.
+    Exclusive,
+}
+
+impl From<TxKind> for TransactionKind {
+    fn from(kind: TxKind) -> Self {
+        match kind {
+            TxKind::Mergeable => Self::Mergeable,
+            TxKind::Exclusive => Self::Exclusive,
+        }
+    }
+}
+
+/// Binding-facing authority fate for a rejected transaction.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum TransactionFate {
+    /// The authority rejected the transaction.
+    Rejected {
+        /// Stable public identity derived from the core transaction id.
+        #[serde(rename = "transactionId")]
+        transaction_id: TransactionId,
+        /// Stable machine-readable rejection code.
+        code: String,
+        /// Human-readable rejection reason.
+        reason: String,
+    },
+}
+
+/// Thread-affine callback used by bindings to surface unhandled rejections.
+pub type MutationErrorCallback = Rc<dyn Fn(&MutationErrorEvent) + 'static>;
+
+#[cfg(feature = "sync-autopsy")]
+/// Debug-build sync trace buffer used by integration-test timeout autopsies.
+pub mod sync_autopsy {
+    use super::*;
+
+    const MAX_EVENTS: usize = 512;
+
+    static ENABLED: AtomicBool = AtomicBool::new(false);
+    static EVENTS: LazyLock<Mutex<VecDeque<String>>> =
+        LazyLock::new(|| Mutex::new(VecDeque::with_capacity(MAX_EVENTS)));
+
+    /// Enable passive event capture for the current process.
+    pub fn enable() {
+        ENABLED.store(true, Ordering::Relaxed);
+    }
+
+    /// Clear buffered events.
+    pub fn clear() {
+        if let Ok(mut events) = EVENTS.lock() {
+            events.clear();
+        }
+    }
+
+    /// Return the current buffered event log.
+    pub fn dump() -> String {
+        let events = EVENTS.lock().ok();
+        let mut out = String::from("sync autopsy events:\n");
+        if let Some(events) = events {
+            for event in events.iter() {
+                out.push_str("  ");
+                out.push_str(event);
+                out.push('\n');
+            }
+        } else {
+            out.push_str("  <event buffer poisoned>\n");
+        }
+        out
+    }
+
+    /// Append one event to the ring buffer when capture is enabled.
+    pub fn record(event: impl Into<String>) {
+        if !ENABLED.load(Ordering::Relaxed) {
+            return;
+        }
+        let Ok(mut events) = EVENTS.lock() else {
+            return;
+        };
+        if events.len() == MAX_EVENTS {
+            events.pop_front();
+        }
+        events.push_back(event.into());
+    }
+}
+
+#[cfg(not(feature = "sync-autopsy"))]
+/// No-op sync trace buffer when sync autopsy capture is not compiled in.
+pub mod sync_autopsy {
+    /// Enable passive event capture for the current process.
+    pub fn enable() {}
+    /// Clear buffered events.
+    pub fn clear() {}
+    /// Return the current buffered event log.
+    pub fn dump() -> String {
+        String::new()
+    }
+}
+
+/// Poll a ready-immediate thread-affine database future to completion.
+///
+/// This helper is intentionally tiny: it drives local-lane futures that are
+/// expected to complete without an async runtime by using a no-op waker and
+/// yielding the current thread when a future reports `Pending`.
+pub fn block_on<F: Future>(future: F) -> F::Output {
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    let mut future = pin!(future);
+
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(value) => return value,
+            Poll::Pending => std::thread::yield_now(),
+        }
+    }
+}
+
+/// Thread-affine high-level database handle.
+pub struct Db<S>
+where
+    S: OrderedKvStorage,
+{
+    schema: JazzSchema,
+    schema_version_id: SchemaVersionId,
+    schema_view_is_fixed: bool,
+    schema_views: Rc<RefCell<BTreeMap<SchemaViewId, JazzSchema>>>,
+    identity: DbIdentity,
+    node: Rc<Node<S>>,
+    row_id_source: Rc<RefCell<Box<dyn RowIdSource>>>,
+    next_now_ms: Rc<Cell<u64>>,
+}
+
+/// Process-local, content-addressed identity for an exact typed schema view.
+///
+/// Unlike [`SchemaVersionId`], which identifies structural migration lineage,
+/// this includes defaults and policy metadata used by a typed client facade.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SchemaViewId([u8; 32]);
+
+impl SchemaViewId {
+    /// Stable bytes suitable for binding-level map keys.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    fn for_schema(schema: &JazzSchema) -> Self {
+        let bytes =
+            serde_json::to_vec(schema.public_schema()).expect("public schema always serializes");
+        Self(blake3::derive_key("jazz typed schema view id v1", &bytes))
+    }
+}
+
+/// Shared list of live subscriptions. Held by both the `Node` and any
+/// [`PeerConnection`], so an inbound sync update can push subscription events
+/// through the same path a local write does.
+type SubscriptionList = Rc<RefCell<Vec<Weak<RefCell<SubscriptionState>>>>>;
+type PendingUpstreamCommands = Rc<RefCell<Vec<PendingUpstreamCommand>>>;
+type LatestCoverageSubscriptions = Rc<RefCell<BTreeMap<CoverageKey, SubscriptionKey>>>;
+type UpstreamCoverageRefCounts = Rc<RefCell<BTreeMap<CoverageKey, usize>>>;
+type AwaitingInitialAuthorityCoverage = Rc<RefCell<BTreeSet<CoverageKey>>>;
+type CoverageRefreshGenerations = Rc<RefCell<BTreeMap<CoverageKey, u64>>>;
+type QueryCoverageRegistrations = Rc<RefCell<BTreeMap<SubscriptionKey, QueryCoverageRegistration>>>;
+/// Ephemeral evidence that the current authority connection has confirmed a
+/// canonical binding view. It is deliberately separate from durable
+/// `settled_through`: cursors retain payload possession for repair/dedup, not
+/// authority settlement.
+type ActiveAuthorityViewReceipts = Rc<RefCell<Option<AuthorityViewReceipts>>>;
+type UpstreamSubscriptionOwners =
+    Rc<RefCell<BTreeMap<SubscriptionKey, Vec<Weak<RefCell<SubscriptionState>>>>>>;
+type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
+type WriteStateWaiters = Rc<RefCell<BTreeMap<TxId, Vec<WriteStateWaiter>>>>;
+type PermissionAdviceWaiters =
+    Rc<RefCell<BTreeMap<PermissionAdviceRequestId, oneshot::Sender<PermissionAdvice>>>>;
+type PendingDownstreamFates = Rc<RefCell<Vec<SyncMessage>>>;
+struct PendingLocalPublication {
+    published: Rc<PublishedTransaction>,
+    upload_unit: Option<SyncMessage>,
+}
+
+type PendingLocalPublications = Rc<RefCell<VecDeque<PendingLocalPublication>>>;
+type AdmittedUpstreamAuthorities = Rc<RefCell<Vec<AuthorityContext>>>;
+const MAX_EDGE_FATE_ROUTES: usize = 1024;
+const MAX_EDGE_FATE_ROUTES_PER_TX: usize = 8;
+
+#[derive(Default)]
+struct AuthorityViewReceipts {
+    connection_epoch: u64,
+    confirmation_floor: GlobalTime,
+    binding_views: BTreeSet<BindingViewKey>,
+}
+
+/// An inbound message held across authority selection. It preserves ordinary
+/// sync delivery while ensuring traffic staged before selection cannot become
+/// the selected connection's fresh view receipt.
+struct StagedInboundMessage {
+    message: SyncMessage,
+    authority_receipt_eligible: bool,
+}
+
+struct PendingAuthorityViewUpdate {
+    parts: ViewUpdateParts,
+    authority_receipt_eligible: bool,
+}
+
+struct EdgeFateRoute {
+    authority: Option<AuthorityContext>,
+    queue: Weak<RefCell<Vec<SyncMessage>>>,
+}
+type EdgeFateRoutes = Rc<RefCell<BTreeMap<TxId, Vec<EdgeFateRoute>>>>;
+
+struct LocalFateRoute {
+    queue: Weak<RefCell<Vec<SyncMessage>>>,
+    local_acknowledged: bool,
+}
+type LocalFateRoutes = Rc<RefCell<BTreeMap<TxId, Vec<LocalFateRoute>>>>;
+
+fn register_local_fate_route(
+    routes: &LocalFateRoutes,
+    tx_id: TxId,
+    queue: &PendingDownstreamFates,
+) {
+    let mut routes = routes.borrow_mut();
+    routes.retain(|_, pending| {
+        pending.retain(|candidate| candidate.queue.upgrade().is_some());
+        !pending.is_empty()
+    });
+    if routes.get(&tx_id).is_some_and(|pending| {
+        pending.iter().any(|candidate| {
+            candidate
+                .queue
+                .upgrade()
+                .is_some_and(|candidate| Rc::ptr_eq(&candidate, queue))
+        })
+    }) {
+        return;
+    }
+    routes.entry(tx_id).or_default().push(LocalFateRoute {
+        queue: Rc::downgrade(queue),
+        local_acknowledged: false,
+    });
+}
+
+async fn queue_local_acknowledgements<S>(routes: &LocalFateRoutes, node: &SharedNodeState<S>)
+where
+    S: OrderedKvStorage,
+{
+    let tx_ids = routes.borrow().keys().copied().collect::<Vec<_>>();
+    let mut durable = BTreeSet::new();
+    let mut node = node.lock().await;
+    for tx_id in tx_ids {
+        if node
+            .transaction_state(tx_id)
+            .await
+            .is_some_and(|(_, _, durability)| durability >= DurabilityTier::Local)
+        {
+            durable.insert(tx_id);
+        }
+    }
+    drop(node);
+    let mut routes = routes.borrow_mut();
+    routes.retain(|tx_id, pending| {
+        let locally_durable = durable.contains(tx_id);
+        pending.retain_mut(|route| {
+            let Some(queue) = route.queue.upgrade() else {
+                return false;
+            };
+            if locally_durable && !route.local_acknowledged {
+                queue.borrow_mut().push(SyncMessage::FateUpdate {
+                    tx_id: *tx_id,
+                    fate: Fate::Pending,
+                    global_time: None,
+                    durability: Some(DurabilityTier::Local),
+                });
+                route.local_acknowledged = true;
+            }
+            true
+        });
+        !pending.is_empty()
+    });
+}
+
+fn route_local_fate(routes: &LocalFateRoutes, tx_id: TxId, fate: &SyncMessage) {
+    let terminal = matches!(
+        fate,
+        SyncMessage::FateUpdate {
+            fate: Fate::Rejected(_),
+            ..
+        } | SyncMessage::FateUpdate {
+            durability: Some(DurabilityTier::Global),
+            ..
+        }
+    );
+    let mut routes = routes.borrow_mut();
+    let Some(pending) = routes.get_mut(&tx_id) else {
+        return;
+    };
+    pending.retain(|candidate| {
+        let Some(queue) = candidate.queue.upgrade() else {
+            return false;
+        };
+        queue.borrow_mut().push(fate.clone());
+        !terminal
+    });
+    if pending.is_empty() {
+        routes.remove(&tx_id);
+    }
+}
+
+async fn collect_local_replay_commit_units<S>(
+    node: &mut NodeState<S>,
+    tx_id: TxId,
+    visited: &mut BTreeSet<TxId>,
+    units: &mut Vec<(TxId, SyncMessage)>,
+) -> Result<(), Error>
+where
+    S: OrderedKvStorage,
+{
+    if !visited.insert(tx_id) {
+        return Ok(());
+    }
+    let unit = node.commit_unit_for(tx_id).await?;
+    let SyncMessage::CommitUnit { versions, .. } = &unit else {
+        unreachable!("commit_unit_for always returns a commit unit")
+    };
+    let parents = versions
+        .iter()
+        .flat_map(crate::protocol::VersionRecord::parents)
+        .collect::<BTreeSet<_>>();
+    for parent in parents {
+        Box::pin(collect_local_replay_commit_units(
+            node, parent, visited, units,
+        ))
+        .await?;
+    }
+    units.push((tx_id, unit));
+    Ok(())
+}
+
+/// A parked fate either awaits its first admitted upstream or belongs to one
+/// admitted upstream epoch. Drop routes for departed/replaced sessions (and
+/// dead subscriber queues) eagerly: retaining a weak queue alone would let
+/// arbitrary uploads grow this registry forever.
+fn prune_edge_fate_routes(
+    routes: &mut BTreeMap<TxId, Vec<EdgeFateRoute>>,
+    admitted: Option<AuthorityContext>,
+) {
+    routes.retain(|_, pending| {
+        pending.retain(|route| {
+            route.queue.upgrade().is_some()
+                && match (route.authority, admitted) {
+                    (None, _) => true,
+                    (Some(route), Some(admitted)) => admitted.same_admitted_link(route),
+                    (Some(_), None) => false,
+                }
+        });
+        !pending.is_empty()
+    });
+}
+type SharedMutationErrors = Rc<RefCell<MutationErrorState>>;
+type ShapeRegistrationKey = (ShapeId, ReadViewKey);
+
+/// Per-subscriber state for a shape/read-view registration.
+///
+/// A missing runtime shape is ambiguous: catalogue admission is temporary,
+/// whereas a capability rejection is permanent for this connection. Keep the
+/// distinction at the protocol boundary instead of inferring either from the
+/// node's registered-shape map.
+#[derive(Clone)]
+enum SubscriberShapeRegistration {
+    Registered(RegisterShapeOptions),
+    PendingCatalogueAdmission(RegisterShapeOptions),
+    RejectedUnsupportedCapability(String),
+}
+
+fn default_cell_for_column_type(column_type: &GrooveColumnType, default: &Value) -> Value {
+    match (column_type, default) {
+        (GrooveColumnType::Nullable(_), Value::Nullable(_)) => default.clone(),
+        (GrooveColumnType::Nullable(_), default) => {
+            Value::Nullable(Some(Box::new(default.clone())))
+        }
+        _ => default.clone(),
+    }
+}
+
+fn schema_view_column_default(column: &crate::schema::ColumnSchema) -> Result<Value, Error> {
+    if let Some(default) = &column.default {
+        return Ok(default.clone());
+    }
+    if matches!(column.column_type, GrooveColumnType::Nullable(_)) {
+        return Ok(Value::Nullable(None));
+    }
+    Err(Error::new(
+        ErrorCode::Schema,
+        format!(
+            "schema view column {} requires a migration default",
+            column.name
+        ),
+    ))
+}
+
+fn direct_schema_view_lens(
+    source: &JazzSchema,
+    target: &JazzSchema,
+) -> Result<(MigrationLens, Vec<String>, Vec<String>), Error> {
+    let source_id = source.version_id();
+    let target_id = target.version_id();
+    let mut table_lenses = Vec::new();
+    for source_table in &source.tables {
+        let Some(target_table) = target
+            .tables
+            .iter()
+            .find(|table| table.name == source_table.name)
+        else {
+            continue;
+        };
+        if source_table.references != target_table.references {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                format!(
+                    "schema view changes references on {} without an explicit lens",
+                    target_table.name
+                ),
+            ));
+        }
+        if source_table.merge_strategies != target_table.merge_strategies {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                format!(
+                    "schema view changes merge strategies on {} without an explicit lens",
+                    target_table.name
+                ),
+            ));
+        }
+        if source_table.indexed_columns != target_table.indexed_columns {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                format!(
+                    "schema view changes indices on {} without explicit index admission",
+                    target_table.name
+                ),
+            ));
+        }
+        let mut ops = Vec::new();
+        for target_column in &target_table.columns {
+            match source_table
+                .columns
+                .iter()
+                .find(|column| column.name == target_column.name)
+            {
+                Some(source_column) if source_column.column_type == target_column.column_type => {}
+                Some(_) => {
+                    return Err(Error::new(
+                        ErrorCode::Schema,
+                        format!(
+                            "schema view changes type of {}.{} without an explicit lens",
+                            target_table.name, target_column.name
+                        ),
+                    ));
+                }
+                None => ops.push(LensOp::AddColumn {
+                    column: target_column.name.clone(),
+                    default: schema_view_column_default(target_column)?,
+                }),
+            }
+        }
+        for source_column in &source_table.columns {
+            if target_table
+                .columns
+                .iter()
+                .all(|column| column.name != source_column.name)
+            {
+                ops.push(LensOp::DropColumn {
+                    column: source_column.name.clone(),
+                    backwards_default: schema_view_column_default(source_column)?,
+                });
+            }
+        }
+        table_lenses.push(TableLens {
+            source_table: source_table.name.clone(),
+            target_table: target_table.name.clone(),
+            ops,
+        });
+    }
+    let new_tables = target
+        .tables
+        .iter()
+        .filter(|table| source.tables.iter().all(|source| source.name != table.name))
+        .map(|table| table.name.clone())
+        .collect::<Vec<_>>();
+    let dropped_tables = source
+        .tables
+        .iter()
+        .filter(|table| target.tables.iter().all(|target| target.name != table.name))
+        .map(|table| table.name.clone())
+        .collect::<Vec<_>>();
+    Ok((
+        MigrationLens::new(source_id, target_id, table_lenses),
+        new_tables,
+        dropped_tables,
+    ))
+}
+
+struct WriteStateWaiter {
+    id: u64,
+    notify: WriteStateWaiterNotify,
+}
+
+enum WriteStateWaiterNotify {
+    Future(oneshot::Sender<()>),
+    Callback(Box<dyn FnOnce()>),
+}
+
+#[derive(Default)]
+struct MutationErrorState {
+    callback: Option<MutationErrorCallback>,
+    pending: BTreeMap<TxId, MutationErrorEvent>,
+}
+
+#[derive(Clone)]
+enum PendingUpstreamCommand {
+    Subscribe(PendingUpstreamSubscription),
+    Unsubscribe(SubscriptionKey),
+    AuthorizationScopeIntent {
+        request_id: PermissionAdviceRequestId,
+        action: PermissionAdviceAction,
+    },
+}
+
+#[derive(Clone)]
+struct PendingUpstreamSubscription {
+    subscription: SubscriptionKey,
+    shape: ValidatedQuery,
+    binding: Binding,
+    opts: RegisterShapeOptions,
+    identity: AuthorId,
+}
+
+struct QueryCoverageRegistration {
+    coverage: CoverageKey,
+    subscription: PendingUpstreamSubscription,
+    owns_subscription: bool,
+    ref_count: usize,
+}
+
+#[derive(Clone)]
+struct UpstreamCoverageHandle {
+    coverage: CoverageKey,
+    subscription: SubscriptionKey,
+}
+
+struct OpenedUpstreamCoverage {
+    handles: Vec<UpstreamCoverageHandle>,
+    awaits_initial_authority_response: bool,
+}
+
+struct CoverageGroup {
+    shape: ValidatedQuery,
+    binding: Binding,
+    subscribers: BTreeSet<SubscriptionKey>,
+    pending_initial_subscribers: BTreeSet<SubscriptionKey>,
+    initialized: bool,
+    upstream_subscription: SubscriptionKey,
+    upstream_opts: RegisterShapeOptions,
+    awaiting_upstream_settlement: bool,
+}
+
+/// Authority-derived scope identity retained for a support subscription.
+/// Never constructed from the caller's wire payload.
+#[derive(Clone, Debug, PartialEq)]
+struct AuthorizedScopePurpose {
+    key: crate::protocol::AuthorizationSupportScopeKey,
+    operation: crate::protocol::AuthorizationOperationKey,
+    action: PermissionAdviceAction,
+    expected_support: BTreeSet<(ShapeId, BindingId)>,
+}
+
+// Compatibility spelling retained for module-local tests while the actual
+// implementation is the shared authority proof primitive.
+#[cfg(test)]
+type ScopeAggregate = AuthorityScopeAggregate;
+
+/// One receipt-bound authorization operation owned by one admitted upstream.
+///
+/// This state deliberately lives on `ConnectionLink::Upstream`: a receipt is
+/// only meaningful for the authenticated authority epoch that delivered it.
+/// The manager additionally records every support subscription, since an
+/// aggregate receipt names only the final completing subscription.
+struct AuthorizationScopeLeaseRequest {
+    action: PermissionAdviceAction,
+    /// Every local caller sharing this authority hydration.  The first id is
+    /// the wire correlation id; later ids never cause another support view.
+    waiters: BTreeSet<PermissionAdviceRequestId>,
+    key: Option<crate::protocol::AuthorizationSupportScopeKey>,
+    lease: Option<AuthorizationScopeLease>,
+    owner: Option<AuthorizationScopeOwnerToken>,
+    clause_count: Option<u16>,
+    applied_clauses: BTreeMap<u16, (SubscriptionKey, crate::time::GlobalTime, u64)>,
+}
+
+/// Per-upstream admission manager for scope receipts and their retained leases.
+#[derive(Default)]
+struct AuthorizationScopeLeaseManager {
+    registry: AuthorizationScopeRegistry,
+    requests: BTreeMap<PermissionAdviceRequestId, AuthorizationScopeLeaseRequest>,
+}
+
+/// One authority-compiled support hydration retained only while every
+/// authority revision and global cut it represents remains current.  It is
+/// keyed by the support scope rather than the candidate operation, so distinct
+/// rows/patches can reuse hydration but still evaluate their own action.
+#[derive(Clone)]
+struct ServedAuthorizationScopeHydration {
+    clauses: Vec<ServedAuthorizationScopeClause>,
+    receipt: AuthorizationScopeReceipt,
+}
+
+#[derive(Clone)]
+struct ServedAuthorizationScopeClause {
+    subscription: SubscriptionKey,
+    register: SyncMessage,
+    subscribe: SyncMessage,
+    view: SyncMessage,
+}
+
+/// Locally-authored transactions awaiting upload, oldest first. Shared with
+/// upstream [`PeerConnection`]s, each of which tracks how far it has shipped.
+type Outbox = Rc<RefCell<Vec<PendingUpload>>>;
+
+#[derive(Clone)]
+struct PendingUpload {
+    tx_id: TxId,
+    unit: Option<SyncMessage>,
+}
+
+/// Application-visible fate and durability for a local write transaction.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct WriteState {
+    /// Latest authority fate observed by this `Db`.
+    pub fate: Fate,
+    /// Highest durability tier observed by this `Db`.
+    pub durability: DurabilityTier,
+}
+
+/// Explicit client durability cadence while the first server snapshot is
+/// loading.
+///
+/// A crash can lose up to `M - 1` writes since the last completed boundary,
+/// where `M` is this value. Older completed boundaries recover from the
+/// storage WAL. The final partial initial-sync batch is always flushed before
+/// the client returns to per-write durability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InitialSyncFlushCadence(NonZeroUsize);
+
+impl InitialSyncFlushCadence {
+    /// The client default: a durability boundary every 512 initial-sync writes.
+    pub const DEFAULT: Self = Self(NonZeroUsize::new(512).expect("non-zero"));
+
+    /// Create a cadence with one durability boundary per `writes` initial-sync
+    /// writes.
+    pub const fn every(writes: NonZeroUsize) -> Self {
+        Self(writes)
+    }
+
+    /// Number of writes between completed durability boundaries.
+    pub const fn writes(self) -> usize {
+        self.0.get()
+    }
+}
+
+/// Usage-site query coverage attachment.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueryAttachment {
+    subscriptions: Vec<SubscriptionKey>,
+    required_after: Vec<(BindingViewKey, u64)>,
+    /// Edge/Global coverage is live authority evidence, not merely a newer
+    /// durable view generation.
+    requires_current_authority_receipt: bool,
+    registrations: Vec<SubscriptionKey>,
+    refreshes: Vec<(CoverageKey, u64)>,
+}
+
+impl QueryAttachment {
+    /// Wire subscription id owned by this attachment.
+    pub fn subscription(&self) -> SubscriptionKey {
+        self.subscriptions[0]
+    }
+}
+
+/// Future that resolves when a database observes a write-state change.
+///
+/// This is a wake primitive: callers should read [`Db::write_state`] before
+/// registering it, read again after registration, and then re-read after it
+/// resolves.
+pub struct WriteStateChange {
+    waiters: WriteStateWaiters,
+    tx_id: TxId,
+    waiter_id: u64,
+    receiver: oneshot::Receiver<()>,
+}
+
+impl Future for WriteStateChange {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match Pin::new(&mut self.receiver).poll(cx) {
+            Poll::Ready(_) => Poll::Ready(()),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Drop for WriteStateChange {
+    fn drop(&mut self) {
+        let mut waiters = self.waiters.borrow_mut();
+        let Some(tx_waiters) = waiters.get_mut(&self.tx_id) else {
+            return;
+        };
+        tx_waiters.retain(|waiter| waiter.id != self.waiter_id);
+        let empty = tx_waiters.is_empty();
+        if empty {
+            waiters.remove(&self.tx_id);
+        }
+    }
+}
+
+/// Cancel-safe future for one authoritative permission preflight.
+pub struct PermissionAdviceFuture {
+    waiters: PermissionAdviceWaiters,
+    request_id: PermissionAdviceRequestId,
+    receiver: oneshot::Receiver<PermissionAdvice>,
+}
+
+impl Future for PermissionAdviceFuture {
+    type Output = PermissionAdvice;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match Pin::new(&mut self.receiver).poll(cx) {
+            Poll::Ready(Ok(advice)) => Poll::Ready(advice),
+            Poll::Ready(Err(_)) => Poll::Ready(PermissionAdvice::Unknown),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl PermissionAdviceFuture {
+    /// Opaque id used to cancel only this request.
+    pub fn request_id(&self) -> PermissionAdviceRequestId {
+        self.request_id
+    }
+}
+
+impl Drop for PermissionAdviceFuture {
+    fn drop(&mut self) {
+        self.waiters.borrow_mut().remove(&self.request_id);
+    }
+}
+
+mod catalogue;
+mod lifecycle;
+mod mutations;
+mod reads;
+mod subscriptions;
+mod transactions;
+
+/// Counts produced while servicing non-blocking database connection work.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DbTickStats {
+    /// Number of live subscriptions that received a queued event.
+    pub subscription_events: usize,
+    /// Number of connection ticks that applied remote sync state locally.
+    pub remote_sync_applied: usize,
+}
+
+mod node_runtime;
+pub use node_runtime::{ConnectionSessionContext, Node, Transport};
+use node_runtime::{register_upstream_subscription_owner, unregister_upstream_subscription_owner};
+mod peer_connection;
+use peer_connection::{ConnectionLink, schedule_tick_in};
+pub use peer_connection::{PeerConnection, ResumeCursor};
+mod config;
+pub use config::{DbConfig, DbIdentity, ProductionRowIdSource, RowIdSource, SeededRowIdSource};
+
+/// One-shot read options.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ReadOpts {
+    /// Durability tier that gates the first result.
+    pub tier: DurabilityTier,
+    /// Whether own local updates are visible immediately.
+    pub local_updates: LocalUpdates,
+    /// Whether evaluation may propagate upstream.
+    pub propagation: Propagation,
+    /// Include current rows whose deletion winner is `Deleted`.
+    pub include_deleted: bool,
+    /// Semantic read view to evaluate against.
+    pub read_view: ReadViewSpec,
+}
+
+impl Default for ReadOpts {
+    fn default() -> Self {
+        Self {
+            tier: DurabilityTier::Local,
+            local_updates: LocalUpdates::Immediate,
+            propagation: Propagation::Full,
+            include_deleted: false,
+            read_view: ReadViewSpec::default(),
+        }
+    }
+}
+
+impl ReadOpts {
+    /// Evaluate the query as a live head branch composed over an optional base.
+    pub fn branch_view(mut self, head: BranchSelector, base: Option<BranchViewBase>) -> Self {
+        self.read_view = ReadViewSpec::branch_view(head, base);
+        self
+    }
+}
+
+/// Own-write overlay policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum LocalUpdates {
+    /// Include local writes immediately.
+    Immediate,
+    /// Defer local writes until the requested tier observes them.
+    Deferred,
+}
+
+/// Read propagation policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum Propagation {
+    /// Full propagation may be used by future remote paths.
+    Full,
+    /// Evaluate only against local knowledge.
+    LocalOnly,
+}
+
+/// Public API error with stable machine-readable codes.
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+pub struct Error {
+    /// Stable error code.
+    pub code: ErrorCode,
+    /// Human-readable detail.
+    pub message: String,
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.code {
+            ErrorCode::TransactionConflict => {
+                write!(formatter, "(transaction_conflict): {}", self.message)
+            }
+            _ => write!(formatter, "{:?}: {}", self.code, self.message),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl Error {
+    fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+fn row_already_deleted(row: RowUuid) -> Error {
+    Error::new(
+        ErrorCode::WriteRejected,
+        format!("row already deleted: {}", row.0),
+    )
+}
+
+fn read_for_write_denied(operation: &str, table: &str) -> Error {
+    Error::new(
+        ErrorCode::WriteRejected,
+        format!(
+            "read policy denied {operation} on table {table}: the operation requires read permission on the target row"
+        ),
+    )
+}
+
+/// Stable API error code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum ErrorCode {
+    /// Schema validation failed.
+    Schema,
+    /// Query validation or binding failed.
+    Query,
+    /// Write was rejected.
+    WriteRejected,
+    /// An exclusive transaction's fixed snapshot was invalidated locally.
+    TransactionConflict,
+    /// Storage failed.
+    Storage,
+    /// Protocol or local node operation failed.
+    Protocol,
+    /// Local transport queue is full and the operation should be retried later.
+    Backpressure,
+    /// Requested observation is not locally available in this slice.
+    NotObserved,
+    /// Historical read must be evaluated by a complete-history server.
+    HistoricalReadRequiresServer,
+}
+
+impl From<crate::node::Error> for Error {
+    fn from(error: crate::node::Error) -> Self {
+        let code = match &error {
+            crate::node::Error::HistoricalReadRequiresServer => {
+                ErrorCode::HistoricalReadRequiresServer
+            }
+            crate::node::Error::Storage(_) | crate::node::Error::Groove(_) => ErrorCode::Storage,
+            crate::node::Error::Query(_) => ErrorCode::Query,
+            crate::node::Error::TransactionConflict => ErrorCode::TransactionConflict,
+            crate::node::Error::TableNotFound(_)
+            | crate::node::Error::UnsupportedColumnType(_)
+            | crate::node::Error::InvalidMergeableCommit(_) => ErrorCode::Schema,
+            _ => ErrorCode::Protocol,
+        };
+        Self::new(code, error.to_string())
+    }
+}
+
+impl From<QueryError> for Error {
+    fn from(error: QueryError) -> Self {
+        Self::new(ErrorCode::Query, error.to_string())
+    }
+}
+
+#[doc(hidden)]
+pub mod doctest_support {
+    use std::collections::BTreeMap;
+    use std::future::Future;
+
+    use groove::records::Value;
+    pub use groove::storage::MemoryStorage;
+
+    use crate::db::{Db, DbConfig, DbIdentity, Error, RowCells, SeededRowIdSource};
+    use crate::ids::{AuthorId, NodeUuid};
+    use crate::schema::JazzSchema;
+    use crate::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+
+    /// Poll a ready-immediate Db future in examples.
+    pub fn block_on<F: Future>(future: F) -> F::Output {
+        crate::db::block_on(future)
+    }
+
+    /// Example schema used by Db doctests.
+    pub fn schema() -> JazzSchema {
+        let source = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("title", ColumnType::Text)
+                    .column("done", ColumnType::Boolean),
+            )
+            .build();
+        crate::schema::JazzSchema::new(&source).expect("Db doctest public schema compiles")
+    }
+
+    /// Open a fresh Db over in-memory storage.
+    pub async fn open_todos_db() -> Result<Db<MemoryStorage>, Error> {
+        let schema = schema();
+        let cfs = schema.column_families();
+        let refs = cfs.iter().map(String::as_str).collect::<Vec<_>>();
+        Db::open(DbConfig {
+            schema,
+            storage: MemoryStorage::new(&refs),
+            identity: DbIdentity {
+                node: NodeUuid::from_bytes([0x11; 16]),
+                author: AuthorId::from_bytes([0xa1; 16]),
+            },
+            id_source: Some(Box::new(SeededRowIdSource::new(0x1111))),
+        })
+        .await
+    }
+
+    /// Todo row payload for examples.
+    pub fn todo_cells(title: &str, done: bool) -> RowCells {
+        BTreeMap::from([
+            ("title".to_owned(), Value::String(title.to_owned())),
+            ("done".to_owned(), Value::Bool(done)),
+        ])
+    }
+}
+
+fn effective_read_tier(opts: &ReadOpts) -> DurabilityTier {
+    if opts.local_updates == LocalUpdates::Immediate {
+        opts.tier.max(DurabilityTier::Local)
+    } else {
+        opts.tier
+    }
+}
+
+fn supports_pending_overlay_reconciliation(query: &Query) -> bool {
+    // ponytail: row-key reconciliation currently covers flat root results;
+    // add contributor provenance before enabling structured or aggregate shapes.
+    query.aggregate.is_none()
+        && query.flat_join.is_none()
+        && query.array_subqueries.is_empty()
+        && query.includes.is_empty()
+        && query.joins.is_empty()
+        && query.policy_branches.is_empty()
+        && query.inherits.is_empty()
+        && query.reachable.is_empty()
+        && query.limit.is_none()
+        && query.offset == 0
+}
+
+fn upstream_register_shape_options(
+    tier: DurabilityTier,
+    read_view: ReadViewSpec,
+    upstream_durability_floor: DurabilityTier,
+    propagate_upstream: bool,
+) -> RegisterShapeOptions {
+    RegisterShapeOptions {
+        tier: remote_subscription_tier(tier, upstream_durability_floor),
+        read_view,
+        propagate_upstream,
+    }
+}
+
+fn remote_subscription_tier(
+    tier: DurabilityTier,
+    upstream_durability_floor: DurabilityTier,
+) -> DurabilityTier {
+    tier.max(upstream_durability_floor)
+}
+
+fn ensure_default_read_view(opts: &ReadOpts) -> Result<(), Error> {
+    if opts.read_view.is_default() {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorCode::Query,
+        "non-default read_view is not supported yet; reads currently execute against the current/default view",
+    ))
+}
+
+fn ensure_supported_read_view(opts: &ReadOpts) -> Result<(), Error> {
+    if matches!(
+        opts.read_view.source,
+        ReadViewSourceSpec::Current | ReadViewSourceSpec::BranchView { .. }
+    ) {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorCode::Query,
+        "this read_view combination is not supported yet",
+    ))
+}
+
+fn ensure_supported_subscription_read_opts(opts: &ReadOpts) -> Result<(), Error> {
+    if opts.include_deleted {
+        return Err(Error::new(
+            ErrorCode::Query,
+            "live subscriptions do not support include_deleted yet",
+        ));
+    }
+    ensure_supported_read_view(opts)
+}
+
+fn ensure_supported_register_shape_read_view(opts: &RegisterShapeOptions) -> Result<(), Error> {
+    let read_opts = ReadOpts {
+        read_view: opts.read_view.clone(),
+        ..ReadOpts::default()
+    };
+    ensure_supported_read_view(&read_opts)
+}
+
+fn ensure_supported_register_shape_options(
+    opts: &RegisterShapeOptions,
+    local_receiver: bool,
+    peer_role: PeerRole,
+) -> Result<(), Error> {
+    ensure_supported_register_shape_read_view(opts)?;
+    let supported = match (local_receiver, peer_role) {
+        (true, _) | (false, PeerRole::Relay) => opts.tier >= DurabilityTier::Local,
+        (false, PeerRole::ClientLink { .. }) => opts.tier == DurabilityTier::Global,
+    };
+    if !supported {
+        let message = match (local_receiver, peer_role) {
+            (true, _) => {
+                "Local sync subscription serving requires at least local-tier registration"
+            }
+            (false, PeerRole::Relay) => {
+                "relay sync subscription serving requires at least local-tier registration"
+            }
+            (false, PeerRole::ClientLink { .. }) => {
+                "sync subscription serving supports only global-tier registration"
+            }
+        };
+        return Err(Error::new(ErrorCode::Query, message));
+    }
+    Ok(())
+}
+
+fn validate_shape_ast_for_registration<S>(
+    node: &NodeState<S>,
+    shape_id: ShapeId,
+    ast: &ShapeAst,
+) -> Result<Option<ValidatedQuery>, crate::node::Error>
+where
+    S: OrderedKvStorage,
+{
+    node.validate_shape_ast_for_registration(shape_id, ast)
+}
+
+fn send_unsupported_shape_capability_rejection(
+    transport: &mut dyn Transport,
+    subscription: SubscriptionKey,
+    detail: String,
+) -> Result<(), TransportError> {
+    send_subscription_rejection(
+        transport,
+        subscription,
+        SubscribeRejectReason::UnsupportedShapeCapability { detail },
+    )
+}
+
+fn reject_server_subscription_failure(
+    transport: &mut dyn Transport,
+    subscription: SubscriptionKey,
+    error: &crate::node::Error,
+) -> Result<(), TransportError> {
+    // Keep the complete error on the serving process only. Subscription keys
+    // provide a correlation handle without disclosing schema, policy, or
+    // storage details to the peer.
+    eprintln!(
+        "jazz subscription rejected: shape={} binding={} read_view={} server_error={error}",
+        subscription.shape_id.0, subscription.binding_id.0, subscription.read_view.id,
+    );
+    send_subscription_rejection(
+        transport,
+        subscription,
+        SubscribeRejectReason::ServerFailure {
+            code: server_failure_code(error),
+        },
+    )
+}
+
+fn send_subscription_rejection(
+    transport: &mut dyn Transport,
+    subscription: SubscriptionKey,
+    reason: SubscribeRejectReason,
+) -> Result<(), TransportError> {
+    transport.send(SyncMessage::SubscribeRejected {
+        subscription,
+        reason,
+    })
+}
+
+fn server_failure_code(error: &crate::node::Error) -> SubscribeServerFailureCode {
+    match error {
+        crate::node::Error::TableNotFound(_) => SubscribeServerFailureCode::TableNotFound,
+        crate::node::Error::Query(error) if matches!(**error, QueryError::UnknownTable(_)) => {
+            SubscribeServerFailureCode::TableNotFound
+        }
+        crate::node::Error::Query(_) => SubscribeServerFailureCode::QueryValidation,
+        crate::node::Error::QueryLowering(_) => SubscribeServerFailureCode::QueryLowering,
+        crate::node::Error::AuthorizationDenied => SubscribeServerFailureCode::PolicyEvaluation,
+        crate::node::Error::InvalidStoredValue(_)
+        | crate::node::Error::InvalidCatalogueUpdate(_) => {
+            SubscribeServerFailureCode::SchemaResolution
+        }
+        _ => SubscribeServerFailureCode::Internal,
+    }
+}
+
+fn is_server_shape_validation_failure(error: &crate::node::Error) -> bool {
+    matches!(
+        error,
+        crate::node::Error::TableNotFound(_) | crate::node::Error::Query(_)
+    )
+}
+
+fn register_shape_rejection_subscription(
+    shape_id: ShapeId,
+    read_view: ReadViewKey,
+) -> SubscriptionKey {
+    SubscriptionKey {
+        shape_id,
+        binding_id: BindingId(uuid::Uuid::nil()),
+        read_view,
+    }
+}
+
+fn coverage_key(
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    opts: RegisterShapeOptions,
+) -> CoverageKey {
+    CoverageKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        opts,
+    }
+}
+
+fn subscriber_permissions_ready(permissions_ready: bool, trust: CommitUnitTrust) -> bool {
+    trust.is_trusted() || permissions_ready
+}
+
+/// Messages whose semantics assert downstream authority state must never be
+/// accepted from a subscriber transport. Keep this admission check ahead of
+/// `NodeState::apply_sync_message`: validation inside the node cannot recover
+/// the direction or authenticated link role after dispatch.
+fn subscriber_inbound_message_is_authority_only(
+    message: &SyncMessage,
+    trust: CommitUnitTrust,
+) -> bool {
+    matches!(
+        message,
+        SyncMessage::FateUpdate { .. }
+            | SyncMessage::SubscribeRejected { .. }
+            | SyncMessage::CatalogueAck(_)
+            | SyncMessage::ViewUpdate { .. }
+            | SyncMessage::RowVersionPayloads { .. }
+            | SyncMessage::CatalogueSnapshot(_)
+            | SyncMessage::PermissionAdviceResponse { .. }
+            | SyncMessage::AuthorizationScopeReceipt { .. }
+            | SyncMessage::AuthorizationScopeView { .. }
+            | SyncMessage::AuthorizationScopeAggregateReceipt { .. }
+            | SyncMessage::AuthorizationScopeUnavailable { .. }
+            | SyncMessage::AuthorizationScopeDecision { .. }
+    ) || (trust == CommitUnitTrust::Session && matches!(message, SyncMessage::SessionClaims { .. }))
+}
+
+fn subscriber_permission_subject(ingest: CommitUnitIngestContext) -> AuthorId {
+    match ingest.trust {
+        CommitUnitTrust::Session => ingest.identity,
+        CommitUnitTrust::TrustedBackend | CommitUnitTrust::TrustedAdmin => AuthorId::SYSTEM,
+    }
+}
+
+/// Row cells supplied to write methods.
+pub type RowCells = BTreeMap<String, Value>;
+
+/// Build [`RowCells`] with bare identifier column names.
+///
+/// Keys are converted to column names with `stringify!`, and values are
+/// converted with `Into<Value>`. Column and type validation remains lazy at
+/// write/query validation time.
+///
+/// ```rust
+/// # use jazz::db::doctest_support::{block_on, open_todos_db};
+/// # use jazz::tx::DurabilityTier;
+/// let db = block_on(open_todos_db())?;
+/// let write = block_on(db.insert(
+///     "todos",
+///     jazz::row! {
+///         title: "Ship it",
+///         done: false,
+///     },
+/// ))?;
+/// block_on(write.wait(DurabilityTier::Local))?;
+///
+/// let todos = db.prepare_query(&db.table("todos"))?;
+/// assert_eq!(db.read(&todos)?.len(), 1);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[macro_export]
+macro_rules! row {
+    () => {
+        $crate::db::RowCells::new()
+    };
+    ($($key:ident : $value:expr),+ $(,)?) => {{
+        let mut cells = $crate::db::RowCells::new();
+        $(
+            cells.insert(::std::string::String::from(stringify!($key)), ($value).into());
+        )+
+        cells
+    }};
+}
+
+/// CRUD operations for an open mergeable transaction.
+///
+/// [`MergeableTx`] and [`MergeableTxRef`] implement this trait, so mergeable
+/// CRUD has one definition regardless of who owns the transaction lifetime.
+/// Import this trait to call its methods.
+pub trait MergeableTxOps<S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    /// The database that owns the open transaction.
+    fn db(&self) -> &Db<S>;
+
+    /// The id of the already-open transaction.
+    fn tx_id(&self) -> OpenTransactionId;
+
+    /// Stage an insert with a generated row id.
+    async fn insert(&self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
+        let row = self.db().row_id_source.borrow_mut().next_row_id();
+        self.insert_with_id(table, row, cells).await?;
+        Ok(row)
+    }
+
+    /// Stage an insert with a caller-supplied row id.
+    async fn insert_with_id(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<(), Error> {
+        self.insert_with_id_at_ms_option(table, row, cells, None)
+            .await
+    }
+
+    /// Stage an insert in one exact branch-local row.
+    async fn insert_with_id_in_branch(
+        &self,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<(), Error> {
+        self.db()
+            .stage_mergeable_insert_in_branch(self.tx_id(), table, branch, row, cells, None)
+            .await
+    }
+
+    /// Stage an insert with a caller-supplied row id and explicit millisecond provenance time.
+    async fn insert_with_id_at_ms(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: u64,
+    ) -> Result<(), Error> {
+        self.insert_with_id_at_ms_option(table, row, cells, Some(now_ms))
+            .await
+    }
+
+    /// Stage an update; omitted fields keep the transaction-local value.
+    async fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
+        self.update_at_ms_option(table, row, patch, None).await
+    }
+
+    /// Stage an update through a head-over-base branch view.
+    async fn update_in_branch_view(
+        &self,
+        table: &str,
+        head: BranchSelector,
+        base: Option<BranchViewBase>,
+        row: RowUuid,
+        patch: RowCells,
+    ) -> Result<(), Error> {
+        self.db()
+            .stage_mergeable_update_in_branch_view(
+                self.tx_id(),
+                table,
+                head,
+                base,
+                row,
+                patch,
+                None,
+            )
+            .await
+    }
+
+    /// Stage an update with an explicit millisecond provenance time.
+    async fn update_at_ms(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        now_ms: u64,
+    ) -> Result<(), Error> {
+        self.update_at_ms_option(table, row, patch, Some(now_ms))
+            .await
+    }
+
+    /// Stage a soft delete.
+    async fn delete(&self, table: &str, row: RowUuid) -> Result<(), Error> {
+        self.delete_at_ms_option(table, row, None).await
+    }
+
+    /// Stage a deletion through a head-over-base branch view.
+    async fn delete_in_branch_view(
+        &self,
+        table: &str,
+        head: BranchSelector,
+        base: Option<BranchViewBase>,
+        row: RowUuid,
+    ) -> Result<(), Error> {
+        self.db()
+            .stage_mergeable_delete_in_branch_view(self.tx_id(), table, head, base, row, None)
+            .await
+    }
+
+    /// Stage a soft delete with explicit millisecond provenance time.
+    async fn delete_at_ms(&self, table: &str, row: RowUuid, now_ms: u64) -> Result<(), Error> {
+        self.delete_at_ms_option(table, row, Some(now_ms)).await
+    }
+
+    /// Stage a restore, applying defaults for omitted columns.
+    async fn restore(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
+        self.restore_at_ms_option(table, row, cells, None).await
+    }
+
+    /// Stage a restore in one exact branch-local row.
+    async fn restore_in_branch(
+        &self,
+        table: &str,
+        branch: BranchSelector,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<(), Error> {
+        self.db()
+            .stage_mergeable_restore_in_branch(self.tx_id(), table, branch, row, cells, None)
+            .await
+    }
+
+    /// Stage an atomic move of one object branch-local row between exact branch
+    /// keys. The destination receives an explicit content write and restore,
+    /// while the source receives an explicit deletion in the same transaction.
+    async fn move_between_branches(
+        &self,
+        table: &str,
+        source: BranchSelector,
+        target: BranchSelector,
+        row: RowUuid,
+    ) -> Result<(), Error> {
+        if source == target {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                "branch move requires distinct source and target selectors",
+            ));
+        }
+        let mut cells = self
+            .db()
+            .node
+            .node
+            .lock()
+            .await
+            .visible_current_cells_in_branch(table, &source, row)
+            .await?
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorCode::NotObserved,
+                    format!("source branch-local row is not visible: {}", row.0),
+                )
+            })?;
+        let table_schema = self
+            .db()
+            .schema
+            .tables
+            .iter()
+            .find(|candidate| candidate.name == table)
+            .ok_or_else(|| Error::new(ErrorCode::Schema, format!("unknown table {table}")))?;
+        let (_, target_cells) = self
+            .db()
+            .schema
+            .project_branch_selector(table_schema, &target)
+            .map_err(|message| Error::new(ErrorCode::Schema, message))?;
+        cells.extend(target_cells);
+        self.restore_in_branch(table, target, row, cells).await?;
+        self.delete_in_branch_view(table, source, None, row).await
+    }
+
+    /// Stage a restore with explicit millisecond provenance time, applying defaults for omitted columns.
+    async fn restore_at_ms(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: u64,
+    ) -> Result<(), Error> {
+        self.restore_at_ms_option(table, row, cells, Some(now_ms))
+            .await
+    }
+
+    /// Read one row with this transaction's pending writes overlaid.
+    async fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
+        self.db()
+            .node
+            .node
+            .lock()
+            .await
+            .tx_read_in_schema(self.tx_id(), self.db().schema_version_id, table, row)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Read a prepared query with this transaction's pending writes overlaid.
+    async fn all_prepared(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
+        self.all_prepared_with_opts(prepared, ReadOpts::default())
+            .await
+    }
+
+    /// Read a prepared query with transaction-local writes and explicit read semantics.
+    async fn all_prepared_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.db()
+            .transaction_all(self.tx_id(), prepared, opts)
+            .await
+    }
+
+    /// Read a prepared query inside this transaction as `author`.
+    async fn all_prepared_for_identity(
+        &self,
+        prepared: &PreparedQuery,
+        author: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.all_prepared_for_identity_with_opts(prepared, author, ReadOpts::default())
+            .await
+    }
+
+    /// Read a prepared query as `author` with explicit read semantics.
+    async fn all_prepared_for_identity_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        author: AuthorId,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.db()
+            .transaction_all_for_identity(self.tx_id(), prepared, author, opts)
+            .await
+    }
+
+    /// Stage an insert with an optional explicit provenance time.
+    async fn insert_with_id_at_ms_option(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        self.db()
+            .stage_mergeable_insert(self.tx_id(), table, row, cells, now_ms)
+            .await
+    }
+
+    /// Stage an update with an optional explicit provenance time.
+    async fn update_at_ms_option(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        self.db()
+            .stage_mergeable_update(self.tx_id(), table, row, patch, now_ms)
+            .await
+    }
+
+    /// Stage a deletion with an optional explicit provenance time.
+    async fn delete_at_ms_option(
+        &self,
+        table: &str,
+        row: RowUuid,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        self.db()
+            .stage_mergeable_delete(self.tx_id(), table, row, now_ms)
+            .await
+    }
+
+    /// Stage a restore with an optional explicit provenance time.
+    async fn restore_at_ms_option(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        now_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        self.db()
+            .stage_mergeable_restore(self.tx_id(), table, row, cells, now_ms)
+            .await
+    }
+}
+
+/// Owning, Rust-facing handle for a group of mergeable writes.
+///
+/// This handle owns the transaction lifetime and abandons an uncommitted
+/// transaction on drop. Use [`MergeableTxRef`] when a caller retains an
+/// [`OpenTransactionId`] between calls and must not close the transaction on return.
+pub struct MergeableTx<'a, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    db: &'a Db<S>,
+    tx_id: OpenTransactionId,
+    /// Set once the transaction has been committed, so `Drop` does not then
+    /// abandon it. Without this, `commit` consumed `self` and `Drop` still ran
+    /// `abandon_transaction_handle` on an already-committed transaction — benign
+    /// only because `abandon_tx` tolerates an unknown id, and silent because the
+    /// result was discarded.
+    committed: bool,
+}
+
+impl<S> MergeableTx<'_, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    /// Commit all staged writes as one mergeable transaction.
+    ///
+    /// Once the commit succeeds, dropping this handle does not abandon the
+    /// already-committed transaction. If it fails, dropping the handle attempts
+    /// to abandon any transaction that remains open.
+    pub async fn commit(mut self) -> Result<TxId, Error> {
+        let result = self.db.commit_mergeable_handle(self.tx_id).await;
+        if result.is_ok() {
+            self.committed = true;
+        }
+        result
+    }
+}
+
+impl<S> MergeableTxOps<S> for MergeableTx<'_, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    fn db(&self) -> &Db<S> {
+        self.db
+    }
+
+    fn tx_id(&self) -> OpenTransactionId {
+        self.tx_id
+    }
+}
+
+/// Non-owning operations handle for an already-open mergeable transaction.
+///
+/// Construct this with [`Db::mergeable_tx_ref`] when another layer owns the
+/// [`OpenTransactionId`] lifetime. Dropping this ref never abandons the transaction.
+pub struct MergeableTxRef<'a, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    db: &'a Db<S>,
+    tx_id: OpenTransactionId,
+}
+
+impl<S> MergeableTxOps<S> for MergeableTxRef<'_, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    fn db(&self) -> &Db<S> {
+        self.db
+    }
+
+    fn tx_id(&self) -> OpenTransactionId {
+        self.tx_id
+    }
+}
+
+impl<S> Drop for MergeableTx<'_, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let _ = self.db.abandon_transaction_handle(self.tx_id);
+    }
+}
+
+/// CRUD and read operations for an open exclusive transaction.
+///
+/// [`ExclusiveTx`] and [`ExclusiveTxRef`] implement this trait, so exclusive
+/// operations have one definition regardless of who owns the transaction
+/// lifetime. Import this trait to call its methods.
+pub trait ExclusiveTxOps<S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    /// The database that owns the open transaction.
+    fn db(&self) -> &Db<S>;
+
+    /// The id of the already-open transaction.
+    fn tx_id(&self) -> OpenTransactionId;
+
+    /// Read one row inside the exclusive transaction.
+    async fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
+        self.db().exclusive_read(self.tx_id(), table, row).await
+    }
+
+    /// Read all current rows in a table inside the exclusive transaction.
+    async fn all(&self, table: &str) -> Result<Vec<CurrentRow>, Error> {
+        self.db()
+            .node
+            .node
+            .lock()
+            .await
+            .tx_current_rows(self.tx_id(), table)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Read a prepared query inside the exclusive transaction.
+    async fn all_prepared(&self, prepared: &PreparedQuery) -> Result<Vec<CurrentRow>, Error> {
+        self.all_prepared_with_opts(prepared, ReadOpts::default())
+            .await
+    }
+
+    /// Read a prepared query with transaction-local writes and explicit read semantics.
+    async fn all_prepared_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.db()
+            .transaction_all(self.tx_id(), prepared, opts)
+            .await
+    }
+
+    /// Read a prepared query inside the exclusive transaction as `author`.
+    async fn all_prepared_for_identity(
+        &self,
+        prepared: &PreparedQuery,
+        author: AuthorId,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.all_prepared_for_identity_with_opts(prepared, author, ReadOpts::default())
+            .await
+    }
+
+    /// Read a prepared query as `author` with explicit read semantics.
+    async fn all_prepared_for_identity_with_opts(
+        &self,
+        prepared: &PreparedQuery,
+        author: AuthorId,
+        opts: ReadOpts,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        self.db()
+            .transaction_all_for_identity(self.tx_id(), prepared, author, opts)
+            .await
+    }
+
+    /// Stage an insert with a generated row id.
+    async fn insert(&self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
+        let row = self.db().row_id_source.borrow_mut().next_row_id();
+        self.insert_with_id(table, row, cells).await?;
+        Ok(row)
+    }
+
+    /// Stage an insert with a caller-supplied row id.
+    async fn insert_with_id(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<(), Error> {
+        self.db()
+            .stage_exclusive_insert(self.tx_id(), table, row, cells)
+            .await
+    }
+
+    /// Stage an update; omitted fields keep the transaction-local value.
+    async fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
+        let mut cells = self.read(table, row).await?.unwrap_or_default();
+        cells.extend(patch);
+        self.insert_with_id(table, row, cells).await
+    }
+
+    /// Stage a soft delete.
+    async fn delete(&self, table: &str, row: RowUuid) -> Result<(), Error> {
+        self.db()
+            .stage_exclusive_delete(self.tx_id(), table, row)
+            .await
+    }
+
+    /// Stage a restore, applying defaults for omitted columns.
+    async fn restore(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
+        self.db()
+            .stage_exclusive_restore(self.tx_id(), table, row, cells)
+            .await
+    }
+}
+
+/// Owning, Rust-facing handle for an exclusive transaction over a stable snapshot.
+///
+/// This handle owns the transaction lifetime and abandons an uncommitted
+/// transaction on drop. Use [`ExclusiveTxRef`] when a caller retains an
+/// [`OpenTransactionId`] between calls and must not close the transaction on return.
+pub struct ExclusiveTx<'a, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    db: &'a Db<S>,
+    tx_id: OpenTransactionId,
+    committed: bool,
+}
+
+impl<S> ExclusiveTx<'_, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    /// Commit the exclusive transaction.
+    ///
+    /// Once the commit succeeds, dropping this handle does not abandon the
+    /// already-committed transaction. If it fails, dropping the handle attempts
+    /// to abandon any transaction that remains open.
+    pub async fn commit(mut self) -> Result<TxId, Error> {
+        let result = self.db.commit_exclusive_handle(self.tx_id).await;
+        if result.is_ok() {
+            self.committed = true;
+        }
+        result
+    }
+}
+
+impl<S> ExclusiveTxOps<S> for ExclusiveTx<'_, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    fn db(&self) -> &Db<S> {
+        self.db
+    }
+
+    fn tx_id(&self) -> OpenTransactionId {
+        self.tx_id
+    }
+}
+
+impl<S> Drop for ExclusiveTx<'_, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let _ = self.db.abandon_exclusive_handle(self.tx_id);
+    }
+}
+
+/// Non-owning operations handle for an already-open exclusive transaction.
+///
+/// Construct this with [`Db::exclusive_tx_ref`] when another layer owns the
+/// [`OpenTransactionId`] lifetime. Dropping this ref never abandons the transaction.
+pub struct ExclusiveTxRef<'a, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    db: &'a Db<S>,
+    tx_id: OpenTransactionId,
+}
+
+impl<S> ExclusiveTxOps<S> for ExclusiveTxRef<'_, S>
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    fn db(&self) -> &Db<S> {
+        self.db
+    }
+
+    fn tx_id(&self) -> OpenTransactionId {
+        self.tx_id
+    }
+}
+
+/// Handle for an applied local write.
+pub struct WriteHandle<S>
+where
+    S: OrderedKvStorage,
+{
+    node: WeakNodeState<S>,
+    row_uuid: RowUuid,
+    tx_id: TxId,
+    local_tier: DurabilityTier,
+}
+
+impl<S> WriteHandle<S>
+where
+    S: OrderedKvStorage,
+{
+    /// Generated or caller-supplied row id affected by this write.
+    pub fn row_uuid(&self) -> RowUuid {
+        self.row_uuid
+    }
+
+    /// Mergeable transaction id backing this write.
+    ///
+    /// ```rust
+    /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
+    /// let db = block_on(open_todos_db())?;
+    /// let write = block_on(db.insert("todos", todo_cells("has id", false)))?;
+    ///
+    /// let _row_id = write.row_uuid();
+    /// let _tx_id = write.mergeable_tx_id();
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn mergeable_tx_id(&self) -> TxId {
+        self.tx_id
+    }
+
+    /// Wait until this write has reached the requested tier.
+    ///
+    /// ```rust
+    /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
+    /// # use jazz::tx::DurabilityTier;
+    /// let db = block_on(open_todos_db())?;
+    /// let write = block_on(db.insert("todos", todo_cells("wait locally", false)))?;
+    ///
+    /// let tx_id = block_on(write.wait(DurabilityTier::Local))?;
+    /// assert_eq!(tx_id, write.mergeable_tx_id());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub async fn wait(&self, tier: DurabilityTier) -> Result<TxId, Error> {
+        if tier <= self.local_tier {
+            return Ok(self.tx_id);
+        }
+        let state = self.write_state().await?;
+        match state.fate {
+            Fate::Rejected(reason) => Err(write_rejected(self.tx_id, reason)),
+            Fate::Pending if tier >= DurabilityTier::Edge => Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("write has not been accepted at requested tier {tier:?}"),
+            )),
+            Fate::Pending | Fate::Accepted if state.durability < tier => Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("write has not reached requested tier {tier:?}"),
+            )),
+            Fate::Pending | Fate::Accepted => Ok(self.tx_id),
+        }
+    }
+
+    /// Return the locally observed fate and durability for this write.
+    pub async fn write_state(&self) -> Result<WriteState, Error> {
+        let Some(node) = self.node.upgrade() else {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                "database handle was dropped",
+            ));
+        };
+        let Some((fate, _, durability)) = node.lock().await.transaction_state(self.tx_id).await
+        else {
+            return Err(Error::new(
+                ErrorCode::NotObserved,
+                format!("transaction {:?} is not known locally", self.tx_id),
+            ));
+        };
+        Ok(WriteState { fate, durability })
+    }
+}
+
+fn write_rejected(transaction_id: impl std::fmt::Debug, reason: RejectionReason) -> Error {
+    Error::new(
+        ErrorCode::WriteRejected,
+        format!("transaction {transaction_id:?} was rejected: {reason:?}"),
+    )
+}
+
+/// Decode Groove's recursively assembled terminal value into Jazz's typed
+/// structured-result view. This separates relation fields from scalar row
+/// fields, but does not join or assemble relation facts.
+fn materialize_result_tree(query: &Query, snapshot: RelationSnapshot) -> Result<ResultTree, Error> {
+    fn node_from_record(
+        table: &str,
+        record: OwnedRecord,
+        arrays: &[crate::query::ArraySubquery],
+    ) -> Result<ResultNode, Error> {
+        let descriptor = *record.descriptor();
+        let values = record.to_values().map_err(|error| {
+            Error::new(
+                ErrorCode::Protocol,
+                format!("invalid Groove terminal record: {error}"),
+            )
+        })?;
+        let array_by_name = arrays
+            .iter()
+            .map(|array| (array.column_name.as_str(), array))
+            .collect::<BTreeMap<_, _>>();
+        let mut scalar_fields = Vec::new();
+        let mut scalar_values = Vec::new();
+        let mut relations = BTreeMap::new();
+        for (field, value) in descriptor.fields().iter().zip(values) {
+            let Some(name) = field.name.as_deref() else {
+                return Err(Error::new(
+                    ErrorCode::Protocol,
+                    "Groove terminal emitted an unnamed field",
+                ));
+            };
+            let Some(array) = array_by_name.get(name) else {
+                scalar_fields.push((name.to_owned(), field.value_type.clone()));
+                scalar_values.push(value);
+                continue;
+            };
+            let Value::Array(children) = value else {
+                return Err(Error::new(
+                    ErrorCode::Protocol,
+                    format!("Groove terminal relation {name} was not an array"),
+                ));
+            };
+            let children = children
+                .into_iter()
+                .map(|value| {
+                    let Value::Record(record) = value else {
+                        return Err(Error::new(
+                            ErrorCode::Protocol,
+                            format!("Groove terminal relation {name} contained a non-record"),
+                        ));
+                    };
+                    node_from_record(&array.table, record, &array.nested_arrays)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            relations.insert(name.to_owned(), ResultRelation::Array(children));
+        }
+        let scalar_descriptor = RecordDescriptor::new(scalar_fields);
+        let raw = scalar_descriptor.create(&scalar_values).map_err(|error| {
+            Error::new(
+                ErrorCode::Protocol,
+                format!("invalid scalar projection from Groove terminal: {error}"),
+            )
+        })?;
+        let row = CurrentRow::new(table, OwnedRecord::new(raw, scalar_descriptor));
+        let occurrence = OutputOccurrenceId::single_source(ObjectId::from_uuid(row.row_uuid().0));
+        Ok(ResultNode {
+            occurrence,
+            row,
+            relations,
+        })
+    }
+
+    if !snapshot.edges.is_empty() {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "structured result unexpectedly contained relation-fact edges",
+        ));
+    }
+    let roots = snapshot
+        .rows
+        .into_iter()
+        .take(snapshot.root_count)
+        .map(|row| {
+            let (descriptor, raw) = row.encoded_record();
+            node_from_record(
+                row.table(),
+                OwnedRecord::new(raw.to_vec(), *descriptor),
+                &query.array_subqueries,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ResultTree { roots })
+}
+
+struct SubscriptionState {
+    terminal_rows: bool,
+    kind: SubscriptionKind,
+    groove_runtime_token: u64,
+    /// The maintained subscription currently owned by this public stream.
+    /// Rehydration replaces the Groove ID, and drop must clean up that new ID.
+    local_subscription_cleanup: Rc<Cell<Option<(u64, groove::ivm::SubscriptionId)>>>,
+    propagates_upstream: bool,
+    author: AuthorId,
+    authorization_mode: QueryAuthorizationMode,
+    read_tier: DurabilityTier,
+    remote_read_tier: Option<DurabilityTier>,
+    /// Once this stream has an upstream, cached durable state needs a receipt
+    /// from each replacement connection before it can be settled again.
+    requires_authority_receipt: bool,
+    /// Routing intent sent with this subscription's remote registration.
+    remote_propagate_upstream: bool,
+    read_view: ReadViewSpec,
+    snapshot: RelationSnapshot,
+    snapshot_index: RelationSnapshotIndex,
+    snapshot_source: SubscriptionSnapshotSource,
+    settled: bool,
+    sender: UnboundedSender<SubscriptionEvent>,
+}
+
+#[derive(Clone, Default)]
+struct RelationSnapshotIndex {
+    roots: BTreeMap<OutputOccurrenceId, usize>,
+    related: BTreeMap<(String, RowUuid), usize>,
+    edges: BTreeSet<RelationEdge>,
+}
+
+impl RelationSnapshotIndex {
+    fn from_snapshot(snapshot: &RelationSnapshot) -> Self {
+        let mut index = Self::default();
+        for (position, row) in snapshot.rows.iter().take(snapshot.root_count).enumerate() {
+            index
+                .roots
+                .insert(subscription_row_occurrence_id(row), position);
+        }
+        for (offset, row) in snapshot.rows.iter().skip(snapshot.root_count).enumerate() {
+            index.related.insert(
+                (row.table().to_owned(), row.row_uuid()),
+                snapshot.root_count + offset,
+            );
+        }
+        index.edges = snapshot.edges.iter().cloned().collect();
+        index
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubscriptionSnapshotSource {
+    LocalMaintained,
+    LinkSnapshot,
+}
+
+enum SubscriptionKind {
+    Prepared {
+        shape: ValidatedQuery,
+        binding: Binding,
+        maintained_subscription: Option<LocalMaintainedViewSubscription>,
+    },
+}
+
+/// Row identity removed from a materialized subscription result.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct RemovedRow {
+    /// Logical table that contained the removed row.
+    pub table: String,
+    /// Stable row identity.
+    pub row_uuid: RowUuid,
+    /// Stable identity of the removed output occurrence.
+    pub occurrence_id: OutputOccurrenceId,
+}
+
+impl RemovedRow {
+    #[doc(hidden)]
+    pub fn from_result_key(table: String, row_uuid: RowUuid, key: ResultKey) -> Self {
+        Self {
+            table,
+            row_uuid,
+            occurrence_id: key.as_occurrence().clone(),
+        }
+    }
+}
+
+/// One row addressed by its maintained output occurrence identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubscriptionOutputRow {
+    /// Stable output occurrence identity.
+    pub occurrence_id: OutputOccurrenceId,
+    /// Materialized row body for this output occurrence.
+    pub row: CurrentRow,
+}
+
+/// Immutable producer-owned decoding contract for a structured terminal root.
+///
+/// The maintained query compiler creates this alongside its app-row terminal.
+/// Consumers install it before applying operations which name `id`; the
+/// descriptor remains the source of truth for encoded types while these slots
+/// map public fields to their physical record positions.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalRootLayout {
+    /// Stable hash of the descriptor, slots, identities and carrier.
+    pub id: String,
+    /// Exact physical root descriptor used to decode packed bytes.
+    pub root_descriptor: RecordDescriptor,
+    /// Descriptor slot containing the stable root UUID.
+    pub root_key_slot: usize,
+    /// Exact descriptor identity of the root UUID slot.
+    pub root_key_field_name: String,
+    /// Public field-to-descriptor slot mappings, in public output order.
+    pub public_fields: Vec<TerminalRootPublicField>,
+    /// Physical representation used for public cells.
+    pub carrier: TerminalRootCarrier,
+}
+
+/// One public root field's immutable physical slot identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalRootPublicField {
+    /// Public column name.
+    pub name: String,
+    /// Physical descriptor field name at `slot`.
+    pub descriptor_field_name: String,
+    /// Physical descriptor slot.
+    pub slot: usize,
+    /// Encoded representation of this individual slot.
+    pub carrier: TerminalRootCarrier,
+}
+
+/// The producer representation applied around declared public column types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TerminalRootCarrier {
+    /// A physical `CurrentRow`: each application cell has one extra nullable
+    /// carrier around its declared storage type.
+    CurrentRow,
+    /// A logical collector/projection record with declared storage types.
+    Logical,
+}
+
+impl std::ops::Deref for SubscriptionOutputRow {
+    type Target = CurrentRow;
+
+    fn deref(&self) -> &Self::Target {
+        &self.row
+    }
+}
+
+/// Delta event emitted by a database subscription stream.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SubscriptionEvent {
+    /// Incremental or reset result change.
+    Delta {
+        /// Whether this delta replaces all previously observed rows and edges.
+        ///
+        /// Fresh subscriptions start with a reset delta from the empty result.
+        reset: bool,
+        /// Whether this event represents an authority-backed observation.
+        /// A locally constructed opening frame is provisional until an
+        /// authority publishes the corresponding reset.
+        publishable: bool,
+        /// Rows newly visible to the subscription.
+        added: Vec<SubscriptionOutputRow>,
+        /// Rows still visible with changed projected cells.
+        updated: Vec<SubscriptionOutputRow>,
+        /// Rows no longer visible to the subscription.
+        removed: Vec<RemovedRow>,
+        /// First public root position of an ordered suffix reconciliation.
+        ordered_suffix_start: Option<usize>,
+        /// Typed structural edits to already hydrated terminal rows.
+        terminal_operations: Vec<groove::ivm::TerminalOperation>,
+        /// Immutable root decoding contract for `terminal_operations`, when
+        /// this event carries structured terminal changes.
+        terminal_layout: Option<TerminalRootLayout>,
+        /// Whether the result is complete at the requested read tier.
+        settled: bool,
+        /// Read tier used to materialize the rows.
+        tier: DurabilityTier,
+    },
+    /// The serving peer rejected the propagated upstream subscription.
+    Rejected {
+        /// Stable rejection class plus diagnostic detail from the serving peer.
+        reason: SubscribeRejectReason,
+    },
+    /// The subscription stream was closed by the producer.
+    Closed,
+}
+
+/// Stream of materialized subscription events.
+pub struct SubscriptionStream {
+    receiver: UnboundedReceiver<SubscriptionEvent>,
+    _state: Rc<RefCell<SubscriptionState>>,
+    cleanup: Option<Box<dyn FnOnce()>>,
+}
+
+struct CleanupGuard {
+    cleanup: Option<Box<dyn FnOnce()>>,
+}
+
+impl CleanupGuard {
+    fn new(cleanup: Box<dyn FnOnce()>) -> Self {
+        Self {
+            cleanup: Some(cleanup),
+        }
+    }
+
+    fn take(&mut self) -> Box<dyn FnOnce()> {
+        self.cleanup
+            .take()
+            .expect("cleanup guard must only be disarmed once")
+    }
+}
+
+impl Drop for CleanupGuard {
+    fn drop(&mut self) {
+        if let Some(cleanup) = self.cleanup.take() {
+            cleanup();
+        }
+    }
+}
+
+impl SubscriptionStream {
+    #[cfg(test)]
+    async fn next_raw(&mut self) -> Option<SubscriptionEvent> {
+        std::future::poll_fn(|cx| Pin::new(&mut self.receiver).poll_next(cx)).await
+    }
+
+    /// Await the next materialized subscription event.
+    pub async fn next_event(&mut self) -> Option<SubscriptionEvent> {
+        loop {
+            let event =
+                std::future::poll_fn(|cx| Pin::new(&mut self.receiver).poll_next(cx)).await?;
+            if subscription_event_is_publishable(&event) {
+                return Some(event);
+            }
+        }
+    }
+
+    /// Return the next queued materialized subscription event without waiting.
+    pub fn try_next_event(&mut self) -> Option<SubscriptionEvent> {
+        loop {
+            let event = self.receiver.try_recv().ok()?;
+            if subscription_event_is_publishable(&event) {
+                return Some(event);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn retained_plan_authorization_mode(&self) -> Option<QueryAuthorizationMode> {
+        let state = self._state.borrow();
+        let SubscriptionKind::Prepared {
+            maintained_subscription,
+            ..
+        } = &state.kind;
+        maintained_subscription
+            .as_ref()
+            .and_then(LocalMaintainedViewSubscription::retained_plan_authorization_mode)
+    }
+}
+
+fn subscription_event_is_publishable(event: &SubscriptionEvent) -> bool {
+    !matches!(
+        event,
+        SubscriptionEvent::Delta {
+            publishable: false,
+            ..
+        }
+    )
+}
+
+impl Stream for SubscriptionStream {
+    type Item = SubscriptionEvent;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        loop {
+            match Pin::new(&mut this.receiver).poll_next(cx) {
+                Poll::Ready(Some(event)) if subscription_event_is_publishable(&event) => {
+                    return Poll::Ready(Some(event));
+                }
+                Poll::Ready(Some(_)) => continue,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+impl Drop for SubscriptionStream {
+    fn drop(&mut self) {
+        if let Some(cleanup) = self.cleanup.take() {
+            cleanup();
+        }
+    }
+}
+
+/// Validated and bound query plan used by all `Db` reads and subscriptions.
+#[derive(Clone, Debug)]
+pub struct PreparedQuery {
+    shape: ValidatedQuery,
+    binding: Binding,
+    local_plan: Option<PreparedQueryPlanHandle>,
+    global_plan: Option<PreparedQueryPlanHandle>,
+    /// Plans contain IDs from one live Groove graph registry. A catalogue
+    /// change can replace that registry while this public handle survives.
+    groove_runtime_token: u64,
+}
+
+impl PreparedQuery {
+    /// Validated query shape.
+    pub fn shape(&self) -> &ValidatedQuery {
+        &self.shape
+    }
+
+    /// Bound parameter values.
+    pub fn binding(&self) -> &Binding {
+        &self.binding
+    }
+
+    fn plan_for_tier(
+        &self,
+        tier: DurabilityTier,
+        groove_runtime_token: u64,
+    ) -> Option<&PreparedQueryPlanHandle> {
+        if self.groove_runtime_token != groove_runtime_token {
+            return None;
+        }
+        match tier {
+            DurabilityTier::Local => self.local_plan.as_ref(),
+            DurabilityTier::Global => self.global_plan.as_ref(),
+            DurabilityTier::None | DurabilityTier::Edge => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn has_plan_for_tier(&self, tier: DurabilityTier) -> bool {
+        self.plan_for_tier(tier, self.groove_runtime_token)
+            .is_some()
+    }
+}
+
+fn should_install_prepared_plan(shape: &ValidatedQuery) -> bool {
+    !shape.query().joins.is_empty() || !shape.query().reachable.is_empty()
+}
+
+fn subscription_delta_event(
+    tier: DurabilityTier,
+    settled: bool,
+    previous: &RelationSnapshot,
+    current: &RelationSnapshot,
+    terminal_rows: bool,
+) -> SubscriptionEvent {
+    subscription_delta_event_with_reset(tier, settled, previous, current, false, terminal_rows)
+}
+
+/// Publishes an ordered terminal as a root-addressed suffix splice.
+///
+/// A row delta has stable occurrence identities but no positional field. When
+/// terminal ordering changes, retracting and re-adding the first changed suffix
+/// is therefore the smallest representation that lets every consumer recover
+/// the authoritative Groove order. Content-only changes retain their position
+/// and remain ordinary `updated` roots, independent of total result size.
+fn subscription_terminal_delta_event(
+    tier: DurabilityTier,
+    settled: bool,
+    previous: &RelationSnapshot,
+    previous_occurrences: &[OutputOccurrenceId],
+    current: &RelationSnapshot,
+    current_occurrences: &[OutputOccurrenceId],
+) -> Result<SubscriptionEvent, Error> {
+    let previous_roots = &previous.rows[..previous.root_count];
+    let current_roots = &current.rows[..current.root_count];
+    if previous_roots.len() != previous_occurrences.len()
+        || current_roots.len() != current_occurrences.len()
+    {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "maintained terminal occurrence sidecar length does not match root rows",
+        ));
+    }
+    let common_prefix = previous_roots
+        .iter()
+        .zip(previous_occurrences)
+        .zip(current_roots.iter().zip(current_occurrences))
+        .take_while(|((_, previous), (_, current))| previous == current)
+        .count();
+
+    let updated = previous_roots[..common_prefix]
+        .iter()
+        .zip(&current_roots[..common_prefix])
+        .zip(&current_occurrences[..common_prefix])
+        .filter(|((previous, current), _)| previous != current)
+        .map(|((_, current), occurrence_id)| SubscriptionOutputRow {
+            occurrence_id: occurrence_id.clone(),
+            row: current.clone(),
+        })
+        .collect();
+    let removed = previous_roots[common_prefix..]
+        .iter()
+        .zip(&previous_occurrences[common_prefix..])
+        .map(|(row, occurrence_id)| RemovedRow {
+            table: row.table().to_owned(),
+            row_uuid: row.row_uuid(),
+            occurrence_id: occurrence_id.clone(),
+        })
+        .collect();
+    let added = current_roots[common_prefix..]
+        .iter()
+        .zip(&current_occurrences[common_prefix..])
+        .map(|(row, occurrence_id)| SubscriptionOutputRow {
+            occurrence_id: occurrence_id.clone(),
+            row: row.clone(),
+        })
+        .collect();
+
+    Ok(SubscriptionEvent::Delta {
+        reset: false,
+        publishable: true,
+        added,
+        updated,
+        removed,
+        ordered_suffix_start: Some(common_prefix),
+        terminal_operations: Vec::new(),
+        terminal_layout: None,
+        settled,
+        tier,
+    })
+}
+
+fn subscription_delta_event_with_reset(
+    tier: DurabilityTier,
+    settled: bool,
+    previous: &RelationSnapshot,
+    current: &RelationSnapshot,
+    reset: bool,
+    _terminal_rows: bool,
+) -> SubscriptionEvent {
+    // A reset is a complete ordered snapshot.  Re-keying it through the
+    // occurrence BTreeMap below would sort by identity and silently discard
+    // the maintained query order (for example `order_by rank`).
+    if reset {
+        return SubscriptionEvent::Delta {
+            reset: true,
+            publishable: true,
+            added: current
+                .rows
+                .iter()
+                .cloned()
+                .map(subscription_output_row)
+                .collect(),
+            updated: Vec::new(),
+            removed: Vec::new(),
+            ordered_suffix_start: None,
+            terminal_operations: Vec::new(),
+            terminal_layout: None,
+            settled,
+            tier,
+        };
+    }
+    let mut previous_by_id = BTreeMap::new();
+    for row in &previous.rows {
+        previous_by_id.insert(subscription_row_key(row), row);
+    }
+
+    let mut current_by_id = BTreeMap::new();
+    for row in &current.rows {
+        current_by_id.insert(subscription_row_key(row), row);
+    }
+
+    let mut added = Vec::new();
+    let mut updated = Vec::new();
+    let mut removed = Vec::new();
+    for (key, row) in &current_by_id {
+        match previous_by_id.get(key) {
+            None => added.push(subscription_output_row((*row).clone())),
+            Some(previous_row) if *previous_row != *row => {
+                updated.push(subscription_output_row((*row).clone()))
+            }
+            Some(_) => {}
+        }
+    }
+
+    for (key, _) in &previous_by_id {
+        if !current_by_id.contains_key(key) {
+            let row = previous_by_id[key];
+            removed.push(RemovedRow {
+                table: row.table().to_owned(),
+                row_uuid: row.row_uuid(),
+                occurrence_id: key.clone(),
+            });
+        }
+    }
+
+    SubscriptionEvent::Delta {
+        reset,
+        publishable: true,
+        added,
+        updated,
+        removed,
+        ordered_suffix_start: None,
+        terminal_operations: Vec::new(),
+        terminal_layout: None,
+        settled,
+        tier,
+    }
+}
+
+fn apply_maintained_update_to_snapshot(
+    snapshot: &mut RelationSnapshot,
+    snapshot_index: &mut RelationSnapshotIndex,
+    update: LocalMaintainedViewSubscriptionUpdate,
+    tier: DurabilityTier,
+    settled: bool,
+    _terminal_rows: bool,
+) -> SubscriptionEvent {
+    let LocalMaintainedViewSubscriptionUpdate {
+        authoritative_membership_changed: _,
+        added: update_added,
+        removed: update_removed,
+        added_edges: update_added_edges,
+        removed_edges: update_removed_edges,
+        terminal_operations,
+        terminal_layout,
+    } = update;
+
+    if snapshot.rows.is_empty()
+        && snapshot.edges.is_empty()
+        && snapshot.root_count == 0
+        && update_removed.is_empty()
+        && update_removed_edges.is_empty()
+    {
+        if update_added_edges.is_empty() {
+            snapshot.root_count = update_added.len();
+            snapshot.rows.reserve(update_added.len());
+            snapshot
+                .rows
+                .extend(update_added.iter().map(|(_, row)| row.clone()));
+            snapshot_index.roots = update_added
+                .iter()
+                .enumerate()
+                .map(|(index, (occurrence, _))| (occurrence.clone(), index))
+                .collect();
+            return SubscriptionEvent::Delta {
+                reset: false,
+                publishable: true,
+                added: update_added
+                    .into_iter()
+                    .map(|(occurrence_id, row)| SubscriptionOutputRow { occurrence_id, row })
+                    .collect(),
+                updated: Vec::new(),
+                removed: Vec::new(),
+                ordered_suffix_start: None,
+                terminal_operations: terminal_operations.clone(),
+                terminal_layout: terminal_layout.clone(),
+                settled,
+                tier,
+            };
+        }
+
+        let mut event_added = Vec::with_capacity(update_added.len());
+        let mut added_related = Vec::new();
+        let mut seen_rows = BTreeSet::new();
+        for (occurrence_id, row) in &update_added {
+            seen_rows.insert((row.table().to_owned(), row.row_uuid()));
+            event_added.push((occurrence_id.clone(), row.clone()));
+        }
+
+        let mut seen_edges = BTreeSet::new();
+        for (edge, row) in &update_added_edges {
+            if seen_edges.insert(edge.clone()) {
+                snapshot.edges.push(edge.clone());
+            }
+            let Some(row) = row else {
+                continue;
+            };
+            if seen_rows.insert((row.table().to_owned(), row.row_uuid())) {
+                added_related.push(row.clone());
+            }
+        }
+
+        snapshot.root_count = event_added.len();
+        snapshot
+            .rows
+            .reserve(event_added.len() + added_related.len());
+        snapshot
+            .rows
+            .extend(event_added.iter().map(|(_, row)| row.clone()));
+        snapshot.rows.extend(added_related.iter().cloned());
+        *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
+        snapshot_index.roots = event_added
+            .iter()
+            .enumerate()
+            .map(|(index, (occurrence, _))| (occurrence.clone(), index))
+            .collect();
+
+        return SubscriptionEvent::Delta {
+            reset: false,
+            publishable: true,
+            added: event_added
+                .into_iter()
+                .map(|(occurrence_id, row)| SubscriptionOutputRow { occurrence_id, row })
+                .collect(),
+            updated: Vec::new(),
+            removed: Vec::new(),
+            ordered_suffix_start: None,
+            terminal_operations: terminal_operations.clone(),
+            terminal_layout: terminal_layout.clone(),
+            settled,
+            tier,
+        };
+    }
+
+    let mut added = Vec::new();
+    let mut updated = Vec::new();
+    let mut removed = Vec::new();
+    let mut added_related = Vec::new();
+
+    for (key, row) in &update_added {
+        if let Some(position) = snapshot_index.roots.get(&key).copied() {
+            if snapshot.rows[position] != *row {
+                snapshot.rows[position] = row.clone();
+                updated.push(SubscriptionOutputRow {
+                    occurrence_id: key.clone(),
+                    row: row.clone(),
+                });
+            }
+        } else {
+            snapshot.rows.insert(snapshot.root_count, row.clone());
+            for position in snapshot_index.related.values_mut() {
+                *position += 1;
+            }
+            snapshot_index
+                .roots
+                .insert(key.clone(), snapshot.root_count);
+            snapshot.root_count += 1;
+            added.push(SubscriptionOutputRow {
+                occurrence_id: key.clone(),
+                row: row.clone(),
+            });
+        }
+    }
+
+    let mut index = 0;
+    while index < snapshot.root_count {
+        let occurrence_id = snapshot_index
+            .roots
+            .iter()
+            .find_map(|(occurrence, position)| (*position == index).then(|| occurrence.clone()))
+            .expect("every maintained root row has an occurrence index");
+        if update_removed.contains(&occurrence_id)
+            && !update_added
+                .iter()
+                .any(|(added, _)| *added == occurrence_id)
+        {
+            let row = snapshot.rows.remove(index);
+            snapshot.root_count -= 1;
+            snapshot_index.roots.remove(&occurrence_id);
+            for position in snapshot_index.roots.values_mut() {
+                if *position > index {
+                    *position -= 1;
+                }
+            }
+            for position in snapshot_index.related.values_mut() {
+                *position -= 1;
+            }
+            removed.push(RemovedRow {
+                table: row.table().to_owned(),
+                row_uuid: row.row_uuid(),
+                occurrence_id,
+            });
+        } else {
+            index += 1;
+        }
+    }
+
+    if !update_removed_edges.is_empty() {
+        snapshot.edges.retain(|edge| {
+            let remove = update_removed_edges.iter().any(|removed| removed == edge);
+            if remove {
+                snapshot_index.edges.remove(edge);
+            }
+            !remove
+        });
+    }
+
+    for (edge, row) in &update_added_edges {
+        if snapshot_index.edges.insert(edge.clone()) {
+            snapshot.edges.push(edge.clone());
+        }
+        let Some(row) = row else {
+            continue;
+        };
+        let root_key = subscription_row_occurrence_id(row);
+        if snapshot_index.roots.contains_key(&root_key) {
+            continue;
+        }
+        let key = (row.table().to_owned(), row.row_uuid());
+        if let Some(position) = snapshot_index.related.get(&key).copied() {
+            snapshot.rows[position] = row.clone();
+        } else {
+            snapshot_index.related.insert(key, snapshot.rows.len());
+            snapshot.rows.push(row.clone());
+        }
+        added_related.push(row.clone());
+    }
+
+    for removed_edge in &update_removed_edges {
+        let still_referenced = snapshot_index.edges.iter().any(|edge| {
+            edge.target_table == removed_edge.target_table
+                && edge.target_row == removed_edge.target_row
+        });
+        let target_key = (removed_edge.target_table.clone(), removed_edge.target_row);
+        let is_root = snapshot_index
+            .roots
+            .contains_key(&OutputOccurrenceId::single_source(ObjectId::from_uuid(
+                target_key.1.0,
+            )));
+        if !still_referenced && !is_root {
+            if let Some(position) = snapshot_index.related.remove(&target_key) {
+                snapshot.rows.remove(position);
+                for indexed_position in snapshot_index.related.values_mut() {
+                    if *indexed_position > position {
+                        *indexed_position -= 1;
+                    }
+                }
+            }
+        }
+    }
+
+    SubscriptionEvent::Delta {
+        reset: false,
+        publishable: true,
+        added,
+        updated,
+        removed,
+        ordered_suffix_start: None,
+        terminal_operations,
+        terminal_layout,
+        settled,
+        tier,
+    }
+}
+
+/// Restore the query's observable root order after applying a maintained
+/// membership transition. Groove owns membership/windowing, while this helper
+/// only orders the selected roots before their row-only delta is bridged to an
+/// application subscription.
+fn order_maintained_snapshot_roots<S>(
+    node: &NodeState<S>,
+    query: &crate::query::Query,
+    snapshot: &mut RelationSnapshot,
+    snapshot_index: &mut RelationSnapshotIndex,
+) -> Result<(), Error>
+where
+    S: OrderedKvStorage,
+{
+    let mut roots = snapshot.rows[..snapshot.root_count].to_vec();
+    let mut occurrences = snapshot_root_occurrences(snapshot, snapshot_index)?;
+    node.apply_query_order_with_occurrences(query, &mut roots, &mut occurrences)?;
+    snapshot.rows[..snapshot.root_count].clone_from_slice(&roots);
+    snapshot_index.roots = root_occurrence_positions(&occurrences);
+    Ok(())
+}
+
+fn snapshot_root_occurrences(
+    snapshot: &RelationSnapshot,
+    snapshot_index: &RelationSnapshotIndex,
+) -> Result<Vec<OutputOccurrenceId>, Error> {
+    let mut occurrences = vec![None; snapshot.root_count];
+    for (occurrence, position) in &snapshot_index.roots {
+        let slot = occurrences.get_mut(*position).ok_or_else(|| {
+            Error::new(
+                ErrorCode::Protocol,
+                "maintained root occurrence index exceeds snapshot roots",
+            )
+        })?;
+        *slot = Some(occurrence.clone());
+    }
+    occurrences
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| {
+            Error::new(
+                ErrorCode::Protocol,
+                "maintained snapshot root is missing an occurrence identity",
+            )
+        })
+}
+
+fn root_occurrence_positions(
+    occurrences: &[OutputOccurrenceId],
+) -> BTreeMap<OutputOccurrenceId, usize> {
+    occurrences
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(position, occurrence)| (occurrence, position))
+        .collect()
+}
+
+fn relation_snapshot_index_with_root_occurrences(
+    snapshot: &RelationSnapshot,
+    occurrences: &[OutputOccurrenceId],
+) -> Result<RelationSnapshotIndex, Error> {
+    if snapshot.root_count != occurrences.len() {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "maintained terminal occurrence sidecar length does not match root rows",
+        ));
+    }
+    let mut index = RelationSnapshotIndex::from_snapshot(snapshot);
+    index.roots = root_occurrence_positions(occurrences);
+    if index.roots.len() != occurrences.len() {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "maintained terminal occurrence sidecar contains duplicate identity",
+        ));
+    }
+    Ok(index)
+}
+
+/// Flat tuple identity is carried by the maintained terminal sidecar, not the
+/// public row: an external reset may omit hidden joined-row fields. Preserve
+/// that sidecar whenever its materialized snapshot is the replacement being
+/// installed; ordinary link-only snapshots retain row-derived indexing.
+fn maintained_snapshot_index_or_row_index<S>(
+    node: &mut NodeState<S>,
+    kind: &SubscriptionKind,
+    snapshot: &RelationSnapshot,
+) -> Result<RelationSnapshotIndex, Error>
+where
+    S: OrderedKvStorage,
+{
+    let SubscriptionKind::Prepared {
+        shape,
+        maintained_subscription: Some(maintained),
+        ..
+    } = kind
+    else {
+        return Ok(RelationSnapshotIndex::from_snapshot(snapshot));
+    };
+    if shape.query().flat_join.is_none() {
+        return Ok(RelationSnapshotIndex::from_snapshot(snapshot));
+    }
+    let materialized = crate::db::block_on(
+        node.materialize_local_maintained_relation_snapshot_with_occurrences(maintained),
+    )?;
+    if materialized.snapshot.root_count == snapshot.root_count {
+        return relation_snapshot_index_with_root_occurrences(
+            snapshot,
+            &materialized.root_occurrence_ids,
+        );
+    }
+    Ok(RelationSnapshotIndex::from_snapshot(snapshot))
+}
+
+fn relation_snapshot_with_delta_slack(snapshot: &RelationSnapshot) -> RelationSnapshot {
+    let mut snapshot = snapshot.clone();
+    reserve_relation_snapshot_delta_slack(&mut snapshot);
+    snapshot
+}
+
+fn reserve_relation_snapshot_delta_slack(snapshot: &mut RelationSnapshot) {
+    fn slack(len: usize) -> usize {
+        (len / 8).max(64)
+    }
+
+    snapshot.rows.reserve(slack(snapshot.rows.len()));
+    snapshot.edges.reserve(slack(snapshot.edges.len()));
+}
+
+fn subscription_is_settled<S>(
+    node: &NodeState<S>,
+    active_authority_view_receipts: &ActiveAuthorityViewReceipts,
+    shape: &ValidatedQuery,
+    binding: &Binding,
+    tier: DurabilityTier,
+    read_view: ReadViewSpec,
+    propagate_upstream: bool,
+    requires_authority_receipt: bool,
+) -> bool
+where
+    S: OrderedKvStorage,
+{
+    if tier <= DurabilityTier::Local {
+        return true;
+    }
+    let binding_view_key = BindingViewKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions {
+            tier,
+            read_view,
+            propagate_upstream,
+        }
+        .read_view_key(),
+    };
+    node.has_settled_result_set(binding_view_key)
+        && !node.opening_pending_for_binding_view(binding_view_key)
+        && (!requires_authority_receipt
+            || active_authority_view_receipts
+                .borrow()
+                .as_ref()
+                .is_some_and(|receipts| receipts.binding_views.contains(&binding_view_key)))
+}
+
+pub(crate) fn subscription_row_occurrence_id(row: &CurrentRow) -> OutputOccurrenceId {
+    let root = ObjectId::from_uuid(row.row_uuid().0);
+    let mut joined = Vec::new();
+    for position in 1.. {
+        let Some(Value::Uuid(row_id)) = row.raw_field(&format!("__flat_join_row_{position}"))
+        else {
+            break;
+        };
+        joined.push(ObjectId::from_uuid(row_id));
+    }
+    OutputOccurrenceId::new(root, joined)
+}
+
+fn subscription_outputs_with_occurrence_sidecar(
+    snapshot: &RelationSnapshot,
+    occurrence_ids: &[OutputOccurrenceId],
+) -> Result<Vec<SubscriptionOutputRow>, Error> {
+    if occurrence_ids.len() != snapshot.root_count {
+        return Err(Error::new(
+            ErrorCode::Protocol,
+            "maintained root occurrence sidecar length does not match root rows",
+        ));
+    }
+    let mut unique = BTreeSet::new();
+    snapshot
+        .rows
+        .iter()
+        .take(snapshot.root_count)
+        .zip(occurrence_ids)
+        .map(|(row, occurrence_id)| {
+            let bytes = occurrence_id.canonical_bytes();
+            if bytes.get(..16) != Some(row.row_uuid().0.as_bytes()) {
+                return Err(Error::new(
+                    ErrorCode::Protocol,
+                    "maintained root occurrence sidecar root does not match row",
+                ));
+            }
+            if !unique.insert(occurrence_id.clone()) {
+                return Err(Error::new(
+                    ErrorCode::Protocol,
+                    "maintained root occurrence sidecar contains duplicate identity",
+                ));
+            }
+            Ok(SubscriptionOutputRow {
+                occurrence_id: occurrence_id.clone(),
+                row: row.clone(),
+            })
+        })
+        .collect()
+}
+
+fn reset_removed_roots(
+    previous: &RelationSnapshot,
+    previous_index: &RelationSnapshotIndex,
+    current_occurrences: &[OutputOccurrenceId],
+) -> Vec<RemovedRow> {
+    let current = current_occurrences.iter().collect::<BTreeSet<_>>();
+    previous_index
+        .roots
+        .iter()
+        .filter(|(occurrence, _)| !current.contains(occurrence))
+        .map(|(occurrence_id, position)| {
+            let row = &previous.rows[*position];
+            RemovedRow {
+                table: row.table().to_owned(),
+                row_uuid: row.row_uuid(),
+                occurrence_id: occurrence_id.clone(),
+            }
+        })
+        .collect()
+}
+
+fn subscription_output_row(row: CurrentRow) -> SubscriptionOutputRow {
+    SubscriptionOutputRow {
+        occurrence_id: subscription_row_occurrence_id(&row),
+        row,
+    }
+}
+
+fn subscription_row_key(row: &CurrentRow) -> OutputOccurrenceId {
+    subscription_row_occurrence_id(row)
+}
+
+#[cfg(test)]
+mod tests;

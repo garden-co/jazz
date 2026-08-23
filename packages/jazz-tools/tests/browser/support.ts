@@ -20,7 +20,7 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Generate a unique dbName to isolate OPFS state between tests. */
+/** Generate a unique dbName to isolate persistent browser state between tests. */
 export function uniqueDbName(label: string): string {
   return `test-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -129,38 +129,6 @@ export async function withTimeout<T>(
   }
 }
 
-/**
- * Wait for a worker to emit a message with a specific `type` field.
- */
-export async function waitForWorkerMessageType(
-  worker: Worker,
-  expectedType: string,
-  timeoutMs: number,
-  label: string,
-): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error(`${label}: no ${expectedType} worker message within ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    const handler = (event: MessageEvent) => {
-      const data = event.data as { type?: string } | undefined;
-      if (data?.type === expectedType) {
-        cleanup();
-        resolve();
-      }
-    };
-
-    const cleanup = () => {
-      clearTimeout(timeout);
-      worker.removeEventListener("message", handler);
-    };
-
-    worker.addEventListener("message", handler);
-  });
-}
-
 // ---------------------------------------------------------------------------
 // Query builders
 // ---------------------------------------------------------------------------
@@ -255,7 +223,7 @@ export class TestCleanup {
 // ---------------------------------------------------------------------------
 
 /**
- * Create a Db connected to the testing server with OPFS persistence.
+ * Create a Db connected to the testing server with IndexedDB persistence.
  *
  * Equivalent of Rust `TestingClient::builder().with_server(...).connect()`.
  * The returned Db is automatically tracked by `ctx` for cleanup.

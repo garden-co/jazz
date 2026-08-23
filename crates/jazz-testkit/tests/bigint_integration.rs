@@ -1,0 +1,148 @@
+use jazz_testkit as support;
+
+use std::time::Duration;
+
+use jazz::query::{OrderDirection, col, gt, lit, lt};
+use jazz::row_input;
+use jazz::tools::{ColumnType, DurabilityTier, Schema, SchemaBuilder, TableSchema, Value};
+use jazz_server::JazzServer;
+use support::{
+    TestingClient, has_added_id, wait_for_edge_query_ready, wait_for_query,
+    wait_for_subscription_update,
+};
+
+const QUERY_TIMEOUT: Duration = Duration::from_secs(25);
+const BIG_SAFE_PLUS_ONE: i64 = 9_007_199_254_740_993;
+
+fn bigint_schema() -> Schema {
+    SchemaBuilder::new()
+        .table(
+            TableSchema::builder("metrics")
+                .column("label", ColumnType::Text)
+                .column("amount", ColumnType::BigInt),
+        )
+        .build()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn bigint_insert_query_order_predicate_and_subscribe_are_lossless() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let schema = bigint_schema();
+            let server = JazzServer::start_with_schema(schema.clone()).await;
+            let client = TestingClient::builder()
+                .with_server(&server)
+                .with_schema(schema)
+                .with_user_id("00000000-0000-4000-8000-000000000064")
+                .ready_on("metrics", QUERY_TIMEOUT)
+                .connect()
+                .await;
+
+            let rows = [
+                ("negative", -BIG_SAFE_PLUS_ONE),
+                ("small", 42),
+                ("huge", BIG_SAFE_PLUS_ONE),
+            ];
+            let mut txs = Vec::with_capacity(rows.len());
+            for (label, amount) in rows {
+                let (_, _, transaction_id) = client
+                    .insert("metrics", row_input!("label" => label, "amount" => amount))
+                    .expect("insert bigint row");
+                txs.push(transaction_id.expect("ordinary mutation commits immediately"));
+            }
+            support::wait_for_edge_txs(&client, &txs).await;
+
+            let ordered_query = jazz::query::Query::from("metrics")
+                .select(["label", "amount"])
+                .order_by("amount", OrderDirection::Asc);
+            wait_for_query(
+                &client,
+                ordered_query,
+                Some(DurabilityTier::EdgeServer),
+                QUERY_TIMEOUT,
+                "BIGINT rows order by signed amount",
+                |rows| {
+                    let values = rows
+                        .iter()
+                        .map(|(_, values)| values.clone())
+                        .collect::<Vec<_>>();
+                    (values
+                        == vec![
+                            vec![
+                                Value::Text("negative".to_owned()),
+                                Value::BigInt(-BIG_SAFE_PLUS_ONE),
+                            ],
+                            vec![Value::Text("small".to_owned()), Value::BigInt(42)],
+                            vec![
+                                Value::Text("huge".to_owned()),
+                                Value::BigInt(BIG_SAFE_PLUS_ONE),
+                            ],
+                        ])
+                    .then_some(())
+                },
+            )
+            .await;
+
+            let filtered_query = jazz::query::Query::from("metrics")
+                .select(["label", "amount"])
+                .filter(gt(col("amount"), lit(9)))
+                .filter(lt(col("amount"), lit(BIG_SAFE_PLUS_ONE + 1)))
+                .order_by("amount", OrderDirection::Asc);
+            wait_for_query(
+                &client,
+                filtered_query,
+                Some(DurabilityTier::EdgeServer),
+                QUERY_TIMEOUT,
+                "BIGINT predicates coerce integer literals and preserve i64 literals",
+                |rows| {
+                    let values = rows
+                        .iter()
+                        .map(|(_, values)| values.clone())
+                        .collect::<Vec<_>>();
+                    (values
+                        == vec![
+                            vec![Value::Text("small".to_owned()), Value::BigInt(42)],
+                            vec![
+                                Value::Text("huge".to_owned()),
+                                Value::BigInt(BIG_SAFE_PLUS_ONE),
+                            ],
+                        ])
+                    .then_some(())
+                },
+            )
+            .await;
+
+            let subscription_query = jazz::query::Query::from("metrics")
+                .filter(gt(col("amount"), lit(BIG_SAFE_PLUS_ONE)));
+            let mut stream = client
+                .subscribe(subscription_query)
+                .await
+                .expect("subscribe to BIGINT predicate");
+            let mut log = Vec::new();
+
+            let (late_id, _, transaction_id) = client
+                .insert(
+                    "metrics",
+                    row_input!("label" => "later", "amount" => BIG_SAFE_PLUS_ONE + 1),
+                )
+                .expect("insert subscribed bigint row");
+            support::wait_for_edge_txs(
+                &client,
+                &[transaction_id.expect("ordinary mutation commits immediately")],
+            )
+            .await;
+
+            wait_for_subscription_update(
+                &mut stream,
+                &mut log,
+                QUERY_TIMEOUT,
+                "BIGINT subscription predicate receives inserted row",
+                |log| has_added_id(log, late_id),
+            )
+            .await;
+
+            wait_for_edge_query_ready(&client, "metrics", QUERY_TIMEOUT).await;
+            server.shutdown().await;
+        })
+        .await;
+}

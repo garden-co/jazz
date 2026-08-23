@@ -6,7 +6,7 @@ import type { WasmSchema } from "../../src/drivers/types.js";
 interface Todo {
   id: string;
   title: string;
-  rank?: number;
+  rank: number | null;
   done: boolean;
 }
 
@@ -50,6 +50,11 @@ function makeTodosQuery(body: {
 }
 
 const sortedByRankAscQuery = makeTodosQuery({ orderBy: [["rank", "asc"]] });
+
+// Browser subscription delivery is asynchronous. Keep this aligned with the
+// rest of this suite's convergence waits: a sub-second deadline flakes when
+// the full browser suite is sharing a worker, without testing a latency SLO.
+const SUBSCRIPTION_CONVERGENCE_TIMEOUT_MS = 10_000;
 
 function uniqueDbName(label: string): string {
   return `db-subscribe-all-sort-${label}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -163,7 +168,7 @@ describe("db.subscribeAll sorting browser integration", () => {
 
         await waitForCondition(
           () => deltas.some((delta) => delta.all.length === 3),
-          500,
+          SUBSCRIPTION_CONVERGENCE_TIMEOUT_MS,
           "expected initial sorted snapshot",
         );
 
@@ -174,7 +179,7 @@ describe("db.subscribeAll sorting browser integration", () => {
 
         await waitForCondition(
           () => deltas.some((delta) => hasUpdateForId(delta, idB)),
-          500,
+          SUBSCRIPTION_CONVERGENCE_TIMEOUT_MS,
           "expected update delta for row B",
         );
 
@@ -306,6 +311,26 @@ describe("db.subscribeAll sorting browser integration", () => {
         );
 
         expect(latestIds(snapshots)).toEqual(expectedById);
+
+        await db.delete(todos, expectedById[1]!);
+        await waitForCondition(
+          () => latestRows(snapshots).length === 2,
+          10_000,
+          "expected default-order deletion",
+        );
+        expect(latestIds(snapshots)).toEqual([expectedById[0]!, expectedById[2]!]);
+
+        const {
+          value: { id: insertedId },
+        } = await db.insert(todos, { title: "Inserted", rank: 0, done: false });
+        await waitForCondition(
+          () => latestRows(snapshots).some((row) => row.id === insertedId),
+          10_000,
+          "expected default-order insertion",
+        );
+        expect(latestIds(snapshots)).toEqual(
+          [expectedById[0]!, expectedById[2]!, insertedId].toSorted((a, b) => a.localeCompare(b)),
+        );
       } finally {
         unsubscribe();
       }
@@ -667,17 +692,55 @@ describe("db.subscribeAll sorting browser integration", () => {
     }
   });
 
-  it("keeps null/undefined sort-value ordering stable", async () => {
+  it("restores canonical id order across restart when orderBy is omitted", async () => {
+    const appId = uniqueDbName("default-restart");
+    const dbName = uniqueDbName("default-restart");
+
+    const db1 = await createDb({ appId, driver: { type: "persistent", dbName } });
+    const ids = [] as string[];
+    ids.push((await db1.insert(todos, { title: "First", rank: 3, done: false })).value.id);
+    ids.push((await db1.insert(todos, { title: "Second", rank: 1, done: false })).value.id);
+    ids.push((await db1.insert(todos, { title: "Third", rank: 2, done: false })).value.id);
+    await db1.shutdown();
+
+    const db2 = await createDb({ appId, driver: { type: "persistent", dbName } });
+    const snapshots: Todo[][] = [];
+    const unsubscribe = db2.subscribeAll(makeTodosQuery({}), (delta) => {
+      snapshots.push(delta.all);
+    });
+
+    try {
+      await waitForCondition(
+        () => latestRows(snapshots).length === 3,
+        10_000,
+        "expected default-ordered snapshot after restart",
+      );
+      expect(latestIds(snapshots)).toEqual(ids.toSorted((a, b) => a.localeCompare(b)));
+    } finally {
+      unsubscribe();
+      await db2.shutdown();
+    }
+  });
+
+  it("keeps an explicit null sort value ordering stable", async () => {
     await withDb("null-sort-values", async (db) => {
       const snapshots: Todo[][] = [];
+      let sawInitialReset = false;
       const unsubscribe = db.subscribeAll(sortedByRankAscQuery, (delta) => {
+        sawInitialReset ||= delta.reset === true;
         snapshots.push(delta.all);
       });
 
       try {
+        await waitForCondition(
+          () => sawInitialReset,
+          SUBSCRIPTION_CONVERGENCE_TIMEOUT_MS,
+          "expected initial empty subscription reset",
+        );
+
         const {
           value: { id: idNull },
-        } = await db.insert(todos, { title: "N", rank: undefined, done: false });
+        } = await db.insert(todos, { title: "N", rank: null, done: false });
         const {
           value: { id: idOne },
         } = await db.insert(todos, { title: "A", rank: 1, done: false });

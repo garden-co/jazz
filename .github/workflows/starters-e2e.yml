@@ -4,8 +4,8 @@ name: Starters E2E
 # changesets release PR if any starter fails to scaffold, install, build, or
 # pass its Playwright suite against the production build.
 #
-# Trigger: any push to the changesets-managed release branch
-# (`changeset-release/main`), plus manual dispatch for ad-hoc runs.
+# Trigger: a changesets-managed release pull request targeting `main`, plus
+# manual dispatch for ad-hoc runs. Ordinary pull requests are skipped.
 #
 # Shape: the `prepare` job builds the workspace once and packs the three
 # workspace tarballs (jazz-tools, jazz-napi, jazz-wasm) plus the runtime
@@ -30,7 +30,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  JAZZ_SKIP_RN_DEPS: "1"
   # The scaffolded starter pins its own pnpm via `packageManager`; without
   # this, Corepack prompts on first download and the non-TTY CI run aborts.
   COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
@@ -39,7 +38,7 @@ jobs:
   prepare:
     # On PR events, only fire on the changesets release PR. Manual dispatch is
     # always allowed (handy for testing a starter in isolation).
-    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'changeset-release/') }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/main' }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 25
     steps:
@@ -55,6 +54,19 @@ jobs:
           node-version-file: .nvmrc
 
       - run: corepack enable
+
+      - name: Get pnpm store directory
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: starters-e2e-pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            starters-e2e-pnpm-${{ runner.os }}-
+
       - run: pnpm install --frozen-lockfile
 
       - name: Install Rust prerequisites
@@ -110,7 +122,7 @@ jobs:
 
   e2e:
     needs: prepare
-    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.head_ref, 'changeset-release/') }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.head_ref == 'changeset-release/main' }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     strategy:
@@ -137,6 +149,19 @@ jobs:
           node-version-file: .nvmrc
 
       - run: corepack enable
+
+      - name: Get pnpm store directory
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: starters-e2e-pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            starters-e2e-pnpm-${{ runner.os }}-
+
       - run: pnpm install --frozen-lockfile
 
       - name: Restore prebuilt artifacts

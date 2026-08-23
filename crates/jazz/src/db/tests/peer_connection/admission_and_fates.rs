@@ -1,0 +1,1610 @@
+//! Link admission, authority selection, permission advice, and routed fates.
+
+use super::*;
+use crate::node::SKEW_TOLERANCE_MS;
+
+#[test]
+fn authenticated_client_upload_uses_authority_clock_for_forward_skew() {
+    let identity = AuthorId::from_bytes([0xc1; 16]);
+    let schema = schema();
+    let client = open_core(0xc1, identity, &schema);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let authority_now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let future_ms = authority_now_ms + SKEW_TOLERANCE_MS + 10_000;
+    let (tx_id, unit) = client
+        .node()
+        .borrow_mut()
+        .commit_mergeable_unit_settled(
+            MergeableCommit::new("todos", RowUuid::from_bytes([0xf1; 16]), future_ms)
+                .made_by(identity)
+                .cells(cells("future", false, identity)),
+        )
+        .unwrap();
+    let before = server.node().borrow().committed_global_time();
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, identity);
+
+    client_transport.send(unit).unwrap();
+    let mut response = None;
+    for _ in 0..3 {
+        subscriber.borrow_mut().tick().unwrap();
+        while let Some(message) = client_transport.try_recv() {
+            if matches!(message, SyncMessage::FateUpdate { .. }) {
+                response = Some(message);
+            }
+        }
+    }
+    let Some(SyncMessage::FateUpdate {
+        fate, global_time, ..
+    }) = response
+    else {
+        panic!("authority must return a fate");
+    };
+    assert_eq!(
+        fate,
+        Fate::Rejected(RejectionReason::ClientClockTooFarAhead)
+    );
+    assert_eq!(global_time, None);
+    assert_eq!(server.node().borrow().committed_global_time(), before);
+    assert_eq!(
+        server
+            .node()
+            .borrow_mut()
+            .transaction_state(tx_id)
+            .unwrap()
+            .0,
+        Fate::Rejected(RejectionReason::ClientClockTooFarAhead)
+    );
+}
+
+#[test]
+fn catalogue_fingerprint_change_is_eager_only_on_trusted_backend_link() {
+    // This stays internal because trust is authenticated by the host at the
+    // transport boundary; exposing it through a public client fixture would
+    // test the HTTP/WebSocket bootstrap race rather than this hop contract.
+    let base = schema();
+    let core = open_core(0x5e, AuthorId::SYSTEM, &base);
+
+    let (mut edge_transport, core_edge_transport) = duplex();
+    let edge_link = core.accept_subscriber_with_trust(
+        core_edge_transport,
+        AuthorId::from_bytes([0xe1; 16]),
+        CommitUnitTrust::TrustedBackend,
+    );
+    let (mut client_transport, core_client_transport) = duplex();
+    let client_link =
+        core.accept_subscriber(core_client_transport, AuthorId::from_bytes([0xc1; 16]));
+
+    edge_link.borrow_mut().tick().unwrap();
+    assert!(matches!(
+        edge_transport.try_recv(),
+        Some(SyncMessage::CatalogueSnapshot(_))
+    ));
+    assert!(edge_transport.try_recv().is_none());
+    edge_link.borrow_mut().tick().unwrap();
+    assert!(
+        edge_transport.try_recv().is_none(),
+        "an unchanged catalogue fingerprint must not resend its snapshot"
+    );
+    client_link.borrow_mut().tick().unwrap();
+    assert!(
+        client_transport.try_recv().is_none(),
+        "ordinary sessions must not receive authority catalogue snapshots"
+    );
+
+    let evolved = SchemaVersion::new(build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .column("body", PublicColumnType::Text),
+        ),
+    ));
+    let lens = MigrationLens::new(
+        base.version_id(),
+        evolved.id,
+        vec![TableLens {
+            source_table: "todos".to_owned(),
+            target_table: "todos".to_owned(),
+            ops: vec![LensOp::AddColumn {
+                column: "body".to_owned(),
+                default: Value::String(String::new()),
+            }],
+        }],
+    );
+    core.server
+        .node()
+        .borrow_mut()
+        .apply_trusted_catalogue_message_settled(SyncMessage::PublishSchemaWithLens {
+            author: AuthorId::SYSTEM,
+            catalogue_seq: 1,
+            publication: Box::new(SchemaLineagePublication::new(
+                evolved.clone(),
+                lens,
+                Vec::<String>::new(),
+                Vec::<String>::new(),
+            )),
+        })
+        .unwrap();
+
+    edge_link.borrow_mut().tick().unwrap();
+    let Some(SyncMessage::CatalogueSnapshot(snapshot)) = edge_transport.try_recv() else {
+        panic!("trusted edge must receive the changed catalogue before any subscription");
+    };
+    assert!(
+        snapshot
+            .schemas
+            .iter()
+            .any(|schema| schema.id == evolved.id),
+        "changed snapshot carries the newly published schema"
+    );
+    assert!(edge_transport.try_recv().is_none());
+
+    client_link.borrow_mut().tick().unwrap();
+    assert!(
+        client_transport.try_recv().is_none(),
+        "catalogue changes stay authority-only on ordinary session links"
+    );
+}
+
+#[test]
+fn admitted_duplex_context_binds_peer_epochs_and_rejects_cross_wiring() {
+    let identity = AuthorId::from_bytes([0x71; 16]);
+    let schema = schema();
+    let client = open_db(0x72, identity, &schema);
+    let server = open_core(0x73, AuthorId::SYSTEM, &schema);
+    let client_node = NodeUuid::from_bytes([0x72; 16]);
+    let server_node = NodeUuid::from_bytes([0x73; 16]);
+    let (client_transport, server_transport) =
+        duplex_with_admitted_session_context(identity, client_node, 41, server_node, 97);
+    let upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, identity);
+    assert_eq!(upstream.borrow().connection_epoch, 41);
+    assert_eq!(subscriber.borrow().connection_epoch, 97);
+
+    let expected = AuthorityContext {
+        authority: *server_node.as_bytes(),
+        link: *identity.as_bytes(),
+        connection_id: 41,
+        connection_epoch: 97,
+        claims_revision: 0,
+        policy_epoch: 0,
+        authorization_progress: 0,
+        settled_through: 0,
+    };
+    let receipt = AuthorizationScopeReceipt {
+        key: AuthorizationSupportScopeKey {
+            support_shape_digest: [1; 32],
+            subject: identity,
+            claims_digest: [2; 32],
+            policy_digest: [3; 32],
+        },
+        authority: expected.authority,
+        link: expected.link,
+        authority_epoch: expected.connection_epoch,
+        claims_revision: 0,
+        policy_epoch: 0,
+        settled_through: GlobalTime(0),
+        authorization_progress: 0,
+    };
+    assert!(authorization_scope_receipt_matches_transport_context(
+        &receipt,
+        expected,
+        Some(GlobalTime(0)),
+    ));
+    assert!(
+        !authorization_scope_receipt_matches_transport_context(
+            &AuthorizationScopeReceipt {
+                authority: *client_node.as_bytes(),
+                authority_epoch: 41,
+                ..receipt.clone()
+            },
+            expected,
+            Some(GlobalTime(0)),
+        ),
+        "a receipt from the opposite duplex endpoint must not cross-wire"
+    );
+
+    let (reconnected_client, reconnected_server) =
+        duplex_with_admitted_session_context(identity, client_node, 42, server_node, 98);
+    let reconnect = crate::db::block_on(client.connect_upstream(reconnected_client));
+    let resumed = server.accept_subscriber(reconnected_server, identity);
+    assert_ne!(
+        upstream.borrow().connection_epoch,
+        reconnect.borrow().connection_epoch
+    );
+    assert_ne!(
+        subscriber.borrow().connection_epoch,
+        resumed.borrow().connection_epoch
+    );
+}
+
+#[test]
+fn permission_advice_uses_authenticated_link_identity_without_mutating() {
+    let schema = owner_read_schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let mallory = AuthorId::from_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let owned = server
+        .insert("todos", cells("secret", false, alice))
+        .unwrap()
+        .row_uuid();
+
+    let alice_client = open_db(0xa1, alice, &schema);
+    let (alice_transport, alice_server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _alice_upstream = crate::db::block_on(alice_client.connect_upstream(alice_transport));
+    let _alice_subscriber = server.accept_subscriber(alice_server_transport, alice);
+    let alice_advice = alice_client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: owned,
+    });
+
+    let mallory_client = open_db(0xb2, mallory, &schema);
+    let (mallory_transport, mallory_server_transport) = duplex_with_admitted_session_context(
+        mallory,
+        NodeUuid::from_bytes([0xb2; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        2,
+    );
+    let _mallory_upstream = crate::db::block_on(mallory_client.connect_upstream(mallory_transport));
+    let _mallory_subscriber = server.accept_subscriber(mallory_server_transport, mallory);
+    let mallory_advice = mallory_client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: owned,
+    });
+
+    alice_client.tick().unwrap();
+    mallory_client.tick().unwrap();
+    server.tick().unwrap();
+    alice_client.tick().unwrap();
+    mallory_client.tick().unwrap();
+
+    assert_eq!(block_on(alice_advice), PermissionAdvice::Allowed);
+    assert_eq!(block_on(mallory_advice), PermissionAdvice::Denied);
+    assert_eq!(server.read(&Query::from("todos")).unwrap().len(), 1);
+}
+
+#[test]
+fn distinct_advice_actions_with_one_compiled_scope_hydrate_once() {
+    let schema = owner_read_schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let allowed = server
+        .insert("todos", cells("owned", false, alice))
+        .unwrap()
+        .row_uuid();
+    let denied = server
+        .insert(
+            "todos",
+            cells("other", false, AuthorId::from_bytes([0xb2; 16])),
+        )
+        .unwrap()
+        .row_uuid();
+    let client = open_db(0xa1, alice, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, alice);
+
+    let first = client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: allowed,
+    });
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(block_on(first), PermissionAdvice::Allowed);
+
+    let second = client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: denied,
+    });
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(block_on(second), PermissionAdvice::Denied);
+
+    let hydration_count = match &subscriber.borrow().link {
+        ConnectionLink::Subscriber(SubscriberConnectionState {
+            authority_scope_hydration_count,
+            ..
+        }) => *authority_scope_hydration_count,
+        ConnectionLink::Upstream(_) => unreachable!("server link is a subscriber"),
+    };
+    assert_eq!(
+        hydration_count, 1,
+        "candidate rows must share the compiled authority support hydration"
+    );
+}
+
+#[test]
+fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
+    let schema = owner_read_schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let target = server
+        .insert("todos", cells("owned", false, alice))
+        .unwrap()
+        .row_uuid();
+    let client = open_db(0xa1, alice, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, alice);
+
+    let first = client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: target,
+    });
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(block_on(first), PermissionAdvice::Allowed);
+
+    server.node().borrow_mut().set_session_claims(
+        alice,
+        BTreeMap::from([("fresh".to_owned(), Value::Bool(true))]),
+    );
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    let refreshed = client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: target,
+    });
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(block_on(refreshed), PermissionAdvice::Allowed);
+
+    server.node().borrow_mut().set_session_claims(
+        alice,
+        BTreeMap::from([("fresh".to_owned(), Value::Bool(false))]),
+    );
+    server.tick().unwrap();
+    client.tick().unwrap();
+    let advanced = client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: target,
+    });
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(block_on(advanced), PermissionAdvice::Allowed);
+
+    let hydration_count = match &subscriber.borrow().link {
+        ConnectionLink::Subscriber(SubscriberConnectionState {
+            authority_scope_hydration_count,
+            ..
+        }) => *authority_scope_hydration_count,
+        ConnectionLink::Upstream(_) => unreachable!("server link is a subscriber"),
+    };
+    assert_eq!(
+        hydration_count, 3,
+        "each 0→1→2 authority claim transition must reject stale evidence and rehydrate"
+    );
+}
+
+#[test]
+fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
+    let schema = owner_write_schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    // A Core may also maintain an upstream relay; that topology fact must not
+    // turn its client ingress into Edge routing or bypass local proof.
+    let (core_upstream, _upstream_peer) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0x5e; 16]),
+        9,
+        NodeUuid::from_bytes([0xc0; 16]),
+        9,
+    );
+    let _core_upstream = crate::db::block_on(server.server.connect_upstream(core_upstream));
+    let client = open_db(0xa1, alice, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let subscriber = server.accept_subscriber(server_transport, alice);
+
+    let inserted = client
+        .insert("todos", cells("owned", false, alice))
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    // The previous-row policy may allow Alice, but the update-check candidate
+    // switches ownership to Bob and must be denied by the terminal core.
+    let changed_owner = client
+        .update(
+            "todos",
+            inserted.row_uuid(),
+            BTreeMap::from([("owner".to_owned(), Value::Uuid(bob.0))]),
+        )
+        .unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(matches!(
+        changed_owner.write_state().unwrap().fate,
+        Fate::Rejected(_)
+    ));
+
+    let deleted = client.delete("todos", inserted.row_uuid()).unwrap();
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(matches!(
+        deleted.write_state().unwrap().fate,
+        Fate::Accepted
+    ));
+
+    let proofs = match &subscriber.borrow().link {
+        ConnectionLink::Subscriber(SubscriberConnectionState { peer, .. }) => {
+            peer.terminal_authority_scope_proof_count()
+        }
+        ConnectionLink::Upstream(_) => unreachable!("server link is a subscriber"),
+    };
+    assert_eq!(
+        proofs, 3,
+        "production terminal fate admission must execute one exact aggregate proof per operation"
+    );
+}
+
+#[test]
+fn concurrent_upstreams_keep_selected_owner_until_detach_handoff() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xa1; 16]);
+    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
+    let edge_node = NodeUuid::from_bytes([0xe0; 16]);
+    let (a_transport, _a_peer) = duplex_with_admitted_session_context(
+        identity,
+        edge_node,
+        10,
+        NodeUuid::from_bytes([0xa2; 16]),
+        20,
+    );
+    let a = crate::db::block_on(edge.server.connect_upstream(a_transport));
+    let first = *edge.server.admitted_upstream_authority.borrow();
+    let (b_transport, _b_peer) = duplex_with_admitted_session_context(
+        identity,
+        edge_node,
+        11,
+        NodeUuid::from_bytes([0xb2; 16]),
+        21,
+    );
+    let _b = crate::db::block_on(edge.server.connect_upstream(b_transport));
+    assert_eq!(
+        *edge.server.admitted_upstream_authority.borrow(),
+        first,
+        "a concurrent admitted upstream must not steal existing route ownership"
+    );
+    assert_eq!(edge.server.admitted_upstream_authorities.borrow().len(), 2);
+    let tx_id = edge
+        .node()
+        .borrow_mut()
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x91), 1).cells(cells("handoff", false, identity)),
+        )
+        .unwrap();
+    let queue = Rc::new(RefCell::new(Vec::new()));
+    edge.server.edge_fate_routes.borrow_mut().insert(
+        tx_id,
+        vec![EdgeFateRoute {
+            authority: Some(first.unwrap()),
+            queue: Rc::downgrade(&queue),
+        }],
+    );
+    assert!(edge.server.detach_connection(&a));
+    assert_ne!(
+        *edge.server.admitted_upstream_authority.borrow(),
+        first,
+        "detaching the selected owner must deterministically hand off future routes"
+    );
+    let handoff = edge.server.admitted_upstream_authority.borrow().unwrap();
+    assert_eq!(
+        edge.server.edge_fate_routes.borrow()[&tx_id][0].authority,
+        Some(handoff),
+        "an Edge-Accepted caller route must follow the selected handoff rather than vanish"
+    );
+}
+
+#[test]
+fn edge_route_capacity_rejects_instead_of_reporting_edge_acceptance() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xa1; 16]);
+    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
+    let (upstream, _authority) = duplex_with_admitted_session_context(
+        identity,
+        NodeUuid::from_bytes([0xe0; 16]),
+        1,
+        NodeUuid::from_bytes([0xc0; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(edge.server.connect_upstream(upstream));
+    let selected = edge
+        .server
+        .admitted_upstream_authority
+        .borrow()
+        .expect("admitted upstream");
+
+    let client = open_db(0xa1, identity, &schema);
+    let (client_transport, edge_transport) = duplex_with_admitted_session_context(
+        identity,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0xe0; 16]),
+        2,
+    );
+    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = edge.server.accept_edge_authority_subscriber_with_claims(
+        edge_transport,
+        identity,
+        BTreeMap::new(),
+    );
+    let write = client
+        .insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("bounded".to_owned()))]),
+        )
+        .unwrap();
+    let queue = Rc::new(RefCell::new(Vec::new()));
+    edge.server.edge_fate_routes.borrow_mut().insert(
+        write.mergeable_tx_id(),
+        (0..MAX_EDGE_FATE_ROUTES_PER_TX)
+            .map(|_| EdgeFateRoute {
+                authority: Some(selected),
+                queue: Rc::downgrade(&queue),
+            })
+            .collect(),
+    );
+    client.tick().unwrap();
+    edge.server.tick().unwrap();
+    client.tick().unwrap();
+    assert!(matches!(
+        write.write_state().unwrap().fate,
+        Fate::Rejected(RejectionReason::MalformedCommit(_))
+    ));
+}
+
+/// An admitted Edge routes a terminal fate from its selected upstream authority
+/// to exactly the downstream client that uploaded the commit.
+///
+/// This deliberately reaches the route registry directly because the contract
+/// is below the public database API: it proves that authenticated session
+/// admission binds the parked route to one authority epoch before a websocket
+/// adapter or a server lifecycle can obscure the exact wire recipient.
+///
+/// ```text
+/// alice --CommitUnit--> edge --park(tx, core epoch)--> core
+/// alice <--FateUpdate-- edge <--FateUpdate------------ core
+/// ```
+#[test]
+fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
+    let schema = schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let edge_node = NodeUuid::from_bytes([0xe0; 16]);
+    let core_node = NodeUuid::from_bytes([0xc0; 16]);
+    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
+
+    // The upstream endpoint is the authority that is allowed to discharge a
+    // downstream Edge-accepted write. The client endpoint is deliberately a
+    // different admitted session, so it cannot supply that authority context.
+    let (edge_upstream_transport, core_transport) =
+        duplex_with_admitted_session_context(AuthorId::SYSTEM, edge_node, 41, core_node, 97);
+    let edge_upstream = crate::db::block_on(edge.server.connect_upstream(edge_upstream_transport));
+    let core = open_core(0xc0, AuthorId::SYSTEM, &schema);
+    let core_session = core.accept_subscriber(core_transport, AuthorId::SYSTEM);
+
+    let client = open_db(0xa1, alice, &schema);
+    let (client_transport, edge_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        11,
+        edge_node,
+        13,
+    );
+    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
+        edge_transport,
+        alice,
+        BTreeMap::new(),
+    );
+
+    let write = client
+        .insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("routed".to_owned()))]),
+        )
+        .unwrap();
+    let tx_id = write.mergeable_tx_id();
+    client.tick().unwrap();
+    edge.tick().unwrap();
+
+    let expected_authority = AuthorityContext {
+        authority: *core_node.as_bytes(),
+        link: *AuthorId::SYSTEM.as_bytes(),
+        connection_id: 41,
+        connection_epoch: 97,
+        claims_revision: 0,
+        policy_epoch: 0,
+        authorization_progress: 0,
+        settled_through: 0,
+    };
+    let routes = edge.server.edge_fate_routes.borrow();
+    let routes_for_tx = routes.get(&tx_id).expect("edge must park the upload route");
+    assert_eq!(routes_for_tx.len(), 1);
+    assert_eq!(routes_for_tx[0].authority, Some(expected_authority));
+    drop(routes);
+
+    // Scope receipts advance authorization metadata on the same physical
+    // connection. They must not turn that admitted link into a different fate
+    // authority: FateUpdate carries no receipt generation of its own.
+    {
+        let mut edge_upstream = edge_upstream.borrow_mut();
+        let ConnectionLink::Upstream(UpstreamConnectionState {
+            expected_scope_authority,
+            ..
+        }) = &mut edge_upstream.link
+        else {
+            panic!("edge upstream must retain its admitted authority context");
+        };
+        let authority_context = expected_scope_authority
+            .as_mut()
+            .expect("admitted authority context");
+        authority_context.claims_revision = 3;
+        authority_context.policy_epoch = 5;
+        authority_context.authorization_progress = 7;
+        authority_context.settled_through = 11;
+    }
+
+    let fate = SyncMessage::FateUpdate {
+        tx_id,
+        fate: Fate::Accepted,
+        global_time: Some(GlobalTime(17)),
+        durability: Some(DurabilityTier::Global),
+    };
+
+    // Receipt metadata is intentionally not a fate-route discriminator, but
+    // every physical link discriminator still is. A FateUpdate from a
+    // different epoch, local connection, authority, or admitted subject must
+    // remain unable to discharge Alice's parked route.
+    let advanced_context = {
+        let edge_upstream = edge_upstream.borrow();
+        let ConnectionLink::Upstream(UpstreamConnectionState {
+            expected_scope_authority,
+            ..
+        }) = &edge_upstream.link
+        else {
+            panic!("edge upstream must retain its admitted authority context");
+        };
+        expected_scope_authority.expect("advanced authority context")
+    };
+    for physically_different in [
+        AuthorityContext {
+            connection_id: advanced_context.connection_id.wrapping_add(1),
+            ..advanced_context
+        },
+        AuthorityContext {
+            connection_epoch: advanced_context.connection_epoch.wrapping_add(1),
+            ..advanced_context
+        },
+        AuthorityContext {
+            authority: *NodeUuid::from_bytes([0xc2; 16]).as_bytes(),
+            ..advanced_context
+        },
+        AuthorityContext {
+            link: *AuthorId::from_bytes([0xb2; 16]).as_bytes(),
+            ..advanced_context
+        },
+    ] {
+        {
+            let mut edge_upstream = edge_upstream.borrow_mut();
+            let ConnectionLink::Upstream(UpstreamConnectionState {
+                expected_scope_authority,
+                ..
+            }) = &mut edge_upstream.link
+            else {
+                unreachable!("edge upstream shape remains stable");
+            };
+            *expected_scope_authority = Some(physically_different);
+        }
+        core_session
+            .borrow_mut()
+            .transport
+            .send(SyncMessage::FateUpdate {
+                tx_id,
+                fate: Fate::Rejected(RejectionReason::MalformedCommit(
+                    "wrong physical link".to_owned(),
+                )),
+                global_time: None,
+                durability: None,
+            })
+            .unwrap();
+        edge_upstream.borrow_mut().tick().unwrap();
+        assert!(
+            edge_client.borrow().downstream_fates.borrow().is_empty(),
+            "a physically distinct authority context must not reach Alice"
+        );
+        assert_eq!(
+            edge.node()
+                .borrow_mut()
+                .transaction_state_settled(tx_id)
+                .unwrap()
+                .0,
+            Fate::Pending,
+            "a rejected fate from a different physical link must not alter edge state"
+        );
+    }
+    {
+        let mut edge_upstream = edge_upstream.borrow_mut();
+        let ConnectionLink::Upstream(UpstreamConnectionState {
+            expected_scope_authority,
+            ..
+        }) = &mut edge_upstream.link
+        else {
+            unreachable!("edge upstream shape remains stable");
+        };
+        *expected_scope_authority = Some(advanced_context);
+    }
+    core_session
+        .borrow_mut()
+        .transport
+        .send(fate.clone())
+        .unwrap();
+    // Step only the selected upstream connection. This makes the exact
+    // downstream fate observable before the client session consumes it.
+    edge_upstream.borrow_mut().tick().unwrap();
+    assert_eq!(
+        edge_client.borrow().downstream_fates.borrow().as_slice(),
+        std::slice::from_ref(&fate),
+        "the authority's terminal fate must be queued once for Alice's session"
+    );
+    assert!(
+        !edge.server.edge_fate_routes.borrow().contains_key(&tx_id),
+        "terminal delivery must retire its exact authority route"
+    );
+
+    edge_client.borrow_mut().tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Global
+    );
+}
+
+#[test]
+fn stale_upstream_epoch_cannot_settle_routed_local_fate_before_selected_epoch() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xa1; 16]);
+    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
+    let (a_transport, mut a_peer) = duplex_with_admitted_session_context(
+        identity,
+        NodeUuid::from_bytes([0xe0; 16]),
+        1,
+        NodeUuid::from_bytes([0xa2; 16]),
+        1,
+    );
+    let _a = crate::db::block_on(edge.server.connect_upstream(a_transport));
+    let selected = edge.server.admitted_upstream_authority.borrow().unwrap();
+    let (b_transport, mut b_peer) = duplex_with_admitted_session_context(
+        identity,
+        NodeUuid::from_bytes([0xe0; 16]),
+        2,
+        NodeUuid::from_bytes([0xb2; 16]),
+        2,
+    );
+    let _b = crate::db::block_on(edge.server.connect_upstream(b_transport));
+    let tx_id = edge
+        .node()
+        .borrow_mut()
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row(0x44), 1).cells(cells("pending", false, identity)),
+        )
+        .unwrap();
+    let downstream = Rc::new(RefCell::new(Vec::new()));
+    edge.server.edge_fate_routes.borrow_mut().insert(
+        tx_id,
+        vec![EdgeFateRoute {
+            authority: Some(selected),
+            queue: Rc::downgrade(&downstream),
+        }],
+    );
+    b_peer
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(1)),
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    edge.server.tick().unwrap();
+    assert!(matches!(
+        edge.node()
+            .borrow_mut()
+            .transaction_state_settled(tx_id)
+            .unwrap()
+            .0,
+        Fate::Pending
+    ));
+    assert!(downstream.borrow().is_empty());
+    a_peer
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(1)),
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    edge.server.tick().unwrap();
+    assert!(matches!(
+        edge.node()
+            .borrow_mut()
+            .transaction_state_settled(tx_id)
+            .unwrap()
+            .0,
+        Fate::Accepted
+    ));
+    assert_eq!(downstream.borrow().len(), 1);
+}
+
+#[test]
+fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xa1; 16]);
+    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
+    let authority_a = open_core(0xa2, AuthorId::SYSTEM, &schema);
+    let authority_b = open_core(0xb2, AuthorId::SYSTEM, &schema);
+    let edge_node = NodeUuid::from_bytes([0xe0; 16]);
+
+    let (edge_a_transport, a_transport) = duplex_with_admitted_session_context(
+        identity,
+        edge_node,
+        10,
+        NodeUuid::from_bytes([0xa2; 16]),
+        20,
+    );
+    let edge_a = crate::db::block_on(edge.server.connect_upstream(edge_a_transport));
+    let a = authority_a.accept_subscriber(a_transport, identity);
+    let (edge_b_transport, b_transport) = duplex_with_admitted_session_context(
+        identity,
+        edge_node,
+        11,
+        NodeUuid::from_bytes([0xb2; 16]),
+        21,
+    );
+    let edge_b = crate::db::block_on(edge.server.connect_upstream(edge_b_transport));
+    let _b = authority_b.accept_subscriber(b_transport, identity);
+
+    let client = open_db(0xc1, identity, &schema);
+    let (client_transport, edge_transport) = duplex_with_admitted_session_context(
+        identity,
+        NodeUuid::from_bytes([0xc1; 16]),
+        1,
+        edge_node,
+        2,
+    );
+    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
+        edge_transport,
+        identity,
+        BTreeMap::new(),
+    );
+
+    let write = client
+        .insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("handoff".to_owned()))]),
+        )
+        .unwrap();
+    client.tick().unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Edge
+    );
+
+    // B is a real connected authority but it is not the selected one.  Have
+    // it consume the same upload and reject it while permission state is
+    // unavailable; that real early fate must not settle or forward the
+    // parked downstream write.
+    authority_b.server.set_permissions_ready(false).unwrap();
+    authority_b.tick().unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Edge
+    );
+    {
+        let edge_b = edge_b.borrow();
+        let ConnectionLink::Upstream(UpstreamConnectionState { uploaded, .. }) = &edge_b.link
+        else {
+            panic!("B must be an upstream connection");
+        };
+        assert!(
+            uploaded.contains(&write.mergeable_tx_id()),
+            "B must have already uploaded the write before it becomes owner"
+        );
+    }
+
+    assert!(edge.server.detach_connection(&edge_a));
+    // The detach schedules a handoff immediately, and the successor must
+    // re-upload even though it was already connected before selection.
+    {
+        let edge_b = edge_b.borrow();
+        let ConnectionLink::Upstream(UpstreamConnectionState { uploaded, .. }) = &edge_b.link
+        else {
+            panic!("B must remain the upstream handoff connection");
+        };
+        assert!(
+            !uploaded.contains(&write.mergeable_tx_id()),
+            "handoff must clear B's prior upload suppression before redriving"
+        );
+    }
+    authority_b.server.set_permissions_ready(true).unwrap();
+    edge.tick().unwrap();
+    authority_b.tick().unwrap();
+    // Step B's actual upstream connection separately so the downstream fate
+    // queue is observable before the edge-client connection flushes it.
+    edge_b.borrow_mut().tick().unwrap();
+    assert_eq!(
+        edge_client.borrow().downstream_fates.borrow().len(),
+        1,
+        "B's terminal fate must enqueue exactly one downstream notification"
+    );
+    assert!(
+        !edge
+            .server
+            .edge_fate_routes
+            .borrow()
+            .contains_key(&write.mergeable_tx_id()),
+        "forwarding the terminal fate must retire its route"
+    );
+    edge_client.borrow_mut().tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Global
+    );
+
+    // A late packet from the detached authority has no route and cannot add a
+    // second terminal notification for the original downstream handle.
+    a.borrow_mut()
+        .transport
+        .send(SyncMessage::FateUpdate {
+            tx_id: write.mergeable_tx_id(),
+            fate: Fate::Rejected(RejectionReason::MalformedCommit("late A".to_owned())),
+            global_time: None,
+            durability: None,
+        })
+        .unwrap();
+    edge.tick().unwrap();
+    edge_client.borrow_mut().tick().unwrap();
+    client.tick().unwrap();
+    assert!(
+        edge_client.borrow().downstream_fates.borrow().is_empty(),
+        "late A must not enqueue a second downstream fate"
+    );
+    assert!(
+        !edge
+            .server
+            .edge_fate_routes
+            .borrow()
+            .contains_key(&write.mergeable_tx_id()),
+        "late A must not recreate the retired route"
+    );
+    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Global
+    );
+}
+
+#[test]
+fn edge_parks_downstream_fate_until_a_later_authority_connects() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xa1; 16]);
+    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
+    let authority_a = open_core(0xa2, AuthorId::SYSTEM, &schema);
+    let edge_node = NodeUuid::from_bytes([0xe0; 16]);
+    let (edge_a_transport, a_transport) = duplex_with_admitted_session_context(
+        identity,
+        edge_node,
+        10,
+        NodeUuid::from_bytes([0xa2; 16]),
+        20,
+    );
+    let edge_a = crate::db::block_on(edge.server.connect_upstream(edge_a_transport));
+    let _a = authority_a.accept_subscriber(a_transport, identity);
+
+    let client = open_db(0xc1, identity, &schema);
+    let (client_transport, edge_transport) = duplex_with_admitted_session_context(
+        identity,
+        NodeUuid::from_bytes([0xc1; 16]),
+        1,
+        edge_node,
+        2,
+    );
+    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
+        edge_transport,
+        identity,
+        BTreeMap::new(),
+    );
+    let write = client
+        .insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("parked".to_owned()))]),
+        )
+        .unwrap();
+    client.tick().unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Edge
+    );
+
+    assert!(edge.server.detach_connection(&edge_a));
+    assert_eq!(edge.server.edge_fate_routes.borrow().len(), 1);
+    assert_eq!(
+        edge.server.edge_fate_routes.borrow()[&write.mergeable_tx_id()][0].authority,
+        None,
+        "a route whose authority disconnected remains parked without stale authority claims"
+    );
+
+    let authority_c = open_core(0xc2, AuthorId::SYSTEM, &schema);
+    let (edge_c_transport, c_transport) = duplex_with_admitted_session_context(
+        identity,
+        edge_node,
+        12,
+        NodeUuid::from_bytes([0xc2; 16]),
+        22,
+    );
+    let _edge_c = crate::db::block_on(edge.server.connect_upstream(edge_c_transport));
+    let _c = authority_c.accept_subscriber(c_transport, identity);
+    edge.tick().unwrap();
+    authority_c.tick().unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Global
+    );
+    assert!(edge.server.edge_fate_routes.borrow().is_empty());
+}
+
+/// An offline-ready Edge retains a client's fate route when a write arrives
+/// before normal upstream admission.
+///
+/// A validated durable Edge may serve while its Core is offline. Its local
+/// acceptance therefore has to retain an unbound downstream obligation, bind
+/// it to the first authenticated authority, and redrive the canonical unit.
+///
+/// ```text
+/// alice --write--> edge (no upstream yet) --later attach--> core
+///                    \-- park(tx, alice) --bind(core)--> global fate
+/// ```
+#[test]
+fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
+    let schema = schema();
+    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let edge_node = NodeUuid::from_bytes([0xe0; 16]);
+    let core_node = NodeUuid::from_bytes([0xc0; 16]);
+    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xa1, alice, &schema);
+    let (client_transport, edge_transport) = duplex_with_admitted_session_context(
+        alice,
+        NodeUuid::from_bytes([0xa1; 16]),
+        11,
+        edge_node,
+        13,
+    );
+    let client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
+        edge_transport,
+        alice,
+        BTreeMap::new(),
+    );
+
+    let write = client
+        .insert("todos", cells("startup race", false, alice))
+        .unwrap();
+    let tx_id = write.mergeable_tx_id();
+    client.tick().unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Edge
+    );
+    assert_eq!(
+        edge.server.edge_fate_routes.borrow()[&tx_id][0].authority,
+        None,
+        "an offline-ready edge retains the downstream obligation without inventing authority"
+    );
+    client_upstream
+        .borrow_mut()
+        .transport
+        .send(
+            client
+                .node
+                .node
+                .borrow_mut()
+                .commit_unit_for(tx_id)
+                .unwrap(),
+        )
+        .unwrap();
+    edge.tick().unwrap();
+    assert_eq!(
+        edge.server.edge_fate_routes.borrow()[&tx_id].len(),
+        1,
+        "a retransmitted pre-admission unit must reuse the same downstream route"
+    );
+
+    let (edge_upstream_transport, core_transport) =
+        duplex_with_admitted_session_context(AuthorId::SYSTEM, edge_node, 41, core_node, 97);
+    let _edge_upstream = crate::db::block_on(edge.server.connect_upstream(edge_upstream_transport));
+    assert!(
+        edge.server.edge_fate_routes.borrow()[&tx_id][0]
+            .authority
+            .is_some(),
+        "the first authenticated authority binds the parked route"
+    );
+    let core = open_core(0xc0, AuthorId::SYSTEM, &schema);
+    let core_session = core.accept_subscriber(core_transport, AuthorId::SYSTEM);
+    edge.tick().unwrap();
+    let uploaded = std::iter::from_fn(|| core_session.borrow_mut().transport.try_recv())
+        .any(|message| matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == tx_id));
+    assert!(
+        uploaded,
+        "binding the first authority redrives the parked unit"
+    );
+    core_session
+        .borrow_mut()
+        .transport
+        .send(SyncMessage::FateUpdate {
+            tx_id,
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(1)),
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    edge.tick().unwrap();
+    edge_client.borrow_mut().tick().unwrap();
+    client.tick().unwrap();
+
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Global,
+        "the late Core fate must discharge the offline client's parked route"
+    );
+    assert!(edge.server.edge_fate_routes.borrow().is_empty());
+}
+
+#[test]
+fn stale_same_authority_session_cannot_settle_or_forward_a_routed_fate() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xa1; 16]);
+    let edge = open_core(0xe0, AuthorId::SYSTEM, &schema);
+    let edge_node = NodeUuid::from_bytes([0xe0; 16]);
+    let authority_node = NodeUuid::from_bytes([0xa2; 16]);
+    let old_authority = open_core(0xa2, AuthorId::SYSTEM, &schema);
+    let current_authority = open_core(0xa2, AuthorId::SYSTEM, &schema);
+
+    let (edge_old_transport, old_transport) =
+        duplex_with_admitted_session_context(identity, edge_node, 10, authority_node, 20);
+    let _edge_old = crate::db::block_on(edge.server.connect_upstream(edge_old_transport));
+    let old = old_authority.accept_subscriber(old_transport, identity);
+    let (edge_current_transport, current_transport) =
+        duplex_with_admitted_session_context(identity, edge_node, 11, authority_node, 21);
+    let _edge_current = crate::db::block_on(edge.server.connect_upstream(edge_current_transport));
+    let current = current_authority.accept_subscriber(current_transport, identity);
+
+    let client = open_db(0xc1, identity, &schema);
+    let (client_transport, edge_transport) = duplex_with_admitted_session_context(
+        identity,
+        NodeUuid::from_bytes([0xc1; 16]),
+        1,
+        edge_node,
+        2,
+    );
+    let _client_upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _edge_client = edge.server.accept_edge_authority_subscriber_with_claims(
+        edge_transport,
+        identity,
+        BTreeMap::new(),
+    );
+    let write = client
+        .insert(
+            "todos",
+            BTreeMap::from([("title".to_owned(), Value::String("epoch".to_owned()))]),
+        )
+        .unwrap();
+    client.tick().unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Edge
+    );
+
+    // Model the already-admitted successor taking ownership while the old
+    // same-UUID socket still has an in-flight frame.  UUID equality alone is
+    // deliberately insufficient: connection id and remote epoch bind the
+    // route to the current authenticated session.
+    let current_context = edge.server.admitted_upstream_authorities.borrow()[1];
+    *edge.server.admitted_upstream_authority.borrow_mut() = Some(current_context);
+    edge.server
+        .edge_fate_routes
+        .borrow_mut()
+        .get_mut(&write.mergeable_tx_id())
+        .expect("routed edge write")[0]
+        .authority = Some(current_context);
+    old.borrow_mut()
+        .transport
+        .send(SyncMessage::FateUpdate {
+            tx_id: write.mergeable_tx_id(),
+            fate: Fate::Rejected(RejectionReason::MalformedCommit("old session".to_owned())),
+            global_time: None,
+            durability: None,
+        })
+        .unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Edge
+    );
+
+    current
+        .borrow_mut()
+        .transport
+        .send(SyncMessage::FateUpdate {
+            tx_id: write.mergeable_tx_id(),
+            fate: Fate::Accepted,
+            global_time: Some(GlobalTime(1)),
+            durability: Some(DurabilityTier::Global),
+        })
+        .unwrap();
+    edge.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(write.write_state().unwrap().fate, Fate::Accepted);
+    assert_eq!(
+        write.write_state().unwrap().durability,
+        DurabilityTier::Global
+    );
+}
+
+#[test]
+fn public_permission_advice_accepts_an_explicit_zero_clause_receipt() {
+    let schema = schema();
+    let identity = AuthorId::from_bytes([0xa3; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let target = server
+        .insert("todos", cells("public", false, identity))
+        .unwrap()
+        .row_uuid();
+    let client = open_db(0xa3, identity, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        identity,
+        NodeUuid::from_bytes([0xa3; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, identity);
+    let advice = client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: target,
+    });
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    assert_eq!(block_on(advice), PermissionAdvice::Allowed);
+}
+
+#[test]
+fn permission_advice_is_unknown_until_authority_permissions_are_ready() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    server.server.set_permissions_ready(false).unwrap();
+    let client = open_db(0xa1, author, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, author);
+    let advice = client.request_permission_advice(PermissionAdviceAction::Insert {
+        table: "todos".to_owned(),
+        cells: cells("candidate", false, author),
+    });
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    assert_eq!(block_on(advice), PermissionAdvice::Unknown);
+    assert!(server.read(&Query::from("todos")).unwrap().is_empty());
+}
+
+#[test]
+fn partial_replica_cannot_act_as_permission_advice_authority() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xa1; 16]);
+    let partial = open_db(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xa1, author, &schema);
+    let (client_transport, partial_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = partial.accept_subscriber(partial_transport, author);
+    let advice = client.request_permission_advice(PermissionAdviceAction::Insert {
+        table: "todos".to_owned(),
+        cells: cells("candidate", false, author),
+    });
+
+    client.tick().unwrap();
+    partial.tick().unwrap();
+    client.tick().unwrap();
+
+    assert_eq!(block_on(advice), PermissionAdvice::Unknown);
+}
+
+#[test]
+fn permission_advice_update_evaluates_post_patch_update_check() {
+    let policy = public_literal_eq("done", PublicValue::Boolean(false));
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(PublicTablePolicies::new().with_update(None, policy)),
+        ),
+    );
+    let author = AuthorId::from_bytes([0xa1; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let target = server
+        .insert("todos", cells("target", false, author))
+        .unwrap()
+        .row_uuid();
+    let client = open_db(0xa1, author, &schema);
+    let (client_transport, server_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber(server_transport, author);
+    let advice = client.request_permission_advice(PermissionAdviceAction::Update {
+        table: "todos".to_owned(),
+        row: target,
+        patch: BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+    });
+
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+
+    assert_eq!(block_on(advice), PermissionAdvice::Denied);
+
+    let missing = client.request_permission_advice(PermissionAdviceAction::Update {
+        table: "todos".to_owned(),
+        row: row(0xee),
+        patch: BTreeMap::from([("done".to_owned(), Value::Bool(false))]),
+    });
+    client.tick().unwrap();
+    server.tick().unwrap();
+    client.tick().unwrap();
+    assert_eq!(block_on(missing), PermissionAdvice::Denied);
+}
+
+#[test]
+fn permission_advice_response_wire_cannot_carry_policy_rows_or_reasons() {
+    let request_id = PermissionAdviceRequestId([7; 16]);
+    let message = SyncMessage::PermissionAdviceResponse {
+        request_id,
+        advice: PermissionAdvice::Denied,
+    };
+    assert_eq!(
+        message,
+        SyncMessage::PermissionAdviceResponse {
+            request_id,
+            advice: PermissionAdvice::Denied,
+        }
+    );
+}
+
+#[test]
+fn cancelled_permission_advice_ignores_late_or_replayed_response_ids() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xa1; 16]);
+    let client = open_db(0xa1, author, &schema);
+    let (client_transport, mut authority_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+
+    let cancelled = client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: row(1),
+    });
+    client.tick().unwrap();
+    let cancelled_id = match try_recv_subscriber_payload(authority_transport.as_mut()).unwrap() {
+        SyncMessage::AuthorizationScopeIntent { request_id, .. } => request_id,
+        message => panic!("expected authority scope intent, got {message:?}"),
+    };
+    drop(cancelled);
+
+    let current = client.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: row(2),
+    });
+    client.tick().unwrap();
+    let current_id = match try_recv_subscriber_payload(authority_transport.as_mut()).unwrap() {
+        SyncMessage::AuthorizationScopeIntent { request_id, .. } => request_id,
+        message => panic!("expected authority scope intent, got {message:?}"),
+    };
+    assert_ne!(cancelled_id, current_id);
+
+    authority_transport
+        .send(SyncMessage::AuthorizationScopeUnavailable {
+            request_id: cancelled_id,
+        })
+        .unwrap();
+    authority_transport
+        .send(SyncMessage::AuthorizationScopeUnavailable {
+            request_id: current_id,
+        })
+        .unwrap();
+    client.tick().unwrap();
+
+    assert_eq!(block_on(current), PermissionAdvice::Unknown);
+}
+
+#[test]
+fn identical_permission_advice_requests_share_one_authority_intent() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xa4; 16]);
+    let client = open_db(0xa4, author, &schema);
+    let (client_transport, mut authority_transport) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa4; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let action = PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: row(1),
+    };
+    let first = client.request_permission_advice(action.clone());
+    let second = client.request_permission_advice(action);
+    client.tick().unwrap();
+
+    let request_id = match try_recv_subscriber_payload(authority_transport.as_mut()).unwrap() {
+        SyncMessage::AuthorizationScopeIntent { request_id, .. } => request_id,
+        message => panic!("expected one authority scope intent, got {message:?}"),
+    };
+    assert!(
+        try_recv_subscriber_payload(authority_transport.as_mut()).is_none(),
+        "coalesced advice must not allocate a second support hydration"
+    );
+    authority_transport
+        .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
+        .unwrap();
+    client.tick().unwrap();
+    assert_eq!(block_on(first), PermissionAdvice::Unknown);
+    assert_eq!(block_on(second), PermissionAdvice::Unknown);
+}
+
+#[test]
+fn dropped_permission_advice_is_not_sent_and_reopened_nodes_use_fresh_ids() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xa1; 16]);
+
+    let first = open_db(0xa1, author, &schema);
+    let (first_transport, mut first_authority) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa1; 16]),
+        1,
+        NodeUuid::from_bytes([0x5e; 16]),
+        1,
+    );
+    let _first_upstream = crate::db::block_on(first.connect_upstream(first_transport));
+    let cancelled = first.request_permission_advice(PermissionAdviceAction::Insert {
+        table: "todos".to_owned(),
+        cells: cells("sensitive", false, author),
+    });
+    drop(cancelled);
+    first.tick().unwrap();
+    assert!(try_recv_subscriber_payload(first_authority.as_mut()).is_none());
+
+    let first_live = first.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: row(1),
+    });
+    first.tick().unwrap();
+    let first_id = match try_recv_subscriber_payload(first_authority.as_mut()).unwrap() {
+        SyncMessage::AuthorizationScopeIntent { request_id, .. } => request_id,
+        message => panic!("expected authority scope intent, got {message:?}"),
+    };
+    drop(first_live);
+
+    let reopened = open_db(0xa1, author, &schema);
+    let (reopened_transport, mut reopened_authority) = duplex_with_admitted_session_context(
+        author,
+        NodeUuid::from_bytes([0xa1; 16]),
+        2,
+        NodeUuid::from_bytes([0x5e; 16]),
+        2,
+    );
+    let _reopened_upstream = crate::db::block_on(reopened.connect_upstream(reopened_transport));
+    let reopened_live = reopened.request_permission_advice(PermissionAdviceAction::Read {
+        table: "todos".to_owned(),
+        row: row(1),
+    });
+    reopened.tick().unwrap();
+    let reopened_id = match try_recv_subscriber_payload(reopened_authority.as_mut()).unwrap() {
+        SyncMessage::AuthorizationScopeIntent { request_id, .. } => request_id,
+        message => panic!("expected authority scope intent, got {message:?}"),
+    };
+    drop(reopened_live);
+
+    assert_ne!(first_id, reopened_id);
+}

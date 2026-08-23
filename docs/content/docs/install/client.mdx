@@ -1,7 +1,7 @@
 ---
 title: Client
 description: Build a local-first to-do app with Jazz, step by step.
-reviewedAt: "22485728"
+reviewedAt: "b29b48d1a"
 ---
 
 import { Callout } from "fumadocs-ui/components/callout";
@@ -104,8 +104,8 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
     registerRootComponent(App);
     ```
 
-    Keep this import first in the app entry point. It installs the React Native `fetch`, stream, and
-    related web API shims Jazz needs before the RN runtime is loaded.
+    Keep this import first in the app entry point. It installs `ReadableStream` when React Native
+    does not provide it.
 
     Update `babel.config.js` to enable the `import.meta` transform and strip Flow types:
 
@@ -134,13 +134,12 @@ Start with a fresh app. If you already have one, skip to [Install](#install).
 
     const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 
-    const config = getDefaultConfig(projectRoot);
+    const config = await withJazz(getDefaultConfig(projectRoot), {
+      schemaDir: projectRoot,
+    });
 
     // pnpm uses symlinks for hoisted packages
     config.resolver.unstable_enableSymlinks = true;
-
-    // Start the Jazz dev server and inject EXPO_PUBLIC_JAZZ_* env vars for Metro to inline.
-    await withJazz({}, { schemaDir: projectRoot });
 
     export default config;
     ```
@@ -217,6 +216,12 @@ Create the basic structure for your app with Jazz and a to-do list.
 
   </Tab>
 </Tabs>
+
+<Callout type="warn">
+  The Expo/React Native binding is compile-level scaffolding in this alpha. Persistent client
+  storage is not supported. Explicit memory mode has not passed Metro/Hermes device validation and
+  is not a supported persistence alternative.
+</Callout>
 
 <Accordions type="single">
   <Accordion title="Client Config">
@@ -315,7 +320,7 @@ Full mutation API: [Writing Data](/docs/writing/writing-data).
 
 <Accordions type="single">
   <Accordion title="Local writes">
-    Jazz persists all writes locally, so your data is saved and your UI updates
+    With the default persistent browser driver, Jazz saves writes locally and updates your UI
     immediately&hairsp;—&hairsp;even while offline.
   </Accordion>
 </Accordions>
@@ -407,5 +412,3 @@ For self-hosted deployments, see [Server Setup](/docs/getting-started/server-set
 
 - [Todo app (React)](https://github.com/garden-co/jazz2/tree/main/examples/docs/todo-client-localfirst-react)&hairsp;—&hairsp;the app you just built, as a complete project
 - [Todo app (Solid)](https://github.com/garden-co/jazz2/tree/main/examples/docs/todo-client-localfirst-solid)&hairsp;—&hairsp;the same app built with `jazz-tools/solid`
-- [File upload (React)](https://github.com/garden-co/jazz2/tree/main/examples/file-upload-react)&hairsp;—&hairsp;image upload and rendering with Jazz
-- [Wequencer (Svelte)](https://github.com/garden-co/jazz2/tree/main/examples/wequencer)&hairsp;—&hairsp;collaborative real-time music sequencer

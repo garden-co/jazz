@@ -275,23 +275,3 @@ describe("listPages()", () => {
     expect(gs.description).toBe("Learn how to install and configure Jazz.");
   });
 });
-
-// ---------------------------------------------------------------------------
-// Top-level import safety
-// ---------------------------------------------------------------------------
-
-describe("module import safety", () => {
-  it("the module source does not contain a top-level node:sqlite import", async () => {
-    // Read the source file and verify there is no top-level static import of node:sqlite.
-    // This is a static analysis check — the runtime test is that the module loads fine
-    // even when node:sqlite is unavailable (which we can't easily simulate here).
-    const { readFile } = await import("node:fs/promises");
-    const { fileURLToPath } = await import("node:url");
-    const { dirname, join: pathJoin } = await import("node:path");
-    const here = dirname(fileURLToPath(import.meta.url));
-    const src = await readFile(pathJoin(here, "backend-sqlite.ts"), "utf8");
-    // Top-level static imports look like: import ... from "node:sqlite"
-    const topLevelImportRe = /^import\s+.*from\s+["']node:sqlite["']/m;
-    expect(topLevelImportRe.test(src)).toBe(false);
-  });
-});

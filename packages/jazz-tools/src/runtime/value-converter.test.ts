@@ -58,7 +58,10 @@ describe("toValue", () => {
 
   it("converts BigInt values", () => {
     const colType: ColumnType = { type: "BigInt" };
-    expect(toValue(9007199254740991, colType)).toEqual({ type: "BigInt", value: 9007199254740991 });
+    expect(toValue(9007199254740993n, colType)).toEqual({
+      type: "BigInt",
+      value: 9007199254740993n,
+    });
   });
 
   it("converts Timestamp values", () => {
@@ -136,6 +139,35 @@ describe("toValue", () => {
     expect(() => toValue("invalid", colType)).toThrow("Invalid enum value");
   });
 
+  it("converts payload enum values with scalar fields and fails closed", () => {
+    const colType: ColumnType = {
+      type: "EnumPayload",
+      cases: [
+        {
+          name: "message",
+          fields: [
+            { name: "text", column_type: { type: "Text" }, nullable: false },
+            { name: "level", column_type: { type: "Integer" }, nullable: true },
+          ],
+        },
+      ],
+    };
+    expect(toValue({ type: "message", text: "hello", level: null }, colType)).toEqual({
+      type: "Enum",
+      value: {
+        case: "message",
+        values: [{ type: "Text", value: "hello" }, { type: "Null" }],
+      },
+    });
+    expect(() => toValue({ type: "message" }, colType)).toThrow("Missing required payload field");
+    expect(() => toValue({ type: "message", text: "hello", extra: true }, colType)).toThrow(
+      "Unknown payload field",
+    );
+    expect(() => toValue({ type: "missing", text: "hello" }, colType)).toThrow(
+      "Invalid payload enum case",
+    );
+  });
+
   it("converts Array values", () => {
     const colType: ColumnType = { type: "Array", element: { type: "Text" } };
     expect(toValue(["a", "b", "c"], colType)).toEqual({
@@ -193,6 +225,19 @@ describe("toWriteRecord", () => {
         { name: "done", column_type: { type: "Boolean" }, nullable: false },
         { name: "priority", column_type: { type: "Integer" }, nullable: true },
         { name: "payload", column_type: { type: "Bytea" }, nullable: true },
+        {
+          name: "metadata",
+          column_type: {
+            type: "Json",
+            schema: {
+              type: "object",
+              properties: {
+                title: { type: "string", minLength: 1 },
+              },
+            },
+          },
+          nullable: false,
+        },
       ],
     },
   };
@@ -258,6 +303,12 @@ describe("toWriteRecord", () => {
   it("throws when null is used for a required field", () => {
     expect(() => toWriteRecord({ title: null }, schema, "todos")).toThrow(
       "Cannot set required field 'title' to null",
+    );
+  });
+
+  it("validates Json values against column schemas", () => {
+    expect(() => toWriteRecord({ metadata: { title: "" } }, schema, "todos")).toThrow(
+      'encoding error: JSON schema validation failed for column `metadata`: "" is shorter than 1 character',
     );
   });
 });

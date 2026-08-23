@@ -1,192 +1,97 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Session } from "../runtime/context.js";
-import type { DbConfig } from "./db.js";
-import { createJazzClient } from "./create-jazz-client.js";
+import { schema as s } from "../index.js";
+import {
+  createDb,
+  createJazzClient,
+  REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR,
+  REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR,
+  type JazzClient,
+  type ReactNativeSqliteStorageDriver,
+} from "./index.js";
 
-const mocks = vi.hoisted(() => {
-  const createDb = vi.fn();
-  const managerCtor = vi.fn();
-  const managerInit = vi.fn();
-  const managerShutdown = vi.fn();
-
-  class MockSubscriptionsOrchestrator {
-    constructor(config: { appId: string }, instanceDb: unknown, sessionArg: Session | null) {
-      managerCtor(config, instanceDb, sessionArg);
-    }
-
-    init = managerInit;
-    setSession = vi.fn();
-    shutdown = managerShutdown;
-  }
-
-  return {
-    createDb,
-    managerCtor,
-    managerInit,
-    managerShutdown,
-    MockSubscriptionsOrchestrator,
-  };
+const app = s.defineApp({
+  notes: s.table({ title: s.string() }),
 });
 
-vi.mock("./db.js", async () => {
-  const actual = await vi.importActual<typeof import("./db.js")>("./db.js");
-  return {
-    ...actual,
-    createDb: mocks.createDb,
-  };
-});
+describe("React Native binding scaffolding in the Node test runtime", () => {
+  let client: JazzClient | undefined;
 
-vi.mock("../subscriptions-orchestrator.js", async () => {
-  const actual = await vi.importActual<typeof import("../subscriptions-orchestrator.js")>(
-    "../subscriptions-orchestrator.js",
-  );
-
-  return {
-    ...actual,
-    SubscriptionsOrchestrator: mocks.MockSubscriptionsOrchestrator,
-  };
-});
-
-type SetupOptions = {
-  resolvedConfig?: DbConfig;
-  session?: Session | null;
-  dbError?: Error;
-  orchestratorInitError?: Error;
-};
-
-async function setupCreateClient(options: SetupOptions = {}) {
-  const resolvedConfig: DbConfig = options.resolvedConfig ?? {
-    appId: "rn-create-client-resolved",
-  };
-
-  const dbShutdown = vi.fn(async () => {});
-  const db = {
-    getAuthState: vi.fn(() => ({
-      status: options.session ? "authenticated" : "unauthenticated",
-      session: options.session ?? null,
-    })),
-    onAuthChanged: vi.fn(() => () => {}),
-    shutdown: dbShutdown,
-  };
-
-  mocks.createDb.mockImplementation(async (_config: DbConfig) => {
-    if (options.dbError) {
-      throw options.dbError;
-    }
-    return db;
+  afterEach(async () => {
+    await client?.shutdown();
+    client = undefined;
   });
 
-  mocks.managerInit.mockImplementation(async () => {
-    if (options.orchestratorInitError) {
-      throw options.orchestratorInitError;
-    }
+  it("exports the exact installed-package persistence boundary messages", () => {
+    expect(REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR).toBe(
+      "React Native persistent storage is not available in this alpha; memory mode is unverified scaffolding, not device-supported persistence",
+    );
+    expect(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR).toBe(
+      "ReactNativeDbConfig.sqliteStorage is proposal-only and cannot be used by the v2 runtime; remove sqliteStorage (memory mode remains unverified scaffolding)",
+    );
   });
-  mocks.managerShutdown.mockImplementation(async () => {});
 
-  return {
-    createJazzClient,
-    createDb: mocks.createDb,
-    resolvedConfig,
-    db,
-    dbShutdown,
-    managerCtor: mocks.managerCtor,
-    managerInit: mocks.managerInit,
-    managerShutdown: mocks.managerShutdown,
-  };
-}
+  it("routes explicit memory configuration through the Node WASM harness", async () => {
+    client = await createJazzClient({
+      appId: "react-native-memory-launch-test",
+      driver: { type: "memory" },
+    });
 
-afterEach(() => {
-  mocks.createDb.mockReset();
-  mocks.managerCtor.mockReset();
-  mocks.managerInit.mockReset();
-  mocks.managerShutdown.mockReset();
-  vi.clearAllMocks();
-});
+    await expect(client.db.all(app.notes)).resolves.toEqual([]);
+  });
 
-describe("react-native/create-jazz-client", () => {
-  it("RNC-U01 initializes client session + manager and shuts down cleanly", async () => {
-    const session: Session = {
-      user_id: "local:rn-user",
-      claims: {},
-      authMode: "local-first",
+  it("rejects the default persistent configuration", async () => {
+    const error = await createDb({ appId: "react-native-default-persistent-boundary-test" }).catch(
+      (error: unknown) => error,
+    );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe(REACT_NATIVE_PERSISTENT_RUNTIME_UNAVAILABLE_ERROR);
+  });
+
+  it("rejects an injected SQLite driver before opening it", async () => {
+    const open = vi.fn();
+    const sqliteStorage: ReactNativeSqliteStorageDriver = {
+      type: "react-native-sqlite",
+      open,
+      deleteDatabase: vi.fn(),
     };
-    const resolvedConfig: DbConfig = {
-      appId: "rn-create-client-happy",
+
+    const error = await createDb({
+      appId: "react-native-persistent-boundary-test",
+      sqliteStorage,
+    }).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR);
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("rejects rather than ignores sqliteStorage combined with memory mode", async () => {
+    const open = vi.fn();
+    const sqliteStorage: ReactNativeSqliteStorageDriver = {
+      type: "react-native-sqlite",
+      open,
+      deleteDatabase: vi.fn(),
     };
-    const {
-      createJazzClient,
-      createDb,
-      resolvedConfig: actualResolvedConfig,
-      db,
-      dbShutdown,
-      managerCtor,
-      managerInit,
-      managerShutdown,
-    } = await setupCreateClient({ resolvedConfig, session });
-    const config: DbConfig = { appId: "rn-create-client-happy" };
 
-    const client = await createJazzClient(config);
+    const error = await createDb({
+      appId: "react-native-memory-sqlite-ambiguity-test",
+      driver: { type: "memory" },
+      sqliteStorage,
+    }).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe(REACT_NATIVE_SQLITE_STORAGE_REJECTED_ERROR);
+    expect(open).not.toHaveBeenCalled();
+  });
 
-    expect(actualResolvedConfig).toEqual(resolvedConfig);
-    expect(createDb).toHaveBeenCalledWith(config);
-    expect(managerCtor).toHaveBeenCalledWith({ appId: resolvedConfig.appId }, db, session);
-    expect(managerInit).toHaveBeenCalledTimes(1);
-    expect(client.db).toBe(db);
-    expect(client.session).toEqual(session);
-
+  it("can shut down and reopen the Node-only memory scaffold", async () => {
+    const config = {
+      appId: "react-native-memory-reopen-test",
+      driver: { type: "memory" as const },
+    };
+    client = await createJazzClient(config);
+    await expect(client.db.all(app.notes)).resolves.toEqual([]);
     await client.shutdown();
 
-    expect(managerShutdown).toHaveBeenCalledTimes(1);
-    expect(dbShutdown).toHaveBeenCalledTimes(1);
-  });
-
-  it("RNC-U02 rejects when db creation fails", async () => {
-    const dbError = new Error("db creation failed");
-    const resolvedConfig: DbConfig = {
-      appId: "rn-create-client-db-failure",
-    };
-    const { createJazzClient, createDb, managerCtor, managerInit } = await setupCreateClient({
-      dbError,
-      resolvedConfig,
-    });
-    const config: DbConfig = { appId: "rn-create-client-db-failure" };
-
-    await expect(createJazzClient(config)).rejects.toBe(dbError);
-    expect(createDb).toHaveBeenCalledWith(config);
-    expect(managerCtor).not.toHaveBeenCalled();
-    expect(managerInit).not.toHaveBeenCalled();
-  });
-
-  it("RNC-U03 rejects when orchestrator init fails", async () => {
-    const initError = new Error("orchestrator init failed");
-    const resolvedConfig: DbConfig = {
-      appId: "rn-create-client-manager-failure",
-    };
-    const session: Session = {
-      user_id: "local:rn-user-4",
-      claims: {},
-      authMode: "local-first",
-    };
-    const {
-      createJazzClient,
-      createDb,
-      db,
-      dbShutdown,
-      managerCtor,
-      managerInit,
-      managerShutdown,
-    } = await setupCreateClient({
-      resolvedConfig,
-      session,
-      orchestratorInitError: initError,
-    });
-    const config: DbConfig = { appId: "rn-create-client-manager-failure" };
-
-    await expect(createJazzClient(config)).rejects.toBe(initError);
-    expect(createDb).toHaveBeenCalledWith(config);
-    expect(managerCtor).toHaveBeenCalledWith({ appId: resolvedConfig.appId }, db, session);
-    expect(managerInit).toHaveBeenCalledTimes(1);
-    expect(managerShutdown).not.toHaveBeenCalled();
-    expect(dbShutdown).not.toHaveBeenCalled();
+    client = await createJazzClient(config);
+    await expect(client.db.all(app.notes)).resolves.toEqual([]);
   });
 });

@@ -1,0 +1,509 @@
+//! BTree-backed ordered key/value storage.
+
+use std::cell::RefCell;
+use std::collections::BTreeSet;
+use std::rc::Rc;
+
+#[cfg(target_arch = "wasm32")]
+use opfs_btree::OpfsFile;
+#[cfg(not(target_arch = "wasm32"))]
+use opfs_btree::StdFile;
+pub use opfs_btree::SyncPolicy as BtreeSyncPolicy;
+use opfs_btree::{BTreeOptions, OpfsBTree, SyncFile};
+
+use super::{
+    ColumnFamilyName, Error, Key, OrderedKvStorage, OwnedWriteOperation, ReadyStorageCursor,
+    ScanBounds, ScanDirection, ScanRequest, StorageFuture, StorageScan, Value, apply_storage_delta,
+    key_codec,
+};
+
+#[derive(Clone)]
+pub struct BtreeStorage<F: SyncFile> {
+    tree: Rc<RefCell<OpfsBTree<F>>>,
+    column_families: Rc<RefCell<BTreeSet<String>>>,
+    write_flush_cadence: Rc<RefCell<Option<WriteFlushCadence>>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WriteFlushCadence {
+    every: usize,
+    pending: usize,
+}
+
+#[cfg(target_arch = "wasm32")]
+pub type OpfsStorage = BtreeStorage<OpfsFile>;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub type NativeBtreeStorage = BtreeStorage<StdFile>;
+
+fn browser_fidelity_options() -> BTreeOptions {
+    BTreeOptions {
+        pin_internal_pages: true,
+        read_coalesce_pages: 4,
+        ..Default::default()
+    }
+}
+
+fn browser_fidelity_options_with_sync_policy(sync_policy: BtreeSyncPolicy) -> BTreeOptions {
+    BTreeOptions {
+        sync_policy,
+        ..browser_fidelity_options()
+    }
+}
+
+impl<F> BtreeStorage<F>
+where
+    F: SyncFile,
+{
+    pub fn from_file(file: F, column_families: &[&str]) -> Result<Self, Error> {
+        let tree = OpfsBTree::open(file, browser_fidelity_options())?;
+        Self::from_tree(tree, column_families)
+    }
+
+    fn from_tree(tree: OpfsBTree<F>, column_families: &[&str]) -> Result<Self, Error> {
+        Ok(Self {
+            tree: Rc::new(RefCell::new(tree)),
+            column_families: Rc::new(RefCell::new(
+                column_families.iter().map(|cf| (*cf).to_owned()).collect(),
+            )),
+            write_flush_cadence: Rc::new(RefCell::new(None)),
+        })
+    }
+
+    fn ensure_cf(&self, cf: &ColumnFamilyName) -> Result<(), Error> {
+        if self.column_families.borrow().contains(cf) {
+            Ok(())
+        } else {
+            Err(Error::ColumnFamilyNotFound(cf.to_owned()))
+        }
+    }
+
+    fn encoded_key(&self, cf: &ColumnFamilyName, key: &Key) -> Result<Vec<u8>, Error> {
+        self.ensure_cf(cf)?;
+        key_codec::encode_column_family_key(cf, key)
+    }
+
+    fn prevalidate_write_many(&self, operations: &[OwnedWriteOperation]) -> Result<(), Error> {
+        let column_families = self.column_families.borrow();
+        for operation in operations {
+            let cf = match operation {
+                OwnedWriteOperation::Set { cf, .. }
+                | OwnedWriteOperation::Delete { cf, .. }
+                | OwnedWriteOperation::Delta { cf, .. } => cf,
+            };
+            if !column_families.contains(cf) {
+                return Err(Error::ColumnFamilyNotFound(cf.to_owned()));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeBtreeStorage {
+    /// Open the native BTree backend at `path`.
+    ///
+    /// This uses the same opfs-btree layout and options as the browser OPFS
+    /// backend, but stores the tree in a native [`StdFile`]. It is intended for
+    /// native harnesses that need browser-storage fidelity rather than RocksDB
+    /// tuning.
+    pub fn open(
+        path: impl AsRef<std::path::Path>,
+        column_families: &[&str],
+    ) -> Result<Self, Error> {
+        Self::from_file(StdFile::open(path)?, column_families)
+    }
+
+    pub fn open_with_sync_policy(
+        path: impl AsRef<std::path::Path>,
+        column_families: &[&str],
+        sync_policy: BtreeSyncPolicy,
+    ) -> Result<Self, Error> {
+        let tree = OpfsBTree::open(
+            StdFile::open(path)?,
+            browser_fidelity_options_with_sync_policy(sync_policy),
+        )?;
+        Self::from_tree(tree, column_families)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl OpfsStorage {
+    pub async fn open(namespace: &str, column_families: &[&str]) -> Result<Self, Error> {
+        let file = OpfsFile::open(namespace).await?;
+        let tree = OpfsBTree::open(
+            file,
+            browser_fidelity_options_with_sync_policy(BtreeSyncPolicy::OnClose),
+        )?;
+        Self::from_tree(tree, column_families)
+    }
+
+    pub async fn destroy(namespace: &str) -> Result<(), Error> {
+        Ok(OpfsFile::destroy(namespace).await?)
+    }
+}
+
+impl<F> OrderedKvStorage for BtreeStorage<F>
+where
+    F: SyncFile,
+{
+    fn get(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<Option<Value>, Error>> {
+        Box::pin(async move {
+            let key = self.encoded_key(&cf, &key)?;
+            Ok(self.tree.borrow_mut().get(&key)?)
+        })
+    }
+
+    fn set(
+        &self,
+        cf: String,
+        key: Vec<u8>,
+        value: Vec<u8>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async move {
+            let key = self.encoded_key(&cf, &key)?;
+            Ok(self.tree.borrow_mut().put(&key, &value)?)
+        })
+    }
+
+    fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async move {
+            let key = self.encoded_key(&cf, &key)?;
+            Ok(self.tree.borrow_mut().delete(&key)?)
+        })
+    }
+
+    fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async move { Ok(self.tree.borrow_mut().close()?) })
+    }
+
+    fn set_write_flush_cadence(&self, every: usize) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async move {
+            assert!(every > 0, "write flush cadence must be non-zero");
+            *self.write_flush_cadence.borrow_mut() = Some(WriteFlushCadence { every, pending: 0 });
+            Ok(())
+        })
+    }
+
+    fn flush_write_boundary(&self) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async move {
+            let mut tree = self.tree.borrow_mut();
+            tree.flush_wal()?;
+            tree.flush_file()?;
+            if let Some(cadence) = self.write_flush_cadence.borrow_mut().as_mut() {
+                cadence.pending = 0;
+            }
+            Ok(())
+        })
+    }
+
+    fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        Box::pin(async move {
+            let ScanRequest {
+                cf,
+                bounds,
+                direction,
+                max_items,
+            } = request;
+            if max_items == Some(0) {
+                self.encoded_key(&cf, &[])?;
+                return Ok(Box::new(ReadyStorageCursor::new(Vec::new())) as StorageScan<'_>);
+            }
+            let (start, end) = match bounds {
+                ScanBounds::Prefix(prefix) => {
+                    let start = self.encoded_key(&cf, &prefix)?;
+                    let end = key_codec::prefix_upper_bound(&start).unwrap_or_else(|| vec![0xFF]);
+                    (start, end)
+                }
+                ScanBounds::Range { start, end } => {
+                    (self.encoded_key(&cf, &start)?, self.encoded_key(&cf, &end)?)
+                }
+            };
+            let limit = max_items.unwrap_or(usize::MAX);
+            let rows = match direction {
+                ScanDirection::Forward => self.tree.borrow_mut().range(&start, &end, limit)?,
+                ScanDirection::Reverse => {
+                    self.tree.borrow_mut().range_reverse(&start, &end, limit)?
+                }
+            };
+            let values = rows
+                .into_iter()
+                .map(|(key, value)| {
+                    let (_, user_key) = key_codec::decode_column_family_key(&key)?;
+                    Ok((user_key.to_vec(), value))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
+        })
+    }
+
+    fn last_with_prefix_before_or_at(
+        &self,
+        cf: String,
+        prefix: Vec<u8>,
+        upper: Vec<u8>,
+    ) -> StorageFuture<'_, Result<Option<super::KeyValue>, Error>> {
+        Box::pin(async move {
+            let start = self.encoded_key(&cf, &prefix)?;
+            let encoded_upper = self.encoded_key(&cf, &upper)?;
+            let mut end = encoded_upper;
+            end.push(0);
+            for (key, value) in self.tree.borrow_mut().range_reverse(&start, &end, 1)? {
+                let (_, user_key) = key_codec::decode_column_family_key(&key)?;
+                if user_key.starts_with(&prefix) && user_key <= upper.as_slice() {
+                    return Ok(Some((user_key.to_vec(), value)));
+                }
+            }
+            Ok(None)
+        })
+    }
+
+    fn write_many(
+        &self,
+        operations: Vec<OwnedWriteOperation>,
+    ) -> StorageFuture<'_, Result<(), Error>> {
+        Box::pin(async move {
+            self.prevalidate_write_many(&operations)?;
+            let mut encoded_operations = Vec::with_capacity(operations.len());
+            for operation in operations {
+                encoded_operations.push(match operation {
+                    OwnedWriteOperation::Set { cf, key, value } => {
+                        (self.encoded_key(&cf, &key)?, Some(value))
+                    }
+                    OwnedWriteOperation::Delete { cf, key } => (self.encoded_key(&cf, &key)?, None),
+                    OwnedWriteOperation::Delta { cf, key, delta } => {
+                        let key = self.encoded_key(&cf, &key)?;
+                        let existing = self.tree.borrow_mut().get(&key)?;
+                        let encoded = delta.encode()?;
+                        let merged = apply_storage_delta(existing.as_deref(), &encoded)?;
+                        (key, Some(merged))
+                    }
+                });
+            }
+
+            let mut tree = self.tree.borrow_mut();
+            for (key, value) in encoded_operations {
+                if let Some(value) = value {
+                    tree.put(&key, &value)?;
+                } else {
+                    tree.delete(&key)?;
+                }
+            }
+            let should_flush = match self.write_flush_cadence.borrow_mut().as_mut() {
+                Some(cadence) => {
+                    cadence.pending += 1;
+                    if cadence.pending == cadence.every {
+                        cadence.pending = 0;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                None => true,
+            };
+            if should_flush {
+                tree.flush_wal()?;
+                if self.write_flush_cadence.borrow().is_some() {
+                    tree.flush_file()?;
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+impl<F> super::ReopenableStorage for BtreeStorage<F>
+where
+    F: SyncFile + 'static,
+{
+    fn reopen(self, column_families: Vec<String>) -> StorageFuture<'static, Result<Self, Error>> {
+        Box::pin(async move {
+            self.column_families.borrow_mut().extend(column_families);
+            Ok(self)
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opfs_btree::{BTreeError, BTreeOptions, MemoryFile, SyncFile};
+
+    #[derive(Clone)]
+    struct FlushCountingFile {
+        inner: MemoryFile,
+        flushes: Rc<RefCell<usize>>,
+    }
+
+    impl FlushCountingFile {
+        fn new() -> Self {
+            Self {
+                inner: MemoryFile::new(),
+                flushes: Rc::new(RefCell::new(0)),
+            }
+        }
+
+        fn flushes(&self) -> usize {
+            *self.flushes.borrow()
+        }
+    }
+
+    impl SyncFile for FlushCountingFile {
+        fn len(&self) -> Result<u64, BTreeError> {
+            self.inner.len()
+        }
+
+        fn read_exact_at(&self, offset: u64, buf: &mut [u8]) -> Result<(), BTreeError> {
+            self.inner.read_exact_at(offset, buf)
+        }
+
+        fn write_all_at(&self, offset: u64, buf: &[u8]) -> Result<(), BTreeError> {
+            self.inner.write_all_at(offset, buf)
+        }
+
+        fn truncate(&self, len: u64) -> Result<(), BTreeError> {
+            self.inner.truncate(len)
+        }
+
+        fn flush(&self) -> Result<(), BTreeError> {
+            *self.flushes.borrow_mut() += 1;
+            self.inner.flush()
+        }
+    }
+
+    fn memory_storage(column_families: &[&str]) -> BtreeStorage<MemoryFile> {
+        BtreeStorage::from_file(MemoryFile::new(), column_families).unwrap()
+    }
+
+    #[futures_test::test]
+    async fn write_many_prevalidates_column_families_before_writing() {
+        let storage = memory_storage(&["records"]);
+
+        let error = storage
+            .write_many(vec![
+                OwnedWriteOperation::set("records", b"1", b"record"),
+                OwnedWriteOperation::set("missing", b"2", b"nope"),
+            ])
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, Error::ColumnFamilyNotFound(_)));
+        assert_eq!(
+            storage.get("records".into(), b"1".to_vec()).await.unwrap(),
+            None
+        );
+    }
+
+    #[futures_test::test]
+    async fn memory_file_conforms_to_order_and_atomic_batch_contract() {
+        let storage = memory_storage(&["records"]);
+
+        super::super::conformance::persistence_order_and_batch_atomicity(storage).await;
+    }
+
+    #[futures_test::test]
+    async fn memory_file_conforms_to_delta_append_contract() {
+        let storage = memory_storage(&["records"]);
+        super::super::conformance::delta_append_current_winner_observes_merged_state(storage).await;
+    }
+
+    #[futures_test::test]
+    async fn write_many_flushes_replayable_wal_without_eager_checkpoint() {
+        // This is intentionally a storage-level test: public database APIs can
+        // observe persistence, but not whether browser-fidelity BTree batches
+        // use the WAL path instead of rewriting checkpoint pages per batch.
+        let file = MemoryFile::new();
+        let storage = BtreeStorage::from_file(file.clone(), &["records"]).unwrap();
+
+        storage
+            .write_many(vec![OwnedWriteOperation::set("records", b"1", b"record")])
+            .await
+            .unwrap();
+
+        let checkpoint_len = storage.tree.borrow().checkpoint_state().total_pages
+            * BTreeOptions::default().page_size as u64;
+        assert!(
+            file.len().unwrap() > checkpoint_len,
+            "write_many should append a WAL tail rather than checkpoint eagerly",
+        );
+
+        let reopened = BtreeStorage::from_file(file.clone(), &["records"]).unwrap();
+        assert_eq!(
+            reopened.get("records".into(), b"1".to_vec()).await.unwrap(),
+            Some(b"record".to_vec())
+        );
+        drop(reopened);
+
+        storage.close().await.unwrap();
+        let checkpoint_len = storage.tree.borrow().checkpoint_state().total_pages
+            * BTreeOptions::default().page_size as u64;
+        assert_eq!(file.len().unwrap(), checkpoint_len);
+    }
+
+    #[futures_test::test]
+    async fn configured_cadence_flushes_at_the_boundary_and_final_partial_batch() {
+        // This is intentionally a storage-level test: the public Db API cannot
+        // observe OPFS SyncAccessHandle flush calls, which are the physical
+        // durability boundary exercised by this setting.
+        let file = FlushCountingFile::new();
+        let tree = OpfsBTree::open(
+            file.clone(),
+            browser_fidelity_options_with_sync_policy(BtreeSyncPolicy::OnClose),
+        )
+        .unwrap();
+        let storage = BtreeStorage::from_tree(tree, &["records"]).unwrap();
+        let baseline = file.flushes();
+        storage.set_write_flush_cadence(2).await.unwrap();
+
+        storage
+            .write_many(vec![OwnedWriteOperation::set("records", b"1", b"first")])
+            .await
+            .unwrap();
+        assert_eq!(file.flushes(), baseline, "first write is below cadence");
+
+        storage
+            .write_many(vec![OwnedWriteOperation::set("records", b"2", b"second")])
+            .await
+            .unwrap();
+        assert_eq!(file.flushes(), baseline + 1, "second write crosses cadence");
+
+        storage
+            .write_many(vec![OwnedWriteOperation::set("records", b"3", b"third")])
+            .await
+            .unwrap();
+        storage.flush_write_boundary().await.unwrap();
+        assert_eq!(
+            file.flushes(),
+            baseline + 2,
+            "final partial batch is flushed"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn native_storage(column_families: &[&str]) -> NativeBtreeStorage {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.keep().join("native.btree");
+        NativeBtreeStorage::open(path, column_families).unwrap()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[futures_test::test]
+    async fn native_btree_conforms_to_order_and_atomic_batch_contract() {
+        let storage = native_storage(&["records"]);
+        super::super::conformance::persistence_order_and_batch_atomicity(storage).await;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[futures_test::test]
+    async fn native_btree_conforms_to_delta_append_contract() {
+        let storage = native_storage(&["records"]);
+        super::super::conformance::delta_append_current_winner_observes_merged_state(storage).await;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[futures_test::test]
+    async fn native_btree_reopen_adds_column_families_without_losing_data() {
+        let storage = native_storage(&["records"]);
+        super::super::conformance::reopen_preserves_data_and_adds_families(storage).await;
+    }
+}

@@ -1,0 +1,42 @@
+[package]
+name = "jazz-testkit"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["scenarios", "rocksdb", "transport-compression-zstd"]
+scenarios = [
+  "jazz/testing",
+  "dep:jsonwebtoken",
+  "dep:jazz-native-transport",
+  "dep:jazz-server",
+  "dep:reqwest",
+  "dep:serde",
+  "dep:serde_json",
+  "dep:tempfile",
+  "dep:tokio",
+  "dep:uuid",
+]
+rocksdb = ["scenarios", "dep:jazz-storage-rocksdb"]
+transport-compression-zstd = ["jazz/transport-compression-zstd", "dep:zstd"]
+
+[dependencies]
+groove.workspace = true
+jazz.workspace = true
+jazz-storage-rocksdb = { workspace = true, optional = true }
+jazz-native-transport = { workspace = true, optional = true }
+jazz-server = { path = "../jazz-server", features = ["test"], optional = true }
+jsonwebtoken = { version = "10.4", default-features = false, features = [
+  "rust_crypto",
+  "use_pem",
+], optional = true }
+reqwest = { version = "0.12", default-features = false, features = [
+  "json",
+  "rustls-tls",
+], optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+tempfile = { version = "3.27.0", optional = true }
+tokio = { version = "1", features = ["time"], optional = true }
+uuid = { version = "1", features = ["v5"], optional = true }
+zstd = { version = "0.13.3", optional = true }

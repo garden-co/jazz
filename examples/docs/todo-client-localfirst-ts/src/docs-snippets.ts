@@ -1,4 +1,4 @@
-import type { Db } from "jazz-tools";
+import { PersistedWriteRejectedError, schema as s, type Db } from "jazz-tools";
 import { app } from "../schema.js";
 
 const EXAMPLE_PROJECT_ID = "00000000-0000-0000-0000-000000000000";
@@ -14,13 +14,13 @@ export async function readTodosOneshot(db: Db) {
 
 // #region reading-subscriptions-ts
 export function subscribeTodos(db: Db, onCount: (count: number) => void) {
-  return db.subscribeAll(app.todos.where({ done: false }), ({ all }) => onCount(all.length));
+  return db.subscribeAll(app.todos.where({ done: false }), ({ all }) => onCount(all?.length ?? 0));
 }
 // #endregion reading-subscriptions-ts
 
 // #region where-subscription-ts
 export function subscribeOpenTodos(db: Db, onChange: (todos: unknown[]) => void) {
-  return db.subscribeAll(app.todos.where({ done: false }), ({ all }) => onChange(all));
+  return db.subscribeAll(app.todos.where({ done: false }), ({ all }) => onChange(all ?? []));
 }
 // #endregion where-subscription-ts
 
@@ -133,7 +133,12 @@ export async function readTodosSortedByTitle(db: Db) {
 export async function readTodoPage(db: Db, page: number, pageSize = 20) {
   const offset = Math.max(0, (page - 1) * pageSize);
   return db.all(
-    app.todos.where({ done: false }).orderBy("title", "asc").limit(pageSize).offset(offset),
+    app.todos
+      .where({ done: false })
+      .orderBy("title", "asc")
+      .orderBy("id", "asc")
+      .limit(pageSize)
+      .offset(offset),
   );
 }
 // #endregion reading-pagination-ts
@@ -157,35 +162,29 @@ export async function readTodoTitlesWithSelectedProject(db: Db) {
 }
 // #endregion reading-select-ts
 
-// #region reading-magic-columns-ts
-export async function readTodoPermissionIntrospection(db: Db) {
-  return db.all(
-    app.todos.select("title", "$canRead", "$canEdit", "$canDelete").orderBy("title", "asc"),
-  );
+// #region dry-run-permissions-ts
+export async function canReadTodo(db: Db, todoId: string) {
+  return db.canRead(app.todos, todoId);
 }
 
 export async function readTodosWithDeletePermission(db: Db) {
-  return db.all(app.todos.select("*", "$canDelete").orderBy("title", "asc"));
+  const todos = await db.all(app.todos.select("id", "title").orderBy("title", "asc"));
+  const advice = await Promise.all(todos.map((todo) => db.canDelete(app.todos, todo.id)));
+  return todos.filter((_, index) => advice[index] === "allowed");
 }
 
 export async function readEditableTodos(db: Db) {
-  return db.all(app.todos.where({ $canEdit: true }).select("title", "$canEdit"));
-}
-
-export async function readDeletableTodos(db: Db) {
-  return db.all(app.todos.where({ $canDelete: true }).select("title", "$canDelete"));
-}
-// #endregion reading-magic-columns-ts
-
-// #region reading-magic-columns-include-ts
-export async function readProjectsWithTodoPermissions(db: Db) {
-  return db.all(
-    app.projects.include({
-      todosViaProject: app.todos.select("title", "$canEdit", "$canDelete").orderBy("title", "asc"),
-    }),
+  const todos = await db.all(app.todos.select("id", "title").orderBy("title", "asc"));
+  const advice = await Promise.all(
+    todos.map((todo) => db.canUpdate(app.todos, todo.id, { title: todo.title })),
   );
+  return todos.filter((_, index) => advice[index] === "allowed");
 }
-// #endregion reading-magic-columns-include-ts
+
+export async function canCreateTodo(db: Db, title: string) {
+  return db.canInsert(app.todos, { title, done: false });
+}
+// #endregion dry-run-permissions-ts
 
 // #region reading-edit-metadata-magic-columns-ts
 export async function readTodoEditMetadata(db: Db, currentUserId: string, updatedSinceMs: number) {
@@ -207,8 +206,13 @@ export async function readProjectsWithTodos(db: Db) {
 // #endregion reading-reverse-relation-ts
 
 // #region reading-require-includes-ts
-export async function readTodosWithRequiredProject(db: Db) {
-  return db.all(app.todos.where({ done: false }).include({ project: true }).requireIncludes());
+const requiredReferences = s.defineApp({
+  customers: s.table({ name: s.string() }),
+  orders: s.table({ customerId: s.ref("customers") }),
+});
+
+export async function readOrdersWithRequiredCustomer(db: Db) {
+  return db.all(requiredReferences.orders.include({ customer: true }).requireIncludes());
 }
 // #endregion reading-require-includes-ts
 
@@ -216,7 +220,7 @@ export async function readTodosWithRequiredProject(db: Db) {
 export function buildTodoLineageQuery() {
   return app.todos.gather({
     start: { done: false },
-    step: ({ current }) => app.todos.where({ parentId: current }).hopTo("parent"),
+    step: ({ current }) => app.todos.where({ id: current }).hopTo("parent"),
     maxDepth: 10,
   });
 }
@@ -247,9 +251,23 @@ export async function writeTodoCrud(db: Db, todoId: string) {
 }
 // #endregion writing-crud-ts
 
+// #region writing-upsert-ts
+export async function upsertTodo(db: Db, importedTodoId: string) {
+  const write = db.upsert(app.todos, importedTodoId, {
+    title: "Imported task",
+    done: false,
+  });
+
+  await write.wait({ tier: "edge" });
+}
+// #endregion writing-upsert-ts
+
 // #region writing-restore-ts
-export function restoreDeletedTodo(db: Db, todoId: string) {
+export async function restoreDeletedTodo(db: Db, todoId: string) {
   db.delete(app.todos, todoId);
+
+  const deletedTodo = await db.one(app.todos.where({ id: todoId }).includeDeleted());
+  if (!deletedTodo) throw new Error("Deleted todo not found");
 
   const { value: restored } = db.restore(app.todos, todoId, {
     title: "Restored task",
@@ -284,6 +302,116 @@ export async function writeTodoWithDurabilityTiers(db: Db) {
   await db.delete(app.todos, id).wait({ tier: "global" });
 }
 // #endregion writing-durability-tier-ts
+
+// #region writing-mutation-errors-ts
+export async function insertTodoAndWait(db: Db) {
+  const pending = db.insert(app.todos, {
+    title: "Ship review fixes",
+    done: false,
+    owner_id: EXAMPLE_OWNER_ID,
+    projectId: EXAMPLE_PROJECT_ID,
+  });
+
+  console.log(await pending.transactionId);
+
+  try {
+    const row = await pending.wait({ tier: "global" });
+    console.log(row.id);
+  } catch (error) {
+    if (error instanceof PersistedWriteRejectedError) {
+      console.error(error.code, error.reason);
+      return;
+    }
+
+    throw error;
+  }
+}
+// #endregion writing-mutation-errors-ts
+
+// #region writing-mutation-error-listener-ts
+export function listenForMutationErrors(db: Db) {
+  return db.onMutationError((event) => {
+    console.error("DB mutation failed:", event.code, event.reason);
+  });
+}
+// #endregion writing-mutation-error-listener-ts
+
+// #region writing-transaction-ts
+export async function groupTodoWrites(db: Db, existingTodoId: string) {
+  const result = await db.transaction(async (tx) => {
+    const created = tx.insert(app.todos, {
+      title: "Write transaction docs",
+      done: false,
+      owner_id: EXAMPLE_OWNER_ID,
+      projectId: EXAMPLE_PROJECT_ID,
+    });
+
+    tx.update(app.todos, existingTodoId, { done: true });
+
+    const staged = await tx.one(app.todos.where({ id: created.id }));
+    if (!staged) throw new Error("Staged todo not found");
+
+    return staged.id;
+  });
+
+  await result.wait({ tier: "edge" });
+  return result.value;
+}
+// #endregion writing-transaction-ts
+
+// #region writing-exclusive-transaction-ts
+export async function finishTodoExclusively(db: Db, todoId: string) {
+  const result = await db.exclusiveTransaction(async (tx) => {
+    const todo = await tx.one(app.todos.where({ id: todoId }));
+    if (!todo) throw new Error("Todo not found");
+
+    tx.update(app.todos, todo.id, { done: true });
+    return todo.id;
+  });
+
+  return result.wait();
+}
+// #endregion writing-exclusive-transaction-ts
+
+// #region writing-transaction-errors-ts
+export async function completeTodoInTransaction(db: Db, todoId: string) {
+  try {
+    const result = await db.transaction((tx) => {
+      tx.update(app.todos, todoId, { done: true });
+    });
+
+    await result.wait({ tier: "edge" });
+  } catch (error) {
+    if (error instanceof PersistedWriteRejectedError) {
+      console.error(error.code, error.reason);
+      return;
+    }
+
+    throw error;
+  }
+}
+// #endregion writing-transaction-errors-ts
+
+// #region writing-manual-transaction-ts
+export async function stageTodoAcrossSteps(db: Db, shouldCancel: boolean) {
+  const tx = db.beginTransaction();
+
+  tx.insert(app.todos, {
+    title: "Review staged changes",
+    done: false,
+    owner_id: EXAMPLE_OWNER_ID,
+    projectId: EXAMPLE_PROJECT_ID,
+  });
+
+  if (shouldCancel) {
+    await tx.rollback();
+    return;
+  }
+
+  const result = await tx.commit();
+  await result.wait({ tier: "edge" });
+}
+// #endregion writing-manual-transaction-ts
 
 // #region chaining-ts
 export async function chainingExamples(db: Db) {

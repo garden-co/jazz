@@ -1,4 +1,4 @@
-import type { SubscriptionDelta } from "./runtime/subscription-manager.js";
+import { applySubscriptionDelta, type SubscriptionDelta } from "./runtime/subscription-manager.js";
 
 /**
  * Apply a subscription delta to a reactive array, deep-merging only
@@ -8,20 +8,14 @@ export function applyDelta<T extends { id: string }>(
   target: T[],
   delta: SubscriptionDelta<T>,
 ): void {
-  const changedIds = new Set<string>();
-  for (const change of delta.delta) {
-    if (change.kind === 2) changedIds.add(change.id);
+  if (delta.all !== undefined) {
+    reconcileArray(target, delta.all);
+    return;
   }
 
-  for (const id of changedIds) {
-    const existing = target.find((item) => item.id === id);
-    const source = delta.all.find((item) => item.id === id);
-    if (existing && source) {
-      deepMerge(existing as Record<string, unknown>, source as Record<string, unknown>);
-    }
-  }
-  // Without reconciliation, ordering is not guaranteed.
-  reconcileArray(target, delta.all);
+  const next = [...target];
+  applySubscriptionDelta(next, delta);
+  reconcileArray(target, next);
 }
 
 /**

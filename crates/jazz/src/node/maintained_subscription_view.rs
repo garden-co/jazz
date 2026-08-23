@@ -1,0 +1,2786 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::mem;
+
+use groove::ivm::{MultisinkDeltas, RecordDeltas, TerminalEdit, TerminalOperation};
+use groove::records::{
+    BorrowedRecord, EnumValue, OwnedRecord, RecordDescriptor, RecordProjector, Value, ValueType,
+};
+
+use super::codec::{
+    VersionLayer, VersionRow, VersionRowParts, deletion_event_from_value,
+    history_values_from_parts, nullable_value, owned_record_from_storage_values_with_descriptor,
+    register_values_from_parts, tx_ids_from_value, version_tx_id_from_aliases,
+};
+use super::query_engine::{
+    AggregateResultSchema, AppRowCarrier, AppRowSchema, OutputTerminalSchema, ProgramFactKey,
+    ProgramFactSchema, ProgramFactTerminal, QueryProgram, RelationEdgeSchema,
+    ResultMembershipSchema, ResultMembershipVersionSchema, VersionWitnessSchema,
+    VersionedRowRefSchema, logical_user_column,
+};
+use crate::db::{TerminalRootCarrier, TerminalRootLayout, TerminalRootPublicField};
+use crate::ids::{AuthorId, NodeAlias, NodeUuid, RowUuid};
+use crate::protocol::{
+    BranchKey, ProgramFactEntry, RealRowMemberEntry, RelationEdgeEntry, ResultMemberEntry,
+    ResultMemberPayloadEntry, ResultRowLayer, RowVersionRefEntry, SyntheticReplacementToken,
+};
+use crate::schema::TableSchema;
+use crate::time::{GlobalTime, TxTime};
+use crate::tools::{ObjectId, OutputOccurrenceId};
+use crate::tx::TxId;
+
+type TableSchemas = BTreeMap<String, TableSchema>;
+type VersionDecodePlanCache = BTreeMap<(String, VersionLayer), VersionDecodePlan>;
+
+#[derive(Clone, Debug)]
+struct VersionDecodePlan {
+    descriptor: RecordDescriptor,
+    branch_idx: Option<usize>,
+    row_idx: usize,
+    tx_time_idx: usize,
+    tx_node_idx: usize,
+    schema_version_idx: usize,
+    parents_idx: usize,
+    created_by_idx: usize,
+    created_at_idx: usize,
+    updated_by_idx: usize,
+    updated_at_idx: usize,
+    user_indices: BTreeMap<String, usize>,
+    authored_columns_idx: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct MaintainedSubscriptionView {
+    result_weights: BTreeMap<ResultMemberEntry, i64>,
+    result_payloads: BTreeMap<ResultMemberEntry, ResultMemberPayloadEntry>,
+    /// Incrementally maintained collector output. The key is the root row and
+    /// the encoded tree so a -/+ replacement for one root never requires
+    /// touching the rendered trees for other roots.
+    structured_app_rows: BTreeMap<RowUuid, BTreeMap<Vec<u8>, i64>>,
+    structured_app_row_descriptor: Option<RecordDescriptor>,
+    versions: WeightedVersionIndex,
+    replacements: ReplacementIndex,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct MaintainedSubscriptionViewFootprint {
+    pub(crate) result_rows: usize,
+    pub(crate) result_weights: usize,
+    pub(crate) result_payloads: usize,
+    pub(crate) structured_app_rows: usize,
+    pub(crate) version_identities: usize,
+    pub(crate) version_tx_entries: usize,
+    pub(crate) replacement_entries: usize,
+    pub(crate) result_weights_bytes: usize,
+    pub(crate) result_payloads_bytes: usize,
+    pub(crate) structured_app_rows_bytes: usize,
+    pub(crate) versions_bytes: usize,
+    pub(crate) replacements_bytes: usize,
+    pub(crate) total_heap_bytes: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct WeightedVersionIndex {
+    by_identity: BTreeMap<VersionIdentity, WeightedVersion>,
+    by_tx: BTreeMap<TxId, BTreeMap<VersionSortKey, BTreeSet<VersionIdentity>>>,
+}
+
+#[derive(Clone, Debug)]
+struct WeightedVersion {
+    row: VersionRow,
+    tx_id: TxId,
+    sort_key: VersionSortKey,
+    weight: i64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ReplacementIndex {
+    content_by_key: BTreeMap<ReplacementKey, BTreeMap<VersionIdentity, WeightedVersion>>,
+    deletion_by_key: BTreeMap<ReplacementKey, BTreeMap<VersionIdentity, WeightedVersion>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct VersionIdentity {
+    table: groove::Intern<String>,
+    layer: VersionLayer,
+    raw_record: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct VersionSortKey {
+    table: groove::Intern<String>,
+    row_uuid: RowUuid,
+    layer: VersionLayer,
+    raw_record: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ReplacementKey {
+    table: groove::Intern<String>,
+    row_uuid: RowUuid,
+    layer: VersionLayer,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ResultTransitions {
+    /// Membership was reconciled from a newly advanced remote authority view,
+    /// rather than emitted by this local Groove subscription.
+    pub(crate) authoritative_membership_changed: bool,
+    /// Exact members admitted by the newly advanced authority view. These
+    /// may replace a stale internal member with the same public occurrence;
+    /// unrelated local adds coalesced into the same batch must not.
+    pub(crate) authoritative_member_adds: BTreeSet<ResultMemberEntry>,
+    pub(crate) adds: Vec<ResultMemberEntry>,
+    pub(crate) removes: Vec<ResultMemberEntry>,
+    pub(crate) result_payload_adds: Vec<(ResultMemberEntry, ResultMemberPayloadEntry)>,
+    pub(crate) result_payload_removes: Vec<ResultMemberEntry>,
+    pub(crate) program_fact_adds: Vec<ProgramFactEntry>,
+    pub(crate) program_fact_removes: Vec<ProgramFactEntry>,
+    /// Root occurrences whose retained collector record changed in this tick.
+    /// The future structured carrier can render exactly these parents.
+    pub(crate) structured_app_row_changes: BTreeSet<RowUuid>,
+    /// Generic Groove terminal patches. These bypass relation/result assembly
+    /// and are forwarded unchanged to the subscription boundary.
+    pub(crate) terminal_operations: Vec<TerminalOperation>,
+    pub(crate) allow_storage_witness_fallback: bool,
+    pub(crate) observed_result_delta_batches: usize,
+    /// A deletion-register witness changed while its anti-joined result
+    /// terminal may be silent. The caller must replace this tick with an
+    /// authoritative membership reconciliation, even if other terminals
+    /// produced deltas concurrently.
+    pub(crate) requires_authoritative_membership_reconcile: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum DecodedMaintainedEvent {
+    ResultCurrent {
+        member: ResultMemberEntry,
+        payload: ResultMemberPayloadEntry,
+    },
+    AggregateResult {
+        member: ResultMemberEntry,
+        payload: ResultMemberPayloadEntry,
+        synthetic: super::query_engine::SyntheticResultMembershipSchema,
+        value_fields: Vec<String>,
+    },
+    VersionContent(VersionRow),
+    VersionDeletion(VersionRow),
+    ReplacementContent(VersionRow),
+    ReplacementDeletion(VersionRow),
+    RelationEdge(RelationEdgeEntry),
+    StructuredAppRow {
+        root: RowUuid,
+        record: OwnedRecord,
+    },
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct MaintainedTerminalSchemas {
+    sinks: BTreeMap<String, MaintainedTerminalKind>,
+}
+
+#[derive(Clone, Debug)]
+enum MaintainedTerminalKind {
+    ResultCurrent(ResultMembershipSchema),
+    AggregateResult(AggregateResultSchema),
+    VersionContent(VersionWitnessSchema),
+    VersionDeletion(VersionWitnessSchema),
+    ReplacementContent(VersionWitnessSchema),
+    ReplacementDeletion(VersionWitnessSchema),
+    RelationEdge(RelationEdgeSchema),
+    StructuredAppRows {
+        schema: AppRowSchema,
+        layout: TerminalRootLayout,
+    },
+    /// Public aggregate rows are a one-shot output sibling. Maintained state
+    /// is driven by the typed AggregateResult fact terminal instead.
+    IgnoredAggregateAppRows,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum EventIdentity {
+    Result(ResultMemberEntry),
+    Version(VersionIdentity),
+    Replacement(ReplacementKey, VersionIdentity),
+    ProgramFact(ProgramFactEntry),
+    StructuredAppRow(RowUuid, Vec<u8>),
+}
+
+#[derive(Clone, Debug)]
+enum NetEvent {
+    Result(ResultMemberEntry, ResultMemberPayloadEntry),
+    AggregateResult(
+        ResultMemberEntry,
+        ResultMemberPayloadEntry,
+        super::query_engine::SyntheticResultMembershipSchema,
+        Vec<String>,
+    ),
+    Version(VersionIdentity, VersionRow),
+    Replacement(ReplacementKey, VersionIdentity, VersionRow),
+    ProgramFact(ProgramFactEntry),
+    StructuredAppRow(RowUuid, OwnedRecord),
+}
+
+impl MaintainedSubscriptionView {
+    pub(crate) fn terminal_schemas_for_program(
+        program: &QueryProgram,
+    ) -> MaintainedTerminalSchemas {
+        MaintainedTerminalSchemas::for_program(program)
+    }
+
+    pub(crate) fn apply_typed_deltas(
+        &mut self,
+        sink: &str,
+        deltas: &RecordDeltas,
+        schemas: &MaintainedTerminalSchemas,
+        tables: &TableSchemas,
+        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    ) -> Result<ResultTransitions, super::Error> {
+        let kind = schemas.get(sink)?;
+        if matches!(kind, MaintainedTerminalKind::IgnoredAggregateAppRows) {
+            return Ok(ResultTransitions::default());
+        }
+        let observed_result_delta_batch = !deltas.is_empty() && kind.is_result_terminal();
+        // Deletion witnesses are part of the membership proof: a current-row
+        // anti-join can become empty solely because its deletion-register
+        // input changed. Groove reports that change through the witness
+        // terminal even when the result-current terminal is silent.
+        let requires_authoritative_membership_reconcile =
+            !deltas.is_empty() && kind.requires_authoritative_membership_reconcile();
+        let mut decode_plan_cache = VersionDecodePlanCache::new();
+        let decoded = deltas
+            .iter()
+            .map(|(record, weight)| {
+                decode_typed_terminal_record(
+                    record,
+                    kind,
+                    tables,
+                    node_aliases,
+                    &mut decode_plan_cache,
+                )
+                .map(|event| (event, weight))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut transitions = self.apply_decoded_deltas(decoded, node_aliases)?;
+        if observed_result_delta_batch {
+            transitions.observed_result_delta_batches += 1;
+        }
+        transitions.requires_authoritative_membership_reconcile =
+            requires_authoritative_membership_reconcile;
+        Ok(transitions)
+    }
+
+    pub(crate) fn apply_multisink_deltas(
+        &mut self,
+        deltas: MultisinkDeltas,
+        schemas: &MaintainedTerminalSchemas,
+        tables: &TableSchemas,
+        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    ) -> Result<ResultTransitions, super::Error> {
+        let mut transitions = ResultTransitions::default();
+        for (sink, terminal) in &deltas.terminal_sinks {
+            if let MaintainedTerminalKind::StructuredAppRows { layout, .. } = schemas.get(sink)? {
+                for operation in &terminal.operations {
+                    transitions
+                        .terminal_operations
+                        .push(rebind_terminal_operation_to_layout(operation, layout)?);
+                }
+            }
+        }
+        for (sink, deltas) in deltas.sinks {
+            let delta_transitions =
+                self.apply_typed_deltas(&sink, &deltas, schemas, tables, node_aliases)?;
+            transitions.adds.extend(delta_transitions.adds);
+            transitions.removes.extend(delta_transitions.removes);
+            transitions
+                .program_fact_adds
+                .extend(delta_transitions.program_fact_adds);
+            transitions
+                .program_fact_removes
+                .extend(delta_transitions.program_fact_removes);
+            transitions
+                .result_payload_adds
+                .extend(delta_transitions.result_payload_adds);
+            transitions
+                .result_payload_removes
+                .extend(delta_transitions.result_payload_removes);
+            transitions
+                .structured_app_row_changes
+                .extend(delta_transitions.structured_app_row_changes);
+            transitions.observed_result_delta_batches +=
+                delta_transitions.observed_result_delta_batches;
+            transitions.requires_authoritative_membership_reconcile |=
+                delta_transitions.requires_authoritative_membership_reconcile;
+        }
+        Ok(transitions)
+    }
+
+    pub(crate) fn apply_decoded_deltas(
+        &mut self,
+        rows: impl IntoIterator<Item = (DecodedMaintainedEvent, i64)>,
+        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    ) -> Result<ResultTransitions, super::Error> {
+        let mut net = BTreeMap::<EventIdentity, (NetEvent, i64)>::new();
+        for (event, weight) in rows {
+            let net_event = match event {
+                DecodedMaintainedEvent::ResultCurrent { member, payload } => {
+                    NetEvent::Result(member, payload)
+                }
+                DecodedMaintainedEvent::AggregateResult {
+                    member,
+                    payload,
+                    synthetic,
+                    value_fields,
+                } => NetEvent::AggregateResult(member, payload, synthetic, value_fields),
+                DecodedMaintainedEvent::VersionContent(row)
+                | DecodedMaintainedEvent::VersionDeletion(row) => {
+                    let identity = VersionIdentity::for_row(&row);
+                    NetEvent::Version(identity, row)
+                }
+                DecodedMaintainedEvent::ReplacementContent(row) => {
+                    let identity = VersionIdentity::for_row(&row);
+                    let key = ReplacementKey::for_row(&row, VersionLayer::Content);
+                    NetEvent::Replacement(key, identity, row)
+                }
+                DecodedMaintainedEvent::ReplacementDeletion(row) => {
+                    let identity = VersionIdentity::for_row(&row);
+                    let key = ReplacementKey::for_row(&row, VersionLayer::Deletion);
+                    NetEvent::Replacement(key, identity, row)
+                }
+                DecodedMaintainedEvent::RelationEdge(edge) => {
+                    NetEvent::ProgramFact(ProgramFactEntry::RelationEdge(edge))
+                }
+                DecodedMaintainedEvent::StructuredAppRow { root, record } => {
+                    NetEvent::StructuredAppRow(root, record)
+                }
+            };
+            let identity = net_event.identity();
+            net.entry(identity)
+                .and_modify(|(_, net_weight)| *net_weight += weight)
+                .or_insert((net_event, weight));
+        }
+
+        let mut transitions = ResultTransitions::default();
+        for (_, (event, weight)) in net {
+            if weight == 0 {
+                continue;
+            }
+            match event {
+                NetEvent::Result(entry, payload) => {
+                    self.apply_result_delta(entry, payload, weight, &mut transitions);
+                }
+                NetEvent::AggregateResult(member, payload, synthetic, value_fields) => {
+                    self.apply_aggregate_result_delta(
+                        member,
+                        payload,
+                        &synthetic,
+                        &value_fields,
+                        weight,
+                        &mut transitions,
+                    )?;
+                }
+                NetEvent::Version(identity, row) => {
+                    self.versions
+                        .apply_delta(identity, row, weight, node_aliases)?;
+                }
+                NetEvent::Replacement(key, identity, row) => {
+                    self.replacements
+                        .apply_delta(key, identity, row, weight, node_aliases)?;
+                }
+                NetEvent::ProgramFact(fact) => {
+                    if weight > 0 {
+                        transitions.program_fact_adds.push(fact);
+                    } else {
+                        transitions.program_fact_removes.push(fact);
+                    }
+                }
+                NetEvent::StructuredAppRow(root, record) => {
+                    self.apply_structured_app_row_delta(root, record, weight);
+                    transitions.structured_app_row_changes.insert(root);
+                }
+            }
+        }
+        Ok(transitions)
+    }
+
+    pub(crate) fn versions_by_tx(&self, tx_id: TxId) -> Vec<VersionRow> {
+        self.versions.versions_by_tx(tx_id)
+    }
+
+    /// Source records whose row identities occur in visible flat tuples.
+    /// The caller resolves each maintained record back to its authored history
+    /// version before publishing the result-to-contributor admission fact.
+    pub(crate) fn tuple_source_versions_for_members(
+        &self,
+        members: &[ResultMemberEntry],
+        source_tables: &[String],
+    ) -> Vec<(ResultMemberEntry, usize, VersionRow)> {
+        let mut tuples = Vec::new();
+        for member in members {
+            let Some(occurrence) = member.output_occurrence_id() else {
+                continue;
+            };
+            for (source_index, source) in occurrence.joined_sources().iter().enumerate() {
+                let Some(source_table) = source_tables.get(source_index) else {
+                    continue;
+                };
+                let source_row = RowUuid(*source.uuid());
+                for weighted in self.versions.by_identity.values() {
+                    if weighted.weight > 0
+                        && weighted.row.deletion().is_none()
+                        && weighted.row.table() == source_table
+                        && weighted.row.row_uuid() == source_row
+                    {
+                        tuples.push((member.clone(), source_index, weighted.row.clone()));
+                    }
+                }
+            }
+        }
+        tuples
+    }
+
+    pub(crate) fn replacement_for(
+        &self,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> (Option<VersionRow>, Option<VersionRow>) {
+        self.replacements.replacement_for(table, row_uuid)
+    }
+
+    pub(crate) fn footprint(&self) -> MaintainedSubscriptionViewFootprint {
+        let result_weights_bytes = btree_map_bytes(self.result_weights.len())
+            + self
+                .result_weights
+                .keys()
+                .map(|member| result_member_entry_bytes(member) + mem::size_of::<i64>())
+                .sum::<usize>();
+        let result_payloads_bytes = btree_map_bytes(self.result_payloads.len())
+            + self
+                .result_payloads
+                .iter()
+                .map(|(member, payload)| {
+                    result_member_entry_bytes(member) + result_member_payload_entry_bytes(payload)
+                })
+                .sum::<usize>();
+        let versions_bytes = self.versions.footprint_bytes();
+        let replacements_bytes = self.replacements.footprint_bytes();
+        let structured_app_rows_bytes = self
+            .structured_app_rows
+            .values()
+            .map(|records| {
+                records
+                    .keys()
+                    .map(|record| record.len() + mem::size_of::<i64>())
+                    .sum::<usize>()
+                    + btree_map_bytes(records.len())
+            })
+            .sum::<usize>()
+            + btree_map_bytes(self.structured_app_rows.len());
+        MaintainedSubscriptionViewFootprint {
+            result_rows: self
+                .result_weights
+                .values()
+                .filter(|weight| **weight > 0)
+                .count(),
+            result_weights: self.result_weights.len(),
+            result_payloads: self.result_payloads.len(),
+            structured_app_rows: self
+                .structured_app_rows
+                .values()
+                .map(|records| records.values().filter(|weight| **weight > 0).count())
+                .sum(),
+            version_identities: self.versions.by_identity.len(),
+            version_tx_entries: self
+                .versions
+                .by_tx
+                .values()
+                .flat_map(|by_sort_key| by_sort_key.values())
+                .map(BTreeSet::len)
+                .sum(),
+            replacement_entries: self.replacements.entry_count(),
+            result_weights_bytes,
+            result_payloads_bytes,
+            structured_app_rows_bytes,
+            versions_bytes,
+            replacements_bytes,
+            total_heap_bytes: result_weights_bytes
+                + result_payloads_bytes
+                + structured_app_rows_bytes
+                + versions_bytes
+                + replacements_bytes,
+        }
+    }
+
+    pub(crate) fn payload_facts_for_members(
+        &self,
+        members: &[ResultMemberEntry],
+    ) -> Vec<ProgramFactEntry> {
+        members
+            .iter()
+            .filter_map(|member| self.result_payloads.get(member))
+            .cloned()
+            .map(ProgramFactEntry::ResultPayload)
+            .collect()
+    }
+
+    /// Current positive result memberships, including unchanged members during
+    /// a non-reset rehydrate. Tuple-source admissions are a closure over this
+    /// set, not merely over the membership delta.
+    pub(crate) fn active_result_members(&self) -> Vec<ResultMemberEntry> {
+        self.result_weights
+            .iter()
+            .filter(|(_, weight)| **weight > 0)
+            .map(|(member, _)| member.clone())
+            .collect()
+    }
+
+    /// Returns the collector's current recursive row for one changed root.
+    ///
+    /// The incremental update builder uses this to replace just that root.
+    pub(crate) fn structured_app_row(&self, root: RowUuid) -> Option<OwnedRecord> {
+        let descriptor = self.structured_app_row_descriptor?;
+        self.structured_app_rows
+            .get(&root)?
+            .iter()
+            .filter(|(_, weight)| **weight > 0)
+            .map(|(raw, _)| OwnedRecord::new(raw.clone(), descriptor))
+            .next()
+    }
+
+    pub(crate) fn structured_app_rows(&self) -> Vec<(RowUuid, OwnedRecord)> {
+        self.structured_app_rows
+            .keys()
+            .filter_map(|root| self.structured_app_row(*root).map(|record| (*root, record)))
+            .collect()
+    }
+
+    fn apply_structured_app_row_delta(&mut self, root: RowUuid, record: OwnedRecord, weight: i64) {
+        self.structured_app_row_descriptor = Some(*record.descriptor());
+        let records = self.structured_app_rows.entry(root).or_default();
+        let new_weight = records.get(record.raw()).copied().unwrap_or(0) + weight;
+        if new_weight == 0 {
+            records.remove(record.raw());
+        } else {
+            records.insert(record.into_raw(), new_weight);
+        }
+        if records.is_empty() {
+            self.structured_app_rows.remove(&root);
+        }
+    }
+
+    /// Rebase aggregate terminal state after an authoritative remote reset.
+    /// The local IVM may still emit the matching before/after pair while its
+    /// source catches up; retaining an obsolete synthetic revision here would
+    /// otherwise turn that harmless pair into a later public removal.
+    pub(crate) fn replace_aggregate_result_state(
+        &mut self,
+        members: &BTreeSet<ResultMemberEntry>,
+        facts: &BTreeSet<ProgramFactEntry>,
+    ) {
+        self.result_weights
+            .retain(|member, _| !matches!(member, ResultMemberEntry::Synthetic { .. }));
+        self.result_payloads
+            .retain(|member, _| !matches!(member, ResultMemberEntry::Synthetic { .. }));
+        for member in members {
+            if matches!(member, ResultMemberEntry::Synthetic { .. }) {
+                self.result_weights.insert(member.clone(), 1);
+            }
+        }
+        for fact in facts {
+            let ProgramFactEntry::ResultPayload(payload) = fact else {
+                continue;
+            };
+            if matches!(payload.member, ResultMemberEntry::Synthetic { .. }) {
+                self.result_payloads
+                    .insert(payload.member.clone(), payload.clone());
+            }
+        }
+    }
+
+    fn apply_result_delta(
+        &mut self,
+        entry: ResultMemberEntry,
+        payload: ResultMemberPayloadEntry,
+        weight: i64,
+        transitions: &mut ResultTransitions,
+    ) {
+        let old = self.result_weights.get(&entry).copied().unwrap_or(0);
+        let new = old + weight;
+        if old <= 0 && new > 0 {
+            transitions.adds.push(entry.clone());
+            if entry
+                .as_real_row()
+                .is_some_and(|row| row.row_digest.is_some())
+            {
+                transitions
+                    .result_payload_adds
+                    .push((entry.clone(), payload.clone()));
+                self.result_payloads.insert(entry.clone(), payload);
+            }
+        }
+        if old > 0 && new <= 0 {
+            transitions.removes.push(entry.clone());
+            transitions.result_payload_removes.push(entry.clone());
+            self.result_payloads.remove(&entry);
+        }
+        if new == 0 {
+            self.result_weights.remove(&entry);
+        } else {
+            self.result_weights.insert(entry, new);
+        }
+    }
+
+    fn apply_aggregate_result_delta(
+        &mut self,
+        member: ResultMemberEntry,
+        payload: ResultMemberPayloadEntry,
+        _synthetic: &super::query_engine::SyntheticResultMembershipSchema,
+        _value_fields: &[String],
+        weight: i64,
+        transitions: &mut ResultTransitions,
+    ) -> Result<(), super::Error> {
+        let (old_member, old_payload) = self.aggregate_payload_for_stable_member(&member);
+        if weight < 0 {
+            // Groove's aggregate operator emits complete before/after group
+            // rows. A retraction therefore removes only the payload it names;
+            // if its replacement is already current, it is stale.
+            if old_member.as_ref() == Some(&member) {
+                transitions.removes.push(member.clone());
+                self.result_weights.remove(&member);
+                if let Some(existing) = self.result_payloads.remove(&member) {
+                    transitions.result_payload_removes.push(member.clone());
+                    transitions
+                        .program_fact_removes
+                        .push(ProgramFactEntry::ResultPayload(existing));
+                }
+            }
+            return Ok(());
+        }
+
+        if let Some(old_member) = old_member
+            && old_member != member
+        {
+            transitions.removes.push(old_member.clone());
+            self.result_weights.remove(&old_member);
+            if let Some(existing) = self.result_payloads.remove(&old_member).or(old_payload) {
+                transitions.result_payload_removes.push(old_member.clone());
+                transitions
+                    .program_fact_removes
+                    .push(ProgramFactEntry::ResultPayload(existing));
+            }
+        }
+        if self.result_weights.get(&member).copied().unwrap_or(0) <= 0 {
+            transitions.adds.push(member.clone());
+        }
+        transitions
+            .program_fact_adds
+            .push(ProgramFactEntry::ResultPayload(payload.clone()));
+        transitions
+            .result_payload_adds
+            .push((member.clone(), payload.clone()));
+        self.result_payloads.insert(member.clone(), payload);
+        self.result_weights.insert(member, 1);
+        Ok(())
+    }
+
+    fn aggregate_payload_for_stable_member(
+        &self,
+        member: &ResultMemberEntry,
+    ) -> (Option<ResultMemberEntry>, Option<ResultMemberPayloadEntry>) {
+        let ResultMemberEntry::Synthetic { table, row, .. } = member else {
+            return (None, None);
+        };
+        self.result_payloads
+            .iter()
+            .find_map(|(candidate, payload)| match candidate {
+                ResultMemberEntry::Synthetic {
+                    table: candidate_table,
+                    row: candidate_row,
+                    ..
+                } if candidate_table == table && candidate_row == row => {
+                    Some((candidate.clone(), payload.clone()))
+                }
+                _ => None,
+            })
+            .map(|(member, payload)| (Some(member), Some(payload)))
+            .unwrap_or((None, None))
+    }
+}
+
+/// Rebind a runtime terminal operation to its early-bound prepared layout.
+///
+/// The runtime may tighten a root field from `Nullable(T)` to `T` after an
+/// inner proof.  That is not an alternate public layout: the prepared layout
+/// is the subscription's immutable decoding contract.  Re-encode only a
+/// root-level payload into that contract, preserving the source value as a
+/// present nullable cell.  Nested edits remain byte-addressed by their root
+/// descriptor, so they must already agree exactly.
+fn rebind_terminal_operation_to_layout(
+    operation: &TerminalOperation,
+    layout: &TerminalRootLayout,
+) -> Result<TerminalOperation, super::Error> {
+    if operation.root_descriptor == layout.root_descriptor {
+        return Ok(operation.clone());
+    }
+    if !terminal_descriptor_can_rebind_to_layout(
+        &operation.root_descriptor,
+        &layout.root_descriptor,
+    ) || (!operation.path.is_empty() && operation.root_descriptor != layout.root_descriptor)
+    {
+        return Err(super::Error::InvalidStoredValue(
+            "structured terminal operation descriptor disagrees with prepared root layout",
+        ));
+    }
+
+    let mut rebound = operation.clone();
+    match &mut rebound.edit {
+        TerminalEdit::Insert { value, .. } | TerminalEdit::Update { value, .. } => {
+            *value = reencode_terminal_root_record(
+                operation.root_descriptor,
+                &layout.root_descriptor,
+                value,
+            )?;
+        }
+        TerminalEdit::Remove { .. } | TerminalEdit::Move { .. } => {}
+    }
+    rebound.root_descriptor = layout.root_descriptor;
+    Ok(rebound)
+}
+
+fn terminal_descriptor_can_rebind_to_layout(
+    source: &RecordDescriptor,
+    target: &RecordDescriptor,
+) -> bool {
+    source.fields().len() == target.fields().len()
+        && source
+            .fields()
+            .iter()
+            .zip(target.fields())
+            .all(|(source, target)| {
+                source.name == target.name
+                    && terminal_field_can_rebind_to_layout(&source.value_type, &target.value_type)
+            })
+}
+
+fn terminal_field_can_rebind_to_layout(source: &ValueType, target: &ValueType) -> bool {
+    source == target
+        || matches!(target, ValueType::Nullable(inner) if source == inner.as_ref())
+        || RecordProjector::new_registry_rebound(
+            RecordDescriptor::new([("value", source.clone())]),
+            RecordDescriptor::new([("value", target.clone())]),
+            [(0, 0)],
+        )
+        .is_ok()
+}
+
+fn reencode_terminal_root_record(
+    source: RecordDescriptor,
+    target: &RecordDescriptor,
+    raw: &[u8],
+) -> Result<Vec<u8>, super::Error> {
+    let values = source
+        .bind(raw)
+        .to_values()
+        .map_err(|_| super::Error::InvalidStoredValue("invalid structured terminal record"))?;
+    let values = source
+        .fields()
+        .iter()
+        .zip(target.fields())
+        .zip(values)
+        .map(|((source, target), value)| {
+            rebind_terminal_value(value, &source.value_type, &target.value_type)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    target.create(&values).map_err(|_| {
+        super::Error::InvalidStoredValue("structured terminal root re-encoding failed")
+    })
+}
+
+fn rebind_terminal_value(
+    value: Value,
+    source: &ValueType,
+    target: &ValueType,
+) -> Result<Value, super::Error> {
+    if source == target {
+        return Ok(value);
+    }
+    if let ValueType::Nullable(inner) = target
+        && source == inner.as_ref()
+    {
+        return Ok(Value::Nullable(Some(Box::new(value))));
+    }
+    if !terminal_field_can_rebind_to_layout(source, target) {
+        return Err(super::Error::InvalidStoredValue(
+            "structured terminal root value disagrees with prepared layout",
+        ));
+    }
+    match (value, source, target) {
+        (Value::Tuple(values), ValueType::Tuple(source), ValueType::Tuple(target)) => {
+            Ok(Value::Tuple(
+                values
+                    .into_iter()
+                    .zip(source)
+                    .zip(target)
+                    .map(|((value, source), target)| rebind_terminal_value(value, source, target))
+                    .collect::<Result<_, _>>()?,
+            ))
+        }
+        (Value::Array(values), ValueType::Array(source), ValueType::Array(target)) => {
+            Ok(Value::Array(
+                values
+                    .into_iter()
+                    .map(|value| rebind_terminal_value(value, source, target))
+                    .collect::<Result<_, _>>()?,
+            ))
+        }
+        (Value::Nullable(value), ValueType::Nullable(source), ValueType::Nullable(target)) => {
+            Ok(Value::Nullable(
+                value
+                    .map(|value| rebind_terminal_value(*value, source, target).map(Box::new))
+                    .transpose()?,
+            ))
+        }
+        (Value::Record(record), ValueType::Record(source), ValueType::Record(target)) => {
+            let values = record.to_values().map_err(|_| {
+                super::Error::InvalidStoredValue("invalid structured terminal record")
+            })?;
+            let values = source
+                .fields()
+                .iter()
+                .zip(target.fields())
+                .zip(values)
+                .map(|((source, target), value)| {
+                    rebind_terminal_value(value, &source.value_type, &target.value_type)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let raw = target.create(&values).map_err(|_| {
+                super::Error::InvalidStoredValue("structured terminal nested re-encoding failed")
+            })?;
+            Ok(Value::Record(OwnedRecord::new(raw, **target)))
+        }
+        (Value::Enum(value), ValueType::Enum(source), ValueType::Enum(target)) => {
+            let tag = value.tag();
+            let source_case = source.case(tag).map_err(|_| {
+                super::Error::InvalidStoredValue("invalid structured terminal enum tag")
+            })?;
+            let target_case = target.case(tag).map_err(|_| {
+                super::Error::InvalidStoredValue("prepared terminal enum tag is absent")
+            })?;
+            let record = rebind_terminal_value(
+                Value::Record(value.into_record()),
+                &ValueType::Record(Box::new(source_case.payload)),
+                &ValueType::Record(Box::new(target_case.payload)),
+            )?;
+            let Value::Record(record) = record else {
+                unreachable!("record rebinding preserves record value")
+            };
+            Ok(Value::Enum(EnumValue::new(tag, record)))
+        }
+        (value, _, _) => Ok(value),
+    }
+}
+
+impl MaintainedTerminalSchemas {
+    #[cfg(feature = "testing")]
+    pub(crate) fn footprint(&self) -> MaintainedTerminalSchemasFootprint {
+        let terminal_schemas_bytes = btree_map_bytes(self.sinks.len())
+            + self
+                .sinks
+                .iter()
+                .map(|(sink, kind)| sink.len() + mem::size_of_val(kind))
+                .sum::<usize>();
+        MaintainedTerminalSchemasFootprint {
+            terminal_schemas: self.sinks.len(),
+            terminal_schemas_bytes,
+        }
+    }
+
+    fn for_program(program: &QueryProgram) -> Self {
+        let mut sinks = BTreeMap::new();
+        for terminal in &program.lowered.terminals {
+            if let OutputTerminalSchema::AppRows(rows) = &terminal.output {
+                if rows.descriptor.field_index("row_uuid").is_some() {
+                    sinks.insert(
+                        terminal.sink.clone(),
+                        MaintainedTerminalKind::StructuredAppRows {
+                            schema: rows.clone(),
+                            layout: terminal_root_layout(rows),
+                        },
+                    );
+                } else {
+                    sinks.insert(
+                        terminal.sink.clone(),
+                        MaintainedTerminalKind::IgnoredAggregateAppRows,
+                    );
+                }
+                continue;
+            };
+            let OutputTerminalSchema::Fact(fact) = &terminal.output else {
+                unreachable!("app-row terminals were handled above")
+            };
+            let kind = match (&fact.key, fact.terminal, &fact.schema) {
+                (
+                    ProgramFactKey::ResultMembership,
+                    ProgramFactTerminal::Primary,
+                    ProgramFactSchema::ResultMembership(schema),
+                ) => Some(MaintainedTerminalKind::ResultCurrent(schema.clone())),
+                (
+                    ProgramFactKey::ResultMembership,
+                    ProgramFactTerminal::Primary,
+                    ProgramFactSchema::AggregateResult(schema),
+                ) => Some(MaintainedTerminalKind::AggregateResult(schema.clone())),
+                (
+                    ProgramFactKey::RelationEdges,
+                    ProgramFactTerminal::Primary,
+                    ProgramFactSchema::RelationEdges(schema),
+                ) => Some(MaintainedTerminalKind::RelationEdge(schema.clone())),
+                (
+                    ProgramFactKey::VersionWitnesses,
+                    ProgramFactTerminal::VersionWitnessDeletion,
+                    ProgramFactSchema::VersionWitnesses(schema),
+                ) => schema
+                    .deletion
+                    .clone()
+                    .map(MaintainedTerminalKind::VersionDeletion),
+                (
+                    ProgramFactKey::VersionWitnesses,
+                    ProgramFactTerminal::VersionWitnessContent,
+                    ProgramFactSchema::VersionWitnesses(schema),
+                ) => schema
+                    .content
+                    .clone()
+                    .map(MaintainedTerminalKind::VersionContent),
+                (
+                    ProgramFactKey::ReplacementWitnesses,
+                    ProgramFactTerminal::ReplacementWitnessDeletion,
+                    ProgramFactSchema::ReplacementWitnesses(schema),
+                ) => schema
+                    .deletion
+                    .clone()
+                    .map(MaintainedTerminalKind::ReplacementDeletion),
+                (
+                    ProgramFactKey::ReplacementWitnesses,
+                    ProgramFactTerminal::ReplacementWitnessContent,
+                    ProgramFactSchema::ReplacementWitnesses(schema),
+                ) => schema
+                    .content
+                    .clone()
+                    .map(MaintainedTerminalKind::ReplacementContent),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                sinks.insert(terminal.sink.clone(), kind);
+            }
+        }
+        Self { sinks }
+    }
+
+    fn get(&self, sink: &str) -> Result<&MaintainedTerminalKind, super::Error> {
+        self.sinks.get(sink).ok_or(super::Error::InvalidStoredValue(
+            "maintained view delta arrived for an unknown query-engine terminal",
+        ))
+    }
+
+    pub(crate) fn terminal_root_layout(&self) -> Option<&TerminalRootLayout> {
+        self.sinks.values().find_map(|kind| match kind {
+            MaintainedTerminalKind::StructuredAppRows { layout, .. } => Some(layout),
+            _ => None,
+        })
+    }
+}
+
+fn terminal_root_layout(rows: &AppRowSchema) -> TerminalRootLayout {
+    let root_key_slot = rows
+        .descriptor
+        .field_index("row_uuid")
+        .expect("structured app-row terminal has a row_uuid slot");
+    // Bind every public descriptor slot, including collector-owned trailing
+    // arrays/records. A collector root may contain both physical `user_*`
+    // source cells and logical nested fields, so the presence of one family
+    // must not hide the other.
+    let public_fields = rows
+        .descriptor
+        .fields()
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, field)| {
+            let name = field.name.as_deref()?;
+            (slot != root_key_slot && !rows.hidden_fields.contains(name)).then(|| {
+                let carrier = rows
+                    .field_carriers
+                    .get(name)
+                    .copied()
+                    .unwrap_or(rows.carrier);
+                TerminalRootPublicField {
+                    // The compiler binds this identity before terminal
+                    // publication. Carrier describes encoding, not naming:
+                    // a logical include may legitimately begin with `user_`.
+                    name: rows.public_field_names.get(name).cloned().unwrap_or_else(
+                        || match carrier {
+                            AppRowCarrier::CurrentRow => logical_user_column(name).to_owned(),
+                            AppRowCarrier::Logical => name.to_owned(),
+                        },
+                    ),
+                    descriptor_field_name: name.to_owned(),
+                    slot,
+                    carrier: match carrier {
+                        AppRowCarrier::CurrentRow => TerminalRootCarrier::CurrentRow,
+                        AppRowCarrier::Logical => TerminalRootCarrier::Logical,
+                    },
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"jazz terminal root layout v1");
+    hasher.update(
+        &postcard::to_allocvec(&rows.descriptor)
+            .expect("record descriptors are postcard serializable"),
+    );
+    hasher.update(&(root_key_slot as u64).to_le_bytes());
+    hasher.update(&[match rows.carrier {
+        AppRowCarrier::CurrentRow => 0,
+        AppRowCarrier::Logical => 1,
+    }]);
+    for field in &public_fields {
+        hasher.update(field.name.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(field.descriptor_field_name.as_bytes());
+        hasher.update(&[0]);
+        hasher.update(&(field.slot as u64).to_le_bytes());
+        hasher.update(&[match field.carrier {
+            TerminalRootCarrier::CurrentRow => 0,
+            TerminalRootCarrier::Logical => 1,
+        }]);
+    }
+    TerminalRootLayout {
+        id: format!("terminal:{}", hasher.finalize().to_hex()),
+        root_descriptor: rows.descriptor,
+        root_key_slot,
+        root_key_field_name: rows.descriptor.fields()[root_key_slot]
+            .name
+            .clone()
+            .expect("structured app-row row_uuid field is named"),
+        public_fields,
+        carrier: match rows.carrier {
+            AppRowCarrier::CurrentRow => TerminalRootCarrier::CurrentRow,
+            AppRowCarrier::Logical => TerminalRootCarrier::Logical,
+        },
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[cfg(feature = "testing")]
+pub(crate) struct MaintainedTerminalSchemasFootprint {
+    pub(crate) terminal_schemas: usize,
+    pub(crate) terminal_schemas_bytes: usize,
+}
+
+impl MaintainedTerminalKind {
+    fn is_result_terminal(&self) -> bool {
+        matches!(
+            self,
+            MaintainedTerminalKind::ResultCurrent(_) | MaintainedTerminalKind::AggregateResult(_)
+        )
+    }
+
+    fn requires_authoritative_membership_reconcile(&self) -> bool {
+        matches!(
+            self,
+            MaintainedTerminalKind::VersionDeletion(_)
+                | MaintainedTerminalKind::ReplacementDeletion(_)
+        )
+    }
+}
+
+fn decode_typed_terminal_record(
+    record: BorrowedRecord<'_>,
+    kind: &MaintainedTerminalKind,
+    tables: &TableSchemas,
+    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    decode_plan_cache: &mut VersionDecodePlanCache,
+) -> Result<DecodedMaintainedEvent, super::Error> {
+    match kind {
+        MaintainedTerminalKind::IgnoredAggregateAppRows => {
+            unreachable!("ignored aggregate app-row terminals are filtered before record decoding")
+        }
+        MaintainedTerminalKind::ResultCurrent(schema) => {
+            let table_name = match record.get_idx(field_idx(record, &schema.table_field)?)? {
+                Value::String(value) => value,
+                _ => {
+                    return Err(super::Error::InvalidStoredValue(
+                        "maintained result membership table field must be string",
+                    ));
+                }
+            };
+            let table = tables
+                .get(&table_name)
+                .ok_or(super::Error::InvalidStoredValue(
+                    "maintained result membership table_name must exist",
+                ))?;
+            let row_uuid = RowUuid(record.get_uuid(field_idx(record, &schema.row_field)?)?);
+            let mut occurrence_ids = Vec::with_capacity(schema.occurrence_id_fields.len());
+            for field in &schema.occurrence_id_fields {
+                occurrence_ids.push(ObjectId::from_uuid(
+                    record.get_uuid(field_idx(record, field)?)?,
+                ));
+            }
+            let Some((root, joined)) = occurrence_ids.split_first() else {
+                return Err(super::Error::InvalidStoredValue(
+                    "maintained result membership occurrence must include its root row",
+                ));
+            };
+            let union_arms = schema
+                .occurrence_union_arm_fields
+                .iter()
+                .map(|(position, field)| {
+                    let label = match record.get_idx(field_idx(record, field)?)? {
+                        Value::String(label) if !label.is_empty() => label.clone(),
+                        _ => {
+                            return Err(super::Error::InvalidStoredValue(
+                                "maintained result union arm must be a non-empty string",
+                            ));
+                        }
+                    };
+                    Ok((*position, label))
+                })
+                .collect::<Result<Vec<_>, super::Error>>()?;
+            let occurrence_id =
+                OutputOccurrenceId::with_union_arms(*root, joined.iter().copied(), union_arms)
+                    .ok_or(super::Error::InvalidStoredValue(
+                        "maintained result union occurrence carrier is malformed",
+                    ))?;
+            let (tx_time_field, tx_node_field) = match &schema.version {
+                super::query_engine::ResultMembershipVersionSchema::Content(content) => {
+                    (&content.tx_time_field, &content.tx_node_field)
+                }
+                super::query_engine::ResultMembershipVersionSchema::ContentOrDeletion {
+                    ..
+                } => {
+                    return Err(super::Error::InvalidStoredValue(
+                        "maintained result membership does not support include-deleted schemas yet",
+                    ));
+                }
+            };
+            let tx_time = TxTime(record_u64(record, tx_time_field)?);
+            let tx_node_alias = NodeAlias(record_u64(record, tx_node_field)?);
+            let tx_node = node_aliases
+                .iter()
+                .find_map(|(node, alias)| (*alias == tx_node_alias).then_some(*node))
+                .ok_or(super::Error::InvalidStoredValue(
+                    "result tx node alias must exist",
+                ))?;
+            let settle_position = schema
+                .settle_position_field
+                .as_ref()
+                .map(|field| nullable_u64(record, field).map(|seq| seq.map(GlobalTime)))
+                .transpose()?
+                .flatten();
+            let flat_join_digest = (!schema.payload_fields.is_empty())
+                .then(|| {
+                    schema
+                        .payload_fields
+                        .iter()
+                        .map(|field| {
+                            record
+                                .get_idx(field_idx(record, &field.name)?)
+                                .map_err(super::Error::from)
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                        .and_then(|values| {
+                            postcard::to_allocvec(&values).map_err(|_| {
+                                super::Error::InvalidStoredValue(
+                                    "flat joined result revision encoding failed",
+                                )
+                            })
+                        })
+                })
+                .transpose()?;
+            let branch_or_prefix = schema
+                .branch_or_prefix_field
+                .as_deref()
+                .map(|field| match record.get_idx(field_idx(record, field)?)? {
+                    Value::Uuid(value) => Ok(value.as_bytes().to_vec()),
+                    Value::Bytes(value) => Ok(value),
+                    Value::Nullable(Some(value)) => match *value {
+                        Value::Uuid(value) => Ok(value.as_bytes().to_vec()),
+                        Value::Bytes(value) => Ok(value),
+                        _ => Err(super::Error::InvalidStoredValue(
+                            "result branch discriminator must be UUID or bytes",
+                        )),
+                    },
+                    Value::Nullable(None) => Ok(Vec::new()),
+                    _ => Err(super::Error::InvalidStoredValue(
+                        "result branch discriminator must be UUID or bytes",
+                    )),
+                })
+                .transpose()?
+                // The empty/shared branch has a non-empty postcard encoding.
+                // Keep its historical `None` identity so ordinary result
+                // members and durable receipts do not churn merely because
+                // branch coordinates are now carried for non-shared rows.
+                .filter(|bytes| {
+                    !bytes.is_empty() && *bytes != BranchKey::default().canonical_bytes()
+                });
+            let mut member = RealRowMemberEntry::current_content((
+                table.name.clone().into(),
+                row_uuid,
+                TxId::new(tx_time, tx_node),
+            ))
+            .with_occurrence_id(occurrence_id)
+            .with_settle_position(settle_position);
+            member.branch_or_prefix = branch_or_prefix;
+            let member: ResultMemberEntry = match flat_join_digest {
+                Some(digest) => member.with_row_digest(digest),
+                None => member,
+            }
+            .into();
+            let payload = ResultMemberPayloadEntry {
+                member: member.clone(),
+                descriptor: encode_record_descriptor(&record.descriptor())?,
+                record: record.raw().to_vec(),
+            };
+            Ok(DecodedMaintainedEvent::ResultCurrent { member, payload })
+        }
+        MaintainedTerminalKind::AggregateResult(schema) => {
+            let table = match record.get_idx(field_idx(record, &schema.synthetic.table_field)?)? {
+                Value::String(value) => value,
+                _ => {
+                    return Err(super::Error::InvalidStoredValue(
+                        "aggregate result table field must be string",
+                    ));
+                }
+            };
+            let row_value = record.get_idx(field_idx(record, &schema.synthetic.row_field)?)?;
+            let row = postcard::to_allocvec(&row_value).map_err(|_| {
+                super::Error::InvalidStoredValue("aggregate result row encoding failed")
+            })?;
+            let replacement_value =
+                record.get_idx(field_idx(record, &schema.synthetic.replacement_field)?)?;
+            let replacement = postcard::to_allocvec(&replacement_value).map_err(|_| {
+                super::Error::InvalidStoredValue("aggregate replacement token encoding failed")
+            })?;
+            let member = ResultMemberEntry::Synthetic {
+                table,
+                row,
+                replacement: SyntheticReplacementToken::from_encoded_record(replacement),
+            };
+            let payload = ResultMemberPayloadEntry {
+                member: member.clone(),
+                descriptor: encode_record_descriptor(&record.descriptor())?,
+                record: record.raw().to_vec(),
+            };
+            Ok(DecodedMaintainedEvent::AggregateResult {
+                member,
+                payload,
+                synthetic: schema.synthetic.clone(),
+                value_fields: schema
+                    .value_fields
+                    .iter()
+                    .map(|field| field.name.clone())
+                    .collect(),
+            })
+        }
+        MaintainedTerminalKind::VersionContent(schema) => {
+            validate_witness_event_kind(record, "version_content")?;
+            decode_typed_version_witness(record, schema, tables, decode_plan_cache)
+                .map(DecodedMaintainedEvent::VersionContent)
+        }
+        MaintainedTerminalKind::VersionDeletion(schema) => {
+            validate_witness_event_kind(record, "version_deletion")?;
+            decode_typed_version_witness(record, schema, tables, decode_plan_cache)
+                .map(DecodedMaintainedEvent::VersionDeletion)
+        }
+        MaintainedTerminalKind::ReplacementContent(schema) => {
+            validate_witness_event_kind(record, "replacement_content")?;
+            decode_typed_version_witness(record, schema, tables, decode_plan_cache)
+                .map(DecodedMaintainedEvent::ReplacementContent)
+        }
+        MaintainedTerminalKind::ReplacementDeletion(schema) => {
+            validate_witness_event_kind(record, "replacement_deletion")?;
+            decode_typed_version_witness(record, schema, tables, decode_plan_cache)
+                .map(DecodedMaintainedEvent::ReplacementDeletion)
+        }
+        MaintainedTerminalKind::RelationEdge(schema) => {
+            decode_typed_relation_edge(record, schema, tables, node_aliases)
+                .map(DecodedMaintainedEvent::RelationEdge)
+        }
+        MaintainedTerminalKind::StructuredAppRows { schema, .. } => {
+            let root = RowUuid(record.get_uuid(field_idx(record, "row_uuid")?)?);
+            Ok(DecodedMaintainedEvent::StructuredAppRow {
+                root,
+                record: OwnedRecord::new(record.raw().to_vec(), schema.descriptor),
+            })
+        }
+    }
+}
+
+fn decode_typed_relation_edge(
+    record: BorrowedRecord<'_>,
+    schema: &RelationEdgeSchema,
+    tables: &TableSchemas,
+    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+) -> Result<RelationEdgeEntry, super::Error> {
+    let source_table = table_name_from_versioned_ref(record, &schema.source, tables)?;
+    let target_table = table_name_from_versioned_ref(record, &schema.target, tables)?;
+    let path = match record.get_idx(field_idx(record, &schema.path_field)?)? {
+        Value::String(value) => value,
+        _ => {
+            return Err(super::Error::InvalidStoredValue(
+                "relation edge path field must be string",
+            ));
+        }
+    };
+    Ok(RelationEdgeEntry {
+        path,
+        source_table: source_table.clone().into(),
+        source_row: RowUuid(record.get_uuid(field_idx(record, &schema.source.row.row_field)?)?),
+        target_table: target_table.clone().into(),
+        target_row: RowUuid(record.get_uuid(field_idx(record, &schema.target.row.row_field)?)?),
+        kind: Some(crate::protocol::RelationEdgeKind::Relation),
+        source_version: decode_relation_edge_version(record, &schema.source, node_aliases)?,
+        target_version: decode_relation_edge_version(record, &schema.target, node_aliases)?,
+        depth: None,
+        edge_id: None,
+        branch: None,
+        role: Some(crate::protocol::RelationEdgeRole::Terminal),
+        order: None,
+        hole_state: None,
+    })
+}
+
+fn table_name_from_versioned_ref(
+    record: BorrowedRecord<'_>,
+    schema: &VersionedRowRefSchema,
+    tables: &TableSchemas,
+) -> Result<String, super::Error> {
+    let table_name = match record.get_idx(field_idx(record, &schema.row.table_field)?)? {
+        Value::String(value) => value,
+        _ => {
+            return Err(super::Error::InvalidStoredValue(
+                "relation edge table field must be string",
+            ));
+        }
+    };
+    tables
+        .get(&table_name)
+        .ok_or(super::Error::InvalidStoredValue(
+            "relation edge table_name must exist",
+        ))?;
+    Ok(table_name)
+}
+
+fn decode_relation_edge_version(
+    record: BorrowedRecord<'_>,
+    schema: &VersionedRowRefSchema,
+    node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+) -> Result<Option<RowVersionRefEntry>, super::Error> {
+    let Some(ResultMembershipVersionSchema::Content(version)) = &schema.version else {
+        return Ok(None);
+    };
+    let tx_time = TxTime(record_u64(record, &version.tx_time_field)?);
+    let tx_node_alias = NodeAlias(record_u64(record, &version.tx_node_field)?);
+    let tx_node = node_aliases
+        .iter()
+        .find_map(|(node, alias)| (*alias == tx_node_alias).then_some(*node))
+        .ok_or(super::Error::InvalidStoredValue(
+            "relation edge tx node alias must exist",
+        ))?;
+    let branch_or_prefix = schema
+        .branch_or_prefix_field
+        .as_deref()
+        .map(|field| match record.get_idx(field_idx(record, field)?)? {
+            Value::Uuid(value) => Ok(value.as_bytes().to_vec()),
+            Value::Bytes(value) => Ok(value),
+            Value::Nullable(Some(value)) => match *value {
+                Value::Uuid(value) => Ok(value.as_bytes().to_vec()),
+                Value::Bytes(value) => Ok(value),
+                _ => Err(super::Error::InvalidStoredValue(
+                    "relation edge branch discriminator must be UUID or bytes",
+                )),
+            },
+            Value::Nullable(None) => Ok(Vec::new()),
+            _ => Err(super::Error::InvalidStoredValue(
+                "relation edge branch discriminator must be UUID or bytes",
+            )),
+        })
+        .transpose()?
+        .filter(|bytes| !bytes.is_empty());
+    Ok(Some(RowVersionRefEntry {
+        tx: TxId::new(tx_time, tx_node),
+        schema_version: None,
+        layer: ResultRowLayer::Content,
+        batch: None,
+        branch_or_prefix,
+        row_digest: None,
+    }))
+}
+
+fn validate_witness_event_kind(
+    record: BorrowedRecord<'_>,
+    expected: &str,
+) -> Result<(), super::Error> {
+    match record.get_idx(field_idx(record, "event_kind")?)? {
+        Value::String(value) if value == expected => Ok(()),
+        Value::String(_) => Err(super::Error::InvalidStoredValue(
+            "maintained witness event kind did not match query-engine terminal schema",
+        )),
+        _ => Err(super::Error::InvalidStoredValue(
+            "maintained witness event kind must be string",
+        )),
+    }
+}
+
+fn decode_typed_version_witness(
+    record: BorrowedRecord<'_>,
+    schema: &VersionWitnessSchema,
+    tables: &TableSchemas,
+    decode_plan_cache: &mut VersionDecodePlanCache,
+) -> Result<VersionRow, super::Error> {
+    let table_name = match record.get_idx(field_idx(record, &schema.identity.table_field)?)? {
+        Value::String(value) => value,
+        _ => {
+            return Err(super::Error::InvalidStoredValue(
+                "maintained witness table field must be string",
+            ));
+        }
+    };
+    let table = tables
+        .get(&table_name)
+        .ok_or(super::Error::InvalidStoredValue(
+            "maintained witness table_name must exist",
+        ))?;
+    let deletion = tagged_deletion(record.get_idx(field_idx(record, &schema.deletion_field)?)?)?;
+    let layer = if deletion.is_some() {
+        VersionLayer::Deletion
+    } else {
+        VersionLayer::Content
+    };
+    let cache_key = (table.name.clone(), layer);
+    if !decode_plan_cache.contains_key(&cache_key) {
+        let plan = build_version_decode_plan(record.descriptor(), schema, table, layer)?;
+        decode_plan_cache.insert(cache_key.clone(), plan);
+    }
+    let plan = decode_plan_cache
+        .get(&cache_key)
+        .expect("version decode plan was just inserted");
+    let tx_time = TxTime(record_u64_idx(record, plan.tx_time_idx)?);
+    let branch_key = match plan.branch_idx {
+        Some(idx) => match record.get_idx(idx)? {
+            Value::Bytes(bytes) => BranchKey::from_canonical_bytes(&bytes).map_err(|_| {
+                super::Error::InvalidStoredValue("maintained witness branch key is invalid")
+            })?,
+            Value::Nullable(None) => BranchKey::default(),
+            Value::Nullable(Some(value)) => match *value {
+                Value::Bytes(bytes) => BranchKey::from_canonical_bytes(&bytes).map_err(|_| {
+                    super::Error::InvalidStoredValue("maintained witness branch key is invalid")
+                })?,
+                _ => return Err(super::Error::InvalidStoredValue("branch key must be bytes")),
+            },
+            _ => return Err(super::Error::InvalidStoredValue("branch key must be bytes")),
+        },
+        None => BranchKey::default(),
+    };
+    let mut cells = BTreeMap::new();
+    if layer == VersionLayer::Content {
+        for column in &table.columns {
+            if let Some(value) = nullable_value(record.get_idx(plan.user_indices[&column.name])?)? {
+                cells.insert(column.name.clone(), value);
+            }
+        }
+    }
+    let authored_columns = if layer == VersionLayer::Content {
+        nullable_value(record.get_idx(plan.authored_columns_idx)?)?
+            .map(|value| match value {
+                Value::Bytes(bytes) => serde_json::from_slice(&bytes).map_err(|_| {
+                    super::Error::InvalidStoredValue("authored columns must be valid JSON")
+                }),
+                _ => Err(super::Error::InvalidStoredValue(
+                    "authored columns must be bytes",
+                )),
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let parts = VersionRowParts {
+        table: table.name.clone(),
+        branch_key,
+        row_uuid: RowUuid(record.get_uuid(plan.row_idx)?),
+        tx_node_alias: NodeAlias(record_u64_idx(record, plan.tx_node_idx)?),
+        schema_version_alias: crate::ids::SchemaVersionAlias(record_u64_idx(
+            record,
+            plan.schema_version_idx,
+        )?),
+        tx_time,
+        parents: tx_ids_from_value(record.get_idx(plan.parents_idx)?)?,
+        created_by: AuthorId(record.get_uuid(plan.created_by_idx)?),
+        created_at: TxTime(record_u64_idx(record, plan.created_at_idx)?),
+        updated_by: AuthorId(record.get_uuid(plan.updated_by_idx)?),
+        updated_at: TxTime(record_u64_idx(record, plan.updated_at_idx)?),
+        cells,
+        authored_columns,
+        deletion,
+    };
+    let values = if layer == VersionLayer::Content {
+        history_values_from_parts(table, &parts)?
+    } else {
+        register_values_from_parts(&parts)?
+    };
+    Ok(VersionRow {
+        table: groove::Intern::new(parts.table),
+        branch_key: parts.branch_key,
+        record: owned_record_from_storage_values_with_descriptor(plan.descriptor, values)?,
+    })
+}
+
+fn build_version_decode_plan(
+    terminal_descriptor: RecordDescriptor,
+    schema: &VersionWitnessSchema,
+    table: &TableSchema,
+    layer: VersionLayer,
+) -> Result<VersionDecodePlan, super::Error> {
+    let descriptor = if layer == VersionLayer::Deletion {
+        table.register_storage_table().record_schema()
+    } else {
+        table.history_storage_table().record_schema()
+    };
+    let branch_idx = schema
+        .identity
+        .branch_or_prefix_field
+        .as_ref()
+        .map(|field| field_idx_in_descriptor(terminal_descriptor, field))
+        .transpose()?;
+    let user_indices = if layer == VersionLayer::Content {
+        schema
+            .user_fields
+            .iter()
+            .map(|(column, field)| {
+                Ok((
+                    column.clone(),
+                    field_idx_in_descriptor(terminal_descriptor, field)?,
+                ))
+            })
+            .collect::<Result<_, super::Error>>()?
+    } else {
+        BTreeMap::new()
+    };
+    Ok(VersionDecodePlan {
+        descriptor,
+        branch_idx,
+        row_idx: field_idx_in_descriptor(terminal_descriptor, &schema.identity.row_field)?,
+        tx_time_idx: field_idx_in_descriptor(terminal_descriptor, &schema.identity.tx_time_field)?,
+        tx_node_idx: field_idx_in_descriptor(terminal_descriptor, &schema.identity.tx_node_field)?,
+        schema_version_idx: field_idx_in_descriptor(
+            terminal_descriptor,
+            &schema.identity.schema_field,
+        )?,
+        parents_idx: field_idx_in_descriptor(terminal_descriptor, &schema.parents_field)?,
+        created_by_idx: field_idx_in_descriptor(terminal_descriptor, &schema.created_by_field)?,
+        created_at_idx: field_idx_in_descriptor(terminal_descriptor, &schema.created_at_field)?,
+        updated_by_idx: field_idx_in_descriptor(terminal_descriptor, &schema.updated_by_field)?,
+        updated_at_idx: field_idx_in_descriptor(terminal_descriptor, &schema.updated_at_field)?,
+        user_indices,
+        authored_columns_idx: field_idx_in_descriptor(
+            terminal_descriptor,
+            &schema.authored_columns_field,
+        )?,
+    })
+}
+
+fn tagged_deletion(value: Value) -> Result<Option<crate::tx::DeletionEvent>, super::Error> {
+    match value {
+        Value::Nullable(None) => Ok(None),
+        Value::Nullable(Some(value)) => {
+            let value = match *value {
+                Value::U8(discriminant) => Value::EnumTag(discriminant),
+                value => value,
+            };
+            deletion_event_from_value(value).map(Some)
+        }
+        _ => Err(super::Error::InvalidStoredValue(
+            "tagged _deletion must be nullable",
+        )),
+    }
+}
+
+fn record_u64(record: BorrowedRecord<'_>, field: &str) -> Result<u64, super::Error> {
+    match record.get_idx(field_idx(record, field)?)? {
+        Value::U64(value) => Ok(value),
+        _ => Err(super::Error::InvalidStoredValue("field must be u64")),
+    }
+}
+
+fn record_u64_idx(record: BorrowedRecord<'_>, field_idx: usize) -> Result<u64, super::Error> {
+    match record.get_idx(field_idx)? {
+        Value::U64(value) => Ok(value),
+        _ => Err(super::Error::InvalidStoredValue("field must be u64")),
+    }
+}
+
+fn nullable_u64(record: BorrowedRecord<'_>, field: &str) -> Result<Option<u64>, super::Error> {
+    match record.get_idx(field_idx(record, field)?)? {
+        Value::Nullable(None) => Ok(None),
+        Value::Nullable(Some(value)) => match *value {
+            Value::U64(value) => Ok(Some(value)),
+            _ => Err(super::Error::InvalidStoredValue(
+                "nullable field payload must be u64",
+            )),
+        },
+        Value::U64(value) => Ok(Some(value)),
+        _ => Err(super::Error::InvalidStoredValue(
+            "field must be nullable u64",
+        )),
+    }
+}
+
+fn field_idx(record: BorrowedRecord<'_>, field: &str) -> Result<usize, super::Error> {
+    record
+        .descriptor()
+        .field_index(field)
+        .ok_or(super::Error::InvalidStoredValue(
+            "maintained view terminal missing field",
+        ))
+}
+
+fn field_idx_in_descriptor(
+    descriptor: RecordDescriptor,
+    field: &str,
+) -> Result<usize, super::Error> {
+    descriptor
+        .field_index(field)
+        .ok_or(super::Error::InvalidStoredValue(
+            "maintained view terminal missing field",
+        ))
+}
+
+impl WeightedVersionIndex {
+    fn footprint_bytes(&self) -> usize {
+        btree_map_bytes(self.by_identity.len())
+            + self
+                .by_identity
+                .iter()
+                .map(|(identity, version)| {
+                    version_identity_bytes(identity) + weighted_version_bytes(version)
+                })
+                .sum::<usize>()
+            + btree_map_bytes(self.by_tx.len())
+            + self
+                .by_tx
+                .values()
+                .map(|by_sort_key| {
+                    btree_map_bytes(by_sort_key.len())
+                        + by_sort_key
+                            .iter()
+                            .map(|(sort_key, identities)| {
+                                version_sort_key_bytes(sort_key)
+                                    + btree_set_bytes(identities.len())
+                                    + identities.iter().map(version_identity_bytes).sum::<usize>()
+                            })
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
+    }
+
+    fn apply_delta(
+        &mut self,
+        identity: VersionIdentity,
+        row: VersionRow,
+        weight: i64,
+        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    ) -> Result<(), super::Error> {
+        let old = self
+            .by_identity
+            .get(&identity)
+            .map(|version| version.weight)
+            .unwrap_or(0);
+        let tx_id = version_tx_id_from_aliases(&row, node_aliases).ok_or(
+            super::Error::InvalidStoredValue("history tx node alias must exist"),
+        )?;
+        let sort_key = VersionSortKey::for_row(&row);
+        let new = old + weight;
+
+        if old <= 0 && new > 0 {
+            self.by_tx
+                .entry(tx_id)
+                .or_default()
+                .entry(sort_key.clone())
+                .or_default()
+                .insert(identity.clone());
+        }
+        if old > 0
+            && new <= 0
+            && let Some(existing) = self.by_identity.get(&identity)
+        {
+            remove_tx_identity(
+                &mut self.by_tx,
+                existing.tx_id,
+                &existing.sort_key,
+                &identity,
+            );
+        }
+
+        if new > 0 {
+            self.by_identity.insert(
+                identity,
+                WeightedVersion {
+                    row,
+                    tx_id,
+                    sort_key,
+                    weight: new,
+                },
+            );
+        } else {
+            self.by_identity.remove(&identity);
+        }
+        Ok(())
+    }
+
+    fn versions_by_tx(&self, tx_id: TxId) -> Vec<VersionRow> {
+        let Some(by_sort_key) = self.by_tx.get(&tx_id) else {
+            return Vec::new();
+        };
+        by_sort_key
+            .values()
+            .flat_map(|identities| {
+                identities.iter().filter_map(|identity| {
+                    self.by_identity
+                        .get(identity)
+                        .filter(|version| version.weight > 0)
+                        .map(|version| version.row.clone())
+                })
+            })
+            .collect()
+    }
+}
+
+impl ReplacementIndex {
+    fn footprint_bytes(&self) -> usize {
+        replacement_map_bytes(&self.content_by_key) + replacement_map_bytes(&self.deletion_by_key)
+    }
+
+    fn apply_delta(
+        &mut self,
+        key: ReplacementKey,
+        identity: VersionIdentity,
+        row: VersionRow,
+        weight: i64,
+        node_aliases: &BTreeMap<NodeUuid, NodeAlias>,
+    ) -> Result<(), super::Error> {
+        let by_key = match key.layer {
+            VersionLayer::Content => &mut self.content_by_key,
+            VersionLayer::Deletion => &mut self.deletion_by_key,
+        };
+        let row_versions = by_key.entry(key.clone()).or_default();
+        let old = row_versions
+            .get(&identity)
+            .map(|version| version.weight)
+            .unwrap_or(0);
+        let new = old + weight;
+        if new > 0 {
+            let tx_id = version_tx_id_from_aliases(&row, node_aliases).ok_or(
+                super::Error::InvalidStoredValue("history tx node alias must exist"),
+            )?;
+            row_versions.insert(
+                identity,
+                WeightedVersion {
+                    sort_key: VersionSortKey::for_row(&row),
+                    row,
+                    tx_id,
+                    weight: new,
+                },
+            );
+        } else {
+            row_versions.remove(&identity);
+        }
+        if row_versions.is_empty() {
+            by_key.remove(&key);
+        }
+        Ok(())
+    }
+
+    fn replacement_for(
+        &self,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> (Option<VersionRow>, Option<VersionRow>) {
+        let table = groove::Intern::new(table.to_owned());
+        let content = self.content_by_key.get(&ReplacementKey {
+            table,
+            row_uuid,
+            layer: VersionLayer::Content,
+        });
+        let deletion = self.deletion_by_key.get(&ReplacementKey {
+            table,
+            row_uuid,
+            layer: VersionLayer::Deletion,
+        });
+        (replacement_winner(content), replacement_winner(deletion))
+    }
+
+    fn entry_count(&self) -> usize {
+        self.content_by_key
+            .values()
+            .chain(self.deletion_by_key.values())
+            .map(BTreeMap::len)
+            .sum()
+    }
+}
+
+fn replacement_map_bytes(
+    by_key: &BTreeMap<ReplacementKey, BTreeMap<VersionIdentity, WeightedVersion>>,
+) -> usize {
+    btree_map_bytes(by_key.len())
+        + by_key
+            .iter()
+            .map(|(key, row_versions)| {
+                replacement_key_bytes(key)
+                    + btree_map_bytes(row_versions.len())
+                    + row_versions
+                        .iter()
+                        .map(|(identity, version)| {
+                            version_identity_bytes(identity) + weighted_version_bytes(version)
+                        })
+                        .sum::<usize>()
+            })
+            .sum::<usize>()
+}
+
+fn btree_map_bytes(len: usize) -> usize {
+    len * 96
+}
+
+fn btree_set_bytes(len: usize) -> usize {
+    len * 64
+}
+
+fn intern_string_bytes(value: &groove::Intern<String>) -> usize {
+    mem::size_of_val(value) + value.as_str().len()
+}
+
+fn vec_bytes<T>(value: &[T]) -> usize {
+    mem::size_of::<Vec<T>>() + mem::size_of_val(value)
+}
+
+fn option_vec_bytes<T>(value: &Option<Vec<T>>) -> usize {
+    value.as_deref().map(vec_bytes).unwrap_or_default()
+}
+
+fn result_member_entry_bytes(member: &ResultMemberEntry) -> usize {
+    mem::size_of_val(member)
+        + match member {
+            ResultMemberEntry::Row(row) | ResultMemberEntry::TypedRow { row, .. } => {
+                intern_string_bytes(&row.table)
+                    + option_vec_bytes(&row.branch_or_prefix)
+                    + option_vec_bytes(&row.row_digest)
+            }
+            ResultMemberEntry::Synthetic {
+                table,
+                row,
+                replacement,
+            } => table.len() + vec_bytes(row) + mem::size_of_val(replacement),
+            ResultMemberEntry::PathTuple {
+                path,
+                source_table,
+                target_table,
+                edge_id,
+                revision,
+                ..
+            } => {
+                path.len()
+                    + intern_string_bytes(source_table)
+                    + intern_string_bytes(target_table)
+                    + option_vec_bytes(edge_id)
+                    + vec_bytes(revision)
+            }
+        }
+}
+
+fn result_member_payload_entry_bytes(payload: &ResultMemberPayloadEntry) -> usize {
+    mem::size_of_val(payload)
+        + result_member_entry_bytes(&payload.member)
+        + vec_bytes(&payload.descriptor)
+        + vec_bytes(&payload.record)
+}
+
+fn version_identity_bytes(identity: &VersionIdentity) -> usize {
+    mem::size_of_val(identity)
+        + intern_string_bytes(&identity.table)
+        + vec_bytes(&identity.raw_record)
+}
+
+fn version_sort_key_bytes(sort_key: &VersionSortKey) -> usize {
+    mem::size_of_val(sort_key)
+        + intern_string_bytes(&sort_key.table)
+        + vec_bytes(&sort_key.raw_record)
+}
+
+fn replacement_key_bytes(key: &ReplacementKey) -> usize {
+    mem::size_of_val(key) + intern_string_bytes(&key.table)
+}
+
+fn weighted_version_bytes(version: &WeightedVersion) -> usize {
+    mem::size_of_val(version)
+        + version_row_bytes(&version.row)
+        + version_sort_key_bytes(&version.sort_key)
+}
+
+fn version_row_bytes(row: &VersionRow) -> usize {
+    mem::size_of_val(row) + intern_string_bytes(&row.table) + row.record.raw().len()
+}
+
+impl VersionIdentity {
+    fn for_row(row: &VersionRow) -> Self {
+        Self {
+            table: row.table,
+            layer: row.layer(),
+            raw_record: row.record.raw().to_vec(),
+        }
+    }
+}
+
+impl VersionSortKey {
+    fn for_row(row: &VersionRow) -> Self {
+        Self {
+            table: row.table,
+            row_uuid: row.row_uuid(),
+            layer: row.layer(),
+            raw_record: row.record.raw().to_vec(),
+        }
+    }
+}
+
+impl ReplacementKey {
+    fn for_row(row: &VersionRow, layer: VersionLayer) -> Self {
+        Self {
+            table: row.table,
+            row_uuid: row.row_uuid(),
+            layer,
+        }
+    }
+}
+
+impl NetEvent {
+    fn identity(&self) -> EventIdentity {
+        match self {
+            Self::Result(entry, _) => EventIdentity::Result(entry.clone()),
+            Self::AggregateResult(member, ..) => EventIdentity::Result(member.clone()),
+            Self::Version(identity, _) => EventIdentity::Version(identity.clone()),
+            Self::Replacement(key, identity, _) => {
+                EventIdentity::Replacement(key.clone(), identity.clone())
+            }
+            Self::ProgramFact(fact) => EventIdentity::ProgramFact(fact.clone()),
+            Self::StructuredAppRow(root, record) => {
+                EventIdentity::StructuredAppRow(*root, record.raw().to_vec())
+            }
+        }
+    }
+}
+
+fn encode_record_descriptor(descriptor: &RecordDescriptor) -> Result<Vec<u8>, super::Error> {
+    let fields = descriptor
+        .fields()
+        .iter()
+        .map(|field| (field.name.clone(), field.value_type.clone()))
+        .collect::<Vec<_>>();
+    postcard::to_allocvec(&fields)
+        .map_err(|_| super::Error::InvalidStoredValue("aggregate descriptor encoding failed"))
+}
+
+fn remove_tx_identity(
+    by_tx: &mut BTreeMap<TxId, BTreeMap<VersionSortKey, BTreeSet<VersionIdentity>>>,
+    tx_id: TxId,
+    sort_key: &VersionSortKey,
+    identity: &VersionIdentity,
+) {
+    let Some(by_sort_key) = by_tx.get_mut(&tx_id) else {
+        return;
+    };
+    if let Some(identities) = by_sort_key.get_mut(sort_key) {
+        identities.remove(identity);
+        if identities.is_empty() {
+            by_sort_key.remove(sort_key);
+        }
+    }
+    if by_sort_key.is_empty() {
+        by_tx.remove(&tx_id);
+    }
+}
+
+fn replacement_winner(
+    versions: Option<&BTreeMap<VersionIdentity, WeightedVersion>>,
+) -> Option<VersionRow> {
+    let versions = versions?;
+    versions
+        .values()
+        .filter(|version| version.weight > 0)
+        .max_by_key(|version| version.tx_id)
+        .map(|version| version.row.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use groove::ivm::RecordDelta;
+    use groove::records::{Value, ValueType};
+    use groove::schema::ColumnType;
+
+    use super::*;
+    use crate::ids::{NodeUuid, SchemaVersionAlias};
+    use crate::node::Error;
+    use crate::node::codec::{VersionRow, VersionRowParts};
+    use crate::protocol::ResultRowEntry;
+    use crate::schema::{ColumnSchema, TableSchema};
+    use crate::time::TxTime;
+    use crate::tx::DeletionEvent;
+
+    fn node(byte: u8) -> NodeUuid {
+        NodeUuid::from_bytes([byte; 16])
+    }
+
+    fn row(byte: u8) -> RowUuid {
+        RowUuid::from_bytes([byte; 16])
+    }
+
+    fn tx(byte: u8, time: u64) -> TxId {
+        TxId::new(TxTime(time), node(byte))
+    }
+
+    fn aliases() -> BTreeMap<NodeUuid, NodeAlias> {
+        BTreeMap::from([(node(1), NodeAlias(10)), (node(2), NodeAlias(20))])
+    }
+
+    /// Production-shaped typed relation facts retain branch identity through
+    /// decode, initial/reset installation, and ordinary removal.
+    #[test]
+    fn typed_branch_relation_edge_decodes_adds_and_removes_with_discriminator() {
+        use crate::node::query_engine::{ContentVersionFields, RowRefSchema};
+
+        let descriptor = RecordDescriptor::new([
+            ("source_table", ValueType::String),
+            ("source_row", ValueType::Uuid),
+            ("source_tx_time", ValueType::U64),
+            ("source_tx_node_id", ValueType::U64),
+            ("source_branch_or_prefix", ValueType::Uuid),
+            ("path", ValueType::String),
+            ("target_table", ValueType::String),
+            ("target_row", ValueType::Uuid),
+            ("target_tx_time", ValueType::U64),
+            ("target_tx_node_id", ValueType::U64),
+            ("target_branch_or_prefix", ValueType::Uuid),
+        ]);
+        let branch = uuid::Uuid::from_bytes([0xb1; 16]);
+        let raw = descriptor
+            .create(&[
+                Value::String("posts".to_owned()),
+                Value::Uuid(row(0xb2).0),
+                Value::U64(11),
+                Value::U64(10),
+                Value::Uuid(branch),
+                Value::String("author".to_owned()),
+                Value::String("users".to_owned()),
+                Value::Uuid(row(0xb3).0),
+                Value::U64(12),
+                Value::U64(10),
+                Value::Uuid(branch),
+            ])
+            .expect("encode typed branch relation edge");
+        let versioned = |prefix: &str| VersionedRowRefSchema {
+            row: RowRefSchema {
+                source_field: format!("{prefix}_source"),
+                table_field: format!("{prefix}_table"),
+                row_field: format!("{prefix}_row"),
+            },
+            version: Some(ResultMembershipVersionSchema::Content(
+                ContentVersionFields {
+                    tx_time_field: format!("{prefix}_tx_time"),
+                    tx_node_field: format!("{prefix}_tx_node_id"),
+                },
+            )),
+            branch_or_prefix_field: Some(format!("{prefix}_branch_or_prefix")),
+        };
+        let schema = RelationEdgeSchema {
+            source: versioned("source"),
+            path_field: "path".to_owned(),
+            target: versioned("target"),
+            kind_field: "kind".to_owned(),
+            depth_field: None,
+            edge_id_field: None,
+            branch_field: None,
+            role_field: None,
+            order_field: None,
+            hole_state_field: None,
+        };
+        let tables = BTreeMap::from([
+            (
+                "posts".to_owned(),
+                TableSchema::new("posts", [ColumnSchema::new("title", ColumnType::String)]),
+            ),
+            (
+                "users".to_owned(),
+                TableSchema::new("users", [ColumnSchema::new("name", ColumnType::String)]),
+            ),
+        ]);
+        let edge = decode_typed_relation_edge(
+            BorrowedRecord::new(&raw, &descriptor),
+            &schema,
+            &tables,
+            &aliases(),
+        )
+        .expect("decode production-shaped branch edge");
+        assert_eq!(
+            edge.target_version
+                .as_ref()
+                .and_then(|version| version.branch_or_prefix.as_deref()),
+            Some(branch.as_bytes().as_slice())
+        );
+
+        let fact = ProgramFactEntry::RelationEdge(edge);
+        let mut maintained = MaintainedSubscriptionView::default();
+        let reset = maintained
+            .apply_decoded_deltas(
+                [(
+                    DecodedMaintainedEvent::RelationEdge(match &fact {
+                        ProgramFactEntry::RelationEdge(edge) => edge.clone(),
+                        _ => unreachable!(),
+                    }),
+                    1,
+                )],
+                &aliases(),
+            )
+            .expect("install reset edge");
+        assert_eq!(reset.program_fact_adds, vec![fact.clone()]);
+        let remove = maintained
+            .apply_decoded_deltas(
+                [(
+                    DecodedMaintainedEvent::RelationEdge(match &fact {
+                        ProgramFactEntry::RelationEdge(edge) => edge.clone(),
+                        _ => unreachable!(),
+                    }),
+                    -1,
+                )],
+                &aliases(),
+            )
+            .expect("remove branch edge");
+        assert_eq!(remove.program_fact_removes, vec![fact]);
+    }
+
+    #[test]
+    fn terminal_layout_includes_nested_public_slots_and_excludes_hidden_routes() {
+        let descriptor = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            (
+                "user_title",
+                ValueType::Nullable(Box::new(ValueType::String)),
+            ),
+            (
+                "user___jazz_include_project",
+                ValueType::Nullable(Box::new(ValueType::String)),
+            ),
+            (
+                "__jazz_include_project",
+                ValueType::Array(Box::new(ValueType::Record(Box::new(
+                    RecordDescriptor::new([
+                        ("row_uuid", ValueType::Uuid),
+                        ("title", ValueType::String),
+                    ]),
+                )))),
+            ),
+            ("__route_org", ValueType::Uuid),
+        ]);
+        let rows = AppRowSchema {
+            descriptor: descriptor.clone(),
+            hidden_fields: BTreeSet::from(["__route_org".to_owned()]),
+            carrier: AppRowCarrier::Logical,
+            field_carriers: BTreeMap::from([
+                ("user_title".to_owned(), AppRowCarrier::CurrentRow),
+                (
+                    "user___jazz_include_project".to_owned(),
+                    AppRowCarrier::CurrentRow,
+                ),
+                ("__jazz_include_project".to_owned(), AppRowCarrier::Logical),
+            ]),
+            public_field_names: BTreeMap::from([
+                ("user_title".to_owned(), "title".to_owned()),
+                (
+                    "user___jazz_include_project".to_owned(),
+                    "__jazz_include_project".to_owned(),
+                ),
+                ("__jazz_include_project".to_owned(), "project".to_owned()),
+            ]),
+        };
+        let layout = terminal_root_layout(&rows);
+        assert_eq!(
+            layout.public_fields,
+            vec![
+                TerminalRootPublicField {
+                    name: "title".to_owned(),
+                    descriptor_field_name: "user_title".to_owned(),
+                    slot: 1,
+                    carrier: TerminalRootCarrier::CurrentRow,
+                },
+                TerminalRootPublicField {
+                    name: "__jazz_include_project".to_owned(),
+                    descriptor_field_name: "user___jazz_include_project".to_owned(),
+                    slot: 2,
+                    carrier: TerminalRootCarrier::CurrentRow,
+                },
+                TerminalRootPublicField {
+                    name: "project".to_owned(),
+                    descriptor_field_name: "__jazz_include_project".to_owned(),
+                    slot: 3,
+                    carrier: TerminalRootCarrier::Logical,
+                },
+            ]
+        );
+
+        let mut without_nested = rows;
+        without_nested
+            .hidden_fields
+            .insert("__jazz_include_project".to_owned());
+        assert_ne!(layout.id, terminal_root_layout(&without_nested).id);
+    }
+
+    fn layout(descriptor: RecordDescriptor) -> TerminalRootLayout {
+        TerminalRootLayout {
+            id: "test-layout".to_owned(),
+            root_key_slot: 0,
+            root_key_field_name: "row_uuid".to_owned(),
+            root_descriptor: descriptor,
+            public_fields: Vec::new(),
+            carrier: TerminalRootCarrier::Logical,
+        }
+    }
+
+    #[test]
+    fn terminal_operation_rebinds_tightened_root_field_to_prepared_nullable_layout() {
+        let source = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("user_child", ValueType::Uuid),
+        ]);
+        let target = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("user_child", ValueType::Nullable(Box::new(ValueType::Uuid))),
+        ]);
+        let row_uuid = row(0x71);
+        let raw = source
+            .create(&[Value::Uuid(row_uuid.0), Value::Uuid(row(0x72).0)])
+            .unwrap();
+        let operation = TerminalOperation {
+            root_descriptor: source,
+            root_key: row_uuid.0.as_bytes().to_vec(),
+            path: Vec::new(),
+            edit: TerminalEdit::Update {
+                key: row_uuid.0.as_bytes().to_vec(),
+                value: raw,
+            },
+        };
+
+        let rebound = rebind_terminal_operation_to_layout(&operation, &layout(target)).unwrap();
+        assert_eq!(rebound.root_descriptor, target);
+        let TerminalEdit::Update { value, .. } = rebound.edit else {
+            panic!("operation remains an update");
+        };
+        assert_eq!(
+            target.bind(&value).to_values().unwrap(),
+            vec![
+                Value::Uuid(row_uuid.0),
+                Value::Nullable(Some(Box::new(Value::Uuid(row(0x72).0)))),
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_operation_rebinds_nested_registry_only_record_layout() {
+        let source_metadata = RecordDescriptor::new([(
+            "status",
+            ValueType::EnumTag(
+                groove::records::ScalarEnumSchema::new("status", ["open"])
+                    .unwrap()
+                    .with_registry_id(11),
+            ),
+        )]);
+        let target_metadata = RecordDescriptor::new([(
+            "status",
+            ValueType::EnumTag(
+                groove::records::ScalarEnumSchema::new("status", ["open"])
+                    .unwrap()
+                    .with_registry_id(22),
+            ),
+        )]);
+        let source = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("metadata", ValueType::Record(Box::new(source_metadata))),
+        ]);
+        let target = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("metadata", ValueType::Record(Box::new(target_metadata))),
+        ]);
+        let row_uuid = row(0x71);
+        let raw = source
+            .create(&[
+                Value::Uuid(row_uuid.0),
+                Value::Record(OwnedRecord::new(
+                    source_metadata.create(&[Value::EnumTag(0)]).unwrap(),
+                    source_metadata,
+                )),
+            ])
+            .unwrap();
+        let operation = TerminalOperation {
+            root_descriptor: source,
+            root_key: row_uuid.0.as_bytes().to_vec(),
+            path: Vec::new(),
+            edit: TerminalEdit::Update {
+                key: row_uuid.0.as_bytes().to_vec(),
+                value: raw,
+            },
+        };
+
+        let rebound = rebind_terminal_operation_to_layout(&operation, &layout(target)).unwrap();
+        let TerminalEdit::Update { value, .. } = rebound.edit else {
+            panic!("operation remains an update");
+        };
+        let values = target.bind(&value).to_values().unwrap();
+        let Value::Record(metadata) = &values[1] else {
+            panic!("nested metadata remains a record");
+        };
+        assert_eq!(metadata.descriptor(), &target_metadata);
+        assert_eq!(metadata.to_values().unwrap(), vec![Value::EnumTag(0)]);
+    }
+
+    #[test]
+    fn terminal_operation_rebind_rejects_unrelated_prepared_field() {
+        let source = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("user_child", ValueType::Uuid),
+        ]);
+        let target = RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("user_other", ValueType::Nullable(Box::new(ValueType::Uuid))),
+        ]);
+        let row_uuid = row(0x71);
+        let operation = TerminalOperation {
+            root_descriptor: source,
+            root_key: row_uuid.0.as_bytes().to_vec(),
+            path: Vec::new(),
+            edit: TerminalEdit::Remove {
+                key: row_uuid.0.as_bytes().to_vec(),
+            },
+        };
+
+        assert!(matches!(
+            rebind_terminal_operation_to_layout(&operation, &layout(target)),
+            Err(Error::InvalidStoredValue(
+                "structured terminal operation descriptor disagrees with prepared root layout"
+            ))
+        ));
+    }
+
+    fn witness_schema() -> VersionWitnessSchema {
+        VersionWitnessSchema {
+            descriptor: RecordDescriptor::new(std::iter::empty::<(String, ValueType)>()),
+            identity: crate::node::query_engine::VersionIdentityFields {
+                table_field: "table".to_owned(),
+                row_field: "row_uuid".to_owned(),
+                tx_time_field: "tx_time".to_owned(),
+                tx_node_field: "tx_node_id".to_owned(),
+                batch_id_field: None,
+                branch_or_prefix_field: None,
+                row_digest_field: None,
+                schema_field: "schema_version".to_owned(),
+                layer_field: "layer".to_owned(),
+            },
+            created_by_field: "created_by".to_owned(),
+            created_at_field: "created_at".to_owned(),
+            updated_by_field: "updated_by".to_owned(),
+            updated_at_field: "updated_at".to_owned(),
+            parents_field: "parents".to_owned(),
+            authored_columns_field: "authored_columns".to_owned(),
+            deletion_field: "_deletion".to_owned(),
+            user_fields: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn deletion_witnesses_force_authoritative_membership_reconciliation() {
+        assert!(
+            MaintainedTerminalKind::VersionDeletion(witness_schema())
+                .requires_authoritative_membership_reconcile()
+        );
+        assert!(
+            MaintainedTerminalKind::ReplacementDeletion(witness_schema())
+                .requires_authoritative_membership_reconcile()
+        );
+        assert!(
+            !MaintainedTerminalKind::VersionContent(witness_schema())
+                .requires_authoritative_membership_reconcile()
+        );
+    }
+
+    fn table() -> TableSchema {
+        TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)])
+    }
+
+    fn version(row_uuid: RowUuid, time: u64, title: &str) -> VersionRow {
+        VersionRow::from_parts_with_schema_version(
+            &table(),
+            VersionRowParts {
+                table: "todos".to_owned(),
+                branch_key: BranchKey::default(),
+                row_uuid,
+                tx_node_alias: NodeAlias(10),
+                schema_version_alias: SchemaVersionAlias(0),
+                tx_time: TxTime(time),
+                parents: Vec::new(),
+                created_by: AuthorId::SYSTEM,
+                created_at: TxTime(time),
+                updated_by: AuthorId::SYSTEM,
+                updated_at: TxTime(time),
+                cells: BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+                authored_columns: Some(BTreeSet::from(["title".to_owned()])),
+                deletion: None,
+            },
+            None,
+        )
+        .unwrap()
+    }
+
+    fn deletion(row_uuid: RowUuid, time: u64) -> VersionRow {
+        VersionRow::from_parts_with_schema_version(
+            &table(),
+            VersionRowParts {
+                table: "todos".to_owned(),
+                branch_key: BranchKey::default(),
+                row_uuid,
+                tx_node_alias: NodeAlias(10),
+                schema_version_alias: SchemaVersionAlias(0),
+                tx_time: TxTime(time),
+                parents: Vec::new(),
+                created_by: AuthorId::SYSTEM,
+                created_at: TxTime(time),
+                updated_by: AuthorId::SYSTEM,
+                updated_at: TxTime(time),
+                cells: BTreeMap::new(),
+                authored_columns: None,
+                deletion: Some(DeletionEvent::Deleted),
+            },
+            None,
+        )
+        .unwrap()
+    }
+
+    fn result(row_uuid: RowUuid, time: u64) -> ResultRowEntry {
+        ("todos".to_owned().into(), row_uuid, tx(1, time))
+    }
+
+    fn result_current(member: ResultMemberEntry) -> DecodedMaintainedEvent {
+        DecodedMaintainedEvent::ResultCurrent {
+            payload: ResultMemberPayloadEntry {
+                member: member.clone(),
+                descriptor: Vec::new(),
+                record: Vec::new(),
+            },
+            member,
+        }
+    }
+
+    #[test]
+    fn result_single_enter_then_leave_emits_add_then_remove() {
+        let aliases = aliases();
+        let entry = result(row(1), 10);
+        let member = ResultMemberEntry::from(entry);
+        let mut maintained = MaintainedSubscriptionView::default();
+
+        let first = maintained
+            .apply_decoded_deltas([(result_current(member.clone()), 1)], &aliases)
+            .unwrap();
+        assert_eq!(first.adds, vec![member.clone()]);
+        assert!(first.removes.is_empty());
+
+        let second = maintained
+            .apply_decoded_deltas([(result_current(member.clone()), -1)], &aliases)
+            .unwrap();
+        assert!(second.adds.is_empty());
+        assert_eq!(second.removes, vec![member]);
+        assert!(maintained.result_weights.is_empty());
+    }
+
+    #[test]
+    fn typed_union_terminal_removes_one_arm_and_rehydrates_the_other() {
+        let descriptor = RecordDescriptor::new([
+            ("table", groove::records::ValueType::String),
+            ("row_uuid", groove::records::ValueType::Uuid),
+            ("joined_uuid", groove::records::ValueType::Uuid),
+            ("union_arm", groove::records::ValueType::String),
+            ("tx_time", groove::records::ValueType::U64),
+            ("tx_node", groove::records::ValueType::U64),
+        ]);
+        let schema = ResultMembershipSchema {
+            table_field: "table".to_owned(),
+            row_field: "row_uuid".to_owned(),
+            occurrence_id_fields: vec!["row_uuid".to_owned(), "joined_uuid".to_owned()],
+            occurrence_union_arm_fields: BTreeMap::from([(0, "union_arm".to_owned())]),
+            payload_fields: Vec::new(),
+            branch_or_prefix_field: None,
+            version: ResultMembershipVersionSchema::Content(
+                super::super::query_engine::ContentVersionFields {
+                    tx_time_field: "tx_time".to_owned(),
+                    tx_node_field: "tx_node".to_owned(),
+                },
+            ),
+            settle_position_field: None,
+            routing_param_fields: BTreeSet::new(),
+        };
+        let schemas = MaintainedTerminalSchemas {
+            sinks: BTreeMap::from([(
+                "maintained.result_current".to_owned(),
+                MaintainedTerminalKind::ResultCurrent(schema),
+            )]),
+        };
+        let tables = BTreeMap::from([("todos".to_owned(), table())]);
+        let encoded = |label: &str, weight| RecordDeltas {
+            descriptor: descriptor.clone(),
+            deltas: vec![RecordDelta {
+                record: descriptor
+                    .create(&[
+                        Value::String("todos".to_owned()),
+                        Value::Uuid(row(1).0),
+                        Value::Uuid(row(2).0),
+                        Value::String(label.to_owned()),
+                        Value::U64(10),
+                        Value::U64(10),
+                    ])
+                    .unwrap()
+                    .into(),
+                weight,
+            }],
+        };
+        let mut maintained = MaintainedSubscriptionView::default();
+        let direct = maintained
+            .apply_typed_deltas(
+                "maintained.result_current",
+                &encoded("direct", 1),
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap()
+            .adds
+            .pop()
+            .unwrap();
+        let inherited = maintained
+            .apply_typed_deltas(
+                "maintained.result_current",
+                &encoded("inherited", 1),
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap()
+            .adds
+            .pop()
+            .unwrap();
+        assert_ne!(
+            direct.output_occurrence_id(),
+            inherited.output_occurrence_id()
+        );
+
+        let removed = maintained
+            .apply_typed_deltas(
+                "maintained.result_current",
+                &encoded("direct", -1),
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap();
+        assert_eq!(removed.removes, [direct]);
+        assert_eq!(maintained.result_weights.get(&inherited), Some(&1));
+
+        let mut reopened = MaintainedSubscriptionView::default();
+        let rehydrated = reopened
+            .apply_typed_deltas(
+                "maintained.result_current",
+                &encoded("inherited", 1),
+                &schemas,
+                &tables,
+                &aliases(),
+            )
+            .unwrap();
+        assert_eq!(rehydrated.adds, std::slice::from_ref(&inherited));
+        assert_eq!(reopened.result_weights.get(&inherited), Some(&1));
+    }
+
+    #[test]
+    fn result_non_consolidated_drain_nets_to_one_add() {
+        let aliases = aliases();
+        let entry = result(row(1), 10);
+        let member = ResultMemberEntry::from(entry);
+        let mut maintained = MaintainedSubscriptionView::default();
+
+        let transitions = maintained
+            .apply_decoded_deltas(
+                [
+                    (result_current(member.clone()), 1),
+                    (result_current(member.clone()), 1),
+                    (result_current(member.clone()), -1),
+                ],
+                &aliases,
+            )
+            .unwrap();
+
+        assert_eq!(transitions.adds, vec![member.clone()]);
+        assert!(transitions.removes.is_empty());
+        assert_eq!(maintained.result_weights.get(&member), Some(&1));
+    }
+
+    #[test]
+    fn result_weight_magnitude_greater_than_one_tracks_active_membership() {
+        let aliases = aliases();
+        let entry = result(row(1), 10);
+        let member = ResultMemberEntry::from(entry);
+        let mut maintained = MaintainedSubscriptionView::default();
+
+        let active = maintained
+            .apply_decoded_deltas([(result_current(member.clone()), 2)], &aliases)
+            .unwrap();
+        assert_eq!(active.adds, vec![member.clone()]);
+        assert!(active.removes.is_empty());
+
+        let inactive = maintained
+            .apply_decoded_deltas([(result_current(member.clone()), -2)], &aliases)
+            .unwrap();
+        assert!(inactive.adds.is_empty());
+        assert_eq!(inactive.removes, vec![member]);
+        assert!(maintained.result_weights.is_empty());
+    }
+
+    #[test]
+    fn versions_by_tx_contains_distinct_identities_sorted_and_prunes_retracted_one() {
+        let aliases = aliases();
+        let tx_id = tx(1, 10);
+        let row_b = row(2);
+        let row_a = row(1);
+        let version_b = version(row_b, 10, "b");
+        let version_a = version(row_a, 10, "a");
+        let mut maintained = MaintainedSubscriptionView::default();
+
+        maintained
+            .apply_decoded_deltas(
+                [
+                    (DecodedMaintainedEvent::VersionContent(version_b.clone()), 1),
+                    (DecodedMaintainedEvent::VersionContent(version_a.clone()), 1),
+                ],
+                &aliases,
+            )
+            .unwrap();
+
+        let versions = maintained.versions_by_tx(tx_id);
+        assert_eq!(versions, vec![version_a.clone(), version_b]);
+        let ordering = versions
+            .iter()
+            .map(|version| {
+                (
+                    version.table().to_owned(),
+                    version.row_uuid(),
+                    version.layer(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ordering,
+            vec![
+                ("todos".to_owned(), row_a, VersionLayer::Content),
+                ("todos".to_owned(), row_b, VersionLayer::Content),
+            ]
+        );
+
+        maintained
+            .apply_decoded_deltas(
+                [(
+                    DecodedMaintainedEvent::VersionContent(version_a.clone()),
+                    -1,
+                )],
+                &aliases,
+            )
+            .unwrap();
+        assert_eq!(
+            maintained.versions_by_tx(tx_id),
+            vec![version(row_b, 10, "b")]
+        );
+    }
+
+    #[test]
+    fn replacement_winner_change_leaves_one_active_winner() {
+        let aliases = aliases();
+        let row_uuid = row(1);
+        let old = version(row_uuid, 10, "old");
+        let new = version(row_uuid, 11, "new");
+        let deletion = deletion(row_uuid, 12);
+        let mut maintained = MaintainedSubscriptionView::default();
+
+        maintained
+            .apply_decoded_deltas(
+                [(DecodedMaintainedEvent::ReplacementContent(old.clone()), 1)],
+                &aliases,
+            )
+            .unwrap();
+        assert_eq!(
+            maintained.replacement_for("todos", row_uuid).0,
+            Some(old.clone())
+        );
+
+        maintained
+            .apply_decoded_deltas(
+                [
+                    (DecodedMaintainedEvent::ReplacementContent(old), -1),
+                    (DecodedMaintainedEvent::ReplacementContent(new.clone()), 1),
+                ],
+                &aliases,
+            )
+            .unwrap();
+        assert_eq!(
+            maintained.replacement_for("todos", row_uuid),
+            (Some(new), None)
+        );
+
+        maintained
+            .apply_decoded_deltas(
+                [(
+                    DecodedMaintainedEvent::ReplacementDeletion(deletion.clone()),
+                    1,
+                )],
+                &aliases,
+            )
+            .unwrap();
+        assert_eq!(
+            maintained.replacement_for("todos", row_uuid),
+            (Some(version(row_uuid, 11, "new")), Some(deletion))
+        );
+    }
+
+    #[test]
+    fn version_identity_retraction_removes_from_by_tx_and_prunes_tx_entry() {
+        let aliases = aliases();
+        let tx_id = tx(1, 10);
+        let version = deletion(row(1), 10);
+        let mut maintained = MaintainedSubscriptionView::default();
+
+        maintained
+            .apply_decoded_deltas(
+                [(DecodedMaintainedEvent::VersionDeletion(version.clone()), 1)],
+                &aliases,
+            )
+            .unwrap();
+        assert_eq!(maintained.versions_by_tx(tx_id), vec![version.clone()]);
+
+        maintained
+            .apply_decoded_deltas(
+                [(DecodedMaintainedEvent::VersionDeletion(version), -1)],
+                &aliases,
+            )
+            .unwrap();
+        assert!(maintained.versions_by_tx(tx_id).is_empty());
+        assert!(!maintained.versions.by_tx.contains_key(&tx_id));
+    }
+}

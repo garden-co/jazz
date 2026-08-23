@@ -1,0 +1,410 @@
+import { httpUrlToWs } from "../url.js";
+import { mapAuthReason } from "../auth-state.js";
+import type { AuthFailureReason } from "../auth-state.js";
+import { isUsableSubject } from "../author-id.js";
+import { PostcardReader, PostcardWriter } from "./native-codec.js";
+
+export type WebSocketFrameHandler = (frame: Uint8Array) => void;
+export type WebSocketErrorHandler = (error: WireError) => void;
+
+export type WireError = {
+  code: string;
+  retry: string;
+  message: string;
+};
+
+export type WebSocketNegotiation = {
+  protocolVersion: number;
+  features: number;
+  authority?: { node: Uint8Array; epoch: bigint };
+};
+
+export type WebSocketCarrierOptions = {
+  endpointUrl: string;
+  peerIdentity: Uint8Array;
+  authJson?: string;
+  onFrame: WebSocketFrameHandler;
+  onError?: WebSocketErrorHandler;
+  WebSocket?: WebSocketConstructor;
+};
+
+export type WebSocketConstructor = new (url: string) => BrowserWebSocket;
+
+export type BrowserWebSocket = {
+  binaryType: "arraybuffer" | "blob";
+  readonly readyState: number;
+  send(data: Uint8Array | string): void;
+  close(): void;
+  addEventListener(type: "open", listener: () => void): void;
+  addEventListener(type: "message", listener: (event: { data: unknown }) => void): void;
+  addEventListener(type: "error", listener: (event: unknown) => void): void;
+  addEventListener(
+    type: "close",
+    listener: (event: { code: number; reason: string }) => void,
+  ): void;
+};
+
+export const WIRE_PROTOCOL_VERSION = 11;
+export const MIN_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
+export const MAX_WIRE_PROTOCOL_VERSION = WIRE_PROTOCOL_VERSION;
+export const FEATURE_SYNC_MESSAGE_PAYLOAD = 1 << 0;
+export const FEATURE_STRUCTURED_ERRORS = 1 << 2;
+export const FEATURE_PAYLOAD_ZSTD = 1 << 4;
+export const FEATURE_MESSAGE_FRAGMENTATION = 1 << 5;
+export const FEATURE_AUTHORIZATION_SCOPE_RECEIPTS = 1 << 6;
+export const FEATURE_AUTHORIZATION_SCOPE_VIEWS = 1 << 7;
+export const CLIENT_WIRE_FEATURES =
+  FEATURE_SYNC_MESSAGE_PAYLOAD |
+  FEATURE_STRUCTURED_ERRORS |
+  FEATURE_PAYLOAD_ZSTD |
+  FEATURE_MESSAGE_FRAGMENTATION |
+  FEATURE_AUTHORIZATION_SCOPE_RECEIPTS |
+  FEATURE_AUTHORIZATION_SCOPE_VIEWS;
+
+// The server route accepts WebSocket messages up to one MiB. Reserve enough
+// postcard framing bytes that a burst of otherwise-valid wire frames remains
+// a valid WebSocket message.
+const MAX_WEBSOCKET_BATCH_BYTES = 1 << 20;
+const POSTCARD_FRAME_LENGTH_RESERVE = 5;
+const POSTCARD_BATCH_LENGTH_RESERVE = 5;
+
+export function webSocketUrl(serverUrl: string, appId: string): string {
+  return httpUrlToWs(serverUrl, appId);
+}
+
+export function encodeWebSocketFrameBatch(frames: readonly Uint8Array[]): Uint8Array {
+  const writer = new PostcardWriter();
+  writer.vec((itemWriter, index) => itemWriter.bytes(frames[index]!), frames.length);
+  return writer.finish();
+}
+
+export function decodeWebSocketFrameBatch(batch: Uint8Array): Uint8Array[] {
+  const reader = new PostcardReader(batch);
+  return reader.readVec((itemReader) => itemReader.bytes());
+}
+
+export function encodeWireClientHello(): Uint8Array {
+  const writer = new PostcardWriter();
+  writer.u64(0); // WireFrame::Hello
+  writer.u64(MIN_WIRE_PROTOCOL_VERSION); // min_protocol_version
+  writer.u64(MAX_WIRE_PROTOCOL_VERSION); // max_protocol_version
+  writer.u64(CLIENT_WIRE_FEATURES);
+  writer.u64(0); // WirePeerRole::Client
+  // Browser carriers do not receive the authenticated session context needed
+  // to validate scoped receipts. Do not self-assert an authority endpoint:
+  // preserve ordinary sync and let the server fail closed for scoped features.
+  writer.none(); // WireHello::authority
+  return writer.finish();
+}
+
+export function isWireHello(frame: Uint8Array): boolean {
+  return new PostcardReader(frame).u64() === 0;
+}
+
+export function isWireMessage(frame: Uint8Array): boolean {
+  return new PostcardReader(frame).u64() === 1;
+}
+
+export function isWireError(frame: Uint8Array): boolean {
+  return new PostcardReader(frame).u64() === 2;
+}
+
+export function decodeWireError(frame: Uint8Array): WireError {
+  const reader = new PostcardReader(frame);
+  const tag = reader.u64();
+  if (tag !== 2) throw new Error(`expected WireFrame::Error, got tag ${tag}`);
+  return {
+    code: wireErrorCodeName(reader.u64()),
+    retry: wireRetryName(reader.u64()),
+    message: reader.string(),
+  };
+}
+
+export function wireAuthFailureReason(error: WireError): AuthFailureReason | null {
+  if (error.code !== "auth_failed") return null;
+  return mapAuthReason(error.message);
+}
+
+export class WebSocketCarrier {
+  readonly url: string;
+  private readonly socket: BrowserWebSocket;
+  private readonly onFrame: WebSocketFrameHandler;
+  private readonly onError?: WebSocketErrorHandler;
+  private readonly opened: Promise<WebSocketNegotiation>;
+  private resolveNegotiation!: (value: WebSocketNegotiation) => void;
+  private rejectNegotiation!: (reason: unknown) => void;
+  private negotiated = false;
+  private closing = false;
+
+  constructor(options: WebSocketCarrierOptions) {
+    const WebSocketCtor = options.WebSocket ?? browserWebSocketConstructor();
+    this.url = options.endpointUrl;
+    this.onFrame = options.onFrame;
+    this.onError = options.onError;
+    this.socket = new WebSocketCtor(this.url);
+    this.socket.binaryType = "arraybuffer";
+    this.opened = new Promise<WebSocketNegotiation>((resolve, reject) => {
+      this.resolveNegotiation = resolve;
+      this.rejectNegotiation = reject;
+    });
+    void waitForOpen(this.socket).then(
+      () => {
+        this.socket.send(encodeWebSocketPrelude(options.authJson ?? "{}", options.peerIdentity));
+        this.socket.send(encodeWebSocketFrameBatch([encodeWireClientHello()]));
+      },
+      (error) => this.rejectNegotiation(error),
+    );
+    this.socket.addEventListener("message", (event) => {
+      void this.handleMessage(event.data).catch((error) => {
+        this.rejectNegotiation(error);
+        this.close();
+      });
+    });
+    this.socket.addEventListener("error", () => {
+      if (this.closing) return;
+      this.rejectNegotiation(new Error("websocket transport error"));
+      this.onError?.({
+        code: "websocket_error",
+        retry: "later",
+        message: "websocket transport error",
+      });
+    });
+    this.socket.addEventListener("close", (event) => {
+      if (this.closing) return;
+      this.rejectNegotiation(new Error("websocket transport closed during negotiation"));
+      const close = websocketCloseDetails(event);
+      this.onError?.({
+        code: "websocket_closed",
+        retry: "later",
+        message: `websocket closed (code=${close.code ?? "unknown"}, reason=${close.reason ?? "none"})`,
+      });
+    });
+  }
+
+  async send(frame: Uint8Array): Promise<void> {
+    await this.sendBatch([frame]);
+  }
+
+  async sendBatch(frames: readonly Uint8Array[]): Promise<void> {
+    await this.ready();
+    let batch: Uint8Array[] = [];
+    let batchBytes = POSTCARD_BATCH_LENGTH_RESERVE;
+    for (const frame of frames) {
+      const frameBytes = frame.byteLength + POSTCARD_FRAME_LENGTH_RESERVE;
+      if (batch.length > 0 && batchBytes + frameBytes > MAX_WEBSOCKET_BATCH_BYTES) {
+        this.socket.send(encodeWebSocketFrameBatch(batch));
+        batch = [];
+        batchBytes = POSTCARD_BATCH_LENGTH_RESERVE;
+      }
+      batch.push(frame);
+      batchBytes += frameBytes;
+    }
+    if (batch.length > 0) {
+      this.socket.send(encodeWebSocketFrameBatch(batch));
+    }
+  }
+
+  ready(): Promise<WebSocketNegotiation> {
+    return this.opened;
+  }
+
+  close(): void {
+    if (this.closing) return;
+    this.closing = true;
+    try {
+      this.socket.close();
+    } catch {
+      // Node's undici WebSocket can throw while already closing; intentional
+      // shutdown should not be reported as a transport failure.
+    }
+  }
+
+  private async handleMessage(data: unknown): Promise<void> {
+    for (const frame of decodeWebSocketFrameBatch(await bytesFromWebSocketMessage(data))) {
+      if (this.closing) return;
+      if (isWireHello(frame)) {
+        if (this.negotiated) continue;
+        this.negotiated = true;
+        this.resolveNegotiation(decodeServerHello(frame));
+        continue;
+      }
+      if (!this.negotiated) {
+        if (isWireError(frame)) {
+          const error = decodeWireError(frame);
+          if (wireAuthFailureReason(error)) {
+            this.onError?.(error);
+            this.rejectNegotiation(
+              new Error("websocket authentication failed before server hello"),
+            );
+            this.close();
+            return;
+          }
+        }
+        this.rejectNegotiation(new Error("websocket received semantic frame before server hello"));
+        this.close();
+        return;
+      }
+      if (isWireError(frame)) {
+        this.onError?.(decodeWireError(frame));
+        continue;
+      }
+      this.onFrame(frame);
+    }
+  }
+}
+
+function decodeServerHello(frame: Uint8Array): WebSocketNegotiation {
+  const reader = new PostcardReader(frame);
+  if (reader.u64() !== 0) throw new Error("expected WireFrame::Hello");
+  const min = reader.u64();
+  const max = reader.u64();
+  if (min > WIRE_PROTOCOL_VERSION || max < WIRE_PROTOCOL_VERSION) {
+    throw new Error(`server does not support wire protocol ${WIRE_PROTOCOL_VERSION}`);
+  }
+  const features = reader.u64();
+  if (features & ~CLIENT_WIRE_FEATURES) {
+    throw new Error(`server accepted unsupported wire features 0x${features.toString(16)}`);
+  }
+  if (reader.u64() !== 1) throw new Error("expected WirePeerRole::Core server hello");
+  const authority = reader.option((value) => ({
+    node: value.bytes(false),
+    epoch: value.u64BigInt(),
+  }));
+  return { protocolVersion: WIRE_PROTOCOL_VERSION, features, authority };
+}
+
+function websocketCloseDetails(event: unknown): { code?: number; reason?: string } {
+  if (!event || typeof event !== "object") return {};
+  const close = event as { code?: unknown; reason?: unknown };
+  return {
+    code: typeof close.code === "number" ? close.code : undefined,
+    reason: typeof close.reason === "string" ? close.reason : undefined,
+  };
+}
+
+export function encodeWebSocketPrelude(authJson: string, peerIdentity: Uint8Array): string {
+  const auth = JSON.parse(authJson) as Record<string, unknown>;
+  const sub = authSub(auth) ?? bytesToHex(peerIdentity);
+  return JSON.stringify({
+    peer_identity: bytesToHex(peerIdentity),
+    ...auth,
+    auth: { ...auth, sub },
+    sub,
+  });
+}
+
+export async function connectWebSocketCarrier(
+  options: WebSocketCarrierOptions,
+): Promise<WebSocketCarrier> {
+  const carrier = new WebSocketCarrier(options);
+  await carrier.ready();
+  return carrier;
+}
+
+export async function bytesFromWebSocketMessage(data: unknown): Promise<Uint8Array> {
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (ArrayBuffer.isView(data)) {
+    return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  }
+  if (typeof Blob !== "undefined" && data instanceof Blob) {
+    return new Uint8Array(await data.arrayBuffer());
+  }
+  throw new Error(`expected binary websocket message, got ${typeof data}`);
+}
+
+function browserWebSocketConstructor(): WebSocketConstructor {
+  const candidate = (globalThis as { WebSocket?: WebSocketConstructor }).WebSocket;
+  if (!candidate) {
+    throw new Error("browser WebSocket is not available");
+  }
+  return candidate;
+}
+
+function wireErrorCodeName(tag: number): string {
+  switch (tag) {
+    case 0:
+      return "unsupported_protocol_version";
+    case 1:
+      return "unsupported_feature";
+    case 2:
+      return "malformed_frame";
+    case 3:
+      return "auth_failed";
+    case 4:
+      return "backpressure";
+    case 5:
+      return "internal";
+    default:
+      return `unknown_${tag}`;
+  }
+}
+
+function wireRetryName(tag: number): string {
+  switch (tag) {
+    case 0:
+      return "never";
+    case 1:
+      return "after_auth";
+    case 2:
+      return "after_resume";
+    case 3:
+      return "later";
+    default:
+      return `unknown_${tag}`;
+  }
+}
+
+function waitForOpen(socket: BrowserWebSocket): Promise<void> {
+  if (socket.readyState === 1) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const settle = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      callback();
+    };
+    socket.addEventListener("open", () => settle(resolve));
+    socket.addEventListener("error", (event) => settle(() => reject(event)));
+    socket.addEventListener("close", () =>
+      settle(() => reject(new Error("websocket closed before open"))),
+    );
+  });
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function authSub(auth: Record<string, unknown>): string | null {
+  const directSub = auth.sub;
+  if (typeof directSub === "string" && isUsableSubject(directSub)) return directSub;
+  const jwtToken = auth.jwt_token;
+  if (typeof jwtToken === "string") {
+    const jwtSub = jwtSubject(jwtToken);
+    if (jwtSub) return jwtSub;
+  }
+  const session = auth.backend_session;
+  if (session && typeof session === "object") {
+    const userId = (session as { user_id?: unknown }).user_id;
+    if (typeof userId === "string" && isUsableSubject(userId)) return userId;
+  }
+  return null;
+}
+
+function jwtSubject(jwtToken: string): string | null {
+  const parts = jwtToken.split(".");
+  if (parts.length < 2) return null;
+  try {
+    const payload = JSON.parse(base64UrlDecode(parts[1]!)) as { sub?: unknown };
+    return typeof payload.sub === "string" && isUsableSubject(payload.sub) ? payload.sub : null;
+  } catch {
+    return null;
+  }
+}
+
+function base64UrlDecode(value: string): string {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+  if (typeof atob === "function") return atob(padded);
+  return Buffer.from(padded, "base64").toString("binary");
+}

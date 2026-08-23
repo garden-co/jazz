@@ -1,5 +1,4 @@
-import type { DbConfig } from "./runtime/db.js";
-import { resolveClientSessionSync } from "./runtime/client-session.js";
+import { resolveDefaultPersistentDbName, type DbConfig } from "./runtime/db.js";
 
 type WindowJazzStorageDb = {
   getConfig(): DbConfig;
@@ -17,7 +16,7 @@ export interface WindowJazzClientApi {
   listLiveStorageNamespaces(): string[];
   /**
    * Shut down live Jazz client storage contexts and await full cleanup
-   * (worker termination, OPFS lock release).  Pass a namespace to target
+   * (runtime teardown and pending IndexedDB persistence). Pass a namespace to target
    * one context; with no argument, shuts down every live context.
    *
    * Resolves once all targets have completed shutdown.  Db.shutdown is
@@ -40,25 +39,7 @@ function resolveStorageNamespace(config: DbConfig): string | null {
     return null;
   }
 
-  const explicitDbName = driver.dbName?.trim() || config.dbName?.trim();
-  if (explicitDbName) {
-    return explicitDbName;
-  }
-
-  // Mirror resolveDefaultPersistentDbName exactly (including the anonymous
-  // check) so the window storage API lists the namespace the client
-  // actually persists under.
-  const session = resolveClientSessionSync({
-    appId: config.appId,
-    jwtToken: config.jwtToken,
-    cookieSession: config.cookieSession,
-  });
-
-  if (!session?.user_id || session.authMode === "anonymous") {
-    return config.appId;
-  }
-
-  return `${config.appId}::${encodeURIComponent(session.user_id)}`;
+  return resolveDefaultPersistentDbName(config);
 }
 
 function getLiveStorageContexts(currentWindow: Window): Set<LiveStorageContext> {

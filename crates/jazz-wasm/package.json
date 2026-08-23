@@ -14,6 +14,8 @@
     "url": "https://github.com/garden-co/jazz"
   },
   "files": [
+    "wasm-url.js",
+    "wasm-url.d.ts",
     "pkg/jazz_wasm_bg.wasm",
     "pkg/jazz_wasm.js",
     "pkg/jazz_wasm.d.ts"
@@ -26,7 +28,8 @@
     "tag": "alpha"
   },
   "scripts": {
-    "build": "wasm-pack build --target web --release",
-    "build:profiling": "wasm-pack build --target web --profiling"
+    "build": "node ../../dev/artifacts/build.mjs wasm release",
+    "build:fast": "node ../../dev/artifacts/build.mjs wasm fast",
+    "build:profiling": "node ../../dev/artifacts/build.mjs wasm profiling"
   }
 }

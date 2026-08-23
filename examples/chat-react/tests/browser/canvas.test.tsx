@@ -8,7 +8,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID } from "./test-constants.js";
+import { TEST_SERVER_URL, APP_ID, testSecret } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
@@ -197,12 +197,13 @@ describe("Canvas E2E", () => {
   // -------------------------------------------------------------------------
 
   it("draws collaboratively between two sessions", async () => {
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const serverUrl = TEST_SERVER_URL;
 
     // --- User A: create a canvas -------------------------------------------
     const aliceContainer = await mountApp({
       appId: APP_ID,
       serverUrl,
+      secret: await testSecret(`canvas-user-a-${Date.now()}`),
     });
 
     await waitFor(
@@ -258,6 +259,7 @@ describe("Canvas E2E", () => {
     const bobContainer = await mountApp({
       appId: APP_ID,
       serverUrl,
+      secret: await testSecret(`canvas-user-b-${Date.now()}`),
     });
 
     // User B should see the canvas

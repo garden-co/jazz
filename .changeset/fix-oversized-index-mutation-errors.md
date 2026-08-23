@@ -2,7 +2,6 @@
 "jazz-tools": patch
 "jazz-napi": patch
 "jazz-wasm": patch
-"jazz-rn": patch
 ---
 
 Fail indexed writes cleanly when an indexed value would exceed the storage key limit instead of panicking in native storage.

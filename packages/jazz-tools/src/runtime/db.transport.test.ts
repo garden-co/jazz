@@ -1,29 +1,35 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { schema as s } from "../index.js";
-import { JazzClient, WriteResult, type DirectInsertResult } from "./client.js";
-import { createDbWithRuntimeModule, Db, type DbConfig } from "./db.js";
 import {
-  DbRuntimeModule,
-  type DbRuntimeClientContext,
+  JazzClient,
+  WriteResult,
+  type BatchId,
+  type InsertResult,
+  type Runtime,
+} from "./client.js";
+import { createDbWithRuntimeSource, Db, type DbConfig } from "./db.js";
+import {
+  RuntimeSource,
+  type RuntimeClientContext,
   type RuntimeTokenOptions,
-} from "./db-runtime-module.js";
+} from "./runtime-source.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 class TestDb extends Db {
-  static readonly runtime = { WasmRuntime: class {} };
+  static readonly runtime = { TestRuntime: class {} };
 
-  constructor(
-    config: DbConfig,
-    runtimeModule: DbRuntimeModule<DbConfig> = new TestDirectRuntimeModule(),
-  ) {
-    super(config, runtimeModule);
+  constructor(config: DbConfig, runtimeSource: RuntimeSource<DbConfig> = new TestRuntimeSource()) {
+    super(config, runtimeSource);
   }
   public exposeGetClient(schema: WasmSchema): JazzClient {
     return this.getClient(schema);
   }
+  public exposeEnsureReady(): Promise<void> {
+    return this.ensureReady();
+  }
 }
 
-class TestDirectRuntimeModule extends DbRuntimeModule<DbConfig> {
+class TestRuntimeSource extends RuntimeSource<DbConfig> {
   protected override async loadRuntime(): Promise<typeof TestDb.runtime> {
     return TestDb.runtime;
   }
@@ -31,29 +37,24 @@ class TestDirectRuntimeModule extends DbRuntimeModule<DbConfig> {
   override createClient({
     config,
     schema,
-    hasWorker,
-    useBinaryEncoding,
     onAuthFailure,
-  }: DbRuntimeClientContext<DbConfig>): JazzClient {
-    return JazzClient.connectSync(
-      TestDb.runtime as never,
+  }: RuntimeClientContext<DbConfig>): JazzClient {
+    return JazzClient.connectWithRuntime(
+      makeRuntimeStub(),
       {
         appId: config.appId,
         schema,
         driver: config.driver,
-        serverUrl: hasWorker ? undefined : config.serverUrl,
+        serverUrl: config.serverUrl,
         env: config.env,
-        userBranch: config.userBranch,
         jwtToken: config.jwtToken,
         cookieSession: config.cookieSession,
         adminSecret: config.adminSecret,
-        tier: hasWorker ? undefined : "local",
-        defaultDurabilityTier: hasWorker ? undefined : config.serverUrl ? "edge" : undefined,
+        tier: "local",
+        defaultDurabilityTier: config.serverUrl ? "edge" : undefined,
       },
       {
-        useBinaryEncoding,
         onAuthFailure,
-        nonDurableClientRuntime: hasWorker,
       },
     );
   }
@@ -90,14 +91,41 @@ function makeClientStub() {
     shutdown: vi.fn(async () => undefined),
     updateAuthToken: vi.fn(),
     connectTransport: vi.fn(),
+    disconnectTransport: vi.fn(async () => undefined),
     getRuntime: vi.fn(() => ({}) as never),
-    onMutationError: vi.fn(() => () => undefined),
+    onMutationError: vi.fn(),
   } as unknown as JazzClient & {
     connectTransport: ReturnType<typeof vi.fn>;
+    disconnectTransport: ReturnType<typeof vi.fn>;
   };
 }
 
-describe("runtime/Db direct path upstream wiring", () => {
+function makeRuntimeStub(): Runtime {
+  return {
+    insert: vi.fn(),
+    restore: vi.fn(),
+    update: vi.fn(),
+    upsert: vi.fn(),
+    delete: vi.fn(),
+    beginTransaction: vi.fn(),
+    commitTransaction: vi.fn(),
+    waitForTransaction: vi.fn(),
+    rollbackTransaction: vi.fn(),
+    query: vi.fn(),
+    createSubscription: vi.fn(),
+    executeSubscription: vi.fn(),
+    unsubscribe: vi.fn(),
+    getSchema: vi.fn(),
+    getSchemaHash: vi.fn(),
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+    updateAuth: vi.fn(),
+    onAuthFailure: vi.fn(),
+    onMutationError: vi.fn(),
+  } as unknown as Runtime;
+}
+
+describe("runtime/Db native runtime path upstream wiring", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
@@ -107,7 +135,9 @@ describe("runtime/Db direct path upstream wiring", () => {
 
   it("DBRT-U01 calls connectTransport with serverUrl and derived app scope when configured and no worker", () => {
     const client = makeClientStub();
-    const connectSyncSpy = vi.spyOn(JazzClient, "connectSync").mockReturnValue(client);
+    const connectWithRuntimeSpy = vi
+      .spyOn(JazzClient, "connectWithRuntime")
+      .mockReturnValue(client);
 
     const db = new TestDb({
       appId: "app",
@@ -117,7 +147,7 @@ describe("runtime/Db direct path upstream wiring", () => {
     });
     db.exposeGetClient(makeSchema());
 
-    expect(connectSyncSpy).toHaveBeenCalledTimes(1);
+    expect(connectWithRuntimeSpy).toHaveBeenCalledTimes(1);
     expect((client as any).connectTransport).toHaveBeenCalledWith("https://example.test", {
       jwt_token: "jwt-x",
       admin_secret: "admin-y",
@@ -126,7 +156,7 @@ describe("runtime/Db direct path upstream wiring", () => {
 
   it("DBRT-U01b calls connectTransport without a separate prefix argument", () => {
     const client = makeClientStub();
-    vi.spyOn(JazzClient, "connectSync").mockReturnValue(client);
+    vi.spyOn(JazzClient, "connectWithRuntime").mockReturnValue(client);
 
     const db = new TestDb({
       appId: "app",
@@ -144,7 +174,7 @@ describe("runtime/Db direct path upstream wiring", () => {
 
   it("DBRT-U02 does not call connectTransport when serverUrl is absent", () => {
     const client = makeClientStub();
-    vi.spyOn(JazzClient, "connectSync").mockReturnValue(client);
+    vi.spyOn(JazzClient, "connectWithRuntime").mockReturnValue(client);
 
     const db = new TestDb({ appId: "app" });
     db.exposeGetClient(makeSchema());
@@ -152,9 +182,79 @@ describe("runtime/Db direct path upstream wiring", () => {
     expect((client as any).connectTransport).not.toHaveBeenCalled();
   });
 
+  it("DBRT-U02b disconnects and reconnects existing clients through the public Db API", async () => {
+    const client = makeClientStub();
+    vi.spyOn(JazzClient, "connectWithRuntime").mockReturnValue(client);
+
+    const db = new TestDb({
+      appId: "app",
+      serverUrl: "https://example.test",
+      jwtToken: "jwt-x",
+      adminSecret: "admin-y",
+    });
+    db.exposeGetClient(makeSchema());
+
+    await db.disconnect();
+    await db.reconnect();
+
+    expect((client as any).disconnectTransport).toHaveBeenCalledTimes(1);
+    expect((client as any).connectTransport).toHaveBeenCalledTimes(2);
+    expect((client as any).connectTransport).toHaveBeenLastCalledWith("https://example.test", {
+      jwt_token: "jwt-x",
+      admin_secret: "admin-y",
+      backend_secret: undefined,
+      backend_session: undefined,
+    });
+  });
+
+  it("DBRT-U02c keeps lazily-created clients offline until reconnect", async () => {
+    const client = makeClientStub();
+    vi.spyOn(JazzClient, "connectWithRuntime").mockReturnValue(client);
+
+    const db = new TestDb({
+      appId: "app",
+      serverUrl: "https://example.test",
+      jwtToken: "jwt-x",
+    });
+
+    await db.disconnect();
+    db.exposeGetClient(makeSchema());
+    expect((client as any).connectTransport).not.toHaveBeenCalled();
+
+    await db.reconnect();
+    expect((client as any).connectTransport).toHaveBeenCalledTimes(1);
+    expect((client as any).connectTransport).toHaveBeenCalledWith("https://example.test", {
+      jwt_token: "jwt-x",
+      admin_secret: undefined,
+      backend_secret: undefined,
+      backend_session: undefined,
+    });
+  });
+
+  it("DBRT-U02d keeps readiness behind the reconnect barrier", async () => {
+    const db = new TestDb({
+      appId: "app",
+      serverUrl: "https://example.test",
+    });
+
+    await db.disconnect();
+    let isReady = false;
+    const readiness = db.exposeEnsureReady().then(() => {
+      isReady = true;
+    });
+    await Promise.resolve();
+    expect(isReady).toBe(false);
+
+    await db.reconnect();
+    await readiness;
+    expect(isReady).toBe(true);
+  });
+
   it("DBRT-U03 strips local policies for memory-driver admin-secret clients", () => {
     const client = makeClientStub();
-    const connectSyncSpy = vi.spyOn(JazzClient, "connectSync").mockReturnValue(client);
+    const connectWithRuntimeSpy = vi
+      .spyOn(JazzClient, "connectWithRuntime")
+      .mockReturnValue(client);
     const schema: WasmSchema = {
       todos: {
         columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
@@ -176,8 +276,8 @@ describe("runtime/Db direct path upstream wiring", () => {
     });
     db.exposeGetClient(schema);
 
-    expect(connectSyncSpy).toHaveBeenCalledTimes(1);
-    const runtimeSchema = connectSyncSpy.mock.calls[0]?.[1].schema;
+    expect(connectWithRuntimeSpy).toHaveBeenCalledTimes(1);
+    const runtimeSchema = connectWithRuntimeSpy.mock.calls[0]?.[1].schema;
     expect(runtimeSchema.todos.policies).toBeUndefined();
     expect(runtimeSchema).toMatchObject({
       todos: {
@@ -186,10 +286,12 @@ describe("runtime/Db direct path upstream wiring", () => {
     });
   });
 
-  it("DBRT-U03b preserves local policies when the runtime does not support policy bypass", () => {
+  it("DBRT-U03b preserves local policies when the runtime source does not support policy bypass", () => {
     const client = makeClientStub();
-    const connectSyncSpy = vi.spyOn(JazzClient, "connectSync").mockReturnValue(client);
-    class PolicyEvaluatingRuntimeModule extends TestDirectRuntimeModule {
+    const connectWithRuntimeSpy = vi
+      .spyOn(JazzClient, "connectWithRuntime")
+      .mockReturnValue(client);
+    class PolicyEvaluatingRuntimeSource extends TestRuntimeSource {
       override readonly supportsPolicyBypass = false;
     }
     const schema: WasmSchema = {
@@ -212,12 +314,12 @@ describe("runtime/Db direct path upstream wiring", () => {
         adminSecret: "admin-y",
         driver: { type: "memory" },
       },
-      new PolicyEvaluatingRuntimeModule(),
+      new PolicyEvaluatingRuntimeSource(),
     );
     db.exposeGetClient(schema);
 
-    expect(connectSyncSpy).toHaveBeenCalledTimes(1);
-    const runtimeSchema = connectSyncSpy.mock.calls[0]?.[1].schema;
+    expect(connectWithRuntimeSpy).toHaveBeenCalledTimes(1);
+    const runtimeSchema = connectWithRuntimeSpy.mock.calls[0]?.[1].schema;
     expect(runtimeSchema.todos).toHaveProperty("policies", {
       update: {
         using: {
@@ -227,14 +329,15 @@ describe("runtime/Db direct path upstream wiring", () => {
     });
   });
 
-  it("DBRT-U04 routes Db runtime wiring through an injected runtime module", async () => {
+  it("DBRT-U04 routes Db runtime wiring through an injected runtime source", async () => {
     const app = makeTodosApp();
     const schema = app.todos._schema;
-    const loadedRuntime = { kind: "test-runtime" };
-    const runtimeRow: DirectInsertResult = {
+    const loadedRuntime = { kind: "test-core" };
+    const runtimeRow: InsertResult = {
       id: "todo-1",
       values: [{ type: "Text", value: "Buy milk" }],
-      batchId: "batch-1",
+      kind: "committed",
+      batchId: "transaction-1" as BatchId,
     };
     const client = {
       insert: vi.fn(() => new WriteResult(runtimeRow, runtimeRow.batchId, client)),
@@ -242,17 +345,15 @@ describe("runtime/Db direct path upstream wiring", () => {
       updateAuthToken: vi.fn(),
       connectTransport: vi.fn(),
       getRuntime: vi.fn(() => ({}) as never),
-      onMutationError: vi.fn(() => () => undefined),
+      onMutationError: vi.fn(),
     } as unknown as JazzClient & {
       insert: ReturnType<typeof vi.fn>;
       shutdown: ReturnType<typeof vi.fn>;
       updateAuthToken: ReturnType<typeof vi.fn>;
     };
-    class TestRuntimeModule extends DbRuntimeModule<DbConfig> {
+    class TestRuntimeSource extends RuntimeSource<DbConfig> {
       readonly loadRuntimeMock = vi.fn(async (_config: DbConfig) => loadedRuntime);
-      override readonly createClient = vi.fn(
-        (_context: DbRuntimeClientContext<DbConfig>) => client,
-      );
+      override readonly createClient = vi.fn((_context: RuntimeClientContext<DbConfig>) => client);
       override readonly mintLocalFirstToken = vi.fn(
         (options: RuntimeTokenOptions) =>
           `jwt:${options.secret}:${options.audience}:${options.ttlSeconds}`,
@@ -262,15 +363,15 @@ describe("runtime/Db direct path upstream wiring", () => {
         return await this.loadRuntimeMock(config);
       }
     }
-    const runtimeModule = new TestRuntimeModule();
+    const runtimeSource = new TestRuntimeSource();
 
-    const db = await createDbWithRuntimeModule(
+    const db = await createDbWithRuntimeSource(
       {
         appId: "facade-app",
         secret: "alice-secret",
         serverUrl: "https://example.test",
       },
-      runtimeModule,
+      runtimeSource,
     );
 
     const inserted = db.insert(app.todos, { title: "Buy milk" });
@@ -282,19 +383,17 @@ describe("runtime/Db direct path upstream wiring", () => {
     await db.shutdown();
 
     expect(inserted.value).toEqual({ id: "todo-1", title: "Buy milk" });
-    expect(runtimeModule.loadRuntimeMock).toHaveBeenCalledTimes(1);
-    expect(runtimeModule.mintLocalFirstToken).toHaveBeenCalledWith(
+    expect(runtimeSource.loadRuntimeMock).toHaveBeenCalledTimes(1);
+    expect(runtimeSource.mintLocalFirstToken).toHaveBeenCalledWith(
       expect.objectContaining({
         secret: "alice-secret",
         audience: "facade-app",
         ttlSeconds: 3600,
       }),
     );
-    expect(runtimeModule.createClient).toHaveBeenCalledWith(
+    expect(runtimeSource.createClient).toHaveBeenCalledWith(
       expect.objectContaining({
         schema,
-        hasWorker: false,
-        useBinaryEncoding: false,
         config: expect.objectContaining({
           appId: "facade-app",
           jwtToken: "jwt:alice-secret:facade-app:3600",
@@ -303,7 +402,7 @@ describe("runtime/Db direct path upstream wiring", () => {
         onAuthFailure: expect.any(Function),
       }),
     );
-    const createClientContext = runtimeModule.createClient.mock.calls[0]?.[0];
+    const createClientContext = runtimeSource.createClient.mock.calls[0]?.[0];
     expect(createClientContext).toBeDefined();
     expect("loadedRuntime" in createClientContext!).toBe(false);
     expect(client.updateAuthToken).toHaveBeenCalledWith("fresh-jwt");
@@ -311,21 +410,75 @@ describe("runtime/Db direct path upstream wiring", () => {
     expect(client.shutdown).toHaveBeenCalledTimes(1);
   });
 
-  it("forwards auth refreshes through the connection manager", () => {
-    const connection = {
-      updateAuth: vi.fn(),
-    };
+  it("uses the native runtime path", () => {
+    const client = makeClientStub();
+    class RecordingRuntimeSource extends RuntimeSource<DbConfig> {
+      readonly createClientMock = vi.fn((_context: RuntimeClientContext<DbConfig>) => client);
+
+      protected override async loadRuntime(): Promise<typeof TestDb.runtime> {
+        return TestDb.runtime;
+      }
+
+      override createClient(context: RuntimeClientContext<DbConfig>): JazzClient {
+        return this.createClientMock(context);
+      }
+    }
+
+    const runtimeSource = new RecordingRuntimeSource();
+    new TestDb({ appId: "direct" }, runtimeSource).exposeGetClient(makeSchema());
+
+    expect(runtimeSource.createClientMock.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        config: expect.objectContaining({ appId: "direct" }),
+        schema: makeSchema(),
+        onAuthFailure: expect.any(Function),
+      }),
+    );
+  });
+
+  it("creates one client for one schema and rejects a different schema", () => {
+    const client = makeClientStub();
+    class RecordingRuntimeSource extends RuntimeSource<DbConfig> {
+      readonly createClientMock = vi.fn((_context: RuntimeClientContext<DbConfig>) => client);
+
+      override createClient(context: RuntimeClientContext<DbConfig>): JazzClient {
+        return this.createClientMock(context);
+      }
+    }
+
+    const runtimeSource = new RecordingRuntimeSource();
+    const db = new TestDb({ appId: "single-schema" }, runtimeSource);
+    const schema = makeSchema();
+
+    expect(db.exposeGetClient(schema)).toBe(client);
+    expect(db.exposeGetClient(structuredClone(schema))).toBe(client);
+    expect(() =>
+      db.exposeGetClient({
+        todos: {
+          columns: [
+            { name: "title", column_type: { type: "Text" }, nullable: false },
+            { name: "done", column_type: { type: "Boolean" }, nullable: false },
+          ],
+        },
+      }),
+    ).toThrow(
+      "Db is already initialized with a different schema. Create a separate Db for each schema/app.",
+    );
+    expect(runtimeSource.createClientMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends auth refreshes to memoized runtime clients", () => {
     const db = new TestDb({
       appId: "app",
       serverUrl: "https://example.test",
       jwtToken: makeJwt({ sub: "alice" }),
     });
-
-    (db as unknown as { connection: typeof connection }).connection = connection;
+    const client = db.exposeGetClient(makeSchema());
+    const updateAuthToken = vi.spyOn(client, "updateAuthToken");
 
     const refreshed = makeJwt({ sub: "alice", refresh: 1 });
     db.updateAuthToken(refreshed);
 
-    expect(connection.updateAuth).toHaveBeenCalledWith({ jwtToken: refreshed });
+    expect(updateAuthToken).toHaveBeenCalledWith(refreshed);
   });
 });

@@ -824,9 +824,9 @@ function buildB5Setup(scenario, serverInfo, dbPrefix) {
       const allowedLocalSecret = h.generateAuthSecret();
       const intermediateLocalSecret = h.generateAuthSecret();
       const wasmModule = await h.loadWasmModule();
-      const allowedPrincipalId = wasmModule.WasmRuntime.deriveUserId(allowedLocalSecret);
-      const deniedPrincipalId = wasmModule.WasmRuntime.deriveUserId(h.generateAuthSecret());
-      const intermediatePrincipalId = wasmModule.WasmRuntime.deriveUserId(intermediateLocalSecret);
+      const allowedPrincipalId = wasmModule.deriveUserId(allowedLocalSecret);
+      const deniedPrincipalId = wasmModule.deriveUserId(h.generateAuthSecret());
+      const intermediatePrincipalId = wasmModule.deriveUserId(intermediateLocalSecret);
       const seedDb = await h.createServerDb({
         appId: server.appId,
         dbName: dbPrefix + "-seed",

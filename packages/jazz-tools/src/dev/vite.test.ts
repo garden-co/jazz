@@ -66,14 +66,12 @@ describe("jazzPlugin", () => {
     expect(plugin.name).toBe("jazz");
   });
 
-  it("config hook injects worker format and optimizeDeps exclude", () => {
+  it("config hook injects optimizeDeps exclude", () => {
     const plugin = jazzPlugin();
     const config = (plugin as { config?: (c: Record<string, unknown>) => unknown }).config;
     const result = config!({}) as {
-      worker?: { format?: string };
       optimizeDeps?: { exclude?: string[] };
     };
-    expect(result.worker?.format).toBe("es");
     expect(result.optimizeDeps?.exclude).toContain("jazz-wasm");
   });
 
@@ -85,6 +83,24 @@ describe("jazzPlugin", () => {
     };
     expect(result.optimizeDeps?.exclude).toContain("jazz-wasm");
     expect(result.optimizeDeps?.exclude).toContain("some-dep");
+  });
+
+  it("persists the generated app ID before Vite starts its server", async () => {
+    const schemaDir = await tempRoots.create("jazz-vite-bootstrap-env-test-");
+    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
+
+    const plugin = jazzPlugin({ schemaDir });
+    const config = plugin.config as (
+      config: Record<string, unknown>,
+      env: { command: string; mode: string },
+    ) => unknown;
+
+    await config({ root: schemaDir }, { command: "serve", mode: "development" });
+
+    const envContent = await readFile(join(schemaDir, ".env"), "utf8");
+    expect(envContent).toMatch(
+      /^VITE_JAZZ_APP_ID=[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/m,
+    );
   });
 
   // Without this alias, a Vite consumer installed via pnpm hits
@@ -153,56 +169,19 @@ describe("jazzPlugin", () => {
     expect(fakeViteServer.config.env.VITE_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
     expect(process.env.VITE_JAZZ_APP_ID).toBe(fakeViteServer.config.env.VITE_JAZZ_APP_ID);
     expect(process.env.VITE_JAZZ_SERVER_URL).toBe(`http://127.0.0.1:${port}`);
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("Inspector overlay enabled"));
-    // The plugin signals the client (mount the toggle) by exposing this flag.
-    expect(fakeViteServer.config.env.VITE_JAZZ_INSPECTOR).toBe("1");
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `Open the inspector: https://jazz2-inspector.vercel.app/#serverUrl=${encodeURIComponent(
+          `http://127.0.0.1:${port}`,
+        )}&appId=${encodeURIComponent(fakeViteServer.config.env.VITE_JAZZ_APP_ID!)}&adminSecret=vite-test-admin`,
+      ),
+    );
 
     for (const handler of closeHandlers) {
       await handler();
     }
 
     await expect(fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok)).rejects.toThrow();
-  }, 30_000);
-
-  it("does not wire the inspector overlay when inspector: false", async () => {
-    const port = await getAvailablePort();
-    const schemaDir = await tempRoots.create("jazz-vite-test-");
-    await writeFile(join(schemaDir, "schema.ts"), todoSchema());
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-
-    const plugin = jazzPlugin({
-      server: { port, adminSecret: "vite-test-admin" },
-      schemaDir,
-      inspector: false,
-    });
-
-    const closeHandlers: (() => Promise<void> | void)[] = [];
-    const fakeViteServer = {
-      config: {
-        root: schemaDir,
-        command: "serve" as const,
-        env: {} as Record<string, string>,
-      },
-      httpServer: {
-        once(_event: string, cb: () => void) {
-          closeHandlers.push(cb);
-        },
-      },
-      ws: { send() {} },
-    };
-
-    const configureServer = plugin.configureServer as (
-      server: typeof fakeViteServer,
-    ) => Promise<void>;
-    await configureServer(fakeViteServer);
-
-    // Disabled: no client flag injected and no announcement.
-    expect(fakeViteServer.config.env.VITE_JAZZ_INSPECTOR).toBeUndefined();
-    expect(logSpy).not.toHaveBeenCalledWith(expect.stringContaining("Inspector overlay enabled"));
-
-    for (const handler of closeHandlers) {
-      await handler();
-    }
   }, 30_000);
 
   it("does not inject a dev server url during build", async () => {

@@ -33,11 +33,7 @@ export default function Router({ routes }: RouterProps) {
 
       event.preventDefault();
 
-      if (href.startsWith("#")) {
-        window.location.hash = href;
-      } else {
-        navigate(href);
-      }
+      navigate(href);
     };
 
     window.addEventListener("click", onClick);

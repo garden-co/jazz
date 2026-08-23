@@ -5,10 +5,6 @@
  * over stdio with newline-delimited JSON-RPC, and exercises the full lifecycle
  * and all three tools against the committed index artefacts.
  *
- * Naive-backend coverage: the stderr warning on SQLite unavailability is
- * tested at the unit level in backend-naive.test.ts; that backend is not
- * exercised here because node:sqlite is available in the test environment.
- *
  * Requires: `pnpm build` before running (dist/mcp/server.js must exist).
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";

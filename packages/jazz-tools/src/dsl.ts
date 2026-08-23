@@ -8,6 +8,7 @@ import type {
   Schema,
   Table,
   SqlType,
+  EnumCaseSqlType,
   EnumSqlType,
   JsonSqlType,
   JsonSchema,
@@ -24,9 +25,14 @@ import type {
 } from "./schema.js";
 import { assertUserColumnNameAllowed } from "./magic-columns.js";
 
+const MAX_ENUM_VARIANTS = 256;
+
 function normalizeEnumVariants(variants: readonly string[]): string[] {
   if (variants.length === 0) {
     throw new Error("Enum columns require at least one variant.");
+  }
+  if (variants.length > MAX_ENUM_VARIANTS) {
+    throw new Error(`Enum columns support at most ${MAX_ENUM_VARIANTS} variants.`);
   }
   for (const variant of variants) {
     if (variant.length === 0) {
@@ -37,7 +43,9 @@ function normalizeEnumVariants(variants: readonly string[]): string[] {
   if (unique.size !== variants.length) {
     throw new Error("Enum variants must be unique.");
   }
-  return [...unique].sort((a, b) => a.localeCompare(b));
+  // Scalar-enum discriminants are declaration-order-sensitive. Keeping this
+  // order lets later schemas append a case without retagging existing values.
+  return [...variants];
 }
 
 type JsonSchemaSource<Output = JsonValue> = StandardJSONSchemaV1<unknown, Output> | JsonSchema;
@@ -122,7 +130,10 @@ export type TypedColumnBuilder<
   readonly __jazzHasDefault: HasDefault;
   readonly __jazzValue: Value;
   /**
-   * Set the default value for the column
+   * Set the default value for the column.
+   *
+   * `db.insert(...)` and `db.restore(...)` apply this literal when the column is omitted before
+   * submitting the write to the runtime. Explicit `null` on nullable columns is preserved.
    */
   default(
     value: MaybeOptional<ColumnDefaultValue<Sql>, Optional>,
@@ -148,12 +159,19 @@ export type TypedColumnBuilder<
   optional(): ColumnAlias<Sql, true, Ref, HasDefault, Value>;
 };
 
-export type AnyTypedColumnBuilder = TypedColumnBuilder<
-  SqlType,
-  boolean,
-  string | undefined,
-  boolean
->;
+// This is a constraint for builder input positions, not a public builder
+// surface. Omitting its generic mutator methods avoids contravariant method
+// parameter collapse when a payload enum's discriminated SQL type is widened.
+export type AnyTypedColumnBuilder = Omit<
+  ColumnBuilder,
+  "optional" | "default" | "merge" | "transform"
+> & {
+  readonly __jazzSqlType: SqlType;
+  readonly __jazzOptional: boolean;
+  readonly __jazzReferences: string | undefined;
+  readonly __jazzHasDefault: boolean;
+  readonly __jazzValue: unknown;
+};
 export type ColumnBuilderSqlType<TBuilder extends AnyTypedColumnBuilder> =
   TBuilder["__jazzSqlType"];
 export type ColumnBuilderOptional<TBuilder extends AnyTypedColumnBuilder> =
@@ -184,6 +202,11 @@ export type IntColumn<
   HasDefault extends boolean = false,
   Value = number,
 > = TypedColumnBuilder<"INTEGER", Optional, undefined, HasDefault, Value>;
+export type BigIntColumn<
+  Optional extends boolean = false,
+  HasDefault extends boolean = false,
+  Value = bigint,
+> = TypedColumnBuilder<"BIGINT", Optional, undefined, HasDefault, Value>;
 export type TimestampColumn<
   Optional extends boolean = false,
   HasDefault extends boolean = false,
@@ -220,6 +243,12 @@ export type EnumColumn<
   HasDefault,
   Value
 >;
+export type EnumCasesColumn<
+  Cases extends readonly EnumCaseSqlType[] = readonly EnumCaseSqlType[],
+  Optional extends boolean = false,
+  HasDefault extends boolean = false,
+  Value = TSTypeFromSqlType<{ kind: "ENUM"; cases: Cases }>,
+> = TypedColumnBuilder<{ kind: "ENUM"; cases: Cases }, Optional, undefined, HasDefault, Value>;
 export type RefColumn<
   TargetTable extends string,
   Optional extends boolean = false,
@@ -261,20 +290,27 @@ export type ColumnAlias<
         ? BooleanColumn<Optional, HasDefault, Value>
         : Sql extends "INTEGER"
           ? IntColumn<Optional, HasDefault, Value>
-          : Sql extends "TIMESTAMP"
-            ? TimestampColumn<Optional, HasDefault, Value>
-            : Sql extends "REAL"
-              ? FloatColumn<Optional, HasDefault, Value>
-              : Sql extends "BYTEA"
-                ? BytesColumn<Optional, HasDefault, Value>
-                : Sql extends JsonSqlType<infer Output>
-                  ? JsonColumn<Output, Optional, HasDefault, Value>
-                  : Sql extends {
-                        kind: "ENUM";
-                        variants: infer Variants extends readonly string[];
-                      }
-                    ? EnumColumn<Variants, Optional, HasDefault, Value>
-                    : TypedColumnBuilder<Sql, Optional, Ref, HasDefault, Value>;
+          : Sql extends "BIGINT"
+            ? BigIntColumn<Optional, HasDefault, Value>
+            : Sql extends "TIMESTAMP"
+              ? TimestampColumn<Optional, HasDefault, Value>
+              : Sql extends "REAL"
+                ? FloatColumn<Optional, HasDefault, Value>
+                : Sql extends "BYTEA"
+                  ? BytesColumn<Optional, HasDefault, Value>
+                  : Sql extends JsonSqlType<infer Output>
+                    ? JsonColumn<Output, Optional, HasDefault, Value>
+                    : Sql extends {
+                          kind: "ENUM";
+                          variants: infer Variants extends readonly string[];
+                        }
+                      ? EnumColumn<Variants, Optional, HasDefault, Value>
+                      : Sql extends {
+                            kind: "ENUM";
+                            cases: infer Cases extends readonly EnumCaseSqlType[];
+                          }
+                        ? EnumCasesColumn<Cases, Optional, HasDefault, Value>
+                        : TypedColumnBuilder<Sql, Optional, Ref, HasDefault, Value>;
 
 type RefColumnKey = `${string}Id` | `${string}_id`;
 type RefArrayColumnKey = `${string}Ids` | `${string}_ids`;
@@ -379,8 +415,45 @@ class EnumBuilder implements ColumnBuilder {
   public _sqlType: EnumSqlType;
   _transform?: ColumnTransform<unknown, unknown>;
 
-  constructor(...variants: string[]) {
-    this._sqlType = { kind: "ENUM", variants: normalizeEnumVariants(variants) };
+  constructor(variantsOrCases: string[] | Record<string, ColumnBuilder>) {
+    if (Array.isArray(variantsOrCases)) {
+      this._sqlType = { kind: "ENUM", variants: normalizeEnumVariants(variantsOrCases) };
+      return;
+    }
+    const cases: EnumCaseSqlType[] = [];
+    for (const [caseName, payload] of Object.entries(variantsOrCases)) {
+      if (!caseName) throw new Error("Enum case names cannot be empty strings.");
+      const fields: Column[] = [];
+      for (const [fieldName, builder] of Object.entries(
+        payload as unknown as Record<string, ColumnBuilder>,
+      )) {
+        if (fieldName === "type") {
+          throw new Error('Enum payload field name "type" is reserved for the discriminant.');
+        }
+        assertUserColumnNameAllowed(fieldName);
+        if (builder._references !== undefined) {
+          throw new Error("Enum payload fields cannot use references; use a UUID value instead.");
+        }
+        const field = builder._build(fieldName);
+        if (typeof field.sqlType !== "string") {
+          throw new Error(
+            "Payload enum v1 fields must be scalar columns; arrays and nested enums are not supported yet.",
+          );
+        }
+        if (containsReference(field.sqlType)) {
+          throw new Error(
+            "Enum payload fields cannot contain references; use UUID values instead.",
+          );
+        }
+        fields.push(field);
+      }
+      cases.push({ name: caseName, fields });
+    }
+    if (cases.length === 0) throw new Error("Payload enums must declare at least one case.");
+    if (new Set(cases.map((entry) => entry.name)).size !== cases.length) {
+      throw new Error("Enum case names must be unique.");
+    }
+    this._sqlType = { kind: "ENUM", cases };
   }
 
   optional(): this {
@@ -419,6 +492,12 @@ class EnumBuilder implements ColumnBuilder {
   get _references(): string | undefined {
     return undefined;
   }
+}
+
+function containsReference(sqlType: SqlType): boolean {
+  return (
+    typeof sqlType === "object" && sqlType.kind === "ARRAY" && containsReference(sqlType.element)
+  );
 }
 
 class JsonBuilder<Output = JsonValue> implements ColumnBuilder {
@@ -607,6 +686,12 @@ class AddBuilder {
     return { _type: "add", sqlType: "INTEGER", default: opts.default };
   }
 
+  bigint<const TDefault extends bigint | null>(opts: {
+    default: TDefault;
+  }): AddOp<"BIGINT", TDefault> {
+    return { _type: "add", sqlType: "BIGINT", default: opts.default };
+  }
+
   timestamp<const TDefault extends Date | number | null>(opts: {
     default: TDefault;
   }): AddOp<"TIMESTAMP", TDefault> {
@@ -703,6 +788,12 @@ class DropBuilder {
     return { _type: "drop", sqlType: "INTEGER", backwardsDefault: opts.backwardsDefault };
   }
 
+  bigint<const TBackwardsDefault extends bigint | null>(opts: {
+    backwardsDefault: TBackwardsDefault;
+  }): DropOp<"BIGINT", TBackwardsDefault> {
+    return { _type: "drop", sqlType: "BIGINT", backwardsDefault: opts.backwardsDefault };
+  }
+
   timestamp<const TBackwardsDefault extends Date | number | null>(opts: {
     backwardsDefault: TBackwardsDefault;
   }): DropOp<"TIMESTAMP", TBackwardsDefault> {
@@ -792,6 +883,7 @@ export const col = {
   string: () => new ScalarBuilder("TEXT") as unknown as StringColumn,
   boolean: () => new ScalarBuilder("BOOLEAN") as unknown as BooleanColumn,
   int: () => new ScalarBuilder("INTEGER") as unknown as IntColumn,
+  bigint: () => new ScalarBuilder("BIGINT") as unknown as BigIntColumn,
   timestamp: () => new ScalarBuilder("TIMESTAMP") as unknown as TimestampColumn,
   float: () => new ScalarBuilder("REAL") as unknown as FloatColumn,
   bytes: () => new ScalarBuilder("BYTEA") as unknown as BytesColumn,
@@ -802,12 +894,35 @@ export const col = {
     ): JsonColumn<StandardJSONSchemaV1.InferOutput<Schema>>;
     (schema: JsonSchema): JsonColumn;
   },
-  enum: <const Variants extends readonly [string, ...string[]]>(...variants: Variants) =>
-    new EnumBuilder(...variants) as unknown as EnumColumn<Variants>,
+  enum: ((...input: unknown[]) => {
+    if (input.length === 1 && typeof input[0] === "object" && input[0] !== null) {
+      return new EnumBuilder(input[0] as Record<string, ColumnBuilder>);
+    }
+    return new EnumBuilder(input as string[]);
+  }) as unknown as {
+    <const Variants extends readonly [string, ...string[]]>(
+      ...variants: Variants
+    ): EnumColumn<Variants>;
+    <const Cases extends Record<string, Record<string, AnyTypedColumnBuilder>>>(
+      cases: Cases,
+    ): EnumCasesColumn<
+      {
+        [Name in keyof Cases & string]: {
+          name: Name;
+          fields: {
+            [Field in keyof Cases[Name] & string]: Column & {
+              name: Field;
+              sqlType: ColumnBuilderSqlType<Cases[Name][Field]>;
+            };
+          }[keyof Cases[Name] & string][];
+        };
+      }[keyof Cases & string][]
+    >;
+  },
   ref: <const TargetTable extends string>(targetTable: TargetTable) =>
     new RefBuilder(targetTable) as unknown as RefColumn<TargetTable>,
   array: <Builder extends AnyTypedColumnBuilder>(element: Builder) =>
-    new ArrayBuilder(element) as unknown as ArrayColumn<
+    new ArrayBuilder(element as unknown as ColumnBuilder) as unknown as ArrayColumn<
       ColumnBuilderSqlType<Builder>,
       false,
       ColumnBuilderReferences<Builder>

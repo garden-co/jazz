@@ -1,0 +1,439 @@
+//! Persistent Global-query hydration receipt with fixed selectivity.
+//!
+//! The selected team and result size stay fixed while total table size grows.
+//! Logical storage-read counters reveal whether initial query hydration follows
+//! the declared `team` index or scans the entire Global current table.
+//!
+//! ```text
+//! cargo bench -p jazz --features testing --bench selective_global_hydration --quiet
+//! ```
+//!
+//! `JAZZ_SELECTIVE_HYDRATION_ROWS` controls the comma-separated table-size
+//! ladder. `JAZZ_SELECTIVE_HYDRATION_TARGET_ROWS`,
+//! `JAZZ_SELECTIVE_HYDRATION_RESULT_ROWS`, and
+//! `JAZZ_SELECTIVE_HYDRATION_BATCH_ROWS` control the fixed selection and seed
+//! batching.
+
+mod schema_fixture;
+mod support;
+
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::time::Instant;
+
+use jazz::db::{
+    Db, DbConfig, DbIdentity, LocalUpdates, MergeableTxOps, Propagation, ReadOpts,
+    SeededRowIdSource, block_on,
+};
+use jazz::groove::db::StorageReadMetrics;
+use jazz::groove::records::Value;
+use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::query::{OrderDirection, Query, col, eq, lit, param};
+use jazz::schema::JazzSchema;
+use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
+use jazz::tx::DurabilityTier;
+use jazz_storage_rocksdb::RocksDbStorage;
+use serde_json::{Map, json};
+use sha2::{Digest, Sha256};
+
+const TABLE: &str = "documents";
+
+fn main() {
+    jazz_benchmark_guard::refuse_contaminated_measurement();
+    let config = Config::from_env();
+    config.validate();
+
+    let mut receipts = Vec::with_capacity(config.table_rows.len());
+    for &table_rows in &config.table_rows {
+        let receipt = run_rung(config.as_ref(), table_rows);
+        receipt.emit();
+        receipts.push(receipt);
+    }
+
+    let first = receipts.first().expect("non-empty table-size ladder");
+    let last = receipts.last().expect("non-empty table-size ladder");
+    let mut fields = Map::new();
+    fields.insert("phase".to_owned(), json!("scale_summary"));
+    fields.insert("selection_fixed".to_owned(), json!(true));
+    fields.insert("first_table_rows".to_owned(), json!(first.table_rows));
+    fields.insert("last_table_rows".to_owned(), json!(last.table_rows));
+    fields.insert(
+        "table_scale_ratio".to_owned(),
+        json!(last.table_rows as f64 / first.table_rows as f64),
+    );
+    fields.insert(
+        "query_path_global_current_row_read_ratio".to_owned(),
+        json!(ratio(
+            query_path_global_row_reads(last),
+            query_path_global_row_reads(first),
+        )),
+    );
+    fields.insert(
+        "query_path_global_current_index_read_ratio".to_owned(),
+        json!(ratio(
+            query_path_global_index_reads(last),
+            query_path_global_index_reads(first),
+        )),
+    );
+    fields.insert(
+        "end_to_end_global_current_row_read_ratio".to_owned(),
+        json!(ratio(
+            end_to_end_global_row_reads(last),
+            end_to_end_global_row_reads(first),
+        )),
+    );
+    fields.insert(
+        "end_to_end_global_current_index_read_ratio".to_owned(),
+        json!(ratio(
+            end_to_end_global_index_reads(last),
+            end_to_end_global_index_reads(first),
+        )),
+    );
+    fields.insert(
+        "tooling_friction".to_owned(),
+        json!("A reusable settled fixture would avoid reseeding each scale rung while preserving the fixed-selection read boundary."),
+    );
+    support::emit_json_line("selective_global_hydration", fields);
+}
+
+#[derive(Clone, Copy)]
+struct ConfigRef {
+    target_rows: usize,
+    result_rows: usize,
+    batch_rows: usize,
+}
+
+struct Config {
+    table_rows: Vec<usize>,
+    target_rows: usize,
+    result_rows: usize,
+    batch_rows: usize,
+}
+
+impl Config {
+    fn from_env() -> Self {
+        Self {
+            table_rows: support::csv_usizes("JAZZ_SELECTIVE_HYDRATION_ROWS", "1000,10000,100000"),
+            target_rows: support::env_usize("JAZZ_SELECTIVE_HYDRATION_TARGET_ROWS", 100),
+            result_rows: support::env_usize("JAZZ_SELECTIVE_HYDRATION_RESULT_ROWS", 50),
+            batch_rows: support::env_usize("JAZZ_SELECTIVE_HYDRATION_BATCH_ROWS", 1000),
+        }
+    }
+
+    fn validate(&self) {
+        assert!(
+            !self.table_rows.is_empty(),
+            "table-size ladder must not be empty"
+        );
+        assert!(self.target_rows > 0, "target row count must be positive");
+        assert!(self.result_rows > 0, "result row count must be positive");
+        assert!(self.batch_rows > 0, "seed batch size must be positive");
+        assert!(
+            self.result_rows <= self.target_rows,
+            "result rows must not exceed target rows"
+        );
+        assert!(
+            self.table_rows.iter().all(|rows| *rows >= self.target_rows),
+            "every table-size rung must contain the fixed target rows"
+        );
+        assert!(
+            self.table_rows.windows(2).all(|pair| pair[0] < pair[1]),
+            "table-size ladder must be strictly increasing"
+        );
+    }
+
+    fn as_ref(&self) -> ConfigRef {
+        ConfigRef {
+            target_rows: self.target_rows,
+            result_rows: self.result_rows,
+            batch_rows: self.batch_rows,
+        }
+    }
+}
+
+struct RungReceipt {
+    table_rows: usize,
+    target_rows: usize,
+    result_rows: usize,
+    seed_us: u128,
+    storage_open_us: u128,
+    db_open_us: u128,
+    prepare_us: u128,
+    query_us: u128,
+    result_digest: String,
+    open_metrics: StorageReadMetrics,
+    prepare_metrics: StorageReadMetrics,
+    query_metrics: StorageReadMetrics,
+}
+
+impl RungReceipt {
+    fn emit(&self) {
+        let mut fields = Map::new();
+        fields.insert("phase".to_owned(), json!("query_hydration"));
+        fields.insert("storage".to_owned(), json!("rocksdb_wal_no_sync"));
+        fields.insert("read_tier".to_owned(), json!("global"));
+        fields.insert(
+            "cache_state".to_owned(),
+            json!("fresh_rocksdb_instance_os_cache_uncontrolled"),
+        );
+        fields.insert("table_rows".to_owned(), json!(self.table_rows));
+        fields.insert("target_rows".to_owned(), json!(self.target_rows));
+        fields.insert("result_rows".to_owned(), json!(self.result_rows));
+        fields.insert("selection_fixed".to_owned(), json!(true));
+        fields.insert("result_digest".to_owned(), json!(self.result_digest));
+        fields.insert("seed_us".to_owned(), json!(self.seed_us));
+        fields.insert("storage_open_us".to_owned(), json!(self.storage_open_us));
+        fields.insert("db_open_us".to_owned(), json!(self.db_open_us));
+        fields.insert("prepare_us".to_owned(), json!(self.prepare_us));
+        fields.insert("query_us".to_owned(), json!(self.query_us));
+        insert_read_metrics(&mut fields, "open", &self.open_metrics);
+        insert_read_metrics(&mut fields, "prepare", &self.prepare_metrics);
+        insert_read_metrics(&mut fields, "query", &self.query_metrics);
+        support::emit_json_line("selective_global_hydration", fields);
+    }
+}
+
+fn run_rung(config: ConfigRef, table_rows: usize) -> RungReceipt {
+    let temp = tempfile::tempdir().expect("create selective-hydration RocksDB directory");
+    let schema = schema();
+    let (db, _, _) = open_db(temp.path(), schema.clone());
+
+    let seed_started = Instant::now();
+    seed_rows(&db, config, table_rows);
+    let seed_us = seed_started.elapsed().as_micros();
+    block_on(db.close()).expect("close seeded selective-hydration database");
+    drop(db);
+
+    let (db, storage_open_us_after_seed, db_open_us_after_seed) = open_db(temp.path(), schema);
+    let open_metrics = db.take_storage_read_metrics_for_test();
+    let query = Query::from(TABLE)
+        .filter(eq(col("team"), param("team")))
+        .filter(eq(col("active"), lit(true)))
+        .order_by("updated_at", OrderDirection::Desc)
+        .order_by("id", OrderDirection::Desc)
+        .limit(config.result_rows);
+    db.reset_storage_read_metrics_for_test();
+    let prepare_started = Instant::now();
+    let prepared = db
+        .prepare_query_bound(
+            &query,
+            BTreeMap::from([("team".to_owned(), Value::Uuid(target_team().0))]),
+        )
+        .expect("prepare selective Global query");
+    let prepare_us = prepare_started.elapsed().as_micros();
+    let prepare_metrics = db.take_storage_read_metrics_for_test();
+
+    db.reset_storage_read_metrics_for_test();
+    let query_started = Instant::now();
+    let rows = block_on(db.all(&prepared, global_read_opts())).expect("run selective Global query");
+    let query_us = query_started.elapsed().as_micros();
+    let query_metrics = db.take_storage_read_metrics_for_test();
+
+    assert!(
+        query_metrics.global_current_rows.reads <= config.target_rows,
+        "selective Global hydration read {} current rows for {} indexed candidates at table size {table_rows}",
+        query_metrics.global_current_rows.reads,
+        config.target_rows,
+    );
+    assert!(
+        (1..=config.target_rows).contains(&query_metrics.global_current_indexes.reads),
+        "selective Global hydration must use the declared index without reading more than the fixed candidate set"
+    );
+
+    let observed = rows.iter().map(|row| row.row_uuid()).collect::<Vec<_>>();
+    let expected = (config.target_rows - config.result_rows..config.target_rows)
+        .rev()
+        .map(target_row)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        observed, expected,
+        "selective Global result changed at table size {table_rows}"
+    );
+    let result_digest = digest_rows(&observed);
+    assert_eq!(result_digest, digest_rows(&expected));
+
+    block_on(db.close()).expect("close measured selective-hydration database");
+
+    RungReceipt {
+        table_rows,
+        target_rows: config.target_rows,
+        result_rows: config.result_rows,
+        seed_us,
+        storage_open_us: storage_open_us_after_seed,
+        db_open_us: db_open_us_after_seed,
+        prepare_us,
+        query_us,
+        result_digest,
+        open_metrics,
+        prepare_metrics,
+        query_metrics,
+    }
+}
+
+fn schema() -> JazzSchema {
+    schema_fixture::compile(
+        SchemaBuilder::new().table(
+            TableSchemaBuilder::new(TABLE)
+                .column("team", ColumnType::Uuid)
+                .column("active", ColumnType::Boolean)
+                .column("updated_at", ColumnType::Timestamp)
+                .column("title", ColumnType::Text)
+                .index_only(["team"]),
+        ),
+    )
+}
+
+fn open_db(path: &Path, schema: JazzSchema) -> (Db<RocksDbStorage>, u128, u128) {
+    let column_families = schema.column_families();
+    let refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let storage_started = Instant::now();
+    let storage = RocksDbStorage::open(path, &refs).expect("open selective-hydration RocksDB");
+    let storage_open_us = storage_started.elapsed().as_micros();
+    let db_started = Instant::now();
+    let db = block_on(Db::open_history_complete(
+        DbConfig::new(
+            schema,
+            storage,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x73; 16]),
+                author: AuthorId::SYSTEM,
+            },
+        )
+        .with_id_source(SeededRowIdSource::new(0x73)),
+    ))
+    .expect("open selective-hydration Jazz database");
+    let db_open_us = db_started.elapsed().as_micros();
+    (db, storage_open_us, db_open_us)
+}
+
+fn seed_rows(db: &Db<RocksDbStorage>, config: ConfigRef, table_rows: usize) {
+    for batch_start in (0..table_rows).step_by(config.batch_rows) {
+        let batch_end = table_rows.min(batch_start + config.batch_rows);
+        let tx = block_on(db.mergeable_tx()).expect("open selective-hydration seed transaction");
+        for index in batch_start..batch_end {
+            let (row, team, updated_at) = if index < config.target_rows {
+                (target_row(index), target_team(), index)
+            } else {
+                (filler_row(index), filler_team(), index)
+            };
+            block_on(tx.insert_with_id(
+                TABLE,
+                row,
+                BTreeMap::from([
+                    ("team".to_owned(), Value::Uuid(team.0)),
+                    ("active".to_owned(), Value::Bool(true)),
+                    ("updated_at".to_owned(), Value::U64(updated_at as u64)),
+                    (
+                        "title".to_owned(),
+                        Value::String(format!("document-{index}")),
+                    ),
+                ]),
+            ))
+            .expect("stage selective-hydration seed row");
+        }
+        let tx_id = block_on(tx.commit()).expect("commit selective-hydration seed batch");
+        db.finalize_local_mergeable_commit_for_test(tx_id)
+            .expect("settle selective-hydration seed batch");
+    }
+}
+
+fn global_read_opts() -> ReadOpts {
+    ReadOpts {
+        tier: DurabilityTier::Global,
+        local_updates: LocalUpdates::Deferred,
+        propagation: Propagation::LocalOnly,
+        include_deleted: false,
+        ..ReadOpts::default()
+    }
+}
+
+fn target_team() -> RowUuid {
+    tagged_row(0x10, 1)
+}
+
+fn filler_team() -> RowUuid {
+    tagged_row(0x20, 1)
+}
+
+fn target_row(index: usize) -> RowUuid {
+    tagged_row(0x30, index as u64)
+}
+
+fn filler_row(index: usize) -> RowUuid {
+    tagged_row(0x40, index as u64)
+}
+
+fn tagged_row(tag: u8, index: u64) -> RowUuid {
+    let mut bytes = [0_u8; 16];
+    bytes[0] = tag;
+    bytes[8..].copy_from_slice(&index.to_be_bytes());
+    RowUuid::from_bytes(bytes)
+}
+
+fn digest_rows(rows: &[RowUuid]) -> String {
+    let mut digest = Sha256::new();
+    for row in rows {
+        digest.update(row.0.as_bytes());
+    }
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn insert_read_metrics(
+    fields: &mut Map<String, serde_json::Value>,
+    prefix: &str,
+    metrics: &StorageReadMetrics,
+) {
+    fields.insert(
+        format!("{prefix}_logical_reads"),
+        json!(metrics.total.reads),
+    );
+    fields.insert(
+        format!("{prefix}_logical_ranges"),
+        json!(metrics.total.ranges),
+    );
+    fields.insert(
+        format!("{prefix}_global_current_row_reads"),
+        json!(metrics.global_current_rows.reads),
+    );
+    fields.insert(
+        format!("{prefix}_global_current_row_ranges"),
+        json!(metrics.global_current_rows.ranges),
+    );
+    fields.insert(
+        format!("{prefix}_global_current_index_reads"),
+        json!(metrics.global_current_indexes.reads),
+    );
+    fields.insert(
+        format!("{prefix}_global_current_index_ranges"),
+        json!(metrics.global_current_indexes.ranges),
+    );
+}
+
+fn query_path_global_row_reads(receipt: &RungReceipt) -> usize {
+    receipt.prepare_metrics.global_current_rows.reads
+        + receipt.query_metrics.global_current_rows.reads
+}
+
+fn query_path_global_index_reads(receipt: &RungReceipt) -> usize {
+    receipt.prepare_metrics.global_current_indexes.reads
+        + receipt.query_metrics.global_current_indexes.reads
+}
+
+fn end_to_end_global_row_reads(receipt: &RungReceipt) -> usize {
+    receipt.open_metrics.global_current_rows.reads + query_path_global_row_reads(receipt)
+}
+
+fn end_to_end_global_index_reads(receipt: &RungReceipt) -> usize {
+    receipt.open_metrics.global_current_indexes.reads + query_path_global_index_reads(receipt)
+}
+
+fn ratio(numerator: usize, denominator: usize) -> Option<f64> {
+    (denominator != 0).then(|| numerator as f64 / denominator as f64)
+}

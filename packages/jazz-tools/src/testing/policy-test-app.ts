@@ -1,6 +1,5 @@
 import { createJazzContext, Db, Session, type JazzContext } from "../backend/index.js";
 import type { WasmSchema } from "../drivers/types.js";
-import { TransactionScope } from "../index.js";
 import type { CompiledPermissions } from "../permissions/index.js";
 import { deploy } from "../dev/catalogue.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../dev/dev-server.js";
@@ -11,26 +10,50 @@ type ExpectLike = (value: unknown) => {
     toThrow(expected?: unknown): void;
   };
   toThrow(expected?: unknown): void;
+  rejects: {
+    toThrow(expected?: unknown): Promise<void>;
+  };
 };
-type TestDbMethodCallback = (db: TransactionScope) => unknown;
+type TestDbMethodCallback = (db: Db) => unknown;
+type PendingWrite = {
+  wait(options: { tier: "edge" }): Promise<unknown>;
+};
+type SeedWrite<T> = {
+  readonly value: T;
+  wait(options: { tier: "local" | "edge" }): Promise<T>;
+};
+
+/** @internal */
+export async function settlePolicySeed<T>(write: SeedWrite<T>): Promise<T> {
+  return write.wait({ tier: "local" });
+}
+
+/** @internal */
+export async function settlePolicySeedForSessionReads<T>(write: SeedWrite<T>): Promise<T> {
+  await settlePolicySeed(write);
+  return write.wait({ tier: "edge" });
+}
 
 /**
  * Db used for testing permissions.
- * Supports all {@link Db} operations plus the {@link TestDb.expectAllowed} and {@link TestDb.expectDenied}
- * helpers to test write operations without producing side effects on the test database.
+ * Supports all {@link Db} operations plus helpers for client-local write
+ * staging and serving-authority rejection. A rejected write briefly exists as
+ * an optimistic local batch, but is not persisted by the server.
  */
 export type TestDb = Db & {
   /**
-   * Assert that the callback does not throw a policy error.
+   * Assert that the callback does not throw while staging its write locally.
    * Write operations performed inside the callback are not persisted.
    */
   expectAllowed(callback: TestDbMethodCallback): void;
 
   /**
-   * Assert that the callback throws a policy error.
-   * Write operations performed inside the callback are not persisted.
+   * Assert that a write is rejected by the serving authority.
+   *
+   * Client writes are admitted optimistically, so this checks the write's edge
+   * receipt rather than expecting synchronous local permission enforcement.
    */
-  expectDenied(callback: TestDbMethodCallback): void;
+  expectDenied(callback: (db: Db) => PendingWrite): Promise<void>;
 };
 
 function asTestDb(db: Db, expect: ExpectLike): TestDb {
@@ -40,15 +63,19 @@ function asTestDb(db: Db, expect: ExpectLike): TestDb {
     expectAllowed: {
       value: (callback: TestDbMethodCallback) => {
         const tx = db.beginTransaction();
-        expect(() => callback(tx)).not.toThrow();
-        tx.rollback();
+        try {
+          expect(() => callback(tx as unknown as Db)).not.toThrow();
+        } finally {
+          tx.rollback();
+        }
       },
     },
     expectDenied: {
-      value: (callback: TestDbMethodCallback) => {
-        const tx = db.beginTransaction();
-        expect(() => callback(tx)).toThrow('WriteError("policy denied');
-        tx.rollback();
+      value: async (callback: (db: Db) => PendingWrite) => {
+        const write = callback(db);
+        await expect(write.wait({ tier: "edge" })).rejects.toThrow(
+          /AuthorizationDenied|Write rejected by server authorization/,
+        );
       },
     },
   });
@@ -69,19 +96,21 @@ export class PolicyTestApp {
   ) {}
 
   /**
-   * Seed the database with the given callback.
-   * The callback is executed in an admin database context.
+   * Seed the database with one admin write and wait until the serving
+   * authority has accepted it before returning. Session-scoped reads default
+   * to the edge tier, so local staging alone can otherwise race their first
+   * policy-evaluated query.
    */
-  seed<T>(callback: (db: Db) => T): T {
-    const db = this.jazzContext.asBackend(this.app);
-    return callback(db);
+  async seed<T>(callback: (db: Db) => SeedWrite<T>): Promise<T> {
+    const db = this.jazzContext.asBackend();
+    return settlePolicySeedForSessionReads(callback(db));
   }
 
   /**
    * Get a database client for the given session.
    */
   as(session: Session): TestDb {
-    const db = this.jazzContext.forSession(session, this.app);
+    const db = this.jazzContext.forSession(session);
     return asTestDb(db, this.expect);
   }
 
@@ -130,7 +159,6 @@ export async function createPolicyTestApp(
     serverUrl: server.url,
     backendSecret,
     env: "test",
-    userBranch: "main",
   });
 
   return new PolicyTestApp(expectFn, app, jazzContext, server);

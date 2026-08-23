@@ -1,4 +1,4 @@
-import type { SubscriptionDelta } from "./runtime/subscription-manager.js";
+import { applySubscriptionDelta, type SubscriptionDelta } from "./runtime/subscription-manager.js";
 import type { QueryBuilder, QueryOptions } from "./runtime/db.js";
 import type { Session } from "./runtime/context.js";
 
@@ -137,12 +137,14 @@ interface InternalCacheEntry<T extends { id: string }> {
   key: string;
   query: QueryBuilder<T>;
   options?: QueryOptions;
+  generation: number;
   state: UseAllState<T>;
   promise: TrackedPromise<T[]>;
   resolvefulfilled: (data: T[]) => void;
   rejectfulfilled: (error: unknown) => void;
   listeners: Set<QueryEntryCallbacks<T>>;
   cleanupTimeoutId: ReturnType<typeof setTimeout> | null;
+  emptyRefreshScheduled: boolean;
   unsubscribe?: () => void;
   status: UseAllState<T>["status"];
   error: unknown;
@@ -164,6 +166,11 @@ const SHARED_PENDING: UseAllStatePending<any> = {
 };
 
 interface DbLike {
+  all?<T extends { id: string }>(
+    query: QueryBuilder<T>,
+    options?: QueryOptions,
+    session?: Session,
+  ): Promise<T[]> | T[];
   subscribeAll<T extends { id: string }>(
     query: QueryBuilder<T>,
     callback: (delta: SubscriptionDelta<T>) => void,
@@ -311,6 +318,7 @@ export class SubscriptionsOrchestrator {
       key,
       query: queryDef.query,
       options: queryDef.options,
+      generation: 0,
       state: initialState,
       promise: deferred,
       resolvefulfilled: (data) => {
@@ -321,6 +329,7 @@ export class SubscriptionsOrchestrator {
       },
       listeners: new Set(),
       cleanupTimeoutId: null,
+      emptyRefreshScheduled: false,
       subscribe: (callbacks) => {
         this.cancelCleanup(entry);
         entry.listeners.add(callbacks);
@@ -390,24 +399,31 @@ export class SubscriptionsOrchestrator {
   }
 
   private subscribeEntry<T extends { id: string }>(entry: InternalCacheEntry<T>): void {
+    const generation = entry.generation;
     try {
       entry.unsubscribe = this.db.subscribeAll<T>(
         entry.query,
         (delta) => {
+          if (entry.generation !== generation) return;
           const wasPending = entry.state.status === "pending";
+          const data = entry.state.status === "fulfilled" ? [...entry.state.data] : [];
+          applySubscriptionDelta(data, delta);
           entry.state = {
             status: "fulfilled",
-            data: delta.all,
+            data,
             error: null,
           };
 
           if (wasPending) {
-            entry.resolvefulfilled(delta.all);
+            entry.resolvefulfilled(data);
           }
 
           for (const listener of Array.from(entry.listeners)) {
             if (wasPending) {
-              listener.onfulfilled?.(delta.all);
+              listener.onfulfilled?.(data);
+            } else if (delta.reset) {
+              listener.onReset?.();
+              listener.onfulfilled?.(data);
             } else {
               listener.onDelta?.(delta);
             }
@@ -415,6 +431,10 @@ export class SubscriptionsOrchestrator {
 
           if (entry.listeners.size === 0) {
             this.scheduleCleanup(entry);
+          }
+
+          if (wasPending && data.length === 0) {
+            this.scheduleEmptyRefresh(entry, generation, this.session ?? undefined);
           }
         },
         entry.options,
@@ -432,6 +452,39 @@ export class SubscriptionsOrchestrator {
       }
       this.scheduleCleanup(entry);
     }
+  }
+
+  private scheduleEmptyRefresh<T extends { id: string }>(
+    entry: InternalCacheEntry<T>,
+    generation: number,
+    session: Session | undefined,
+  ): void {
+    if (entry.emptyRefreshScheduled || !this.db.all) return;
+    entry.emptyRefreshScheduled = true;
+    setTimeout(() => {
+      entry.emptyRefreshScheduled = false;
+      if (!this.entries.has(entry.key) || entry.generation !== generation) return;
+      void Promise.resolve(this.db.all!(entry.query, entry.options, session))
+        .then((snapshot) => {
+          if (!this.entries.has(entry.key) || entry.generation !== generation) return;
+          if (entry.state.status === "rejected") return;
+          if (entry.state.status === "fulfilled" && entry.state.data.length > 0) return;
+          if (snapshot.length === 0) return;
+
+          entry.state = {
+            status: "fulfilled",
+            data: [...snapshot],
+            error: null,
+          };
+          entry.resolvefulfilled(snapshot);
+
+          for (const listener of Array.from(entry.listeners)) {
+            listener.onReset?.();
+            listener.onfulfilled?.(entry.state.data);
+          }
+        })
+        .catch(() => undefined);
+    }, 0);
   }
 
   /**
@@ -457,6 +510,8 @@ export class SubscriptionsOrchestrator {
       entry.unsubscribe();
       entry.unsubscribe = undefined;
     }
+    entry.generation += 1;
+    entry.emptyRefreshScheduled = false;
 
     // The prior session's rows are no longer valid. Drop a settled entry back to
     // `pending` and tell listeners to clear, so stale data is nuked with the

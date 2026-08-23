@@ -9,7 +9,7 @@
 
 export type Value =
   | { type: "Integer"; value: number }
-  | { type: "BigInt"; value: number }
+  | { type: "BigInt"; value: bigint | number }
   | { type: "Double"; value: number }
   | { type: "Boolean"; value: boolean }
   | { type: "Text"; value: string }
@@ -18,6 +18,7 @@ export type Value =
   | { type: "Bytea"; value: Uint8Array }
   | { type: "Array"; value: Value[] }
   | { type: "Row"; value: { id?: string; values: Value[] } }
+  | { type: "Enum"; value: { case: string; values: Value[] } }
   | { type: "Null" };
 
 export type InsertValues = Record<string, Value>;
@@ -60,13 +61,50 @@ export type WireRowChange = WireRowDeltaAdded | WireRowDeltaRemoved | WireRowDel
 
 export type RowDelta = WireRowChange[];
 
+export type NativeTerminalPathSegment = { Collection: string } | { Key: number[] };
+export type NativeTerminalEdit =
+  | { Insert: { index: number; key: number[]; value: number[] } }
+  | { Update: { key: number[]; value: number[] } }
+  | { Remove: { key: number[] } }
+  | { Move: { key: number[]; index: number } };
+/** Immutable producer-owned root descriptor contract, registered before use. */
+export interface NativeTerminalRootLayout {
+  id: string;
+  rootDescriptor: number[];
+  rootKeySlot: number;
+  rootKeyFieldName: string;
+  publicFields: Array<{
+    name: string;
+    descriptorFieldName: string;
+    slot: number;
+    carrier?: "CurrentRow" | "Logical";
+  }>;
+  carrier: "CurrentRow" | "Logical";
+}
+export interface NativeTerminalOperation {
+  /** Stable ID of a layout published in the same or an earlier delta. */
+  rootLayoutId?: string;
+  /** Legacy self-describing operation; new native producers must not send it. */
+  rootDescriptor?: number[];
+  root_key: number[];
+  path: NativeTerminalPathSegment[];
+  edit: NativeTerminalEdit;
+}
+
 export interface NativeRowDelta {
+  __jazzNativeRowDelta: true;
+  reset?: boolean;
   added: Uint8Array;
   removed: Uint8Array;
   updated: Uint8Array;
   addedCount: number;
   removedCount: number;
   updatedCount: number;
+  addedOccurrenceKeys?: Uint8Array[];
+  updatedOccurrenceKeys?: Uint8Array[];
+  removedOccurrenceKeys?: Uint8Array[];
+  terminalLayouts?: NativeTerminalRootLayout[];
+  terminalOperations?: NativeTerminalOperation[];
 }
 
 export type SubscriptionWireDelta = RowDelta | NativeRowDelta;
@@ -79,6 +117,7 @@ export type ColumnType =
   | { type: "Text" }
   | { type: "Json"; schema?: Record<string, unknown> }
   | { type: "Enum"; variants: string[] }
+  | { type: "EnumPayload"; cases: Array<{ name: string; fields: ColumnDescriptor[] }> }
   | { type: "Timestamp" }
   | { type: "Uuid" }
   | { type: "Bytea" }
@@ -91,6 +130,8 @@ export interface ColumnDescriptor {
   name: string;
   column_type: ColumnType;
   nullable: boolean;
+  /** Physical current-row carriers may omit this wildcard field. */
+  sparse?: boolean;
   default?: Value;
   references?: string;
   merge_strategy?: ColumnMergeStrategy;
@@ -149,6 +190,8 @@ export interface TableSchema {
   columns: ColumnDescriptor[];
   indexed_columns?: string[];
   policies?: TablePolicies;
+  /** Ordinary immutable columns that form this table's branch key. */
+  branchBy?: string[];
 }
 
 export type Schema = Record<string, TableSchema>;
@@ -162,13 +205,13 @@ export type WasmSchema = Schema;
 /**
  * Interface for storage backend implementations.
  *
- * - `persistent`: local persistence enabled (OPFS in browser, platform-specific native storage elsewhere)
+ * - `persistent`: local persistence enabled (IndexedDB in browser, Fjall in backend)
  * - `memory`: non-persistent in-memory runtime only
  */
 export type StorageDriver =
   | {
       type: "persistent";
-      /** Browser OPFS namespace when persistence is enabled (default: appId). */
+      /** Browser IndexedDB namespace when persistence is enabled (default: appId). */
       dbName?: string;
     }
   | {

@@ -21,6 +21,17 @@ describe("createDb in-memory driver", () => {
     db = undefined;
   });
 
+  it("opens a native Db with the current ordinary-column schema layout", async () => {
+    db = await createDb({
+      appId: "in-memory-current-column-layout-test",
+      driver: { type: "memory" },
+    });
+
+    // Opening the native client decodes and compiles the TypeScript-authored
+    // source schema before this query can run.
+    await expect(db.all(app.notes)).resolves.toEqual([]);
+  });
+
   it("can read and write data without connecting to a server", async () => {
     db = await createDb({
       appId: "in-memory-db-test",

@@ -19,7 +19,16 @@
   "exclude": [
     "node_modules",
     "dist",
+    "src/**/*.test.ts",
+    "src/**/*.test.tsx",
+    "src/**/*.typecheck.ts",
+    "src/**/*.typecheck.tsx",
     "src/solid/**/*",
+    "src/dev/test-helpers.ts",
+    "src/react-core/test-utils.ts",
+    "src/runtime/client-tests/**/*",
+    "src/runtime/testing/**/*",
+    "src/testing/relation-ir-test-helpers.ts",
     "src/**/*.svelte.test.ts",
     "src/svelte/test-helpers.svelte.ts"
   ]

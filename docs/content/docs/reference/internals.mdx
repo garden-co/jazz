@@ -1,7 +1,7 @@
 ---
 title: Advanced Internals
 description: "How Jazz works under the hood: raw tables, row histories, sync, the query pipeline, and the browser architecture."
-reviewedAt: "2b1e2e78b"
+reviewedAt: "b29b48d1a"
 ---
 
 This page describes Jazz's internal architecture. You do not need any of this to use Jazz, but it
@@ -126,8 +126,10 @@ ordering straightforward within a single device or process.
 
 ### Merge strategies
 
-By default, Jazz adopts a per-column last-writer-wins strategy to resolve concurrent edits. This means that if
-two clients update the same column of the same row simultaneously, the one with the later timestamp overwrites the earlier one.
+By default, Jazz adopts a per-column last-writer-wins strategy to resolve concurrent edits. If two
+clients update the same column of the same row simultaneously, Jazz's deterministic
+[hybrid logical clock](/docs/concepts/how-sync-works#hybrid-logical-clock) ordering chooses the
+winner.
 
 This is a sensible default, but can cause some unexpected behaviour with certain types of data. For example,
 imagine a voting app. Alice and Bob both read the current `voteCount` value as 2. They each want to increment
@@ -211,26 +213,20 @@ The result is that cold-start cost is much closer to "index size" than "total st
 
 ## Browser architecture
 
-### Dual-runtime model
+### Core browser runtime
 
-In the browser, Jazz runs two runtime instances:
+In the browser, Jazz uses the direct Rust/WASM core for reads, writes, subscriptions, and sync. With
+`driver: { type: "memory" }`, the database runs in the main thread and syncs to the configured
+server over the core WebSocket protocol.
 
-- **Main thread** — an in-memory runtime that serves UI-facing reads and writes immediately
-- **Dedicated worker** — a persistent runtime backed by OPFS (Origin Private File System) that owns
-  durable storage and upstream server sync
+With `driver: { type: "persistent" }`, Jazz uses a SharedWorker broker to coordinate tabs for the
+same database namespace. The broker elects one tab as the leader. That tab creates a dedicated
+worker, which opens the core database with `WasmDb.openBrowser(...)`, owns OPFS, and maintains the
+server connection. Follower tabs receive message ports from the broker and route their database
+traffic through the leader. If the leader closes, the broker promotes another tab.
 
-The main thread treats the worker as its upstream peer. Writes apply to the in-memory runtime
-immediately, then sync to the worker via `postMessage`. The worker persists them to OPFS and
-forwards them to the next sync tier. Incoming server updates flow the reverse path: server ->
-worker -> main thread -> your UI callback.
-
-```text
-Main thread (in-memory runtime)
-  ↕ postMessage
-Dedicated worker (persistent OPFS runtime)
-  ↕ HTTP/SSE
-Edge/global server runtime
-```
+The main-thread runtime keeps a non-durable client-side peer so that application writes can be
+applied synchronously while the durable worker processes them in the background.
 
 With `driver: { type: "memory" }`, the worker and OPFS are skipped entirely, and the main-thread
 runtime syncs directly with the server.
@@ -242,20 +238,13 @@ checkpoint writes dirty pages, flushes, then swaps the active superblock. On reo
 or torn write, the highest valid superblock generation wins, recovering to the last complete
 checkpoint.
 
-### Tab coordination
-
-Jazz uses a browser broker backed by `SharedWorker`, `MessageChannel`, and the Web Locks API
-(`navigator.locks`) to keep one OPFS-backed worker per persistent browser namespace. The broker
-elects a leader tab, and that leader owns the dedicated worker. Follower tabs receive broker-routed
-message ports to the leader's worker instead of spawning their own OPFS worker.
-
-When the leader tab closes, the browser releases the lock and the broker promotes another tab.
-
 ### React Native
 
-React Native uses a separate native runtime adapter with no web worker or OPFS path. It still uses
-the same table-first runtime model, but local persistence is provided by the native embedded backend
-rather than by browser APIs.
+React Native has compile-level adapter scaffolding with no web worker or OPFS path. In this alpha,
+the adapter does not yet connect a native embedded storage backend to the v2 runtime: persistent
+startup fails before opening a driver, and the explicit memory path has not been validated under
+Metro/Hermes on a device. The table-first model remains the intended native architecture, not a
+claim that local database persistence is currently supported.
 
 ## Query engine
 
@@ -295,9 +284,10 @@ live subscriptions, which is why they participate in durability-tier gating and 
 
 ### Include performance
 
-Each outer row in an `include()` / array subquery gets its own compiled sub-graph. With 1,000 outer
-rows, that is 1,000 sub-graphs. Any change to the inner table re-settles all instances. This is
-correct and simple, but worth remembering when including across very large result sets.
+Initial setup and materialisation still scale with the size of the relation returned by an
+`include()` or array subquery. Once the query is maintained, a child-row change is routed
+incrementally to the affected result. A canonical scale canary checks that the allocation cost of
+one maintained relation change does not grow with the accumulated relation size.
 
 ## Sync protocol
 
@@ -350,7 +340,8 @@ Migrations in Jazz produce **lenses** — bidirectional transformations between 
 such as adding, removing, or renaming columns and tables.
 
 At query time, Jazz can use lens paths to read older stored data through the current schema. At
-write time, updates to older rows are written back into the current schema branch via copy-on-write.
+write time, it projects updates through the lens path while retaining the row's physical schema
+identity.
 
 ### Catalogue sync
 

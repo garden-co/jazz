@@ -57,6 +57,25 @@ async function createLocalFirstIdentity(
   return { token, userId };
 }
 
+async function removeTempDir(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await rm(path, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (
+        attempt === 4 ||
+        !(error instanceof Error) ||
+        !("code" in error) ||
+        error.code !== "ENOTEMPTY"
+      ) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+}
+
 /**
  * Publishes the todo app schema + permissions to the server, creates a
  * persistent `JazzContext`, registers `onTestFinished` cleanup, and returns
@@ -86,16 +105,14 @@ async function createTestContext(
     driver: { type: "persistent", dataPath },
     serverUrl: server.url,
     backendSecret,
-    adminSecret,
     env: "test",
-    userBranch: "main",
     tier: "local",
   });
 
   onTestFinished(async () => {
     await context.shutdown();
     await new Promise((resolve) => setTimeout(resolve, 50));
-    await rm(dataRoot, { recursive: true, force: true });
+    await removeTempDir(dataRoot);
   });
 
   return context;
@@ -191,15 +208,17 @@ describe("forRequest auth and policy", () => {
       { timeout: 10_000 },
     );
 
-    // Insert with a foreign owner_id is rejected by the policy.
-    expect(() =>
-      aliceDb.insert(todoApp.todos, {
-        title: "imposter",
-        done: false,
-        description: scopeTag,
-        owner_id: "someone-else",
-      }),
-    ).toThrow('Insert failed: WriteError("policy denied INSERT on table todos")');
+    // The client stages this optimistically; the serving authority rejects it.
+    await expect(
+      aliceDb
+        .insert(todoApp.todos, {
+          title: "imposter",
+          done: false,
+          description: scopeTag,
+          owner_id: "someone-else",
+        })
+        .wait({ tier: "edge" }),
+    ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
 
     // Backend can see the row regardless of ownership.
     await vi.waitFor(
@@ -303,7 +322,6 @@ describe("forRequest auth and policy", () => {
       backendSecret,
       adminSecret,
       env: "test",
-      userBranch: "main",
     });
 
     onTestFinished(async () => {
@@ -457,24 +475,27 @@ describe("forRequest concurrent session isolation", () => {
       { timeout: 10_000 },
     );
 
-    // Cross-user write rejection: alice and bob must not be able to insert
-    // rows owned by each other, even when their requests are in flight concurrently.
-    expect(() =>
-      aliceDb.insert(todoApp.todos, {
-        title: "alice-as-bob",
-        done: false,
-        description: scopeTag,
-        owner_id: bob.userId,
-      }),
-    ).toThrow('Insert failed: WriteError("policy denied INSERT on table todos")');
-    expect(() =>
-      bobDb.insert(todoApp.todos, {
-        title: "bob-as-alice",
-        done: false,
-        description: scopeTag,
-        owner_id: alice.userId,
-      }),
-    ).toThrow('Insert failed: WriteError("policy denied INSERT on table todos")');
+    // Cross-user writes stage locally but are rejected by the serving authority.
+    await expect(
+      aliceDb
+        .insert(todoApp.todos, {
+          title: "alice-as-bob",
+          done: false,
+          description: scopeTag,
+          owner_id: bob.userId,
+        })
+        .wait({ tier: "edge" }),
+    ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
+    await expect(
+      bobDb
+        .insert(todoApp.todos, {
+          title: "bob-as-alice",
+          done: false,
+          description: scopeTag,
+          owner_id: alice.userId,
+        })
+        .wait({ tier: "edge" }),
+    ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
 
     // A new Db handle for alice (same identity, new forRequest call — simulating
     // a subsequent HTTP request from the same user) must stay isolated from bob's data.
@@ -547,10 +568,10 @@ describe("forRequest concurrent session isolation", () => {
 
     // Cross-user update must be rejected.
     expect(() => aliceDb.update(todoApp.todos, bobRow.id, { title: "alice-as-bob" })).toThrow(
-      'Update failed: WriteError("policy denied UPDATE on table todos")',
+      'Update failed: WriteError("read policy denied partial UPDATE on table todos: the operation requires read permission on the target row")',
     );
     expect(() => bobDb.update(todoApp.todos, aliceRow.id, { title: "bob-as-alice" })).toThrow(
-      'Update failed: WriteError("policy denied UPDATE on table todos")',
+      'Update failed: WriteError("read policy denied partial UPDATE on table todos: the operation requires read permission on the target row")',
     );
   }, 30_000);
 
@@ -590,12 +611,12 @@ describe("forRequest concurrent session isolation", () => {
         .wait({ tier: "edge" }),
     ]);
 
-    // Cross-user delete must be rejected while rows still exist.
-    expect(() => aliceDb.delete(todoApp.todos, bobRow.id)).toThrow(
-      'Delete failed: WriteError("policy denied DELETE on table todos")',
+    // Cross-user deletes stage locally but are rejected by the serving authority.
+    await expect(aliceDb.delete(todoApp.todos, bobRow.id).wait({ tier: "edge" })).rejects.toThrow(
+      /AuthorizationDenied|Write rejected by server authorization/,
     );
-    expect(() => bobDb.delete(todoApp.todos, aliceRow.id)).toThrow(
-      'Delete failed: WriteError("policy denied DELETE on table todos")',
+    await expect(bobDb.delete(todoApp.todos, aliceRow.id).wait({ tier: "edge" })).rejects.toThrow(
+      /AuthorizationDenied|Write rejected by server authorization/,
     );
 
     // Each user can delete their own row concurrently.

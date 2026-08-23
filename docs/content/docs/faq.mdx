@@ -1,7 +1,7 @@
 ---
 title: FAQ
 description: Frequently asked questions about Jazz.
-reviewedAt: "f6535a533"
+reviewedAt: "b29b48d1a"
 ---
 
 import { Accordion, Accordions } from "fumadocs-ui/components/accordion";
@@ -38,13 +38,14 @@ This is useful when iterating on your schema during development.
 
 <Accordion id="undefined-vs-empty-array" title="Why does useAll return undefined?">
 
-`useAll` and `QuerySubscription` return `undefined` until the first response arrives from the requested tier. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated. See [The undefined loading state](/docs/reading/queries#the-undefined-loading-state) for details.
+`useAll` and `QuerySubscription` return `undefined` until the first response arrives from the requested tier. After that, the value is an array&hairsp;—&hairsp;empty (`[]`) if no rows match, or populated. See [The loading state](/docs/reading/queries#the-loading-state) for details.
 
 </Accordion>
 
 <Accordion id="offline-only" title="Can I use Jazz without a server?">
 
-Yes. Omit `serverUrl` from your config — data will be persisted locally only.
+Yes. Omit `serverUrl` from your config. Jazz will not try to sync: browser clients keep their data
+in local persistent storage, while other runtimes use their configured local driver.
 
 </Accordion>
 
@@ -56,69 +57,21 @@ Yes. When a user signs up with an external provider, their identity carries over
 
 <Accordion id="rust-migrations" title="Do Rust apps need separate migration files?">
 
-No. Rust services use the same TypeScript migration files. The Rust runtime consumes the compiled schema representation through the CLI. See [Migrations](/docs/schemas/migrations) for details.
+No. Define and publish migrations with the TypeScript tooling. The server stores the compiled
+migrations that the Rust runtime uses. See [Migrations](/docs/schemas/migrations) for details.
 
 </Accordion>
 
-<Accordion id="common-errors" title="What do the sync error messages mean?">
+<Accordion id="common-errors" title="How do I handle a rejected write?">
 
-Jazz may return the following errors when a client's request is rejected by the server:
+Keep the result of the write and call `wait()` when your app needs to know whether the server
+accepted it. A rejected write throws `PersistedWriteRejectedError`, which provides the server's
+`code`, `reason`, and `transactionId`.
 
-- **`PermissionDenied`**&hairsp;—&hairsp;a write was rejected because it failed the table's
-  [permission policy](/docs/auth/permissions). Check that the session has the right to perform
-  that operation on the row.
-- **`SessionRequired`**&hairsp;—&hairsp;a write was attempted without an authenticated session.
-  Make sure the client is using a valid auth mode (local-first or external JWT).
-- **`CatalogueWriteDenied`**&hairsp;—&hairsp;a client attempted to write a schema or lens
-  catalogue object without the required admin secret. In production, catalogue writes require
-  `--admin-secret`.
-- **`QuerySubscriptionRejected`**&hairsp;—&hairsp;a query subscription was rejected by the
-  server, typically because the query references a table or schema the server doesn't know about.
-  This can happen if the schema hasn't synced yet or if there's a version mismatch.
-
-</Accordion>
-
-<Accordion
-  id="browser-version-mismatch-prompt"
-  title="How do I customize the browser version mismatch prompt?"
->
-
-In persistent browser mode, one tab owns the local OPFS-backed worker and other tabs connect through
-the same browser broker. If a tab from a different app version or runtime configuration is already
-open, a new tab may be unable to join that broker safely. By default Jazz shows a native browser
-prompt asking the user to close the other tabs and reload.
-
-Use `onIncompatibleBrowserBrokerConfiguration` to extend or replace that default flow. Providing the
-handler disables the built-in prompt, so call `window.confirm(...)` and `window.location.reload()`
-yourself if you still want the native browser behavior:
-
-```tsx title="App.tsx"
-<JazzProvider
-  config={{
-    appId,
-    serverUrl,
-    secret,
-    onIncompatibleBrowserBrokerConfiguration(error) {
-      // Optional: report the mismatch before continuing with the browser-native flow.
-      console.warn(error);
-
-      const shouldReload = window.confirm(
-        "Another tab is using a different version of this app. Close the other tabs, then reload this page.\n\nReload now?",
-      );
-
-      if (shouldReload) {
-        window.location.reload();
-      }
-    },
-  }}
->
-  <App />
-</JazzProvider>
-```
-
-The same option is available on plain `createDb(...)`. The callback is only a handling hook for this
-startup failure; the incompatible client creation still rejects, so the tab should reload or show
-your app's normal initialization error state.
+Use `db.onMutationError()` as a fallback for rejected writes that do not have an active `wait()`
+call. The callback receives the rejection `code`, `reason`, and local transaction record. See
+[Writing data](/docs/writing/writing-data#write-durability-tiers) for an example and
+[Permissions](/docs/auth/permissions) for how the server decides whether to accept a write.
 
 </Accordion>
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useJazzAuth } from "./jazz-provider";
+import { useLocalFirstAuth } from "jazz-tools/react";
 
 type Status =
   | { kind: "idle" }
@@ -20,7 +20,7 @@ export function AuthBackup({
   redirectAfterRestore?: string;
   mode?: "full" | "restore-only";
 } = {}) {
-  const auth = useJazzAuth();
+  const auth = useLocalFirstAuth();
 
   function navigate() {
     if (redirectAfterRestore) {

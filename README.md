@@ -19,10 +19,14 @@ npm create jazz
 
 Or follow one of the setup guides:
 
-- Local-first [React](https://jazz.tools/docs/install/client#jazz-framework-react) &middot; [Vue](https://jazz.tools/docs/install/client#jazz-framework-vue) &middot; [Svelte](https://jazz.tools/docs/install/client#jazz-framework-svelte) &middot; [Solid](https://jazz.tools/docs/install/client#jazz-framework-solid) &middot; [Expo](https://jazz.tools/docs/install/client#jazz-framework-expo) &middot; [Plain TypeScript](https://jazz.tools/docs/install/client#jazz-framework-typescript)
+- Local-first [React](https://jazz.tools/docs/install/client#jazz-framework-react) &middot; [Vue](https://jazz.tools/docs/install/client#jazz-framework-vue) &middot; [Svelte](https://jazz.tools/docs/install/client#jazz-framework-svelte) &middot; [Solid](https://jazz.tools/docs/install/client#jazz-framework-solid) &middot; [Expo binding scaffold](https://jazz.tools/docs/install/client#jazz-framework-expo) (persistent and device-supported memory runtimes are not available in this alpha) &middot; [Plain TypeScript](https://jazz.tools/docs/install/client#jazz-framework-typescript)
 - Server-side [TypeScript](https://jazz.tools/docs/install/typescript-server)
 
 # Contributing
+
+## Architecture specs
+
+The authoritative architecture contracts live with the crates: [`crates/jazz/SPEC/`](crates/jazz/SPEC/) (data model, transactions, authorization, sync, queries, lowering, API) and [`crates/groove/SPEC/`](crates/groove/SPEC/) (storage model, operators, incremental maintenance). Each chapter is structured as Overview (read this) / Details / Open Questions.
 
 ## Prerequisites
 
@@ -54,6 +58,22 @@ Server builds compile RocksDB from source on first build (cached afterwards by `
 ## Package versioning
 
 `jazz-tools`, `jazz-wasm`, `jazz-napi`, and `jazz-rn` are configured as a Changesets fixed group for lock-stepped releases. Keep workspace links in source (`workspace:*`) and let pack/publish resolve concrete versions.
+
+### Fast local binding builds
+
+Use `pnpm --filter jazz-wasm build:fast` for correctness-focused WASM work. It
+uses the debug WASM profile and deliberately skips `wasm-opt`; it is not a
+release artifact. `pnpm --filter jazz-wasm build` remains the optimized release
+build used by CI and publishing. `dev/rebuild-artifacts.sh wasm-fast` exposes the
+same path alongside the other local artifact rebuilds.
+
+Generated WASM and NAPI bindings carry a small provenance manifest. The manifest
+binds an artifact to the exact Git tree (including local changes), Cargo.lock,
+Rust toolchain/version, target/profile and relevant Rust/package inputs. Run
+`dev/gates/artifacts-fresh.sh` before a focused test that consumes an existing
+binding; it prints the precise rebuild command when an artifact is stale. This
+works from any checkout on macOS, Linux, and CI—no devbox-specific paths or hash
+utilities are required.
 
 Releases are currently locked to the alpha prerelease channel via `.changeset/pre.json` (`tag: alpha`).
 The `Changesets Release PR` workflow uses `changesets/action` to auto-create/update a `Version Packages (alpha)` PR on `main`.

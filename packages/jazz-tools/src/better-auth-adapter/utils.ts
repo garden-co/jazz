@@ -1,4 +1,4 @@
-import type { Where } from "better-auth/adapters";
+import type { CleanedWhere } from "better-auth/adapters";
 import type { QueryBuilder, TableProxy } from "../runtime/db.js";
 import type { WasmSchema } from "../drivers/types.js";
 import {
@@ -17,20 +17,11 @@ export function assertNativeJoinsDisabled(join?: unknown): void {
 
 // Identify if the query is supported by Jazz engine
 // Otherwise, we will fall back to client-side filtering
-export function isQuerySupported(tableSchema: WasmSchema[string], where?: Where[]): boolean {
+export function isQuerySupported(tableSchema: WasmSchema[string], where?: CleanedWhere[]): boolean {
   const columnByName = new Map(tableSchema.columns.map((column) => [column.name, column] as const));
 
   for (const condition of where ?? []) {
     if (condition.connector === "OR") {
-      return false;
-    }
-
-    const operator = condition.operator ?? "eq";
-    if (
-      condition.mode === "insensitive" &&
-      typeof condition.value === "string" &&
-      ["eq", "contains", "starts_with", "ends_with"].includes(operator)
-    ) {
       return false;
     }
 
@@ -42,7 +33,7 @@ export function isQuerySupported(tableSchema: WasmSchema[string], where?: Where[
       return false;
     }
 
-    if (!supportedOperators.includes(operator as WhereOperator)) {
+    if (!supportedOperators.includes(condition.operator as WhereOperator)) {
       return false;
     }
 
@@ -53,7 +44,7 @@ export function isQuerySupported(tableSchema: WasmSchema[string], where?: Where[
         return false;
       }
 
-      if (operator === "ne" && column.references) {
+      if (condition.operator === "ne" && column.references) {
         return false;
       }
     }
@@ -91,7 +82,7 @@ export function createQueryBuilder(
   };
 }
 
-export function filterListByWhere<T>(data: T[], where: Where[] | undefined): T[] {
+export function filterListByWhere<T>(data: T[], where: CleanedWhere[] | undefined): T[] {
   if (!Array.isArray(data)) {
     throw new Error("Expected data to be an array");
   }
@@ -105,25 +96,18 @@ export function filterListByWhere<T>(data: T[], where: Where[] | undefined): T[]
   }
 
   // Helper to evaluate a single condition
-  function evaluateCondition(item: any, condition: Where): boolean {
-    const { field, value } = condition;
-    const operator = condition.operator ?? "eq";
+  function evaluateCondition(item: any, condition: CleanedWhere): boolean {
+    const { field, operator, value } = condition;
     const itemValue = item[field];
-    const insensitive =
-      condition.mode === "insensitive" &&
-      typeof itemValue === "string" &&
-      typeof value === "string";
-    const comparableItemValue = insensitive ? itemValue.toLowerCase() : itemValue;
-    const comparableValue = insensitive ? value.toLowerCase() : value;
 
     switch (operator) {
       case "eq":
-        return comparableItemValue === comparableValue;
+        return itemValue === value;
       case "ne":
         if (value === null) {
           return itemValue !== null && itemValue !== undefined;
         }
-        return comparableItemValue !== comparableValue;
+        return itemValue !== value;
       case "lt":
         return value !== null && itemValue < value;
       case "lte":
@@ -141,16 +125,16 @@ export function filterListByWhere<T>(data: T[], where: Where[] | undefined): T[]
           ? !(value as (string | number | boolean | Date)[]).includes(itemValue)
           : false;
       case "contains":
-        return typeof comparableItemValue === "string" && typeof comparableValue === "string"
-          ? comparableItemValue.includes(comparableValue)
+        return typeof itemValue === "string" && typeof value === "string"
+          ? itemValue.includes(value)
           : false;
       case "starts_with":
-        return typeof comparableItemValue === "string" && typeof comparableValue === "string"
-          ? comparableItemValue.startsWith(comparableValue)
+        return typeof itemValue === "string" && typeof value === "string"
+          ? itemValue.startsWith(value)
           : false;
       case "ends_with":
-        return typeof comparableItemValue === "string" && typeof comparableValue === "string"
-          ? comparableItemValue.endsWith(comparableValue)
+        return typeof itemValue === "string" && typeof value === "string"
+          ? itemValue.endsWith(value)
           : false;
       default:
         throw new Error(`Unsupported operator: ${operator}`);
@@ -230,18 +214,28 @@ export function paginateList<T>(
   return data.slice(start, end);
 }
 
-function isWhereByField(field: string, where: Where): boolean {
-  return (
-    where.field === field &&
-    (where.operator ?? "eq") === "eq" &&
-    (where.connector ?? "AND") === "AND"
-  );
+function isWhereByField(field: string, where: CleanedWhere): boolean {
+  return where.field === field && where.operator === "eq" && where.connector === "AND";
+}
+
+type SingleStringEqWhere<T extends string> = CleanedWhere & {
+  field: T;
+  operator: "eq";
+  value: string;
+  connector: "AND";
+};
+
+function isStringEqWhereByField<T extends string>(
+  field: T,
+  where: CleanedWhere,
+): where is SingleStringEqWhere<T> {
+  return isWhereByField(field, where) && typeof where.value === "string";
 }
 
 export function isWhereBySingleField<T extends string>(
   field: T,
-  where: Where[] | undefined,
-): where is [Where & { field: T; operator: "eq"; value: string; connector: "AND" }] {
+  where: CleanedWhere[] | undefined,
+): where is [SingleStringEqWhere<T>] {
   if (where === undefined || where.length !== 1) {
     return false;
   }
@@ -251,12 +245,12 @@ export function isWhereBySingleField<T extends string>(
     return false;
   }
 
-  return isWhereByField(field, cond);
+  return isStringEqWhereByField(field, cond);
 }
 
 export function containWhereByField<T extends string>(
   field: T,
-  where: Where[] | undefined,
+  where: CleanedWhere[] | undefined,
 ): boolean {
   if (where === undefined) {
     return false;
@@ -267,8 +261,8 @@ export function containWhereByField<T extends string>(
 
 export function extractWhereByField<T extends string>(
   field: T,
-  where: Where[] | undefined,
-): [Where | undefined, Where[]] {
+  where: CleanedWhere[] | undefined,
+): [CleanedWhere | undefined, CleanedWhere[]] {
   if (where === undefined) {
     return [undefined, []];
   }

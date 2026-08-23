@@ -1,0 +1,17 @@
+{
+  "name": "branching-project-planner-ts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "node ../../packages/jazz-tools/dist/cli.js validate && vite build"
+  },
+  "dependencies": {
+    "jazz-tools": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "catalog:default",
+    "vite": "catalog:default"
+  }
+}

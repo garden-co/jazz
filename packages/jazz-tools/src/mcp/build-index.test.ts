@@ -1,8 +1,10 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { fileURLToPath } from "node:url";
 
 import {
   buildIndex,
@@ -11,6 +13,63 @@ import {
   resolveIncludes,
   splitIntoSections,
 } from "./build-index.js";
+import { createSqliteBackend } from "./backend-sqlite.js";
+
+const packageBinDir = resolve(dirname(fileURLToPath(import.meta.url)), "../../bin");
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
+
+function corpusSearchQueries(dbPath: string): string[] {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    const rows = db.prepare("SELECT title, section_heading FROM sections_fts").all() as Array<{
+      title: string;
+      section_heading: string;
+    }>;
+    const terms = [
+      ...new Set(
+        rows
+          .flatMap(
+            ({ title, section_heading }) =>
+              `${title} ${section_heading}`.toLowerCase().match(/[a-z0-9]+/g) ?? [],
+          )
+          .filter((term) => term.length >= 5),
+      ),
+    ].sort();
+    const stride = Math.max(1, Math.floor(terms.length / 24));
+    return terms.filter((_, index) => index % stride === 0).slice(0, 24);
+  } finally {
+    db.close();
+  }
+}
+
+function readIndexContract(dbPath: string) {
+  const db = new DatabaseSync(dbPath);
+  try {
+    const quickCheck = db.prepare("PRAGMA quick_check").all();
+    db.exec("INSERT INTO sections_fts(sections_fts) VALUES('integrity-check')");
+    return {
+      integrity: { quickCheck, fts5: "ok" },
+      schema: db
+        .prepare(
+          "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY type, name, tbl_name, sql",
+        )
+        .all()
+        .map((row) => ({ ...row })),
+      pages: db
+        .prepare("SELECT title, slug, description, body FROM pages ORDER BY slug")
+        .all()
+        .map((row) => ({ ...row })),
+      sections: db
+        .prepare(
+          "SELECT title, slug, section_heading, body FROM sections_fts ORDER BY slug, section_heading, title, body",
+        )
+        .all()
+        .map((row) => ({ ...row })),
+    };
+  } finally {
+    db.close();
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -264,10 +323,9 @@ describe("buildIndex", () => {
     await cleanupFixtureTree(tmpDir);
   });
 
-  it("produces docs-index.db and docs-index.txt", async () => {
+  it("produces docs-index.db", async () => {
     const { existsSync } = await import("node:fs");
     expect(existsSync(join(outputDir(), "docs-index.db"))).toBe(true);
-    expect(existsSync(join(outputDir(), "docs-index.txt"))).toBe(true);
   });
 
   it("pages table has correct schema", async () => {
@@ -365,22 +423,7 @@ describe("buildIndex", () => {
     db.close();
   });
 
-  it("docs-index.txt contains ===PAGE:slug=== markers for all pages", async () => {
-    const txt = await readFile(join(outputDir(), "docs-index.txt"), "utf8");
-    expect(txt).toContain("===PAGE:getting-started===");
-    expect(txt).toContain("===PAGE:api-reference===");
-    expect(txt).toContain("===PAGE:quickstarts/react===");
-  });
-
-  it("docs-index.txt includes TITLE and DESCRIPTION lines per page", async () => {
-    const txt = await readFile(join(outputDir(), "docs-index.txt"), "utf8");
-    expect(txt).toContain("TITLE:Getting Started");
-    expect(txt).toContain("DESCRIPTION:Learn how to get started with Jazz.");
-  });
-
-  // The more content we have in the docs, the longer this test will take,
-  // and the more likely it is to fail due to timeouts.
-  it.skip("is deterministic: running twice produces identical output", async () => {
+  it("is deterministic: running twice produces identical output", async () => {
     const tmpDir = await createFixtureTree();
     const outputDir = join(tmpDir, "output");
     const opts = {
@@ -391,18 +434,113 @@ describe("buildIndex", () => {
     try {
       await mkdir(outputDir, { recursive: true });
       await buildIndex(opts);
-      const txt1 = await readFile(join(outputDir, "docs-index.txt"), "utf8");
+      const db1 = await readFile(join(outputDir, "docs-index.db"));
 
-      // Remove db and txt, rebuild
+      // Remove db, rebuild
       await rm(join(outputDir, "docs-index.db"));
-      await rm(join(outputDir, "docs-index.txt"));
 
-      await buildIndex(opts);
-      const txt2 = await readFile(join(outputDir, "docs-index.txt"), "utf8");
+      const discoveredInReverse = [
+        join(opts.contentDir, "quickstarts", "react.mdx"),
+        join(opts.contentDir, "getting-started.mdx"),
+        join(opts.contentDir, "api-reference.mdx"),
+      ];
+      await buildIndex(opts, async () => discoveredInReverse);
+      const db2 = await readFile(join(outputDir, "docs-index.db"));
 
-      expect(txt1).toBe(txt2);
+      expect(db1.equals(db2)).toBe(true);
     } finally {
       await cleanupFixtureTree(tmpDir);
     }
   }, 10_000);
+});
+
+describe("packaged docs index", () => {
+  it("regenerates the packaged index before committing docs changes", () => {
+    const lefthook = JSON.parse(
+      execFileSync("pnpm", ["exec", "lefthook", "dump", "--format", "json"], {
+        cwd: repoRoot,
+        encoding: "utf8",
+      }),
+    ) as {
+      "pre-commit": {
+        commands: Record<string, { glob?: string[]; run?: string; stage_fixed?: boolean }>;
+      };
+    };
+
+    expect(lefthook["pre-commit"].commands["docs-index"]).toEqual({
+      glob: ["docs/**"],
+      run: "pnpm --filter docs exec tsx ../packages/jazz-tools/src/mcp/build-index.ts",
+      stage_fixed: true,
+    });
+  });
+
+  it("matches a clean rebuild of the complete production docs corpus", async () => {
+    const outputDir = await mkdtemp(join(tmpdir(), "production-docs-index-"));
+    try {
+      await buildIndex({
+        contentDir: join(repoRoot, "docs", "content", "docs"),
+        outputDir,
+        fileCwd: join(repoRoot, "docs"),
+      });
+
+      const rebuiltPath = join(outputDir, "docs-index.db");
+      const packagedCopyPath = join(outputDir, "packaged-docs-index.db");
+      await copyFile(join(packageBinDir, "docs-index.db"), packagedCopyPath);
+
+      expect(readIndexContract(rebuiltPath)).toEqual(readIndexContract(packagedCopyPath));
+
+      const queries = corpusSearchQueries(rebuiltPath);
+      expect(queries).toHaveLength(24);
+      const [rebuiltBackend, packagedBackend] = await Promise.all([
+        createSqliteBackend(rebuiltPath),
+        createSqliteBackend(packagedCopyPath),
+      ]);
+      const searchContract = (backend: Awaited<ReturnType<typeof createSqliteBackend>>) => ({
+        malformed: backend.search('"', 7),
+        queries: queries.map((query) => ({
+          query,
+          zero: backend.search(query, 0),
+          one: backend.search(query, 1),
+          ranked: backend.search(query, 7),
+        })),
+      });
+      const rebuiltSearch = searchContract(rebuiltBackend);
+      const packagedSearch = searchContract(packagedBackend);
+      expect(rebuiltSearch.malformed).toEqual([]);
+      for (const result of rebuiltSearch.queries) {
+        expect(result.zero).toEqual([]);
+        expect(result.one).toEqual(result.ranked.slice(0, 1));
+        expect(result.ranked.length).toBeLessThanOrEqual(7);
+      }
+      expect(rebuiltSearch).toEqual(packagedSearch);
+    } finally {
+      await rm(outputDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("ships current authentication docs in docs-index.db", async () => {
+    const db = new DatabaseSync(join(packageBinDir, "docs-index.db"));
+    const row = db
+      .prepare("SELECT description, body FROM pages WHERE slug = 'auth/authentication'")
+      .get() as { description: string; body: string } | undefined;
+    db.close();
+
+    expect(row).toBeDefined();
+    expect(row!.description).toBe(
+      '"How and when to use Jazz\'s auth modes, and how to manage JWT auth over the lifetime of a live client."',
+    );
+    expect(row!.body).toContain(
+      "Jazz has three auth modes: `anonymous`, `local-first`, and `external`.",
+    );
+    expect(row!.body).toContain('jwtToken: "<provider-jwt>"');
+    expect(row!.body).toContain("db.updateAuthToken(jwt)");
+    expect(row!.body).toContain("recreate `JazzProvider` or `Db` with a new auth config");
+    expect(row!.body).toContain("### Managing JWT changes on a live client");
+    expect(row!.body).toContain("### Reacting to expiry and unauthenticated responses");
+
+    expect(row!.body).not.toContain("allowSelfSigned");
+    expect(row!.body).not.toContain(
+      "jazz-server --jwks-url https://your-app.example.com/api/auth/jwks",
+    );
+  });
 });

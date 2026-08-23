@@ -1,29 +1,22 @@
 export {
-  type CreateOptions,
-  JazzClient,
   type AuthConfig,
-  type BatchMode,
-  type BatchFate,
-  type LocalBatchRecord,
-  type LocalUpdatesMode,
+  type LocalTransactionRecord,
   type MutationErrorEvent,
+  type TransactionFate,
+  type LocalUpdatesMode,
+  type PermissionAdvice,
   PersistedWriteRejectedError,
   loadWasmModule,
   type DurabilityTier,
-  type QueryExecutionOptions,
-  type QueryInput,
   type QueryPropagation,
   type QueryVisibility,
-  type RequestLike,
   type Row,
-  type Runtime,
-  type RestoreOptions,
   type SubscriptionCallback,
-  type UpdateOptions,
-  type UpsertOptions,
   type WasmModule,
-  type WriteResult,
-  type WriteHandle,
+  WriteHandle,
+  WriteResult,
+  ExclusiveWriteHandle,
+  ExclusiveWriteResult,
 } from "./client.js";
 export type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
 export {
@@ -32,27 +25,30 @@ export {
   type ActiveQuerySubscriptionTrace,
   type DbConfig,
   type LogoutOptions,
-  DbDirectBatch,
-  DbTransaction,
-  type BatchScope,
+  Transaction,
+  type TransactionKind,
   type TransactionScope,
   type QueryBuilder,
   type QueryOptions,
+  type QueryOptions as QueryExecutionOptions,
+  type Branch,
+  type BranchBase,
+  type BranchValue,
+  type QualifiedBranch,
+  type InsertOptions,
+  type RestoreOptions,
+  type UpdateOptions,
+  type DeleteOptions,
   type TableProxy,
 } from "./db.js";
-export { allRowsInTableQuery, type DynamicTableRow } from "./dynamic-query.js";
-export { resolveClientSessionSync, resolveClientSessionStateSync } from "./client-session.js";
 export type { AuthFailureReason, AuthState } from "./auth-state.js";
-export {
-  INCOMPATIBLE_BROWSER_BROKER_CONFIGURATION_CODE,
-  IncompatibleBrowserBrokerConfigurationError,
-  type IncompatibleBrowserBrokerConfigurationHandler,
-} from "./browser-broker-errors.js";
 export {
   fetchStoredPermissions,
   fetchSchemaHashes,
   fetchStoredWasmSchema,
   publishStoredPermissions,
+  publishStoredSchema,
+  type PublishStoredSchemaOptions,
   type PublishStoredPermissionsOptions,
   type FetchStoredPermissionsOptions,
   type FetchStoredWasmSchemaOptions,
@@ -65,25 +61,11 @@ export {
   type IntrospectionSubscriptionGroup,
   type IntrospectionSubscriptionResponse,
 } from "./introspection-fetch.js";
-export { translateQuery } from "./query-adapter.js";
-export { transformRows, unwrapValue, type WasmValue } from "./row-transformer.js";
-export { toValue, toWriteRecord } from "./value-converter.js";
 export {
-  DEFAULT_FILE_CHUNK_SIZE_BYTES,
-  MAX_FILE_PART_BYTES,
-  FileNotFoundError,
-  IncompleteFileDataError,
-  type ConventionalFileApp,
-  type ConventionalFileRow,
-  type FileReadOptions,
-  type FileWriteOptions,
-} from "./file-storage.js";
-export {
-  SubscriptionManager,
   RowChangeKind,
+  applySubscriptionDelta,
   type RowDelta,
   type SubscriptionDelta,
 } from "./subscription-manager.js";
-export { WorkerBridge, type WorkerBridgeOptions } from "./worker-bridge.js";
 export { generateAuthSecret, BrowserAuthSecretStore } from "./auth-secret-store.js";
 export type { AuthSecretStore, BrowserAuthSecretStoreOptions } from "./auth-secret-store.js";

@@ -39,17 +39,17 @@ const schema: WasmSchema = {
       { name: "payload", column_type: { type: "Bytea" }, nullable: true },
     ],
   },
-  file_parts: {
+  bundle_items: {
     columns: [{ name: "label", column_type: { type: "Text" }, nullable: false }],
   },
-  files: {
+  bundles: {
     columns: [
       { name: "name", column_type: { type: "Text" }, nullable: false },
       {
-        name: "parts",
+        name: "items",
         column_type: { type: "Array", element: { type: "Uuid" } },
         nullable: false,
-        references: "file_parts",
+        references: "bundle_items",
       },
     ],
   },
@@ -83,15 +83,15 @@ interface Todo {
   payload?: Uint8Array;
 }
 
-interface FilePart {
+interface BundleItem {
   id: string;
   label: string;
 }
 
-interface File {
+interface Bundle {
   id: string;
   name: string;
-  parts: string[];
+  items: string[];
 }
 
 const orgs: TableProxy<Org, Omit<Org, "id">> = {
@@ -122,18 +122,18 @@ const todos: TableProxy<Todo, Omit<Todo, "id">> = {
   _initType: {} as Omit<Todo, "id">,
 };
 
-const fileParts: TableProxy<FilePart, Omit<FilePart, "id">> = {
-  _table: "file_parts",
+const bundleItems: TableProxy<BundleItem, Omit<BundleItem, "id">> = {
+  _table: "bundle_items",
   _schema: schema,
-  _rowType: {} as FilePart,
-  _initType: {} as Omit<FilePart, "id">,
+  _rowType: {} as BundleItem,
+  _initType: {} as Omit<BundleItem, "id">,
 };
 
-const files: TableProxy<File, Omit<File, "id">> = {
-  _table: "files",
+const bundles: TableProxy<Bundle, Omit<Bundle, "id">> = {
+  _table: "bundles",
   _schema: schema,
-  _rowType: {} as File,
-  _initType: {} as Omit<File, "id">,
+  _rowType: {} as Bundle,
+  _initType: {} as Omit<Bundle, "id">,
 };
 
 const CONDITION_OWNER_ID = "00000000-0000-0000-0000-000000000201";
@@ -240,9 +240,9 @@ describe("db.subscribeAll browser integration", () => {
     {
       name: "lt",
       query: makeQuery<Todo>("todos", {
-        conditions: [{ column: "priority", op: "lt", value: 0 }],
+        conditions: [{ column: "priority", op: "lt", value: 2 }],
       }),
-      insert: { title: "lt-hit", done: false, priority: -1, owner_id: undefined, tags: ["x"] },
+      insert: { title: "lt-hit", done: false, priority: 1, owner_id: undefined, tags: ["x"] },
     },
     {
       name: "lte",
@@ -454,6 +454,36 @@ describe("db.subscribeAll browser integration", () => {
 
     const latestAll = deltas[deltas.length - 1]?.all ?? [];
     expect(latestAll.some((row) => row.id === id)).toBe(false);
+
+    unsubscribe();
+  });
+
+  it("delivers a write made after a persistent subscription starts", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-subscribe-test",
+        driver: { type: "persistent", dbName: uniqueDbName("subscription-write-fifo") },
+      }),
+    );
+    const deltas: Array<SubscriptionDelta<Todo>> = [];
+    const unsubscribe = trackUnsubscribe(
+      db.subscribeAll(makeQuery<Todo>("todos", {}), (delta) => deltas.push(delta)),
+    );
+
+    const { value } = db.insert(todos, {
+      title: "after subscription registration",
+      done: false,
+      priority: 1,
+      owner_id: undefined,
+      tags: [],
+    });
+    await waitForCondition(
+      () => deltas.some((delta) => hasChangeForId(delta, 0, value.id)),
+      4000,
+      "expected the live subscription to observe the subsequent write",
+    );
+    expect(deltas[0]?.all).toEqual([]);
+    expect(deltas.slice(1).some((delta) => hasChangeForId(delta, 0, value.id))).toBe(true);
 
     unsubscribe();
   });
@@ -673,6 +703,128 @@ describe("db.subscribeAll browser integration", () => {
     unsubscribe();
   });
 
+  it("reacts when only a reverse include target row changes", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-subscribe-test",
+        driver: { type: "persistent", dbName: uniqueDbName("include-target-update") },
+      }),
+    );
+
+    const {
+      value: { id: userId },
+    } = db.insert(users, { name: "Owner", team_id: undefined });
+    const {
+      value: { id: todoId },
+    } = db.insert(todos, {
+      title: "before",
+      done: false,
+      priority: 1,
+      owner_id: userId,
+      tags: ["x"],
+    });
+
+    const deltas: Array<SubscriptionDelta<User & { todosViaOwner?: Todo[] }>> = [];
+    const unsubscribe = trackUnsubscribe(
+      db.subscribeAll(
+        makeQuery<User & { todosViaOwner?: Todo[] }>("users", {
+          conditions: [{ column: "id", op: "eq", value: userId }],
+          includes: { todosViaOwner: true },
+        }),
+        (delta) => deltas.push(delta),
+      ),
+    );
+
+    await waitForCondition(
+      () => {
+        const latestAll = deltas[deltas.length - 1]?.all ?? [];
+        return latestAll[0]?.todosViaOwner?.some((todo) => todo.id === todoId) === true;
+      },
+      4000,
+      "expected initial reverse include result",
+    );
+
+    await db.update(todos, todoId, { title: "after" });
+
+    await waitForCondition(
+      () => {
+        const latestAll = deltas[deltas.length - 1]?.all ?? [];
+        return (
+          latestAll[0]?.todosViaOwner?.some(
+            (todo) => todo.id === todoId && todo.title === "after",
+          ) === true
+        );
+      },
+      4000,
+      "expected reverse include target update to wake subscribeAll",
+    );
+
+    unsubscribe();
+  });
+
+  it("decodes nullable child records delivered through an include terminal", async () => {
+    const db = track(
+      await createDb({
+        appId: "db-subscribe-test",
+        driver: { type: "persistent", dbName: uniqueDbName("include-nullable-child") },
+      }),
+    );
+
+    const {
+      value: { id: userId },
+    } = db.insert(users, { name: "Owner", team_id: undefined });
+    const deltas: Array<SubscriptionDelta<User & { todosViaOwner?: Todo[] }>> = [];
+    const unsubscribe = trackUnsubscribe(
+      db.subscribeAll(
+        makeQuery<User & { todosViaOwner?: Todo[] }>("users", {
+          conditions: [{ column: "id", op: "eq", value: userId }],
+          includes: { todosViaOwner: true },
+        }),
+        (delta) => deltas.push(delta),
+      ),
+    );
+
+    const {
+      value: { id: todoId },
+    } = db.insert(todos, {
+      title: "nullable terminal child",
+      done: false,
+      priority: 3,
+      owner_id: userId,
+      tags: ["x"],
+      payload: Uint8Array.of(7, 0, 8),
+    });
+
+    await waitForCondition(
+      () => {
+        const child = deltas[deltas.length - 1]?.all[0]?.todosViaOwner?.find(
+          (todo) => todo.id === todoId,
+        );
+        return child?.id === todoId;
+      },
+      4000,
+      "expected nullable child record through include terminal",
+    );
+    const child = deltas[deltas.length - 1]?.all[0]?.todosViaOwner?.find(
+      (todo) => todo.id === todoId,
+    );
+    expect(child?.priority).toBe(3);
+    expect(child?.owner_id).toBe(userId);
+    expect(child?.payload).toEqual(Uint8Array.of(7, 0, 8));
+
+    await db.update(todos, todoId, { priority: 7 });
+    await waitForCondition(
+      () =>
+        deltas[deltas.length - 1]?.all[0]?.todosViaOwner?.some(
+          (todo) => todo.id === todoId && todo.priority === 7,
+        ) === true,
+      4000,
+      "expected nullable child terminal update to decode",
+    );
+
+    unsubscribe();
+  });
+
   it("supports hop queries", async () => {
     const db = track(
       await createDb({
@@ -794,20 +946,20 @@ describe("db.subscribeAll browser integration", () => {
 
     const {
       value: { id: partAId },
-    } = db.insert(fileParts, { label: "A" });
+    } = db.insert(bundleItems, { label: "A" });
     const {
       value: { id: partBId },
-    } = db.insert(fileParts, { label: "B" });
+    } = db.insert(bundleItems, { label: "B" });
     const {
-      value: { id: fileId },
-    } = db.insert(files, { name: "File", parts: [partAId] });
+      value: { id: bundleId },
+    } = db.insert(bundles, { name: "Bundle", items: [partAId] });
 
-    const deltas: Array<SubscriptionDelta<FilePart>> = [];
+    const deltas: Array<SubscriptionDelta<BundleItem>> = [];
     const unsubscribe = trackUnsubscribe(
       db.subscribeAll(
-        makeQuery<FilePart>("files", {
-          conditions: [{ column: "id", op: "eq", value: fileId }],
-          hops: ["parts"],
+        makeQuery<BundleItem>("bundles", {
+          conditions: [{ column: "id", op: "eq", value: bundleId }],
+          hops: ["items"],
         }),
         (delta) => deltas.push(delta),
       ),
@@ -822,7 +974,7 @@ describe("db.subscribeAll browser integration", () => {
       "expected initial UUID[] hop result",
     );
 
-    await db.update(files, fileId, { parts: [partBId] });
+    await db.update(bundles, bundleId, { items: [partBId] });
 
     await waitForCondition(
       () => {
@@ -890,7 +1042,15 @@ describe("db.subscribeAll browser integration", () => {
       () => {
         const latestAll = deltas[deltas.length - 1]?.all ?? [];
         const ids = latestAll.map((row) => row.id);
-        return ids.includes(rootId) && ids.includes(midId) && ids.includes(leafId);
+        const names = latestAll.map((row) => row.name);
+        return (
+          ids.includes(rootId) &&
+          ids.includes(midId) &&
+          ids.includes(leafId) &&
+          names.includes("root") &&
+          names.includes("mid") &&
+          names.includes("leaf")
+        );
       },
       4000,
       "expected gather query subscription result",

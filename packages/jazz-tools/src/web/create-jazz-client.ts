@@ -1,22 +1,16 @@
 import type { Session } from "../runtime/context.js";
+import { acquireClient, releaseClient } from "../runtime/client-registry.js";
 import type { Db, DbConfig } from "../runtime/db.js";
 import { createDb } from "../runtime/db.js";
 import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
+import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import { registerWindowJazzStorageClient } from "../window-client-storage.js";
 
-/**
- * @todo Make VUE, React and SVELTE consume from this agnostic client
- *
- * The following files are practically 1:1 to this one:
- * ./packages/jazz-tools/src/react/create-jazz-client.ts
- * ./packages/jazz-tools/src/vue/create-jazz-client.ts
- * ./packages/jazz-tools/src/svelte/create-jazz-client.ts
- **/
+export type JazzClientConfig = DbConfig;
 
 export interface JazzClient {
   db: Db;
   session: Session | null;
-  manager: SubscriptionsOrchestrator;
   shutdown(): Promise<void>;
 }
 
@@ -31,21 +25,47 @@ async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
   });
   const unregisterWindowJazzStorageClient = registerWindowJazzStorageClient(db);
 
-  return {
-    db,
-    get session() {
-      return session;
+  return attachSubscriptionStore(
+    {
+      db,
+      get session() {
+        return session;
+      },
+      async shutdown() {
+        stopSessionSync?.();
+        unregisterWindowJazzStorageClient();
+        await manager.shutdown();
+        await db.shutdown();
+      },
     },
     manager,
-    async shutdown() {
-      stopSessionSync?.();
-      unregisterWindowJazzStorageClient();
-      await manager.shutdown();
-      await db.shutdown();
-    },
-  };
+  );
+}
+
+function configKey(config: DbConfig): string {
+  // The React provider also uses the generic client registry. Namespace this
+  // runtime lease so its wrapper cannot collide with the underlying client.
+  return `web:${JSON.stringify(config)}`;
 }
 
 export function createJazzClient(config: DbConfig): Promise<JazzClient> {
-  return trackPromise(createJazzClientInternal(config));
+  const key = configKey(config);
+  const holder = {};
+  const shared = acquireClient<JazzClient>(key, () => createJazzClientInternal(config), holder);
+  return trackPromise(
+    shared.then((client) =>
+      attachSubscriptionStore(
+        {
+          db: client.db,
+          get session() {
+            return client.session;
+          },
+          shutdown() {
+            return releaseClient(key, holder);
+          },
+        },
+        getSubscriptionStore(client),
+      ),
+    ),
+  );
 }

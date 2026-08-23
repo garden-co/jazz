@@ -40,22 +40,6 @@ const schema = {
     pointsJson: s.string(),
     createdAt: s.timestamp(),
   }),
-  attachments: s.table({
-    messageId: s.ref("messages"),
-    type: s.string(),
-    name: s.string(),
-    fileId: s.ref("files"),
-    size: s.int(),
-  }),
-  file_parts: s.table({
-    data: s.bytes(),
-  }),
-  files: s.table({
-    name: s.string().optional(),
-    mimeType: s.string(),
-    partIds: s.array(s.ref("file_parts")),
-    partSizes: s.array(s.int()),
-  }),
 };
 
 type AppSchema = s.Schema<typeof schema>;
@@ -64,4 +48,3 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
 export type Profile = s.RowOf<typeof app.profiles>;
 export type Chat = s.RowOf<typeof app.chats>;
 export type Message = s.RowOf<typeof app.messages>;
-export type Attachment = s.RowOf<typeof app.attachments>;

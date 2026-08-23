@@ -1,9 +1,4 @@
-// Pure MDX → pages/sections parsing helpers.
-//
-// This module deliberately has NO `node:sqlite` dependency (directly or
-// transitively) so it stays importable on Node < 22 and non-Node runtimes.
-// The text-search fallback backend depends on it; only the index *writer*
-// (build-index.ts) needs node:sqlite.
+// Pure MDX -> pages/sections parsing helpers.
 
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";

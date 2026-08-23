@@ -1,0 +1,246 @@
+use std::fmt;
+use std::ops::Deref;
+use std::sync::Arc;
+
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_bytes::ByteBuf;
+
+use crate::tools::Value;
+use crate::tools::metadata::RowProvenance;
+use crate::tools::object::ResultKey;
+use crate::tools::transaction::TransactionId;
+
+/// One named, typed field in a materialized query result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryResultField {
+    /// Stable output name. Joined fields are source-qualified (for example,
+    /// `author.name`).
+    pub name: String,
+    pub value: Value,
+}
+
+/// One materialized query result with its stable identity and named fields.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryResult {
+    /// Stable identity of this result, including every joined source row.
+    pub key: ResultKey,
+    /// Typed fields in the query's declared output order.
+    pub fields: Vec<QueryResultField>,
+}
+
+impl QueryResult {
+    pub fn new(key: ResultKey, fields: Vec<QueryResultField>) -> Self {
+        Self { key, fields }
+    }
+
+    /// Look up a field by its stable output name.
+    pub fn get(&self, name: &str) -> Option<&Value> {
+        self.fields
+            .iter()
+            .find(|field| field.name == name)
+            .map(|field| &field.value)
+    }
+
+    /// Consume this result and return its values in declared output order.
+    pub fn into_values(self) -> Vec<Value> {
+        self.fields.into_iter().map(|field| field.value).collect()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct RowBytes(Arc<[u8]>);
+
+impl fmt::Debug for RowBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Rows may contain arbitrary application data. Logging a length is
+        // enough to diagnose framing problems without leaking or flooding logs.
+        f.debug_struct("RowBytes")
+            .field("len", &self.0.len())
+            .finish()
+    }
+}
+
+impl RowBytes {
+    pub fn to_vec(&self) -> Vec<u8> {
+        self.0.as_ref().to_vec()
+    }
+}
+
+impl From<Vec<u8>> for RowBytes {
+    fn from(value: Vec<u8>) -> Self {
+        Self(Arc::from(value.into_boxed_slice()))
+    }
+}
+
+impl From<&[u8]> for RowBytes {
+    fn from(value: &[u8]) -> Self {
+        Self(Arc::from(value))
+    }
+}
+
+impl Deref for RowBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_ref()
+    }
+}
+
+impl AsRef<[u8]> for RowBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+}
+
+impl PartialEq<Vec<u8>> for RowBytes {
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        self.0.as_ref() == other.as_slice()
+    }
+}
+
+impl PartialEq<RowBytes> for Vec<u8> {
+    fn eq(&self, other: &RowBytes) -> bool {
+        self.as_slice() == other.0.as_ref()
+    }
+}
+
+impl Serialize for RowBytes {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(self.0.as_ref())
+    }
+}
+
+impl<'de> Deserialize<'de> for RowBytes {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Ok(Self::from(ByteBuf::deserialize(deserializer)?.into_vec()))
+    }
+}
+
+/// A maintained output row with its result key, binary data, and transaction identity.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(not(feature = "testing"), derive(Eq))]
+pub struct Row {
+    pub id: ResultKey,
+    /// Binary encoded row data.
+    pub data: RowBytes,
+    #[cfg(feature = "testing")]
+    /// Named, typed fields decoded according to the subscribed query.
+    pub fields: Vec<QueryResultField>,
+    pub transaction_id: TransactionId,
+    pub provenance: RowProvenance,
+}
+
+impl Row {
+    pub fn new(
+        id: ResultKey,
+        data: impl Into<RowBytes>,
+        transaction_id: TransactionId,
+        provenance: RowProvenance,
+    ) -> Self {
+        Self {
+            id,
+            data: data.into(),
+            #[cfg(feature = "testing")]
+            fields: Vec::new(),
+            transaction_id,
+            provenance,
+        }
+    }
+
+    #[cfg(feature = "testing")]
+    /// Attach named, typed query-result fields to this row.
+    pub fn with_fields(mut self, fields: Vec<QueryResultField>) -> Self {
+        self.fields = fields;
+        self
+    }
+
+    #[cfg(feature = "testing")]
+    /// Look up a decoded field by its public query-result name.
+    pub fn get(&self, name: &str) -> Option<&Value> {
+        self.fields
+            .iter()
+            .find(|field| field.name == name)
+            .map(|field| &field.value)
+    }
+}
+
+/// Delta for row-level changes (after materialization).
+/// Contains full row data for processing by filter/sort/output nodes.
+#[derive(Debug, Clone, Default)]
+pub struct RowDelta {
+    pub added: Vec<Row>,
+    pub removed: Vec<Row>,
+    /// Rows that stayed in-window but changed position.
+    /// Semantics: detach these IDs from current order, then append in listed order.
+    pub moved: Vec<ResultKey>,
+    /// Updated rows as (old, new) pairs.
+    pub updated: Vec<(Row, Row)>,
+}
+
+impl RowDelta {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty()
+            && self.removed.is_empty()
+            && self.moved.is_empty()
+            && self.updated.is_empty()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OrderedAdded {
+    pub id: ResultKey,
+    pub index: usize,
+    pub row: Row,
+}
+
+#[derive(Debug, Clone)]
+pub struct OrderedRemoved {
+    pub id: ResultKey,
+    pub index: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct OrderedUpdated {
+    pub id: ResultKey,
+    pub old_index: usize,
+    pub new_index: usize,
+    pub row: Option<Row>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct OrderedRowDelta {
+    pub added: Vec<OrderedAdded>,
+    pub removed: Vec<OrderedRemoved>,
+    pub updated: Vec<OrderedUpdated>,
+    pub pending: bool,
+}
+
+impl OrderedRowDelta {
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.removed.is_empty() && self.updated.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RowBytes;
+
+    #[test]
+    fn row_bytes_debug_is_stable_bounded_and_content_safe() {
+        assert_eq!(format!("{:?}", RowBytes::default()), "RowBytes { len: 0 }");
+        assert_eq!(
+            format!("{:?}", RowBytes::from(b"secret-row".as_slice())),
+            "RowBytes { len: 10 }"
+        );
+
+        let payload = vec![b'x'; 1_000_000];
+        let debug = format!("{:?}", RowBytes::from(payload));
+        assert_eq!(debug, "RowBytes { len: 1000000 }");
+        assert!(debug.len() < 64);
+        assert!(!debug.contains("secret-row"));
+    }
+}

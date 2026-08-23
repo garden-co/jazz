@@ -8,8 +8,7 @@ use wasm_bindgen_test::*;
 
 wasm_bindgen_test_configure!(run_in_browser);
 
-use jazz_wasm::types::Value;
-use jazz_wasm::{current_timestamp, generate_id, parse_schema, WasmQueryBuilder};
+use jazz_wasm::{current_timestamp, derive_user_id, generate_id, mint_anonymous_token};
 
 #[wasm_bindgen_test]
 fn test_generate_id() {
@@ -37,134 +36,25 @@ fn test_current_timestamp() {
 }
 
 #[wasm_bindgen_test]
-fn test_parse_schema() {
-    let schema_json = r#"{
-        "todos": {
-            "columns": [
-                {"name": "title", "column_type": {"type": "Text"}, "nullable": false},
-                {"name": "completed", "column_type": {"type": "Boolean"}, "nullable": false}
-            ]
-        }
-    }"#;
+fn test_identity_helpers_accept_valid_seed() {
+    let seed = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
-    let result = parse_schema(schema_json);
-    assert!(result.is_ok());
+    let user_id = derive_user_id(seed.to_string()).expect("derive user id");
+    assert!(!user_id.is_empty());
+
+    let token = mint_anonymous_token(
+        seed.to_string(),
+        "test-audience".to_string(),
+        60,
+        1_704_067_200,
+    )
+    .expect("mint anonymous token");
+    assert_eq!(token.split('.').count(), 3);
 }
 
 #[wasm_bindgen_test]
-fn test_parse_schema_invalid() {
-    let result = parse_schema("not valid json");
-    assert!(result.is_err());
+fn test_identity_helpers_reject_invalid_seed() {
+    let err = derive_user_id("not-base64url".to_string()).expect_err("invalid seed should fail");
+    let message = err.as_string().unwrap_or_default();
+    assert!(message.contains("seed"));
 }
-
-#[wasm_bindgen_test]
-fn test_query_builder_basic() {
-    let builder = WasmQueryBuilder::new("todos");
-    let query = builder.branch("main").build();
-
-    assert!(query.is_ok());
-    let query_str = query.unwrap();
-    assert!(query_str.contains("todos"));
-    assert!(query_str.contains("main"));
-}
-
-#[wasm_bindgen_test]
-fn test_query_builder_with_filters() {
-    let builder = WasmQueryBuilder::new("todos");
-
-    // Create a boolean value for filtering
-    let value = serde_wasm_bindgen::to_value(&Value::Boolean(true)).unwrap();
-
-    let result = builder.branch("main").filter_eq("completed", value);
-
-    assert!(result.is_ok());
-
-    let query = result.unwrap().build();
-    assert!(query.is_ok());
-
-    let query_str = query.unwrap();
-    assert!(query_str.contains("completed"));
-}
-
-#[wasm_bindgen_test]
-fn test_query_builder_order_and_limit() {
-    let builder = WasmQueryBuilder::new("todos");
-    let query = builder
-        .branch("main")
-        .order_by_desc("created_at")
-        .limit(10)
-        .offset(5)
-        .build();
-
-    assert!(query.is_ok());
-    let query_str = query.unwrap();
-    assert!(query_str.contains("created_at"));
-    assert!(query_str.contains("10"));
-}
-
-#[wasm_bindgen_test]
-fn test_query_builder_select() {
-    let builder = WasmQueryBuilder::new("todos");
-    let query = builder
-        .branch("main")
-        .select(vec!["title".to_string(), "completed".to_string()])
-        .build();
-
-    assert!(query.is_ok());
-    let query_str = query.unwrap();
-    assert!(query_str.contains("title"));
-    assert!(query_str.contains("completed"));
-}
-
-#[wasm_bindgen_test]
-fn test_query_builder_join() {
-    let builder = WasmQueryBuilder::new("posts");
-    let query = builder
-        .branch("main")
-        .alias("p")
-        .join("users")
-        .alias("u")
-        .on("p.author_id", "u.id")
-        .build();
-
-    assert!(query.is_ok());
-    let query_str = query.unwrap();
-    assert!(query_str.contains("posts"));
-    assert!(query_str.contains("users"));
-}
-
-#[wasm_bindgen_test]
-fn test_query_builder_or() {
-    let builder = WasmQueryBuilder::new("todos");
-
-    let value1 = serde_wasm_bindgen::to_value(&Value::Text("urgent".to_string())).unwrap();
-    let value2 = serde_wasm_bindgen::to_value(&Value::Boolean(true)).unwrap();
-
-    let result = builder.branch("main").filter_eq("priority", value1);
-
-    assert!(result.is_ok());
-
-    let result2 = result.unwrap().or().filter_eq("urgent", value2);
-
-    assert!(result2.is_ok());
-
-    let query = result2.unwrap().build();
-    assert!(query.is_ok());
-}
-
-#[wasm_bindgen_test]
-fn test_query_builder_multiple_branches() {
-    let builder = WasmQueryBuilder::new("todos");
-    let query = builder
-        .branches(vec!["main".to_string(), "draft".to_string()])
-        .build();
-
-    assert!(query.is_ok());
-    let query_str = query.unwrap();
-    assert!(query_str.contains("main"));
-    assert!(query_str.contains("draft"));
-}
-
-// Note: WasmRuntime tests require a JS driver implementation,
-// which can't be easily mocked in Rust WASM tests.
-// Full runtime tests should be done in JavaScript/TypeScript.

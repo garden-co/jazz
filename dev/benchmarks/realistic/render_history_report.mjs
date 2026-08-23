@@ -97,6 +97,7 @@ function scenarioLabel(scenario) {
 function storageEngineLabel(storageEngine) {
   if (storageEngine === "rocksdb") return "RocksDB";
   if (storageEngine === "sqlite") return "SQLite";
+  if (storageEngine === "indexeddb-btree") return "IndexedDB B-tree";
   if (storageEngine === "opfs-btree") return "OPFS-btree";
   return storageEngine || "default";
 }
@@ -124,6 +125,12 @@ function metricKeysForScenario(scenario) {
     if (Number.isFinite(Number(summary.avg_ms))) keys.push(`op:${opName}/avg_ms`);
     if (Number.isFinite(Number(summary.p95_ms))) keys.push(`op:${opName}/p95_ms`);
   }
+  const extraMetrics = scenario?.extra?.metrics ?? {};
+  if (extraMetrics && typeof extraMetrics === "object") {
+    for (const metricName of Object.keys(extraMetrics).sort()) {
+      if (Number.isFinite(Number(extraMetrics[metricName]))) keys.push(`extra:${metricName}`);
+    }
+  }
 
   return keys;
 }
@@ -131,6 +138,10 @@ function metricKeysForScenario(scenario) {
 function metricValue(scenario, metric) {
   if (metric === "wall_time_ms") return Number(scenario?.wall_time_ms);
   if (metric === "throughput_ops_per_sec") return Number(scenario?.throughput_ops_per_sec);
+  if (metric.startsWith("extra:")) {
+    const metricName = metric.slice("extra:".length);
+    return Number(scenario?.extra?.metrics?.[metricName]);
+  }
   if (!metric.startsWith("op:")) return Number.NaN;
 
   const slash = metric.lastIndexOf("/");
@@ -183,8 +194,10 @@ function toPct(delta, base) {
 function trend(metric, delta, significant) {
   if (!significant) return "noise";
   if (!Number.isFinite(delta) || delta === 0) return "flat";
-  if (metric.includes("throughput_ops_per_sec")) return delta > 0 ? "better" : "worse";
-  if (metric.includes("_ms")) return delta < 0 ? "better" : "worse";
+  if (metric.includes("throughput_ops_per_sec") || metric.includes("_per_sec")) {
+    return delta > 0 ? "better" : "worse";
+  }
+  if (metric.includes("_ms") || metric.includes("_us")) return delta < 0 ? "better" : "worse";
   return delta > 0 ? "up" : "down";
 }
 

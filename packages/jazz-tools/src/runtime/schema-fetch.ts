@@ -55,12 +55,12 @@ export async function fetchStoredWasmSchema(
   }
 
   const body = (await response.json()) as {
-    schema: WasmSchema;
+    schema: { tables: WasmSchema };
     publishedAt?: number | null;
   };
 
   return {
-    schema: body.schema,
+    schema: body.schema.tables,
     publishedAt: normalizePublishedAtEpochMilliseconds(body.publishedAt),
   };
 }
@@ -154,8 +154,6 @@ export interface PublishStoredSchemaOptions {
   appId: string;
   adminSecret: string;
   schema: WasmSchema;
-  /** @deprecated Use `publishStoredPermissions` instead. */
-  permissions?: CompiledPermissionsMap;
 }
 
 export async function publishStoredSchema(
@@ -168,12 +166,7 @@ export async function publishStoredSchema(
       "Content-Type": "application/json",
       "X-Jazz-Admin-Secret": options.adminSecret,
     },
-    body: JSON.stringify({
-      schema: options.schema,
-      permissions: options.permissions
-        ? normalizePermissionsForWasm(options.permissions)
-        : undefined,
-    }),
+    body: JSON.stringify({ schema: { tables: options.schema } }),
   });
 
   if (!response.ok) {
@@ -336,7 +329,7 @@ export async function fetchSchemaConnectivity(
 
 export type PublishedMigrationValue =
   | { type: "Integer"; value: number }
-  | { type: "BigInt"; value: number }
+  | { type: "BigInt"; value: bigint | string | number }
   | { type: "Double"; value: number }
   | { type: "Boolean"; value: boolean }
   | { type: "Text"; value: string }
@@ -345,6 +338,7 @@ export type PublishedMigrationValue =
   | { type: "Bytea"; value: number[] }
   | { type: "Array"; value: PublishedMigrationValue[] }
   | { type: "Row"; value: { id?: string; values: PublishedMigrationValue[] } }
+  | { type: "Enum"; value: { case: string; values: PublishedMigrationValue[] } }
   | { type: "Null" };
 
 export type PublishedMigrationOp =
@@ -384,6 +378,11 @@ export interface PublishStoredMigrationOptions {
 
 export function encodePublishedMigrationValue(value: WasmValue): PublishedMigrationValue {
   switch (value.type) {
+    case "BigInt":
+      return {
+        type: "BigInt",
+        value: value.value.toString(),
+      };
     case "Bytea":
       return {
         type: "Bytea",
@@ -399,6 +398,14 @@ export function encodePublishedMigrationValue(value: WasmValue): PublishedMigrat
         type: "Row",
         value: {
           id: value.value.id,
+          values: value.value.values.map(encodePublishedMigrationValue),
+        },
+      };
+    case "Enum":
+      return {
+        type: "Enum",
+        value: {
+          case: value.value.case,
           values: value.value.values.map(encodePublishedMigrationValue),
         },
       };

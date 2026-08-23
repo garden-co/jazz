@@ -1,0 +1,156 @@
+[package]
+name = "jazz"
+version = "0.1.0"
+edition = "2024"
+autobins = false
+autobenches = false
+autotests = true
+
+[features]
+# Jazz is the common semantic library. Process and target shells select
+# storage, transport, compression, and runtime capabilities explicitly.
+default = []
+runtime = ["dep:jsonwebtoken", "dep:tokio"]
+sync-autopsy = []
+# Disabled-by-default counters for the cold-settle attribution bench. They do
+# not alter protocol behavior or production measurement paths.
+cold-settle-attribution = ["groove/cold-settle-attribution"]
+r3-open-attribution = ["testing"]
+testing = ["runtime"]
+transport-compression-lz4 = ["jazz-compression/lz4"]
+transport-compression-zstd = ["jazz-compression/zstd"]
+transport-compression-ruzstd = ["jazz-compression/ruzstd"]
+
+[dependencies]
+futures-core = "0.3.31"
+futures-channel = "0.3.31"
+futures = "0.3"
+futures-util = "0.3"
+blake3 = "1"
+groove = { workspace = true, default-features = false }
+jazz-compression.workspace = true
+postcard = { version = "1.1.3", features = ["alloc"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+thiserror = "2.0.17"
+uuid = { version = "1.18.1", features = ["serde", "v4", "v5", "v7"] }
+web-time = "1.1"
+tracing = "0.1"
+hex = "0.4"
+rand = "0.8"
+serde_bytes = "0.11"
+jsonschema = { version = "0.42", default-features = false }
+internment = "0.8"
+smallvec = { version = "1.11", features = ["serde"] }
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"], optional = true }
+jsonwebtoken = { version = "10.4", default-features = false, features = [
+  "rust_crypto",
+  "use_pem",
+], optional = true }
+base64 = "0.22"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+
+[dev-dependencies]
+groove = { workspace = true, default-features = false, features = ["test"] }
+jazz-benchmark-guard = { path = "../benchmark-guard" }
+jazz-testkit = { path = "../jazz-testkit", default-features = false }
+hdrhistogram = "7.5.4"
+tempfile = "3.27.0"
+libc = "0.2"
+criterion = "0.5"
+insta = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+jsonwebtoken = { version = "10.4", default-features = false, features = ["rust_crypto", "use_pem"] }
+jazz-storage-rocksdb.workspace = true
+futures = "0.3"
+tokio = { version = "1", features = [
+  "macros",
+  "net",
+  "rt",
+  "rt-multi-thread",
+  "sync",
+  "test-util",
+  "time",
+] }
+tower = { version = "0.5", features = ["util"] }
+rcgen = { version = "0.13", default-features = false, features = ["ring"] }
+
+[[bench]]
+name = "validation"
+harness = false
+
+[[bench]]
+name = "sync"
+harness = false
+
+[[bench]]
+name = "known_state_scaling"
+harness = false
+
+[[bench]]
+name = "maintained_rehydrate_scaling"
+harness = false
+
+[[bench]]
+name = "cold_subscription"
+harness = false
+
+[[bench]]
+name = "relation_include_delivery"
+harness = false
+
+[[bench]]
+name = "selective_global_hydration"
+harness = false
+required-features = ["testing"]
+
+[[bench]]
+name = "owner_filter_diagnostic"
+harness = false
+required-features = ["testing"]
+
+[[bench]]
+name = "observer_write_path"
+harness = false
+
+[[bench]]
+name = "db_benchmark"
+harness = false
+
+[[bench]]
+name = "authorization_scope_benchmark"
+harness = false
+
+[[bench]]
+name = "realistic_phase1"
+harness = false
+
+[[bench]]
+name = "insert_benchmark"
+harness = false
+
+[[bench]]
+name = "update_benchmark"
+harness = false
+
+[[bench]]
+name = "subscription_benchmark"
+harness = false
+
+[[bench]]
+name = "route_subscription_curve"
+harness = false
+required-features = ["testing"]
+
+[[test]]
+name = "parameterized_subscription_routing"
+required-features = ["testing"]
+
+[[test]]
+name = "authorization_scope_reentry"
+required-features = ["testing"]
+
+[[test]]
+name = "edge_fate_authority"
+required-features = ["runtime"]

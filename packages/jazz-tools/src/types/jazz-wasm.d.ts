@@ -1,171 +1,178 @@
-import type { MutationErrorEvent } from "../runtime/client.js";
-
 declare module "jazz-wasm" {
-  type InsertValues = Record<string, unknown>;
-  type HrTime = [number, number];
-
-  export type WasmTraceEntry =
-    | {
-        kind: "span";
-        sequence: number;
-        name: string;
-        target: string;
-        level: string;
-        startUnixNano: HrTime;
-        endUnixNano: HrTime;
-        fields: Record<string, string>;
-      }
-    | {
-        kind: "log";
-        sequence: number;
-        target: string;
-        level: string;
-        timestampUnixNano: HrTime;
-        message: string;
-        fields: Record<string, string>;
-      }
-    | { kind: "dropped"; count: number };
-
   export default function init(input?: unknown): Promise<void>;
   export function initSync(input?: unknown): void;
-  export function setTraceEntryCollectionEnabled(enabled: boolean): void;
-  export function drainTraceEntries(): WasmTraceEntry[];
-  export function subscribeTraceEntries(callback: () => void): () => void;
-  /**
-   * Worker-side entry point. Called by the JS shim after WASM init.
-   * Synchronously installs a Rust closure as `self.onmessage`, then opens
-   * the runtime and posts `init-ok` asynchronously.
-   */
-  export function runAsWorker(initMessage: unknown, pendingMessages: unknown[]): void;
-  /**
-   * Encode a JS-shaped main→worker control message (`{type: "<kebab-case>", ...}`)
-   * to a postcard-binary `Uint8Array`. Test-harness convenience.
-   */
-  export function encodeMainToWorkerJs(value: unknown): Uint8Array;
-  /**
-   * Encode a JS-shaped worker→main control message (`{type: "<kebab-case>", ...}`)
-   * to a postcard-binary `Uint8Array`. Test-harness convenience.
-   */
-  export function encodeWorkerToMainJs(value: unknown): Uint8Array;
-  /**
-   * Decode a postcard-binary main→worker message back into a JS object
-   * (`{type: "<kebab-case>", ...}`). Test-harness convenience.
-   */
-  export function decodeMainToWorkerJs(bytes: Uint8Array): {
-    type: string;
-    [key: string]: unknown;
-  };
-  /**
-   * Decode a postcard-binary worker→main message back into a JS object
-   * (`{type: "<kebab-case>", ...}`). Test-harness convenience.
-   */
-  export function decodeWorkerToMainJs(bytes: Uint8Array): {
-    type: string;
-    [key: string]: unknown;
-  };
+  export function generateId(): string;
+  export function currentTimestamp(): bigint;
+  export function deriveUserId(seedB64: string): string;
+  export function mintLocalFirstToken(
+    seedB64: string,
+    audience: string,
+    ttlSeconds: number,
+    nowSeconds: bigint,
+  ): string;
+  export function mintAnonymousToken(
+    seedB64: string,
+    audience: string,
+    ttlSeconds: number,
+    nowSeconds: bigint,
+  ): string;
 
-  export class WasmWorkerBridge {
-    static attach(worker: Worker, runtime: WasmRuntime, options: unknown): WasmWorkerBridge;
-    init(): Promise<{ clientId: string }>;
-    updateAuth(jwtToken?: string | null): void;
-    sendLifecycleHint(event: string): void;
-    openPeer(peerId: string): void;
-    sendPeerSync(peerId: string, term: number, payload: Uint8Array[]): void;
-    closePeer(peerId: string): void;
-    setServerPayloadForwarder(
-      callback:
-        | ((payload: Uint8Array | string, isCatalogue: boolean, sequence: number | null) => void)
-        | null,
-    ): void;
-    applyIncomingServerPayload(payload: Uint8Array): void;
-    waitForUpstreamServerConnection(): Promise<void>;
-    replayServerConnection(): void;
-    disconnectUpstream(): void;
-    reconnectUpstream(): void;
-    simulateCrash(): Promise<void>;
-    setListeners(listeners: object): void;
-    shutdown(): Promise<void>;
-    getWorkerClientId(): string | null;
+  export class WasmPreparedQuery {}
+  export class QueryAttachment {}
+  export class WasmPermissionAdviceRequest {
+    readonly promise: Promise<"allowed" | "denied" | "unknown">;
+    cancel(): void;
   }
 
-  export class WasmRuntime {
-    constructor(
-      schemaJson: string,
-      appId: string,
-      env: string,
-      userBranch: string,
-      tier?: string,
-      useBinaryEncoding?: boolean,
-      nonDurableClient?: boolean,
-    );
+  export class WasmWrite {
+    readonly batchId: string;
+    readonly payload: Uint8Array;
+    writeState(): unknown;
+    wait(tier: string): Promise<void>;
+    close(): boolean;
+  }
 
-    insert(
-      table: string,
-      values: InsertValues,
-      writeContextJson?: string | null,
-      objectId?: string | null,
-    ): { id: string; values: any[]; batchId: string };
-    restore(
-      table: string,
-      objectId: string,
-      values: InsertValues,
-      writeContextJson?: string | null,
-    ): { id: string; values: any[]; batchId: string };
-    update(
-      objectId: string,
-      values: unknown,
-      writeContextJson?: string | null,
-    ): { batchId: string };
-    upsert(
-      table: string,
-      objectId: string,
-      values: InsertValues,
-      writeContextJson?: string | null,
-    ): { batchId: string };
-    delete(objectId: string, writeContextJson?: string | null): { batchId: string };
-    onMutationError(callback: (event: MutationErrorEvent) => void): void;
-    beginBatch(batchMode: "direct" | "transactional"): string;
-    rollbackBatch(batchId: string): boolean;
-    commitBatch(batchId: string): void;
-    waitForBatch(batchId: string, tier: string): Promise<void>;
-    /** Connect to a Jazz server over WebSocket. */
-    connect(url: string, authJson: string): void;
-    /** Disconnect from the Jazz server and drop the transport handle. */
-    disconnect(): void;
-    /** Push updated auth credentials into the live transport. */
-    updateAuth(authJson: string): void;
-    /** Register a callback invoked when the Rust transport rejects auth. */
-    onAuthFailure(callback: (reason: string) => void): void;
-    query(
-      queryJson: string,
-      sessionJson?: string | null,
-      tier?: string | null,
-      optionsJson?: string | null,
-    ): Promise<unknown>;
-    createSubscription(
-      queryJson: string,
-      sessionJson?: string | null,
-      tier?: string | null,
-      optionsJson?: string | null,
-    ): number;
-    executeSubscription(handle: number, onUpdate: Function): void;
-    unsubscribe(handle: number): void;
-    /** Construct a Rust-owned `WasmWorkerBridge` attached to this runtime. Options
-     * are parsed at attach time per spec; `init()` is parameter-less. */
-    createWorkerBridge(worker: Worker, options: unknown): WasmWorkerBridge;
-    getSchema(): unknown;
-    getSchemaHash(): string;
-    close?(): void;
+  export class WasmTransport {
+    sendWireFrame(frame: Uint8Array): void;
+    recvWireFrames(): Uint8Array[];
+    tick(): Promise<number>;
+    updateAuthenticatedClaims(claims: Record<string, unknown>): Promise<void>;
+    close(): boolean;
+  }
 
-    /** Derive a deterministic user ID (UUIDv5) from a base64url-encoded seed. */
-    static deriveUserId(seedB64: string): string;
-    /** Mint a Jazz self-signed JWT from a base64url-encoded seed. */
-    static mintJazzSelfSignedToken(
-      seedB64: string,
-      issuer: string,
-      audience: string,
-      ttlSeconds: bigint,
-      nowSeconds: bigint,
-    ): string;
+  export class WasmTx {
+    insertWithIdEncoded(
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      updatedAtMs?: number | null,
+    ): void;
+    updateEncoded(
+      table: string,
+      rowId: Uint8Array,
+      patch: Uint8Array,
+      updatedAtMs?: number | null,
+    ): void;
+    upsertEncoded(
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      updatedAtMs?: number | null,
+    ): void;
+    delete(table: string, rowId: Uint8Array, updatedAtMs?: number | null): void;
+    restoreEncoded(
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      updatedAtMs?: number | null,
+    ): void;
+    commit(): WasmWrite;
+    rollback(): void;
+  }
+
+  export class WasmDb {
+    static openMemory(schema: Uint8Array, config: Uint8Array): WasmDb;
+    static openBrowser(pageStore: unknown, schema: Uint8Array, config: Uint8Array): Promise<WasmDb>;
+    static destroyBrowserStorage(namespace: string): Promise<void>;
+
+    registerSchema(schema: Uint8Array): WasmDb;
+    beginTransaction(openBatchId: string, kind: string, author?: Uint8Array | null): void;
+    commitTransaction(openBatchId: string, kind?: string | null): WasmWrite;
+    rollbackTransaction(openBatchId: string): void;
+    attachMergeableTx(openBatchId: string): WasmTx;
+    attachExclusiveTx(openBatchId: string): WasmTx;
+
+    prepareQuery(query: Uint8Array): WasmPreparedQuery;
+    all(query: WasmPreparedQuery, opts: unknown): Uint8Array;
+    one(query: WasmPreparedQuery, opts: unknown): Uint8Array;
+    allForIdentity(query: WasmPreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
+    allRelationQuery(queryJson: string, opts: unknown): Promise<Uint8Array>;
+    allRelationQueryForIdentity(
+      queryJson: string,
+      author: Uint8Array,
+      opts: unknown,
+    ): Promise<Uint8Array>;
+    attachQuery(query: WasmPreparedQuery, opts: unknown): QueryAttachment;
+    attachQueryForIdentity(
+      query: WasmPreparedQuery,
+      author: Uint8Array,
+      opts: unknown,
+    ): QueryAttachment;
+    queryAttachmentIsCovered(attachment: QueryAttachment): boolean;
+    detachQuery(attachment: QueryAttachment): void;
+    subscribe(query: WasmPreparedQuery, opts: unknown): ReadableStream<unknown>;
+    subscribeRelationQuery(queryJson: string, opts: unknown): ReadableStream<unknown>;
+    subscribeRelationQueryForIdentity(
+      queryJson: string,
+      author: Uint8Array,
+      opts: unknown,
+    ): ReadableStream<unknown>;
+
+    insertEncoded(table: string, cells: Uint8Array): WasmWrite;
+    canInsertEncoded(table: string, cells: Uint8Array): "allowed" | "denied" | "unknown";
+    requestInsertPermissionAdviceEncoded(
+      table: string,
+      cells: Uint8Array,
+    ): WasmPermissionAdviceRequest;
+    requestReadPermissionAdvice(table: string, rowId: Uint8Array): WasmPermissionAdviceRequest;
+    insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite;
+    insertWithIdEncodedForIdentity(
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      author: Uint8Array,
+    ): WasmWrite;
+    updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): WasmWrite;
+    updateEncodedForIdentity(
+      table: string,
+      rowId: Uint8Array,
+      patch: Uint8Array,
+      author: Uint8Array,
+    ): WasmWrite;
+    requestUpdatePermissionAdviceEncoded(
+      table: string,
+      rowId: Uint8Array,
+      patch: Uint8Array,
+    ): WasmPermissionAdviceRequest;
+    requestDeletePermissionAdvice(table: string, rowId: Uint8Array): WasmPermissionAdviceRequest;
+    upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite;
+    upsertEncodedForIdentity(
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      author: Uint8Array,
+    ): WasmWrite;
+    delete(table: string, rowId: Uint8Array, updatedAtMs?: number | null): WasmWrite;
+    deleteForIdentity(
+      table: string,
+      rowId: Uint8Array,
+      author: Uint8Array,
+      updatedAtMs?: number | null,
+    ): WasmWrite;
+    restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): WasmWrite;
+    restoreEncodedForIdentity(
+      table: string,
+      rowId: Uint8Array,
+      cells: Uint8Array,
+      author: Uint8Array,
+    ): WasmWrite;
+    setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void;
+    onMutationError(callback: (event: any) => void): void;
+    tick(): Promise<void>;
+    setNonDurableClient(): void;
+    close(): Promise<boolean>;
+    connectUpstream(): WasmTransport;
+    connectUpstreamWithSession(
+      protocolVersion: number,
+      features: number,
+      remoteNode: Uint8Array,
+      remoteEpoch: bigint,
+      localNode: Uint8Array,
+      localEpoch: bigint,
+    ): Promise<WasmTransport>;
+    acceptSubscriber(identity: Uint8Array, claims: Record<string, unknown>): WasmTransport;
+    mergeableTx(openBatchId: string): WasmTx;
+    mergeableTxForIdentity(openBatchId: string, author: Uint8Array): WasmTx;
+    exclusiveTx(openBatchId: string): WasmTx;
   }
 }

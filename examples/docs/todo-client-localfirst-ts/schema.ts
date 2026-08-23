@@ -15,23 +15,6 @@ const schema = {
     projectId: s.ref("projects").optional(),
   }),
   // #endregion schema-todo-client-ts
-
-  // #region schema-files-and-blobs-ts
-  file_parts: s.table({
-    data: s.bytes(),
-  }),
-  files: s.table({
-    name: s.string().optional(),
-    mimeType: s.string(),
-    partIds: s.array(s.ref("file_parts")),
-    partSizes: s.array(s.int()),
-  }),
-  uploads: s.table({
-    owner_id: s.string(),
-    label: s.string(),
-    fileId: s.ref("files"),
-  }),
-  // #endregion schema-files-and-blobs-ts
 };
 
 // #region schema-define-app-ts

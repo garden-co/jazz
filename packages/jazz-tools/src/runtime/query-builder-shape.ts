@@ -192,7 +192,7 @@ function normalizeIncludeEntry(raw: unknown): NormalizedIncludeEntry | null {
   }
 
   if (isBuiltQueryShape(raw)) {
-    const normalized = normalizeBuiltQuery(raw, "");
+    const normalized = normalizeBuiltQuery(raw);
     return {
       table: normalized.table || undefined,
       conditions: normalized.conditions,
@@ -249,11 +249,14 @@ export function normalizeIncludeEntries(raw: unknown): NormalizedIncludeSpec {
   return includes;
 }
 
-export function normalizeBuiltQuery(raw: unknown, fallbackTable: string): NormalizedBuiltQuery {
+export function normalizeBuiltQuery(raw: unknown): NormalizedBuiltQuery {
   const value = isPlainObject(raw) ? raw : {};
+  if (typeof value.table !== "string" || value.table.length === 0) {
+    throw new Error("QueryBuilder._build() must include a non-empty table.");
+  }
 
   return {
-    table: typeof value.table === "string" && value.table.length > 0 ? value.table : fallbackTable,
+    table: value.table,
     conditions: normalizeConditions(value.conditions),
     includes: normalizeIncludeEntries(value.includes),
     requireIncludes: value[INTERNAL_REQUIRE_INCLUDES_KEY] === true,

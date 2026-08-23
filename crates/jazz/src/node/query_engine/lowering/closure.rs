@@ -1,0 +1,447 @@
+//! Closure-path membership and required-include lowering.
+//!
+//! Keeping this boundary separate from terminal construction makes the
+//! authorization-shaped graph construction easier to audit in isolation.
+
+use super::*;
+
+#[derive(Clone, Debug)]
+pub(super) struct ClosureLowering {
+    pub(super) visible_root: GraphBuilder,
+    pub(super) result_members: BTreeMap<SourceId, GraphBuilder>,
+}
+
+impl ClosureLowering {
+    fn all_visible_members(&self, root_source: SourceId) -> Vec<(SourceId, GraphBuilder)> {
+        std::iter::once((root_source, self.visible_root.clone()))
+            .chain(
+                self.result_members
+                    .iter()
+                    .map(|(source, graph)| (source.clone(), graph.clone())),
+            )
+            .collect()
+    }
+}
+
+pub(super) fn lower_closure_membership(
+    root_graph: GraphBuilder,
+    request: &QueryProgramRequest,
+    root_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    route_fields: &BTreeSet<String>,
+    root_carrier_fields: &BTreeSet<String>,
+) -> CapabilityResult<ClosureLowering> {
+    let mut visible_root = root_graph;
+    for path in &request.input.shape.closure_paths {
+        if let ClosurePath::ExplicitInclude {
+            segments,
+            root_gate: Some(root_gate),
+            ..
+        } = path
+        {
+            visible_root = required_closure_parent_graph(
+                visible_root,
+                segments,
+                *root_gate,
+                root_source,
+                resolved_sources,
+                root_carrier_fields,
+            )?;
+        }
+    }
+    let mut result_members = BTreeMap::<SourceId, GraphBuilder>::new();
+    for path in &request.input.shape.closure_paths {
+        for (_, source, graph) in closure_membership_graph_for_path(
+            visible_root.clone(),
+            path,
+            root_source,
+            resolved_sources,
+            route_fields,
+        )? {
+            let Some(resolved_source) = resolved_sources.get(&source) else {
+                continue;
+            };
+            let graph = graph.project_fields(project_source_fields_with_routes(
+                resolved_source,
+                route_fields,
+            ));
+            result_members
+                .entry(source)
+                .and_modify(|existing| {
+                    *existing = GraphBuilder::union([existing.clone(), graph.clone()]);
+                })
+                .or_insert(graph);
+        }
+    }
+    Ok(ClosureLowering {
+        visible_root,
+        result_members,
+    })
+}
+
+fn reachable_contribution_membership_graph(
+    visible_root: GraphBuilder,
+    contribution: &ReachableContribution,
+    root_source: &ResolvedSource,
+    contribution_source: &ResolvedSource,
+    nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> CapabilityResult<GraphBuilder> {
+    let mut visited = BTreeSet::new();
+    let plan = analyze_relation_input_node(&contribution.access_input, nodes, &mut visited)
+        .map_err(single_gap_report)?;
+    let lowered =
+        lower_relation_input(&plan, resolved_sources, request).map_err(single_gap_report)?;
+    let join_field = user_column_field(&contribution.root_ref_field);
+    if !lowered.fields.contains(&join_field) {
+        return Err(Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Operator(format!(
+                "reachable contribution {} does not provide root reference field {join_field}",
+                contribution.id
+            ))],
+            explain: ExplainPlan {
+                capabilities: vec![
+                    "reachable contribution payload requires root reference field".to_owned(),
+                ],
+                ..ExplainPlan::default()
+            },
+        }));
+    }
+    let mut contribution_graph = lowered.graph;
+    if lowered.nullable_fields.contains(&join_field) {
+        contribution_graph = unwrap_nullable_join_key(contribution_graph, join_field.clone(), 1);
+    }
+    Ok(GraphBuilder::join(
+        visible_root,
+        contribution_graph,
+        [root_source.row_shape.row_uuid_field.clone()],
+        [join_field],
+    )
+    .project_fields(project_source_fields_from_prefix(
+        contribution_source,
+        RIGHT_JOIN_PREFIX,
+    )))
+}
+
+pub(super) fn join_contribution_membership_graph(
+    visible_root: GraphBuilder,
+    contribution: &JoinContribution,
+    root_source: &ResolvedSource,
+    contribution_source: &ResolvedSource,
+    nodes: &BTreeMap<RowSetNodeId, RowSetExpr>,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
+) -> CapabilityResult<GraphBuilder> {
+    let mut visited = BTreeSet::new();
+    let plan = analyze_relation_input_node(&contribution.input, nodes, &mut visited)
+        .map_err(single_gap_report)?;
+    let lowered =
+        lower_relation_input(&plan, resolved_sources, request).map_err(single_gap_report)?;
+    let (root_keys, join_keys) = lower_root_to_relation_key_pairs(
+        &contribution.membership,
+        root_source,
+        &plan,
+        &lowered,
+        request,
+    )
+    .map_err(single_gap_report)?;
+    if let Some(join_key) = join_keys
+        .iter()
+        .find(|join_key| !lowered.fields.contains(*join_key))
+    {
+        return Err(Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Operator(format!(
+                "join contribution {} does not provide join key field {join_key}",
+                contribution.id
+            ))],
+            explain: ExplainPlan {
+                capabilities: vec![
+                    "join contribution payload requires the normalized join key".to_owned(),
+                ],
+                ..ExplainPlan::default()
+            },
+        }));
+    }
+    let mut contribution_graph = lowered.graph;
+    let mut unwrapped_join_keys = BTreeSet::new();
+    for join_key in &join_keys {
+        if lowered.nullable_fields.contains(join_key)
+            && unwrapped_join_keys.insert(join_key.clone())
+        {
+            contribution_graph = unwrap_nullable_join_key(contribution_graph, join_key.clone(), 1);
+        }
+    }
+    Ok(
+        GraphBuilder::join(visible_root, contribution_graph, root_keys, join_keys).project_fields(
+            project_source_fields_from_prefix(contribution_source, RIGHT_JOIN_PREFIX),
+        ),
+    )
+}
+
+fn required_closure_parent_graph(
+    parent_graph: GraphBuilder,
+    segments: &[ClosurePathSegment],
+    root_gate: ClosureRootGate,
+    root_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    route_fields: &BTreeSet<String>,
+) -> CapabilityResult<GraphBuilder> {
+    required_closure_parent_graph_from_segment(
+        parent_graph,
+        segments,
+        0,
+        root_gate,
+        root_source,
+        resolved_sources,
+        route_fields,
+    )
+}
+
+fn required_closure_parent_graph_from_segment(
+    parent_graph: GraphBuilder,
+    segments: &[ClosurePathSegment],
+    index: usize,
+    root_gate: ClosureRootGate,
+    parent_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    route_fields: &BTreeSet<String>,
+) -> CapabilityResult<GraphBuilder> {
+    let Some(segment) = segments.get(index) else {
+        return Ok(parent_graph);
+    };
+    let target = resolved_sources.get(&segment.target).ok_or_else(|| {
+        Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Runtime(format!(
+                "closure target source {:?} was not resolved",
+                segment.target
+            ))],
+            explain: ExplainPlan::default(),
+        })
+    })?;
+    let no_route_fields = BTreeSet::new();
+    let target_valid = required_closure_parent_graph_from_segment(
+        target.graph.clone(),
+        segments,
+        index + 1,
+        root_gate,
+        target,
+        resolved_sources,
+        &no_route_fields,
+    )?;
+    let source_key = user_column_field(&segment.source_field);
+    let Some(source_key_type) = source_field_type(parent_source, &source_key) else {
+        return Err(Box::new(CapabilityReport {
+            gaps: vec![UnsupportedReason::Operator(format!(
+                "closure source field {source_key:?} is not projected"
+            ))],
+            explain: ExplainPlan::default(),
+        }));
+    };
+    let parent_row_uuid = parent_source.row_shape.row_uuid_field.clone();
+    let target_row_uuid = target.row_shape.row_uuid_field.clone();
+    let (required_base, required_key_type) =
+        unwrap_nullable_layers(parent_graph.clone(), source_key.clone(), source_key_type);
+    let required = match required_key_type {
+        ValueType::Array(_) => required_base.unnest(source_key.clone(), CLOSURE_REQUIRED_ELEMENT),
+        _ => required_base,
+    };
+    let left_key = match required_key_type {
+        ValueType::Array(_) => CLOSURE_REQUIRED_ELEMENT.to_owned(),
+        _ => source_key.clone(),
+    };
+    let mut covered_fields = project_source_fields_with_routes_from_prefix(
+        parent_source,
+        LEFT_JOIN_PREFIX,
+        route_fields,
+    );
+    if left_key == CLOSURE_REQUIRED_ELEMENT {
+        covered_fields.push(ProjectField::renamed(
+            "left.__closure_required_element",
+            CLOSURE_REQUIRED_ELEMENT,
+        ));
+    }
+    let covered = GraphBuilder::join(
+        required.clone(),
+        target_valid,
+        [left_key.clone()],
+        [target_row_uuid.clone()],
+    )
+    .project_fields(covered_fields);
+    if root_gate == ClosureRootGate::Inner && !matches!(required_key_type, ValueType::Array(_)) {
+        // Matching an optional reference requires temporarily unwrapping its
+        // nullable source cell. That unwrapped copy is only a predicate
+        // witness: publishing it as the root would change the whole-row
+        // terminal descriptor. Select the authoritative parent rows through
+        // their stable identity so the prepared and incremental layouts keep
+        // the source carrier exactly.
+        let covered_roots = covered.project_fields([ProjectField::named(parent_row_uuid.clone())]);
+        return Ok(GraphBuilder::semi_join(
+            parent_graph,
+            covered_roots,
+            [parent_row_uuid.clone()],
+            [parent_row_uuid],
+        )
+        .project_fields(project_source_fields_with_routes(
+            parent_source,
+            route_fields,
+        )));
+    }
+    let missing = if left_key == CLOSURE_REQUIRED_ELEMENT {
+        GraphBuilder::anti_join(
+            required.clone(),
+            covered.clone(),
+            [parent_row_uuid.clone(), left_key],
+            [
+                parent_row_uuid.clone(),
+                source_key_for_required(required_key_type, &source_key),
+            ],
+        )
+    } else {
+        GraphBuilder::anti_join(
+            required.clone(),
+            covered.clone(),
+            [left_key],
+            [source_key_for_required(required_key_type, &source_key)],
+        )
+    }
+    .project_fields(project_source_fields_with_routes(
+        parent_source,
+        route_fields,
+    ));
+    let all_required_refs_resolve = GraphBuilder::anti_join(
+        parent_graph,
+        missing,
+        [parent_row_uuid.clone()],
+        [parent_row_uuid.clone()],
+    );
+    if root_gate == ClosureRootGate::Required {
+        return Ok(all_required_refs_resolve);
+    }
+    Ok(GraphBuilder::join(
+        all_required_refs_resolve,
+        GraphBuilder::arg_min_by(
+            covered,
+            [parent_row_uuid.clone()],
+            [parent_row_uuid.clone()],
+        ),
+        [parent_row_uuid.clone()],
+        [parent_row_uuid],
+    )
+    .project_fields(project_source_fields_with_routes_from_prefix(
+        parent_source,
+        LEFT_JOIN_PREFIX,
+        route_fields,
+    )))
+}
+
+fn source_key_for_required(source_key_type: &ValueType, source_key: &str) -> String {
+    match source_key_type {
+        ValueType::Array(_) => CLOSURE_REQUIRED_ELEMENT.to_owned(),
+        _ => source_key.to_owned(),
+    }
+}
+
+fn unwrap_nullable_layers(
+    mut graph: GraphBuilder,
+    field: String,
+    mut value_type: &ValueType,
+) -> (GraphBuilder, &ValueType) {
+    while let ValueType::Nullable(inner) = value_type {
+        graph = graph.unwrap_nullable(field.clone());
+        value_type = inner.as_ref();
+    }
+    (graph, value_type)
+}
+
+fn closure_membership_graph_for_path(
+    root_graph: GraphBuilder,
+    path: &ClosurePath,
+    root_source: &ResolvedSource,
+    resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    route_fields: &BTreeSet<String>,
+) -> CapabilityResult<Vec<(usize, SourceId, GraphBuilder)>> {
+    let segments = closure_path_segments(path);
+    let can_lower_as_parent_semijoin =
+        route_fields.is_empty() && matches!(path, ClosurePath::ImplicitRootReference { .. });
+    let mut current_graph = root_graph.project_fields(
+        project_source_fields_with_routes(root_source, route_fields)
+            .into_iter()
+            .chain([ProjectField::renamed(
+                root_source.row_shape.row_uuid_field.clone(),
+                "__closure_root_row_uuid",
+            )]),
+    );
+    let mut current_source = root_source.clone();
+    let mut outputs = Vec::new();
+    for (index, segment) in segments.iter().enumerate() {
+        let target = resolved_sources.get(&segment.target).ok_or_else(|| {
+            Box::new(CapabilityReport {
+                gaps: vec![UnsupportedReason::Runtime(format!(
+                    "closure target source {:?} was not resolved",
+                    segment.target
+                ))],
+                explain: ExplainPlan::default(),
+            })
+        })?;
+        let source_key = user_column_field(&segment.source_field);
+        let Some(source_key_type) = source_field_type(&current_source, &source_key) else {
+            return Err(Box::new(CapabilityReport {
+                gaps: vec![UnsupportedReason::Operator(format!(
+                    "closure source field {source_key:?} is not projected"
+                ))],
+                explain: ExplainPlan::default(),
+            }));
+        };
+        let joined = if can_lower_as_parent_semijoin {
+            let (source_base, source_key_type) =
+                unwrap_nullable_layers(current_graph, source_key.clone(), source_key_type);
+            let source_keys = match source_key_type {
+                ValueType::Array(_) => {
+                    source_base.unnest(source_key.clone(), CLOSURE_REQUIRED_ELEMENT)
+                }
+                _ => source_base,
+            };
+            let source_key = source_key_for_required(source_key_type, &source_key);
+            GraphBuilder::semi_join(
+                target.graph.clone(),
+                source_keys.project_fields(vec![ProjectField::named(source_key.clone())]),
+                [target.row_shape.row_uuid_field.clone()],
+                [source_key],
+            )
+            .project_fields(project_source_fields_with_routes(target, route_fields))
+        } else {
+            GraphBuilder::join(
+                current_graph.unwrap_nullable(source_key.clone()),
+                target.graph.clone(),
+                [source_key],
+                [target.row_shape.row_uuid_field.clone()],
+            )
+            .project_fields(
+                project_source_fields_from_prefix(target, RIGHT_JOIN_PREFIX)
+                    .into_iter()
+                    .chain([ProjectField::renamed(
+                        "left.__closure_root_row_uuid",
+                        "__closure_root_row_uuid",
+                    )])
+                    .chain(
+                        route_fields
+                            .iter()
+                            .map(|field| ProjectField::renamed(left_field(field), field.clone())),
+                    ),
+            )
+        };
+        outputs.push((index, segment.target.clone(), joined.clone()));
+        current_graph = joined;
+        current_source = target.clone();
+    }
+    let _ = current_source;
+    Ok(outputs)
+}
+
+pub(super) fn closure_path_segments(path: &ClosurePath) -> Vec<&ClosurePathSegment> {
+    match path {
+        ClosurePath::ImplicitRootReference { segment, .. } => vec![segment],
+        ClosurePath::ExplicitInclude { segments, .. } => segments.iter().collect(),
+    }
+}

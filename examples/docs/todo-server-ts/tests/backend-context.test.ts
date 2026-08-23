@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { WebSocket as UndiciWebSocket } from "undici";
 import { startLocalJazzServer } from "jazz-tools/testing";
 import { createServer, startServer, stopServer, type RunningServer } from "../src/main.ts";
+
+globalThis.WebSocket ??= UndiciWebSocket as unknown as typeof globalThis.WebSocket;
 
 describe("Todo Server backend context", () => {
   it("requires upstream sync config", async () => {
@@ -14,6 +17,10 @@ describe("Todo Server backend context", () => {
     ).rejects.toThrow(/JAZZ_SERVER_URL and JAZZ_BACKEND_SECRET are required/i);
   });
 
+  // `startLocalJazzServer` resolves only after the native server is ready,
+  // but durable-store startup can contend with the workspace's parallel TS
+  // suites in CI. Keep the normal 6s budget for request behavior and grant
+  // this explicit server-lifecycle test its own readiness budget.
   it("boots against an upstream Jazz server", async () => {
     const upstream = await startLocalJazzServer();
     let server: RunningServer | undefined;
@@ -37,5 +44,5 @@ describe("Todo Server backend context", () => {
       }
       await upstream.stop();
     }
-  });
+  }, 20_000);
 });

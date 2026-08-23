@@ -111,17 +111,12 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
             conditions: (options.where ?? []).map((condition) =>
               toQueryCondition(model, condition),
             ),
-            orderBy: options.sortBy
-              ? {
-                  field: getFieldName({ model, field: options.sortBy.field }),
-                  direction: options.sortBy.direction,
-                }
-              : undefined,
-            limit: options.limit,
-            offset: options.offset,
           });
 
-          return config.db().all(qb, { tier: "global" }) as Promise<JazzRowRecord[]>;
+          let rows = (await config.db().all(qb, { tier: "global" })) as JazzRowRecord[];
+          rows = sortListByField(rows, options.sortBy);
+          rows = paginateList(rows, options.limit, options.offset);
+          return rows;
         } else {
           console.warn(
             `Query not supported yet by Jazz engine: ${JSON.stringify(options.where?.map((c) => ({ ...c, value: typeof c.value === "string" ? "..." : c.value })))}`,

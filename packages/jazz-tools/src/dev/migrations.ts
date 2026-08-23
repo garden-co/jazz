@@ -81,6 +81,8 @@ function baseBuilderExpression(columnType: WasmColumnType, references?: string):
       return columnType.schema ? `s.json(${JSON.stringify(columnType.schema)})` : "s.json()";
     case "Enum":
       return `s.enum(${columnType.variants.map((variant) => JSON.stringify(variant)).join(", ")})`;
+    case "EnumPayload":
+      throw new Error("Migration stub generation does not yet support payload enums.");
     case "Uuid":
       if (!references) {
         throw new Error("Migration stub generation does not yet support bare UUID columns.");
@@ -156,6 +158,8 @@ function renderAddOperationExpression(column: ColumnDescriptor, defaultExpressio
       return `s.add.enum(${column.column_type.variants
         .map((variant) => JSON.stringify(variant))
         .join(", ")}, { default: ${defaultExpression} })`;
+    case "EnumPayload":
+      throw new Error("Migration stub generation does not yet support payload enums.");
     case "Uuid":
       if (column.references) {
         return `s.add.ref(${JSON.stringify(column.references)}, { default: ${defaultExpression} })`;
@@ -195,6 +199,8 @@ function renderDropOperationExpression(
       return `s.drop.enum(${column.column_type.variants
         .map((variant) => JSON.stringify(variant))
         .join(", ")}, { backwardsDefault: ${defaultExpression} })`;
+    case "EnumPayload":
+      throw new Error("Migration stub generation does not yet support payload enums.");
     case "Uuid":
       if (column.references) {
         return `s.drop.ref(${JSON.stringify(column.references)}, { backwardsDefault: ${defaultExpression} })`;

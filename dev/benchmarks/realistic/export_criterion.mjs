@@ -22,6 +22,8 @@ function printHelp() {
 }
 
 function parseArgs(argv) {
+  // Keep the historical artifact filenames so update_history can ingest old and
+  // new native Criterion outputs through the same manifest paths.
   const out = {
     criterionRoot: "target/criterion",
     scenariosDir: "dev/benchmarks/realistic/scenarios",

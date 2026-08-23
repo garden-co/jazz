@@ -1,84 +1,252 @@
 ---
 title: Branches
-description: How Jazz uses branches to isolate data across environments, schema versions, and user-defined contexts.
-reviewedAt: "4059cdef"
+description: Model application-owned branches with ordinary columns and head-over-base views.
+reviewedAt: "ce310cf5a"
 ---
 
-Every row version in Jazz belongs to a **branch**&hairsp;—&hairsp;a named, independent view of your
-data. Some branches are merged automatically at query time (schema versions), while others are
-fully isolated (environments and user branches). This makes it easy to keep development data
-separate from production, or to create parallel lines of work like drafts or staging.
+Jazz provides the storage and query mechanics for branches, but it does not prescribe what a
+branch is. Your app can use branches for drafts, scenarios, environments, or any other parallel
+view of the same objects.
 
-## How branches are composed
+The app owns branch names, lifecycle, parent relationships, and merge UI. Jazz owns two narrow
+mechanisms:
 
-A branch name in Jazz has three parts:
+- **Branch columns** form the coordinates that separate row history.
+- **Branch views** read a head coordinate, optionally falling back to a live or frozen base.
 
-| Part            | Set by                         | Example           |
-| --------------- | ------------------------------ | ----------------- |
-| **Environment** | Your app config (`env`)        | `dev`, `prod`     |
-| **Schema hash** | Jazz (automatically)           | `a1b2c3d4`        |
-| **User branch** | Your app config (`userBranch`) | `main`, `staging` |
-
-These are joined into a single identifier: `dev-a1b2c3d4-main`.
-
-The schema hash is derived automatically from your current schema definition.
-
-## Configuring branches
-
-By default, Jazz uses `env: "dev"` and `userBranch: "main"`. To target a different branch, set `env` and/or `userBranch` when creating your database context:
-
-<Tabs
-  groupId="jazz-framework"
-  persist
-  updateAnchor
-  items={["React", "Vue", "Svelte", "Solid", "TypeScript"]}
->
-  <Tab value="React">
-    <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-react/src/branch-snippets.tsx#branch-react
-    </include>
-  </Tab>
-  <Tab value="Vue">
-    <include cwd lang="vue">
-      ../examples/docs/todo-client-localfirst-vue/src/BranchExample.vue#branch-vue
-    </include>
-  </Tab>
-  <Tab value="Svelte">
-    <include cwd lang="svelte">
-      ../examples/docs/todo-client-localfirst-svelte/src/BranchExample.svelte#branch-svelte
-    </include>
-  </Tab>
-  <Tab value="Solid">
-    <include cwd lang="tsx">
-      ../examples/docs/todo-client-localfirst-solid/src/BranchExample.tsx
-    </include>
-  </Tab>
-  <Tab value="TypeScript">
-    <include cwd lang="ts">
-      ../examples/docs/todo-client-localfirst-ts/src/branch-snippets.ts#branch-ts
-    </include>
-  </Tab>
-</Tabs>
-
-All [reads](/docs/reading/queries) and [writes](/docs/writing/writing-data) through this context will operate on the `prod-{schemaHash}-staging` branch. Data on other branches is unaffected.
+This means branch columns remain normal data. A branch can be as small as a string such as `"main"`
+or `"draft"`. When an app needs richer semantics, the column can instead reference an ordinary row.
 
 <Callout type="info">
-  As a best practice, set `env` to `"prod"` in production using an environment variable. This avoids
-  cross-pollination of data between development and production.
+  Branch views are part of the new Jazz core API. Framework-specific branch conveniences are still
+  being filled in; the examples below use the current typed schema, read, and mutation APIs.
 </Callout>
 
-## Schema versions are merged automatically
+## Start with a string column
 
-When your schema changes, Jazz creates a new branch with a different schema hash (e.g. `prod-a1b2c3d4-main` for v1 and `prod-e5f6g7h8-main` for v2). At the storage level, data from different schema versions is kept separate.
+The smallest useful model adds a normal string column to the table and lists it in `branchBy`:
 
-At query time, Jazz automatically fetches data from all known schema versions within your current environment and user branch. It applies [migrations](/docs/schemas/migrations) to adapt older data to your current schema automatically. See the [schemas, lenses and branches diagram](/docs/schemas/migrations#schemas-lenses-and-branches) for how schema versions, lenses and per-hash branches fit together.
+```ts title="schema.ts"
+import { schema as s } from "jazz-tools";
 
-## Environments and user branches are fully isolated
+const schema = {
+  documents: s
+    .table({
+      branch: s.string(),
+      title: s.string(),
+    })
+    .branchBy("branch"),
+};
 
-Unlike schema versions, different environments and user branches are never merged. A query on `dev-*-main` does not include data from `prod-*-main`, and a query on `*-*-staging` does not include data from `*-*-main`. This is hard isolation: there is no way to combine data across environments or user branches at query time.
+type AppSchema = s.Schema<typeof schema>;
+export const app: s.App<AppSchema> = s.defineApp(schema);
+```
 
-<Callout type="info" title="Not to be confused with row history">
-  A branch is a named table view such as `prod-a1b2c3d4-main`. A row history is the per-row version
-  graph that records how one row changed over time. They are related, but they are not the same
-  thing.
+`branch` is still an ordinary application column. `branchBy` additionally tells Jazz to keep each
+value's row history separate and to use it when composing branch views.
+
+For a table with one branch column, pass that column's ordinary value directly:
+
+```ts
+const documents = await db.all(app.documents.orderBy("title", "asc"), {
+  branch: "draft",
+  base: "main",
+});
+
+const unsubscribe = db.subscribeAll(app.documents, ({ all }) => renderDocuments(all), {
+  branch: "draft",
+  base: "main",
+});
+```
+
+For every row, Jazz selects the draft's current content when present and otherwise falls back to
+main. Draft deletions hide inherited rows. Filters, joins, includes, permissions, and indices all
+consume that effective view; fallback is not a late union of two query result sets.
+
+The same row UUID identifies the application object across branches. Its content may differ in each
+branch-local row. Results expose the selected head coordinate, including for content inherited from
+the base, so application code sees one consistent effective branch.
+
+## Model richer branches with references
+
+A string is enough when branch names and relationships live elsewhere in the application. When a
+branch needs queryable metadata, model it as an ordinary row and make the branch column a reference.
+
+```ts title="schema.ts"
+const schema = {
+  branches: s.table({
+    workspace_id: s.uuid(),
+    name: s.string(),
+    base_branch_id: s.ref("branches").optional(),
+    base_snapshot_ref: s.json().optional(),
+    status: s.enum(["open", "approved", "archived"]),
+  }),
+  documents: s
+    .table({
+      branch_id: s.ref("branches"),
+      title: s.string(),
+    })
+    .branchBy("branch_id"),
+};
+```
+
+Jazz does not assign meaning to the branch row's `base_branch_id`, `base_snapshot_ref`, or `status`.
+The app reads the row, resolves its base, and supplies the reference IDs to the same read-side API:
+
+```ts
+const branchRow = await db.one(app.branches.where({ id: draftBranchId }));
+if (!branchRow?.base_branch_id) throw new Error("Branch has no base");
+
+const documents = await db.all(app.documents, {
+  branch: branchRow.id,
+  base: branchRow.base_branch_id,
+});
+```
+
+This keeps review, archival, nested drafts, environment promotion, and base selection in userland.
+
+Because `branch_id` is an ordinary column, branch access does not need a separate authorization
+system. A policy can compare it directly or follow its reference to application-owned data. For
+example, an app can allow writes only when:
+
+```text
+document.branch_id -> branches.id
+branches.workspace_id -> workspace_memberships.workspace_id
+workspace_memberships.user_id == session.user_id
+branches.status == "open"
+```
+
+Missing branch or membership rows are missing policy evidence and fail closed. Jazz does not add an
+implicit requirement that a branch row exists, nor does it impose built-in open, closed, owner, or
+parent semantics.
+
+Transactions may contain writes to several branch coordinates and shared tables. They retain one
+atomic fate: if one write is invalid or unauthorized, the whole transaction is rejected.
+
+## Use compound branch coordinates
+
+Most apps need only one branch column. When a branch is qualified by multiple dimensions, declare
+them with the array form:
+
+```ts
+const schema = {
+  documents: s
+    .table({
+      workspace_id: s.ref("workspaces"),
+      branch_id: s.ref("branches"),
+      title: s.string(),
+    })
+    .branchBy(["workspace_id", "branch_id"]),
+};
+```
+
+Compound selectors name every dimension explicitly:
+
+```ts
+const documents = await db.all(app.documents, {
+  branch: {
+    workspace_id: workspaceId,
+    branch_id: draftBranchId,
+  },
+  base: {
+    workspace_id: workspaceId,
+    branch_id: mainBranchId,
+  },
+});
+```
+
+The qualified form also works for generic code targeting a single-column table:
+
+```ts
+await db.all(app.documents, {
+  branch: { branch_id: draftBranchId },
+  base: { branch_id: mainBranchId },
+});
+```
+
+## Write to the branch
+
+An insert targets one exact branch selector and includes the matching ordinary column value:
+
+```ts
+const { value: document } = db.insert(
+  app.documents,
+  { branch: "draft", title: "Draft title" },
+  { branch: "draft" },
+);
+```
+
+Updates and deletes accept a branch view. If the visible row currently comes from main, Jazz copies
+it into the draft before applying the change:
+
+```ts
+db.update(
+  app.documents,
+  existingDocumentId,
+  { title: "Reworked in the draft" },
+  { branch: "draft", base: "main" },
+);
+
+db.delete(app.documents, inheritedDocumentId, {
+  branch: "draft",
+  base: "main",
+});
+```
+
+The main branch-local row remains unchanged. A deletion is branch-qualified too, so deleting the
+object from the draft does not delete it from main.
+
+## Branch-column rules
+
+Every `branchBy` entry must name a non-null, key-encodable ordinary column. Branch columns are
+immutable after insertion. When the same branch-column name appears in multiple tables, it must have
+the same type in every table.
+
+There is no separate branch declaration, binding, or stable branch identity. Branch selectors use
+the ordinary column names. A schema migration may rename a branch column because normal column
+lineage preserves its physical identity.
+
+Tables may use different subsets of the same named branch columns. For example, documents might
+branch by `workspace_id` and `branch_id`, memberships only by `workspace_id`, and users by neither.
+An unbranched table is shared by every branch view.
+
+<Callout type="warn" title="Branch columns are coordinates">
+  To move an object between branch values, write the destination branch-local row and remove the
+  source branch-local row explicitly. Both writes may be in one transaction.
 </Callout>
+
+## Use a frozen base
+
+If a draft should keep seeing main exactly as it was at a particular point, pass a snapshot
+reference with the resolved base:
+
+```ts
+if (!branchRow.base_branch_id || !branchRow.base_snapshot_ref) {
+  throw new Error("Branch has no frozen base");
+}
+
+const frozenDraft = {
+  branch: branchRow.id,
+  base: [branchRow.base_branch_id, branchRow.base_snapshot_ref],
+} as const;
+
+const documents = await db.all(app.documents, frozenDraft);
+```
+
+Jazz applies that cut consistently to base rows and to base data reached through joins and
+permissions. The app decides which snapshot to use.
+
+## Merging stays a userland operation
+
+A merge is a high-level helper that reads authorized source and target views, calculates ordinary
+target writes, and emits one transaction. The core does not need a branch lifecycle event or a
+special merge commit type to admit those writes.
+
+That leaves the app in control of merge strategy and UX while Jazz transaction metadata can retain
+precise contribution provenance. Concurrent offline merges are still subject to Jazz's normal
+mergeable transaction semantics; branch views do not introduce a distributed exactly-once or
+distributed uniqueness guarantee.
+
+See the [branching project planner example](https://github.com/garden-co/jazz/tree/main/examples/branching-project-planner-ts)
+for a complete userland model with scenario rows, reference-based authorization, a live base, and
+copy-on-write editing.

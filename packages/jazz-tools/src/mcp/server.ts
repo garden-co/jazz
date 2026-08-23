@@ -2,7 +2,7 @@ import { createInterface } from "node:readline";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { DocsBackend } from "./backend-sqlite.js";
+import { createSqliteBackend } from "./backend-sqlite.js";
 import { callTool, toolDefinitions, ToolError } from "./tools.js";
 
 // ---------------------------------------------------------------------------
@@ -14,32 +14,6 @@ export interface RunServerOptions {
   output?: NodeJS.WritableStream;
   /** Path to docs-index.db. Defaults to <package-root>/bin/docs-index.db */
   dbPath?: string;
-  /** Path to docs-index.txt. Defaults to <package-root>/bin/docs-index.txt */
-  txtPath?: string;
-}
-
-// ---------------------------------------------------------------------------
-// Backend selection
-// ---------------------------------------------------------------------------
-
-async function selectBackend(dbPath: string, txtPath: string): Promise<DocsBackend> {
-  try {
-    // Step 1: confirm node:sqlite is importable
-    const { DatabaseSync } = await import("node:sqlite");
-
-    // Step 2: FTS5 probe on an in-memory DB
-    const probe = new DatabaseSync(":memory:");
-    probe.exec("CREATE VIRTUAL TABLE _probe USING fts5(x)");
-    probe.close();
-
-    // Both passed — use SQLite backend
-    const { createSqliteBackend } = await import("./backend-sqlite.js");
-    return createSqliteBackend(dbPath);
-  } catch {
-    // Fall back to naive backend (it emits its own stderr warning)
-    const { createNaiveBackend } = await import("./backend-naive.js");
-    return createNaiveBackend(txtPath);
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -54,9 +28,8 @@ export async function runServer(opts: RunServerOptions = {}): Promise<void> {
   const here = dirname(fileURLToPath(import.meta.url));
   const binDir = resolve(here, "../../bin");
   const dbPath = opts.dbPath ?? join(binDir, "docs-index.db");
-  const txtPath = opts.txtPath ?? join(binDir, "docs-index.txt");
 
-  const backend = await selectBackend(dbPath, txtPath);
+  const backend = await createSqliteBackend(dbPath);
 
   function write(obj: unknown): void {
     (output as NodeJS.WritableStream).write(JSON.stringify(obj) + "\n");

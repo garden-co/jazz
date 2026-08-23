@@ -1,5 +1,5 @@
 import { createMemo, createSignal, type ParentProps } from "solid-js";
-import { JazzProvider, createSolidJazzClient } from "jazz-tools/solid";
+import { JazzProvider } from "jazz-tools/solid";
 
 export function AuthExternal(props: ParentProps) {
   const appId = "my-app";
@@ -7,12 +7,12 @@ export function AuthExternal(props: ParentProps) {
   const providerJwt = "<provider-jwt>";
   const [hasJwt, setHasJwt] = createSignal(false);
 
-  const localClient = createSolidJazzClient(() => ({ appId, serverUrl }));
-  const jwtClient = createSolidJazzClient(() => ({ appId, serverUrl, jwt: providerJwt }));
-  const client = createMemo(() => (hasJwt() ? jwtClient : localClient));
+  const config = createMemo(() =>
+    hasJwt() ? { appId, serverUrl, jwtToken: providerJwt } : { appId, serverUrl },
+  );
 
   return (
-    <JazzProvider client={client()}>
+    <JazzProvider config={config()}>
       <button type="button" onClick={() => setHasJwt(true)}>
         Sign in
       </button>

@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createDb, type Db, type QueryBuilder, type TableProxy } from "../../src/runtime/db.js";
-import { WriteHandle } from "../../src/runtime/client.js";
 import type { WasmSchema } from "../../src/drivers/types.js";
 import { uniqueDbName } from "./support.js";
 
@@ -57,10 +56,34 @@ afterEach(async () => {
   await db.shutdown();
 });
 
-describe("db transaction reads browser integration", () => {
+describe("db exclusive transaction initialization browser integration", () => {
+  it("rejects beginning before the JazzClient exists", () => {
+    expect(() => db.beginExclusiveTransaction()).toThrow(
+      "Cannot begin an exclusive transaction before the JazzClient has been created. Run a query or mutation first.",
+    );
+  });
+});
+
+describe("db exclusive transaction reads browser integration", () => {
+  beforeEach(async () => {
+    await db.all<Todo>(makeTodoQuery());
+  });
+
+  it("anchors a read-only transaction snapshot when begin is called", async () => {
+    const { value: beforeBegin } = db.insert(todos, {
+      title: "visible at begin",
+      done: false,
+    });
+    const tx = db.beginExclusiveTransaction();
+    db.insert(todos, { title: "committed after begin", done: false });
+
+    await expect(tx.all<Todo>(makeTodoQuery())).resolves.toEqual([beforeBegin]);
+    await tx.rollback();
+  });
+
   it("shows only the current transaction's staged inserts through tx.all", async () => {
-    const aliceTx = db.beginTransaction();
-    const bobTx = db.beginTransaction();
+    const aliceTx = db.beginExclusiveTransaction();
+    const bobTx = db.beginExclusiveTransaction();
 
     const aliceDraft = aliceTx.insert(todos, { title: "Alice draft", done: false });
     const bobDraft = bobTx.insert(todos, { title: "Bob draft", done: false });
@@ -78,8 +101,8 @@ describe("db transaction reads browser integration", () => {
   it("keeps same-row staged updates isolated to the transaction that issued them", async () => {
     const { value: base } = db.insert(todos, { title: "Shared", done: false });
 
-    const aliceTx = db.beginTransaction();
-    const bobTx = db.beginTransaction();
+    const aliceTx = db.beginExclusiveTransaction();
+    const bobTx = db.beginExclusiveTransaction();
 
     aliceTx.update(todos, base.id, { title: "Alice draft" });
     bobTx.update(todos, base.id, { title: "Bob draft" });
@@ -100,39 +123,37 @@ describe("db transaction reads browser integration", () => {
 
   it("keeps staged deletes isolated to the transaction that issued them", async () => {
     const { value: todo } = db.insert(todos, { title: "Shared", done: false });
-    const tx = db.beginTransaction();
+    const tx = db.beginExclusiveTransaction();
 
     tx.delete(todos, todo.id);
 
     expect(await db.one<Todo>(makeTodoQuery())).toEqual(todo);
     expect(await tx.one<Todo>(makeTodoQuery())).toBeNull();
 
-    tx.commit();
+    await tx.commit();
 
     expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
   });
 
   it("makes transaction writes visible globally once the transaction commits and the authority accepts the transaction", async () => {
-    const tx = db.beginTransaction();
-    const insertedTodo = tx.insert(todos, { title: "Batch", done: false });
+    const tx = db.beginExclusiveTransaction();
+    const insertedTodo = tx.insert(todos, { title: "Exclusive transaction", done: false });
 
     expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
 
-    const _txResult = tx.commit();
-    // No need to wait in this case, because the Db is not connected to a server
-    // await _txResult.wait({ tier: "global" });
+    await tx.commit();
 
     expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
   });
 
   it("rejects transaction operations after commit", async () => {
-    const tx = db.beginTransaction();
+    const tx = db.beginExclusiveTransaction();
     tx.insert(todos, { title: "Committed transaction", done: false });
-    const batchId = tx.batchId();
+    const openBatchId = tx.openBatchId();
 
-    tx.commit();
+    await tx.commit();
 
-    const coreError = `transaction ${batchId} is already committed`;
+    const coreError = `open transaction ${openBatchId} is already committed`;
     expect(() => tx.commit()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.rollback()).toThrow(`Write error: ${coreError}`);
     expect(() => tx.insert(todos, { title: "Nope", done: false })).toThrow(
@@ -144,24 +165,24 @@ describe("db transaction reads browser integration", () => {
   });
 
   it("changes from rolled-back transactions are not visible globally", async () => {
-    const tx = db.beginTransaction();
-    tx.insert(todos, { title: "Batch", done: false });
+    const tx = db.beginExclusiveTransaction();
+    tx.insert(todos, { title: "Exclusive transaction", done: false });
 
-    tx.rollback();
+    await tx.rollback();
 
     expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
   });
 
   it("rejects transaction operations after rollback", async () => {
-    const tx = db.beginTransaction();
+    const tx = db.beginExclusiveTransaction();
     tx.insert(todos, { title: "Rolled-back transaction", done: false });
-    const batchId = tx.batchId();
+    const openBatchId = tx.openBatchId();
 
-    tx.rollback();
+    await tx.rollback();
 
-    const coreError = `batch ${batchId} has already been completed or was never opened`;
-    expect(() => tx.commit()).toThrow(`Commit batch failed: Write error: ${coreError}`);
-    expect(() => tx.rollback()).toThrow(`Rollback batch failed: Write error: ${coreError}`);
+    const coreError = `open transaction ${openBatchId} has already been completed or was never opened`;
+    expect(() => tx.commit()).toThrow(`Commit transaction failed: Write error: ${coreError}`);
+    expect(() => tx.rollback()).toThrow(`Rollback transaction failed: Write error: ${coreError}`);
     expect(() => tx.insert(todos, { title: "Nope", done: false })).toThrow(
       `Insert failed: WriteError("${coreError}")`,
     );
@@ -176,7 +197,7 @@ describe("db transaction reads browser integration", () => {
       done: false,
     });
 
-    const tx = db.beginTransaction();
+    const tx = db.beginExclusiveTransaction();
 
     const customId = "00000000-0000-0000-0000-000000000123";
     const insertedTodo = tx.insert(
@@ -186,8 +207,8 @@ describe("db transaction reads browser integration", () => {
     );
 
     const createdByUpsertId = "00000000-0000-0000-0000-000000000124";
-    tx.upsert(todos, { title: "Bob wrote release notes", done: false }, { id: createdByUpsertId });
-    tx.upsert(todos, { title: "Bob drafted release notes", done: true }, { id: existingTodo.id });
+    tx.upsert(todos, createdByUpsertId, { title: "Bob wrote release notes", done: false });
+    tx.upsert(todos, existingTodo.id, { title: "Bob drafted release notes", done: true });
 
     expect(insertedTodo).toEqual({
       id: customId,
@@ -196,7 +217,7 @@ describe("db transaction reads browser integration", () => {
     });
     expect(await db.all<Todo>(makeTodoQuery())).toEqual([existingTodo]);
 
-    tx.commit();
+    await tx.commit();
 
     const committedRows = await db.all<Todo>(makeTodoQuery());
     expect(committedRows).toHaveLength(3);
@@ -218,32 +239,241 @@ describe("db transaction reads browser integration", () => {
   });
 
   it("rejects partial upserts for missing rows inside transactions", async () => {
-    const tx = db.beginTransaction();
+    const tx = db.beginExclusiveTransaction();
 
-    expect(() =>
-      tx.upsert(todos, { done: true }, { id: "00000000-0000-0000-0000-000000000125" }),
-    ).toThrow("missing required field `title`");
+    expect(() => tx.upsert(todos, "00000000-0000-0000-0000-000000000125", { done: true })).toThrow(
+      "missing required field `title`",
+    );
   });
 
-  describe("db.transaction(cb)", () => {
+  describe("db.exclusiveTransaction(cb)", () => {
     it("returns the callback value when an async transaction only reads", async () => {
       const { value: existingTodo } = db.insert(todos, {
         title: "Alice checked the roadmap",
         done: false,
       });
 
-      const result = await db.transaction(async (tx) => {
+      const result = await db.exclusiveTransaction(async (tx) => {
         const rows = await tx.all<Todo>(makeTodoQuery());
         expect(rows).toEqual([existingTodo]);
         return "no writes needed";
       });
       expect(result.value).toEqual("no writes needed");
-      expect(result.wait({ tier: "global" })).resolves.toEqual("no writes needed");
+      await expect(result.wait()).resolves.toEqual("no writes needed");
     });
 
     it("rolls back cleanly when an async transaction reads then throws before writing", async () => {
       const { value: existingTodo } = db.insert(todos, {
         title: "Alice checked rollback",
+        done: false,
+      });
+      const error = new Error("no write transaction failed");
+
+      await expect(
+        db.exclusiveTransaction(async (tx) => {
+          const rows = await tx.all<Todo>(makeTodoQuery());
+          expect(rows).toEqual([existingTodo]);
+          throw error;
+        }),
+      ).rejects.toBe(error);
+
+      await expect(db.all<Todo>(makeTodoQuery())).resolves.toEqual([existingTodo]);
+    });
+
+    it("commits changes once the callback resolves and the authority accepts the transaction", async () => {
+      const txResult = await db.exclusiveTransaction((tx) => {
+        return tx.insert(todos, { title: "Exclusive transaction", done: false });
+      });
+      const insertedTodo = txResult.value;
+
+      expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
+    });
+
+    describe("rolls back changes if the callback rejects", () => {
+      it("insert", async () => {
+        await expect(() =>
+          db.exclusiveTransaction(async (tx) => {
+            const todo = tx.insert(todos, { title: "Todo", done: false });
+            expect(await tx.one(makeTodoQuery())).toEqual(todo);
+            expect(await db.one(makeTodoQuery())).toBeNull();
+            throw new Error("callback failed");
+          }),
+        ).rejects.toThrow("callback failed");
+
+        expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
+      });
+
+      it("update", async () => {
+        const { value: todo } = db.insert(todos, { title: "Todo", done: false });
+
+        await expect(() =>
+          db.exclusiveTransaction(async (tx) => {
+            tx.update(todos, todo.id, { title: "Updated todo" });
+            expect((await tx.one(makeTodoQuery()))?.title).toEqual("Updated todo");
+            expect((await db.one(makeTodoQuery()))?.title).toEqual("Todo");
+            throw new Error("callback failed");
+          }),
+        ).rejects.toThrow("callback failed");
+
+        expect((await db.one(makeTodoQuery()))?.title).toEqual("Todo");
+      });
+
+      it("delete", async () => {
+        const { value: todo } = db.insert(todos, { title: "Todo", done: false });
+
+        await expect(() =>
+          db.exclusiveTransaction(async (tx) => {
+            tx.delete(todos, todo.id);
+            expect(await tx.one(makeTodoQuery())).toBeNull();
+            expect(await db.one(makeTodoQuery())).toEqual(todo);
+            throw new Error("callback failed");
+          }),
+        ).rejects.toThrow("callback failed");
+
+        expect(await db.one(makeTodoQuery())).toEqual(todo);
+      });
+    });
+  });
+
+  it("concurrent transactions cannot modify the same data", async () => {
+    const { value: base } = db.insert(todos, { title: "Shared", done: false });
+
+    const aliceTx = db.beginExclusiveTransaction();
+    const bobTx = db.beginExclusiveTransaction();
+
+    aliceTx.update(todos, base.id, { title: "Alice's title" });
+    bobTx.update(todos, base.id, { title: "Bob's title" });
+
+    await (await aliceTx.commit()).wait();
+    await expect(async () => bobTx.commit().wait()).rejects.toThrow(
+      "(transaction_conflict): row visible parent changed since transaction write was staged",
+    );
+
+    expect((await db.one<Todo>(makeTodoQuery()))?.title).toEqual("Alice's title");
+  });
+});
+
+describe("db mergeable transaction reads browser integration", () => {
+  it("keeps uncommitted mergeable transaction changes out of global reads", async () => {
+    const tx = db.beginTransaction();
+    const insertedTodo = tx.insert(todos, { title: "Mergeable transaction", done: false });
+
+    expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
+
+    await tx.commit();
+    expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
+  });
+
+  it("rejects mergeable transaction operations after commit", async () => {
+    const tx = db.beginTransaction();
+    tx.insert(todos, { title: "Committed mergeable transaction", done: false });
+    const openBatchId = tx.openBatchId();
+
+    await tx.commit();
+
+    const coreError = `open transaction ${openBatchId} is already committed`;
+    expect(() => tx.commit()).toThrow(`Write error: ${coreError}`);
+    expect(() => tx.rollback()).toThrow(`Write error: ${coreError}`);
+    expect(() => tx.insert(todos, { title: "Nope", done: false })).toThrow(
+      `Insert failed: WriteError("${coreError}")`,
+    );
+    await expect(tx.all<Todo>(makeTodoQuery())).rejects.toThrow(
+      `Query setup failed: Write error: ${coreError}`,
+    );
+  });
+
+  it("rejects mergeable transaction operations after rollback", async () => {
+    const tx = db.beginTransaction();
+    tx.insert(todos, { title: "Rolled-back mergeable transaction", done: false });
+    const openBatchId = tx.openBatchId();
+
+    await tx.rollback();
+
+    const coreError = `open transaction ${openBatchId} has already been completed or was never opened`;
+    expect(() => tx.commit()).toThrow(`Commit transaction failed: Write error: ${coreError}`);
+    expect(() => tx.rollback()).toThrow(`Rollback transaction failed: Write error: ${coreError}`);
+    expect(() => tx.insert(todos, { title: "Nope", done: false })).toThrow(
+      `Insert failed: WriteError("${coreError}")`,
+    );
+    await expect(tx.all<Todo>(makeTodoQuery())).rejects.toThrow(
+      `Query setup failed: Write error: ${coreError}`,
+    );
+  });
+
+  it("supports custom ids and upserts inside mergeable transactions", async () => {
+    const { value: existingTodo } = db.insert(todos, {
+      title: "Bob queued docs review",
+      done: false,
+    });
+
+    const tx = db.beginTransaction();
+
+    const customId = "00000000-0000-0000-0000-000000000223";
+    const insertedTodo = tx.insert(
+      todos,
+      { title: "Alice staged screenshots", done: false },
+      { id: customId },
+    );
+
+    const createdByUpsertId = "00000000-0000-0000-0000-000000000224";
+    tx.upsert(todos, createdByUpsertId, { title: "Bob checked the docs", done: false });
+    tx.upsert(todos, existingTodo.id, { title: "Bob queued docs review", done: true });
+
+    expect(insertedTodo).toEqual({
+      id: customId,
+      title: "Alice staged screenshots",
+      done: false,
+    });
+    expect(await db.all<Todo>(makeTodoQuery())).toEqual([existingTodo]);
+
+    await tx.commit();
+
+    const committedRows = await db.all<Todo>(makeTodoQuery());
+    expect(committedRows).toHaveLength(3);
+    expect(committedRows).toEqual(
+      expect.arrayContaining([
+        {
+          id: existingTodo.id,
+          title: "Bob queued docs review",
+          done: true,
+        },
+        insertedTodo,
+        {
+          id: createdByUpsertId,
+          title: "Bob checked the docs",
+          done: false,
+        },
+      ]),
+    );
+  });
+
+  it("rejects partial upserts for missing rows inside mergeable transactions", async () => {
+    const tx = db.beginTransaction();
+
+    expect(() => tx.upsert(todos, "00000000-0000-0000-0000-000000000225", { done: true })).toThrow(
+      "missing required field `title`",
+    );
+  });
+
+  describe("db.transaction(cb)", () => {
+    it("rejects an async mergeable transaction that only reads because it has no commit", async () => {
+      const { value: existingTodo } = db.insert(todos, {
+        title: "Alice reviewed the plan",
+        done: false,
+      });
+
+      await expect(
+        db.transaction(async (tx) => {
+          const rows = await tx.all<Todo>(makeTodoQuery());
+          expect(rows).toEqual([existingTodo]);
+          return "no writes needed";
+        }),
+      ).rejects.toThrow("empty mergeable transaction has no committed unit; roll it back instead");
+    });
+
+    it("rolls back cleanly when an async mergeable transaction reads then throws before writing", async () => {
+      const { value: existingTodo } = db.insert(todos, {
+        title: "Alice reviewed rollback",
         done: false,
       });
       const error = new Error("no write transaction failed");
@@ -259,12 +489,10 @@ describe("db transaction reads browser integration", () => {
       await expect(db.all<Todo>(makeTodoQuery())).resolves.toEqual([existingTodo]);
     });
 
-    it("commits changes once the callback resolves and the authority accepts the transaction", async () => {
-      const txResult = db.transaction((tx) => {
-        return tx.insert(todos, { title: "Batch", done: false });
+    it("commits changes once the callback resolves", async () => {
+      const txResult = await db.transaction((tx) => {
+        return tx.insert(todos, { title: "Mergeable transaction", done: false });
       });
-      // No need to wait in this case, because the Db is not connected to a server
-      // await txResult.wait({ tier: "global" });
       const insertedTodo = txResult.value;
 
       expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
@@ -274,7 +502,7 @@ describe("db transaction reads browser integration", () => {
       it("insert", async () => {
         await expect(() =>
           db.transaction(async (tx) => {
-            const todo = tx.insert(todos, { title: "Todo", done: false });
+            const todo = tx.insert(todos, { title: "Mergeable transaction", done: false });
             expect(await tx.one(makeTodoQuery())).toEqual(todo);
             expect(await db.one(makeTodoQuery())).toBeNull();
             throw new Error("callback failed");
@@ -306,215 +534,6 @@ describe("db transaction reads browser integration", () => {
           db.transaction(async (tx) => {
             tx.delete(todos, todo.id);
             expect(await tx.one(makeTodoQuery())).toBeNull();
-            expect(await db.one(makeTodoQuery())).toEqual(todo);
-            throw new Error("callback failed");
-          }),
-        ).rejects.toThrow("callback failed");
-
-        expect(await db.one(makeTodoQuery())).toEqual(todo);
-      });
-    });
-  });
-
-  it("concurrent transactions cannot modify the same data", async () => {
-    const { value: base } = db.insert(todos, { title: "Shared", done: false });
-
-    const aliceTx = db.beginTransaction();
-    const bobTx = db.beginTransaction();
-
-    aliceTx.update(todos, base.id, { title: "Alice's title" });
-    bobTx.update(todos, base.id, { title: "Bob's title" });
-
-    await aliceTx.commit().wait({ tier: "local" });
-    await expect(bobTx.commit().wait({ tier: "local" })).rejects.toThrow(
-      "(transaction_conflict): row visible parent changed since transaction write was staged",
-    );
-
-    expect((await db.one<Todo>(makeTodoQuery()))?.title).toEqual("Alice's title");
-  });
-});
-
-describe("db batch reads browser integration", () => {
-  it("keeps uncommitted batch changes out of global reads", async () => {
-    const batch = db.beginBatch();
-    const insertedTodo = batch.insert(todos, { title: "Batch", done: false });
-
-    expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
-
-    batch.commit();
-    expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
-  });
-
-  it("rejects batch operations after commit", async () => {
-    const batch = db.beginBatch();
-    batch.insert(todos, { title: "Committed batch", done: false });
-    const batchId = batch.batchId();
-
-    batch.commit();
-
-    const coreError = `batch ${batchId} is already committed`;
-    expect(() => batch.commit()).toThrow(`Write error: ${coreError}`);
-    expect(() => batch.rollback()).toThrow(`Write error: ${coreError}`);
-    expect(() => batch.insert(todos, { title: "Nope", done: false })).toThrow(
-      `Insert failed: WriteError("${coreError}")`,
-    );
-    await expect(batch.all<Todo>(makeTodoQuery())).rejects.toThrow(
-      `Query setup failed: Write error: ${coreError}`,
-    );
-  });
-
-  it("rejects batch operations after rollback", async () => {
-    const batch = db.beginBatch();
-    batch.insert(todos, { title: "Rolled-back batch", done: false });
-    const batchId = batch.batchId();
-
-    batch.rollback();
-
-    const coreError = `batch ${batchId} has already been completed or was never opened`;
-    expect(() => batch.commit()).toThrow(`Commit batch failed: Write error: ${coreError}`);
-    expect(() => batch.rollback()).toThrow(`Rollback batch failed: Write error: ${coreError}`);
-    expect(() => batch.insert(todos, { title: "Nope", done: false })).toThrow(
-      `Insert failed: WriteError("${coreError}")`,
-    );
-    await expect(batch.all<Todo>(makeTodoQuery())).rejects.toThrow(
-      `Query setup failed: Write error: ${coreError}`,
-    );
-  });
-
-  it("supports custom ids and upserts inside direct batches", async () => {
-    const { value: existingTodo } = db.insert(todos, {
-      title: "Bob queued docs review",
-      done: false,
-    });
-
-    const batch = db.beginBatch();
-
-    const customId = "00000000-0000-0000-0000-000000000223";
-    const insertedTodo = batch.insert(
-      todos,
-      { title: "Alice staged screenshots", done: false },
-      { id: customId },
-    );
-
-    const createdByUpsertId = "00000000-0000-0000-0000-000000000224";
-    batch.upsert(todos, { title: "Bob checked the docs", done: false }, { id: createdByUpsertId });
-    batch.upsert(todos, { title: "Bob queued docs review", done: true }, { id: existingTodo.id });
-
-    expect(insertedTodo).toEqual({
-      id: customId,
-      title: "Alice staged screenshots",
-      done: false,
-    });
-    expect(await db.all<Todo>(makeTodoQuery())).toEqual([existingTodo]);
-
-    batch.commit();
-
-    const committedRows = await db.all<Todo>(makeTodoQuery());
-    expect(committedRows).toHaveLength(3);
-    expect(committedRows).toEqual(
-      expect.arrayContaining([
-        {
-          id: existingTodo.id,
-          title: "Bob queued docs review",
-          done: true,
-        },
-        insertedTodo,
-        {
-          id: createdByUpsertId,
-          title: "Bob checked the docs",
-          done: false,
-        },
-      ]),
-    );
-  });
-
-  it("rejects partial upserts for missing rows inside direct batches", async () => {
-    const batch = db.beginBatch();
-
-    expect(() =>
-      batch.upsert(todos, { done: true }, { id: "00000000-0000-0000-0000-000000000225" }),
-    ).toThrow("missing required field `title`");
-  });
-
-  describe("db.batch(cb)", () => {
-    it("returns the callback value when an async batch only reads", async () => {
-      const { value: existingTodo } = db.insert(todos, {
-        title: "Alice reviewed the plan",
-        done: false,
-      });
-
-      const result = await db.batch(async (batch) => {
-        const rows = await batch.all<Todo>(makeTodoQuery());
-        expect(rows).toEqual([existingTodo]);
-        return "no writes needed";
-      });
-      expect(result.value).toEqual("no writes needed");
-      expect(result.wait({ tier: "global" })).resolves.toEqual("no writes needed");
-    });
-
-    it("rolls back cleanly when an async batch reads then throws before writing", async () => {
-      const { value: existingTodo } = db.insert(todos, {
-        title: "Alice reviewed rollback",
-        done: false,
-      });
-      const error = new Error("no write batch failed");
-
-      await expect(
-        db.batch(async (batch) => {
-          const rows = await batch.all<Todo>(makeTodoQuery());
-          expect(rows).toEqual([existingTodo]);
-          throw error;
-        }),
-      ).rejects.toBe(error);
-
-      await expect(db.all<Todo>(makeTodoQuery())).resolves.toEqual([existingTodo]);
-    });
-
-    it("commits changes once the callback resolves", async () => {
-      const batchResult = db.batch((batch) => {
-        return batch.insert(todos, { title: "Batch", done: false });
-      });
-      const insertedTodo = batchResult.value;
-
-      expect(await db.one<Todo>(makeTodoQuery())).toMatchObject(insertedTodo);
-    });
-
-    describe("rolls back changes if the callback rejects", () => {
-      it("insert", async () => {
-        await expect(() =>
-          db.batch(async (batch) => {
-            const todo = batch.insert(todos, { title: "Batch", done: false });
-            expect(await batch.one(makeTodoQuery())).toEqual(todo);
-            expect(await db.one(makeTodoQuery())).toBeNull();
-            throw new Error("callback failed");
-          }),
-        ).rejects.toThrow("callback failed");
-
-        expect(await db.one<Todo>(makeTodoQuery())).toBeNull();
-      });
-
-      it("update", async () => {
-        const { value: todo } = db.insert(todos, { title: "Todo", done: false });
-
-        await expect(() =>
-          db.batch(async (batch) => {
-            batch.update(todos, todo.id, { title: "Updated todo" });
-            expect((await batch.one(makeTodoQuery()))?.title).toEqual("Updated todo");
-            expect((await db.one(makeTodoQuery()))?.title).toEqual("Todo");
-            throw new Error("callback failed");
-          }),
-        ).rejects.toThrow("callback failed");
-
-        expect((await db.one(makeTodoQuery()))?.title).toEqual("Todo");
-      });
-
-      it("delete", async () => {
-        const { value: todo } = db.insert(todos, { title: "Todo", done: false });
-
-        await expect(() =>
-          db.batch(async (batch) => {
-            batch.delete(todos, todo.id);
-            expect(await batch.one(makeTodoQuery())).toBeNull();
             expect(await db.one(makeTodoQuery())).toEqual(todo);
             throw new Error("callback failed");
           }),

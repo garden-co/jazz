@@ -37,6 +37,10 @@ vi.mock("./provider.js", () => ({
   }),
 }));
 
+vi.mock("../subscription-store-internal.js", () => ({
+  getSubscriptionStore: (client: any) => client.manager,
+}));
+
 import { useAll } from "./use-all.js";
 
 function makeQuery(marker = "todos") {

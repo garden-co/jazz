@@ -1,11 +1,11 @@
 import { createRequire } from "node:module";
 import { onTestFinished } from "vitest";
 import type { WasmSchema } from "../../drivers/types.js";
-import { serializeRuntimeSchema } from "../../drivers/schema-wire.js";
 import type { Runtime } from "../client.js";
+import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 
 type NapiModule = typeof import("jazz-napi");
-export type TestNapiRuntime = Runtime & { close?: () => void };
+export type TestNapiNativeRuntimeAdapter = Runtime & { close?: () => void };
 
 const require = createRequire(import.meta.url);
 
@@ -51,50 +51,76 @@ export async function loadNapiModule(): Promise<NapiModule> {
   return napiModulePromise;
 }
 
-export async function createNapiRuntime(
+export async function createNapiNativeRuntimeAdapter(
   schema: WasmSchema,
   opts?: {
     appId?: string;
     env?: string;
-    userBranch?: string;
-    tier?: string;
+    peerId?: string;
   },
-): Promise<TestNapiRuntime> {
-  const { NapiRuntime } = await loadNapiModule();
-  const runtime = NapiRuntime.inMemory(
-    serializeRuntimeSchema(schema),
-    opts?.appId ?? "test-app",
-    opts?.env ?? "test",
-    opts?.userBranch ?? "main",
-    opts?.tier,
+): Promise<TestNapiNativeRuntimeAdapter> {
+  const { NapiDb } = await loadNapiModule();
+  const appId = opts?.appId ?? "test-app";
+  const env = opts?.env ?? "test";
+  const peerId = opts?.peerId ?? "default";
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: (schemaBytes, configBytes) =>
+        NapiDb.openMemory(schemaBytes, configBytes) as never,
+    },
+    schema,
+    deterministicBytes(`${appId}:${env}:${peerId}:node`),
+    deterministicBytes(`${appId}:${env}:${peerId}:author`),
+    1,
+    true,
   );
-
   registerRuntimeCleanup(runtime);
 
-  return runtime as unknown as TestNapiRuntime;
+  return runtime;
 }
 
-export async function createPersistentNapiRuntime(
+export async function createPersistentNapiNativeRuntimeAdapter(
   schema: WasmSchema,
   dataPath: string,
   opts?: {
     appId?: string;
     env?: string;
-    userBranch?: string;
-    tier?: string;
+    peerId?: string;
   },
-): Promise<TestNapiRuntime> {
-  const { NapiRuntime } = await loadNapiModule();
-  const runtime = new NapiRuntime(
-    serializeRuntimeSchema(schema),
-    opts?.appId ?? "test-app",
-    opts?.env ?? "test",
-    opts?.userBranch ?? "main",
-    dataPath,
-    opts?.tier,
+): Promise<TestNapiNativeRuntimeAdapter> {
+  const { NapiDb } = await loadNapiModule();
+  const appId = opts?.appId ?? "test-app";
+  const env = opts?.env ?? "test";
+  const peerId = opts?.peerId ?? "default";
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: (schemaBytes, configBytes) =>
+        NapiDb.openMemory(schemaBytes, configBytes) as never,
+      openPersistent: (path, schemaBytes, configBytes) =>
+        NapiDb.openPersistent(path, schemaBytes, configBytes) as never,
+    },
+    schema,
+    deterministicBytes(`${appId}:${env}:${peerId}:node`),
+    deterministicBytes(`${appId}:${env}:${peerId}:author`),
+    1,
+    false,
+    { persistentPath: dataPath },
   );
-
   registerRuntimeCleanup(runtime);
 
-  return runtime as unknown as TestNapiRuntime;
+  return runtime;
+}
+
+function deterministicBytes(seed: string): Uint8Array {
+  let hash = 0x811c9dc5;
+  const bytes = new Uint8Array(16);
+  const view = new DataView(bytes.buffer);
+  for (let round = 0; round < 4; round += 1) {
+    for (let i = 0; i < seed.length; i += 1) {
+      hash ^= seed.charCodeAt(i) + round;
+      hash = Math.imul(hash, 0x01000193);
+    }
+    view.setUint32(round * 4, hash >>> 0, true);
+  }
+  return bytes;
 }

@@ -59,7 +59,6 @@ export async function startApp(
   const db = await createDb({
     appId: readEnvAppId() ?? "todo-client-example",
     env: "dev",
-    userBranch: "main",
     ...config,
   });
   // #endregion context-setup-ts-client
@@ -95,7 +94,8 @@ export async function startApp(
   container.appendChild(list);
   // Subscribe to all todos.
   const query = app.todos;
-  db.subscribeAll(query, ({ all: todos }) => {
+  db.subscribeAll(query, ({ all }) => {
+    const todos = all ?? [];
     const ordered = orderTodosWithDepth(todos);
     parentSelect.innerHTML = "";
     parentSelect.appendChild(noParentOption);

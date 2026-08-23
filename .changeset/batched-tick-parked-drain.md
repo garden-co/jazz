@@ -1,6 +1,5 @@
 ---
 "jazz-tools": patch
-"jazz-rn": patch
 ---
 
 Fix a `batched_tick` deadlock that left React Native apps spinning at 100% CPU when a server-side query subscription was deferred waiting for its catalogue/schema.

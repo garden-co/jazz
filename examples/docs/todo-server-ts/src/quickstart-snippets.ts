@@ -6,7 +6,7 @@ import { app as schemaApp } from "../schema.js";
 import permissions from "../permissions.js";
 
 const context = createJazzContext({
-  appId: "todo-server-ts",
+  appId: process.env.JAZZ_APP_ID ?? "todo-server-ts",
   app: schemaApp,
   permissions,
   driver: { type: "persistent", dataPath: "./data/jazz.db" },
@@ -23,12 +23,14 @@ const api = new Hono();
 // #region quickstart-server-write-ts
 api.post("/api/todos", async (c) => {
   const db = await context.forRequest(c.req);
+  const session = db.getAuthState().session;
+  if (!session) return c.json({ error: "Unauthenticated" }, 401);
   const { title } = await c.req.json();
 
   const { value: todo } = db.insert(schemaApp.todos, {
     title,
     done: false,
-    owner_id: "system",
+    owner_id: session.user_id,
   });
 
   return c.json(todo, 201);

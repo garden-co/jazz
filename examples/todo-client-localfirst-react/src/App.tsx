@@ -11,7 +11,6 @@ function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbCon
   return {
     appId,
     env: "dev",
-    userBranch: "main",
     serverUrl,
     secret,
     ...overrides,
@@ -22,10 +21,11 @@ function defaultConfig(secret: string, overrides: Partial<DbConfig> = {}): DbCon
 type AppProps = {
   config?: Partial<DbConfig>;
   fallback?: React.ReactNode;
+  children?: React.ReactNode;
 };
 
 // #region context-setup-react
-export function App({ config, fallback }: AppProps = {}) {
+export function App({ config, fallback, children }: AppProps = {}) {
   const { secret, isLoading } = useLocalFirstAuth();
 
   if (isLoading || !secret) {
@@ -33,11 +33,11 @@ export function App({ config, fallback }: AppProps = {}) {
   }
 
   const resolvedConfig = defaultConfig(secret, config);
-
   return (
     <JazzProvider config={resolvedConfig} fallback={fallback ?? <p>Loading...</p>}>
       <h1>Todos</h1>
       <TodoList />
+      {children}
     </JazzProvider>
   );
 }

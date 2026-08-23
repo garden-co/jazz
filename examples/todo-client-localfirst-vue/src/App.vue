@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { JazzProvider, createJazzClient } from "jazz-tools/vue";
+import { JazzProvider } from "jazz-tools/vue";
 import { generateAuthSecret, type DbConfig } from "jazz-tools";
 import { Toaster } from "vue-sonner";
 import TodoList from "./TodoList.vue";
@@ -35,24 +35,23 @@ function defaultConfig(overrides: Partial<DbConfig> = {}): DbConfig {
   const serverUrl = overrides.serverUrl ?? readEnv("VITE_JAZZ_SERVER_URL");
   if (!appId)
     throw new Error("Missing appId: add jazzPlugin() to vite.config.ts or set VITE_JAZZ_APP_ID");
-  const secret = overrides.auth?.localFirstSecret ?? getOrCreateSecretSync(appId);
+  const secret = overrides.secret ?? getOrCreateSecretSync(appId);
 
   return {
     appId,
     env: "dev",
-    userBranch: "main",
-    auth: { localFirstSecret: secret },
+    secret,
     ...(serverUrl ? { serverUrl } : {}),
     ...overrides,
   };
 }
 // #endregion context-setup-vue
 
-const client = computed(() => createJazzClient(defaultConfig(props.config)));
+const config = computed(() => defaultConfig(props.config));
 </script>
 
 <template>
-  <JazzProvider :client="client">
+  <JazzProvider :config="config">
     <h1>Todos</h1>
     <TodoList />
     <Toaster />

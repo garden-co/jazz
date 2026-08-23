@@ -1,7 +1,7 @@
 ---
 title: Local-first auth
 description: "Authenticate users without a server using self-signed tokens, and optionally upgrade to an external provider while preserving identity."
-reviewedAt: "c5f0807b6"
+reviewedAt: "b29b48d1a"
 ---
 
 Local-first auth lets users start using your app immediately without signing up. Jazz generates a secret on the client, derives a stable account ID from it, and uses self-signed tokens to prove the user owns that account. The secret itself effectively _is_ the account.
@@ -27,7 +27,7 @@ You can also combine modes: let local-first users read and experiment, but requi
 
 ## Client setup
 
-Fetch or create a secret and pass it to your Jazz client. Jazz stores the secret in the browser (or equivalent on native) so subsequent loads reuse the same account.
+Load or create a secret before starting your Jazz client. The framework integrations below store it in the browser (or equivalent on native) so subsequent loads reuse the same account.
 
 <Tabs
   groupId="jazz-framework"
@@ -39,7 +39,8 @@ Fetch or create a secret and pass it to your Jazz client. Jazz stores the secret
     <include cwd lang="tsx" meta='title="App.tsx"'>
       ../examples/docs/todo-client-localfirst-react/src/auth-snippets.tsx#auth-localfirst-react
     </include>
-    `useLocalFirstAuth()` also exposes `login` and `signOut` for switching or clearing accounts.
+    `auth="local-first"` makes `JazzProvider` load or create an `appId`-scoped secret. Descendants
+    can use `useLocalFirstAuth()` for backup, restore, and sign-out flows using the same identity.
   </Tab>
   <Tab value="Vue">
     <include cwd lang="vue" meta='title="App.vue"'>
@@ -182,11 +183,11 @@ The parser is case-insensitive and tolerant of extra whitespace between words. I
 ### Passkey backup
 
 A passkey is a credential stored and synced by the user's browser or platform (via the WebAuthn
-browser API), typically unlocked with biometrics. `jazz-tools/passkey-backup` uses this as an
-encrypted at-rest store for the secret: the secret is held inside a resident WebAuthn
-credential and released after a user verification prompt. This is not a full WebAuthn
-authentication flow&hairsp;—&hairsp;Jazz is not challenging the key, just using the passkey as a vault for the
-seed.
+browser API), typically unlocked with biometrics. `jazz-tools/passkey-backup` stores the secret as
+the user handle of a discoverable WebAuthn credential. The browser only returns it after the
+authenticator confirms user presence and verification. Jazz does not separately encrypt the secret.
+This is not a full WebAuthn authentication flow&hairsp;—&hairsp;Jazz uses the credential to recover the secret,
+not to authenticate a challenge to your server.
 
 Passkey availability depends on where the user's passkey provider works. OS-native stores
 (iCloud Keychain, Google Password Manager) have platform boundaries that are not always visible

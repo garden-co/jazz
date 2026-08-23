@@ -12,10 +12,10 @@ function makeFakeDb(overrides: Record<string, unknown> = {}) {
         appId: "app1",
         serverUrl: "http://server",
         env: "dev",
-        userBranch: "main",
         adminSecret: "sek",
       }),
       getRuntimeSchema: () => ({ todos: { columns: [] } }),
+      openInspectorControlPort: vi.fn(async () => ({}) as MessagePort),
       getActiveQuerySubscriptions: () => [
         {
           id: "s1",
@@ -56,11 +56,7 @@ describe("installInspectorHost", () => {
 
     expect((db as any).setDevMode).toHaveBeenCalledWith(true);
     const handle = (window as any)[INSPECTOR_HOST_GLOBAL];
-    expect(handle.getConnectionConfig()).toMatchObject({
-      appId: "app1",
-      serverUrl: "http://server",
-      adminSecret: "sek",
-    });
+    expect(handle.getConnectionConfig().appId).toBe("app1");
     expect(handle.getWasmSchema()).toEqual({ todos: { columns: [] } });
     expect(handle.getActiveSubscriptions()[0].id).toBe("s1");
     expect("stack" in handle.getActiveSubscriptions()[0]).toBe(false);
@@ -96,23 +92,13 @@ describe("installInspectorHost", () => {
     expect((window as any)[INSPECTOR_HOST_GLOBAL]).toBeUndefined();
   });
 
-  it("omits serverUrl when the host has none (overlay runs on local storage)", () => {
-    const iframeWindow = { postMessage: () => {} } as unknown as Window;
-    const fake = makeFakeDb({ getConfig: () => ({ appId: "a", dbName: "a" }) });
-    installInspectorHost(fake.db, iframeWindow, "http://localhost");
-    const handle = (window as any)[INSPECTOR_HOST_GLOBAL];
-    const config = handle.getConnectionConfig();
-    expect(config.serverUrl).toBeUndefined();
-    expect(config).toMatchObject({ appId: "a", driver: { type: "persistent", dbName: "a" } });
-    // Always resolves a broker URL so the overlay can join the host's store.
-    expect(typeof config.runtimeSources.brokerWorkerUrl).toBe("string");
-  });
-
-  it("forwards exactly one identity credential plus adminSecret", () => {
+  it("publishes persistent coordinates and forwards inspector control-port requests", async () => {
     const iframeWindow = { postMessage: () => {} } as unknown as Window;
     const fake = makeFakeDb({
       getConfig: () => ({
         appId: "a",
+        dbName: "a",
+        serverUrl: "http://server",
         secret: "seed",
         cookieSession: { user_id: "u1" },
         adminSecret: "adm",
@@ -120,8 +106,16 @@ describe("installInspectorHost", () => {
     });
     installInspectorHost(fake.db, iframeWindow, "http://localhost");
     const config = (window as any)[INSPECTOR_HOST_GLOBAL].getConnectionConfig();
-    expect(config.secret).toBe("seed");
+    expect(config).toMatchObject({
+      appId: "a",
+      serverUrl: "http://server",
+      secret: "seed",
+      adminSecret: "adm",
+      driver: { type: "persistent", dbName: "a" },
+    });
     expect(config.cookieSession).toBeUndefined();
-    expect(config.adminSecret).toBe("adm");
+    expect(config.runtimeSources).toBeUndefined();
+    await (window as any)[INSPECTOR_HOST_GLOBAL].openControlPort();
+    expect((fake.db as any).openInspectorControlPort).toHaveBeenCalledOnce();
   });
 });

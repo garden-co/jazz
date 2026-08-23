@@ -1,25 +1,38 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   JazzClient,
+  ExclusiveWriteHandle,
   resolveDefaultDurabilityTier,
-  type MutationErrorEvent,
   type Runtime,
-  PersistedWriteRejectedError,
+  type TransactionalRuntime,
+  type BatchId,
+  type MutationErrorEvent,
+  type OpenBatchId,
+  type WriteReceipt,
 } from "./client.js";
 import type { AppContext } from "./context.js";
 import type { WasmSchema } from "../drivers/types.js";
 
 function makeFakeRuntime() {
   let mutationErrorCallback: ((event: MutationErrorEvent) => void) | null = null;
-  let nextBatchNumber = 0;
+  let nextTransactionNumber = 0;
 
-  function batchIdFromWriteContext(writeContextJson?: string | null): string | undefined {
+  function openBatchIdFromWriteContext(writeContextJson?: string | null): OpenBatchId | undefined {
     if (!writeContextJson) {
       return undefined;
     }
     const writeContext = JSON.parse(writeContextJson) as { batch_id?: unknown };
-    return typeof writeContext.batch_id === "string" ? writeContext.batch_id : undefined;
+    return typeof writeContext.batch_id === "string"
+      ? (writeContext.batch_id as OpenBatchId)
+      : undefined;
   }
+
+  const receipt = (writeContextJson: string | null | undefined, id: string): WriteReceipt => {
+    const openBatchId = openBatchIdFromWriteContext(writeContextJson);
+    return openBatchId
+      ? { kind: "staged", openBatchId }
+      : { kind: "committed", batchId: id as BatchId };
+  };
 
   const runtime = {
     updateAuth: vi.fn<(auth_json: string) => void>(),
@@ -27,35 +40,33 @@ function makeFakeRuntime() {
     // Runtime interface stubs
     insert: vi.fn(
       (table: string, values: any, writeContextJson?: string | null, objectId?: string | null) => {
-        const batchId = batchIdFromWriteContext(writeContextJson);
         return {
-          id: objectId ?? "todo-batch-query",
+          id: objectId ?? "todo-transaction-query",
           values: [],
-          batchId: batchId ?? "batch-query",
+          ...receipt(writeContextJson, "transaction-query"),
         };
       },
     ),
     restore: vi.fn(
       (table: string, objectId: string, values: any, writeContextJson?: string | null) => {
-        const batchId = batchIdFromWriteContext(writeContextJson);
         return {
           id: objectId,
           values: [],
-          batchId: batchId ?? "batch-query",
+          ...receipt(writeContextJson, "transaction-query"),
         };
       },
     ),
-    update: vi.fn((objectId: string, values: any, writeContextJson?: string | null) => ({
-      batchId: batchIdFromWriteContext(writeContextJson) ?? "batch-update",
-    })),
-    upsert: vi.fn(
-      (table: string, objectId: string, values: any, writeContextJson?: string | null) => ({
-        batchId: batchIdFromWriteContext(writeContextJson) ?? "batch-upsert",
-      }),
+    update: vi.fn(
+      (_table: string, _objectId: string, _values: any, writeContextJson?: string | null) =>
+        receipt(writeContextJson, "transaction-update"),
     ),
-    delete: vi.fn((objectId: string, writeContextJson?: string | null) => ({
-      batchId: batchIdFromWriteContext(writeContextJson) ?? "batch-delete",
-    })),
+    upsert: vi.fn(
+      (table: string, objectId: string, values: any, writeContextJson?: string | null) =>
+        receipt(writeContextJson, "transaction-upsert"),
+    ),
+    delete: vi.fn((_table: string, _objectId: string, writeContextJson?: string | null) =>
+      receipt(writeContextJson, "transaction-delete"),
+    ),
     query:
       vi.fn<
         (
@@ -76,22 +87,22 @@ function makeFakeRuntime() {
       >(),
     executeSubscription: vi.fn<(handle: number, on_update: Function) => void>(),
     unsubscribe: vi.fn<(handle: number) => void>(),
-    onMutationError: vi.fn<(callback: (event: MutationErrorEvent) => void) => void>((callback) => {
+    onMutationError: vi.fn<Runtime["onMutationError"]>((callback) => {
       mutationErrorCallback = callback;
     }),
-    beginBatch: vi.fn<Runtime["beginBatch"]>((batchMode) => {
-      nextBatchNumber += 1;
-      return `batch-${batchMode}-${nextBatchNumber}`;
+    beginTransaction: vi.fn<TransactionalRuntime["beginTransaction"]>((_kind, id) => {
+      nextTransactionNumber += 1;
+      return id;
     }),
     connect: vi.fn<Runtime["connect"]>(),
     disconnect: vi.fn<Runtime["disconnect"]>(),
-    commitBatch: vi.fn<(batch_id: string) => void>(),
-    waitForBatch: vi.fn<Runtime["waitForBatch"]>(async () => undefined),
-    rollbackBatch: vi.fn<Runtime["rollbackBatch"]>(() => false),
-    getSchema: vi.fn().mockReturnValue({}),
-    getSchemaHash: vi.fn().mockReturnValue("hash"),
+    commitTransaction: vi.fn<TransactionalRuntime["commitTransaction"]>(
+      () => `committed-${nextTransactionNumber}` as BatchId,
+    ),
+    waitForTransaction: vi.fn<Runtime["waitForTransaction"]>(async () => undefined),
+    rollbackTransaction: vi.fn<TransactionalRuntime["rollbackTransaction"]>(async () => false),
     close: vi.fn(),
-  } satisfies Runtime;
+  } satisfies TransactionalRuntime;
 
   return Object.assign(runtime, {
     emitMutationError(event: MutationErrorEvent) {
@@ -188,7 +199,7 @@ describe("JazzClient.updateAuthToken", () => {
 });
 
 describe("JazzClient.updateCookieSession", () => {
-  it("refreshes transport auth without requiring a JS-readable JWT", () => {
+  it("refreshes transport auth without inventing backend session auth", () => {
     const runtime = makeFakeRuntime();
     const client = JazzClient.connectWithRuntime(runtime as any, {
       appId: "cookie-app",
@@ -220,6 +231,34 @@ describe("JazzClient.updateCookieSession", () => {
     expect(runtime.updateAuth).toHaveBeenCalledTimes(1);
     const arg = runtime.updateAuth.mock.calls[0][0] as string;
     expect(JSON.parse(arg)).toMatchObject({ jwt_token: null });
+    expect(JSON.parse(arg)).not.toHaveProperty("backend_session");
+  });
+
+  it("forwards cookie session as backend_session when backend auth is configured", () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, {
+      ...makeContext(),
+      backendSecret: "backend-secret",
+      cookieSession: {
+        user_id: "00000000-0000-0000-0000-000000000001",
+        claims: { role: "reader" },
+        authMode: "external",
+      },
+    });
+
+    const refreshed = {
+      user_id: "00000000-0000-0000-0000-000000000001",
+      claims: { role: "writer" },
+      authMode: "external" as const,
+    };
+    client.updateCookieSession(refreshed);
+
+    const arg = runtime.updateAuth.mock.calls[0][0] as string;
+    expect(JSON.parse(arg)).toMatchObject({
+      jwt_token: "initial.jwt.token",
+      backend_secret: "backend-secret",
+      backend_session: refreshed,
+    });
   });
 });
 
@@ -233,208 +272,268 @@ describe("resolveDefaultDurabilityTier", () => {
   });
 });
 
-describe("JazzClient runtime schema caching", () => {
-  it("reuses the normalized runtime schema while the schema hash is unchanged", () => {
+describe("JazzClient schema access", () => {
+  it("returns the schema from the client context", () => {
     const schema: WasmSchema = {
       todos: {
         columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
       },
     };
     const runtime = makeFakeRuntime();
-    runtime.getSchema.mockReturnValue(schema);
-    runtime.getSchemaHash.mockReturnValue("schema-hash-1");
     const client = JazzClient.connectWithRuntime(runtime as any, {
-      appId: "schema-cache-app",
+      appId: "schema-context-app",
       schema,
     });
 
     expect(client.getSchema()).toBe(schema);
     expect(client.getSchema()).toBe(schema);
-
-    expect(runtime.getSchema).toHaveBeenCalledTimes(1);
-    expect(runtime.getSchemaHash).toHaveBeenCalledTimes(2);
-  });
-
-  it("refreshes the cached schema when the runtime schema hash changes", () => {
-    const firstSchema: WasmSchema = {
-      todos: {
-        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
-      },
-    };
-    const secondSchema: WasmSchema = {
-      todos: {
-        columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
-        policies: {},
-      },
-    };
-    const runtime = makeFakeRuntime();
-    runtime.getSchema.mockReturnValueOnce(firstSchema).mockReturnValueOnce(secondSchema);
-    runtime.getSchemaHash.mockReturnValueOnce("schema-hash-1").mockReturnValueOnce("schema-hash-2");
-    const client = JazzClient.connectWithRuntime(runtime as any, {
-      appId: "schema-cache-refresh-app",
-      schema: firstSchema,
-    });
-
-    expect(client.getSchema()).toBe(firstSchema);
-    expect(client.getSchema()).toBe(secondSchema);
-
-    expect(runtime.getSchema).toHaveBeenCalledTimes(2);
   });
 });
 
-describe("JazzClient batch query plumbing", () => {
-  it("supports raw reads scoped to the open batch", async () => {
+describe("JazzClient transaction query plumbing", () => {
+  it("encodes exact and head-over-base branch mutation targets", () => {
     const runtime = makeFakeRuntime();
-    runtime.query.mockResolvedValue([{ id: "todo-batch-query", values: [] }]);
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const batchId = client.beginBatch("direct");
+    const head = { values: { workspace: { type: "Integer", value: 7 } as const } };
+    const base = { values: { workspace: { type: "Integer", value: 1 } as const } };
 
-    client.insertInternal("todos", {}, undefined, undefined, undefined, batchId);
+    client.insert("todos", {}, { branch: head });
+    client.update(
+      "todos",
+      "00000000-0000-0000-0000-000000000001",
+      {},
+      {
+        branch: { head, base: { kind: "current", branch: base } },
+      },
+    );
+
+    expect(JSON.parse(runtime.insert.mock.calls[0][2] as string)).toMatchObject({
+      branch_view: { head: { values: { workspace: [14, 14] } } },
+    });
+    expect(JSON.parse(runtime.update.mock.calls[0][3] as string)).toMatchObject({
+      branch_view: {
+        head: { values: { workspace: [14, 14] } },
+        base: { Current: { values: { workspace: [14, 2] } } },
+      },
+    });
+  });
+
+  it("encodes ergonomic branch selectors into the native read view", async () => {
+    const runtime = makeFakeRuntime();
+    runtime.query.mockResolvedValue([]);
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+
+    await client.query(JSON.stringify({ relation_ir: { table: "todos" } }), {
+      branch: {
+        head: { values: { workspace: { type: "Integer", value: 7 } } },
+        base: {
+          kind: "current",
+          branch: {
+            values: {
+              workspace: { type: "Integer", value: 1 },
+              tenant: { type: "Uuid", value: "42424242-4242-4242-4242-424242424242" },
+            },
+          },
+        },
+      },
+    });
+
+    const optionsJson = runtime.query.mock.calls[0][3];
+    expect(JSON.parse(optionsJson as string)).toMatchObject({
+      read_view: {
+        source: {
+          BranchView: {
+            head: { values: { workspace: [14, 14] } },
+            base: {
+              Current: {
+                values: {
+                  workspace: [14, 2],
+                  tenant: [8, 16, ...Array(16).fill(0x42)],
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+  });
+
+  it("canonically encodes string branch values", async () => {
+    const runtime = makeFakeRuntime();
+    runtime.query.mockResolvedValue([]);
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+
+    await client.query(JSON.stringify({ relation_ir: { table: "todos" } }), {
+      branch: {
+        head: { values: { branch: { type: "Text", value: "draft" } } },
+      },
+    });
+
+    const optionsJson = runtime.query.mock.calls[0][3];
+    expect(JSON.parse(optionsJson as string)).toMatchObject({
+      read_view: {
+        source: {
+          BranchView: {
+            head: { values: { branch: [6, 5, 100, 114, 97, 102, 116] } },
+          },
+        },
+      },
+    });
+  });
+
+  it.each([
+    { type: "Integer", value: 0x80000000 },
+    { type: "Integer", value: 1.5 },
+    { type: "BigInt", value: Number.MAX_SAFE_INTEGER + 1 },
+    { type: "BigInt", value: 1n << 63n },
+  ] as const)("rejects invalid branch column value $type:$value", async (value) => {
+    const runtime = makeFakeRuntime();
+    runtime.query.mockResolvedValue([]);
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
 
     await expect(
-      client.query(
-        { _build: () => JSON.stringify({ table: "todos" }) },
-        {
-          localUpdates: "deferred",
-          transactionBatchId: batchId,
-        },
-      ),
-    ).resolves.toEqual([{ id: "todo-batch-query", values: [] }]);
+      client.query(JSON.stringify({ relation_ir: { table: "todos" } }), {
+        branch: { head: { values: { workspace: value } } },
+      }),
+    ).rejects.toThrow(/branch (Integer|BigInt) values/);
+    expect(runtime.query).not.toHaveBeenCalled();
+  });
+
+  it("supports raw reads scoped to the open transaction", async () => {
+    const runtime = makeFakeRuntime();
+    runtime.query.mockResolvedValue([{ id: "todo-transaction-query", values: [] }]);
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const transactionId = client.beginTransaction("mergeable");
+
+    client.insertInternal("todos", {}, undefined, undefined, undefined, transactionId);
+
+    await expect(
+      client.query(JSON.stringify({ relation_ir: { table: "todos" } }), {
+        localUpdates: "deferred",
+        openBatchId: transactionId,
+      }),
+    ).resolves.toEqual([{ id: "todo-transaction-query", values: [] }]);
 
     expect(runtime.query).toHaveBeenCalledTimes(1);
     const optionsJson = runtime.query.mock.calls[0][3];
     expect(JSON.parse(optionsJson as string)).toMatchObject({
       local_updates: "deferred",
-      transaction_batch_id: batchId,
+      transaction_batch_id: transactionId,
     });
   });
 });
 
-describe("JazzClient runtime batch waits", () => {
+describe("JazzClient runtime transaction waits", () => {
   it("delegates unsettled waits to the runtime", async () => {
     const runtime = makeFakeRuntime();
-    runtime.waitForBatch = vi.fn(async () => undefined);
+    runtime.waitForTransaction = vi.fn(async () => undefined);
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
 
-    await expect(client.waitForBatch("batch-runtime", "edge")).resolves.toBeUndefined();
+    await expect(
+      client.waitForTransaction("transaction-runtime" as BatchId, "edge"),
+    ).resolves.toBeUndefined();
 
-    expect(runtime.waitForBatch).toHaveBeenCalledWith("batch-runtime", "edge");
+    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-runtime", "edge");
   });
 
-  it("lets a runtime wait handle rejection without replaying onMutationError", async () => {
+  it("waits for connected exclusive transactions at the global tier", async () => {
     const runtime = makeFakeRuntime();
-    const batchId = "batch-runtime-rejected";
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const handle = new ExclusiveWriteHandle("transaction-exclusive" as BatchId, client);
+
+    await expect(handle.wait()).resolves.toBeUndefined();
+
+    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-exclusive", "global");
+  });
+
+  it("waits for local-only exclusive transactions at the local tier", async () => {
+    const runtime = makeFakeRuntime();
+    const client = JazzClient.connectWithRuntime(runtime as any, {
+      ...makeContext(),
+      serverUrl: undefined,
+    });
+    const handle = new ExclusiveWriteHandle("transaction-exclusive" as BatchId, client);
+
+    await expect(handle.wait()).resolves.toBeUndefined();
+
+    expect(runtime.waitForTransaction).toHaveBeenCalledWith("transaction-exclusive", "local");
+  });
+
+  it("surfaces runtime wait rejection as PersistedWriteRejectedError", async () => {
+    const runtime = makeFakeRuntime();
+    const batchId = "transaction-runtime-rejected" as BatchId;
     let rejectWait!: (error: unknown) => void;
-    runtime.waitForBatch = vi.fn(
+    runtime.waitForTransaction = vi.fn(
       () =>
         new Promise<void>((_resolve, reject) => {
           rejectWait = reject;
         }),
     );
     const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
-    const seen: MutationErrorEvent[] = [];
-    client.onMutationError((event) => {
-      seen.push(event);
-    });
 
-    const waitPromise = client.waitForBatch(batchId, "edge");
+    const waitPromise = client.waitForTransaction(batchId, "edge");
     await Promise.resolve();
 
     rejectWait({
       kind: "rejected",
-      batchId,
+      transactionId: batchId,
       code: "permission_denied",
       reason: "write rejected by policy",
     });
 
-    await expect(waitPromise).rejects.toBeInstanceOf(PersistedWriteRejectedError);
-    expect(seen).toEqual([]);
+    await expect(waitPromise).rejects.toMatchObject({
+      name: "PersistedWriteRejectedError",
+      transactionId: batchId,
+      message: `Persisted transaction ${batchId} was rejected (permission_denied): write rejected by policy`,
+    });
   });
 });
 
 describe("JazzClient mutation error handling", () => {
-  function makeRejectedBatchRecord(batchId: string) {
+  function makeRejectedTransactionRecord(transactionId: BatchId) {
     return {
-      batchId,
-      mode: "direct" as const,
+      transactionId,
+      kind: "mergeable" as const,
       sealed: true,
       latestSettlement: {
         kind: "rejected" as const,
-        batchId,
+        transactionId,
         code: "permission_denied",
         reason: "write rejected by policy",
       },
     };
   }
 
-  it("receives pushed runtime mutation errors without scanning all batch records", async () => {
+  it("forwards pushed runtime mutation errors to the registered listener", () => {
     const runtime = makeFakeRuntime();
-    const client = JazzClient.connectWithRuntime(runtime as any, {
-      appId: "queued-rejection-app",
-      schema: {},
-    });
-
-    const seen: MutationErrorEvent[] = [];
-
-    client.onMutationError((event) => {
-      seen.push(event);
-    });
-
-    runtime.emitMutationError({
-      code: "permission_denied",
-      reason: "write rejected by policy",
-      batch: makeRejectedBatchRecord("batch-rejected"),
-    });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    expect(seen).toEqual([
-      {
-        code: "permission_denied",
-        reason: "write rejected by policy",
-        batch: makeRejectedBatchRecord("batch-rejected"),
-      },
-    ]);
-  });
-
-  it("logs pushed runtime mutation errors when no listener is registered", async () => {
-    const runtime = makeFakeRuntime();
-    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-    JazzClient.connectWithRuntime(runtime as any, {
-      appId: "sync-rejection-app",
-      schema: {},
-    });
-
+    const client = JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const listener = vi.fn();
+    client.onMutationError(listener);
+    const batchId = "batch-rejected" as BatchId;
     const event: MutationErrorEvent = {
       code: "permission_denied",
       reason: "write rejected by policy",
-      batch: makeRejectedBatchRecord("batch-rejected"),
+      transaction: makeRejectedTransactionRecord(batchId),
     };
+
     runtime.emitMutationError(event);
-    await new Promise((resolve) => setTimeout(resolve, 0));
 
-    expect(consoleError).toHaveBeenCalledWith("Unhandled Jazz mutation error", event);
-
-    consoleError.mockRestore();
+    expect(listener).toHaveBeenCalledWith(event);
   });
 
-  it("flushes pending runtime mutation errors during callback registration", async () => {
+  it("logs pushed mutation errors when no application listener replaces the fallback", () => {
     const runtime = makeFakeRuntime();
-    runtime.onMutationError = vi.fn((callback) => {
-      callback({
-        code: "permission_denied",
-        reason: "write rejected by policy",
-        batch: makeRejectedBatchRecord("batch-rejected"),
-      });
-    });
-
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
-    JazzClient.connectWithRuntime(runtime as any, {
-      appId: "startup-rejection-app",
-      schema: {},
-    });
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    JazzClient.connectWithRuntime(runtime as any, makeContext());
+    const batchId = "batch-unhandled" as BatchId;
+    const event: MutationErrorEvent = {
+      code: "permission_denied",
+      reason: "write rejected by policy",
+      transaction: makeRejectedTransactionRecord(batchId),
+    };
 
-    expect(consoleError).toHaveBeenCalledTimes(1);
-    consoleError.mockRestore();
+    runtime.emitMutationError(event);
+
+    expect(consoleError).toHaveBeenCalledWith("Unhandled Jazz mutation error", event);
   });
 });

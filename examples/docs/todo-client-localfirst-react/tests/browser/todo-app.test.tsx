@@ -331,12 +331,14 @@ describe("React Todo App E2E", () => {
     const el1 = await mountApp({
       appId: APP_ID,
       serverUrl,
+      adminSecret: ADMIN_SECRET,
       secret: "disAKUpEX273joMo4f1NTW-tDTpc4bzPy_l5tvNLXnc",
       driver: { type: "memory" },
     });
     const el2 = await mountApp({
       appId: APP_ID,
       serverUrl,
+      adminSecret: ADMIN_SECRET,
       secret: "TqNBXTv_Mv7HBp3FZ6KtHJwBWvnkI7YcOlrS57d3eEs",
       driver: { type: "memory" },
     });

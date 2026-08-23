@@ -1,5 +1,4 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { flushSync } from "svelte";
 import { contextStore } from "./test-helpers.svelte.js";
 
 const { initJazzContext, getJazzContext, getDb, getSession } = await import("./context.svelte.js");
@@ -14,7 +13,7 @@ describe("context with real $state", () => {
 
     expect(ctx.db).toBe(null);
     expect(ctx.session).toBe(null);
-    expect(ctx.manager).toBe(null);
+    expect(ctx.subscriptionStore).toBe(null);
   });
 
   it("getJazzContext round-trips through set/get", () => {

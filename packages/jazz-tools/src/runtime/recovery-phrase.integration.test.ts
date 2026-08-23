@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import { BrowserAuthSecretStore } from "./auth-secret-store.js";
-import { ExpoAuthSecretStore } from "../expo/auth-secret-store.js";
 import { RecoveryPhrase } from "./recovery-phrase.js";
 import { createDb } from "./db.js";
 
@@ -13,21 +12,6 @@ function createMockStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"
     },
     removeItem: (k) => {
       map.delete(k);
-    },
-  };
-}
-
-function createMockSecureStore() {
-  const map = new Map<string, string>();
-  return {
-    getItemAsync: (k: string) => Promise.resolve(map.get(k) ?? null),
-    setItemAsync: (k: string, v: string) => {
-      map.set(k, v);
-      return Promise.resolve();
-    },
-    deleteItemAsync: (k: string) => {
-      map.delete(k);
-      return Promise.resolve();
     },
   };
 }
@@ -47,20 +31,26 @@ describe("RecoveryPhrase integration — BrowserAuthSecretStore", () => {
     await target.saveSecret(restored);
     expect(await target.loadSecret()).toBe(original);
   });
-});
 
-describe("RecoveryPhrase integration — ExpoAuthSecretStore", () => {
-  it("round-trips a secret through backup + restore", async () => {
-    const originSecureStore = createMockSecureStore();
-    const origin = new ExpoAuthSecretStore({ secureStore: originSecureStore });
+  it("round-trips a scoped secret through backup + restore", async () => {
+    const originStorage = createMockStorage();
+    const origin = new BrowserAuthSecretStore({
+      appId: "recovery-app",
+      userId: "origin-user",
+      storage: originStorage,
+    });
     const original = await origin.getOrCreateSecret();
 
     const phrase = RecoveryPhrase.fromSecret(original);
     const restored = RecoveryPhrase.toSecret(phrase);
     expect(restored).toBe(original);
 
-    const targetSecureStore = createMockSecureStore();
-    const target = new ExpoAuthSecretStore({ secureStore: targetSecureStore });
+    const targetStorage = createMockStorage();
+    const target = new BrowserAuthSecretStore({
+      appId: "recovery-app",
+      userId: "target-user",
+      storage: targetStorage,
+    });
     await target.saveSecret(restored);
     expect(await target.loadSecret()).toBe(original);
   });

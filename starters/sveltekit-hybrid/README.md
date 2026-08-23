@@ -42,7 +42,7 @@ src/
     auth.ts                        ← Better Auth server config + identity proof hook
     auth-client.ts                 ← Better Auth Svelte client
   routes/
-    +layout.svelte                 ← switches between anonymous and JWT Jazz clients
+    +layout.svelte                 ← switches between anonymous and JWT Jazz configurations
     +page.svelte                   ← homepage (todo widget + auth nav)
     signup/+page.svelte             ← email/password sign-up form
     signin/+page.svelte             ← email/password sign-in form
@@ -55,12 +55,11 @@ src/
 `JazzClientProvider.svelte`. That provider holds a `LocalFirstAuth`
 instance (from `jazz-tools/svelte`) for the anonymous path and fetches
 a Better Auth JWT for the authenticated path. A `$derived` picks the
-right `createJazzClient(...)` config — `secret` from `auth.secret`
-when no session, `jwtToken` when there is one — so the
-`<JazzSvelteProvider>` only renders once the active client matches the
-current session state. That prevents a race where the UI would briefly
-interact with a stale anonymous client during a sign-up → authenticated
-transition.
+right provider config — `secret` from `auth.secret` when no session,
+`jwtToken` when there is one. `<JazzSvelteProvider>` shuts down the
+previous client before creating its replacement, so the UI cannot
+briefly interact with a stale anonymous client during a sign-up →
+authenticated transition.
 
 ### Identity continuity
 

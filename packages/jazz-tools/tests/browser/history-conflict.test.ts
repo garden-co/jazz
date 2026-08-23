@@ -1,8 +1,8 @@
 /**
  * Browser integration tests for history & conflict management.
  *
- * Exercises the full browser stack: WASM bindings, Web Worker bridge,
- * OPFS persistence, and binary sync transport — layers the Rust E2E
+ * Exercises the full browser stack: WASM bindings,
+ * SharedWorker-owned IndexedDB persistence and binary sync transport — layers the Rust E2E
  * tests don't cover.
  *
  * All tests assert **convergence** (both clients see the same final value)
@@ -116,7 +116,7 @@ describe("History & Conflict Management", () => {
     const { id } = await withTimeout(
       dbAlice.insert(todos, { title: uniqueTitle, done: false }).wait({ tier: "local" }),
       10000,
-      "Alice insert(worker) did not resolve",
+      "Alice insert(local runtime) did not resolve",
     );
 
     // Wait for Bob to see it
@@ -352,18 +352,27 @@ describe("History & Conflict Management", () => {
       20000,
     );
 
-    // Both update concurrently — creates diverged tips (true conflict).
-    await Promise.all([
-      dbAlice.update(todos, id, { title: "alice-edit" }).wait({ tier: "local" }),
-      dbBob.update(todos, id, { title: "bob-edit" }).wait({ tier: "local" }),
+    // Both updates start concurrently — creating diverged tips — then settle
+    // at the edge so a fresh peer has an authoritative conflict winner to read.
+    const aliceConflictTitle = "alice-edit";
+    const bobConflictTitle = "bob-edit";
+    expect(aliceConflictTitle).not.toBe(bobConflictTitle);
+    const aliceConflict = dbAlice.update(todos, id, { title: aliceConflictTitle });
+    const bobConflict = dbBob.update(todos, id, { title: bobConflictTitle });
+    const [aliceConflictBatchId, bobConflictBatchId] = await Promise.all([
+      aliceConflict.transactionId,
+      bobConflict.transactionId,
     ]);
+    expect(aliceConflictBatchId).not.toBe(bobConflictBatchId);
+    await Promise.all([aliceConflict.wait({ tier: "edge" }), bobConflict.wait({ tier: "edge" })]);
 
-    // Wait for convergence between Alice and Bob
+    // Compare edge-tier reads: a local tier may still intentionally include a
+    // client's own optimistic conflict while upstream reconciliation is pending.
     let convergedTitle = "";
     await waitForCondition(
       async () => {
-        const aliceRows = await dbAlice.all(allTodos);
-        const bobRows = await dbBob.all(allTodos);
+        const aliceRows = await dbAlice.all(allTodos, { tier: "edge" });
+        const bobRows = await dbBob.all(allTodos, { tier: "edge" });
         const aliceTodo = aliceRows.find((r) => r.id === id);
         const bobTodo = bobRows.find((r) => r.id === id);
         if (!aliceTodo || !bobTodo) return false;
@@ -390,6 +399,7 @@ describe("History & Conflict Management", () => {
       (rows) => rows.some((row) => row.id === id && row.title === convergedTitle),
       "Charlie sees converged title",
       20000,
+      "edge",
     );
     const charlieTodo = charlieRows.find((r) => r.id === id);
     expect(charlieTodo?.title).toBe(convergedTitle);
@@ -397,14 +407,12 @@ describe("History & Conflict Management", () => {
 
   /**
    * Alice edits title, Bob edits done — concurrently on the same row.
-   * Atomicity is per-row (not per-column): whole-row LWW means the
-   * latest commit wins ALL fields, so one side's field change is lost.
-   * This test is skipped because convergence on mixed-field edits
-   * cannot hold under row-level LWW semantics.
+   * Each update carries authored-column provenance, so independent fields
+   * converge independently: Alice's title and Bob's done value both survive.
    *
    *   dbAlice ──update title──► server ◄──update done── dbBob
    */
-  it.skip("concurrent edits on different fields", async () => {
+  it("concurrent edits on different fields", async () => {
     const token = generateAuthSecret();
     const dbAlice = await createReadySyncedDb(ctx, "hc-alice-fields", token, testingServer);
     const dbBob = await createReadySyncedDb(ctx, "hc-bob-fields", token, testingServer);
@@ -429,7 +437,8 @@ describe("History & Conflict Management", () => {
       dbBob.update(todos, id, { done: true }).wait({ tier: "local" }),
     ]);
 
-    // Both must converge to the same state
+    // Both must converge to the per-column merge, rather than merely to each
+    // other (which would allow whole-row LWW to silently drop one edit).
     await waitForCondition(
       async () => {
         const aliceRows = await dbAlice.all(allTodos);
@@ -437,10 +446,15 @@ describe("History & Conflict Management", () => {
         const a = aliceRows.find((r) => r.id === id);
         const b = bobRows.find((r) => r.id === id);
         if (!a || !b) return false;
-        return a.title === b.title && a.done === b.done;
+        return (
+          a.title === "alice-title" &&
+          a.done === true &&
+          b.title === "alice-title" &&
+          b.done === true
+        );
       },
       40000,
-      "Alice and Bob converge on same row state",
+      "Alice and Bob converge to the authored per-column merge",
     );
   }, 90000);
 });
@@ -478,7 +492,7 @@ async function waitForPeerSync(dbAlice: Db, dbBob: Db, label: string): Promise<v
   const { id: aliceToBobId } = await withTimeout(
     dbAlice
       .insert(todos, { title: `peer-sync-a2b-${label}-${Date.now()}`, done: false })
-      .wait({ tier: "local" }),
+      .wait({ tier: "edge" }),
     10_000,
     `${label} Alice->Bob peer sync insert did not resolve`,
   );
@@ -489,12 +503,13 @@ async function waitForPeerSync(dbAlice: Db, dbBob: Db, label: string): Promise<v
     (rows) => rows.some((row) => row.id === aliceToBobId),
     `${label} Alice->Bob peer sync should reach Bob`,
     20_000,
+    "edge",
   );
 
   const { id: bobToAliceId } = await withTimeout(
     dbBob
       .insert(todos, { title: `peer-sync-b2a-${label}-${Date.now()}`, done: false })
-      .wait({ tier: "local" }),
+      .wait({ tier: "edge" }),
     10_000,
     `${label} Bob->Alice peer sync insert did not resolve`,
   );
@@ -505,5 +520,6 @@ async function waitForPeerSync(dbAlice: Db, dbBob: Db, label: string): Promise<v
     (rows) => rows.some((row) => row.id === bobToAliceId),
     `${label} Bob->Alice peer sync should reach Alice`,
     20_000,
+    "edge",
   );
 }

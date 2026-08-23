@@ -1,5 +1,4 @@
 import type { TimeInput, Tracer } from "@opentelemetry/api";
-import type { WasmTraceEntry } from "jazz-wasm";
 
 export const DEFAULT_TELEMETRY_COLLECTOR_URL = "http://localhost:4318";
 
@@ -8,6 +7,30 @@ export type TelemetryOptions = boolean | string;
 type TelemetrySignal = "traces" | "logs";
 type TelemetryAttributeValue = string | number | boolean;
 type RuntimeThread = "main" | "worker";
+export type WasmTraceEntry =
+  | {
+      kind: "span";
+      sequence: number;
+      level: string;
+      target: string;
+      name?: string;
+      fields?: Record<string, unknown>;
+      startUnixNano: TimeInput;
+      endUnixNano: TimeInput;
+    }
+  | {
+      kind: "log";
+      sequence: number;
+      level: string;
+      target: string;
+      message?: string;
+      fields?: Record<string, unknown>;
+      timestampUnixNano: TimeInput;
+    }
+  | {
+      kind: "dropped";
+      count: number;
+    };
 type ImportMetaWithEnv = ImportMeta & {
   env?: Record<string, string | undefined>;
 };
@@ -56,13 +79,13 @@ export function resolveTelemetryCollectorUrl(
 // property name are literal in the source — computed keys, aliased env
 // objects, and dynamic indexing all defeat static replacement.
 export function resolveTelemetryCollectorUrlFromEnv(): string | undefined {
-  return trim(
-    typeof process !== "undefined"
-      ? (process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL ??
-          process.env.NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL ??
-          process.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL ??
-          process.env.EXPO_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL)
-      : (import.meta as ImportMetaWithEnv).env?.VITE_JAZZ_TELEMETRY_COLLECTOR_URL,
+  const hasProcess = typeof process !== "undefined";
+  return (
+    trim(hasProcess ? process.env.VITE_JAZZ_TELEMETRY_COLLECTOR_URL : undefined) ??
+    trim(hasProcess ? process.env.NEXT_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL : undefined) ??
+    trim(hasProcess ? process.env.PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL : undefined) ??
+    trim(hasProcess ? process.env.EXPO_PUBLIC_JAZZ_TELEMETRY_COLLECTOR_URL : undefined) ??
+    trim((import.meta as ImportMetaWithEnv).env?.VITE_JAZZ_TELEMETRY_COLLECTOR_URL)
   );
 }
 
@@ -83,7 +106,7 @@ export function normalizeOtlpEndpoint(collectorUrl: string, signal: TelemetrySig
 }
 
 export function installWasmTelemetry(options: {
-  wasmModule: WasmTelemetryModule;
+  wasmModule: unknown;
   collectorUrl?: string;
   appId: string;
   runtimeThread: RuntimeThread;
@@ -157,11 +180,13 @@ export function installWasmTelemetry(options: {
   };
 }
 
-function hasWasmTelemetryHooks(wasmModule: WasmTelemetryModule): boolean {
+function hasWasmTelemetryHooks(wasmModule: unknown): wasmModule is WasmTelemetryModule {
+  if (!wasmModule || typeof wasmModule !== "object") return false;
+  const hooks = wasmModule as Partial<WasmTelemetryModule>;
   return (
-    typeof wasmModule.subscribeTraceEntries === "function" &&
-    typeof wasmModule.drainTraceEntries === "function" &&
-    typeof wasmModule.setTraceEntryCollectionEnabled === "function"
+    typeof hooks.subscribeTraceEntries === "function" &&
+    typeof hooks.drainTraceEntries === "function" &&
+    typeof hooks.setTraceEntryCollectionEnabled === "function"
   );
 }
 

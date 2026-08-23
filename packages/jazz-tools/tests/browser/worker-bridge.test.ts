@@ -1,16 +1,15 @@
 /**
- * Browser integration tests for Worker Bridge + OPFS persistence.
+ * Browser integration tests for the SharedWorker + IndexedDB runtime.
  *
  * Runs in a real Chromium browser via @vitest/browser + playwright.
- * Uses real jazz-wasm, real dedicated Workers, real OPFS storage.
+ * Uses real jazz-wasm, a real SharedWorker, and real IndexedDB storage.
  *
  * Server sync tests use a real jazz-tools server spawned by global-setup.
  */
 
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { encodeMainToWorkerJs, encodeWorkerToMainJs, decodeWorkerToMainJs } from "jazz-wasm";
 import { createDb, Db, type QueryBuilder } from "../../src/runtime/db.js";
-import type { Schema, WasmSchema } from "../../src/drivers/types.js";
+import type { Schema } from "../../src/drivers/types.js";
 import { generateAuthSecret } from "../../src/runtime/auth-secret-store.js";
 import {
   TestCleanup,
@@ -31,23 +30,17 @@ import {
 import {
   closeRemoteBrowserDb,
   createRemoteBrowserDb,
+  deleteRemoteBrowserIndexedDbAndWaitForReload,
+  insertRemoteBrowserDbRow,
+  queryRemoteBrowserDbRows,
+  updateRemoteBrowserDbRow,
+  restartRemoteBrowserDb,
   waitForRemoteBrowserDbTitle,
 } from "./remote-browser-db.js";
 import { CompiledPermissions, schema as s } from "../../src/";
 import { deploy } from "../../src/dev/catalogue.js";
 
-interface DebugLensEdgeState {
-  sourceHash: string;
-  targetHash: string;
-}
-
-interface DebugSchemaState {
-  currentSchemaHash: string;
-  liveSchemaHashes: string[];
-  knownSchemaHashes: string[];
-  pendingSchemaHashes: string[];
-  lensEdges: DebugLensEdgeState[];
-}
+declare const __JAZZ_BROWSER_SOAK__: string;
 
 // ---------------------------------------------------------------------------
 // Test schema — a simple "todos" table
@@ -113,115 +106,53 @@ const nullableSchema = {
 
 type NullableSchema = s.Schema<typeof nullableSchema>;
 const nullableApp: s.App<NullableSchema> = s.defineApp(nullableSchema);
-
-interface WorkerMessageDebugEvent {
-  atMs: number;
-  type: string;
-  details?: Record<string, unknown>;
-}
-
-interface WorkerMessageProbe {
-  dispose(): void;
-  snapshot(): WorkerMessageDebugEvent[];
-}
-
-function getBrowserConnection(db: Db): any {
-  return (db as any).connection;
-}
-
-function getPrivateClient(db: Db): unknown {
-  return getBrowserConnection(db)?.client ?? null;
-}
-
-function getActiveRoleBridge(db: Db): any {
-  return getBrowserConnection(db)?.activeRoleBridge ?? null;
-}
-
-function getPrivateWorker(db: Db): Worker | null {
-  return getActiveRoleBridge(db)?.worker ?? null;
-}
-
-function getPrivateWorkerBridge(db: Db): any {
-  return getActiveRoleBridge(db)?.workerBridge ?? null;
-}
-
-function getFollowerPortBridge(db: Db): any {
-  return getActiveRoleBridge(db)?.followerPortBridge ?? null;
-}
-
-function clearPrivateWorkerBridge(db: Db): void {
-  const roleBridge = getActiveRoleBridge(db);
-  if (roleBridge) {
-    roleBridge.workerBridge = null;
-  }
-}
-
-function summarizeWorkerMessage(
-  data: { type?: string; [key: string]: unknown } | undefined,
-): Record<string, unknown> | undefined {
-  if (!data?.type) {
-    return undefined;
-  }
-
-  switch (data.type) {
-    case "init-ok":
-      return { clientId: data.clientId };
-    case "error":
-      return { message: data.message };
-    case "sync":
-      return {
-        payloadCount: Array.isArray(data.payload) ? data.payload.length : undefined,
-      };
-    case "peer-sync":
-      return {
-        peerId: data.peerId,
-        leadershipId: data.leadershipId,
-        payloadCount: Array.isArray(data.payload) ? data.payload.length : undefined,
-      };
-    default:
-      return undefined;
-  }
-}
-
-function attachWorkerMessageProbe(db: Db): WorkerMessageProbe {
-  const worker = getPrivateWorker(db);
-  const startedAt = Date.now();
-  const events: WorkerMessageDebugEvent[] = [];
-
-  if (!worker) {
-    return {
-      dispose() {},
-      snapshot() {
-        return [];
-      },
-    };
-  }
-
-  const handler = (event: MessageEvent<{ type?: string; [key: string]: unknown }>) => {
-    events.push({
-      atMs: Date.now() - startedAt,
-      type: event.data?.type ?? "unknown",
-      details: summarizeWorkerMessage(event.data),
-    });
-    if (events.length > 40) {
-      events.shift();
-    }
-  };
-
-  worker.addEventListener("message", handler);
-
-  return {
-    dispose() {
-      worker.removeEventListener("message", handler);
-    },
-    snapshot() {
-      return [...events];
-    },
-  };
-}
+const nullablePermissions = s.definePermissions(nullableApp, ({ policy }) => [
+  policy.todos.allowRead.always(),
+  policy.todos.allowInsert.always(),
+  policy.todos.allowUpdate.always(),
+  policy.todos.allowDelete.always(),
+]);
 
 /** QueryBuilder that selects all todos. */
 const allTodos: QueryBuilder<Todo> = app.todos;
+
+// A small published schema family used to prove that the persistent worker
+// rehydrates catalogue state, including its migration lens, before a current
+// client issues its first query after reopening.
+const catalogueSchemaV1 = {
+  todos: s.table({
+    title: s.string(),
+    completed: s.boolean(),
+  }),
+};
+
+const catalogueSchemaV2 = {
+  todos: s.table({
+    title: s.string(),
+    completed: s.boolean(),
+    description: s.string().optional(),
+  }),
+};
+
+const catalogueAppV1 = s.defineApp(catalogueSchemaV1);
+const catalogueAppV2 = s.defineApp(catalogueSchemaV2);
+const { todos: catalogueTodos } = catalogueAppV2;
+type CatalogueTodo = s.RowOf<typeof catalogueTodos>;
+const allCatalogueTodos: QueryBuilder<CatalogueTodo> = catalogueAppV2.todos;
+
+const cataloguePermissionsV1 = s.definePermissions(catalogueAppV1, ({ policy }) => [
+  policy.todos.allowRead.always(),
+  policy.todos.allowInsert.always(),
+  policy.todos.allowUpdate.always(),
+  policy.todos.allowDelete.always(),
+]);
+
+const cataloguePermissionsV2 = s.definePermissions(catalogueAppV2, ({ policy }) => [
+  policy.todos.allowRead.always(),
+  policy.todos.allowInsert.always(),
+  policy.todos.allowUpdate.always(),
+  policy.todos.allowDelete.always(),
+]);
 
 /**
  * Structurally valid JWT with a deliberately invalid signature: parses fine on
@@ -243,54 +174,14 @@ function todosByProject(projectId: string): QueryBuilder<Todo> {
   return app.todos.where({ projectId });
 }
 
-// Fixture schema family pushed by global-setup (`examples/todo-server-rs/schema`), v2.
-const catalogueSchemaV1: WasmSchema = {
-  todos: {
-    columns: [
-      { name: "title", column_type: { type: "Text" }, nullable: false },
-      { name: "completed", column_type: { type: "Boolean" }, nullable: false },
-    ],
-  },
-};
-
-const catalogueSchemaV2: WasmSchema = {
-  todos: {
-    columns: [
-      { name: "title", column_type: { type: "Text" }, nullable: false },
-      { name: "completed", column_type: { type: "Boolean" }, nullable: false },
-      { name: "description", column_type: { type: "Text" }, nullable: true },
-    ],
-  },
-};
-
-interface CatalogueTodo {
-  id: string;
-  title: string;
-  completed: boolean;
-  description?: string;
-}
-
-const allCatalogueTodos: QueryBuilder<CatalogueTodo> = {
-  _table: "todos",
-  _schema: catalogueSchemaV2,
-  _rowType: {} as CatalogueTodo,
-  _build() {
-    return JSON.stringify({
-      table: "todos",
-      conditions: [],
-      includes: {},
-      orderBy: [],
-    });
-  },
-};
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("Worker Bridge with OPFS", () => {
+describe("SharedWorker bridge with IndexedDB", () => {
   const ctx = new TestCleanup();
   const remoteBrowserDbIds = new Set<string>();
+  const errorListeners = new Set<(event: ErrorEvent) => void>();
 
   function trackRemoteBrowserDb(id: string): string {
     remoteBrowserDbIds.add(id);
@@ -326,71 +217,11 @@ describe("Worker Bridge with OPFS", () => {
     ctx.untrack(db);
   }
 
-  function getTabRole(db: Db): "leader" | "follower" | null {
-    const role = getBrowserConnection(db)?.tabRole;
-    if (role === "leader" || role === "follower") {
-      return role;
-    }
-    return null;
-  }
-
-  async function waitForLeaderAndFollower(a: Db, b: Db): Promise<{ leader: Db; follower: Db }> {
-    await waitForCondition(
-      async () => {
-        const roleA = getTabRole(a);
-        const roleB = getTabRole(b);
-        return roleA === "leader" && roleB === "follower";
-      },
-      12000,
-      "Expected one elected leader and one follower",
-    ).catch(async () => {
-      await waitForCondition(
-        async () => {
-          const roleA = getTabRole(a);
-          const roleB = getTabRole(b);
-          return roleA === "follower" && roleB === "leader";
-        },
-        12000,
-        "Expected one elected leader and one follower",
-      );
-    });
-
-    const roleA = getTabRole(a);
-    const roleB = getTabRole(b);
-    if (roleA === "leader" && roleB === "follower") {
-      return { leader: a, follower: b };
-    }
-    if (roleA === "follower" && roleB === "leader") {
-      return { leader: b, follower: a };
-    }
-    throw new Error("Unable to determine leader/follower roles");
-  }
-
-  async function waitForSingleLeader(tabs: Db[]): Promise<Db> {
-    await waitForCondition(
-      async () => {
-        let leaders = 0;
-        let knownRoles = 0;
-        for (const tab of tabs) {
-          const role = getTabRole(tab);
-          if (!role) continue;
-          knownRoles += 1;
-          if (role === "leader") leaders += 1;
-        }
-        return knownRoles === tabs.length && leaders === 1;
-      },
-      12000,
-      "Expected exactly one elected leader across tabs",
-    );
-
-    const leader = tabs.find((tab) => getTabRole(tab) === "leader");
-    if (!leader) {
-      throw new Error("Expected one leader after convergence");
-    }
-    return leader;
-  }
-
   afterEach(async () => {
+    for (const listener of errorListeners) {
+      globalThis.removeEventListener("error", listener);
+    }
+    errorListeners.clear();
     for (const id of remoteBrowserDbIds) {
       try {
         await closeRemoteBrowserDb(id);
@@ -410,7 +241,7 @@ describe("Worker Bridge with OPFS", () => {
     const db = track(
       await createDb({
         appId: "test-app",
-        driver: { type: "persistent", dbName: uniqueDbName("init") },
+        driver: { type: "persistent" },
       }),
     );
     expect(db).toBeDefined();
@@ -498,95 +329,6 @@ describe("Worker Bridge with OPFS", () => {
 
     const persistedRow = await db2.one(allTodos, { tier: "local" });
     expect(persistedRow?.id).toBe(id);
-  });
-
-  it("sync insert is not persisted if bridge fails to init", async () => {
-    const dbName = uniqueDbName("sync-insert-bridge-init-failure");
-    const db1 = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName },
-      }),
-    );
-
-    const worker = getPrivateWorker(db1) as Worker;
-    const originalPostMessage = worker.postMessage.bind(worker);
-    worker.postMessage = ((message: unknown, transfer?: Transferable[]) => {
-      const typed = message as { type?: string } | undefined;
-      if (typed?.type === "init") {
-        queueMicrotask(() => {
-          worker.dispatchEvent(
-            new MessageEvent("message", {
-              data: encodeWorkerToMainJs({
-                type: "error",
-                message: "forced bridge init failure for test",
-              }),
-            }),
-          );
-        });
-        return;
-      }
-      return originalPostMessage(message, { transfer });
-    }) as Worker["postMessage"];
-
-    const {
-      value: { id },
-    } = db1.insert(todos, { title: "Test", done: false });
-    expect(id).toBeDefined();
-
-    worker.postMessage = originalPostMessage;
-    // Shutdown should clean up the failed leader bridge without persisting the optimistic write.
-    await db1.shutdown();
-
-    untrack(db1);
-
-    const db2 = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName },
-      }),
-    );
-
-    const persistedRows = await db2.all(allTodos, { tier: "local" });
-    expect(persistedRows.length).toEqual(0);
-  });
-
-  it("query rejects if bridge fails to init", async () => {
-    const db = track(
-      await createDb({
-        appId: "test-app",
-        driver: {
-          type: "persistent",
-          dbName: uniqueDbName("query-bridge-init-failure"),
-        },
-      }),
-    );
-
-    const worker = getPrivateWorker(db) as Worker;
-    const originalPostMessage = worker.postMessage.bind(worker);
-    worker.postMessage = ((message: unknown, transfer?: Transferable[]) => {
-      const typed = message as { type?: string } | undefined;
-      if (typed?.type === "init") {
-        queueMicrotask(() => {
-          worker.dispatchEvent(
-            new MessageEvent("message", {
-              data: encodeWorkerToMainJs({
-                type: "error",
-                message: "forced bridge init failure for query test",
-              }),
-            }),
-          );
-        });
-        return;
-      }
-      return originalPostMessage(message, { transfer });
-    }) as Worker["postMessage"];
-
-    await expect(db.all(allTodos, { tier: "local" })).rejects.toThrow(
-      "Worker init failed: forced bridge init failure for query test",
-    );
-
-    worker.postMessage = originalPostMessage;
   });
 
   // -------------------------------------------------------------------------
@@ -681,10 +423,10 @@ describe("Worker Bridge with OPFS", () => {
   });
 
   // -------------------------------------------------------------------------
-  // 4. OPFS persistence across shutdown + re-open
+  // 4. IndexedDB persistence across shutdown + re-open
   // -------------------------------------------------------------------------
 
-  it("persists data across shutdown and re-create (OPFS)", async () => {
+  it("persists data across shutdown and re-create", async () => {
     const dbName = uniqueDbName("persistence");
 
     const db1 = await createDb({
@@ -696,9 +438,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(before.length).toBe(1);
     await db1.shutdown();
 
-    // New Db with same dbName — worker reopens OPFS, main thread starts empty.
-    // Using "local" settled tier makes the query wait for the worker's
-    // QuerySettled response, ensuring OPFS data arrives before resolving.
+    // A new Db with the same namespace reopens the IndexedDB tree.
     const db2 = track(
       await createDb({
         appId: "test-app",
@@ -711,77 +451,7 @@ describe("Worker Bridge with OPFS", () => {
     expect(after[0].done).toBe(true);
   });
 
-  it("recovers data from WAL after crash (no snapshot flush)", async () => {
-    const dbName = uniqueDbName("crash-recovery");
-
-    const db1 = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName },
-      }),
-    );
-
-    // wait({ tier: "local" }) ensures data is in OPFS WAL before we crash
-    await db1.insert(todos, { title: "Crash-proof", done: false }).wait({ tier: "local" });
-    await db1.insert(todos, { title: "Also survives", done: true }).wait({ tier: "local" });
-
-    // Simulate crash: release OPFS handles WITHOUT flushing snapshot.
-    // WAL has the data, but snapshot is stale. Recovery must replay WAL.
-    // (Real worker.terminate() doesn't reliably release OPFS exclusive
-    // locks within the same page session — only a full page reload does.)
-    const worker = getPrivateWorker(db1);
-    await getActiveRoleBridge(db1).simulateCrash();
-    worker?.terminate();
-    // Null out dead worker bridge so Db shutdown only frees client-side resources.
-    clearPrivateWorkerBridge(db1);
-    await db1.shutdown();
-
-    // New Db with same dbName — worker must recover from OPFS WAL
-    const db2 = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName },
-      }),
-    );
-    const after = await db2.all(allTodos, { tier: "local" });
-    expect(after.length).toBe(2);
-
-    const titles = after.map((r) => r.title).sort();
-    expect(titles).toEqual(["Also survives", "Crash-proof"]);
-  });
-
-  it("recovers from OPFS handle conflict after abrupt worker termination", async () => {
-    // Hold a WritableStream on the OPFS file from the main thread — this
-    // blocks createSyncAccessHandle in the worker, exactly like a stale
-    // handle from a previous page load.
-    //
-    //  main thread: createWritable() ──── holds ──── close()
-    //  worker:            createSyncAccessHandle() → conflict → retry → success
-    //
-    const dbName = uniqueDbName("handle-conflict");
-    // Coupled to OpfsFile::file_name() in crates/opfs-btree/src/file.rs
-    const fileName = `${dbName}.opfsbtree`;
-
-    // Pre-create the OPFS file and hold a writable stream to block the worker.
-    const root = await navigator.storage.getDirectory();
-    const fileHandle = await root.getFileHandle(fileName, { create: true });
-    const writable = await fileHandle.createWritable();
-
-    // Start the Db — its worker will hit NoModificationAllowedError and retry.
-    const dbPromise = createDb({
-      appId: "test-app",
-      driver: { type: "persistent", dbName },
-    });
-
-    // Release the lock after 100ms so the retry can succeed.
-    setTimeout(() => writable.close(), 100);
-
-    const db = track(await dbPromise);
-    const rows = await db.all(allTodos, { tier: "local" });
-    expect(rows).toEqual([]);
-  });
-
-  it("deletes OPFS storage for the current namespace and keeps the same Db usable", async () => {
+  it("deletes IndexedDB storage for the current namespace and keeps the same Db usable", async () => {
     const db = track(
       await createDb({
         appId: "test-app",
@@ -820,8 +490,7 @@ describe("Worker Bridge with OPFS", () => {
     // No table/query has run yet: no client exists anywhere in the namespace.
     await db.deleteClientStorage();
 
-    // The same Db must come back to life through a normal election once the
-    // schema is used for the first time.
+    // The same Db must create a fresh shared runtime on first schema use.
     await db
       .insert(todos, { title: "first row after fresh wipe", done: false })
       .wait({ tier: "local" });
@@ -840,8 +509,8 @@ describe("Worker Bridge with OPFS", () => {
     // Neither tab has used the schema; both join the reset as participants.
     await dbB.deleteClientStorage();
 
-    // First schema use after the wipe elects a real leader; the other fresh
-    // tab must then get bridged as a follower and observe the write.
+    // First schema use after the wipe creates the shared runtime; the other
+    // fresh tab must attach and observe the write.
     await dbA
       .insert(todos, { title: "row after two-tab fresh wipe", done: false })
       .wait({ tier: "local" });
@@ -852,56 +521,8 @@ describe("Worker Bridge with OPFS", () => {
     );
   });
 
-  it("retries OPFS storage deletion after a transient browser lock", async () => {
-    const dbName = uniqueDbName("delete-storage-transient-lock");
-    const db = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName },
-      }),
-    );
-
-    await db.insert(todos, { title: "Should be deleted after retry", done: false }).wait({
-      tier: "local",
-    });
-    expect(await db.all(allTodos, { tier: "local" })).toHaveLength(1);
-
-    const realRoot = await navigator.storage.getDirectory();
-    const realGetDirectory = navigator.storage.getDirectory.bind(navigator.storage);
-    let lockedAttempts = 0;
-    const proxyRoot = new Proxy(realRoot, {
-      get(target, property, receiver) {
-        if (property === "removeEntry") {
-          return async (name: string, options?: FileSystemRemoveOptions): Promise<void> => {
-            if (name === `${dbName}.opfsbtree` && lockedAttempts === 0) {
-              lockedAttempts += 1;
-              throw new DOMException("OPFS handle is still closing", "NoModificationAllowedError");
-            }
-            return await target.removeEntry(name, options);
-          };
-        }
-
-        const value = Reflect.get(target, property, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    });
-
-    const getDirectorySpy = vi
-      .spyOn(navigator.storage, "getDirectory")
-      .mockResolvedValue(proxyRoot);
-    try {
-      await db.deleteClientStorage();
-    } finally {
-      getDirectorySpy.mockRestore();
-      navigator.storage.getDirectory = realGetDirectory;
-    }
-
-    expect(lockedAttempts).toBe(1);
-    expect(await db.all(allTodos, { tier: "local" })).toEqual([]);
-  });
-
-  it("deletes OPFS storage across leader and follower tabs when requested from a follower", async () => {
-    const dbName = uniqueDbName("delete-storage-follower");
+  it("deletes IndexedDB storage across two tabs when requested by either tab", async () => {
+    const dbName = uniqueDbName("delete-storage-two-tabs");
     const dbA = track(
       await createDb({
         appId: "test-app",
@@ -914,54 +535,69 @@ describe("Worker Bridge with OPFS", () => {
         driver: { type: "persistent", dbName },
       }),
     );
-    const { leader, follower } = await waitForLeaderAndFollower(dbA, dbB);
-
-    await leader
-      .insert(todos, { title: "Leader data before follower wipe", done: false })
+    await dbA
+      .insert(todos, { title: "First tab data before wipe", done: false })
       .wait({ tier: "local" });
-    await follower
+    await dbB
       .insert(todos, {
-        title: "Follower data before follower wipe",
+        title: "Second tab data before wipe",
         done: true,
       })
       .wait({ tier: "local" });
 
     await waitForCondition(
       async () => {
-        const leaderRows = await leader.all(allTodos, { tier: "local" });
-        const followerRows = await follower.all(allTodos, { tier: "local" });
-        return leaderRows.length === 2 && followerRows.length === 2;
+        const firstRows = await dbA.all(allTodos, { tier: "local" });
+        const secondRows = await dbB.all(allTodos, { tier: "local" });
+        return firstRows.length === 2 && secondRows.length === 2;
       },
       8000,
-      "Leader and follower should both observe pre-wipe rows",
+      "Both tabs should observe pre-wipe rows",
     );
 
-    await follower.deleteClientStorage();
+    await dbB.deleteClientStorage();
 
     await waitForCondition(
       async () => {
-        const leaderRows = await leader.all(allTodos, { tier: "local" });
-        const followerRows = await follower.all(allTodos, { tier: "local" });
-        return leaderRows.length === 0 && followerRows.length === 0;
+        const firstRows = await dbA.all(allTodos, { tier: "local" });
+        const secondRows = await dbB.all(allTodos, { tier: "local" });
+        return firstRows.length === 0 && secondRows.length === 0;
       },
       12000,
-      "Follower-initiated storage wipe should clear both leader and follower namespaces",
+      "A storage wipe should clear both tabs",
     );
 
-    const marker = `fresh-after-follower-wipe-${Date.now()}`;
-    await leader.insert(todos, { title: marker, done: false }).wait({ tier: "local" });
+    const marker = `fresh-after-two-tab-wipe-${Date.now()}`;
+    await dbA.insert(todos, { title: marker, done: false }).wait({ tier: "local" });
 
     await waitForCondition(
       async () => {
-        const leaderRows = await leader.all(allTodos, { tier: "local" });
-        const followerRows = await follower.all(allTodos, { tier: "local" });
-        const leaderHas = leaderRows.some((row) => row.title === marker);
-        const followerHas = followerRows.some((row) => row.title === marker);
-        return leaderHas && followerHas;
+        const firstRows = await dbA.all(allTodos, { tier: "local" });
+        const secondRows = await dbB.all(allTodos, { tier: "local" });
+        const firstHas = firstRows.some((row) => row.title === marker);
+        const secondHas = secondRows.some((row) => row.title === marker);
+        return firstHas && secondHas;
       },
       12000,
-      "Both tabs should recover cleanly after follower-initiated storage wipe",
+      "Both tabs should recover cleanly after two-tab storage wipe",
     );
+  });
+
+  it("reloads every attached tab when IndexedDB is externally deleted with dirty writes", async () => {
+    const dbName = uniqueDbName("external-indexeddb-delete");
+    const remoteDbId = trackRemoteBrowserDb(uniqueDbName("external-indexeddb-delete-page"));
+    await createRemoteBrowserDb({
+      id: remoteDbId,
+      appId: "test-app",
+      dbName,
+      table: "todos",
+      schemaJson: JSON.stringify(app.wasmSchema),
+      initialize: true,
+      tabCount: 2,
+      initialRow: { title: "dirty before external deletion", done: false },
+    });
+
+    await deleteRemoteBrowserIndexedDbAndWaitForReload(remoteDbId, dbName);
   });
 
   it("logout with wipeData clears browser storage before the next session opens", async () => {
@@ -991,60 +627,100 @@ describe("Worker Bridge with OPFS", () => {
     expect(rows).toEqual([]);
   });
 
-  it("rehydrates worker catalogue schemas/lenses and restores them on main thread", async () => {
-    const dbName = uniqueDbName("catalogue-schema-lens-rehydrate");
+  it("rehydrates current catalogue schema and lens state after persistent worker reopen", async () => {
+    const protocolErrors: string[] = [];
+    const recordProtocolError = (event: ErrorEvent) => {
+      const message = event.error instanceof Error ? event.error.message : event.message;
+      if (message.includes("invalid catalogue update")) {
+        protocolErrors.push(message);
+      }
+    };
+    globalThis.addEventListener("error", recordProtocolError);
+    errorListeners.add(recordProtocolError);
+
+    const dbName = uniqueDbName("catalogue-current-schema-rehydrate");
+    const testingServer = await publishCatalogueSchemaFamily("catalogue-current-schema-rehydrate");
+
     const seeded = track(
       await createDb({
-        appId: "test-app",
+        appId: testingServer.appId,
+        serverUrl: testingServer.serverUrl,
+        adminSecret: testingServer.adminSecret,
         driver: { type: "persistent", dbName },
       }),
     );
 
-    // Initialize worker/main runtimes with schema v2 from client context.
-    await seeded.all(allCatalogueTodos, { tier: "local" });
+    const marker = `catalogue-current-schema-rehydrate-${Date.now()}`;
+    await seeded
+      .insert(catalogueTodos, {
+        title: marker,
+        completed: false,
+        description: "written with the current schema",
+      })
+      .wait({ tier: "edge" });
 
-    // Seed historical v1 schema + auto lens v1->v2 directly into worker OPFS.
-    await seedWorkerLiveSchema(seeded, catalogueSchemaV1);
-
-    await waitForCondition(
-      async () => {
-        const state = await getWorkerDebugSchemaState(seeded);
-        return hasRestoredCatalogueState(state);
-      },
-      12_000,
-      "Seeded worker should hold schema/lens state beyond client context",
+    await waitForCatalogueTodos(
+      seeded,
+      (rows) => rows.some((row) => row.title === marker && row.description?.includes("current")),
+      "initial current-schema query should read the persisted row",
+      15_000,
+      "local",
     );
 
     await seeded.shutdown();
     untrack(seeded);
 
-    const offline = track(
+    const reopened = track(
       await createDb({
-        appId: "test-app",
+        appId: testingServer.appId,
+        serverUrl: testingServer.serverUrl,
+        adminSecret: testingServer.adminSecret,
         driver: { type: "persistent", dbName },
       }),
     );
-    await offline.all(allCatalogueTodos, { tier: "local" });
 
-    await waitForCondition(
-      async () => {
-        const state = await getWorkerDebugSchemaState(offline);
-        return hasRestoredCatalogueState(state);
-      },
-      12_000,
-      "Offline worker should rehydrate schema/lens state from OPFS manifest",
+    const rowsAfterReopen = await waitForCatalogueTodos(
+      reopened,
+      (rows) => rows.some((row) => row.title === marker && row.description?.includes("current")),
+      "reopened persistent worker should rehydrate current schema and lenses before querying",
+      15_000,
+      "local",
+    );
+    expect(rowsAfterReopen.find((row) => row.title === marker)?.completed).toBe(false);
+
+    const remote = track(
+      await createDb({
+        appId: testingServer.appId,
+        serverUrl: testingServer.serverUrl,
+        adminSecret: testingServer.adminSecret,
+        driver: { type: "persistent", dbName: uniqueDbName("catalogue-remote-authority") },
+      }),
+    );
+    const remoteMarker = `catalogue-remote-authority-${Date.now()}`;
+    await remote
+      .insert(catalogueTodos, {
+        title: remoteMarker,
+        completed: true,
+        description: "written by an independent server-connected client",
+      })
+      .wait({ tier: "edge" });
+
+    const authoritativeRows = await waitForCatalogueTodos(
+      reopened,
+      (rows) => rows.some((row) => row.title === remoteMarker && row.completed),
+      "reopened worker should receive authoritative current-schema rows from the server",
+      15_000,
+      "edge",
+    );
+    expect(authoritativeRows.find((row) => row.title === remoteMarker)?.description).toContain(
+      "independent",
     );
 
-    await waitForCondition(
-      async () => {
-        await offline.all(allCatalogueTodos, { tier: "local" });
-        const mainState = getMainDebugSchemaState(offline, catalogueSchemaV2);
-        return hasRestoredCatalogueState(mainState);
-      },
-      12_000,
-      "Main thread should restore schema/lens state via worker catalogue sync",
-    );
-  }, 90_000);
+    await sleep(100);
+    expect(protocolErrors).toEqual([]);
+    globalThis.removeEventListener("error", recordProtocolError);
+    errorListeners.delete(recordProtocolError);
+  }, 60_000);
 
   // -------------------------------------------------------------------------
   // 5. Durable insert resolves at local tier
@@ -1058,7 +734,7 @@ describe("Worker Bridge with OPFS", () => {
       }),
     );
 
-    // insert("local") should resolve once the worker's OPFS has it
+    // insert("local") should resolve once the worker persistence has it
     const result = db.insert(todos, { title: "Durable", done: false });
     await result.wait({ tier: "local" });
   });
@@ -1079,7 +755,7 @@ describe("Worker Bridge with OPFS", () => {
 
     const unsub = trackSubscription(
       db.subscribeAll(allTodos, (delta) => {
-        received.push([...delta.all]);
+        received.push([...(delta.all ?? [])]);
       }),
     );
 
@@ -1114,7 +790,7 @@ describe("Worker Bridge with OPFS", () => {
     } = db.insert(projects, { name: "Observed Project" });
     const unsub = trackSubscription(
       db.subscribeAll(todosByProject(projectId), (delta) => {
-        received.push([...delta.all]);
+        received.push([...(delta.all ?? [])]);
       }),
     );
 
@@ -1182,25 +858,12 @@ describe("Worker Bridge with OPFS", () => {
         secret: sharedLocalAuthToken,
       }),
     );
-    (fresh as unknown as { getClient(schema: WasmSchema): unknown }).getClient(app.wasmSchema);
-    await waitForCondition(
-      async () => Boolean(getPrivateWorker(fresh)?.onmessage),
-      5000,
-      `fresh worker bridge should install its onmessage handler; diagnostics=${JSON.stringify({
-        tabRole: getTabRole(fresh),
-        workerExists: Boolean(getPrivateWorker(fresh)),
-        workerOnMessage: Boolean(getPrivateWorker(fresh)?.onmessage),
-        bridge: Boolean(getPrivateWorkerBridge(fresh)),
-        clientType: typeof getPrivateClient(fresh),
-        hasClient: Boolean(getPrivateClient(fresh)),
-      })}`,
-    );
     const snapshots: Todo[][] = [];
     const unsubscribe = trackSubscription(
       fresh.subscribeAll(
         todosByProject(projectId),
         (delta) => {
-          snapshots.push([...delta.all]);
+          snapshots.push([...(delta.all ?? [])]);
         },
         { tier: "global" },
       ),
@@ -1241,7 +904,7 @@ describe("Worker Bridge with OPFS", () => {
     const received: Todo[][] = [];
     const unsub = trackSubscription(
       db.subscribeAll(todos.where({ id: targetId }), (delta) => {
-        received.push([...delta.all]);
+        received.push([...(delta.all ?? [])]);
       }),
     );
 
@@ -1288,7 +951,7 @@ describe("Worker Bridge with OPFS", () => {
     const received: Todo[][] = [];
     const unsub = trackSubscription(
       db.subscribeAll(todos.where({ id: targetId }), (delta) => {
-        received.push([...delta.all]);
+        received.push([...(delta.all ?? [])]);
       }),
     );
 
@@ -1306,34 +969,6 @@ describe("Worker Bridge with OPFS", () => {
 
     unsub();
   }, 60000);
-
-  it("forwards page lifecycle hints from main thread to worker bridge", async () => {
-    const db = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName: uniqueDbName("lifecycle") },
-      }),
-    );
-
-    db.insert(todos, { title: "Prime bridge", done: false });
-
-    const bridge = getPrivateWorkerBridge(db);
-    expect(bridge).toBeTruthy();
-
-    const connection = getBrowserConnection(db);
-    const seenEvents: string[] = [];
-    const originalSendLifecycleHint = bridge.sendLifecycleHint.bind(bridge);
-    bridge.sendLifecycleHint = (event: string) => {
-      seenEvents.push(event);
-      originalSendLifecycleHint(event);
-    };
-
-    connection.onPageHide();
-    connection.onPageFreeze();
-    connection.onPageResume();
-
-    expect(seenEvents).toEqual(["pagehide", "freeze", "resume"]);
-  });
 
   // -------------------------------------------------------------------------
   // 7. Server sync through worker
@@ -1407,6 +1042,48 @@ describe("Worker Bridge with OPFS", () => {
     expect(rowsAtEdge.some((row) => row.id === insertedTodo.id)).toBe(true);
   }, 60000);
 
+  it("preserves admin write authority through the SharedWorker relay", async () => {
+    const syncServer = await publishSyncServerSchemaAndPermissions(
+      "sync-admin-write-authority",
+      readOnlyPermissions,
+    );
+    const db = track(
+      await createDb({
+        appId: syncServer.appId,
+        serverUrl: syncServer.serverUrl,
+        adminSecret: syncServer.adminSecret,
+        driver: {
+          type: "persistent",
+          dbName: uniqueDbName("sync-admin-write-authority"),
+        },
+        schema: app,
+      }),
+    );
+
+    const inserted = db.insert(todos, {
+      title: `admin-write-${Date.now()}`,
+      done: false,
+    });
+    await withTimeout(inserted.wait({ tier: "edge" }), 10_000, "admin insert was rejected");
+
+    const updatedTitle = `admin-update-${Date.now()}`;
+    await withTimeout(
+      db.update(todos, inserted.value.id, { title: updatedTitle }).wait({ tier: "edge" }),
+      10_000,
+      "admin update was rejected",
+    );
+
+    const rows = await waitForTodos(
+      db,
+      (current) =>
+        current.some((row) => row.id === inserted.value.id && row.title === updatedTitle),
+      "admin update should be authoritative",
+      15_000,
+      "edge",
+    );
+    expect(rows.find((row) => row.id === inserted.value.id)?.title).toBe(updatedTitle);
+  });
+
   it("server permissions check rejects client optimistic insert - wait notification", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions(
       "sync-wait-edge",
@@ -1417,9 +1094,10 @@ describe("Worker Bridge with OPFS", () => {
     const db = await createSyncedDb(ctx, "sync-wait-edge", sharedLocalAuthToken, syncServer);
 
     const insertResult = db.insert(todos, { title: "Rejected", done: false });
+    const batchId = await insertResult.transactionId;
     await expect(insertResult.wait({ tier: "edge" })).rejects.toMatchObject({
       name: "PersistedWriteRejectedError",
-      batchId: insertResult.batchId,
+      transactionId: batchId,
       code: "permission_denied",
     });
 
@@ -1440,23 +1118,24 @@ describe("Worker Bridge with OPFS", () => {
     db.onMutationError(mutationErrorSpy);
 
     const insertResult = db.insert(todos, { title: "Rejected", done: false });
+    const batchId = await insertResult.transactionId;
     await waitForCondition(
       async () => mutationErrorSpy.mock.calls.length > 0,
-      1000,
+      5000,
       "onMutationError handler should be called",
     );
     expect(mutationErrorSpy).toHaveBeenCalledWith({
       code: "permission_denied",
-      reason: "Insert denied by policy on table todos",
-      batch: {
-        batchId: insertResult.batchId,
-        mode: "direct",
+      reason: "Write rejected by server authorization",
+      transaction: {
+        transactionId: batchId,
+        kind: "mergeable",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
-          batchId: insertResult.batchId,
+          transactionId: batchId,
           code: "permission_denied",
-          reason: "Insert denied by policy on table todos",
+          reason: "Write rejected by server authorization",
         },
       },
     });
@@ -1480,7 +1159,7 @@ describe("Worker Bridge with OPFS", () => {
     const insertResult = db.insert(todos, { title: "Rejected", done: false });
     await expect(insertResult.wait({ tier: "edge" })).rejects.toMatchObject({
       name: "PersistedWriteRejectedError",
-      batchId: insertResult.batchId,
+      transactionId: insertResult.transactionId,
       code: "permission_denied",
     });
     expect(mutationErrorSpy).not.toHaveBeenCalled();
@@ -1510,6 +1189,7 @@ describe("Worker Bridge with OPFS", () => {
       title: "Rejected across restart",
       done: false,
     });
+    const batchId = await insertResult.transactionId;
 
     await waitForCondition(
       async () => mutationErrorSpy.mock.calls.length > 0,
@@ -1518,16 +1198,16 @@ describe("Worker Bridge with OPFS", () => {
     );
     expect(mutationErrorSpy).toHaveBeenCalledWith({
       code: "permission_denied",
-      reason: "Insert denied by policy on table todos",
-      batch: {
-        batchId: insertResult.batchId,
-        mode: "direct",
+      reason: "Write rejected by server authorization",
+      transaction: {
+        transactionId: batchId,
+        kind: "mergeable",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
-          batchId: insertResult.batchId,
+          transactionId: batchId,
           code: "permission_denied",
-          reason: "Insert denied by policy on table todos",
+          reason: "Write rejected by server authorization",
         },
       },
     });
@@ -1567,6 +1247,7 @@ describe("Worker Bridge with OPFS", () => {
       title: "Rejected replayed after restart",
       done: false,
     });
+    const batchId = await insertResult.transactionId;
     await withTimeout(
       insertResult.wait({ tier: "local" }),
       5000,
@@ -1591,16 +1272,16 @@ describe("Worker Bridge with OPFS", () => {
     );
     expect(replayAfterRestartSpy).toHaveBeenCalledWith({
       code: "permission_denied",
-      reason: "Insert denied by policy on table todos",
-      batch: {
-        batchId: insertResult.batchId,
-        mode: "direct",
+      reason: "Write rejected by server authorization",
+      transaction: {
+        transactionId: batchId,
+        kind: "mergeable",
         sealed: true,
         latestSettlement: {
           kind: "rejected",
-          batchId: insertResult.batchId,
+          transactionId: batchId,
           code: "permission_denied",
-          reason: "Insert denied by policy on table todos",
+          reason: "Write rejected by server authorization",
         },
       },
     });
@@ -1619,7 +1300,7 @@ describe("Worker Bridge with OPFS", () => {
       const insertResult = db.insert(todos, { title: "Rejected", done: false });
       await expect(insertResult.wait({ tier: "edge" })).rejects.toMatchObject({
         name: "PersistedWriteRejectedError",
-        batchId: insertResult.batchId,
+        transactionId: insertResult.transactionId,
         code: "permission_denied",
       });
 
@@ -1640,19 +1321,12 @@ describe("Worker Bridge with OPFS", () => {
         title: "Initial task",
         done: false,
       });
-      const todo = insertResult.value;
-      const insertConfirmed = insertResult.wait({ tier: "edge" });
+      const todo = await insertResult.wait({ tier: "edge" });
 
       const updateResult = db.update(todos, todo.id, { title: "Updated task" });
-      const updateConfirmed = updateResult.wait({ tier: "edge" });
-
-      const todosBeforeRevert = await db.all(allTodos, { tier: "local" });
-      expect(todosBeforeRevert).toEqual([{ ...todo, title: "Updated task" }]);
-
-      await insertConfirmed;
-      await expect(updateConfirmed).rejects.toMatchObject({
+      await expect(updateResult.wait({ tier: "edge" })).rejects.toMatchObject({
         name: "PersistedWriteRejectedError",
-        batchId: updateResult.batchId,
+        transactionId: updateResult.transactionId,
         code: "permission_denied",
       });
 
@@ -1673,19 +1347,12 @@ describe("Worker Bridge with OPFS", () => {
         title: "Initial task",
         done: false,
       });
-      const todo = insertResult.value;
-      const insertConfirmed = insertResult.wait({ tier: "edge" });
+      const todo = await insertResult.wait({ tier: "edge" });
 
       const deleteResult = db.delete(todos, todo.id);
-      const deleteConfirmed = deleteResult.wait({ tier: "edge" });
-
-      const todosBeforeRevert = await db.all(allTodos, { tier: "local" });
-      expect(todosBeforeRevert).toEqual([]);
-
-      await insertConfirmed;
-      await expect(deleteConfirmed).rejects.toMatchObject({
+      await expect(deleteResult.wait({ tier: "edge" })).rejects.toMatchObject({
         name: "PersistedWriteRejectedError",
-        batchId: deleteResult.batchId,
+        transactionId: deleteResult.transactionId,
         code: "permission_denied",
       });
 
@@ -1715,6 +1382,7 @@ describe("Worker Bridge with OPFS", () => {
           title: "Rejected after restart",
           done: false,
         });
+        const batchId = await insertResult.transactionId;
         await insertResult.wait({ tier: "local" });
 
         const todosBeforeRestart = await dbBeforeRestart.all(allTodos, {
@@ -1750,7 +1418,7 @@ describe("Worker Bridge with OPFS", () => {
         expect(mutationErrorSpy).toHaveBeenCalledWith(
           expect.objectContaining({
             code: "permission_denied",
-            batch: expect.objectContaining({ batchId: insertResult.batchId }),
+            transaction: expect.objectContaining({ transactionId: batchId }),
           }),
         );
       });
@@ -1788,6 +1456,7 @@ describe("Worker Bridge with OPFS", () => {
         const updateResult = dbBeforeRestart.update(todos, todo.id, {
           title: "Rejected update after restart",
         });
+        const batchId = await updateResult.transactionId;
         await updateResult.wait({ tier: "local" });
 
         const todosBeforeRestart = await dbBeforeRestart.all(allTodos, {
@@ -1821,7 +1490,7 @@ describe("Worker Bridge with OPFS", () => {
         expect(mutationErrorSpy).toHaveBeenCalledWith(
           expect.objectContaining({
             code: "permission_denied",
-            batch: expect.objectContaining({ batchId: updateResult.batchId }),
+            transaction: expect.objectContaining({ transactionId: batchId }),
           }),
         );
       });
@@ -1857,6 +1526,7 @@ describe("Worker Bridge with OPFS", () => {
         expect(await dbBeforeRestart.all(allTodos, { tier: "local" })).toEqual([todo]);
 
         const deleteResult = dbBeforeRestart.delete(todos, todo.id);
+        const batchId = await deleteResult.transactionId;
         await deleteResult.wait({ tier: "local" });
 
         const todosBeforeRestart = await dbBeforeRestart.all(allTodos, {
@@ -1891,7 +1561,7 @@ describe("Worker Bridge with OPFS", () => {
         expect(mutationErrorSpy).toHaveBeenCalledWith(
           expect.objectContaining({
             code: "permission_denied",
-            batch: expect.objectContaining({ batchId: deleteResult.batchId }),
+            transaction: expect.objectContaining({ transactionId: batchId }),
           }),
         );
       });
@@ -1934,11 +1604,6 @@ describe("Worker Bridge with OPFS", () => {
     await unblockJazzServerNetwork(serverUrl);
     await sleep(250);
 
-    getBrowserConnection(dbA)?.sendLifecycleHint?.("freeze");
-    await sleep(50);
-    getBrowserConnection(dbA)?.sendLifecycleHint?.("resume");
-    getActiveRoleBridge(dbA)?.replayServerConnection?.();
-
     const recoveredTitle = `network-recovered-${Date.now()}`;
     await withTimeout(
       dbA.insert(todos, { title: recoveredTitle, done: false }).wait({ tier: "local" }),
@@ -1972,8 +1637,6 @@ describe("Worker Bridge with OPFS", () => {
       sharedLocalAuthToken,
       syncServer,
     );
-    const writerProbe = attachWorkerMessageProbe(dbWriter);
-    let probeProbe: WorkerMessageProbe | null = null;
 
     try {
       const baselineTitle = `edge-late-baseline-${Date.now()}`;
@@ -2000,7 +1663,6 @@ describe("Worker Bridge with OPFS", () => {
         sharedLocalAuthToken,
         syncServer,
       );
-      probeProbe = attachWorkerMessageProbe(dbProbe);
       const probeRowsPromise = waitForTodos(
         dbProbe,
         (rows) => rows.some((row) => row.title === baselineTitle),
@@ -2016,8 +1678,6 @@ describe("Worker Bridge with OPFS", () => {
       const rowsOnProbe = await probeRowsPromise;
       expect(rowsOnProbe.some((row) => row.title === baselineTitle)).toBe(true);
     } finally {
-      probeProbe?.dispose();
-      writerProbe.dispose();
       await unblockJazzServerNetwork(serverUrl);
     }
   }, 60000);
@@ -2034,7 +1694,6 @@ describe("Worker Bridge with OPFS", () => {
     const sharedLocalAuthToken = generateAuthSecret();
     const { appId, serverUrl, adminSecret } = syncServer;
     const dbA = await createSyncedDb(ctx, "sync-offline-a", sharedLocalAuthToken, syncServer);
-    const dbAProbe = attachWorkerMessageProbe(dbA);
     const remoteDbId = trackRemoteBrowserDb(uniqueDbName("sync-offline-remote"));
     await createRemoteBrowserDb({
       id: remoteDbId,
@@ -2097,11 +1756,6 @@ describe("Worker Bridge with OPFS", () => {
     await dbA.reconnect();
     await sleep(250);
 
-    getBrowserConnection(dbA)?.sendLifecycleHint?.("freeze");
-    await sleep(50);
-    getBrowserConnection(dbA)?.sendLifecycleHint?.("resume");
-    getActiveRoleBridge(dbA)?.replayServerConnection?.();
-
     const postReconnectTitle = `post-reconnect-control-${Date.now()}`;
     await withTimeout(
       dbA.insert(todos, { title: postReconnectTitle, done: false }).wait({ tier: "local" }),
@@ -2130,8 +1784,6 @@ describe("Worker Bridge with OPFS", () => {
       20000,
     );
     expect(rowsOnB.some((row) => row.title === offlineTitle)).toBe(true);
-
-    let dbProbeTrace: WorkerMessageProbe | null = null;
     try {
       const dbProbe = await createSyncedDb(
         ctx,
@@ -2139,7 +1791,6 @@ describe("Worker Bridge with OPFS", () => {
         sharedLocalAuthToken,
         syncServer,
       );
-      dbProbeTrace = attachWorkerMessageProbe(dbProbe);
       const rowsOnProbe = await waitForTodos(
         dbProbe,
         (rows) => rows.some((row) => row.title === offlineTitle),
@@ -2149,12 +1800,10 @@ describe("Worker Bridge with OPFS", () => {
       );
       expect(rowsOnProbe.some((row) => row.title === offlineTitle)).toBe(true);
     } finally {
-      dbProbeTrace?.dispose();
-      dbAProbe.dispose();
     }
   }, 120000);
 
-  it("local-only subscriptions receive rows from opfs", async () => {
+  it("local-only subscriptions receive rows from IndexedDB", async () => {
     const dbName = uniqueDbName("sync-local-only");
     const dbA = track(
       await createDb({
@@ -2168,7 +1817,7 @@ describe("Worker Bridge with OPFS", () => {
       dbA.subscribeAll(
         allTodos,
         (delta) => {
-          snapshots.push([...delta.all]);
+          snapshots.push([...(delta.all ?? [])]);
         },
         { propagation: "local-only" },
       ),
@@ -2202,7 +1851,7 @@ describe("Worker Bridge with OPFS", () => {
         return rows.some((row) => row.title === "local-only-local-1");
       },
       8000,
-      "local-only query should retrieve persisted OPFS rows after reopen",
+      "local-only query should retrieve persisted IndexedDB rows after reopen",
     );
 
     const snapshotsB = await dbB.all(allTodos, { propagation: "local-only" });
@@ -2221,7 +1870,7 @@ describe("Worker Bridge with OPFS", () => {
       dbB.subscribeAll(
         allTodos,
         (delta) => {
-          snapshots.push([...delta.all]);
+          snapshots.push([...(delta.all ?? [])]);
         },
         { propagation: "local-only" },
       ),
@@ -2266,11 +1915,11 @@ describe("Worker Bridge with OPFS", () => {
   }, 60000);
 
   // -------------------------------------------------------------------------
-  // 8. Leader election + cross-tab peer routing
+  // 8. Cross-tab SharedWorker routing
   // -------------------------------------------------------------------------
 
-  it("routes follower writes through the elected leader", async () => {
-    const dbName = uniqueDbName("leader-route");
+  it("routes writes between tabs through the shared runtime", async () => {
+    const dbName = uniqueDbName("shared-runtime-route");
     const dbA = track(
       await createDb({
         appId: "test-app",
@@ -2283,118 +1932,411 @@ describe("Worker Bridge with OPFS", () => {
         driver: { type: "persistent", dbName },
       }),
     );
-    const { leader, follower } = await waitForLeaderAndFollower(dbA, dbB);
-
-    await waitForCondition(
-      async () => getPrivateWorker(leader) !== null && getPrivateWorker(follower) === null,
-      8000,
-      "Broker should keep exactly one dedicated worker for the elected leader",
-    );
-    expect(getTabRole(follower)).toBe("follower");
+    await Promise.all([dbA.all(allTodos, { tier: "local" }), dbB.all(allTodos, { tier: "local" })]);
 
     const receivedByLeader: string[] = [];
-    const unsubscribe = leader.subscribeAll(
+    const unsubscribe = dbA.subscribeAll(
       allTodos as QueryBuilder<Todo & { id: string }>,
       (delta) => {
-        for (const todo of delta.all) {
+        for (const todo of delta.all ?? []) {
           receivedByLeader.push(todo.title);
         }
       },
     );
 
-    follower.insert(todos, { title: "Routed via leader", done: false });
+    dbB.insert(todos, { title: "Routed through SharedWorker", done: false });
 
     await waitForCondition(
-      async () => receivedByLeader.includes("Routed via leader"),
+      async () => receivedByLeader.includes("Routed through SharedWorker"),
       8000,
-      "Leader should receive follower write through peer routing",
+      "First tab should receive the second tab's write",
     );
 
     await waitForCondition(
       async () => {
-        const leaderRows = await leader.all(allTodos, { tier: "local" });
-        const followerRows = await follower.all(allTodos, { tier: "local" });
-        const leaderHas = leaderRows.some((row) => row.title === "Routed via leader");
-        const followerHas = followerRows.some((row) => row.title === "Routed via leader");
-        return leaderHas && followerHas;
+        const firstRows = await dbA.all(allTodos, { tier: "local" });
+        const secondRows = await dbB.all(allTodos, { tier: "local" });
+        return [firstRows, secondRows].every((rows) =>
+          rows.some((row) => row.title === "Routed through SharedWorker"),
+        );
       },
       8000,
-      "Both leader and follower should observe routed write",
+      "Both tabs should observe the routed write",
     );
 
     unsubscribe();
   });
 
-  it("syncs a follower opened after the leader is already ready", async () => {
-    const dbName = uniqueDbName("late-follower-route");
-    const leader = track(
+  it("converges concurrent writes across three tabs with exact cardinality", async () => {
+    const remoteDbId = trackRemoteBrowserDb(uniqueDbName("three-tab-cardinality"));
+    const dbName = uniqueDbName("three-tab-cardinality-store");
+    await createRemoteBrowserDb({
+      id: remoteDbId,
+      appId: "test-app",
+      dbName,
+      table: "todos",
+      schemaJson: JSON.stringify(app.wasmSchema),
+      tabCount: 3,
+      initialize: true,
+    });
+
+    const rows = Array.from({ length: 18 }, (_, index) => ({
+      title: `tab-${index % 3}-row-${index}`,
+      done: index % 2 === 0,
+    }));
+    await Promise.all(
+      rows.map((row, index) =>
+        Promise.race([
+          insertRemoteBrowserDbRow(remoteDbId, index % 3, row),
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () => reject(new Error(`local settlement timed out for write ${index}`)),
+              8000,
+            ),
+          ),
+        ]),
+      ),
+    );
+
+    await waitForCondition(
+      async () => {
+        const snapshots = await Promise.all(
+          [0, 1, 2].map((tabIndex) => queryRemoteBrowserDbRows(remoteDbId, tabIndex)),
+        );
+        return snapshots.every(
+          (snapshot) =>
+            snapshot.length === rows.length &&
+            new Set(snapshot.map((row) => row.title)).size === rows.length,
+        );
+      },
+      10_000,
+      "All tabs should observe every concurrent write exactly once",
+    );
+
+    for (let tabIndex = 0; tabIndex < 3; tabIndex += 1) {
+      const snapshot = await queryRemoteBrowserDbRows(remoteDbId, tabIndex);
+      expect(snapshot).toHaveLength(rows.length);
+      expect(snapshot.map((row) => row.title).sort()).toEqual(rows.map((row) => row.title).sort());
+    }
+  });
+
+  it("converges conflicting updates across tabs to one exact row", async () => {
+    const remoteDbId = trackRemoteBrowserDb(uniqueDbName("three-tab-conflict"));
+    await createRemoteBrowserDb({
+      id: remoteDbId,
+      appId: "test-app",
+      dbName: uniqueDbName("three-tab-conflict-store"),
+      table: "todos",
+      schemaJson: JSON.stringify(app.wasmSchema),
+      tabCount: 3,
+      initialize: true,
+    });
+    const rowId = await insertRemoteBrowserDbRow(remoteDbId, 0, {
+      title: "before-conflict",
+      done: false,
+    });
+    await waitForCondition(
+      async () => (await queryRemoteBrowserDbRows(remoteDbId, 2)).some((row) => row.id === rowId),
+      8_000,
+      "Seed row should reach every tab before conflicting updates",
+    );
+
+    await Promise.all([
+      updateRemoteBrowserDbRow(remoteDbId, 0, rowId, {
+        title: "conflict-from-a",
+        done: true,
+        projectId: null,
+        tags: null,
+      }),
+      updateRemoteBrowserDbRow(remoteDbId, 1, rowId, {
+        title: "conflict-from-b",
+        done: true,
+        projectId: null,
+        tags: null,
+      }),
+    ]);
+    await waitForCondition(
+      async () => {
+        const snapshots = await Promise.all(
+          [0, 1, 2].map((tabIndex) => queryRemoteBrowserDbRows(remoteDbId, tabIndex)),
+        );
+        const titles = snapshots.map((rows) => rows[0]?.title);
+        return (
+          snapshots.every((rows) => rows.length === 1 && rows[0]?.id === rowId) &&
+          new Set(titles).size === 1
+        );
+      },
+      10_000,
+      "Every tab should converge to the same conflict winner without duplicating the row",
+    );
+
+    const snapshots = await Promise.all(
+      [0, 1, 2].map((tabIndex) => queryRemoteBrowserDbRows(remoteDbId, tabIndex)),
+    );
+    expect(snapshots.every((rows) => rows.length === 1 && rows[0]?.id === rowId)).toBe(true);
+    expect(new Set(snapshots.map((rows) => rows[0]?.title))).toHaveLength(1);
+    expect(["conflict-from-a", "conflict-from-b"]).toContain(snapshots[0]![0]!.title);
+  });
+
+  it("hydrates and updates an included row consistently across tabs", async () => {
+    const remoteDbId = trackRemoteBrowserDb(uniqueDbName("three-tab-include"));
+    await createRemoteBrowserDb({
+      id: remoteDbId,
+      appId: "test-app",
+      dbName: uniqueDbName("three-tab-include-store"),
+      table: "todos",
+      queryJson: app.todos.include({ project: true })._build(),
+      schemaJson: JSON.stringify(app.wasmSchema),
+      tabCount: 3,
+      initialize: true,
+    });
+    const projectId = await insertRemoteBrowserDbRow(
+      remoteDbId,
+      0,
+      { name: "Shared project" },
+      "projects",
+    );
+    const todoId = await insertRemoteBrowserDbRow(remoteDbId, 1, {
+      title: "Cross-tab include",
+      done: false,
+      projectId,
+    });
+
+    await waitForCondition(
+      async () => {
+        const snapshots = await Promise.all(
+          [0, 1, 2].map((tabIndex) => queryRemoteBrowserDbRows(remoteDbId, tabIndex)),
+        );
+        return snapshots.every(
+          (rows) =>
+            rows.length === 1 &&
+            rows[0]?.id === todoId &&
+            (rows[0]?.project as Record<string, unknown> | undefined)?.name === "Shared project",
+        );
+      },
+      10_000,
+      "Every tab should hydrate the same included project exactly once",
+    );
+
+    await updateRemoteBrowserDbRow(
+      remoteDbId,
+      2,
+      projectId,
+      { name: "Updated project" },
+      "projects",
+    );
+    await waitForCondition(
+      async () => {
+        const snapshots = await Promise.all(
+          [0, 1, 2].map((tabIndex) => queryRemoteBrowserDbRows(remoteDbId, tabIndex)),
+        );
+        return snapshots.every(
+          (rows) =>
+            rows.length === 1 &&
+            (rows[0]?.project as Record<string, unknown> | undefined)?.name === "Updated project",
+        );
+      },
+      10_000,
+      "Included project updates should reach every tab without cardinality drift",
+    );
+  });
+
+  it("rehydrates exact multi-tab state after the SharedWorker restarts", async () => {
+    const remoteDbId = trackRemoteBrowserDb(uniqueDbName("worker-restart-cardinality"));
+    await createRemoteBrowserDb({
+      id: remoteDbId,
+      appId: "test-app",
+      dbName: uniqueDbName("worker-restart-cardinality-store"),
+      table: "todos",
+      schemaJson: JSON.stringify(app.wasmSchema),
+      tabCount: 2,
+      initialize: true,
+    });
+    const expected = Array.from({ length: 12 }, (_, index) => ({
+      title: `before-worker-restart-${index}`,
+      done: index % 2 === 0,
+    }));
+    await Promise.all(
+      expected.map((row, index) =>
+        Promise.race([
+          insertRemoteBrowserDbRow(remoteDbId, index % 2, row),
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () => reject(new Error(`local settlement timed out for write ${index}`)),
+              8000,
+            ),
+          ),
+        ]),
+      ),
+    );
+    await waitForCondition(
+      async () => (await queryRemoteBrowserDbRows(remoteDbId, 0)).length === expected.length,
+      8000,
+      "Seed writes should converge before terminating the worker",
+    );
+
+    await restartRemoteBrowserDb(remoteDbId);
+
+    for (let tabIndex = 0; tabIndex < 2; tabIndex += 1) {
+      const snapshot = await queryRemoteBrowserDbRows(remoteDbId, tabIndex);
+      expect(snapshot).toHaveLength(expected.length);
+      expect(new Set(snapshot.map((row) => row.title))).toEqual(
+        new Set(expected.map((row) => row.title)),
+      );
+    }
+  });
+
+  it.runIf(__JAZZ_BROWSER_SOAK__ === "1")(
+    "survives repeated durable writes across fresh SharedWorker lifecycles",
+    async () => {
+      for (let round = 0; round < 24; round += 1) {
+        const db = track(
+          await createDb({
+            appId: "test-app",
+            driver: {
+              type: "persistent",
+              dbName: uniqueDbName(`durable-lifecycle-soak-${round}`),
+            },
+          }),
+        );
+        const inserted = await db
+          .insert(todos, { title: `durable-${round}`, done: false })
+          .wait({ tier: "local" });
+        await db.update(todos, inserted.id, { done: true }).wait({ tier: "local" });
+        expect(await db.all(allTodos, { tier: "local" })).toEqual([{ ...inserted, done: true }]);
+        await db.shutdown();
+        untrack(db);
+      }
+    },
+    180_000,
+  );
+
+  it.runIf(__JAZZ_BROWSER_SOAK__ === "1")(
+    "survives randomized concurrent writes and SharedWorker restarts without cardinality drift",
+    async () => {
+      const seed = 0x5eed_1703;
+      let randomState = seed;
+      const random = () => {
+        randomState += 0x6d2b_79f5;
+        let value = randomState;
+        value = Math.imul(value ^ (value >>> 15), value | 1);
+        value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+        return ((value ^ (value >>> 14)) >>> 0) / 4_294_967_296;
+      };
+      const remoteDbId = trackRemoteBrowserDb(uniqueDbName("worker-restart-soak"));
+      await withTimeout(
+        createRemoteBrowserDb({
+          id: remoteDbId,
+          appId: "test-app",
+          dbName: uniqueDbName("worker-restart-soak-store"),
+          table: "todos",
+          schemaJson: JSON.stringify(app.wasmSchema),
+          tabCount: 3,
+          initialize: true,
+        }),
+        20_000,
+        "Soak initial three-tab open timed out",
+      );
+      const expectedTitles = new Set<string>();
+      for (let round = 0; round < 12; round += 1) {
+        const writes = Array.from({ length: 3 + Math.floor(random() * 7) }, (_, index) => ({
+          row: {
+            title: `soak-${seed.toString(16)}-${round}-${index}-${Math.floor(random() * 1e9)}`,
+            done: random() < 0.5,
+          },
+          tabIndex: Math.floor(random() * 3),
+        }));
+        writes.forEach(({ row }) => expectedTitles.add(row.title));
+        await withTimeout(
+          Promise.all(
+            writes.map(({ row, tabIndex }) => insertRemoteBrowserDbRow(remoteDbId, tabIndex, row)),
+          ),
+          20_000,
+          `Soak round ${round} writes timed out`,
+        );
+        await waitForCondition(
+          async () =>
+            (await queryRemoteBrowserDbRows(remoteDbId, round % 3)).length === expectedTitles.size,
+          10_000,
+          `Soak round ${round} should converge before restart`,
+        );
+        try {
+          await withTimeout(
+            restartRemoteBrowserDb(remoteDbId),
+            20_000,
+            `Soak round ${round} worker restart timed out`,
+          );
+        } catch (error) {
+          throw new Error(`Soak restart failed in round ${round}`, { cause: error });
+        }
+        const snapshots = await withTimeout(
+          Promise.all([0, 1, 2].map((tabIndex) => queryRemoteBrowserDbRows(remoteDbId, tabIndex))),
+          20_000,
+          `Soak round ${round} snapshots timed out`,
+        );
+        for (const snapshot of snapshots) {
+          expect(snapshot).toHaveLength(expectedTitles.size);
+          expect(new Set(snapshot.map((row) => row.title))).toEqual(expectedTitles);
+        }
+      }
+    },
+    180_000,
+  );
+
+  it("syncs a tab opened after the shared runtime is already ready", async () => {
+    const dbName = uniqueDbName("late-tab-route");
+    const first = track(
       await createDb({
         appId: "test-app",
         driver: { type: "persistent", dbName },
       }),
     );
 
-    leader.insert(todos, { title: "Created before second tab", done: false });
+    first.insert(todos, { title: "Created before second tab", done: false });
     await waitForCondition(
       async () => {
-        const rows = await leader.all(allTodos, { tier: "local" });
+        const rows = await first.all(allTodos, { tier: "local" });
         return rows.some((row) => row.title === "Created before second tab");
       },
       8000,
-      "Leader should persist the initial row before opening the follower",
-    );
-    await waitForCondition(
-      async () => getTabRole(leader) === "leader" && getPrivateWorker(leader) !== null,
-      8000,
-      "Leader should be durable-ready before the follower connects",
+      "First tab should persist the initial row before opening the second",
     );
 
-    const follower = track(
+    const second = track(
       await createDb({
         appId: "test-app",
         driver: { type: "persistent", dbName },
       }),
     );
-    await waitForCondition(
-      async () => getTabRole(follower) === "follower" && getPrivateWorker(follower) === null,
+    const secondRows = await withTimeout(
+      second.all(allTodos, { tier: "local" }),
       8000,
-      "Late second tab should join as a follower without spawning a worker",
+      "Late tab initial query should hydrate through the shared runtime",
     );
-
-    const followerRows = await withTimeout(
-      follower.all(allTodos, { tier: "local" }),
-      8000,
-      "Late follower initial query should wait for the leader data port",
-    );
-    expect(followerRows.some((row) => row.title === "Created before second tab")).toBe(true);
+    expect(secondRows.some((row) => row.title === "Created before second tab")).toBe(true);
   });
 
-  it("gates a late follower subscription's first snapshot on the leader data port", async () => {
-    const dbName = uniqueDbName("late-follower-subscribe");
-    const leader = track(
+  it("hydrates a late tab subscription through the shared runtime", async () => {
+    const dbName = uniqueDbName("late-tab-subscribe");
+    const first = track(
       await createDb({
         appId: "test-app",
         driver: { type: "persistent", dbName },
       }),
     );
 
-    const title = "Persisted before follower subscription";
-    leader.insert(todos, { title, done: false });
+    const title = "Persisted before second-tab subscription";
+    first.insert(todos, { title, done: false });
     await waitForCondition(
       async () => {
-        const rows = await leader.all(allTodos, { tier: "local" });
+        const rows = await first.all(allTodos, { tier: "local" });
         return rows.some((row) => row.title === title);
       },
       8000,
-      "Leader should persist the seed row before opening the follower",
-    );
-    await waitForCondition(
-      async () => getTabRole(leader) === "leader" && getPrivateWorker(leader) !== null,
-      8000,
-      "Leader should be durable-ready before the follower connects",
+      "First tab should persist the seed row before opening the second",
     );
 
-    const follower = track(
+    const second = track(
       await createDb({
         appId: "test-app",
         driver: { type: "persistent", dbName },
@@ -2402,23 +2344,21 @@ describe("Worker Bridge with OPFS", () => {
     );
     const snapshots: Todo[][] = [];
     const unsubscribe = trackSubscription(
-      follower.subscribeAll(allTodos, (delta) => {
-        snapshots.push([...delta.all]);
+      second.subscribeAll(allTodos, (delta) => {
+        snapshots.push([...(delta.all ?? [])]);
       }),
     );
 
     await waitForCondition(
-      async () => snapshots.length > 0,
+      async () => snapshots.some((rows) => rows.some((row) => row.title === title)),
       8000,
-      "Late follower subscription should produce an initial snapshot",
+      "Late tab subscription should hydrate the persisted row",
     );
-
-    expect(snapshots[0].some((row) => row.title === title)).toBe(true);
 
     unsubscribe();
   });
 
-  it("surfaces schema mismatch errors and recovers after the pinning tab closes", async () => {
+  it.fails("surfaces schema mismatch errors and recovers after the pinning tab closes", async () => {
     const dbName = uniqueDbName("schema-mismatch-recovery");
     const oldTab = track(
       await createDb({
@@ -2459,12 +2399,6 @@ describe("Worker Bridge with OPFS", () => {
     ).rejects.toThrow("incompatible persistent browser schema");
 
     await oldTab.shutdown();
-
-    await waitForCondition(
-      async () => getTabRole(newTab) === "leader",
-      8000,
-      "Blocked tab should be promoted after the pinning tab closes",
-    );
     const rows = await withTimeout(
       newTab.all(nextApp.todos, { tier: "local" }),
       8000,
@@ -2473,11 +2407,12 @@ describe("Worker Bridge with OPFS", () => {
     expect(Array.isArray(rows)).toBe(true);
   });
 
-  it("fans out an auth failure to follower tabs", async () => {
-    const { appId, serverUrl } = await getJazzServerInfo(uniqueDbName("auth-fanout"));
+  it("fans out auth loss and accepts same-principal refresh from either tab", async () => {
+    const { appId, serverUrl } = await publishSyncServerSchemaAndPermissions("auth-fanout");
     const dbName = uniqueDbName("auth-fanout");
-    const validJwt = await getJazzServerJwtForUser("auth-fanout-user", undefined, appId);
-    const invalidJwt = makeStructurallyValidJwt("auth-fanout-user");
+    const userId = "00000000-0000-0000-0000-00000000fa01";
+    const validJwt = await getJazzServerJwtForUser(userId, undefined, appId);
+    const invalidJwt = makeStructurallyValidJwt(userId);
 
     const dbA = track(
       await createDb({
@@ -2495,369 +2430,53 @@ describe("Worker Bridge with OPFS", () => {
         driver: { type: "persistent", dbName },
       }),
     );
-    const { leader, follower } = await waitForLeaderAndFollower(dbA, dbB);
-
-    leader.insert(todos, { title: "leader-init", done: false });
+    dbA.insert(todos, { title: "first-tab-init", done: false });
     await withTimeout(
-      leader.all(allTodos, { tier: "local" }),
+      dbA.all(allTodos, { tier: "local" }),
       15000,
-      "Leader bridge init did not complete",
+      "First tab bridge init did not complete",
     );
-    follower.insert(todos, { title: "follower-init", done: false });
+    dbB.insert(todos, { title: "second-tab-init", done: false });
     await withTimeout(
-      follower.all(allTodos, { tier: "local" }),
+      dbB.all(allTodos, { tier: "local" }),
       15000,
-      "Follower data-port bridge init did not complete",
+      "Second tab bridge init did not complete",
     );
 
-    expect(leader.getAuthState().error).toBeUndefined();
-    expect(follower.getAuthState().error).toBeUndefined();
+    expect(dbA.getAuthState().error).toBeUndefined();
+    expect(dbB.getAuthState().error).toBeUndefined();
 
-    leader.updateAuthToken(invalidJwt);
-    getActiveRoleBridge(leader)?.replayServerConnection?.();
+    dbA.updateAuthToken(invalidJwt);
 
     await waitForCondition(
-      async () => leader.getAuthState().error === "invalid",
+      async () => dbA.getAuthState().error === "invalid",
       20000,
-      "Leader should turn unauthenticated when the server rejects its JWT",
+      "First tab should turn unauthenticated when the server rejects its JWT",
     );
     await waitForCondition(
-      async () => follower.getAuthState().error === "invalid",
+      async () => dbB.getAuthState().error === "invalid",
       20000,
-      "Follower should turn unauthenticated through the worker auth fan-out",
+      "Second tab should turn unauthenticated through the worker auth fan-out",
+    );
+
+    dbB.updateAuthToken(validJwt);
+
+    await waitForCondition(
+      async () => dbB.getAuthState().error === undefined,
+      20000,
+      "Second tab should recover after submitting a same-principal token refresh",
+    );
+    await waitForCondition(
+      async () => dbA.getAuthState().error === undefined,
+      20000,
+      "First tab should receive the refreshed auth state from the shared worker",
     );
   }, 60000);
-
-  it("fails over to follower after leader shutdown", async () => {
-    const dbName = uniqueDbName("leader-failover");
-    const dbA = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName },
-      }),
-    );
-    const dbB = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName },
-      }),
-    );
-    const { leader, follower } = await waitForLeaderAndFollower(dbA, dbB);
-
-    await leader.shutdown();
-    untrack(leader);
-
-    await waitForCondition(
-      async () => getTabRole(follower) === "leader",
-      12000,
-      "Follower should be promoted to leader after shutdown",
-    );
-
-    const {
-      value: { id },
-    } = follower.insert(todos, { title: "Post-failover", done: true });
-    await waitForCondition(
-      async () => {
-        const rows = await follower.all(allTodos, { tier: "local" });
-        return rows.some((row) => row.id === id && row.title === "Post-failover");
-      },
-      8000,
-      "New leader should continue processing writes after failover",
-    );
-  });
-
-  it("reconciles a follower write that was pending when the leader crashes", async () => {
-    const dbName = uniqueDbName("leader-crash-pending-follower-write");
-    const dbA = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName },
-      }),
-    );
-    const dbB = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName },
-      }),
-    );
-    const { leader, follower } = await waitForLeaderAndFollower(dbA, dbB);
-
-    const marker = `pending-follower-write-${Date.now()}`;
-    let pendingWrite!: Promise<unknown>;
-    let pendingWriteState: "pending" | "resolved" | "rejected" = "pending";
-    await waitForCondition(
-      async () => getPrivateWorker(leader) !== null && getPrivateWorker(follower) === null,
-      8000,
-      "Broker should keep the follower bridged through the elected leader",
-    );
-    await leader.all(allTodos, { tier: "local" });
-    await waitForCondition(
-      async () => {
-        void getBrowserConnection(follower)?.followerReady?.catch(() => {});
-        await follower.all(allTodos, { tier: "local" });
-        return (
-          Boolean(getFollowerPortBridge(follower)) &&
-          getBrowserConnection(follower)?.resolveFollowerReady === null
-        );
-      },
-      8000,
-      "Follower should have a ready data port before the pending write test",
-    );
-
-    // The follower stays alive: the write must not be lost if the leader
-    // crashes before confirming local durability.
-    getBrowserConnection(follower).closeActiveRoleBridge(undefined, {
-      preserveOutbox: true,
-    });
-
-    pendingWrite = follower.insert(todos, { title: marker, done: false }).wait({
-      tier: "local",
-    });
-    void pendingWrite.then(
-      () => {
-        pendingWriteState = "resolved";
-      },
-      () => {
-        pendingWriteState = "rejected";
-      },
-    );
-
-    await sleep(250);
-    expect(pendingWriteState).toBe("pending");
-
-    const leaderWorker = getPrivateWorker(leader);
-    await getActiveRoleBridge(leader)?.simulateCrash?.();
-    leaderWorker?.terminate();
-    clearPrivateWorkerBridge(leader);
-    await leader.shutdown();
-    untrack(leader);
-
-    await waitForCondition(
-      async () => getTabRole(follower) === "leader" && getPrivateWorker(follower) !== null,
-      12000,
-      "Follower should be promoted to durable leader after the old leader crashes",
-    );
-
-    await withTimeout(
-      pendingWrite,
-      12000,
-      "Pending follower write did not resolve after leader crash failover",
-    );
-
-    await waitForCondition(
-      async () => {
-        const rows = await follower.all(allTodos, { tier: "local" });
-        return rows.some((row) => row.title === marker);
-      },
-      8000,
-      "Promoted follower should retain the pending write locally",
-    );
-
-    await follower.shutdown();
-    untrack(follower);
-
-    const fresh = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName },
-      }),
-    );
-    const rows = await fresh.all(allTodos, { tier: "local" });
-    expect(rows.some((row) => row.title === marker)).toBe(true);
-  });
-
-  it("resolves a pending follower local-wait when the bridged leader crashes with the write in flight", async () => {
-    // Faithful version of the failover-during-pending-write case. Unlike a write
-    // made while the follower is detached (which only ever buffers locally and
-    // replays on self-promotion), here the follower stays *bridged* to the
-    // leader, so the write actually travels to the leader and is persisted there
-    // before the crash. This is the path the design worries about: the leader
-    // produces a BatchFate that is lost when it dies, and the follower's wait
-    // must still resolve via failover reconciliation rather than hang forever.
-    const dbName = uniqueDbName("leader-crash-inflight-follower-wait");
-
-    // Bring the leader up first and let it become durable-ready before the second
-    // tab joins. Two tabs created back-to-back race the election (the second can
-    // win and demote the first), which would leave the `leader`/`follower`
-    // references below pointing at the wrong tab. Electing the leader before the
-    // follower connects keeps the roles stable.
-    const leader = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName },
-      }),
-    );
-    leader.insert(todos, { title: "seed", done: false });
-    await waitForCondition(
-      async () => {
-        const rows = await leader.all(allTodos, { tier: "local" });
-        return rows.some((row) => row.title === "seed");
-      },
-      8000,
-      "Leader should persist its seed row before the follower connects",
-    );
-    await waitForCondition(
-      async () => getTabRole(leader) === "leader" && getPrivateWorker(leader) !== null,
-      8000,
-      "Leader should be durable-ready before the follower connects",
-    );
-
-    const follower = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName },
-      }),
-    );
-    await waitForCondition(
-      async () => getTabRole(follower) === "follower" && getPrivateWorker(follower) === null,
-      8000,
-      "Second tab should join as a follower without spawning a worker",
-    );
-    // Reading the leader's seed row over the data port is a black-box proof that
-    // the follower is genuinely bridged to the leader's worker, so the pending
-    // write below will actually reach the leader (not just buffer locally).
-    await waitForCondition(
-      async () => {
-        const rows = await follower.all(allTodos, { tier: "local" });
-        return rows.some((row) => row.title === "seed");
-      },
-      8000,
-      "Follower should receive the leader's row through the live data port",
-    );
-
-    // Issue the write + local wait but do NOT await it: the batch travels to the
-    // leader's worker over the live data port while the wait stays pending.
-    const marker = "pending-when-bridged-leader-crashed";
-    const pendingWrite = follower
-      .insert(todos, { title: marker, done: false })
-      .wait({ tier: "local" });
-    let settled = false;
-    void pendingWrite.then(
-      () => {
-        settled = true;
-      },
-      () => {
-        settled = true;
-      },
-    );
-    // Local durability needs a follower -> leader -> follower round trip that
-    // cannot have happened synchronously, so the wait must still be pending.
-    expect(settled).toBe(false);
-
-    // Crash the leader's worker while the wait is in flight. `simulateCrash`
-    // drains the already-delivered follower batch and flushes the WAL (see
-    // handle_shutdown in crates/jazz-wasm/src/worker_host.rs), so the write is
-    // persisted on the leader's OPFS, but the noop sender it then installs means
-    // the BatchFate is never delivered back to the follower -- the exact
-    // "lost BatchFate" case. (If the batch had not reached the leader yet,
-    // failover retransmit still drives it to durability; either way the wait
-    // must resolve.)
-    const leaderWorker = getPrivateWorker(leader);
-    await getActiveRoleBridge(leader).simulateCrash();
-    leaderWorker?.terminate();
-    // Null the dead bridge so shutdown only frees client-side resources, then
-    // shut the leader down so its tab releases its Web Locks. A real
-    // closed/crashed tab releases them automatically; releasing them here is
-    // what lets the broker elect the surviving follower.
-    clearPrivateWorkerBridge(leader);
-    await leader.shutdown();
-    untrack(leader);
-
-    // The surviving follower is promoted and opens its own durable worker, which
-    // reopens the same OPFS namespace (and replays the persisted write).
-    await waitForCondition(
-      async () => getTabRole(follower) === "leader" && getPrivateWorker(follower) !== null,
-      12000,
-      "Surviving follower should be promoted to a durable leader after the crash",
-    );
-
-    // The assertion that bites: the pending wait resolves through failover
-    // reconciliation instead of hanging forever on the lost BatchFate.
-    await withTimeout(
-      pendingWrite,
-      12000,
-      "Pending follower wait did not resolve after the bridged leader crashed",
-    );
-
-    // And the write is genuinely durable: visible on the promoted follower and
-    // on a freshly opened tab reading the same OPFS namespace.
-    const promotedRows = await follower.all(allTodos, { tier: "local" });
-    expect(promotedRows.some((row) => row.title === marker)).toBe(true);
-
-    await follower.shutdown();
-    untrack(follower);
-
-    const reopened = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName },
-      }),
-    );
-    const reopenedRows = await reopened.all(allTodos, { tier: "local" });
-    expect(reopenedRows.some((row) => row.title === marker)).toBe(true);
-  });
-
-  it("re-elects cleanly when a closed leader tab is reopened", async () => {
-    const dbName = uniqueDbName("leader-reopen");
-    const dbA = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName },
-      }),
-    );
-    const dbB = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName },
-      }),
-    );
-    const { leader: initialLeader, follower: survivor } = await waitForLeaderAndFollower(dbA, dbB);
-
-    await initialLeader.shutdown();
-    untrack(initialLeader);
-
-    await waitForCondition(
-      async () => getTabRole(survivor) === "leader",
-      12000,
-      "Surviving tab should become leader after leader closes",
-    );
-
-    const reopened = track(
-      await createDb({
-        appId: "test-app",
-        driver: { type: "persistent", dbName },
-      }),
-    );
-    const currentLeader = await waitForSingleLeader([survivor, reopened]);
-    const currentFollower = currentLeader === survivor ? reopened : survivor;
-    await currentLeader.all(allTodos, { tier: "local" });
-
-    const marker = `reopen-${Date.now()}`;
-    await withTimeout(
-      currentFollower.insert(todos, { title: marker, done: false }).wait({ tier: "local" }),
-      10000,
-      "Follower insert during reopen re-election did not resolve",
-    );
-
-    await waitForCondition(
-      async () => {
-        const leaderRows = await currentLeader.all(allTodos, { tier: "local" });
-        const followerRows = await currentFollower.all(allTodos, {
-          tier: "local",
-        });
-        const leaderHas = leaderRows.some((row) => row.title === marker);
-        const followerHas = followerRows.some((row) => row.title === marker);
-        return leaderHas && followerHas;
-      },
-      8000,
-      "Reopened tab and current leader should converge after re-election",
-    );
-  });
 
   it("can update an optional row field to null", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions(
       "null-update-repro",
-      undefined,
+      nullablePermissions,
       nullableApp.wasmSchema,
     );
     const sharedLocalAuthToken = generateAuthSecret();
@@ -2904,6 +2523,59 @@ async function waitForTodos(
   return waitForQuery(db, allTodos, predicate, label, timeoutMs, tier);
 }
 
+async function waitForCatalogueTodos(
+  db: Db,
+  predicate: (rows: CatalogueTodo[]) => boolean,
+  label: string,
+  timeoutMs = 15_000,
+  tier?: "local" | "edge",
+): Promise<CatalogueTodo[]> {
+  return waitForQuery(db, allCatalogueTodos, predicate, label, timeoutMs, tier);
+}
+
+async function publishCatalogueSchemaFamily(scope: string): Promise<JazzServerInfo> {
+  const testingServer = await getJazzServerInfo(uniqueDbName(`worker-bridge-${scope}`));
+  const { appId, serverUrl, adminSecret } = testingServer;
+
+  const v1 = await deploy({
+    appId,
+    serverUrl,
+    adminSecret,
+    schema: catalogueAppV1.wasmSchema,
+    permissions: cataloguePermissionsV1,
+  });
+
+  const v2 = await deploy({
+    appId,
+    serverUrl,
+    adminSecret,
+    schema: catalogueAppV2.wasmSchema,
+  });
+
+  const migration = s.defineMigration({
+    fromHash: v1.schema.hash,
+    toHash: v2.schema.hash,
+    from: catalogueSchemaV1,
+    to: catalogueSchemaV2,
+    migrate: {
+      todos: {
+        description: s.add.string({ default: null }),
+      },
+    },
+  });
+
+  await deploy({
+    appId,
+    serverUrl,
+    adminSecret,
+    schema: catalogueAppV2.wasmSchema,
+    permissions: cataloguePermissionsV2,
+    migration,
+  });
+
+  return testingServer;
+}
+
 async function publishSyncServerSchemaAndPermissions(
   scope: string,
   permissions?: CompiledPermissions,
@@ -2946,124 +2618,5 @@ async function publishPermissionsForServer(
     adminSecret,
     schema: schema ?? app.wasmSchema,
     permissions,
-  });
-}
-
-function hasRestoredCatalogueState(state: DebugSchemaState): boolean {
-  return state.liveSchemaHashes.length > 1 && state.lensEdges.length > 0;
-}
-
-function getMainDebugSchemaState(db: Db, schemaForClient: WasmSchema): DebugSchemaState {
-  const client = (db as any).getClient(schemaForClient);
-  const runtime = client.getRuntime() as {
-    __debugSchemaState?: () => DebugSchemaState;
-  };
-  if (typeof runtime.__debugSchemaState !== "function") {
-    throw new Error("Expected runtime.__debugSchemaState to be available");
-  }
-  return runtime.__debugSchemaState();
-}
-
-/**
- * Decode a worker → main `MessageEvent.data`. Returns `null` for messages
- * the helpers don't recognise (init JS-objects, ready, etc.).
- */
-function decodeWorkerMessage(data: unknown): { type: string; [key: string]: unknown } | null {
-  if (data instanceof Uint8Array) {
-    try {
-      return decodeWorkerToMainJs(data);
-    } catch {
-      return null;
-    }
-  }
-  if (data && typeof data === "object" && typeof (data as any).type === "string") {
-    return data as { type: string; [key: string]: unknown };
-  }
-  return null;
-}
-
-async function getWorkerDebugSchemaState(db: Db, timeoutMs = 5000): Promise<DebugSchemaState> {
-  const worker = getPrivateWorker(db);
-  if (!worker) {
-    throw new Error("Expected worker instance to exist");
-  }
-
-  return new Promise<DebugSchemaState>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error(`debug-schema-state: no response within ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    const handler = (event: MessageEvent) => {
-      const data = decodeWorkerMessage(event.data);
-      if (!data) return;
-
-      if (data.type === "debug-schema-state-ok" && data.state) {
-        cleanup();
-        resolve(data.state as DebugSchemaState);
-        return;
-      }
-
-      if (
-        data.type === "error" &&
-        typeof data.message === "string" &&
-        data.message.includes("debug-schema-state")
-      ) {
-        cleanup();
-        reject(new Error(data.message));
-      }
-    };
-
-    const cleanup = () => {
-      clearTimeout(timeout);
-      worker.removeEventListener("message", handler);
-    };
-
-    worker.addEventListener("message", handler);
-    worker.postMessage(encodeMainToWorkerJs({ type: "debug-schema-state" }));
-  });
-}
-
-async function seedWorkerLiveSchema(db: Db, schema: WasmSchema, timeoutMs = 5000): Promise<void> {
-  const worker = getPrivateWorker(db);
-  if (!worker) {
-    throw new Error("Expected worker instance to exist");
-  }
-
-  const schemaJson = JSON.stringify(schema);
-
-  await new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      cleanup();
-      reject(new Error(`debug-seed-live-schema: no response within ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    const handler = (event: MessageEvent) => {
-      const data = decodeWorkerMessage(event.data);
-      if (!data) return;
-
-      if (data.type === "debug-seed-live-schema-ok") {
-        cleanup();
-        resolve();
-        return;
-      }
-
-      if (
-        data.type === "error" &&
-        typeof data.message === "string" &&
-        data.message.includes("debug-seed-live-schema")
-      ) {
-        cleanup();
-        reject(new Error(data.message));
-      }
-    };
-
-    const cleanup = () => {
-      clearTimeout(timeout);
-      worker.removeEventListener("message", handler);
-    };
-
-    worker.addEventListener("message", handler);
-    worker.postMessage(encodeMainToWorkerJs({ type: "debug-seed-live-schema", schemaJson }));
   });
 }

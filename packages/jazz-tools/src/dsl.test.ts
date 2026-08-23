@@ -9,6 +9,7 @@ import {
   table,
 } from "./dsl.js";
 import { schemaToWasm } from "./codegen/schema-reader.js";
+import { structuralSchemaHash } from "./dev/schema-utils.js";
 import type { AddOp } from "./schema.js";
 
 describe("enum DSL invariants", () => {
@@ -24,6 +25,58 @@ describe("enum DSL invariants", () => {
 
   it("rejects duplicate variants", () => {
     expect(() => col.enum("todo", "todo")).toThrow("Enum variants must be unique.");
+  });
+
+  it("rejects more scalar variants than the native tag space supports", () => {
+    const variants = Array.from({ length: 257 }, (_, index) => `variant-${index}`);
+    expect(() => (col.enum as (...values: string[]) => unknown)(...variants)).toThrow(
+      "at most 256 variants",
+    );
+  });
+
+  it("preserves scalar enum declaration order in both schema data and identity", () => {
+    const wasmSchemaFor = (variants: [string, ...string[]]) => {
+      resetCollectedState();
+      table("tasks", { status: col.enum(...variants) });
+      return schemaToWasm(getCollectedSchema());
+    };
+
+    const declared = wasmSchemaFor(["complete", "incomplete", "blocked"]);
+    expect(declared.tasks!.columns[0]!.column_type).toEqual({
+      type: "Enum",
+      variants: ["complete", "incomplete", "blocked"],
+    });
+
+    expect(structuralSchemaHash(wasmSchemaFor(["complete", "incomplete"]))).not.toBe(
+      structuralSchemaHash(wasmSchemaFor(["incomplete", "complete"])),
+    );
+  });
+
+  it("builds scalar payload enum cases and rejects unsupported payload shapes", () => {
+    const event = col.enum({
+      message: { text: col.string(), level: col.int().optional() },
+      closed: { code: col.int() },
+    });
+    expect(event._sqlType).toEqual({
+      kind: "ENUM",
+      cases: [
+        {
+          name: "message",
+          fields: [
+            { name: "text", sqlType: "TEXT", nullable: false },
+            { name: "level", sqlType: "INTEGER", nullable: true },
+          ],
+        },
+        { name: "closed", fields: [{ name: "code", sqlType: "INTEGER", nullable: false }] },
+      ],
+    });
+    expect(() => col.enum({ bad: { type: col.string() } })).toThrow("reserved");
+    expect(() => col.enum({ bad: { tags: col.array(col.string()) } })).toThrow(
+      "must be scalar columns",
+    );
+    expect(() => col.enum({ bad: { authorId: col.ref("users") } })).toThrow(
+      "cannot use references",
+    );
   });
 
   describe("add enum", () => {
@@ -113,7 +166,7 @@ describe("schema default DSL", () => {
       { name: "done", sqlType: "BOOLEAN", nullable: false, default: false },
       {
         name: "status",
-        sqlType: { kind: "ENUM", variants: ["done", "todo"] },
+        sqlType: { kind: "ENUM", variants: ["todo", "done"] },
         nullable: false,
         default: "todo",
       },
@@ -314,37 +367,37 @@ describe("ref DSL", () => {
   it("stores references on ref columns", () => {
     resetCollectedState();
     table("todos", {
-      imageId: col.ref("files"),
+      imageId: col.ref("images"),
     });
     const schema = getCollectedSchema();
     expect(schema.tables[0]?.columns[0]).toMatchObject({
       name: "imageId",
-      references: "files",
+      references: "images",
     });
   });
 
   it("stores references on array(ref(...)) columns", () => {
     resetCollectedState();
-    table("files", {
-      partIds: col.array(col.ref("file_parts")),
+    table("bundles", {
+      itemIds: col.array(col.ref("bundle_items")),
     });
     const schema = getCollectedSchema();
     expect(schema.tables[0]?.columns[0]).toMatchObject({
-      name: "partIds",
-      references: "file_parts",
+      name: "itemIds",
+      references: "bundle_items",
     });
   });
 
   it("rejects scalar reference columns not ending in Id or _id", () => {
     resetCollectedState();
-    expect(() => table("todos", { image: col.ref("files") })).toThrow(
+    expect(() => table("todos", { image: col.ref("images") })).toThrow(
       "Invalid reference key 'image'. Rename it to 'image_id' or 'imageId'.",
     );
   });
 
   it("rejects array(ref(...)) columns not ending in Ids or _ids", () => {
     resetCollectedState();
-    expect(() => table("todos", { images: col.array(col.ref("files")) })).toThrow(
+    expect(() => table("todos", { images: col.array(col.ref("images")) })).toThrow(
       "Invalid array reference key 'images'. Rename it to 'images_ids' or 'imagesIds'.",
     );
   });

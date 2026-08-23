@@ -166,7 +166,7 @@ function runGitInit(cwd: string): void {
   try {
     execFileSync("git", ["init"], execOpts);
     execFileSync("git", ["add", "."], execOpts);
-    execFileSync("git", ["commit", "-m", "Initial commit"], execOpts);
+    execFileSync("git", ["commit", "--no-gpg-sign", "-m", "Initial commit"], execOpts);
   } catch (err) {
     const stderr = getStderr(err);
     if (/auto-detect|author identity unknown|please tell me who you are/i.test(stderr)) {

@@ -7,7 +7,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
-import { TEST_PORT, APP_ID } from "./test-constants.js";
+import { TEST_SERVER_URL, APP_ID, testSecret } from "./test-constants.js";
 import { resetProfileGuard } from "../../src/hooks/useMyProfile.js";
 
 // ---------------------------------------------------------------------------
@@ -132,7 +132,6 @@ describe("Chat App E2E", () => {
       dbName?: string;
       serverUrl?: string;
       secret?: string;
-      authSecretStorageKey?: string;
     } = {},
   ): Promise<HTMLDivElement> {
     const el = document.createElement("div");
@@ -448,15 +447,13 @@ describe("Chat App E2E", () => {
   async function setupPrivateChatAccess(): Promise<{
     bobContainer: HTMLDivElement;
   }> {
-    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
-    const aliceAuthKey = crypto.randomUUID();
-    const bobAuthKey = crypto.randomUUID();
+    const serverUrl = TEST_SERVER_URL;
 
     // --- User A: create a private chat with a secret message ----------------
     const aliceContainer = await mountApp({
       appId: APP_ID,
-      authSecretStorageKey: aliceAuthKey,
       serverUrl,
+      secret: await testSecret(`chat-access-user-a-${Date.now()}`),
     });
 
     await waitFor(
@@ -540,8 +537,8 @@ describe("Chat App E2E", () => {
 
     const bobContainer = await mountApp({
       appId: APP_ID,
-      authSecretStorageKey: bobAuthKey,
       serverUrl,
+      secret: await testSecret(`chat-access-user-b-${Date.now()}`),
     });
 
     // Wait for sync to settle so Bob has whatever data the server delivers

@@ -34,6 +34,10 @@ vi.mock("./provider.js", () => ({
   }),
 }));
 
+vi.mock("../subscription-store-internal.js", () => ({
+  getSubscriptionStore: (client: any) => client.manager,
+}));
+
 import { useAll, useAllSuspense } from "./use-all.js";
 
 function makeQuery(marker = "todos") {
@@ -304,14 +308,14 @@ describe("vue/useAll", () => {
     const result = scope.run(() => useAll(makeQuery()))!;
 
     expect(result.error.value).toBeNull();
-    expect(result.loading.value).toBe(true);
+    expect(result.isLoading.value).toBe(true);
 
     capturedOnError!(new Error("network down"));
 
     expect(result.error.value).toBeInstanceOf(Error);
     expect((result.error.value as Error).message).toBe("network down");
     expect(result.data.value).toBeUndefined();
-    expect(result.loading.value).toBe(false);
+    expect(result.isLoading.value).toBe(false);
 
     scope.stop();
   });
@@ -328,7 +332,7 @@ describe("vue/useAll", () => {
     const result = await scope.run(() => useAllSuspense(makeQuery()))!;
 
     expect(result.data.value).toEqual([alice]);
-    expect("loading" in result).toBe(false);
+    expect("isLoading" in result).toBe(false);
 
     scope.stop();
   });

@@ -271,6 +271,8 @@ function sqlTypeToWasmColumnType(sqlType: SqlType): WasmColumnType {
         return { type: "Boolean" };
       case "INTEGER":
         return { type: "Integer" };
+      case "BIGINT":
+        return { type: "BigInt" };
       case "REAL":
         return { type: "Double" };
       case "TIMESTAMP":
@@ -283,6 +285,9 @@ function sqlTypeToWasmColumnType(sqlType: SqlType): WasmColumnType {
   }
 
   if (sqlType.kind === "ENUM") {
+    if (!sqlType.variants) {
+      throw new Error("Payload enum schema lowering is not implemented yet.");
+    }
     return {
       type: "Enum",
       variants: [...sqlType.variants],

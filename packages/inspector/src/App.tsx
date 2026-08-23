@@ -17,7 +17,6 @@ interface StoredConnection {
   appId: string;
   adminSecret: string;
   env: string;
-  branch: string;
   schemaHash: string;
 }
 
@@ -104,7 +103,6 @@ export default function App() {
       appId: formValues.appId,
       adminSecret: formValues.adminSecret,
       env: formValues.env || "dev",
-      branch: formValues.branch || "main",
       schemaHash,
     };
     const existingIndex = connectionStore.connections.findIndex(
@@ -221,7 +219,6 @@ export default function App() {
             appId: activeConnection.appId,
             serverUrl: activeConnection.serverUrl,
             env: activeConnection.env,
-            userBranch: activeConnection.branch,
             adminSecret: activeConnection.adminSecret,
             driver: { type: "memory" },
           }),
@@ -430,7 +427,7 @@ function ConnectionManager({
                   </div>
                   <p className={styles.connectionMeta}>{connection.serverUrl}</p>
                   <p className={styles.connectionMeta}>
-                    {connection.appId} · {connection.env}/{connection.branch}
+                    {connection.appId} · {connection.env}
                   </p>
                 </div>
                 <div className={styles.connectionActions}>
@@ -478,7 +475,6 @@ function storedConnectionToFormValues(
     appId: connection.appId,
     adminSecret: connection.adminSecret,
     env: connection.env,
-    branch: connection.branch,
   };
 }
 
@@ -511,7 +507,6 @@ function migrateStoredConnections(parsed: unknown): StoredConnections | null {
       appId: parsed.appId,
       adminSecret: parsed.adminSecret,
       env: parsed.env || "dev",
-      branch: parsed.branch || "main",
       schemaHash: parsed.schemaHash,
     };
 
@@ -616,8 +611,8 @@ function readFragmentConfig(): DbConfigFormValues | null {
   if (!raw) return null;
 
   const params = new URLSearchParams(raw);
-  const hasKnownPrefillParam = ["name", "serverUrl", "appId", "adminSecret", "env", "branch"].some(
-    (key) => params.has(key),
+  const hasKnownPrefillParam = ["name", "serverUrl", "appId", "adminSecret", "env"].some((key) =>
+    params.has(key),
   );
 
   if (!hasKnownPrefillParam) {
@@ -630,6 +625,5 @@ function readFragmentConfig(): DbConfigFormValues | null {
     appId: (params.get("appId") ?? "").trim(),
     adminSecret: (params.get("adminSecret") ?? "").trim(),
     env: (params.get("env") ?? "dev").trim() || "dev",
-    branch: (params.get("branch") ?? "main").trim() || "main",
   };
 }

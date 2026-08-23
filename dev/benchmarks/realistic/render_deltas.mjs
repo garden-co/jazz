@@ -47,8 +47,8 @@ function parseArgs(argv) {
     fail("Both --base and --head are required.");
   }
 
-  if (!["all", "native", "browser"].includes(out.kind)) {
-    fail("--kind must be one of: all, native, browser");
+  if (!["all", "native", "browser", "jazz-sim"].includes(out.kind)) {
+    fail("--kind must be one of: all, native, browser, jazz-sim");
   }
 
   return out;
@@ -56,7 +56,7 @@ function parseArgs(argv) {
 
 function printHelp() {
   console.log(`Usage:
-  node dev/benchmarks/realistic/render_deltas.mjs --base <dir> --head <dir> [--kind all|native|browser]
+  node dev/benchmarks/realistic/render_deltas.mjs --base <dir> --head <dir> [--kind all|native|browser|jazz-sim]
 
 Description:
   Reads benchmark artifact bundles by discovering manifest.json files under --base and --head,
@@ -152,6 +152,140 @@ function loadBrowserScenarios(manifestDir) {
   }
 }
 
+function readJsonIfExists(file) {
+  if (!fs.existsSync(file)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function walkFiles(rootDir, predicate) {
+  const files = [];
+  const stack = [rootDir];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) continue;
+
+    let entries = [];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(full);
+        continue;
+      }
+      if (entry.isFile() && predicate(full)) files.push(full);
+    }
+  }
+  return files.sort();
+}
+
+function readJsonl(file) {
+  if (!fs.existsSync(file)) return [];
+  return fs
+    .readFileSync(file, "utf8")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .flatMap((line) => {
+      try {
+        const parsed = JSON.parse(line);
+        return parsed && typeof parsed === "object" ? [parsed] : [];
+      } catch {
+        return [];
+      }
+    });
+}
+
+function passedBenchmarkIds(suiteStatus) {
+  const ids = new Set();
+  const benchmarks = Array.isArray(suiteStatus?.benchmarks) ? suiteStatus.benchmarks : [];
+  for (const benchmark of benchmarks) {
+    if (benchmark?.status === "passed" && typeof benchmark.id === "string") {
+      ids.add(benchmark.id);
+    }
+  }
+  return ids;
+}
+
+function jazzSimBenchmarkIdForPath(file, rootDir) {
+  const rel = path.relative(rootDir, file).split(path.sep).join("/");
+  if (!rel.endsWith(".jsonl")) return null;
+  const scenario = path.basename(rel, ".jsonl");
+  if (!scenario) return null;
+  if (rel.startsWith("wire_frames/")) return `jazz-sim:${scenario}:wire_frames`;
+  return `jazz-sim:${scenario}`;
+}
+
+function stableToken(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function jazzSimVariant(record) {
+  const parts = [
+    record.phase,
+    record.api_surface,
+    record.driver,
+    record.durability_tier,
+    record.envelope,
+    record.adversary,
+    record.trace,
+    record.batch_edits != null ? `batch_${record.batch_edits}` : null,
+    record.scope,
+  ].filter((value) => value != null && String(value).trim().length > 0);
+  return parts.map(stableToken).filter(Boolean).join("/") || "result";
+}
+
+const JAZZ_SIM_METRIC_EXCLUDE = new Set([
+  "batch_edits",
+  "commits",
+  "edits",
+  "seed",
+  "git_dirty",
+  "final_doc_matched",
+]);
+
+function collectJazzSimMetrics(manifestDir, manifest) {
+  const map = new Map();
+  const suiteStatus = readJsonIfExists(path.join(manifestDir, "suite_status.json")) ?? {};
+  const passedIds = passedBenchmarkIds(suiteStatus);
+  const manifestJsonlFiles = (manifest.files ?? [])
+    .map((entry) => (typeof entry?.path === "string" ? path.join(manifestDir, entry.path) : null))
+    .filter((file) => file && file.endsWith(".jsonl"));
+  const jsonlFiles =
+    manifestJsonlFiles.length > 0
+      ? manifestJsonlFiles.sort()
+      : walkFiles(manifestDir, (file) => file.endsWith(".jsonl"));
+
+  for (const file of jsonlFiles) {
+    const benchmarkId = jazzSimBenchmarkIdForPath(file, manifestDir);
+    if (passedIds.size > 0 && benchmarkId && !passedIds.has(benchmarkId)) continue;
+
+    for (const record of readJsonl(file)) {
+      if (typeof record.scenario !== "string" || typeof record.phase !== "string") continue;
+      const baseKey = `jazz-sim/${record.scenario}/${jazzSimVariant(record)}`;
+      for (const [metric, value] of Object.entries(record).sort()) {
+        if (JAZZ_SIM_METRIC_EXCLUDE.has(metric)) continue;
+        const number = Number(value);
+        if (Number.isFinite(number)) map.set(`${baseKey}/${metric}`, number);
+      }
+    }
+  }
+
+  return map;
+}
+
 function collectMetrics(suiteKind, scenarios) {
   const map = new Map();
 
@@ -182,9 +316,9 @@ function fmtNumber(value) {
 
 function classifyTrend(metric, delta) {
   if (!Number.isFinite(delta) || delta === 0) return "flat";
-  const higherIsBetter = metric.includes("throughput_ops_per_sec");
+  const higherIsBetter = metric.includes("throughput_ops_per_sec") || metric.includes("_per_sec");
   if (higherIsBetter) return delta > 0 ? "better" : "worse";
-  const lowerIsBetter = metric.includes("_ms");
+  const lowerIsBetter = metric.includes("_ms") || metric.includes("_us");
   if (lowerIsBetter) return delta < 0 ? "better" : "worse";
   return delta > 0 ? "up" : "down";
 }
@@ -225,6 +359,7 @@ function main() {
 
   const runNative = args.kind === "all" || args.kind === "native";
   const runBrowser = args.kind === "all" || args.kind === "browser";
+  const runJazzSim = args.kind === "all" || args.kind === "jazz-sim";
 
   console.log(`# Realistic Benchmark Delta Report`);
   console.log(`base dir: ${path.resolve(args.base)}`);
@@ -251,6 +386,18 @@ function main() {
       const baseMetrics = collectMetrics("browser", loadBrowserScenarios(baseBrowser.dir));
       const headMetrics = collectMetrics("browser", loadBrowserScenarios(headBrowser.dir));
       renderSuite("Browser", baseBrowser, headBrowser, baseMetrics, headMetrics);
+    }
+  }
+
+  if (runJazzSim) {
+    const baseJazzSim = selectLatestByKind(baseManifests, "realistic-bench-jazz-sim");
+    const headJazzSim = selectLatestByKind(headManifests, "realistic-bench-jazz-sim");
+    if (!baseJazzSim || !headJazzSim) {
+      console.log(`\n## Jazz Sim\nMissing jazz-sim manifests in base/head inputs.`);
+    } else {
+      const baseMetrics = collectJazzSimMetrics(baseJazzSim.dir, baseJazzSim.data);
+      const headMetrics = collectJazzSimMetrics(headJazzSim.dir, headJazzSim.data);
+      renderSuite("Jazz Sim", baseJazzSim, headJazzSim, baseMetrics, headMetrics);
     }
   }
 }

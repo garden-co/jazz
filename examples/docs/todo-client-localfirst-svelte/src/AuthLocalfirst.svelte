@@ -2,7 +2,6 @@
 <script lang="ts">
   import {
     LocalFirstAuth,
-    createJazzClient,
     JazzSvelteProvider,
   } from 'jazz-tools/svelte';
   import type { Snippet } from 'svelte';
@@ -11,15 +10,15 @@
 
   const auth = new LocalFirstAuth();
 
-  let client = $derived(
+  let config = $derived(
     !auth.isLoading && auth.secret
-      ? createJazzClient({ appId: 'my-app', secret: auth.secret })
+      ? { appId: 'my-app', secret: auth.secret }
       : null,
   );
 </script>
 
-{#if client}
-  <JazzSvelteProvider {client}>
+{#if config}
+  <JazzSvelteProvider {config}>
     {@render children()}
   </JazzSvelteProvider>
 {/if}

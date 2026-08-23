@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2Icon } from "lucide-react";
 import { useDb, useAll, useSession } from "jazz-tools/react";
 import { ChatMessage } from "@/components/chat/ChatMessage";
@@ -6,6 +6,7 @@ import { ChatHeader } from "@/components/chat-view/ChatHeader";
 import { MessageComposer } from "@/components/composer/MessageComposer";
 import { Button } from "@/components/ui/button";
 import { useMyProfile } from "@/hooks/useMyProfile";
+import { fireAndReport, waitForWrite } from "@/lib/db-write";
 import { app } from "../../../schema.js";
 import { type DurabilityTier } from "jazz-tools";
 
@@ -21,21 +22,29 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   const session = useSession();
   const userId = session?.user_id ?? null;
   const myProfile = useMyProfile();
-  const sharedWriteOptions: { tier: DurabilityTier } = {
-    tier: db.getConfig().serverUrl ? "edge" : "local",
-  };
+  const sharedWriteOptions: { tier: DurabilityTier } = useMemo(
+    () => ({ tier: db.getConfig().serverUrl ? "edge" : "local" }),
+    [db],
+  );
 
   const [showNLastMessages, setShowNLastMessages] = useState(INITIAL_MESSAGES_TO_SHOW);
 
-  const chatRowsResult = useAll(app.chats.where({ id: chatId }));
+  // Wait for the authority-tier snapshot before treating an empty result as an
+  // access denial. A local empty snapshot can merely mean the chat has not
+  // synced to this client yet.
+  const chatRowsResult = useAll(app.chats.where({ id: chatId }), sharedWriteOptions);
   const chatRows = chatRowsResult.data ?? [];
+  const chat = chatRows[0];
   const chatKnown = chatRows.length > 0;
 
   // Auto-join: if the user can see the chat but isn't a member yet, insert a
   // chatMember row so they appear in the member list and can send messages.
-  const { data: myMemberships = [] } = useAll(
-    userId !== null ? app.chatMembers.where({ chatId, userId }) : undefined,
+  const myMembershipsResult = useAll(
+    app.chatMembers.where({ chatId, userId: userId ?? "__none__" }),
+    sharedWriteOptions,
   );
+  const myMemberships = myMembershipsResult.data ?? [];
+  const membershipKnown = myMembershipsResult.data !== undefined;
   const isMember = myMemberships.length > 0;
   // autoJoinPending: true while we've started the insert but haven't yet
   // received server acknowledgement.  Used to suppress the isMember shortcut
@@ -51,6 +60,12 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   const [membershipReady, setMembershipReady] = useState(false);
 
   useEffect(() => {
+    autoJoined.current = false;
+    autoJoinPending.current = false;
+    setMembershipReady(false);
+  }, [chatId]);
+
+  useEffect(() => {
     // If the local store already shows membership AND we haven't just inserted
     // it ourselves (i.e. this is a pre-existing membership), unlock the
     // composer immediately — no insert needed.
@@ -59,12 +74,14 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
       return;
     }
 
-    if (!userId || !chatKnown || isMember || autoJoined.current) return;
+    const canRequestMembership = chatKnown && chat?.isPublic;
+
+    if (!userId || !canRequestMembership || !membershipKnown || isMember || autoJoined.current)
+      return;
     autoJoined.current = true;
     autoJoinPending.current = true;
 
-    db.insert(app.chatMembers, { chatId, userId })
-      .wait(sharedWriteOptions)
+    waitForWrite(db.insert(app.chatMembers, { chatId, userId }), sharedWriteOptions)
       .then(() => {
         autoJoinPending.current = false;
         setMembershipReady(true);
@@ -74,13 +91,16 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
         autoJoined.current = false;
         autoJoinPending.current = false;
       });
-  }, [userId, chatKnown, isMember, chatId, db, sharedWriteOptions]);
-
-  useEffect(() => {
-    autoJoined.current = false;
-    autoJoinPending.current = false;
-    setMembershipReady(false);
-  }, [chatId]);
+  }, [
+    userId,
+    chatKnown,
+    chat?.isPublic,
+    membershipKnown,
+    isMember,
+    chatId,
+    db,
+    sharedWriteOptions,
+  ]);
 
   const observer = useRef<IntersectionObserver | null>(null);
 
@@ -100,9 +120,11 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
     }
   }, []);
 
+  const canRenderChat = chatKnown || membershipKnown;
+  const canReadChatContents = chatKnown || membershipReady;
   const { data: messages = [] } = useAll(
     app.messages
-      .where({ chatId })
+      .where({ chatId: canReadChatContents ? chatId : "00000000-0000-0000-0000-000000000000" })
       .include({ sender: true })
       .orderBy("createdAt", "desc")
       .limit(showNLastMessages + 1),
@@ -111,10 +133,29 @@ export const ChatView = ({ chatId }: ChatViewProps) => {
   const hasMore = messages.length > showNLastMessages;
 
   const handleDelete = (messageId: string) => {
-    db.delete(app.messages, messageId);
+    fireAndReport(db.delete(app.messages, messageId), "failed to delete message");
   };
 
   if (!chatRowsResult.isLoading && !chatKnown && userId) {
+    return (
+      <div className="flex-1 flex items-center justify-center p-8 text-center text-muted-foreground">
+        <p>You don't have permission to access this chat.</p>
+      </div>
+    );
+  }
+
+  if (!canRenderChat) {
+    return (
+      <div className="flex-1 grid place-items-center p-8 text-center text-muted-foreground italic">
+        <div className="flex gap-2">
+          <Loader2Icon className="animate-spin" />
+          Loading chat...
+        </div>
+      </div>
+    );
+  }
+
+  if (chat && !chat.isPublic && membershipKnown && !isMember) {
     return (
       <div className="flex-1 flex items-center justify-center p-8 text-center text-muted-foreground">
         <p>You don't have permission to access this chat.</p>

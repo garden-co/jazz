@@ -26,7 +26,6 @@
         </div>
       </div>
       <div class="control-bar__row">
-        <BandLogo v-if="firstBandId" :bandId="firstBandId" />
         <button v-if="canEdit" class="btn-auth" @click="switchView()">View as public</button>
         <span v-if="!canEdit" class="public-label">Public view</span>
         <button v-if="!canEdit" class="btn-auth" @click="switchView()">Log in</button>
@@ -129,7 +128,6 @@ import TourPoster from "./components/TourPoster.vue";
 import StopCreateForm from "./components/StopCreateForm.vue";
 import AddStopPopover from "./components/AddStopPopover.vue";
 import TourCalendar from "./components/TourCalendar.vue";
-import BandLogo from "./components/BandLogo.vue";
 import GeolocateFab from "./components/GeolocateFab.vue";
 
 const db = useDb();

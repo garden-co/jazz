@@ -1,7 +1,24 @@
-import type { Db } from "jazz-tools";
+import type { QueryBuilder, QueryOptions, SubscriptionDelta } from "jazz-tools/client";
 import { app } from "../schema.js";
 
 type Todo = { id: string; title: string; done: boolean };
+type MaybePromise<T> = T | Promise<T>;
+type MutationResult<T> = {
+  value: T;
+  wait(options: { tier: "local" | "edge" | "global" }): Promise<T>;
+};
+
+export interface TodoDb {
+  insert<T, Init>(table: unknown, data: Init): MaybePromise<MutationResult<T>>;
+  update(table: unknown, id: string, data: Partial<unknown>): MaybePromise<MutationResult<void>>;
+  delete(table: unknown, id: string): MaybePromise<MutationResult<void>>;
+}
+
+export type TodoSubscribeAll = <T extends { id: string }>(
+  query: QueryBuilder<T>,
+  callback: (delta: SubscriptionDelta<T>) => void,
+  options?: QueryOptions,
+) => () => void;
 
 function renderRow(todo: Todo): HTMLLIElement {
   const li = document.createElement("li");
@@ -27,7 +44,11 @@ function renderRow(todo: Todo): HTMLLIElement {
   return li;
 }
 
-export function mountTodoWidget(parent: HTMLElement, db: Db): () => void {
+export function mountTodoWidget(
+  parent: HTMLElement,
+  db: TodoDb,
+  subscribeAll: TodoSubscribeAll,
+): () => void {
   parent.innerHTML = `
     <section class="todo-widget">
       <h2>Your todos</h2>
@@ -35,19 +56,63 @@ export function mountTodoWidget(parent: HTMLElement, db: Db): () => void {
         <input type="text" name="title" placeholder="Add a task" aria-label="New todo" />
         <button type="submit">Add</button>
       </form>
+      <p role="status" aria-live="polite">Ready to save locally</p>
       <ul></ul>
     </section>
   `;
   const form = parent.querySelector<HTMLFormElement>("form")!;
   const input = form.querySelector<HTMLInputElement>("input[name='title']")!;
   const list = parent.querySelector<HTMLUListElement>("ul")!;
+  const localSaveStatus = parent.querySelector<HTMLElement>("[role='status']")!;
+  let latestSaveGeneration = 0;
+  let pendingLocalSaveCount = 0;
+  let latestLocalSaveState: "saving" | "saved" | "failed" | "sync-failed" = "saved";
 
-  form.addEventListener("submit", (event) => {
+  function renderLocalSaveState() {
+    localSaveStatus.textContent =
+      latestLocalSaveState === "failed"
+        ? "Save failed locally"
+        : latestLocalSaveState === "sync-failed"
+          ? "Saved locally; sync failed"
+          : pendingLocalSaveCount > 0
+            ? "Saving locally…"
+            : "Saved locally";
+  }
+
+  function renderTodos(todos: Todo[]) {
+    list.replaceChildren(...todos.map(renderRow));
+  }
+
+  form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const title = input.value.trim();
     if (!title) return;
-    db.insert(app.todos, { title, done: false });
-    form.reset();
+    const generation = ++latestSaveGeneration;
+    pendingLocalSaveCount += 1;
+    latestLocalSaveState = "saving";
+    renderLocalSaveState();
+    let savedLocally = false;
+    try {
+      const write = await db.insert(app.todos, { title, done: false });
+      await write.wait({ tier: "local" });
+      savedLocally = true;
+      if (generation === latestSaveGeneration) latestLocalSaveState = "saved";
+      pendingLocalSaveCount -= 1;
+      renderLocalSaveState();
+      await write.wait({ tier: "edge" });
+      if (generation === latestSaveGeneration) form.reset();
+    } catch {
+      if (generation === latestSaveGeneration) {
+        latestLocalSaveState = savedLocally ? "sync-failed" : "failed";
+        renderLocalSaveState();
+      }
+    } finally {
+      if (!savedLocally) {
+        pendingLocalSaveCount -= 1;
+        if (generation === latestSaveGeneration) latestLocalSaveState = "failed";
+        renderLocalSaveState();
+      }
+    }
   });
 
   list.addEventListener("click", (event) => {
@@ -56,7 +121,7 @@ export function mountTodoWidget(parent: HTMLElement, db: Db): () => void {
     if (!li) return;
     const id = li.dataset.id!;
     if (target.dataset.action === "delete") {
-      db.delete(app.todos, id);
+      void Promise.resolve(db.delete(app.todos, id)).then((write) => write.wait({ tier: "edge" }));
     }
   });
 
@@ -65,10 +130,12 @@ export function mountTodoWidget(parent: HTMLElement, db: Db): () => void {
     if (target.dataset.action !== "toggle") return;
     const li = target.closest<HTMLLIElement>("li[data-id]");
     if (!li) return;
-    db.update(app.todos, li.dataset.id!, { done: target.checked });
+    void Promise.resolve(db.update(app.todos, li.dataset.id!, { done: target.checked })).then(
+      (write) => write.wait({ tier: "edge" }),
+    );
   });
 
-  return db.subscribeAll(app.todos, (delta) => {
+  return subscribeAll(app.todos, (delta) => {
     // The simplest possible approach: rebuild the whole list on every tick.
     // It's fine here — the list is small and there's no DOM state to preserve
     // (no inline editing, no focused inputs inside rows).
@@ -81,6 +148,6 @@ export function mountTodoWidget(parent: HTMLElement, db: Db): () => void {
     //       { kind: Removed, id, index }         // row gone at `index`
     // Iterate delta.delta to apply per-row DOM patches instead of a full
     // swap, e.g. to keep focus, preserve animations, or avoid reflow cost.
-    list.replaceChildren(...delta.all.map(renderRow));
+    renderTodos(delta.all ?? []);
   });
 }

@@ -13,7 +13,7 @@ import {
 } from "../runtime/client-registry.js";
 import type { Session } from "../runtime/context.js";
 import type { DbConfig } from "../runtime/db.js";
-import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
+import { trackPromise } from "../subscriptions-orchestrator.js";
 
 type CoreJazzDb = {
   getAuthState(): AuthState;
@@ -23,7 +23,6 @@ type CoreJazzDb = {
 
 type CoreJazzClient = {
   db: CoreJazzDb;
-  manager: SubscriptionsOrchestrator;
   session?: Session | null;
   shutdown: () => Promise<void>;
 };
@@ -68,8 +67,8 @@ function acquireClient<TClient extends CoreJazzClient>(
   return registryAcquireClient<TClient>(configKey, () => createJazzClient(config), holder);
 }
 
-function releaseClient(configKey: string, holder: object): void {
-  void registryReleaseClient(configKey, holder);
+function releaseClient(configKey: string, holder: object): Promise<void> {
+  return registryReleaseClient(configKey, holder);
 }
 
 // Refresh latch keyed on the client, not the component. The client is a
@@ -205,24 +204,35 @@ export function JazzProvider({
   // initializer and useEffect don't double-count the same provider.
   const holder = useRef({}).current;
 
-  const configKey = JSON.stringify(config);
+  // Keep the framework-level lease distinct from createJazzClient's own shared
+  // client lease. Both use the generic registry; sharing an unqualified key
+  // makes provider teardown recursively release itself instead of the runtime.
+  const configKey = `react:${JSON.stringify(config)}`;
 
   const [clientPromise, setClientPromise] = useState(() => {
     return acquireClient<CoreJazzClient>(configKey, config, createJazzClient, holder);
   });
+  const activeConfigKey = useRef(configKey);
 
   useEffect(() => {
-    const clientPromise = acquireClient<CoreJazzClient>(
-      configKey,
-      config,
-      createJazzClient,
-      holder,
-    );
+    let cancelled = false;
+    const previousConfigKey = activeConfigKey.current;
+    activeConfigKey.current = configKey;
+    const clientPromise =
+      previousConfigKey === configKey
+        ? acquireClient<CoreJazzClient>(configKey, config, createJazzClient, holder)
+        : releaseClient(previousConfigKey, holder)
+            .then(() => acquireClient<CoreJazzClient>(configKey, config, createJazzClient, holder))
+            .then((client) => {
+              if (cancelled) void releaseClient(configKey, holder);
+              return client;
+            });
 
     setClientPromise(clientPromise);
 
     return () => {
-      releaseClient(configKey, holder);
+      cancelled = true;
+      void releaseClient(configKey, holder);
     };
   }, [configKey, createJazzClient, holder]);
 

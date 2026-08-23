@@ -20,8 +20,8 @@ function findFreePort(): Promise<number> {
 
 export default defineConfig(async () => {
   const { publicJwk, mintJwt } = await createTestKeySet();
-  const adminJwt = await mintJwt("admin", "admin-test-user");
-  const memberJwt = await mintJwt("member", "member-test-user");
+  const adminJwt = await mintJwt("admin", "user_admin_test");
+  const memberJwt = await mintJwt("member", "user_member_test");
 
   const jwksPort = await findFreePort();
   const jazzPort = await findFreePort();

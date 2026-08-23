@@ -46,15 +46,18 @@ function requireEnv(value: string | undefined, name: string): string {
 
 function AppInner() {
   const secret = use(BrowserAuthSecretStore.getOrCreateSecret());
-  const config: DbConfig = {
+  const config: DbConfig & { asyncSubscriptionsOnly: boolean } = {
     appId,
     env: import.meta.env.DEV ? "dev" : "prod",
-    userBranch: "main",
     devMode: import.meta.env.DEV,
     secret,
     serverUrl,
     telemetryCollectorUrl,
     logLevel: telemetryCollectorUrl ? "debug" : undefined,
+    // The generator batches writes with db.transaction, which only the
+    // in-process sync client exposes (the worker-backed async facade has no
+    // transaction support).
+    asyncSubscriptionsOnly: false,
   };
 
   return (

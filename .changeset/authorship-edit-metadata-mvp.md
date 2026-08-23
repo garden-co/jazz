@@ -2,7 +2,6 @@
 "jazz-tools": patch
 "jazz-wasm": patch
 "jazz-napi": patch
-"jazz-rn": patch
 ---
 
 Add authorship-based edit metadata for row writes across the runtime and bindings.

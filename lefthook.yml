@@ -1,15 +1,32 @@
 pre-commit:
   commands:
+    no-sensitive-data:
+      # Patterns live in jazz-private (cleartext there instead of decodable
+      # base64 here). Contributors without that checkout are not blocked, but
+      # the skip is announced: a silent pass is indistinguishable from a clean
+      # scan, and this hook is the only thing keeping customer-identifying
+      # strings out of this public repo.
+      run: >-
+        sh -c 'GATE="$HOME/jazz-private/dev/gates/no-sensitive-data.sh";
+        if [ -x "$GATE" ]; then "$GATE";
+        else echo "WARNING - sensitive-data guard NOT RUN. $GATE is missing, so commits are not scanned for customer-identifying strings. Clone jazz-private to enable it." >&2; exit 0; fi'
     rustfmt:
       glob: "*.rs"
       run: cargo fmt
       stage_fixed: true
     clippy:
-      glob: "*.rs"
-      run: cargo clippy --workspace -- -D warnings
+      glob:
+        - "*.rs"
+        - "Cargo.toml"
+        - "**/Cargo.toml"
+      # `{staged_files}` is the exact staged-file list already computed by
+      # Lefthook. The native shell wrapper invokes Cargo directly, avoiding
+      # Node child_process spawns that restricted shells may reject.
+      run: sh dev/scripts/clippy-staged.sh {staged_files}
     oxfmt:
       glob: "*.{ts,tsx,js,jsx,md,mdx,json,html}"
-      run: pnpm format {staged_files}
+      exclude: "{dev/benchmarks/SMOKE_LEDGER.md,crates/jazz-napi/index.d.ts}"
+      run: pnpm exec oxfmt --ignore-path .oxfmtignore {staged_files}
       stage_fixed: true
     oxlint:
       glob: "*.{ts,tsx,js,jsx}"
@@ -30,3 +47,7 @@ pre-commit:
     docs-site-types:
       glob: "docs/**"
       run: pnpm --filter docs types:check
+    docs-index:
+      glob: "docs/**"
+      run: pnpm --filter docs exec tsx ../packages/jazz-tools/src/mcp/build-index.ts
+      stage_fixed: true

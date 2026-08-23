@@ -1,7 +1,7 @@
 ---
 title: Framework Patterns
 description: Side-by-side reference for React/Expo, Vue, Svelte, and Solid Jazz APIs.
-reviewedAt: "3384730e1"
+reviewedAt: "b29b48d1a"
 ---
 
 Jazz provides framework-specific bindings for React/Expo, Vue, Svelte, and Solid. This page
@@ -13,7 +13,7 @@ full details.
 
 | Concept            | React / Expo                     | Vue                               | Svelte                          | Solid                         |
 | ------------------ | -------------------------------- | --------------------------------- | ------------------------------- | ----------------------------- |
-| Provider           | `<JazzProvider config={config}>` | `<JazzProvider :client="client">` | `<JazzSvelteProvider {client}>` | `<JazzProvider client={...}>` |
+| Provider           | `<JazzProvider config={config}>` | `<JazzProvider :config="config">` | `<JazzSvelteProvider {config}>` | `<JazzProvider config={...}>` |
 | Query subscription | `useAll(query)`                  | `useAll(query)`                   | `new QuerySubscription(query)`  | `useAll(() => ({ query }))`   |
 | DB access          | `useDb()`                        | `useDb()`                         | `getDb()`                       | `useDb()`                     |
 | Session            | `useSession()`                   | `useSession()`                    | `getSession()`                  | `useSession()`                |
@@ -22,6 +22,11 @@ full details.
 ## Provider setup
 
 Wrap your app in a provider to make the database available to every component.
+Svelte callers that create their own client can use `JazzSvelteClientProvider`
+instead; it accepts a client or client promise and leaves shutdown to the caller.
+
+In Solid, use `JazzClientProvider` instead when you already own a client created with
+`createSolidJazzClient`. `JazzClientProvider` does not shut down caller-owned clients.
 
 <Tabs groupId="jazz-framework" items={["React", "Vue", "Svelte", "Solid"]} persist updateAnchor>
   <Tab value="React">
@@ -45,6 +50,9 @@ Wrap your app in a provider to make the database available to every component.
     </include>
   </Tab>
 </Tabs>
+
+Vue's `JazzProvider` creates and shuts down its client. If you already have a client, pass it
+to `JazzClientProvider` instead; you remain responsible for shutting that client down.
 
 ## Query subscriptions
 
@@ -74,7 +82,7 @@ Subscribe to query results reactively. See [Reading Data](/docs/reading/queries)
 </Tabs>
 
 The `?? []` guard handles the `undefined` (not yet connected) case. See
-[Reading Data: The undefined loading state](/docs/reading/queries#the-undefined-loading-state) for patterns that depend on this signal.
+[Reading data: the loading state](/docs/reading/queries#the-loading-state) for patterns that depend on this signal.
 
 In Vue, Svelte, and Solid, the binding reconciles updates into the existing reactive array in place, so only fields that actually changed trigger re-renders. See [Fine-grained updates](/docs/reading/queries#fine-grained-updates) for the full behaviour.
 
