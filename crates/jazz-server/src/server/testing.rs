@@ -155,7 +155,9 @@ impl Default for TestJwtOptions {
     fn default() -> Self {
         Self {
             expires_in: Duration::from_secs(3600),
-            issuer: None,
+            // Test helpers mint ordinary external sessions unless a test
+            // explicitly exercises a missing or reserved issuer.
+            issuer: Some("urn:jazz:test".to_owned()),
         }
     }
 }
@@ -435,12 +437,10 @@ impl JazzServer {
     ) -> AppContext {
         self.require_built_in_jwt_helpers();
         let user_id = user_id.as_ref();
-        // WebSocket sessions validate principals as UUIDs. Preserve concise,
-        // symbolic identities in test call sites by deriving a stable wire
-        // principal for them; callers already using UUIDs retain that value.
-        let user_id = Uuid::parse_str(user_id)
-            .map(|uuid| uuid.to_string())
-            .unwrap_or_else(|_| Uuid::new_v5(&Uuid::NAMESPACE_URL, user_id.as_bytes()).to_string());
+        // Subjects are opaque strings. Keep the test caller's subject intact
+        // so this helper exercises the same issuer-scoped identity boundary as
+        // production external sessions.
+        let user_id = user_id.to_owned();
 
         let client_data_dir = OwnedTempDir::new("jazz-tools-testing-client");
         let data_dir = client_data_dir.path().to_path_buf();

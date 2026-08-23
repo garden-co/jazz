@@ -1174,7 +1174,7 @@ mod tests {
             assert!(
                 resolve_verified_jwt_session(VerifiedJwt {
                     subject: subject.to_owned(),
-                    issuer: None,
+                    issuer: Some("https://issuer.jazz.test".to_owned()),
                     claims: serde_json::json!({}),
                     exp: None,
                 })
@@ -1185,7 +1185,7 @@ mod tests {
         let subject = " WorkOS_User_01J8Y3K4M5N6P7Q8R9S0T1U2V3 ";
         let session = resolve_verified_jwt_session(VerifiedJwt {
             subject: subject.to_owned(),
-            issuer: None,
+            issuer: Some("https://issuer.jazz.test".to_owned()),
             claims: serde_json::json!({}),
             exp: None,
         })
@@ -1199,7 +1199,7 @@ mod tests {
         let jwks = make_hs256_jwks(TEST_JWKS_KID, TEST_JWKS_SECRET);
         let claims = JwtClaims {
             sub: "user-123".to_string(),
-            iss: None,
+            iss: Some("https://issuer.jazz.test".to_owned()),
             claims: serde_json::json!({"role": "admin"}),
             exp: None,
             iat: None,
@@ -1308,7 +1308,7 @@ mod tests {
 
         let claims = JwtClaims {
             sub: "jwt-user".to_string(),
-            iss: None,
+            iss: Some("https://issuer.jazz.test".to_owned()),
             claims: serde_json::json!({}),
             exp: None,
             iat: None,
@@ -1386,7 +1386,7 @@ mod tests {
         let mut headers = HeaderMap::new();
 
         // Add both backend and JWT auth - backend should win
-        let session = Session::new("urn:jazz:test", "backend-user");
+        let session = Session::new("https://issuer.jazz.test", "backend-user");
         let session_json = serde_json::to_string(&session).unwrap();
         let session_b64 = base64::engine::general_purpose::STANDARD.encode(&session_json);
 
