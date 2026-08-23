@@ -28,8 +28,64 @@ fn exclusive_transactions_lower_oversized_scalars_before_publication() {
         .unwrap();
     assert_eq!(
         result[0].cell(&doctest_support::schema().tables[0], "title"),
-        Some(Value::String(title))
+        Some(Value::String(title.clone()))
     );
+
+    let update = db.exclusive_tx().unwrap();
+    assert_eq!(
+        update.read("todos", row).unwrap().unwrap().get("title"),
+        Some(&Value::String(title.clone())),
+        "public transaction reads must not expose the physical descriptor"
+    );
+    assert_eq!(
+        update.all("todos").unwrap()[0].cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String(title.clone()))
+    );
+    update
+        .update(
+            "todos",
+            row,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        )
+        .unwrap();
+    update.commit().unwrap();
+    let after_update = block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .current_physical_cell_in_schema(db.schema_version_id, "todos", row, "title")
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    assert_eq!(physical, after_update, "unchanged locators must be stable");
+
+    let mergeable = db.mergeable_tx().unwrap();
+    assert_eq!(
+        mergeable.read("todos", row).unwrap().unwrap().get("title"),
+        Some(&Value::String(title.clone()))
+    );
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    assert_eq!(
+        mergeable.all_prepared(&prepared).unwrap()[0]
+            .cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String(title.clone()))
+    );
+
+    let forged = db.exclusive_tx().unwrap();
+    forged
+        .insert_with_id(
+            "todos",
+            RowUuid::from_bytes([0x4f; 16]),
+            BTreeMap::from([
+                ("title".to_owned(), physical),
+                ("done".to_owned(), Value::Bool(false)),
+            ]),
+        )
+        .unwrap();
+    let error = block_on(forged.commit()).unwrap_err();
+    assert!(error.message.contains("unverified large-value descriptor"));
 }
 
 #[test]

@@ -2278,14 +2278,7 @@ where
 
     /// Read one row with this transaction's pending writes overlaid.
     async fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
-        self.db()
-            .node
-            .node
-            .lock()
-            .await
-            .tx_read_in_schema(self.tx_id(), self.db().schema_version_id, table, row)
-            .await
-            .map_err(Into::into)
+        self.db().transaction_read(self.tx_id(), table, row).await
     }
 
     /// Read a prepared query with this transaction's pending writes overlaid.
@@ -2483,19 +2476,14 @@ where
 
     /// Read one row inside the exclusive transaction.
     async fn read(&self, table: &str, row: RowUuid) -> Result<Option<RowCells>, Error> {
-        self.db().exclusive_read(self.tx_id(), table, row).await
+        self.db().transaction_read(self.tx_id(), table, row).await
     }
 
     /// Read all current rows in a table inside the exclusive transaction.
     async fn all(&self, table: &str) -> Result<Vec<CurrentRow>, Error> {
         self.db()
-            .node
-            .node
-            .lock()
+            .transaction_current_rows(self.tx_id(), table)
             .await
-            .tx_current_rows(self.tx_id(), table)
-            .await
-            .map_err(Into::into)
     }
 
     /// Read a prepared query inside the exclusive transaction.
@@ -2558,9 +2546,9 @@ where
 
     /// Stage an update; omitted fields keep the transaction-local value.
     async fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
-        let mut cells = self.read(table, row).await?.unwrap_or_default();
-        cells.extend(patch);
-        self.insert_with_id(table, row, cells).await
+        self.db()
+            .stage_exclusive_update(self.tx_id(), table, row, patch)
+            .await
     }
 
     /// Stage a soft delete.

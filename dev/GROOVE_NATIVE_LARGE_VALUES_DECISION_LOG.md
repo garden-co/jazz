@@ -52,6 +52,13 @@ claim from the descriptor, exactly as authority ingress does. Transaction kind
 does not create a second large-value admission mechanism or put claim identity
 on `CommitUnit`.
 
+Exclusive overlays retain physical descriptors internally so an update to a
+different column preserves exact locators. Their public read API hydrates those
+cells to logical primitives, and commit accepts a descriptor-bearing cell only
+when it exactly matches the transaction's projected base snapshot. Thus the
+optimization neither exposes descriptors nor creates a handcrafted-descriptor
+publication path.
+
 ## 2026-08-23 — Nullable scalar representation
 
 Nullability remains a schema-level wrapper around the ordinary scalar. A

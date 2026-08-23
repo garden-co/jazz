@@ -1115,6 +1115,60 @@ database.finish_persistence(persisted)?;
             .await?)
     }
 
+    /// Materialize physical indirect scalar arms before returning cells across
+    /// a public transaction read boundary.
+    pub(crate) async fn hydrate_large_value_cells(
+        &self,
+        cells: &mut BTreeMap<String, Value>,
+    ) -> Result<(), Error> {
+        self.hydrate_large_value_values(cells.values_mut()).await
+    }
+
+    pub(crate) async fn hydrate_current_rows(
+        &self,
+        rows: &mut [CurrentRow],
+    ) -> Result<(), Error> {
+        for row in rows {
+            let descriptor = row.record.descriptor().clone();
+            let mut values = row.record.to_values()?;
+            self.hydrate_large_value_values(values.iter_mut()).await?;
+            row.record = std::sync::Arc::new(OwnedRecord::new(
+                descriptor.create(&values)?,
+                descriptor,
+            ));
+        }
+        Ok(())
+    }
+
+    async fn hydrate_large_value_values<'a>(
+        &self,
+        values: impl IntoIterator<Item = &'a mut Value>,
+    ) -> Result<(), Error> {
+        for value in values {
+            let target = match value {
+                Value::Nullable(Some(inner)) => inner.as_mut(),
+                value => value,
+            };
+            let Value::Large(value_ref) = target else {
+                continue;
+            };
+            let bytes = self
+                .database
+                .read_large_value_range(value_ref, 0..value_ref.byte_length)
+                .await?;
+            let logical = match value_ref.kind {
+                groove::large_values::LargeValueKind::Bytes => Value::Bytes(bytes),
+                groove::large_values::LargeValueKind::String
+                | groove::large_values::LargeValueKind::Json => Value::String(
+                    String::from_utf8(bytes)
+                        .map_err(|_| Error::InvalidStoredValue("large text is not valid UTF-8"))?,
+                ),
+            };
+            *target = logical;
+        }
+        Ok(())
+    }
+
     async fn rebuild_database_slot(&mut self) -> Result<(), Error> {
         // Reopening the database refreshes Groove's physical table catalogue.
         // Parking is in-memory delivery state, not derivable from storage, so a

@@ -715,6 +715,28 @@ where
                     "exclusive transaction cannot contain update patches",
                 ));
             };
+            let snapshot_row = self
+                .snapshot_row_in_schema(
+                    write.schema_version,
+                    &write.table,
+                    write.row_uuid,
+                    &provenance_snapshot,
+                )
+                .await?;
+            let inherited = table_schema
+                .columns
+                .iter()
+                .zip(snapshot_row.content_cells.unwrap_or_default())
+                .filter_map(|(column, value)| value.map(|value| (column.name.clone(), value)))
+                .collect::<BTreeMap<_, _>>();
+            for (column, value) in &cells {
+                if value_contains_indirect_descriptor(value) && inherited.get(column) != Some(value)
+                {
+                    return Err(Error::InvalidMergeableCommit(
+                        "exclusive transaction contains an unverified large-value descriptor",
+                    ));
+                }
+            }
             for value in cells.values_mut() {
                 self.prepare_and_stage_large_scalar(value).await?;
             }
