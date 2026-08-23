@@ -3784,7 +3784,8 @@ mod dynamic_schema_view_tests {
     }
     /// A short-lived WASM schema attachment must not abandon its owner's open
     /// batch when the JavaScript wrapper is collected.
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn attached_tx_drop_preserves_owner_batch() {
         let source = SchemaBuilder::new()
             .table(

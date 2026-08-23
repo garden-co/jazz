@@ -845,11 +845,17 @@ fn exclusive_tx_ref_survives_handle_reconstruction_until_explicit_commit() {
 #[test]
 fn identity_bound_exclusive_transaction_rejects_cross_identity_reads_and_commits_as_bound_author() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
-    let alice = AuthorId::from_bytes([0xa1; 16]);
+    let alice = AuthorId::from_bytes([0xc1; 16]);
     let bob = AuthorId::from_bytes([0xb2; 16]);
     let open = OpenTransactionId::new();
     let row = row(0xa1);
-    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    assert_ne!(alice, db.identity.author);
+    let prepared = db
+        .prepare_query(
+            &db.table("todos")
+                .select(["title", "$createdBy", "$updatedBy"]),
+        )
+        .unwrap();
 
     db.begin_exclusive_for_identity(open, alice).unwrap();
     db.exclusive_tx_ref(open)
@@ -857,13 +863,14 @@ fn identity_bound_exclusive_transaction_rejects_cross_identity_reads_and_commits
         .unwrap();
 
     // Planted positive: the bound identity can read the transaction overlay.
-    assert_eq!(
-        db.exclusive_tx_ref(open)
-            .all_prepared_for_identity(&prepared, alice)
-            .unwrap()
-            .len(),
-        1
-    );
+    let staged = db
+        .exclusive_tx_ref(open)
+        .all_prepared_for_identity(&prepared, alice)
+        .unwrap();
+    assert_eq!(staged.len(), 1);
+    let staged_provenance = staged[0].provenance().unwrap().unwrap();
+    assert_eq!(staged_provenance.created_by, alice);
+    assert_eq!(staged_provenance.updated_by, alice);
     assert!(matches!(
         doctest_support::block_on(
             db.exclusive_tx_ref(open)
@@ -873,10 +880,36 @@ fn identity_bound_exclusive_transaction_rejects_cross_identity_reads_and_commits
     ));
 
     db.commit_exclusive_handle(open).unwrap();
-    assert_eq!(
-        prepared_one(&db, &db.table("todos")).unwrap().row_uuid(),
-        row
+    let committed = prepared_one(
+        &db,
+        &db.table("todos")
+            .select(["title", "$createdBy", "$updatedBy"]),
+    )
+    .unwrap();
+    assert_eq!(committed.row_uuid(), row);
+    let committed_provenance = committed.provenance().unwrap().unwrap();
+    assert_eq!(committed_provenance.created_by, alice);
+    assert_eq!(committed_provenance.updated_by, alice);
+}
+
+/// Mergeable serving reads retain their existing per-call identity semantics.
+#[test]
+fn mergeable_transaction_identity_reads_are_not_forced_to_begin_author() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let alice = AuthorId::from_bytes([0xa3; 16]);
+    let bob = AuthorId::from_bytes([0xb3; 16]);
+    let open = OpenTransactionId::new();
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+
+    db.begin_mergeable_for_identity(open, alice).unwrap();
+    assert!(
+        doctest_support::block_on(
+            db.mergeable_tx_ref(open)
+                .all_prepared_for_identity(&prepared, bob),
+        )
+        .is_ok()
     );
+    db.abandon_transaction_handle(open).unwrap();
 }
 
 #[test]
