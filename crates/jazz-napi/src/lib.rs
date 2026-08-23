@@ -121,6 +121,16 @@ enum NapiDbInnerStorage {
     Persistent(Rc<CoreDb<CoreRocksDbStorage>>),
 }
 
+impl NapiDbInnerStorage {
+    fn shares_runtime_with(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Memory(left), Self::Memory(right)) => Rc::ptr_eq(left, right),
+            (Self::Persistent(left), Self::Persistent(right)) => Rc::ptr_eq(left, right),
+            _ => false,
+        }
+    }
+}
+
 enum NapiWrite {
     Memory {
         db: Rc<CoreDb<CoreMemoryStorage>>,
@@ -1168,12 +1178,17 @@ impl NapiDb {
         )]
         opts: Option<JsonValue>,
     ) -> napi::Result<Uint8Array> {
-        let opts = core_read_opts_from_json(opts)?;
-        let open_tx = tx.open_tx()?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        if !db.shares_runtime_with(&tx.db) {
+            return Err(napi::Error::from_reason(
+                "transaction belongs to a different database runtime",
+            ));
+        }
+        let opts = core_read_opts_from_json(opts)?;
+        let open_tx = tx.open_tx()?;
         let rows = match (db, tx.kind) {
             (NapiDbInnerStorage::Memory(db), NapiTxKind::Mergeable) => core_block_on(
                 db.mergeable_tx_ref(open_tx)
@@ -4092,7 +4107,7 @@ mod tests {
             )))
             .unwrap(),
         );
-        let view = Rc::new(core_block_on(owner.register_schema_view(schema)).unwrap());
+        let view = Rc::new(core_block_on(owner.register_schema_view(schema.clone())).unwrap());
         let batch = CoreOpenBatchId::new();
         core_block_on(owner.begin_mergeable(batch)).unwrap();
         drop(Tx {
@@ -4153,8 +4168,57 @@ mod tests {
             binding.all_in_transaction(&query, &tx, None).is_ok(),
             "planted positive: the bound capability reads successfully"
         );
+
+        let other_owner = Rc::new(
+            core_block_on(CoreDb::open(CoreDbConfig::new(
+                schema.clone(),
+                CoreMemoryStorage::new(&refs),
+                CoreDbIdentity {
+                    node: CoreNodeUuid::from_bytes([0x46; 16]),
+                    author: CoreAuthorId::from_bytes([0xa6; 16]),
+                },
+            )))
+            .unwrap(),
+        );
+        let other_binding = NapiDb {
+            inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::clone(
+                &other_owner,
+            ))))),
+            owns_runtime: false,
+        };
+        other_binding
+            .begin_transaction(
+                bound.to_string(),
+                "exclusive".to_owned(),
+                Some(Uint8Array::new(alice.0.as_bytes().to_vec())),
+            )
+            .unwrap();
+        core_block_on(other_owner.exclusive_tx_ref(bound).insert_with_id(
+            "items",
+            CoreRowUuid::from_bytes([3; 16]),
+            BTreeMap::from([(
+                "label".to_owned(),
+                CoreValue::String("receiver-secret".to_owned()),
+            )]),
+        ))
+        .unwrap();
+        let other_query = PreparedQuery {
+            inner: other_owner
+                .prepare_query(&other_owner.table("items"))
+                .unwrap(),
+        };
+        assert!(
+            matches!(
+                other_binding.all_in_transaction(&other_query, &tx, None),
+                Err(error) if error.reason.contains("different database runtime")
+            ),
+            "a foreign Tx with the same open id must not access receiver rows"
+        );
         binding
             .commit_transaction(bound.to_string(), Some("exclusive".to_owned()))
+            .unwrap();
+        other_binding
+            .rollback_transaction(bound.to_string())
             .unwrap();
     }
 }
