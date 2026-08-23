@@ -25,6 +25,7 @@ members = [
   # gates until they are rebuilt around the new server boundary.
   # "examples/todo-server-rs",
   # "examples/docs/todo-server-rs",
+  "examples/big-label/benchmarks",
   "examples/benchmarks/smoke",
   "dev/benchmarks/storage/bench-core",
 ]
