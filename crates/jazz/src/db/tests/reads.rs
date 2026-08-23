@@ -224,7 +224,7 @@ fn authoritative_global_bound_read_uses_the_declared_index() {
         storage: rocks_storage(&schema),
         identity: DbIdentity {
             node: NodeUuid::from_bytes([0xa5; 16]),
-            author: AuthorId::SYSTEM,
+            author: AuthorSubject::SYSTEM,
         },
         id_source: Some(Box::new(SeededRowIdSource::new(0xa5))),
     }))
@@ -236,7 +236,7 @@ fn authoritative_global_bound_read_uses_the_declared_index() {
         db.seed_settled_mergeable_for_bootstrap(
             "documents",
             id,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             BTreeMap::from([
                 ("team".to_owned(), Value::Uuid(team.0)),
                 ("active".to_owned(), Value::Bool(true)),
@@ -264,7 +264,7 @@ fn authoritative_global_bound_read_uses_the_declared_index() {
             include_deleted: false,
             ..ReadOpts::default()
         },
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
     ))
     .expect("authoritative Global bound read");
     let metrics = db.node.node.borrow().take_storage_read_metrics();
