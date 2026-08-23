@@ -17,6 +17,7 @@ export type Fixture = {
     organizationId: string;
     artistId: string;
     title: string;
+    releaseDate: string;
     status: string;
   }[];
 };
@@ -74,6 +75,7 @@ export function createFixture(profile: FixtureProfile = "small", seed = 17): Fix
         organizationId,
         artistId,
         title: `Release ${o + 1}-${a + 1}`,
+        releaseDate: `2026-${String((a % 12) + 1).padStart(2, "0")}-01T00:00:00.000Z`,
         status: a % 4 === 0 ? "planning" : "scheduled",
       });
     }
