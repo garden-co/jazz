@@ -660,6 +660,45 @@ fn parameterized_one_shot_index_read_does_not_fall_back_to_cached_full_scan() {
     );
 }
 
+// Internal receipt: the public include-deleted result is one row; the counted
+// physical index entry proves that the proved source cap reached storage.
+#[test]
+fn include_deleted_global_index_limit_bounds_the_physical_index_source() {
+    let schema = access_path_schema();
+    let (_writer_dir, mut writer) = open_node_with_schema(node(0xd1), schema.clone());
+    let (_core_dir, mut core) = open_node_with_schema(node(0xd2), schema);
+    let owner = user(0xd3);
+    for (row_uuid, tx_time) in [(row(0xd6), 10), (row(0xd4), 11), (row(0xd5), 12)] {
+        commit_mergeable_global(
+            &mut writer,
+            &mut core,
+            MergeableCommit::new("docs", row_uuid, tx_time)
+                .cells(access_path_doc_cells(owner, "open", "body")),
+        );
+    }
+    let shape = Query::from("docs")
+        .filter(eq(col("owner"), lit(Value::Uuid(owner.0))))
+        .limit(1)
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    core.reset_storage_read_metrics();
+    let rows = core
+        .query_rows_including_deleted_in_authorization_mode(
+            &shape,
+            &binding,
+            DurabilityTier::Global,
+            None,
+            AuthorId::SYSTEM,
+            QueryAuthorizationMode::TrustedServing,
+        )
+        .unwrap();
+    let metrics = core.take_storage_read_metrics();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(metrics.global_current_indexes.reads, 1);
+    assert_eq!(metrics.global_current_rows.reads, 1);
+}
+
 #[test]
 fn physical_index_backfills_existing_rows_and_read_cost_ignores_schema_variant_count() {
     // This is intentionally an internal receipt: schema evolution and query

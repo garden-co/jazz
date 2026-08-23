@@ -1401,6 +1401,12 @@ fn branch_scan(
         None => StaticScanSpec::Prefix(vec![branch]),
         Some(StaticScanSpec::Point(values)) => StaticScanSpec::Point(prepend(values)),
         Some(StaticScanSpec::Prefix(values)) => StaticScanSpec::Prefix(prepend(values)),
+        Some(StaticScanSpec::PrefixLimit { prefix, max_items }) => {
+            StaticScanSpec::PrefixLimit {
+                prefix: prepend(prefix),
+                max_items,
+            }
+        }
         Some(StaticScanSpec::Range { start, end }) => StaticScanSpec::Range {
             start: prepend(start),
             end: prepend(end),

@@ -1,19 +1,151 @@
 //! In-memory implementation of the ordered key/value storage trait.
 
 use std::collections::BTreeMap;
+use std::ops::Bound;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ColumnFamilyName, Error, OrderedKvStorage, OwnedWriteOperation, ReadyStorageCursor,
-    ReopenableStorage, StorageFuture, StorageScan, Value, apply_storage_delta, key_codec,
+    ColumnFamilyName, Error, KeyValue, OrderedKvStorage, OwnedWriteOperation, ReopenableStorage,
+    ScanBounds, ScanDirection, ScanRequest, StorageFuture, StorageScan, Value, apply_storage_delta,
+    key_codec,
 };
 
 const MEMORY_STORAGE_SNAPSHOT_VERSION: u16 = 1;
 
 type ColumnFamilies = BTreeMap<String, BTreeMap<Vec<u8>, Vec<u8>>>;
 type SharedColumnFamilies = Arc<Mutex<ColumnFamilies>>;
+
+/// The in-memory backend keeps only one cursor batch cloned at a time.  This
+/// matters even for test storage: transaction overlays may need to read past
+/// their logical limit for staged deletes, but still carry a finite physical
+/// budget. A snapshotting memory scan would defeat that bounded-traversal
+/// contract.
+struct MemoryStorageCursor {
+    storage: MemoryStorage,
+    cf: String,
+    bounds: ScanBounds,
+    direction: ScanDirection,
+    remaining: Option<usize>,
+    last_key: Option<Vec<u8>>,
+    done: bool,
+}
+
+impl MemoryStorageCursor {
+    fn batch_limit(&self) -> Option<usize> {
+        self.remaining.map_or(Some(256), |remaining| {
+            (remaining > 0).then_some(remaining.min(256))
+        })
+    }
+
+    fn next_values(&mut self, limit: usize) -> Result<Vec<KeyValue>, Error> {
+        let last_key = self.last_key.clone();
+        let values = self.storage.with_cf(&self.cf, |values| {
+            let entries: Vec<KeyValue> = match (&self.bounds, self.direction, &last_key) {
+                (ScanBounds::Prefix(prefix), ScanDirection::Forward, None) => values
+                    .range(prefix.clone()..)
+                    .take_while(|(key, _)| key.starts_with(prefix))
+                    .take(limit)
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+                (ScanBounds::Prefix(prefix), ScanDirection::Forward, Some(last_key)) => values
+                    .range((Bound::Excluded(last_key.clone()), Bound::Unbounded))
+                    .take_while(|(key, _)| key.starts_with(prefix))
+                    .take(limit)
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+                (ScanBounds::Prefix(prefix), ScanDirection::Reverse, None) => {
+                    let start = Bound::Included(prefix.clone());
+                    let end = key_codec::prefix_upper_bound(prefix)
+                        .map(Bound::Excluded)
+                        .unwrap_or(Bound::Unbounded);
+                    values
+                        .range((start, end))
+                        .rev()
+                        .take(limit)
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect()
+                }
+                (ScanBounds::Prefix(prefix), ScanDirection::Reverse, Some(last_key)) => values
+                    .range((
+                        Bound::Included(prefix.clone()),
+                        Bound::Excluded(last_key.clone()),
+                    ))
+                    .rev()
+                    .take_while(|(key, _)| key.starts_with(prefix))
+                    .take(limit)
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+                (ScanBounds::Range { start, end }, ScanDirection::Forward, None) => values
+                    .range(start.clone()..end.clone())
+                    .take(limit)
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+                (ScanBounds::Range { end, .. }, ScanDirection::Forward, Some(last_key)) => values
+                    .range((
+                        Bound::Excluded(last_key.clone()),
+                        Bound::Excluded(end.clone()),
+                    ))
+                    .take(limit)
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+                (ScanBounds::Range { start, end }, ScanDirection::Reverse, None) => values
+                    .range(start.clone()..end.clone())
+                    .rev()
+                    .take(limit)
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+                (ScanBounds::Range { start, .. }, ScanDirection::Reverse, Some(last_key)) => values
+                    .range((
+                        Bound::Included(start.clone()),
+                        Bound::Excluded(last_key.clone()),
+                    ))
+                    .rev()
+                    .take(limit)
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+            };
+            entries
+        })?;
+        #[cfg(test)]
+        self.storage
+            .scan_entries_materialized
+            .fetch_add(values.len(), Ordering::Relaxed);
+        if let Some((last_key, _)) = values.last() {
+            self.last_key = Some(last_key.clone());
+        } else {
+            self.done = true;
+        }
+        Ok(values)
+    }
+}
+
+impl super::StorageCursor for MemoryStorageCursor {
+    fn next_batch(
+        &mut self,
+    ) -> super::StorageFuture<'_, Result<Option<Vec<(Vec<u8>, Vec<u8>)>>, Error>> {
+        Box::pin(async move {
+            if self.done {
+                return Ok(None);
+            }
+            let Some(limit) = self.batch_limit() else {
+                self.done = true;
+                return Ok(None);
+            };
+            let values = self.next_values(limit)?;
+            if values.is_empty() {
+                return Ok(None);
+            }
+            if let Some(remaining) = &mut self.remaining {
+                *remaining -= values.len();
+            }
+            Ok(Some(values))
+        })
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum MemoryStorageSnapshotError {
@@ -39,6 +171,8 @@ struct MemoryStorageSnapshot {
 #[derive(Clone, Default)]
 pub struct MemoryStorage {
     inner: SharedColumnFamilies,
+    #[cfg(test)]
+    scan_entries_materialized: Arc<AtomicUsize>,
 }
 
 impl MemoryStorage {
@@ -66,6 +200,11 @@ impl MemoryStorage {
             .get(cf)
             .ok_or_else(|| Error::ColumnFamilyNotFound(cf.to_owned()))?;
         Ok(f(values))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn take_scan_entries_materialized(&self) -> usize {
+        self.scan_entries_materialized.swap(0, Ordering::Relaxed)
     }
 
     /// Export the full in-memory contents as compact versioned bytes.
@@ -136,37 +275,26 @@ impl OrderedKvStorage for MemoryStorage {
         })
     }
 
-    fn scan_range(
-        &self,
-        cf: String,
-        start: Vec<u8>,
-        end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+    fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         Box::pin(async move {
-            let values = self.with_cf(&cf, |values| {
-                values
-                    .range(start..end)
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect()
-            })?;
-            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
-        })
-    }
-
-    fn scan_prefix(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        Box::pin(async move {
-            let values = self.with_cf(&cf, |values| {
-                values
-                    .range(prefix.clone()..)
-                    .take_while(|(key, _)| key.starts_with(&prefix))
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect()
-            })?;
-            Ok(Box::new(ReadyStorageCursor::new(values)) as StorageScan<'_>)
+            let ScanRequest {
+                cf,
+                bounds,
+                direction,
+                max_items,
+            } = request;
+            // Validate eagerly so even a zero-item request reports a missing
+            // column family, while the cursor itself remains lazy.
+            self.with_cf(&cf, |_| ())?;
+            Ok(Box::new(MemoryStorageCursor {
+                storage: self.clone(),
+                cf,
+                bounds,
+                direction,
+                remaining: max_items,
+                last_key: None,
+                done: false,
+            }) as StorageScan<'_>)
         })
     }
 
@@ -292,6 +420,67 @@ impl ReopenableStorage for MemoryStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::collect_scan;
+
+    #[futures_test::test]
+    async fn lazy_reverse_prefix_scan_keeps_its_prefix_across_batches() {
+        let storage = MemoryStorage::new(&["rows"]);
+        for index in 0..300 {
+            let key = format!("a/{index:03}").into_bytes();
+            storage.set("rows".into(), key.clone(), key).await.unwrap();
+        }
+        // This key is lexicographically between the prefix's first key and
+        // its later keys, so a reverse continuation that only bounds by the
+        // previous key would leak it on its second batch.
+        storage
+            .set(
+                "rows".into(),
+                b"a0-not-in-prefix".to_vec(),
+                b"wrong".to_vec(),
+            )
+            .await
+            .unwrap();
+
+        let rows = collect_scan(
+            storage
+                .scan(ScanRequest::prefix("rows".into(), b"a/".to_vec()).reversed())
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 300);
+        assert_eq!(rows.first().unwrap().0, b"a/299");
+        assert_eq!(rows.last().unwrap().0, b"a/000");
+        assert!(rows.iter().all(|(key, _)| key.starts_with(b"a/")));
+    }
+
+    #[futures_test::test]
+    async fn lazy_scan_observes_a_later_committed_value_in_its_next_batch() {
+        let storage = MemoryStorage::new(&["rows"]);
+        for index in 0..257 {
+            let key = format!("row:{index:03}").into_bytes();
+            storage
+                .set("rows".into(), key.clone(), b"before".to_vec())
+                .await
+                .unwrap();
+        }
+
+        let mut scan = storage
+            .scan(ScanRequest::prefix("rows".into(), b"row:".to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(scan.next_batch().await.unwrap().unwrap().len(), 256);
+        storage
+            .set("rows".into(), b"row:256".to_vec(), b"after".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            scan.next_batch().await.unwrap(),
+            Some(vec![(b"row:256".to_vec(), b"after".to_vec())]),
+            "MemoryStorage is deliberately live between lazy cursor batches"
+        );
+    }
 
     #[futures_test::test]
     async fn snapshot_round_trip_preserves_column_families_and_values() {

@@ -37,7 +37,7 @@ use crate::records::{
     RawProjectionScratch, RecordDescriptor, Value, ValueType,
 };
 use crate::schema::{DatabaseSchema, IndexSchema, TableSchema};
-use crate::storage::{OrderedKvStorage, RecordStore};
+use crate::storage::{OrderedKvStorage, RecordStore, ScanBounds, ScanDirection, ScanRequest};
 use thiserror::Error;
 
 mod aggregate;

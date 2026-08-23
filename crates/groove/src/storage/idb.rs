@@ -8,7 +8,8 @@ use idb_tree::{IdbTree, Options, PageStore, WriteOperation};
 
 use super::{
     ColumnFamilyName, Error, Key, OrderedKvStorage, OwnedWriteOperation, ReadyStorageCursor,
-    StorageFuture, StorageScan, Value, apply_storage_delta, key_codec,
+    ScanBounds, ScanDirection, ScanRequest, StorageFuture, StorageScan, Value, apply_storage_delta,
+    key_codec,
 };
 
 #[derive(Clone)]
@@ -113,43 +114,34 @@ where
         })
     }
 
-    fn scan_range(
-        &self,
-        cf: String,
-        start: Vec<u8>,
-        end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+    fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
         Box::pin(async move {
-            let start = self.encoded_key(&cf, &start)?;
-            let end = self.encoded_key(&cf, &end)?;
-            let rows = Self::decode_rows(self.tree.range(&start, &end).await?)?;
-            Ok(Box::new(ReadyStorageCursor::new(rows)) as StorageScan<'_>)
-        })
-    }
-
-    fn scan_prefix(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        Box::pin(async move {
-            let start = self.encoded_key(&cf, &prefix)?;
-            let end = key_codec::prefix_upper_bound(&start).unwrap_or_else(|| vec![0xff]);
-            let rows = Self::decode_rows(self.tree.range(&start, &end).await?)?;
-            Ok(Box::new(ReadyStorageCursor::new(rows)) as StorageScan<'_>)
-        })
-    }
-
-    fn scan_prefix_reverse(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        Box::pin(async move {
-            let start = self.encoded_key(&cf, &prefix)?;
-            let end = key_codec::prefix_upper_bound(&start).unwrap_or_else(|| vec![0xff]);
-            let rows = Self::decode_rows(self.tree.range_reverse(&start, &end, usize::MAX).await?)?;
-            Ok(Box::new(ReadyStorageCursor::new(rows)) as StorageScan<'_>)
+            let ScanRequest {
+                cf,
+                bounds,
+                direction,
+                max_items,
+            } = request;
+            if max_items == Some(0) {
+                self.encoded_key(&cf, &[])?;
+                return Ok(Box::new(ReadyStorageCursor::new(Vec::new())) as StorageScan<'_>);
+            }
+            let (start, end) = match bounds {
+                ScanBounds::Range { start, end } => {
+                    (self.encoded_key(&cf, &start)?, self.encoded_key(&cf, &end)?)
+                }
+                ScanBounds::Prefix(prefix) => {
+                    let start = self.encoded_key(&cf, &prefix)?;
+                    let end = key_codec::prefix_upper_bound(&start).unwrap_or_else(|| vec![0xff]);
+                    (start, end)
+                }
+            };
+            let limit = max_items.unwrap_or(usize::MAX);
+            let rows = match direction {
+                ScanDirection::Forward => self.tree.range_limit(&start, &end, limit).await?,
+                ScanDirection::Reverse => self.tree.range_reverse(&start, &end, limit).await?,
+            };
+            Ok(Box::new(ReadyStorageCursor::new(Self::decode_rows(rows)?)) as StorageScan<'_>)
         })
     }
 
@@ -264,6 +256,49 @@ mod tests {
             )
             .await;
             super::super::conformance::reopen_preserves_data_and_adds_families(storage).await;
+        });
+    }
+
+    #[test]
+    fn bounded_scan_stops_after_requested_prefix_entries_in_both_directions() {
+        futures::executor::block_on(async {
+            let storage = IdbStorage::open(MemoryPageStore::default(), &["records"])
+                .await
+                .unwrap();
+            for key in [b"a/1", b"a/2", b"a/3", b"b/1"] {
+                storage
+                    .set("records".into(), key.to_vec(), key.to_vec())
+                    .await
+                    .unwrap();
+            }
+            let forward = super::super::collect_scan(
+                storage
+                    .scan(ScanRequest::prefix("records".into(), b"a/".to_vec()).with_max_items(2))
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(forward.len(), 2);
+            assert_eq!(forward[0].0, b"a/1");
+            assert_eq!(forward[1].0, b"a/2");
+
+            let reverse = super::super::collect_scan(
+                storage
+                    .scan(
+                        ScanRequest::prefix("records".into(), b"a/".to_vec())
+                            .reversed()
+                            .with_max_items(2),
+                    )
+                    .await
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                reverse.iter().map(|entry| &entry.0).collect::<Vec<_>>(),
+                vec![b"a/3", b"a/2"]
+            );
         });
     }
 }

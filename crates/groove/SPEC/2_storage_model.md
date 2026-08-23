@@ -11,8 +11,9 @@ rules for tables and indices. Chapters 3–7 build on these guarantees.
 Invariant digest:
 
 - `INV-OK-14`: Base-table writes and durable index/view writes MUST be committed through one storage-atomic batch; if the final batch fails after runtime state advances, the Database...
-- `INV-STORAGE-1`: `OrderedKvStorage` implementations MUST return scan results in lexicographic key order and `scan_range`/`range` MUST include keys `>= start` and exclude keys `>= end`.
-- `INV-STORAGE-2`: `OrderedKvStorage::scan_prefix`/`prefix` MUST return exactly keys beginning with the supplied byte prefix in lexicographic key order, including prefixes whose finite upper bound cannot be computed.
+- `INV-STORAGE-1`: `OrderedKvStorage::scan(ScanRequest)` MUST return range results in the requested lexicographic direction and include keys `>= start` while excluding keys `>= end`.
+- `INV-STORAGE-2`: A prefix `ScanRequest` MUST return exactly keys beginning with the supplied byte prefix in the requested lexicographic direction, including prefixes whose finite upper bound cannot be computed.
+- `INV-STORAGE-29`: An explicit ordered scan request's finite item bound MUST cap the complete cursor result in the requested direction; adapters MUST stop reading beyond that bound rather than treating it as a caller-side collection hint.
 - `INV-STORAGE-4`: `write_many` MUST apply all `Set`/`Delete` operations atomically at the storage-operation level, and a missing column family in the operation list MUST leave earlier valid operations unapplied.
 - `INV-STORAGE-5`: `ReopenableStorage::reopen` MUST preserve existing data while adding newly requested column families.
 - `INV-STORAGE-6`: Table records MUST be stored as values in the table column family named by `TableSchema::name`, keyed by the encoded primary key derived from the row record.
@@ -89,9 +90,11 @@ choice, not part of the portable storage contract.
 The storage layer supplies exactly the ordered byte map groove needs. It is
 partitioned into named column families and exposes a small set of operations
 (`OrderedKvStorage` in the reference implementation): point `get`, `set`, and
-`delete`; forward range scans over `start..end`; prefix scans in forward and
-reverse order; a last-with-prefix helper; and atomic batch writes through
-`write_many`.
+`delete`; explicit ordered scan requests over a prefix or half-open range in
+either direction; a last-with-prefix helper; and atomic batch writes through
+`write_many`. A request may carry a finite item bound. It is a backend contract,
+not a caller-side collection hint: the complete cursor yields no more than that
+many rows and an adapter stops traversal/hydration at that boundary.
 
 Higher layers do not treat that byte map as their public storage abstraction.
 They work through **record stores**, which are typed storage units described by
@@ -103,7 +106,7 @@ implementation; at the specification level, higher layers should reason in
 terms of record stores.
 
 The only ordering property groove requires from the backing store is
-lexicographic byte order. Scans return keys in that order, and `scan_range`
+lexicographic byte order. A range `ScanRequest` returns keys in that order and
 includes keys `>= start` while excluding keys `>= end` (`INV-STORAGE-1`). Batch
 writes are atomic: `write_many` applies every operation in the batch or none of
 them; if any operation is invalid, no operation partially applies
@@ -113,10 +116,24 @@ commit. Backends must classify an uncertain acknowledgement conservatively as
 possibly committed; only a definitely-uncommitted outcome permits callers to
 roll back in-process state or retry the same batch.
 
-_Further invariants._ `INV-STORAGE-2` — `scan_prefix` returns exactly the keys
-with the given byte prefix, in order, including prefixes with no finite upper
-bound. `INV-STORAGE-5` (prov) — `ReopenableStorage::reopen` preserves existing
+_Further invariants._ `INV-STORAGE-2` — a prefix scan request returns exactly the keys
+with the given byte prefix, in its requested direction, including prefixes with no finite upper
+bound. `INV-STORAGE-29` — an explicit scan limit applies across all cursor
+batches and stops physical traversal rather than merely truncating a materialized
+result. `INV-STORAGE-5` (prov) — `ReopenableStorage::reopen` preserves existing
 data while adding newly requested families.
+
+An ordered cursor is **not** a snapshot-isolation primitive. A backend may
+observe committed changes between batches; in particular, `MemoryStorage`
+reacquires its map for every lazy cursor batch to keep memory proportional to
+the active batch rather than the full scan. Code that requires a stable cut
+must obtain it at a higher layer rather than infer it from one scan cursor.
+
+A staged transaction overlay applies its logical limit after merging staged
+writes with base entries. To avoid under-filling after staged deletes, it may
+give its base scan a finite physical budget of the logical limit plus one entry
+for each in-range staged key whose final operation is `Delete`; it MUST NOT
+clear the bound and let a backend materialize its ordinary unbounded batch.
 
 **Implementation-status note.** The shared storage conformance tests exercise
 ordering, prefix upper-bound handling, and failed-batch atomicity on the host
@@ -358,8 +375,8 @@ The former hybrid columnar-base proposal is rejected and is not part of Groove's
   The draft avoids the problem by excluding the two, which costs compaction
   scheduling freedom under sustained read load. Relaxing it needs a source of
   reader isolation, and today there is none to draw on: `OrderedKvStorage`
-  offers `get`/`scan_range`/`scan_prefix`/`write_many` with no snapshot or
-  read-version, so a scan observes whatever is committed while it runs.
+  offers `get`/`scan(ScanRequest)`/`write_many` with no snapshot or
+  read-version, so a scan cursor observes whatever is committed while it runs.
   Keeping superseded material addressable and changing the storage contract
   are both possible answers. Neither should be pursued before the exclusion is
   measured and shown to bind.

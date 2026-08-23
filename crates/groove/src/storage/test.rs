@@ -8,7 +8,8 @@ use std::task::{Poll, Waker};
 
 use super::{
     Error, KeyValue, MemoryStorage, OrderedKvStorage, OwnedWriteOperation, ReadyStorageCursor,
-    ReopenableStorage, StorageCursor, StorageFuture, StorageScan, Value,
+    ReopenableStorage, ScanBounds, ScanDirection, ScanRequest, StorageCursor, StorageFuture,
+    StorageScan, Value,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -380,15 +381,22 @@ struct TestStorageCursor<'a> {
     resident: Rc<RefCell<ResidentState>>,
     region: ResidentRegion,
     rows: Vec<KeyValue>,
+    remaining: Option<usize>,
 }
 
 impl StorageCursor for TestStorageCursor<'_> {
     fn next_batch(&mut self) -> StorageFuture<'_, Result<Option<Vec<KeyValue>>, Error>> {
         Box::pin(async move {
+            if matches!(self.remaining, Some(0)) {
+                return Ok(None);
+            }
             self.control.before(TestStorageOperation::ScanBatch).await?;
             let batch = self.inner.next_batch().await?;
             if let Some(batch) = &batch {
                 self.rows.extend(batch.iter().cloned());
+                if let Some(remaining) = &mut self.remaining {
+                    *remaining = remaining.saturating_sub(batch.len());
+                }
             } else {
                 self.resident
                     .borrow_mut()
@@ -478,85 +486,41 @@ where
         })
     }
 
-    fn scan_range(
-        &self,
-        cf: String,
-        start: Vec<u8>,
-        end: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        let region = ResidentRegion::Range {
-            cf: cf.clone(),
-            start: start.clone(),
-            end: end.clone(),
+    fn scan(&self, request: ScanRequest) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
+        let remaining = request.max_items;
+        let region = match &request.bounds {
+            ScanBounds::Range { start, end } => ResidentRegion::Range {
+                cf: request.cf.clone(),
+                start: start.clone(),
+                end: end.clone(),
+            },
+            ScanBounds::Prefix(prefix) => ResidentRegion::Prefix {
+                cf: request.cf.clone(),
+                prefix: prefix.clone(),
+            },
         };
-        if let Some(rows) = self.resident.borrow().rows_for(&region, false) {
+        if let Some(mut rows) = self
+            .resident
+            .borrow()
+            .rows_for(&region, request.direction == ScanDirection::Reverse)
+        {
+            if let Some(max_items) = request.max_items {
+                rows.truncate(max_items);
+            }
             return Box::pin(async move {
                 Ok(Box::new(ReadyStorageCursor::new(rows)) as StorageScan<'_>)
             });
         }
         Box::pin(async move {
             self.control.before(TestStorageOperation::ScanOpen).await?;
-            let inner = self.inner.scan_range(cf, start, end).await?;
+            let inner = self.inner.scan(request).await?;
             Ok(Box::new(TestStorageCursor {
                 inner,
                 control: self.control.clone(),
                 resident: Rc::clone(&self.resident),
                 region,
                 rows: Vec::new(),
-            }) as StorageScan<'_>)
-        })
-    }
-
-    fn scan_prefix(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        let region = ResidentRegion::Prefix {
-            cf: cf.clone(),
-            prefix: prefix.clone(),
-        };
-        if let Some(rows) = self.resident.borrow().rows_for(&region, false) {
-            return Box::pin(async move {
-                Ok(Box::new(ReadyStorageCursor::new(rows)) as StorageScan<'_>)
-            });
-        }
-        Box::pin(async move {
-            self.control.before(TestStorageOperation::ScanOpen).await?;
-            let inner = self.inner.scan_prefix(cf, prefix).await?;
-            Ok(Box::new(TestStorageCursor {
-                inner,
-                control: self.control.clone(),
-                resident: Rc::clone(&self.resident),
-                region,
-                rows: Vec::new(),
-            }) as StorageScan<'_>)
-        })
-    }
-
-    fn scan_prefix_reverse(
-        &self,
-        cf: String,
-        prefix: Vec<u8>,
-    ) -> StorageFuture<'_, Result<StorageScan<'_>, Error>> {
-        let region = ResidentRegion::Prefix {
-            cf: cf.clone(),
-            prefix: prefix.clone(),
-        };
-        if let Some(rows) = self.resident.borrow().rows_for(&region, true) {
-            return Box::pin(async move {
-                Ok(Box::new(ReadyStorageCursor::new(rows)) as StorageScan<'_>)
-            });
-        }
-        Box::pin(async move {
-            self.control.before(TestStorageOperation::ScanOpen).await?;
-            let inner = self.inner.scan_prefix_reverse(cf, prefix).await?;
-            Ok(Box::new(TestStorageCursor {
-                inner,
-                control: self.control.clone(),
-                resident: Rc::clone(&self.resident),
-                region,
-                rows: Vec::new(),
+                remaining,
             }) as StorageScan<'_>)
         })
     }

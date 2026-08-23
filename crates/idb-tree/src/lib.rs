@@ -186,8 +186,19 @@ impl<S: PageStore + Clone> IdbTree<S> {
     }
 
     pub async fn range(&self, start: &[u8], end: &[u8]) -> Result<Vec<KeyValue>, Error> {
+        self.range_limit(start, end, usize::MAX).await
+    }
+
+    /// Return at most `limit` rows in canonical forward order without walking
+    /// or hydrating pages after the bound is satisfied.
+    pub async fn range_limit(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+    ) -> Result<Vec<KeyValue>, Error> {
         loop {
-            let attempt = self.inner.borrow().try_range(start, end)?;
+            let attempt = self.inner.borrow().try_range(start, end, limit)?;
             match attempt {
                 Attempt::Ready(rows) => return Ok(rows),
                 Attempt::Missing(page_id) => self.hydrate(page_id).await?,
@@ -344,10 +355,15 @@ impl<S: PageStore> TreeCore<S> {
         self.value_resident(&entries[index].1)
     }
 
-    fn try_range(&self, start: &[u8], end: &[u8]) -> Result<Attempt<Vec<KeyValue>>, Error> {
+    fn try_range(
+        &self,
+        start: &[u8],
+        end: &[u8],
+        limit: usize,
+    ) -> Result<Attempt<Vec<KeyValue>>, Error> {
         let mut cells = Vec::new();
         if let Some(page_id) =
-            self.collect_range_resident(self.root_page_id(), start, end, &mut cells)?
+            self.collect_range_resident(self.root_page_id(), start, end, limit, &mut cells)?
         {
             return Ok(Attempt::Missing(page_id));
         }
@@ -523,8 +539,12 @@ impl<S: PageStore> TreeCore<S> {
         page_id: PageId,
         start: &[u8],
         end: &[u8],
+        limit: usize,
         output: &mut Vec<(Vec<u8>, ValueCell)>,
     ) -> Result<Option<PageId>, Error> {
+        if output.len() == limit {
+            return Ok(None);
+        }
         let Some(page) = self.pages.get(&page_id) else {
             return Ok(Some(page_id));
         };
@@ -533,6 +553,7 @@ impl<S: PageStore> TreeCore<S> {
                 entries
                     .iter()
                     .filter(|(key, _)| key.as_slice() >= start && key.as_slice() < end)
+                    .take(limit - output.len())
                     .cloned(),
             ),
             Page::Internal { keys, children } => {
@@ -542,9 +563,12 @@ impl<S: PageStore> TreeCore<S> {
                     if below_end
                         && above_start
                         && let Some(missing) =
-                            self.collect_range_resident(child, start, end, output)?
+                            self.collect_range_resident(child, start, end, limit, output)?
                     {
                         return Ok(Some(missing));
+                    }
+                    if output.len() == limit {
+                        break;
                     }
                 }
             }

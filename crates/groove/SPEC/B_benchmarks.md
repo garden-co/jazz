@@ -57,7 +57,7 @@ workload, a recursive authorization workload, and one-shot query overhead.
   `sqlite_indexed` (a recursive-CTE baseline; per Known staleness below, these
   two ACL names run the same re-query-every-principal path).
 - **oneshot** — latency for `groove_query`, `groove_subscribe`, and
-  `groove_scan` (raw storage `scan_prefix`).
+  `groove_scan` (raw storage `scan(ScanRequest::prefix(...))`).
 
 ### B.5 Counters and how to read them
 

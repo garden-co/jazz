@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use crate::schema::DatabaseSchema;
-use crate::storage::{KeyValue, OwnedStorage, StorageFuture};
+use crate::storage::{KeyValue, OwnedStorage, ScanRequest, StorageFuture};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) enum StorageRequestKey {
@@ -24,10 +24,21 @@ pub(super) enum StorageRequestKey {
         family: String,
         prefix: Vec<u8>,
     },
+    ScanPrefixLimit {
+        family: String,
+        prefix: Vec<u8>,
+        max_items: usize,
+    },
     IndexedRowsPrefix {
         table: String,
         index: String,
         prefix: Vec<u8>,
+    },
+    IndexedRowsPrefixLimit {
+        table: String,
+        index: String,
+        prefix: Vec<u8>,
+        max_items: usize,
     },
     IndexedRowsRange {
         table: String,
@@ -112,7 +123,11 @@ impl<'a> StorageRequests<'a> {
                 }) as PendingRequest<'a>
             }
             StorageRequestKey::ScanRange { family, start, end } => {
-                let future = storage.scan_range(family.clone(), start.clone(), end.clone());
+                let future = storage.scan(ScanRequest::range(
+                    family.clone(),
+                    start.clone(),
+                    end.clone(),
+                ));
                 Box::pin(async move {
                     future
                         .await
@@ -121,7 +136,22 @@ impl<'a> StorageRequests<'a> {
                 }) as PendingRequest<'a>
             }
             StorageRequestKey::ScanPrefix { family, prefix } => {
-                let future = storage.scan_prefix(family.clone(), prefix.clone());
+                let future = storage.scan(ScanRequest::prefix(family.clone(), prefix.clone()));
+                Box::pin(async move {
+                    future
+                        .await
+                        .map(StorageRequestOutput::Rows)
+                        .map_err(Into::into)
+                }) as PendingRequest<'a>
+            }
+            StorageRequestKey::ScanPrefixLimit {
+                family,
+                prefix,
+                max_items,
+            } => {
+                let future = storage.scan(
+                    ScanRequest::prefix(family.clone(), prefix.clone()).with_max_items(*max_items),
+                );
                 Box::pin(async move {
                     future
                         .await
@@ -145,7 +175,34 @@ impl<'a> StorageRequests<'a> {
                     .expect("compiled indexed-row source index exists")
                     .clone();
                 let index = index.clone();
-                let scan = storage.scan_prefix("indices".to_owned(), prefix.clone());
+                let scan = storage.scan(ScanRequest::prefix("indices".to_owned(), prefix.clone()));
+                let storage = storage.clone();
+                Box::pin(async move {
+                    let entries = scan.await?;
+                    load_indexed_rows(storage, table_schema, index_schema, index, entries).await
+                })
+            }
+            StorageRequestKey::IndexedRowsPrefixLimit {
+                table,
+                index,
+                prefix,
+                max_items,
+            } => {
+                let table_schema = schema
+                    .table(table)
+                    .expect("compiled indexed-row source table exists")
+                    .clone();
+                let index_schema = table_schema
+                    .indices
+                    .iter()
+                    .find(|candidate| candidate.name == *index)
+                    .expect("compiled indexed-row source index exists")
+                    .clone();
+                let index = index.clone();
+                let scan = storage.scan(
+                    ScanRequest::prefix("indices".to_owned(), prefix.clone())
+                        .with_max_items(*max_items),
+                );
                 let storage = storage.clone();
                 Box::pin(async move {
                     let entries = scan.await?;
@@ -169,7 +226,11 @@ impl<'a> StorageRequests<'a> {
                     .expect("compiled indexed-row source index exists")
                     .clone();
                 let index = index.clone();
-                let scan = storage.scan_range("indices".to_owned(), start.clone(), end.clone());
+                let scan = storage.scan(ScanRequest::range(
+                    "indices".to_owned(),
+                    start.clone(),
+                    end.clone(),
+                ));
                 let storage = storage.clone();
                 Box::pin(async move {
                     let entries = scan.await?;

@@ -71,6 +71,14 @@ pub struct IndexSourceOp {
 pub enum StaticScanSpec {
     Point(Vec<LiteralValue>),
     Prefix(Vec<LiteralValue>),
+    /// A prefix scan whose physical source is proven to need no more than this
+    /// many entries. This is deliberately distinct from cursor batching: it is
+    /// only emitted by conservative one-shot lowering after every downstream
+    /// operation that could discard or reorder a candidate has been ruled out.
+    PrefixLimit {
+        prefix: Vec<LiteralValue>,
+        max_items: usize,
+    },
     Range {
         start: Vec<LiteralValue>,
         end: Vec<LiteralValue>,

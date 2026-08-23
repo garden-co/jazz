@@ -49,7 +49,10 @@ fn complete_scan_makes_present_and_absent_points_and_nested_scans_resident() {
     block_on(storage.set("rows".into(), b"a/2".to_vec(), b"two".to_vec())).unwrap();
     storage.evict_all();
 
-    let mut cold_scan = Box::pin(storage.scan_prefix("rows".into(), b"a/".to_vec()));
+    let mut cold_scan = Box::pin(storage.scan(groove::storage::ScanRequest::prefix(
+        "rows".into(),
+        b"a/".to_vec(),
+    )));
     assert!(matches!(first_poll(&mut cold_scan), Poll::Pending));
     let scan = block_on(cold_scan).unwrap();
     assert_eq!(block_on(collect_scan(scan)).unwrap().len(), 2);
@@ -62,7 +65,10 @@ fn complete_scan_makes_present_and_absent_points_and_nested_scans_resident() {
         assert!(matches!(first_poll(&mut read), Poll::Ready(Ok(value)) if value == expected));
     }
 
-    let mut nested = Box::pin(storage.scan_prefix("rows".into(), b"a/1".to_vec()));
+    let mut nested = Box::pin(storage.scan(groove::storage::ScanRequest::prefix(
+        "rows".into(),
+        b"a/1".to_vec(),
+    )));
     assert!(matches!(first_poll(&mut nested), Poll::Ready(Ok(_))));
 }
 
