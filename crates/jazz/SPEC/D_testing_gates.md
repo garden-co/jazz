@@ -43,7 +43,7 @@ For a benchmark edit, locally run
 compile check. CI runs `dev/gates/benchmark-smoke.sh --ci`, which checks all
 maintained benchmark APIs and executes deterministic core and jazz-sim scenario
 assertions. CodSpeed evaluates the example benchmark crates on benchmark-labeled
-PRs and nightly; native `jazz`, `jazz-sim`, and Groove timing remains in the
+PRs and nightly; native `jazz` and `jazz-sim` timing remains in the
 realistic benchmark workflow until it is ported. No local omnibus benchmark
 script is a push gate. A change to a public `jazz` type additionally gates the
 full workspace, including examples.
@@ -82,7 +82,7 @@ cargo test -p jazz --lib node::tests::harness::m3_maintained_one_shot_differenti
   repository.
 - **Benchmark API and scenario smoke** — CI compiles all maintained benchmark
   targets and runs deterministic scenario assertions. CodSpeed compares example
-  benchmark crates; native `jazz`, `jazz-sim`, and Groove timing stays in the
+  benchmark crates; native `jazz` and `jazz-sim` timing stays in the
   realistic workflow until migrated.
 - **Public type changes** — changes to public `jazz` types additionally gate the
   full workspace, including examples.

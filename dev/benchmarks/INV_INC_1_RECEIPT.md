@@ -37,6 +37,6 @@ Run the full receipt:
 cargo bench -p jazz --no-default-features --bench relation_include_delivery
 ```
 
-The smoke gate runs the same five rungs with one sample each, since allocation
-counters are deterministic for this fixture and the smoke gate needs a bounded
-cost. Full receipts retain three samples per rung by default.
+The realistic timing workflow runs the same five rungs with one sample each,
+since allocation counters are deterministic for this fixture and the scheduled
+suite needs a bounded cost. Full receipts retain three samples per rung by default.

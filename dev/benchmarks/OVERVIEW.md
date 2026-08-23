@@ -16,14 +16,14 @@ Do not block useful performance work on a repository-wide receipt rewrite.
 Every new high-value lane should emit an attributable, correctness-checked
 receipt and state where that receipt is retained.
 
-| harness                                                   | output and retention                                                                                                                                             |
-| --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| deterministic benchmark checks                            | targeted local API compilation; CI compiles all maintained targets and runs scenario assertions                                                                  |
-| CodSpeed                                                  | performance comparison for the example benchmark crates on benchmark-labeled PRs and the nightly default-branch baseline                                         |
-| realistic native/browser                                  | timing for native `jazz`, `jazz-sim`, and Groove until those suites move to CodSpeed; selected CI results are retained in `realistic/history/bench_history.json` |
-| Groove scenario/micro                                     | JSON on stdout; preserve a deliberate investigation receipt with the change or external performance system, never an append-only in-repo timing ledger           |
-| Criterion                                                 | native reports under `target/criterion`; benchmark-specific JSON receipts may survive separately, but Criterion output itself is machine-local                   |
-| storage, `idb-tree`/IndexedDB page-store, and WASM probes | harness-native output; retain deliberately when a result is used to justify a decision                                                                           |
+| harness                                                   | output and retention                                                                                                                                    |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| deterministic benchmark checks                            | targeted local API compilation; CI compiles all maintained targets and runs scenario assertions                                                         |
+| CodSpeed                                                  | performance comparison for the example benchmark crates on benchmark-labeled PRs and the nightly default-branch baseline                                |
+| realistic native/browser                                  | timing for native `jazz` and `jazz-sim` until those suites move to CodSpeed; selected CI results are retained in `realistic/history/bench_history.json` |
+| Groove scenario/micro                                     | JSON on stdout; preserve a deliberate investigation receipt with the change or external performance system, never an append-only in-repo timing ledger  |
+| Criterion                                                 | native reports under `target/criterion`; benchmark-specific JSON receipts may survive separately, but Criterion output itself is machine-local          |
+| storage, `idb-tree`/IndexedDB page-store, and WASM probes | harness-native output; retain deliberately when a result is used to justify a decision                                                                  |
 
 Timing medians are directional unless the harness controls the relevant cache,
 fixture, and host conditions. Prefer deterministic structural counters for hard

@@ -178,6 +178,17 @@ jobs:
           run validation env GROOVE_CLIENTS=5 GROOVE_ROWS=20 GROOVE_COMMITS=25 cargo bench -p jazz --features testing --bench validation
           run relation_include_delivery env JAZZ_INC_DELIVERY_SCALES=1000,2500,5000,10000,20000 JAZZ_INC_DELIVERY_SAMPLES=1 cargo bench -p jazz --features testing --bench relation_include_delivery
           run route_subscription_curve env JAZZ_ROUTE_CURVE_ROUTES=10 cargo bench -p jazz --features testing --bench route_subscription_curve
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          const dir = "bench-out/native/legacy-jazz";
+          const names = ["cold_subscription", "sync", "validation", "relation_include_delivery", "route_subscription_curve"];
+          const now = new Date().toISOString();
+          const metadata = { kind: "realistic-bench-legacy-jazz", generated_at: now, repository: process.env.GITHUB_REPOSITORY, run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT, sha: process.env.BENCH_SHA, ref: process.env.BENCH_REF, branch: process.env.BENCH_BRANCH, profile: process.env.BENCH_PROFILE, runner_name: process.env.RUNNER_NAME, runner_os: process.env.RUNNER_OS, runner_arch: process.env.RUNNER_ARCH };
+          fs.writeFileSync(`${dir}/metadata.json`, `${JSON.stringify(metadata, null, 2)}\n`);
+          const benchmarks = names.map((name) => ({ id: `legacy-jazz:${name}`, status: "passed", output_path: `logs/${name}.log` }));
+          fs.writeFileSync(`${dir}/suite_status.json`, `${JSON.stringify({ generated_at: now, benchmarks }, null, 2)}\n`);
+          fs.writeFileSync(`${dir}/manifest.json`, `${JSON.stringify({ ...metadata, files: ["metadata.json", "suite_status.json", ...names.map((name) => `logs/${name}.log`)].map((path) => ({ path })) }, null, 2)}\n`);
+          NODE
 
       - name: Publish native execution summary
         run: |
@@ -291,6 +302,7 @@ jobs:
           NODE
 
       - name: Upload native artifacts
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: realistic-native-${{ github.run_id }}-${{ github.run_attempt }}

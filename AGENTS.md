@@ -75,7 +75,7 @@ Benchmark work has three deliberately separate gates:
   assertions in tests, not in a timing receipt.
 - CodSpeed currently compares the example benchmark crates only. Apply the
   `benchmark` label when that coverage is relevant; it refreshes nightly on the
-  default branch. Native `jazz`, `jazz-sim`, and Groove timing remains in the
+  default branch. Native `jazz` and `jazz-sim` timing remains in the
   realistic benchmark workflow (labeled PRs plus scheduled/default-branch
   runs) until those suites are ported to CodSpeed. Do not run a repository-wide
   benchmark suite before push.
