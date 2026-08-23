@@ -225,7 +225,12 @@ fn run_rung(config: ConfigRef, table_rows: usize) -> RungReceipt {
 
     db.reset_storage_read_metrics_for_test();
     let query_started = Instant::now();
-    let rows = block_on(db.all(&prepared, global_read_opts())).expect("run selective Global query");
+    // This receipt seeds a complete authoritative database directly, rather
+    // than consuming an identity-scoped result set delivered by an upstream
+    // peer. `Db::all` is deliberately the latter client-local API at Global;
+    // use the serving entry point so this measures the declared index path.
+    let rows = block_on(db.all_for_identity(&prepared, global_read_opts(), AuthorId::SYSTEM))
+        .expect("run selective Global query");
     let query_us = query_started.elapsed().as_micros();
     let query_metrics = db.take_storage_read_metrics_for_test();
 

@@ -6,6 +6,18 @@ fn joined_issue_query() -> Query {
     Query::from("issues").join_via("issue_tags", "issue", [eq(col("tag"), lit("prepared"))])
 }
 
+fn indexed_documents_schema() -> JazzSchema {
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .column("team", PublicColumnType::Uuid)
+                .column("active", PublicColumnType::Boolean)
+                .column("title", PublicColumnType::Text)
+                .index_only(["team"]),
+        ),
+    )
+}
+
 #[test]
 fn prepared_query_discards_graph_handle_when_runtime_changes() {
     let schema = issue_schema();
@@ -199,6 +211,67 @@ fn filtered_root_prepared_query_still_reads_without_preinstalled_plan() {
             .collect::<Vec<_>>(),
         vec![row(1)]
     );
+}
+
+#[test]
+fn authoritative_global_bound_read_uses_the_declared_index() {
+    // `Db::all` at Global consumes an upstream, identity-scoped result set.
+    // A standalone authority must instead use the explicit serving API, which
+    // evaluates the bound query against its complete settled state.
+    let schema = indexed_documents_schema();
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0xa5; 16]),
+            author: AuthorId::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0xa5))),
+    }))
+    .expect("open history-complete standalone authority");
+    let wanted_team = row(0x51);
+    let wanted = row(0x52);
+    let other = row(0x53);
+    for (id, team, title) in [(wanted, wanted_team, "wanted"), (other, row(0x54), "other")] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "documents",
+            id,
+            AuthorId::SYSTEM,
+            BTreeMap::from([
+                ("team".to_owned(), Value::Uuid(team.0)),
+                ("active".to_owned(), Value::Bool(true)),
+                ("title".to_owned(), Value::String(title.to_owned())),
+            ]),
+        )
+        .unwrap();
+    }
+    let prepared = db
+        .prepare_query_bound(
+            &Query::from("documents")
+                .filter(eq(col("team"), param("team")))
+                .filter(eq(col("active"), lit(true))),
+            BTreeMap::from([("team".to_owned(), Value::Uuid(wanted_team.0))]),
+        )
+        .expect("prepare bound indexed query");
+
+    db.node.node.borrow().reset_storage_read_metrics();
+    let rows = block_on(db.all_for_identity(
+        &prepared,
+        ReadOpts {
+            tier: DurabilityTier::Global,
+            local_updates: LocalUpdates::Deferred,
+            propagation: Propagation::LocalOnly,
+            include_deleted: false,
+            ..ReadOpts::default()
+        },
+        AuthorId::SYSTEM,
+    ))
+    .expect("authoritative Global bound read");
+    let metrics = db.node.node.borrow().take_storage_read_metrics();
+
+    assert_eq!(row_ids(&rows), vec![wanted]);
+    assert_eq!(metrics.global_current_indexes.reads, 1);
+    assert_eq!(metrics.global_current_rows.reads, 1);
 }
 
 #[test]
