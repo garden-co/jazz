@@ -1599,7 +1599,21 @@ where
                         for (tx_id, persistence) in persisted {
                             node.settle_published_transaction(tx_id, persistence)?;
                         }
+                        let authoritative_reset_deferred = node.has_pending_authoritative_reset();
                         drop(node);
+                        if authoritative_reset_deferred {
+                            // The pre-persistence refresh deliberately retained
+                            // this reset while its publication was ambiguous.
+                            // Settlement makes it publishable; complete that
+                            // lifecycle here instead of waiting for unrelated
+                            // query or transport activity to wake subscribers.
+                            stats.subscription_events += refresh_subscriptions_in(
+                                &self.node,
+                                &self.subscriptions,
+                                &self.active_authority_view_receipts,
+                            )
+                            .await?;
+                        }
                         stats.remote_sync_applied += 1;
                         let next = self.subscriber_dirty_epoch.get().wrapping_add(1);
                         self.subscriber_dirty_epoch.set(next);
