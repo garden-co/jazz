@@ -3773,7 +3773,7 @@ fn checked_js_u64_range(start: f64, end: f64) -> Result<std::ops::Range<u64>, Js
 fn author_id_from_bytes(bytes: &[u8]) -> Result<AuthorSubject, JsValue> {
     let canonical = std::str::from_utf8(bytes)
         .map_err(|_| JsValue::from_str("author subject must be canonical UTF-8 JSON"))?;
-    AuthorSubject::from_canonical(canonical).map_err(|error| JsValue::from_str(&error))
+    AuthorSubject::from_canonical(canonical).map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
 fn set_identity_claims<S>(db: &Db<S>, author: AuthorSubject)
