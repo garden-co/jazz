@@ -43,6 +43,8 @@ and turn gaps it finds into separately reviewed API/design work.
 | **Wequencer**         | Collaborative step sequencer                             | High-frequency collaborative writes, hotspot behavior, presence, synchronization/reconnect; clock-perfect playback is an app aspiration, not a benchmark assertion until its contract exists.                                |
 | **PosterShop**        | Collaborative gig-poster design canvas                   | Real-time cursors/edits, canvas-shaped fan-out, history rewind, and branches.                                                                                                                                                |
 | **BigLabel**          | Multi-tenant record-label operations                     | SaaS-scale tenant filtering, organization/team policy graphs, indexed relational reads, migrations, and large synthetic datasets.                                                                                            |
+| **MusicAgent**        | LLM agent for a music agent                              | Streamed transcript turns, tool calls/results, attachments, conversation branches, durable server execution, and recovery after interrupted generation.                                                                      |
+| **EpicDrop**          | Web file browser plus native mounted folder              | Large binary values, streaming and range access, partial residency, local cache eviction, shared-folder permissions, filesystem events, and offline file conflicts.                                                          |
 
 Jamazon and Jamazon Warehouse share branding and synthetic product assets, but
 remain separate schemas and scenarios. The warehouse schema stays close enough
@@ -86,8 +88,8 @@ keep independent microbenchmarks and core canaries.
 | `jazz-sim` `s1_saas`, policy-graph, customer cold-start  | BigLabel                               | Make BigLabel the product meaning of SaaS, policy-graph, and tenant cold-load shapes.                                             |
 | `jazz-sim` `s2_canvas`, `s8_branch_views`                | PosterShop (and SongBook for branches) | Reuse canvas live/replay and branch-view workload semantics.                                                                      |
 | `jazz-sim` `s3_permissions`, `s7_migrations`             | SongBook and BigLabel                  | Exercise deep permissions and multi-version migration/reconnect.                                                                  |
-| `jazz-sim` `s4_order_processing`, `s9_durable_execution` | Jamazon Warehouse and Jamazon          | Keep order-processing/reference comparison and durable-workflow semantics, surfaced through their respective UIs.                 |
-| `jazz-sim` `s5_durable_stream`                           | RecordPlayer                           | Adopt stream lifecycle, persistence, and resume behavior.                                                                         |
+| `jazz-sim` `s4_order_processing`, `s9_durable_execution` | Jamazon Warehouse, Jamazon, MusicAgent | Keep order-processing/reference comparison and durable-workflow semantics, surfaced through their respective UIs.                 |
+| `jazz-sim` `s5_durable_stream`                           | RecordPlayer, EpicDrop, MusicAgent     | Adopt stream lifecycle, persistence, resume, and bounded-memory transfer behavior.                                                |
 
 `moon-lander-react`, server/runtime examples, and framework/auth starters remain
 valuable focused references. They are out of catalogue scope unless a later
@@ -135,8 +137,9 @@ recording blockers rather than designing around them:
 2. **BigLabel and WorldTour:** scale/policy ownership and evolution of the existing map app.
 3. **Jamazon Warehouse and Jamazon:** exclusive transaction/order flow, durable execution, and external-effect boundary.
 4. **PosterShop and SongBook:** canvas/history/branches and rich nested permission flows.
-5. **RecordPlayer:** add after file and durable-stream product flows are ready for a stable end-to-end contract.
-6. **Wequencer:** add after synchronization and high-frequency update contracts are explicit and testable.
+5. **RecordPlayer and EpicDrop:** add after large binary values, partial chunk fulfillment, bounded-memory transfer, and native cache/VFS contracts are stable enough to test honestly.
+6. **MusicAgent:** add after large streamed text values and durable server-side agent execution have explicit recovery and secret-handling contracts.
+7. **Wequencer:** add after synchronization and high-frequency update contracts are explicit and testable.
 
 Before starting an app lane, classify its dependencies as **ready**,
 **implement alongside**, or **blocked**. A blocked app may still contribute a
