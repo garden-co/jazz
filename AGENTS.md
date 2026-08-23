@@ -114,6 +114,16 @@ Wide maintained-vs-one-shot soaks use
 `JAZZ_SEED_COUNT=2000 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
 alongside the existing m3 soak conventions.
 
+**Continuous simulation soak.** `.github/workflows/continuous-simulation-soak.yml`
+runs the deterministic M3 sync-convergence and maintained-vs-one-shot oracle
+nightly on the trusted `jazz-ci` runner, with individual seed receipts. Run the
+same driver locally with `dev/gates/run-continuous-simulation-soak.sh --sync-seeds
+2 --differential-seeds 2`; copy a failed case's replay command from
+`target/simulation-soak/summary.json`. The nightly default is sync 100×200
+commits and differential 50×20 steps at churn depths 10,1000. The 100000-depth
+churn is deliberately deferred from nightly: it is available through
+`--churn-depths 10,1000,100000` when a bounded weekly budget is established.
+
 **Don't rewrite existing tests without permission.** Existing tests encode decisions about what correct behaviour looks like. If the task explicitly involves changing behaviour, updating the tests to match is the right thing to do. But if a test is failing simply because the implementation diverges from what the test expects, rewriting the test to match the new behaviour is risky — the test may well be correct and the implementation wrong. Treat that as a human-in-the-loop decision: surface it to the user rather than resolving it unilaterally.
 
 **Gate cadence — batched (Anselm-approved 2026-07-11).** Levers may be _batched_
