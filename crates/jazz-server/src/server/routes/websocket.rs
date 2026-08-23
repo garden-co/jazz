@@ -259,6 +259,11 @@ async fn ws_admission(
 fn session_claims(
     session: jazz::tools::public_schema::Session,
 ) -> Result<BTreeMap<String, CoreValue>, String> {
+    let author = session
+        .author_subject()
+        .map_err(|error| error.to_string())?
+        .canonical()
+        .to_owned();
     let mut json = match session.claims {
         serde_json::Value::Object(map) => map,
         _ => serde_json::Map::new(),
@@ -268,6 +273,14 @@ fn session_claims(
         serde_json::Value::String(session.user_id.clone()),
     );
     json.insert(
+        "iss".to_owned(),
+        serde_json::Value::String(session.issuer.clone()),
+    );
+    json.insert(
+        "issuer".to_owned(),
+        serde_json::Value::String(session.issuer.clone()),
+    );
+    json.insert(
         "sub".to_owned(),
         serde_json::Value::String(session.user_id.clone()),
     );
@@ -275,6 +288,7 @@ fn session_claims(
         "user_id".to_owned(),
         serde_json::Value::String(session.user_id),
     );
+    json.insert("author".to_owned(), serde_json::Value::String(author));
     json.insert(
         "authMode".to_owned(),
         serde_json::Value::String(
