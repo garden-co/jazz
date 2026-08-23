@@ -23,7 +23,7 @@ pub fn encode_column_family_key(cf: &str, key: &[u8]) -> Result<Vec<u8>, Error> 
 pub fn decode_column_family_key(encoded: &[u8]) -> Result<(&str, &[u8]), Error> {
     if encoded.len() < 3 || encoded[0] != KEY_VERSION {
         return Err(Error::InvalidStorageKey(
-            "unsupported OPFS storage key".to_string(),
+            "unsupported IndexedDB storage key".to_string(),
         ));
     }
 
@@ -31,7 +31,7 @@ pub fn decode_column_family_key(encoded: &[u8]) -> Result<(&str, &[u8]), Error> 
     let key_offset = 3 + cf_len;
     if encoded.len() < key_offset {
         return Err(Error::InvalidStorageKey(
-            "truncated OPFS storage key".to_string(),
+            "truncated IndexedDB storage key".to_string(),
         ));
     }
 
@@ -61,7 +61,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn encoded_key_layout_matches_legacy_opfs_btree_codec() {
+    fn encoded_key_layout_is_stable() {
         assert_eq!(
             encode_column_family_key("rows", &[0, 1, 255]).unwrap(),
             vec![1, 0, 4, b'r', b'o', b'w', b's', 0, 1, 255]

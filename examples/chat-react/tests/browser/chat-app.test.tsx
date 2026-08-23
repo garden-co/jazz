@@ -139,7 +139,7 @@ describe("Chat App E2E", () => {
     const r = createRoot(el);
     mounts.push({ root: r, container: el });
 
-    // Each test gets a unique appId to avoid OPFS lock contention between
+    // Each test gets a unique appId to avoid IndexedDB lock contention between
     // sequential tests (the previous worker may still be shutting down).
     const appId =
       config.appId ?? `test-chat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -184,7 +184,7 @@ describe("Chat App E2E", () => {
     // triggers CreateChatRedirect to create a fresh chat.
     window.location.hash = "";
     // Wait for the JazzProvider's async shutdown (worker termination,
-    // OPFS lock release) to complete before starting the next test.
+    // IndexedDB lock release) to complete before starting the next test.
     await window.__jazz?.shutdown();
   });
 

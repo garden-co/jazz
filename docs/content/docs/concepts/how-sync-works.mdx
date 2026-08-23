@@ -48,9 +48,9 @@ That means:
 
 Reads always come from local storage.
 
-In the browser, Jazz uses a dedicated worker reading from data stored locally in OPFS (Origin
-Private File System). When multiple tabs are open, Jazz elects one tab as the storage leader and
-routes follower tabs through it. If the leader tab closes, a new leader is elected.
+In the browser, Jazz uses a dedicated `SharedWorker` reading from data stored locally in
+IndexedDB. Multiple tabs connect directly to that one durable runtime through message ports; there
+is no tab leader election.
 
 Even without a network connection, your app can still read data it already has locally, whether
 that data was synced earlier or written locally on the device.
@@ -67,7 +67,7 @@ Jazz sync runs across three tiers:
 <TierSyncDiagram />
 
 **Local** is the first tier on the client itself. In browser persistent mode, a dedicated worker
-hosts that local durable copy in OPFS so it can respond immediately while updates from higher tiers
+hosts that local durable copy in IndexedDB so it can respond immediately while updates from higher tiers
 stream in.
 
 **Edge** is the first server hop after the client. In cloud configurations it is usually a nearby

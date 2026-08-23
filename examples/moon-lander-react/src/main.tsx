@@ -13,7 +13,7 @@ function main() {
   const physicsSpeed = params.has("physicsSpeed") ? Number(params.get("physicsSpeed")) : undefined;
   const spawnX = params.has("spawnX") ? Number(params.get("spawnX")) : undefined;
 
-  // Stable dbName per tab — reusing the same OPFS database across refreshes
+  // Stable dbName per tab — reusing the same IndexedDB database across refreshes
   // means the local player row and deposits persist, avoiding ghost duplicates.
   const dbName = params.get("dbName") ?? `moon-lander-${playerId.slice(0, 8)}`;
 

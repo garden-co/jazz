@@ -53,7 +53,6 @@ function containsInput(graph, task, suffix) {
 const closures = [
   { name: "jazz", file: resolve(root, "crates/jazz/src/lib.rs") },
   { name: "groove", file: resolve(root, "crates/groove/src/lib.rs") },
-  { name: "opfs-btree", file: resolve(root, "crates/opfs-btree/src/lib.rs") },
 ];
 const unrelated = resolve(root, "crates/jazz-sim/src/lib.rs");
 const originals = new Map(closures.map(({ file }) => [file, readFileSync(file, "utf8")]));

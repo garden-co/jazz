@@ -13,7 +13,6 @@ members = [
   "crates/jazz-testkit",
   "crates/jazz-otel",
   "crates/jazz-sim",
-  "crates/opfs-btree",
   "crates/jazz-wasm",
   "crates/jazz-napi",
   # React Native is paused while we decide whether the new core runtime should

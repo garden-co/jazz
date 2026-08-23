@@ -79,7 +79,7 @@ authentication adapter.
 - Make generic storage the only core contract.
 - Move RocksDB selection out of Jazz and Groove defaults into
   `jazz-storage-rocksdb`.
-- Keep OPFS/browser storage in the WASM shell.
+- Keep IndexedDB/browser storage in the WASM shell.
 - Define uncompressed semantic framing plus a codec seam in core.
 - Let shells select zstd, lz4, or ruzstd without recompiling semantic core.
 
@@ -182,15 +182,15 @@ deliberately separate diagnostics.
 
 ## Canonical build matrix
 
-| Build unit            | Target | Configuration                      |
-| --------------------- | ------ | ---------------------------------- |
-| semantic core         | native | featureless                        |
-| semantic core         | wasm32 | featureless                        |
-| core white-box tests  | native | `cfg(test)` only                   |
-| native server and CLI | native | shell-selected storage/compression |
-| NAPI                  | native | shell-selected storage/telemetry   |
-| WASM                  | wasm32 | shell-selected OPFS/compression    |
-| test harness          | native | separate dev package               |
+| Build unit            | Target | Configuration                        |
+| --------------------- | ------ | ------------------------------------ |
+| semantic core         | native | featureless                          |
+| semantic core         | wasm32 | featureless                          |
+| core white-box tests  | native | `cfg(test)` only                     |
+| native server and CLI | native | shell-selected storage/compression   |
+| NAPI                  | native | shell-selected storage/telemetry     |
+| WASM                  | wasm32 | shell-selected IndexedDB/compression |
+| test harness          | native | separate dev package                 |
 
 Representative commands should become explicit and stable instead of relying
 on large additive feature bundles.

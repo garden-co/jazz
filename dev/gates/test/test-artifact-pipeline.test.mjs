@@ -470,27 +470,23 @@ test("Turbo invalidates each native artifact only for its Cargo closure", () => 
         "$TURBO_ROOT$/crates/jazz-napi/build.rs",
         "$TURBO_ROOT$/crates/jazz-napi/scripts/**",
         "$TURBO_ROOT$/crates/jazz-napi/src/**/*.rs",
-      ].concat(
-        ["jazz-otel", "jazz", "groove", "opfs-btree"].map(
-          (crate) => `$TURBO_ROOT$/crates/${crate}/**`,
-        ),
-      ),
+      ].concat(["jazz-otel", "jazz", "groove"].map((crate) => `$TURBO_ROOT$/crates/${crate}/**`)),
     ],
     [
       wasm,
       ["package.json", "Cargo.toml", "src/**/*.rs"].concat(
-        ["jazz", "groove", "opfs-btree"].map((crate) => `$TURBO_ROOT$/crates/${crate}/**`),
+        ["jazz", "groove"].map((crate) => `$TURBO_ROOT$/crates/${crate}/**`),
       ),
     ],
     [
       fastWasm,
       ["package.json", "Cargo.toml", "src/**/*.rs"].concat(
-        ["jazz", "groove", "opfs-btree"].map((crate) => `$TURBO_ROOT$/crates/${crate}/**`),
+        ["jazz", "groove"].map((crate) => `$TURBO_ROOT$/crates/${crate}/**`),
       ),
     ],
     [
       cli,
-      ["jazz-cli", "jazz", "groove", "opfs-btree"].flatMap((crate) => [
+      ["jazz-cli", "jazz", "groove"].flatMap((crate) => [
         `$TURBO_ROOT$/crates/${crate}/Cargo.toml`,
         `$TURBO_ROOT$/crates/${crate}/src/**/*.rs`,
       ]),

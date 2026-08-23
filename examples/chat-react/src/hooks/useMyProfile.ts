@@ -4,7 +4,7 @@ import { getRandomUsername } from "@/lib/utils";
 import { app, type Profile } from "../../schema.js";
 
 // Module-level guard: the in-memory WASM store settles synchronously with []
-// before OPFS data streams in from the worker. Without this guard, every page
+// before IndexedDB data streams in from the worker. Without this guard, every page
 // load would create a duplicate profile.
 const createdForUser = new Set<string>();
 

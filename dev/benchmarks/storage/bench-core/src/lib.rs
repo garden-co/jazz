@@ -1,6 +1,6 @@
-//! Shared core of the opfs-btree browser benchmark.
+//! Shared core of the storage benchmark workloads.
 //!
-//! Both engine workers (the `opfs-btree` harness crate and the `wasm_sqlite`
+//! Both native benchmark adapters and the `wasm_sqlite`
 //! sub-crate) depend on this crate so the *workload* is declared and the
 //! *phase semantics* are written exactly once. Each engine only implements the
 //! small [`BenchEngine`] contract; everything else — which benchmarks exist,

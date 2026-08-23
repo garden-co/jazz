@@ -2,7 +2,7 @@ use super::*;
 use crate::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IndexSchema, IntegerKeyType, PrimaryKey,
 };
-use crate::storage::{RecordStore, TestBtreeStorage};
+use crate::storage::{MemoryStorage, RecordStore};
 use std::rc::Rc;
 
 #[futures_test::test]
@@ -776,10 +776,7 @@ fn album_count_graph() -> GraphBuilder {
 async fn aggregate_subscription_hydration_reuses_current_shared_arrangements() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = Rc::new(
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap(),
-    );
+    let storage = Rc::new(MemoryStorage::new(&["albums"]));
     let albums = schema.table("albums").unwrap().record_schema();
     write_two_album_rows(&storage, &albums).await;
 
@@ -825,10 +822,7 @@ async fn aggregate_subscription_hydration_reuses_current_shared_arrangements() {
 async fn one_shot_aggregate_hydration_does_not_satisfy_subscription_arrangement_seed() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = Rc::new(
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap(),
-    );
+    let storage = Rc::new(MemoryStorage::new(&["albums"]));
     let albums = schema.table("albums").unwrap().record_schema();
     write_two_album_rows(&storage, &albums).await;
 
@@ -1514,10 +1508,7 @@ async fn auto_family_excluded_recursive_shape_falls_back_to_direct_path() {
 async fn subscription_retainers_keep_output_ancestors_alive() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema).unwrap();
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = Rc::new(
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap(),
-    );
+    let storage = Rc::new(MemoryStorage::new(&["albums"]));
     let subscription = runtime
         .subscribe_one_sink(
             GraphBuilder::table("albums")
@@ -1574,10 +1565,7 @@ async fn deep_retained_only_graph_ticks_through_the_dependency_queue() {
 async fn unsubscribe_eagerly_collects_unretained_ephemeral_nodes_and_state() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema).unwrap();
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = Rc::new(
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap(),
-    );
+    let storage = Rc::new(MemoryStorage::new(&["albums"]));
     let subscription = runtime
         .subscribe_one_sink(GraphBuilder::table("albums"), &storage)
         .await
@@ -1603,10 +1591,7 @@ async fn unsubscribe_eagerly_collects_unretained_ephemeral_nodes_and_state() {
 async fn identical_subscriptions_share_one_node_with_multiple_retainers() {
     let schema = albums_schema();
     let mut runtime = IvmRuntime::new(schema).unwrap();
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = Rc::new(
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["albums"]).unwrap(),
-    );
+    let storage = Rc::new(MemoryStorage::new(&["albums"]));
     let graph = || {
         GraphBuilder::table("albums")
             .filter(PredicateExpr::gt("id", Value::U64(10)))
@@ -1734,14 +1719,7 @@ async fn stale_as_of_state_rejects_wrong_or_backward_logical_time() {
 async fn similar_join_subscriptions_share_context_independent_base_arrangements() {
     let schema = albums_artists_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = Rc::new(
-        TestBtreeStorage::open(
-            temp_dir.path().join("groove-test.btree"),
-            &["albums", "artists"],
-        )
-        .unwrap(),
-    );
+    let storage = Rc::new(MemoryStorage::new(&["albums", "artists"]));
     let first = runtime
         .subscribe_one_sink(
             GraphBuilder::join(
@@ -1865,10 +1843,7 @@ async fn similar_join_subscriptions_share_context_independent_base_arrangements(
 async fn recursive_recompute_reuses_graph_nodes_without_persisting_contextual_child_state() {
     let schema = edges_schema();
     let mut runtime = IvmRuntime::new(schema.clone()).unwrap();
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = Rc::new(
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap(),
-    );
+    let storage = Rc::new(MemoryStorage::new(&["edges"]));
     let first = runtime
         .subscribe_one_sink(recursive_reach_graph(), &storage)
         .await

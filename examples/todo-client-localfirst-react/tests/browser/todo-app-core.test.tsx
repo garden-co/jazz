@@ -2,7 +2,7 @@
  * Core browser canary for the React todo app.
  *
  * Mounts the real <App /> component in Chromium and connects two persistent
- * OPFS clients to one local Jazz server. The public serverUrl config is
+ * IndexedDB clients to one local Jazz server. The public serverUrl config is
  * converted by the runtime to the websocket endpoint.
  */
 
@@ -157,7 +157,7 @@ describe("React Todo App core browser canary", () => {
     mounts.length = 0;
   });
 
-  it("syncs two persistent OPFS app instances through one core server", async () => {
+  it("syncs two persistent IndexedDB app instances through one core server", async () => {
     const writerDbName = uniqueDbName("core-writer");
     const readerDbName = uniqueDbName("core-reader");
 
@@ -222,7 +222,7 @@ describe("React Todo App core browser canary", () => {
     );
   });
 
-  it("reopens a persistent OPFS app instance with DOM-written todos", async () => {
+  it("reopens a persistent IndexedDB app instance with DOM-written todos", async () => {
     const dbName = uniqueDbName("core-reopen");
     const title = "Core durable todo";
 
@@ -254,13 +254,13 @@ describe("React Todo App core browser canary", () => {
     await waitFor(
       () => hasTodoTitle(secondSession, title),
       5000,
-      "remounted app should load the locally durable todo from OPFS",
+      "remounted app should load the locally durable todo from IndexedDB",
     );
 
     expect(todoTitles(secondSession)).toContain(title);
   });
 
-  it("reopened persistent OPFS client catches up a locally durable write after websocket reconnect", async () => {
+  it("reopened persistent IndexedDB client catches up a locally durable write after websocket reconnect", async () => {
     const writerDbName = uniqueDbName("core-reconnect-writer");
     const readerDbName = uniqueDbName("core-reconnect-reader");
     const writerSecret = "71E6G0xpMXIiQ_dFv6tCLVCEt33kivVHtQ7FD-fkYlc";
@@ -321,7 +321,7 @@ describe("React Todo App core browser canary", () => {
     );
     if (edgeResult) throw edgeResult;
 
-    // The prior online row is already in this reader's OPFS store. Check that
+    // The prior online row is already in this reader's IndexedDB store. Check that
     // local rehydration separately, so a later failure is unambiguously the
     // websocket catch-up stage rather than a remount failure.
     await waitFor(

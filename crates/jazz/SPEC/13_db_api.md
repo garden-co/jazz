@@ -558,7 +558,7 @@ mergeable transaction commit/abort, catalogue publish/lens/pointer
 acknowledgements, worker-thread ownership, and byte transport pumping. The
 browser harness proves worker-owned `WasmDb`/transport objects through a Web
 Worker, Record-encoded rows/cells, permission probes, write-state/wait, reads,
-subscription stream snapshots, OPFS via `WasmDb.openBrowser`, websocket byte
+subscription stream snapshots, IndexedDB via `WasmDb.openBrowser`, websocket byte
 batches, and a headless Chromium smoke gate. `db_read_at` remains
 typed/API-surface-only in the TS harness until there is a serving-node setup for
 that path.

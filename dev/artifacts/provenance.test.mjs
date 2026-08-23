@@ -20,7 +20,6 @@ function fixture() {
     "crates/jazz-wasm/src",
     "crates/jazz/src",
     "crates/groove/src",
-    "crates/opfs-btree/src",
     "crates/wasm-tracing/src",
     "crates/jazz-napi/src",
   ])

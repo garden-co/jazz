@@ -1,6 +1,6 @@
 # todo-client-localfirst-solid
 
-Local-first todo app on Solid + Vite, anonymous auth via `useLocalFirstAuth`, OPFS persistence.
+Local-first todo app on Solid + Vite, anonymous auth via `useLocalFirstAuth`, IndexedDB persistence.
 
 ## What it demonstrates
 
@@ -8,7 +8,7 @@ Local-first todo app on Solid + Vite, anonymous auth via `useLocalFirstAuth`, OP
 - `useAll` reactive queries with composable `where()` filters.
 - `useDb` synchronous local writes (`db.insert`, `db.update`, `db.delete`).
 - Row-level permissions — `owner_id` enforced by `definePermissions`; invalid mutations surface as toast errors via `solid-sonner`.
-- OPFS-backed persistence across reload, plus optional server sync when `VITE_JAZZ_SERVER_URL` is set.
+- IndexedDB-backed persistence across reload, plus optional server sync when `VITE_JAZZ_SERVER_URL` is set.
 - `JazzProvider` wired up via the Jazz Vite plugin (`jazzPlugin` in `vite.config.ts`).
 
 ## Schema
@@ -30,4 +30,4 @@ pnpm dev
 pnpm test
 ```
 
-Vitest browser-mode integration tests (chromium) covering CRUD, OPFS persistence across remount, and server sync between two app instances.
+Vitest browser-mode integration tests (chromium) covering CRUD, IndexedDB persistence across remount, and server sync between two app instances.

@@ -153,7 +153,7 @@ The `criterion_realistic_phase1.*` artifact filenames are retained for history
 ingestion compatibility. New Criterion output is filtered from the active
 `realistic_phase1/` prefix by default.
 
-## Browser Runner (OPFS Worker)
+## Browser Runner (IndexedDB Worker)
 
 Run the browser benchmark test:
 
@@ -162,7 +162,7 @@ pnpm --filter jazz-napi build
 pnpm --dir packages/jazz-tools run bench:realistic:browser
 ```
 
-The test runs against a real Chromium worker + OPFS runtime and emits JSON summaries to stdout.
+The test runs against a real Chromium worker + IndexedDB runtime and emits JSON summaries to stdout.
 The Node-side Jazz server used by the browser harness comes from `jazz-napi`, so its native binding needs to be built first in a workspace checkout.
 
 The browser benchmark sets `logLevel: "warn"` in `DbConfig` so WASM tracing output stays quiet.
@@ -194,8 +194,8 @@ pnpm bench:realistic:profile-browser -- --out-dir ./tmp/browser-profiles
 
 Current browser scenarios:
 
-- `W1`: interactive local workload mix (worker/OPFS)
-- `W4`: cold reopen/query (worker/OPFS)
+- `W1`: interactive local workload mix (worker/IndexedDB)
+- `W4`: cold reopen/query (worker/IndexedDB)
 - `B1`: server-connected CRUD sustained throughput
 - `B2`: server-connected read/load sustained throughput
 - `B3`: server-connected cold load over larger dataset

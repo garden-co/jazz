@@ -219,32 +219,26 @@ In the browser, Jazz uses the direct Rust/WASM core for reads, writes, subscript
 `driver: { type: "memory" }`, the database runs in the main thread and syncs to the configured
 server over the core WebSocket protocol.
 
-With `driver: { type: "persistent" }`, Jazz uses a SharedWorker broker to coordinate tabs for the
-same database namespace. The broker elects one tab as the leader. That tab creates a dedicated
-worker, which opens the core database with `WasmDb.openBrowser(...)`, owns OPFS, and maintains the
-server connection. Follower tabs receive message ports from the broker and route their database
-traffic through the leader. If the leader closes, the broker promotes another tab.
+With `driver: { type: "persistent" }`, Jazz opens one directly durable SharedWorker runtime per
+database namespace. The worker owns the IndexedDB page store and the server connection; each tab
+communicates with that runtime through a message port. There is no tab-leader election, Web Locks
+dependency, or per-tab durable database.
 
-The main-thread runtime keeps a non-durable client-side peer so that application writes can be
-applied synchronously while the durable worker processes them in the background.
+The main thread keeps a responsive client-side peer while the SharedWorker commits durable state in
+the background.
 
-With `driver: { type: "memory" }`, the worker and OPFS are skipped entirely, and the main-thread
+With `driver: { type: "memory" }`, the worker and IndexedDB are skipped entirely, and the main-thread
 runtime syncs directly with the server.
 
-### OPFS crash safety
+### IndexedDB crash safety
 
-The OPFS storage engine uses checkpoint-based persistence with two superblock slots (A/B). Each
-checkpoint writes dirty pages, flushes, then swaps the active superblock. On reopen after a crash
-or torn write, the highest valid superblock generation wins, recovering to the last complete
-checkpoint.
+The IndexedDB page store commits a complete page generation and its metadata in one IndexedDB
+transaction. A failed or interrupted write therefore leaves the previous committed generation
+available on reopen.
 
 ### React Native
 
-React Native has compile-level adapter scaffolding with no web worker or OPFS path. In this alpha,
-the adapter does not yet connect a native embedded storage backend to the v2 runtime: persistent
-startup fails before opening a driver, and the explicit memory path has not been validated under
-Metro/Hermes on a device. The table-first model remains the intended native architecture, not a
-claim that local database persistence is currently supported.
+React Native uses its native adapter rather than browser workers or IndexedDB.
 
 ## Query engine
 

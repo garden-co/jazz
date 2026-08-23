@@ -81,7 +81,7 @@ describe("Vanilla TS Todo App E2E", () => {
     await instances[idx].destroy();
     el.remove();
     instances.splice(idx, 1);
-    // Give OPFS handles time to release
+    // Give IndexedDB handles time to release
     await new Promise((r) => setTimeout(r, 200));
   }
 
@@ -231,10 +231,10 @@ describe("Vanilla TS Todo App E2E", () => {
   });
 
   // -------------------------------------------------------------------------
-  // 6. OPFS persistence across reload
+  // 6. IndexedDB persistence across reload
   // -------------------------------------------------------------------------
 
-  it("persists todos across app destroy and remount (OPFS)", async () => {
+  it("persists todos across app destroy and remount (IndexedDB)", async () => {
     const dbName = crypto.randomUUID();
 
     // First session: mount, add todo, destroy
@@ -249,13 +249,13 @@ describe("Vanilla TS Todo App E2E", () => {
 
     await destroyInstance(el1);
 
-    // Second session: remount with same dbName — OPFS data should load
+    // Second session: remount with same dbName — IndexedDB data should load
     const el2 = await mount({ driver: { type: "persistent", dbName } });
 
     await waitFor(
       () => el2.querySelectorAll("#todo-list li").length === 1,
       5000,
-      "Todo should survive remount from OPFS",
+      "Todo should survive remount from IndexedDB",
     );
 
     expect(el2.querySelector("#todo-list li span")!.textContent).toBe("Survive reload");

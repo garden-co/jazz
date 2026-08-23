@@ -16,7 +16,6 @@ mod idb;
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 mod key_codec;
 mod memory;
-mod opfs;
 #[cfg(any(test, feature = "test"))]
 mod test;
 
@@ -32,10 +31,6 @@ use thiserror::Error;
 
 pub use idb::IdbStorage;
 pub use memory::MemoryStorage;
-#[cfg(test)]
-pub type TestBtreeStorage = NativeBtreeStorage;
-#[cfg(not(target_arch = "wasm32"))]
-pub use opfs::{BtreeSyncPolicy, NativeBtreeStorage};
 #[cfg(any(test, feature = "test"))]
 pub use test::{TestStorage, TestStorageControl, TestStorageOperation, YieldingStorage};
 
@@ -1885,8 +1880,6 @@ pub enum Error {
         message: String,
     },
     #[error(transparent)]
-    Opfs(#[from] opfs_btree::BTreeError),
-    #[error(transparent)]
     IdbTree(#[from] idb_tree::Error),
 }
 
@@ -2531,10 +2524,7 @@ mod tests {
 
     #[futures_test::test]
     async fn get_set_and_delete_values() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let storage =
-            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
-                .unwrap();
+        let storage = MemoryStorage::new(&["records"]);
 
         storage
             .set("records".into(), b"a".to_vec(), b"one".to_vec())
@@ -2556,14 +2546,8 @@ mod tests {
     }
 
     #[futures_test::test]
-    async fn native_durable_test_store_keeps_writes_enabled() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let storage = TestBtreeStorage::open_with_sync_policy(
-            temp_dir.path().join("groove-test.btree"),
-            &["records"],
-            BtreeSyncPolicy::OnClose,
-        )
-        .unwrap();
+    async fn memory_test_store_keeps_writes_enabled() {
+        let storage = MemoryStorage::new(&["records"]);
 
         storage
             .set("records".into(), b"a".to_vec(), b"one".to_vec())
@@ -2578,10 +2562,7 @@ mod tests {
 
     #[futures_test::test]
     async fn range_returns_ordered_values_between_start_and_end() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let storage =
-            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
-                .unwrap();
+        let storage = MemoryStorage::new(&["records"]);
 
         storage
             .set("records".into(), b"a".to_vec(), b"one".to_vec())
@@ -2610,10 +2591,7 @@ mod tests {
 
     #[futures_test::test]
     async fn prefix_returns_ordered_values_with_matching_prefix() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let storage =
-            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
-                .unwrap();
+        let storage = MemoryStorage::new(&["records"]);
 
         storage
             .set("records".into(), b"user:1".to_vec(), b"a".to_vec())
@@ -2642,10 +2620,7 @@ mod tests {
 
     #[futures_test::test]
     async fn prefix_handles_prefixes_without_a_finite_upper_bound() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let storage =
-            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
-                .unwrap();
+        let storage = MemoryStorage::new(&["records"]);
 
         storage
             .set("records".into(), vec![0xfe], b"before".to_vec())
@@ -2671,10 +2646,7 @@ mod tests {
 
     #[futures_test::test]
     async fn direct_operations_report_missing_column_families() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let storage =
-            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
-                .unwrap();
+        let storage = MemoryStorage::new(&["records"]);
 
         assert!(matches!(
             storage.get("missing".into(), b"a".to_vec()).await,
@@ -2708,10 +2680,7 @@ mod tests {
 
     #[futures_test::test]
     async fn scans_visit_ordered_values_without_materializing_in_storage_api() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let storage =
-            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
-                .unwrap();
+        let storage = MemoryStorage::new(&["records"]);
 
         storage
             .set("records".into(), b"a".to_vec(), b"one".to_vec())
@@ -2750,12 +2719,7 @@ mod tests {
 
     #[futures_test::test]
     async fn write_many_writes_all_operations_atomically() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let storage = TestBtreeStorage::open(
-            temp_dir.path().join("groove-test.btree"),
-            &["records", "indices"],
-        )
-        .unwrap();
+        let storage = MemoryStorage::new(&["records", "indices"]);
 
         storage
             .write_many(vec![
@@ -3189,10 +3153,7 @@ mod tests {
 
     #[futures_test::test]
     async fn write_many_fails_without_writing_when_column_family_is_missing() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let storage =
-            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
-                .unwrap();
+        let storage = MemoryStorage::new(&["records"]);
 
         let error = storage
             .write_many(vec![
@@ -3428,10 +3389,7 @@ mod tests {
 
     #[futures_test::test]
     async fn write_many_can_mix_sets_and_deletes_atomically() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let storage =
-            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
-                .unwrap();
+        let storage = MemoryStorage::new(&["records"]);
 
         storage
             .set("records".into(), b"old".to_vec(), b"value".to_vec())
@@ -3857,10 +3815,7 @@ mod tests {
 
     #[futures_test::test]
     async fn record_store_writes_and_reads_typed_records() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let storage =
-            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
-                .unwrap();
+        let storage = MemoryStorage::new(&["records"]);
         let descriptor = RecordDescriptor::new([("id", ValueType::U64)]);
         let store = RecordStore::new(&storage, "records", &descriptor);
         let key = b"1".as_slice();
@@ -3874,16 +3829,13 @@ mod tests {
     }
 
     #[futures_test::test]
-    async fn native_durable_test_store_conforms_to_delta_append_contract() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let storage =
-            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
-                .unwrap();
+    async fn memory_test_store_conforms_to_delta_append_contract() {
+        let storage = MemoryStorage::new(&["records"]);
         conformance::delta_append_current_winner_observes_merged_state(storage).await;
     }
 
     #[futures_test::test]
-    async fn native_durable_delta_append_survives_reopen() {
+    async fn memory_storage_delta_append_survives_in_process_rehydration() {
         fn record(time: u64, node: u8, payload: &[u8]) -> Vec<u8> {
             let mut bytes = Vec::new();
             bytes.extend(time.to_le_bytes());
@@ -3903,31 +3855,24 @@ mod tests {
             .unwrap()
         }
 
-        let temp_dir = tempfile::tempdir().unwrap();
-        {
-            let storage =
-                TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
-                    .unwrap();
-            storage
-                .write_many(vec![OwnedWriteOperation::delta(
-                    "records",
-                    b"row",
-                    delta(10, 1, record(10, 1, b"older")),
-                )])
-                .await
-                .unwrap();
-            storage
-                .write_many(vec![OwnedWriteOperation::delta(
-                    "records",
-                    b"row",
-                    delta(20, 2, record(20, 2, b"newer")),
-                )])
-                .await
-                .unwrap();
-        }
-        let reopened =
-            TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["records"])
-                .unwrap();
+        let storage = MemoryStorage::new(&["records"]);
+        storage
+            .write_many(vec![OwnedWriteOperation::delta(
+                "records",
+                b"row",
+                delta(10, 1, record(10, 1, b"older")),
+            )])
+            .await
+            .unwrap();
+        storage
+            .write_many(vec![OwnedWriteOperation::delta(
+                "records",
+                b"row",
+                delta(20, 2, record(20, 2, b"newer")),
+            )])
+            .await
+            .unwrap();
+        let reopened = storage.reopen(Vec::new()).await.unwrap();
         assert_eq!(
             reopened
                 .get("records".into(), b"row".to_vec())

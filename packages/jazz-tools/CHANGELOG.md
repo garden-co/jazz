@@ -12,7 +12,7 @@
 - 397f84d: Add `Db.disconnect()` and `Db.reconnect()` for temporarily pausing and resuming sync without shutting down local storage.
 - 9bee23f: The postMessage "devtools protocol" bridge and the separate browser-extension/devtools build are deleted now that the inspector overlay talks to the data layer through its own worker connection: `attachDevTools`, `createExtensionJazzClient`, `createEmbeddedJazzClient`, and the `DevToolsAttachment` type are no longer exported.
 - 27f9ced: Add an in-app inspector overlay to the Jazz dev plugins. During development the Vite, SvelteKit, and Next plugins now mount a floating toggle (or press `Alt+Shift+J`) that opens the embedded Jazz inspector docked at the bottom of your app — no separate window or setup. It's on by default whenever the dev plugin is in use and is dropped entirely from production builds. `jazz-inspector` now ships as a dependency of `jazz-tools`, so it no longer needs to be installed separately.
-- 2d5f287: The embedded inspector overlay now connects to the data layer through its **own worker connection** instead of the postMessage "devtools protocol" bridge. The overlay reads the host app's connection config from a same-origin `window.__jazzInspectorHost` handle and **joins the host's local store** — it reuses the host's OPFS namespace, broker SharedWorker URL, and identity, so it sees the host's actual local data (including unsynced local-only rows) and works offline; no `serverUrl` is required. It receives the host's active subscriptions via a one-way push for Live Query.
+- 2d5f287: The embedded inspector overlay now connects to the data layer through its **own worker connection** instead of the postMessage "devtools protocol" bridge. The overlay reads the host app's connection config from a same-origin `window.__jazzInspectorHost` handle and **joins the host's local store** — it reuses the host's IndexedDB namespace, broker SharedWorker URL, and identity, so it sees the host's actual local data (including unsynced local-only rows) and works offline; no `serverUrl` is required. It receives the host's active subscriptions via a one-way push for Live Query.
 - bc74a87: Avoid firing a duplicate immediate tick for auto-committed direct writes. Insert, update, upsert, delete, and restore ticked both inside `commit_batch` and unconditionally afterwards; the follow-up tick now only fires when the write does not auto-seal, halving scheduler pressure during bursts of bare writes.
 - 42e77fd: Allow `createDb({ driver: { type: "memory" } })` to create a standalone in-memory database without connecting to a sync server.
 - Updated dependencies [bc74a87]
@@ -34,7 +34,7 @@
 
   This is an advanced, use-at-your-own-risk surface — the internals our framework bindings are built on, surfaced for reuse. It is not covered by semver; the orchestrator/cache-entry/delta shapes may change between releases, so pin a version if you depend on it.
 
-- 6c17100: Route persistent browser runtimes through a SharedWorker broker so tabs for the same Jazz app share one OPFS-backed leader runtime instead of each opening independent storage handles. The broker coordinates leader promotion, follower message ports, schema compatibility, visibility hints, storage resets, and failover after tab or worker crashes, preserving pending local writes while the durable path reconnects.
+- 6c17100: Route persistent browser runtimes through a SharedWorker broker so tabs for the same Jazz app share one IndexedDB-backed leader runtime instead of each opening independent storage handles. The broker coordinates leader promotion, follower message ports, schema compatibility, visibility hints, storage resets, and failover after tab or worker crashes, preserving pending local writes while the durable path reconnects.
 
   **Breaking change — browser support:** persistent browser mode now requires `SharedWorker`, `MessageChannel`, and Web Locks support. Browsers or embedded webviews missing those capabilities will reject `createDb()`/`createJazzClient()` startup for persistent storage instead of using the previous BroadcastChannel tab-election path. Use a supported browser runtime for persistent local storage, or switch to the memory driver with a `serverUrl` in unsupported environments.
 
@@ -165,7 +165,7 @@
 
 - 37299e9: Keep transaction and direct-batch writes isolated from ordinary indexed queries until commit, while still letting batch-scoped reads see their own staged inserts, updates, and deletes.
 - c392b08: Persist authoritative direct batch fate when a server accepts sealed client-originated direct batches, preventing reconnect replays from being answered as missing.
-- 30b55f4: Fix OPFS-backed storage reads so coalesced disk reads stop at the current file length instead of reading past EOF after uncheckpointed growth.
+- 30b55f4: Fix IndexedDB-backed storage reads so coalesced disk reads stop at the current file length instead of reading past EOF after uncheckpointed growth.
 - 2ea35d5: Fix query subscription sync by preserving local-first auth mode through binary payloads.
 - 8962e44: Fix query planning so multiple conditions on the same column are combined correctly, preserving accurate results for same-column where clauses.
 - bf27d80: Fix reverse and nested relation includes that selected provenance magic columns such as `$createdAt` and `$updatedAt`.
@@ -239,7 +239,7 @@
 
   Thanks, Tobi!
 
-- 75aa36b: Add `window.__jazz.shutdown(namespace?)` for awaiting Jazz client teardown (worker termination + OPFS lock release). Useful in browser tests that mount and unmount apps between cases. `Db.shutdown()` is now idempotent — concurrent or repeated calls share the same in-flight promise — so the new API plays cleanly alongside framework-driven cleanup (e.g. JazzProvider unmount).
+- 75aa36b: Add `window.__jazz.shutdown(namespace?)` for awaiting Jazz client teardown (worker termination + IndexedDB lock release). Useful in browser tests that mount and unmount apps between cases. `Db.shutdown()` is now idempotent — concurrent or repeated calls share the same in-flight promise — so the new API plays cleanly alongside framework-driven cleanup (e.g. JazzProvider unmount).
 - Updated dependencies [8fd0db9]
 - Updated dependencies [2ee98be]
   - jazz-wasm@2.0.0-alpha.45
@@ -358,7 +358,7 @@
 - c825970: Re-apply stored Rejected batch settlements on runtime startup so that a crash between persisting a rejection and deleting its visible row no longer causes the lingering row to flash into queries on reload before being retracted.
 - a4b83ea: `jazz-tools deploy` now warns about tables that have no explicit permission policy, matching the behaviour of `jazz-tools validate`.
 - f8981c6: Fix `jazz-tools deploy` so apps without a `permissions.ts` file still publish their structural schema. The CLI now skips the permissions publish step instead of failing when no current permissions are defined.
-- 751eff9: Fall back to ephemeral in-memory storage when OPFS is blocked by a SecurityError (Firefox private browsing, Safari private mode). Jazz now initialises successfully without persistence instead of failing to load entirely.
+- 751eff9: Fall back to ephemeral in-memory storage when IndexedDB is blocked by a SecurityError (Firefox private browsing, Safari private mode). Jazz now initialises successfully without persistence instead of failing to load entirely.
 - 961361c: Treat reconnect row-history replay as idempotent only when the incoming row exactly matches the stored history member. This avoids spuriously reclassifying replayed inserts as updates on insert-only tables while still allowing same-batch corrections to propagate their final payload.
 - 0fc5388: Add `jazz-tools schema hash` command to print the short hash of the current `schema.ts` without hitting the server or writing a local snapshot.
 - efa67bf: Admin-secret clients now bypass local row-policy enforcement so writes still reach the sync server, where permissions are actually checked.
@@ -423,7 +423,7 @@
 
 ### Patch Changes
 
-- 0585935: Fix OPFS B-tree page splitting for large index keys by choosing split points based on encoded page size instead of entry count. This prevents synced inserts with many near-threshold JSON index values from failing with leaf or internal split fit errors.
+- 0585935: Fix IndexedDB B-tree page splitting for large index keys by choosing split points based on encoded page size instead of entry count. This prevents synced inserts with many near-threshold JSON index values from failing with leaf or internal split fit errors.
 - 213288a: Bind qualified `where(...)` filters on hopped permission relations to the relation's actual joined scope so correlated `exists(...)` closures over gathered team grants evaluate correctly at runtime.
 - 66dc47a: Direct write conflicts now resolve with MRCA-based per-column LWW for visible merge previews and merge-on-write rebases, including accepted transactional rows.
 
@@ -442,7 +442,7 @@
 
 ### Patch Changes
 
-- 2d10b2e: Include the failing index column in synced insert index-update error logs so OPFS-backed index failures are easier to diagnose.
+- 2d10b2e: Include the failing index column in synced insert index-update error logs so IndexedDB-backed index failures are easier to diagnose.
   - jazz-wasm@2.0.0-alpha.32
   - jazz-rn@2.0.0-alpha.32
 
@@ -452,7 +452,7 @@
 
 - ea68566: Isolate browser-local Jazz persistence by default across users and app scopes.
 
-  `createDb()` now derives the default browser persistent namespace from both `appId` and the resolved authenticated principal when no explicit `dbName` is provided, preventing one user from reopening another user's OPFS-backed local cache. `BrowserAuthSecretStore` also now accepts scope hints like `appId`, `userId`, and `sessionId` so browser apps can avoid sharing one global local-first identity secret across unrelated sessions.
+  `createDb()` now derives the default browser persistent namespace from both `appId` and the resolved authenticated principal when no explicit `dbName` is provided, preventing one user from reopening another user's IndexedDB-backed local cache. `BrowserAuthSecretStore` also now accepts scope hints like `appId`, `userId`, and `sessionId` so browser apps can avoid sharing one global local-first identity secret across unrelated sessions.
 
 - 44b90c0: Fix misleading schema-mismatch recovery guidance during client/server handshakes.
 
@@ -462,9 +462,9 @@
   `cookieSession` for local permission evaluation. Servers can now accept JWT auth
   from a configured auth cookie, and cookie-backed websocket handshakes are
   restricted to same-origin requests.
-- fd98d6e: Add coordinated browser logout and storage wipe support so follower tabs can trigger an OPFS reset through the elected leader, stale fallback namespaces are removed, and `db.logout({ wipeData: true })` clears browser state before the next session starts.
+- fd98d6e: Add coordinated browser logout and storage wipe support so follower tabs can trigger an IndexedDB reset through the elected leader, stale fallback namespaces are removed, and `db.logout({ wipeData: true })` clears browser state before the next session starts.
 - 09e16b4: Support recursive gather seeds built from composed same-table relations, including hop-based and unioned permission closures.
-- 2e8e918: Cap oversized secondary index keys to a 5 KiB budget so large text values still use the truncate-and-hash encoding without producing OPFS index entries that can overflow B-tree page splits.
+- 2e8e918: Cap oversized secondary index keys to a 5 KiB budget so large text values still use the truncate-and-hash encoding without producing IndexedDB index entries that can overflow B-tree page splits.
 - 05649ae: Add a new `deploy` CLI command to upload the current schema and permissions to the server. Replaces the existing `permissions push` command.
 - 80a0360: Add `updatedAt` overrides to `insert`, `update`, and `upsert` mutation options in `jazz-tools`.
 
@@ -717,9 +717,8 @@
   Oversized indexed inserts and updates now return a normal mutation error to JS callers, and local updates can recover rows that were previously left in a partial index state by older panic-driven failures.
 
 - d9261b7: Move Jazz client creation into the default React and React Native `JazzProvider` so Strict Mode remounts do not trigger extra startup delays, while still exposing `JazzClientProvider` for apps that need to supply their own client instance.
-- 83f4f5d: Use xxHash-based checksums for `opfs-btree` pages and superblocks to reduce checksum overhead in persistent browser storage.
 
-  Existing OPFS stores created by older builds are not checksum-compatible with this change and will need to be recreated after upgrading.
+  Existing IndexedDB stores created by older builds are not checksum-compatible with this change and will need to be recreated after upgrading.
 
 - Updated dependencies [33bc53f]
 - Updated dependencies [83f4f5d]

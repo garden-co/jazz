@@ -20,7 +20,6 @@ uuid = { version = "1.18.1", features = ["serde", "v5"] }
 web-time = "1.1.0"
 rustc-hash.workspace = true
 idb-tree = { path = "../idb-tree" }
-opfs-btree = { path = "../opfs-btree" }
 
 [dev-dependencies]
 jazz-benchmark-guard = { path = "../benchmark-guard" }

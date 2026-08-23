@@ -51,9 +51,7 @@ impl Future for YieldOnce {
 
 #[futures_test::test]
 async fn deep_recursive_step_evaluates_with_constant_stack() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage = MemoryStorage::new(&["edges"]);
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let seed = GraphBuilder::table("edges").project(["src", "dst"]);
     let frontier = GraphBuilder::frontier_source(
@@ -88,9 +86,7 @@ async fn deep_recursive_step_evaluates_with_constant_stack() {
 
 #[futures_test::test]
 async fn recursive_graph_subscriptions_settle_transitive_closure_in_one_tick() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage = MemoryStorage::new(&["edges"]);
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_one_sink(reachability_graph(16))
@@ -154,9 +150,7 @@ async fn recursive_graph_subscriptions_settle_with_async_idb_tree_storage() {
 
 #[futures_test::test]
 async fn recursive_graph_subscriptions_retract_derived_paths_after_delete() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage = MemoryStorage::new(&["edges"]);
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_one_sink(reachability_graph(16))
@@ -205,9 +199,7 @@ async fn recursive_graph_subscriptions_retract_derived_paths_after_delete() {
 
 #[futures_test::test]
 async fn prepared_recursive_binding_retracts_transitive_paths_after_edge_delete() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage = MemoryStorage::new(&["edges"]);
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let shape = prepared_reachability_shape(&mut database).await;
     let subscription = database
@@ -240,12 +232,7 @@ async fn prepared_recursive_binding_retracts_transitive_paths_after_edge_delete(
 
 #[futures_test::test]
 async fn prepared_recursive_binding_skips_recompute_for_unrelated_table_delta() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["edges", "docs"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["edges", "docs"]);
     let mut database = Database::new(edges_docs_schema(), storage).await.unwrap();
     let shape = database
         .prepare_one_sink(
@@ -295,9 +282,7 @@ async fn prepared_recursive_binding_skips_recompute_for_unrelated_table_delta() 
 
 #[futures_test::test]
 async fn prepared_recursive_binding_recomputes_for_relevant_insert_and_retraction() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage = MemoryStorage::new(&["edges"]);
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let shape = prepared_reachability_shape(&mut database).await;
     let subscription = database
@@ -348,9 +333,7 @@ async fn prepared_recursive_binding_recomputes_for_relevant_insert_and_retractio
 
 #[futures_test::test]
 async fn prepared_recursive_positive_step_inserts_match_recompute_diff_without_recompute() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage = MemoryStorage::new(&["edges"]);
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let shape = prepared_reachability_shape(&mut database).await;
     let subscription = database
@@ -406,9 +389,7 @@ async fn prepared_recursive_positive_step_inserts_match_recompute_diff_without_r
 
 #[futures_test::test]
 async fn prepared_recursive_binding_retracts_paths_after_first_edge_delete() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage = MemoryStorage::new(&["edges"]);
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let shape = prepared_reachability_shape(&mut database).await;
     let subscription = database
@@ -442,9 +423,7 @@ async fn prepared_recursive_binding_retracts_paths_after_first_edge_delete() {
 
 #[futures_test::test]
 async fn prepared_recursive_binding_retraction_recomputes_instead_of_erroring() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage = MemoryStorage::new(&["edges"]);
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let shape = prepared_reachability_shape(&mut database).await;
     let first = database
@@ -512,12 +491,7 @@ async fn prepared_recursive_binding_retraction_recomputes_instead_of_erroring() 
 
 #[futures_test::test]
 async fn prepared_recursive_binding_retracts_transitive_paths_from_antijoin_input() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["edges", "blockers"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["edges", "blockers"]);
     let mut database = Database::new(edges_blockers_schema(), storage)
         .await
         .unwrap();
@@ -555,12 +529,7 @@ async fn prepared_recursive_binding_retracts_transitive_paths_from_antijoin_inpu
 
 #[futures_test::test]
 async fn prepared_recursive_binding_retracts_first_paths_from_antijoin_input() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = TestBtreeStorage::open(
-        temp_dir.path().join("groove-test.btree"),
-        &["edges", "blockers"],
-    )
-    .unwrap();
+    let storage = MemoryStorage::new(&["edges", "blockers"]);
     let mut database = Database::new(edges_blockers_schema(), storage)
         .await
         .unwrap();
@@ -599,9 +568,7 @@ async fn prepared_recursive_binding_retracts_first_paths_from_antijoin_input() {
 
 #[futures_test::test]
 async fn recursive_graph_subscriptions_collapse_duplicate_derivations() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage = MemoryStorage::new(&["edges"]);
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_one_sink(reachability_graph(16))
@@ -621,9 +588,7 @@ async fn recursive_graph_subscriptions_collapse_duplicate_derivations() {
 
 #[futures_test::test]
 async fn recursive_graph_subscriptions_recompute_after_edge_update() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage = MemoryStorage::new(&["edges"]);
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_one_sink(reachability_graph(16))
@@ -655,9 +620,7 @@ async fn recursive_graph_subscriptions_recompute_after_edge_update() {
 
 #[futures_test::test]
 async fn recursive_graph_subscriptions_incrementally_extend_existing_reach_with_new_edge() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage = MemoryStorage::new(&["edges"]);
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_one_sink(reachability_graph(16))
@@ -702,9 +665,7 @@ async fn recursive_graph_subscriptions_incrementally_extend_existing_reach_with_
 
 #[futures_test::test]
 async fn recursive_graph_subscriptions_incrementally_extend_new_seed_with_existing_edge() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage = MemoryStorage::new(&["edges"]);
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let subscription_id = database
         .subscribe_one_sink(reachability_graph(16))
@@ -733,9 +694,7 @@ async fn recursive_graph_subscriptions_incrementally_extend_new_seed_with_existi
 
 #[futures_test::test]
 async fn recursive_graph_subscriptions_converge_on_self_cycles() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage = MemoryStorage::new(&["edges"]);
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let subscription = database
         .subscribe_one_sink(reachability_graph(2))
@@ -753,9 +712,7 @@ async fn recursive_graph_subscriptions_converge_on_self_cycles() {
 
 #[futures_test::test]
 async fn recursive_graphs_reject_seed_and_step_output_descriptor_mismatch() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage = MemoryStorage::new(&["edges"]);
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let frontier = GraphBuilder::frontier_source(
         "frontier",
@@ -780,9 +737,7 @@ async fn recursive_graphs_reject_seed_and_step_output_descriptor_mismatch() {
 
 #[futures_test::test]
 async fn recursive_graphs_reject_nested_recursion_for_v0() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage = MemoryStorage::new(&["edges"]);
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
     let reach = RecordDescriptor::new([
         ("src", ColumnType::U64.clone()),
@@ -803,9 +758,7 @@ async fn recursive_graphs_reject_nested_recursion_for_v0() {
 
 #[futures_test::test]
 async fn recursive_graphs_fail_when_frontier_exceeds_max_iters() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        TestBtreeStorage::open(temp_dir.path().join("groove-test.btree"), &["edges"]).unwrap();
+    let storage = MemoryStorage::new(&["edges"]);
     let mut database = Database::new(edges_schema(), storage).await.unwrap();
 
     let mut batch = database.open_batch();

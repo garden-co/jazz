@@ -188,7 +188,7 @@ The canonical set above is the pre-push discipline mirrored from
 - 🔶 **Multi-server topology tests.** Add integration tests that exercise client
   to edge to core communication, including reconnect, policy narrowing,
   subscription deltas, and durability waits.
-- 🔶 **Browser storage fallback tests.** OPFS-unavailable modes need explicit
+- 🔶 **Browser storage fallback tests.** IndexedDB-unavailable modes need explicit
   browser coverage for fail-loud or in-memory fallback behavior.
 - 🔶 **WASM teardown regression.** Keep navigation/teardown churn coverage for
   multi-client WASM transports until the true shutdown fix lands.

@@ -10,7 +10,7 @@ use groove::records::{RecordDescriptor, Value};
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
 };
-use jazz_storage_rocksdb::RocksDbStorage;
+use groove::storage::MemoryStorage;
 
 fn edges_schema() -> DatabaseSchema {
     DatabaseSchema::new([TableSchema::new(
@@ -61,8 +61,7 @@ fn sorted(mut values: Vec<(Vec<Value>, i64)>) -> Vec<(Vec<Value>, i64)> {
 
 #[futures_test::test]
 async fn incremental_ticks_converge_on_cycles() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
+    let storage = MemoryStorage::new(&["edges"]);
     let mut db = Database::new(edges_schema(), storage).await.unwrap();
     let sub = db.subscribe_one_sink(reachability_graph()).await.unwrap();
     let _initial = sub.recv().unwrap();
@@ -92,8 +91,7 @@ async fn incremental_ticks_converge_on_cycles() {
 
 #[futures_test::test]
 async fn recompute_converges_on_cycles_at_subscribe() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
+    let storage = MemoryStorage::new(&["edges"]);
     let mut db = Database::new(edges_schema(), storage).await.unwrap();
 
     let mut batch = db.open_batch();
@@ -115,8 +113,7 @@ async fn recompute_converges_on_cycles_at_subscribe() {
 
 #[futures_test::test]
 async fn retraction_recompute_converges_while_a_cycle_exists() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage = RocksDbStorage::open(temp_dir.path(), &["edges"]).unwrap();
+    let storage = MemoryStorage::new(&["edges"]);
     let mut db = Database::new(edges_schema(), storage).await.unwrap();
     let sub = db.subscribe_one_sink(reachability_graph()).await.unwrap();
     let _initial = sub.recv().unwrap();

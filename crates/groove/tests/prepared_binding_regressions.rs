@@ -12,7 +12,7 @@ use groove::records::{RecordDescriptor, Value};
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
 };
-use jazz_storage_rocksdb::{Durability, RocksDbStorage};
+use groove::storage::MemoryStorage;
 
 fn edges_schema() -> DatabaseSchema {
     DatabaseSchema::new([TableSchema::new(
@@ -39,13 +39,10 @@ fn edges_by_src_shape_graph() -> GraphBuilder {
     ])
 }
 
-async fn open_db() -> (tempfile::TempDir, Database) {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let storage =
-        RocksDbStorage::open_with_durability(temp_dir.path(), &["edges"], Durability::WalNoSync)
-            .unwrap();
+async fn open_db() -> Database {
+    let storage = MemoryStorage::new(&["edges"]);
     let db = Database::new(edges_schema(), storage).await.unwrap();
-    (temp_dir, db)
+    db
 }
 
 async fn insert_edge(db: &mut Database, id: u64, src: u64, dst: u64) {
@@ -61,7 +58,7 @@ async fn insert_edge(db: &mut Database, id: u64, src: u64, dst: u64) {
 
 #[futures_test::test]
 async fn dropped_shape_receiver_cleanup_retracts_binding_before_rebind() {
-    let (_dir, mut db) = open_db().await;
+    let mut db = open_db().await;
     let shape = db
         .prepare_one_sink(
             edges_by_src_shape_graph(),
@@ -103,7 +100,7 @@ async fn dropped_shape_receiver_cleanup_retracts_binding_before_rebind() {
 
 #[futures_test::test]
 async fn immediate_rebind_cancels_queued_final_binding_retraction() {
-    let (_dir, mut db) = open_db().await;
+    let mut db = open_db().await;
     insert_edge(&mut db, 1, 7, 100).await;
     let shape = db
         .prepare_one_sink(
@@ -142,7 +139,7 @@ async fn immediate_rebind_cancels_queued_final_binding_retraction() {
 
 #[futures_test::test]
 async fn second_identical_shape_does_not_wipe_existing_bindings() {
-    let (_dir, mut db) = open_db().await;
+    let mut db = open_db().await;
     let shape_a = db
         .prepare_one_sink(
             edges_by_src_shape_graph(),
@@ -185,7 +182,7 @@ async fn second_identical_shape_does_not_wipe_existing_bindings() {
 
 #[futures_test::test]
 async fn pending_retraction_does_not_corrupt_freshly_hydrated_sibling_shape() {
-    let (_dir, mut db) = open_db().await;
+    let mut db = open_db().await;
     // Shape A: src/dst projection.
     let shape_a = db
         .prepare_one_sink(
