@@ -1,7 +1,10 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+import { execFile } from "node:child_process";
 import { WebSocket } from "undici";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SubscriptionEvent as NapiSubscriptionEvent } from "jazz-napi";
@@ -17,6 +20,8 @@ import type { WasmRow } from "../drivers/types.js";
 import { createOpenBatchId, type BatchId, type OpenBatchId, type WriteReceipt } from "./client.js";
 
 const require = createRequire(import.meta.url);
+const execFileAsync = promisify(execFile);
+const here = dirname(fileURLToPath(import.meta.url));
 const debugSubscriptionEventFixture = hasJazzNapiBuild()
   ? (
       require("jazz-napi") as typeof import("jazz-napi") & {
@@ -24,6 +29,13 @@ const debugSubscriptionEventFixture = hasJazzNapiBuild()
       }
     ).__testSubscriptionEvents
   : undefined;
+
+async function runNapiFixture(name: string, args: string[] = []) {
+  return await execFileAsync(process.execPath, [join(here, "__fixtures__", name), ...args], {
+    encoding: "utf8",
+    timeout: 9_000,
+  });
+}
 
 function beginTestBatch(runtime: NativeRuntimeAdapter): OpenBatchId {
   const id = createOpenBatchId();
@@ -344,6 +356,29 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
 
     db.close?.();
   }, 20_000);
+
+  it("releases N-API callbacks when the owner closes with a schema view retained", async () => {
+    const schema = Buffer.from(encodeSchema(TEST_SCHEMA)).toString("base64");
+    const config = Buffer.from(
+      openConfig(
+        deterministicBytes("jazz-napi-native-runtime:retained-view-node"),
+        deterministicBytes("jazz-napi-native-runtime:retained-view-author"),
+        1,
+        true,
+      ),
+    ).toString("base64");
+
+    for (const storage of ["memory", "persistent"]) {
+      const result = await runNapiFixture("napi-close-retained-schema-view.mjs", [
+        storage,
+        schema,
+        config,
+      ]);
+
+      expect(result.stderr).toBe("");
+      expect(result.stdout).toBe(`owner closed with ${storage} schema view retained\n`);
+    }
+  }, 10_000);
 
   it("emits core tick scheduler wakes through the NAPI bridge", async () => {
     const { NapiDb } = await loadNapiModule();

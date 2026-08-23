@@ -2459,8 +2459,19 @@ impl NapiDb {
             Ok(())
         } else if let Some(inner) = inner {
             match inner {
-                NapiDbInnerStorage::Memory(db) => core_block_on(db.close()),
-                NapiDbInnerStorage::Persistent(db) => core_block_on(db.close()),
+                NapiDbInnerStorage::Memory(db) => {
+                    // Schema views retain this core through their own Rc. Release every
+                    // N-API-owned callback before the fallible async close so a retained
+                    // view cannot keep Node's event loop alive after its owner closes.
+                    db.set_tick_scheduler(None);
+                    db.clear_mutation_error_callback();
+                    core_block_on(db.close())
+                }
+                NapiDbInnerStorage::Persistent(db) => {
+                    db.set_tick_scheduler(None);
+                    db.clear_mutation_error_callback();
+                    core_block_on(db.close())
+                }
             }
         } else {
             Ok(())
