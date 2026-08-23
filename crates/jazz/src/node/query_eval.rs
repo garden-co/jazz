@@ -707,6 +707,44 @@ where
         prepared_claim_binding_mode: PreparedClaimBindingMode,
         force_inline_binding_source: bool,
     ) -> Result<QueryProgramRequest, Error> {
+        let policy = self.query_program_policy_context(identity);
+        // Linked client shapes carry their read-policy alternatives so an
+        // identity-scoped server can maintain the authorized result. System
+        // authority is different: it bypasses those alternatives entirely.
+        // Drop them before normalization, rather than merely clearing their
+        // prepared claim descriptor later. Otherwise normalization lowers a
+        // policy `Claim` into `__jazz_claim_*` and the System program still
+        // attempts to execute that unbound predicate.
+        let system_shape;
+        let system_binding;
+        let (shape, binding) = if matches!(policy, PolicyContext::System)
+            && !shape.query().policy_branches.is_empty()
+        {
+            let schema = if shape.schema_version() == self.catalogue.current_schema_version_id {
+                &self.catalogue.schema
+            } else {
+                &self
+                    .catalogue
+                    .catalogue_schemas
+                    .get(&shape.schema_version())
+                    .ok_or(Error::InvalidStoredValue("query schema version is unknown"))?
+                    .schema
+            };
+            let mut query = shape.query().clone();
+            query.policy_branches.clear();
+            system_shape = query.validate_with_schema_version(schema, shape.schema_version())?;
+            system_binding = system_shape.bind(
+                binding
+                    .values()
+                    .iter()
+                    .filter(|(name, _)| system_shape.params().contains_key(*name))
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect(),
+            )?;
+            (&system_shape, &system_binding)
+        } else {
+            (shape, binding)
+        };
         let lowered_shape;
         let lowered_binding;
         // Prepared binding sources are a serving-side optimization. Client
@@ -748,7 +786,6 @@ where
             input_shape.nodes.remove(&input_shape.root);
             input_shape.root = input;
         }
-        let policy = self.query_program_policy_context(identity);
         let policy_schema_version = self.read_policy_schema_for_table_name(
             &shape.query().table,
             shape.schema_version(),
