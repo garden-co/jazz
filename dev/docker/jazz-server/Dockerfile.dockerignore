@@ -1,0 +1,9 @@
+.git
+.turbo
+node_modules
+target
+**/node_modules
+**/target
+**/.next
+**/dist
+**/coverage

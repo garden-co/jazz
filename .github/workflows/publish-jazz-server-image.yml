@@ -1,0 +1,109 @@
+name: Publish Jazz server image
+
+# JazzHost v1 deliberately starts on amd64/m7a. Treat other architectures as
+# separately measured optimizations rather than silently publishing variants.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/publish-jazz-server-image.yml"
+      - "dev/docker/jazz-server/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/publish-jazz-server-image.yml"
+      - "dev/docker/jazz-server/**"
+
+concurrency:
+  group: publish-jazz-server-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build amd64 server image
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/garden-co/jazz-server
+      LOCAL_IMAGE: jazz-server:validation
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Build native amd64 image
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          docker build \
+            --platform linux/amd64 \
+            --build-arg "VCS_REF=${GITHUB_SHA}" \
+            --file dev/docker/jazz-server/Dockerfile \
+            --tag "${LOCAL_IMAGE}" \
+            .
+
+      - name: Smoke image and persistent data path
+        shell: bash
+        run: |
+          set -euo pipefail
+          container=jazz-server-image-smoke
+          data_volume=jazz-server-image-smoke-data
+          cleanup() {
+            docker rm --force "${container}" >/dev/null 2>&1 || true
+            docker volume rm "${data_volume}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          cleanup
+          docker volume create "${data_volume}" >/dev/null
+          # Kubernetes applies fsGroup=10001 to the PVC before the non-root
+          # process starts. Mirror that ownership transition in this smoke.
+          docker run --rm \
+            --user 0:0 \
+            --entrypoint /bin/chown \
+            --volume "${data_volume}:/data" \
+            "${LOCAL_IMAGE}" \
+            10001:10001 /data
+          docker run --detach \
+            --name "${container}" \
+            --publish 127.0.0.1::1625 \
+            --volume "${data_volume}:/data" \
+            "${LOCAL_IMAGE}" \
+            server 22f1334f-4e5a-46ae-a557-bcfad28dcd93 \
+            --data-dir /data \
+            --allow-local-first-auth >/dev/null
+          port="$(docker port "${container}" 1625/tcp | sed 's/.*://')"
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent "http://127.0.0.1:${port}/health" >/dev/null; then
+              break
+            fi
+            if ! docker inspect --format '{{.State.Running}}' "${container}" | grep -qx true; then
+              echo "server exited during readiness attempt ${attempt}" >&2
+              docker logs "${container}"
+              exit 1
+            fi
+            sleep 1
+          done
+          curl --fail --silent "http://127.0.0.1:${port}/health" >/dev/null
+          test "$(docker inspect --format '{{.Config.User}}' "${container}")" = 10001:10001
+          docker exec "${container}" test -d /data/server-shell.rocksdb
+
+      - name: Publish immutable commit tag
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="sha-${GITHUB_SHA}"
+          echo "${GHCR_TOKEN}" | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+          docker tag "${LOCAL_IMAGE}" "${IMAGE}:${tag}"
+          docker push "${IMAGE}:${tag}"
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:${tag}")"
+          test -n "${digest}"
+          {
+            echo '### Jazz server image'
+            echo
+            echo "\`${digest}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
