@@ -16,6 +16,21 @@ const allowedTypes = new Set([
   "application/pdf",
 ]);
 export function App({ config }: { config?: Partial<DbConfig> } = {}) {
+  if (config?.jwtToken)
+    return (
+      <ConfiguredApp
+        config={{
+          appId: config.appId ?? appId!,
+          env: config.env ?? "dev",
+          serverUrl: config.serverUrl ?? serverUrl,
+          driver: config.driver,
+          jwtToken: config.jwtToken,
+        }}
+      />
+    );
+  return <LocalFirstApp config={config} />;
+}
+function LocalFirstApp({ config }: { config?: Partial<DbConfig> }) {
   const auth = useLocalFirstAuth();
   const shared = {
     appId: config?.appId ?? appId!,
@@ -23,14 +38,14 @@ export function App({ config }: { config?: Partial<DbConfig> } = {}) {
     serverUrl: config?.serverUrl ?? serverUrl,
     driver: config?.driver,
   };
-  const providerConfig: DbConfig | null = config?.jwtToken
-    ? { ...shared, jwtToken: config.jwtToken }
-    : config?.secret || auth.secret
-      ? { ...shared, secret: config?.secret ?? auth.secret! }
-      : null;
+  const providerConfig: DbConfig | null =
+    config?.secret || auth.secret ? { ...shared, secret: config?.secret ?? auth.secret! } : null;
   if (!providerConfig) return <p>Joining BandChat…</p>;
+  return <ConfiguredApp config={providerConfig} />;
+}
+function ConfiguredApp({ config }: { config: DbConfig }) {
   return (
-    <JazzProvider config={providerConfig} fallback={<p>Opening local stage…</p>}>
+    <JazzProvider config={config} fallback={<p>Opening local stage…</p>}>
       <SessionShell />
     </JazzProvider>
   );
