@@ -2084,6 +2084,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-example-band-chat-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+]
+
+[[package]]
 name = "jazz-example-benchmark-smoke"
 version = "0.1.0"
 dependencies = [
