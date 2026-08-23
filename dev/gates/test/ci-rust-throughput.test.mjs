@@ -843,6 +843,25 @@ test("CodSpeed caches the root-workspace Cargo target", () => {
   );
 });
 
+test("CodSpeed builds and runs the BigLabel benchmark variant", () => {
+  for (const command of ["build", "run"]) {
+    assert.match(
+      codspeedWorkflow,
+      new RegExp(
+        `cargo codspeed ${command} --package jazz-example-benchmark-smoke --package jazz-example-big-label-benchmark`,
+      ),
+    );
+  }
+  assert.throws(
+    () =>
+      assert.match(
+        codspeedWorkflow.replaceAll(" --package jazz-example-big-label-benchmark", ""),
+        /jazz-example-big-label-benchmark/,
+      ),
+    /jazz-example-big-label-benchmark/,
+  );
+});
+
 test("Windows NAPI release builds provision libclang for RocksDB bindgen", () => {
   const windowsNapiSetup =
     /name: Install libclang for Windows bindgen[\s\S]*if: matrix\.platform == 'win32-x64-msvc'[\s\S]*choco install llvm --version=21\.1\.8 --yes --no-progress --limit-output[\s\S]*Test-Path \(Join-Path \$libclangPath "libclang\.dll"\)[\s\S]*LIBCLANG_PATH=\$libclangPath[\s\S]*\$env:GITHUB_PATH/;
