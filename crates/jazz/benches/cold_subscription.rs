@@ -37,6 +37,15 @@ fn main() {
     }
 }
 
+#[allow(dead_code)]
+pub(crate) fn correctness_smoke() {
+    let mut bench = ColdSubscriptionBench::new();
+    bench.seed_history(2);
+    bench.seed_pending(1);
+    let _ = bench.current_rows_update_elapsed(DurabilityTier::Global);
+    let _ = bench.current_rows_update_elapsed(DurabilityTier::Local);
+}
+
 struct ColdSubscriptionBench {
     writer: NodeState<RocksDbStorage>,
     core: NodeState<RocksDbStorage>,

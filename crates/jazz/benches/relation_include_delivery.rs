@@ -81,6 +81,13 @@ fn main() {
     emit_slope(samples, max_ratio, &rungs);
 }
 
+#[allow(dead_code)]
+pub(crate) fn correctness_smoke() {
+    // Exercise the delivery-shape assertions without treating an allocator
+    // ratio measured on this host as a correctness signal.
+    let _ = measure_single_child_insert(3, 0);
+}
+
 #[derive(Clone, Copy, Debug)]
 struct Measurement {
     allocs: u64,

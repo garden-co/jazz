@@ -30,6 +30,16 @@ fn main() {
     bench.print_json(elapsed);
 }
 
+#[allow(dead_code)]
+pub(crate) fn correctness_smoke() {
+    let mut bench = SyncBench::new(Config {
+        commits: 25,
+        view_every: 5,
+        seed: 0x510c_4eed,
+    });
+    let _ = bench.run();
+}
+
 #[derive(Clone, Copy)]
 struct Config {
     commits: usize,

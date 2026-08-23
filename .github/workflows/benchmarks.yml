@@ -125,7 +125,14 @@ jobs:
           cargo build --release -p jazz --features client,sqlite,transport-compression-zstd --example realistic_bench
           cargo bench -p jazz --features rocksdb,transport-compression-zstd --bench realistic_phase1 --no-run
           cargo bench -p jazz --features sqlite,transport-compression-zstd --bench realistic_phase1 --no-run
+          cargo bench -p jazz --features testing --bench cold_subscription --no-run
+          cargo bench -p jazz --features testing --bench sync --no-run
+          cargo bench -p jazz --features testing --bench validation --no-run
+          cargo bench -p jazz --features testing --bench relation_include_delivery --no-run
+          cargo bench -p jazz --features testing --bench route_subscription_curve --no-run
           cargo bench -p jazz-sim --bench s2_canvas --no-run
+          cargo bench -p jazz-sim --bench micro --no-run
+          cargo bench -p jazz-sim --bench s8_branch_views --no-run
 
       - name: Run native benchmark suite
         run: |
@@ -160,6 +167,34 @@ jobs:
             --skip-set dev/benchmarks/realistic/ci_skip_set.json \
             --repeat-count "${BENCH_REPEAT_COUNT}" \
             --timeout-seconds "${BENCH_TIMEOUT_SECONDS}"
+
+      - name: Run legacy Jazz timing suites
+        run: |
+          set -uo pipefail
+          mkdir -p bench-out/native/legacy-jazz/logs
+          status_file=bench-out/native/legacy-jazz/status.tsv
+          : >"${status_file}"
+          failed=0
+          run() { name="$1"; shift; if taskset -c "${BENCH_CPUSET}" "$@" >"bench-out/native/legacy-jazz/logs/${name}.log" 2>&1; then printf '%s\tpassed\n' "$name" >>"${status_file}"; else printf '%s\tfailed\n' "$name" >>"${status_file}"; failed=1; fi; }
+          run cold_subscription env JAZZ_DEPTHS=100 JAZZ_PENDING_SIZES=0,10 cargo bench -p jazz --features testing --bench cold_subscription
+          run sync env GROOVE_COMMITS=20 GROOVE_VIEW_EVERY=5 cargo bench -p jazz --features testing --bench sync
+          run validation env GROOVE_CLIENTS=5 GROOVE_ROWS=20 GROOVE_COMMITS=25 cargo bench -p jazz --features testing --bench validation
+          run relation_include_delivery env JAZZ_INC_DELIVERY_SCALES=1000,2500,5000,10000,20000 JAZZ_INC_DELIVERY_SAMPLES=1 cargo bench -p jazz --features testing --bench relation_include_delivery
+          run route_subscription_curve env JAZZ_ROUTE_CURVE_ROUTES=10 cargo bench -p jazz --features testing --bench route_subscription_curve
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          const dir = "bench-out/native/legacy-jazz";
+          const names = ["cold_subscription", "sync", "validation", "relation_include_delivery", "route_subscription_curve"];
+          const now = new Date().toISOString();
+          const metadata = { kind: "realistic-bench-legacy-jazz", generated_at: now, repository: process.env.GITHUB_REPOSITORY, run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT, sha: process.env.BENCH_SHA, ref: process.env.BENCH_REF, branch: process.env.BENCH_BRANCH, profile: process.env.BENCH_PROFILE, runner_name: process.env.RUNNER_NAME, runner_os: process.env.RUNNER_OS, runner_arch: process.env.RUNNER_ARCH };
+          fs.writeFileSync(`${dir}/metadata.json`, `${JSON.stringify(metadata, null, 2)}\n`);
+          const statuses = new Map(fs.readFileSync(`${dir}/status.tsv`, "utf8").trim().split("\n").filter(Boolean).map((line) => line.split("\t")));
+          const benchmarks = names.map((name) => ({ id: `legacy-jazz:${name}`, status: statuses.get(name) ?? "failed", output_path: `logs/${name}.log` }));
+          fs.writeFileSync(`${dir}/suite_status.json`, `${JSON.stringify({ generated_at: now, benchmarks }, null, 2)}\n`);
+          fs.writeFileSync(`${dir}/manifest.json`, `${JSON.stringify({ ...metadata, files: ["metadata.json", "suite_status.json", "status.tsv", ...names.map((name) => `logs/${name}.log`)].map((path) => ({ path })) }, null, 2)}\n`);
+          NODE
+          cat bench-out/native/legacy-jazz/suite_status.json >> "$GITHUB_STEP_SUMMARY"
+          exit "$failed"
 
       - name: Publish native execution summary
         run: |
@@ -273,6 +308,7 @@ jobs:
           NODE
 
       - name: Upload native artifacts
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: realistic-native-${{ github.run_id }}-${{ github.run_attempt }}
@@ -606,7 +642,6 @@ jobs:
             echo ""
             echo "${deployment_url}"
           } >> "$GITHUB_STEP_SUMMARY"
-
       - name: Deploy benchmark site to production
         if: ${{ github.ref == 'refs/heads/main' }}
         env:

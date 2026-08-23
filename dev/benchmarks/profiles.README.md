@@ -11,10 +11,9 @@ dev/benchmarks/profile.sh
 Each profiled phase writes:
 
 - `<scenario>__<phase>.svg`: flamegraph
-- `<scenario>__<phase>.top.txt`: top-10 self-sample table appended to
-  `dev/benchmarks/SMOKE_LEDGER.md`
+- `<scenario>__<phase>.top.txt`: top-10 self-sample table
 
-The `profiling` feature is off by default, so normal builds and smoke runs do
+The `profiling` feature is off by default, so normal builds and CI gates do
 not compile pprof. For ad-hoc captures, the same bench binaries can be profiled
 directly:
 

@@ -22,16 +22,6 @@ Per Anselm's directive: every CI-relevant removal or alteration documented in de
   regressions and the reviewed full-seed receipt recorded in
   `TEST_BURNDOWN.md`; `--ignored` is still required for deliberate soak runs.
 
-## ALTER: exempt benchmark ledgers from `pnpm format:check` (lint job)
-
-- **What**: add `dev/benchmarks/SMOKE_LEDGER.md` and
-  `dev/benchmarks/realistic/history/bench_history.json` to `.oxfmtignore`.
-- **Why**: the markdown formatter worker OOMs on the 18k-line append-only
-  SMOKE_LEDGER (CI lint job dies with `ERR_WORKER_OUT_OF_MEMORY`). Ledgers are
-  receipts of record, not source; reformatting them would churn historical
-  entries anyway. The bench-history JSON is machine-appended.
-- **Risk**: none to code style; ledger entries are free-form by design.
-
 ## ADD: install wasm-pack in CI (test-ts job, and any job running `pnpm build:ci`)
 
 - **What**: CI fails with `sh: 1: wasm-pack: not found` — the port switched

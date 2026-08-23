@@ -219,6 +219,14 @@ export const BROWSER_BENCHMARKS = [
 
 const JAZZ_SIM_FAST_SCENARIOS = [
   {
+    id: "micro",
+    label: "Jazz-sim micro",
+    bench: "micro",
+    output_path: "micro.jsonl",
+    log_path: "logs/micro.log",
+    env: { JAZZ_MICRO_ITERS: "1" },
+  },
+  {
     id: "s1_saas",
     label: "Jazz-sim S1 SaaS",
     bench: "s1_saas",
@@ -261,6 +269,14 @@ const JAZZ_SIM_FAST_SCENARIOS = [
     log_path: "logs/s7_migrations.log",
   },
   {
+    id: "s8_branch_views",
+    label: "Jazz-sim S8 branch views",
+    bench: "s8_branch_views",
+    output_path: "s8_branch_views.jsonl",
+    log_path: "logs/s8_branch_views.log",
+    env: { JAZZ_SMOKE: "1" },
+  },
+  {
     id: "s9_durable_execution",
     label: "Jazz-sim S9 durable execution",
     bench: "s9_durable_execution",
@@ -278,9 +294,7 @@ export const JAZZ_SIM_BENCHMARKS = [
     bench: scenario.bench,
     output_path: scenario.output_path,
     log_path: scenario.log_path,
-    env: {
-      JAZZ_BENCH_PROFILE: "fast",
-    },
+    env: { JAZZ_BENCH_PROFILE: "fast", ...scenario.env },
   })),
   {
     id: "jazz-sim:s2_canvas:wire_frames",

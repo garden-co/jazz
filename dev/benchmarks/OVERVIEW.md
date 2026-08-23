@@ -16,13 +16,14 @@ Do not block useful performance work on a repository-wide receipt rewrite.
 Every new high-value lane should emit an attributable, correctness-checked
 receipt and state where that receipt is retained.
 
-| harness                                                   | output and retention                                                                                                                                                |
-| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `dev/benchmarks/smoke.sh`                                 | JSONL receipts plus committed previous/delta history in `SMOKE_LEDGER.md`                                                                                           |
-| realistic native/browser                                  | per-scenario JSON; selected CI results are retained in `realistic/history/bench_history.json`, while local exploratory runs remain local unless explicitly imported |
-| Groove scenario/micro                                     | JSON on stdout; `receipt-adapters.sh` can retain results and append smoke-shaped summaries                                                                          |
-| Criterion                                                 | native reports under `target/criterion`; benchmark-specific JSON receipts may survive separately, but Criterion output itself is machine-local                      |
-| storage, `idb-tree`/IndexedDB page-store, and WASM probes | harness-native output; retain deliberately when a result is used to justify a decision                                                                              |
+| harness                                                   | output and retention                                                                                                                                    |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| deterministic benchmark checks                            | targeted local API compilation; CI compiles all maintained targets and runs scenario assertions                                                         |
+| CodSpeed                                                  | performance comparison for the example benchmark crates on benchmark-labeled PRs and the nightly default-branch baseline                                |
+| realistic native/browser                                  | timing for native `jazz` and `jazz-sim` until those suites move to CodSpeed; selected CI results are retained in `realistic/history/bench_history.json` |
+| Groove scenario/micro                                     | JSON on stdout; preserve a deliberate investigation receipt with the change or external performance system, never an append-only in-repo timing ledger  |
+| Criterion                                                 | native reports under `target/criterion`; benchmark-specific JSON receipts may survive separately, but Criterion output itself is machine-local          |
+| storage, `idb-tree`/IndexedDB page-store, and WASM probes | harness-native output; retain deliberately when a result is used to justify a decision                                                                  |
 
 Timing medians are directional unless the harness controls the relevant cache,
 fixture, and host conditions. Prefer deterministic structural counters for hard
@@ -40,7 +41,7 @@ result.
 | `sync`                      | mixed commits over UI → worker → edge → core with periodic view updates           | commit mix, topology, view cadence, known-state reuse     |
 | `relation_include_delivery` | one-row relation/include delivery over a 1k–20k accumulated-view ladder           | incremental delivery work versus retained view size       |
 
-The smoke gate retains these receipts and their deltas. The
+The deterministic scenario checks retain the correctness assertions. The
 `relation_include_delivery` ladder is the quantitative `INV-INC-1` gate added by
 #1166; it holds the change fixed and enforces a `1.03x` allocation/byte ratio.
 #1192 corrects its reporting to use independent per-metric medians. The
@@ -50,16 +51,17 @@ in `INV_INC_1_RECEIPT.md`.
 ### `jazz-sim` scenarios
 
 S1–S9 cover SaaS, canvas, permissions, order processing, durable streams, text
-traces, migrations, branch views, and durable execution. They are retained by
-the smoke workflow. S8 currently measures the local branch-view mechanism;
+traces, migrations, branch views, and durable execution. Their deterministic
+smokes run in ordinary CI tests; CodSpeed/realistic workflows own timing. S8
+currently measures the local branch-view mechanism;
 transport reconnect/conflict/payload-reuse phases remain to be added.
 
 ### Groove
 
 `scenario` covers social-feed joins, recursive ACLs, and one-shot reads;
 `micro` isolates record encoding, planning, and subscribe/unsubscribe costs.
-Groove emits correctness-checked JSON, and `dev/benchmarks/receipt-adapters.sh`
-provides the retained-baseline path described in `crates/groove/SPEC/B_benchmarks.md`.
+Groove emits correctness-checked JSON. Performance baselines belong in CodSpeed
+or a deliberately retained investigation artifact, not an append-only ledger.
 
 ### Realistic `jazz-tools` and browser lanes
 

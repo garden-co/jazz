@@ -35,6 +35,23 @@ fn main() {
     run_validation_entries(&config);
 }
 
+#[allow(dead_code)]
+pub(crate) fn correctness_smoke() {
+    let config = Config {
+        seed: 0x006d_6963_726f,
+        iterations: 1,
+    };
+    // These paths contain the micro harness's protocol and model assertions;
+    // exclude node-open throughput, which is a timing probe over 100k rows.
+    run_hlc(&config);
+    run_domination(&config);
+    run_deletion_register(&config);
+    run_ingest_rate(&config);
+    run_commit_unit(&config);
+    run_read_set_capture(&config);
+    run_validation_entries(&config);
+}
+
 #[derive(Clone, Copy)]
 struct Config {
     seed: u64,

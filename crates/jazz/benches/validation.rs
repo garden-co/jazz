@@ -32,6 +32,19 @@ fn main() {
     bench.print_json(elapsed);
 }
 
+#[allow(dead_code)]
+pub(crate) fn correctness_smoke() {
+    let mut bench = ValidationBench::new(Config {
+        clients: 3,
+        rows: 6,
+        commits: 12,
+        hot_row_pct: 20,
+        seed: 0x5eed_1234,
+    });
+    bench.seed();
+    let _ = bench.run();
+}
+
 #[derive(Clone, Copy)]
 struct Config {
     clients: usize,

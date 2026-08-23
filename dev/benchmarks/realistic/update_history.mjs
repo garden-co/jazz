@@ -505,6 +505,58 @@ function extractJazzSim(jazzSimDir) {
   ];
 }
 
+function extractLegacyJazz(dir) {
+  const manifest = readJsonIfExists(path.join(dir, "manifest.json")) ?? {};
+  if (manifest.kind !== "realistic-bench-legacy-jazz") return [];
+  const metadata = readJsonIfExists(path.join(dir, "metadata.json")) ?? {};
+  const status = readJsonIfExists(path.join(dir, "suite_status.json")) ?? {};
+  const scenarios = (status.benchmarks ?? []).flatMap((item) => {
+    if (item.status !== "passed" || typeof item.output_path !== "string") return [];
+    const records = readJsonl(path.join(dir, item.output_path));
+    return records
+      .filter((record) => record && typeof record === "object")
+      .map((record) => {
+        const fallbackScenario = item.id.replace(/^legacy-jazz:/, "");
+        const routeWallUs = Object.entries(record)
+          .filter(
+            ([key, value]) =>
+              key.endsWith("_us") && key !== "wall_us" && Number.isFinite(Number(value)),
+          )
+          .reduce((total, [, value]) => total + Number(value), 0);
+        return jazzSimScenarioSummary(
+          {
+            ...record,
+            scenario: record.scenario ?? fallbackScenario,
+            phase: record.phase ?? "legacy_timing",
+            elapsed_us: record.elapsed_us ?? record.wall_us ?? (routeWallUs || null),
+          },
+          item.id,
+        );
+      })
+      .filter((record) => Number.isFinite(record.wall_time_ms));
+  });
+  if (!scenarios.length) return [];
+  return [
+    {
+      id: buildRunId(["legacy-jazz", metadata.run_id, metadata.run_attempt, metadata.sha]),
+      suite: "legacy-jazz",
+      storage_engine: null,
+      generated_at: metadata.generated_at,
+      repository: metadata.repository ?? null,
+      run_id: metadata.run_id ?? null,
+      run_attempt: metadata.run_attempt ?? null,
+      sha: metadata.sha ?? null,
+      ref: metadata.ref ?? null,
+      branch: resolveBranch(metadata, manifest, metadata.ref),
+      profile: metadata.profile ?? null,
+      runner_name: metadata.runner_name ?? null,
+      runner_os: metadata.runner_os ?? null,
+      runner_arch: metadata.runner_arch ?? null,
+      scenarios,
+    },
+  ];
+}
+
 function extractNativeCriterion(nativeDir) {
   if (!nativeDir) return [];
   if (!fs.existsSync(nativeDir)) return [];
@@ -641,6 +693,7 @@ function main() {
       ...extractNative(dir),
       ...extractNativeCriterion(dir),
       ...extractJazzSim(dir),
+      ...extractLegacyJazz(dir),
     ]),
     ...browserDirs.flatMap((dir) => extractBrowser(dir)),
   ];

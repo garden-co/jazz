@@ -274,14 +274,13 @@ Two work items:
 
 ### Residuals / accepted-for-now
 
-- Plan-1 receipts (ledger `dev/benchmarks/SMOKE_LEDGER.md`): tick runtime stats
+- Historical Plan-1 receipts: tick runtime stats
   were split into cheap always-on counters plus explicit expensive arrangement
   walks; the S3 permissions smoke receipt moved from **12.597s** before the split
   to **0.893s** in the first post-cleanup smoke run (`20260702T000844Z`, dirty
-  git `18e31f13a`). After Step 8, `smoke.sh` records
-  `prebuild_s` separately; the final Plan-1 execution-only run
-  (`20260702T005632Z`) records S3 smoke at **1.262s** with
-  `prebuild_s = 280.686s`.
+  git `18e31f13a`). The historical execution-only run measured S3 smoke at
+  **1.262s** after a **280.686s** prebuild; that mismatch is why timing is now
+  owned by CodSpeed rather than a local omnibus script.
 - RocksDB baseline configuration landed in groove: the groove crate now declares
   its own `lz4` and `zstd` RocksDB features; the adapter configures block-based
   bloom filters (10 bits/key), a shared 256 MiB LRU block cache, a shared 256 MiB
