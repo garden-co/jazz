@@ -38,9 +38,15 @@ For ordinary Rust/core work, the full gate set is:
 8. the sensitive-data guard from `jazz-private/dev/gates/`, normally reached
    through the optional lefthook hook
 
-Run `dev/benchmarks/smoke.sh` for any change touching protocol, engine,
-storage, or benchmark harnesses. A change to a public `jazz` type additionally
-gates the full workspace, including examples.
+For a benchmark edit, locally run
+`dev/gates/benchmark-smoke.sh <jazz|jazz-sim> <bench>`; it is a targeted debug
+compile check. CI runs `dev/gates/benchmark-smoke.sh --ci`, which checks all
+maintained benchmark APIs and executes deterministic core and jazz-sim scenario
+assertions. CodSpeed evaluates the example benchmark crates on benchmark-labeled
+PRs and nightly; native `jazz`, `jazz-sim`, and Groove timing remains in the
+realistic benchmark workflow until it is ported. No local omnibus benchmark
+script is a push gate. A change to a public `jazz` type additionally gates the
+full workspace, including examples.
 
 Use a `-j` appropriate for the box; see PR #1157 for the rationale behind
 replacing the former fixed `-j 2` guidance.
@@ -74,8 +80,10 @@ cargo test -p jazz --lib node::tests::harness::m3_maintained_one_shot_differenti
 - **Sensitive-data guard** — the guard in `jazz-private/dev/gates/` keeps
   customer-specific fixture names, domains, and ids out of the public
   repository.
-- **Benchmark smoke** — `dev/benchmarks/smoke.sh` is conditional on changes to
-  protocol, engine, storage, or benchmark harnesses.
+- **Benchmark API and scenario smoke** — CI compiles all maintained benchmark
+  targets and runs deterministic scenario assertions. CodSpeed compares example
+  benchmark crates; native `jazz`, `jazz-sim`, and Groove timing stays in the
+  realistic workflow until migrated.
 - **Public type changes** — changes to public `jazz` types additionally gate the
   full workspace, including examples.
 - **Server shell** — the server-shell tests are included in the `jazz` package

@@ -25,7 +25,7 @@ pre-commit:
       run: sh dev/scripts/clippy-staged.sh {staged_files}
     oxfmt:
       glob: "*.{ts,tsx,js,jsx,md,mdx,json,html}"
-      exclude: "{dev/benchmarks/SMOKE_LEDGER.md,crates/jazz-napi/index.d.ts}"
+      exclude: "crates/jazz-napi/index.d.ts"
       run: pnpm exec oxfmt --ignore-path .oxfmtignore {staged_files}
       stage_fixed: true
     oxlint:

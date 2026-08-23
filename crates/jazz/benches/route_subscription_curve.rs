@@ -120,6 +120,11 @@ fn main() {
     assert!(receipt.ok, "route curve correctness gate failed");
 }
 
+#[allow(dead_code)]
+pub(crate) fn correctness_smoke() {
+    assert!(run(1).ok, "route curve correctness gate failed");
+}
+
 fn run(routes: usize) -> Receipt {
     let db = open_db(routes as u64);
     let seed_started = Instant::now();

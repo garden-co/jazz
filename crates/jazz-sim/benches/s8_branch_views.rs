@@ -25,7 +25,7 @@ fn main() {
     run(rows.max(1));
 }
 
-fn run(row_count: usize) {
+pub(crate) fn run(row_count: usize) {
     let schema = schema();
     let families = schema.column_families();
     let db = block_on(Db::open_history_complete(

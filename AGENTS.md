@@ -62,12 +62,26 @@ builds on a memory-constrained laptop — a property of that machine, not of the
 build. Cap it only if you actually observe linker OOM. For reference, a cold
 `cargo test -p jazz -j 16` measured 2m23s wall / 18m18s CPU at ~2GB peak of
 187GB, so memory was never the binding constraint there; on a small machine
-`-j 2` is still the right answer. `dev/benchmarks/smoke.sh` derives this from
-`nproc` and honours `JAZZ_SMOKE_JOBS`.
+`-j 2` is still the right answer.
 
-Run `dev/benchmarks/smoke.sh` for any change touching protocol, engine, storage,
-or benchmark harnesses. Any change to a public `jazz` type additionally gates the
-full workspace, including examples.
+Benchmark work has three deliberately separate gates:
+
+- During local iteration, compile only the affected target with
+  `dev/gates/benchmark-smoke.sh <jazz|jazz-sim> <bench>`. This is a debug
+  `cargo check`, not `cargo bench`; it avoids release-wide RocksDB rebuilds and
+  timing noise.
+- CI runs `dev/gates/benchmark-smoke.sh --ci`: benchmark API compilation plus
+  deterministic core and jazz-sim scenario assertions. Keep correctness
+  assertions in tests, not in a timing receipt.
+- CodSpeed currently compares the example benchmark crates only. Apply the
+  `benchmark` label when that coverage is relevant; it refreshes nightly on the
+  default branch. Native `jazz`, `jazz-sim`, and Groove timing remains in the
+  realistic benchmark workflow (labeled PRs plus scheduled/default-branch
+  runs) until those suites are ported to CodSpeed. Do not run a repository-wide
+  benchmark suite before push.
+
+Any change to a public `jazz` type additionally gates the full workspace,
+including examples.
 
 This rule exists because previous misses stayed hidden too long: `four_tier`
 was born-red for roughly nine commits; `large_blob_values_follow_ordinary_row_permissions`
@@ -90,9 +104,12 @@ user explicitly requests them; report the known failures clearly. Two tiers make
 this concrete:
 
 - _Iteration tier_ (intra-batch, per lever): focused crate suites + the three
-  incremental-delivery canaries + oracle at low seed count; skip smoke. ~fast.
-- _Landing tier_ (before merge): the full canonical set below + smoke +
-  the jazz-private sensitive-data guard.
+  incremental-delivery canaries + oracle at low seed count. For a benchmark,
+  add the one-target `benchmark-smoke.sh` compile check. ~fast.
+- _Landing tier_ (before merge): the full canonical set below + CI benchmark
+  API/scenario smoke + the jazz-private sensitive-data guard. Performance work
+  additionally needs the relevant CodSpeed or realistic-workflow receipt, not
+  a local omnibus run.
 
 **Sensitive-data guard.** the jazz-private sensitive-data guard (in lefthook pre-commit)
 fails on customer-identifying strings. Real customer schemas/data live ONLY in

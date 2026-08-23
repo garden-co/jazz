@@ -45,8 +45,8 @@ Main implementation gap:
 - CLEARLY-GOOD: Add black-box Rust integration coverage through public
   `JazzClient` APIs, builder-created schemas, and `row_input!` inserts.
 - CLEARLY-GOOD: Document the supported matrix in `crates/jazz/SPEC/6_queries.md`.
-- CLEARLY-GOOD: Append the required benchmark-smoke receipt to
-  `dev/benchmarks/SMOKE_LEDGER.md`.
+- CLEARLY-GOOD: Run the focused correctness checks and request the relevant
+  CodSpeed comparison for a performance-sensitive change.
 - SPECULATIVE: none so far.
 
 ## Open Questions

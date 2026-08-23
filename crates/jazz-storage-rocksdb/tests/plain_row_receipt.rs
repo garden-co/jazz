@@ -1,5 +1,5 @@
 //! Manual plain-row RocksDB receipt. Its JSON line is intended to be captured
-//! by `dev/benchmarks/run-receipt.mjs`.
+//! by the benchmark harness that produced it.
 
 use std::cell::Cell;
 use std::fs;
