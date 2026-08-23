@@ -50,12 +50,6 @@ def supportsNamespace() {
 android {
   if (supportsNamespace()) {
     namespace "com.jazzrn"
-
-    sourceSets {
-      main {
-        manifest.srcFile "src/main/AndroidManifestNew.xml"
-      }
-    }
   }
 
   ndkVersion getExtOrDefault("ndkVersion")

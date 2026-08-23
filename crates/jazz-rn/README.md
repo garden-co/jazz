@@ -28,6 +28,12 @@ iOS CocoaPods fail early with an install/configuration instruction otherwise.
 For Expo, add `"plugins": ["jazz-rn"]` and run `expo prebuild`; the plugin
 sets `newArchEnabled`. Bare React Native apps must enable the New Architecture
 themselves. This requirement does not make Expo Go capable of loading Jazz.
+
+The current repository gate executes Expo prebuild for Android and iOS, then
+inspects Expo's autolinking contracts for this package. It is intentionally not
+a native build receipt: this Linux development environment has neither Java
+nor CocoaPods, so Gradle configuration/build and `pod install` must run on the
+respective Blacksmith runners before claiming platform or device support.
 The shared host codec now stages `Open`, `Attach`, `CloseClient`, `CloseRelay`,
 and bounded `Pump`; no platform artifact calls it yet. This is a thin platform
 checkpoint, not device support: there is still no linked JNI artifact,

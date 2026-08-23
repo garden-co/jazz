@@ -3,6 +3,17 @@ require "json"
 package = JSON.parse(File.read(File.join(__dir__, "package.json")))
 folly_compiler_flags = '-DFOLLY_NO_CONFIG -DFOLLY_MOBILE=1 -DFOLLY_USE_LIBCPP=1 -Wno-comma -Wno-shorten-64-to-32'
 
+# Expo records this in Podfile.properties.json rather than setting
+# RCT_NEW_ARCH_ENABLED=1. Bare React Native projects conventionally set the
+# environment variable. Accept either source of the same configuration.
+podfile_properties_path = File.join(Pod::Config.instance.installation_root, "Podfile.properties.json")
+podfile_properties = JSON.parse(File.read(podfile_properties_path)) if File.exist?(podfile_properties_path)
+new_arch_enabled = ENV['RCT_NEW_ARCH_ENABLED'] == '1' || podfile_properties&.fetch('newArchEnabled', nil) == 'true'
+
+if !new_arch_enabled then
+  raise Pod::Informative, "jazz-rn requires the React Native New Architecture. Enable it before pod install (Expo: add the jazz-rn config plugin, then run expo prebuild)."
+end
+
 Pod::Spec.new do |s|
   s.name         = "JazzRn"
   s.version      = package["version"]
@@ -20,10 +31,9 @@ Pod::Spec.new do |s|
   if respond_to?(:install_modules_dependencies, true)
     install_modules_dependencies(s)
   else
-  s.dependency "React-Core"
+    s.dependency "React-Core"
 
-    # Don't install the dependencies when we run `pod install` in the old architecture.
-    if ENV['RCT_NEW_ARCH_ENABLED'] == '1' then
+    if new_arch_enabled then
       s.compiler_flags = folly_compiler_flags + " -DRCT_NEW_ARCH_ENABLED=1"
       s.pod_target_xcconfig    = {
           "HEADER_SEARCH_PATHS" => "\"$(PODS_ROOT)/boost\"",
@@ -37,8 +47,4 @@ Pod::Spec.new do |s|
       s.dependency "ReactCommon/turbomodule/core"
     end
   end
-end
-
-if ENV['RCT_NEW_ARCH_ENABLED'] != '1' then
-  raise Pod::Informative, "jazz-rn requires the React Native New Architecture. Enable it before pod install (Expo: add the jazz-rn config plugin, then run expo prebuild)."
 end

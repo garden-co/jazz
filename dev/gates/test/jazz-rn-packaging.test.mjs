@@ -32,6 +32,53 @@ test("the canonical Expo scaffold really prebuilds both relay-only platforms", (
       stdio: "inherit",
     });
   }
+
+  const autolink = (platform) =>
+    JSON.parse(
+      execFileSync(
+        process.execPath,
+        [
+          "--no-warnings",
+          "--eval",
+          "require('expo/bin/autolinking')",
+          "expo-modules-autolinking",
+          "react-native-config",
+          "--json",
+          "--platform",
+          platform,
+        ],
+        {
+          cwd: new URL("../../../examples/todo-client-localfirst-expo/", import.meta.url),
+          encoding: "utf8",
+        },
+      ),
+    );
+  const androidAutolink = autolink("android");
+  const iosAutolink = autolink("ios");
+  assert.equal(
+    androidAutolink.dependencies["jazz-rn"].platforms.android.packageInstance,
+    "new JazzRelayPackage()",
+  );
+  assert.match(
+    iosAutolink.dependencies["jazz-rn"].platforms.ios.podspecPath,
+    /JazzRn\.podspec$/,
+  );
+
+  const expoRoot = new URL("../../../examples/todo-client-localfirst-expo/", import.meta.url);
+  const androidProperties = readFile(new URL("android/gradle.properties", expoRoot), "utf8");
+  const androidSettings = readFile(new URL("android/settings.gradle", expoRoot), "utf8");
+  const iosProperties = readFile(new URL("ios/Podfile.properties.json", expoRoot), "utf8");
+  const iosPodfile = readFile(new URL("ios/Podfile", expoRoot), "utf8");
+
+  return Promise.all([androidProperties, androidSettings, iosProperties, iosPodfile]).then(
+    ([androidPropertiesText, androidSettingsText, iosPropertiesText, iosPodfileText]) => {
+      assert.match(androidPropertiesText, /^newArchEnabled=true$/m);
+      assert.match(androidSettingsText, /expo-autolinking-settings/);
+      assert.match(androidSettingsText, /autolinkLibrariesFromCommand/);
+      assert.match(iosPropertiesText, /"newArchEnabled": "true"/);
+      assert.match(iosPodfileText, /use_native_modules!/);
+    },
+  );
 });
 
 test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts", async () => {
@@ -57,6 +104,7 @@ test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts",
   assert.doesNotMatch(podspec, /vendored_frameworks|uniffi-bindgen-react-native/);
   assert.match(podspec, /requires the React Native New Architecture/);
   assert.doesNotMatch(androidBuild, /externalNativeBuild|jniLibs|CMakeLists/);
+  assert.doesNotMatch(androidBuild, /AndroidManifestNew/);
   assert.match(androidBuild, /requires the React Native New Architecture/);
   assert.match(androidPackage, /class JazzRelayPackage/);
   assert.doesNotMatch(androidPackage, /JazzRnModule/);
