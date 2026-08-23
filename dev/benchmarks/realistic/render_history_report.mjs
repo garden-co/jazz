@@ -312,7 +312,10 @@ function render(history, args) {
   let renderedComparisons = 0;
 
   for (const lane of lanes) {
-    const [suite, storageEngine] = lane.split("::");
+    const [suite, rawStorageEngine] = lane.split("::");
+    // Lane keys use an empty suffix for storage-less suites (jazz-sim and
+    // legacy Jazz); normalize it back to the null stored in history.
+    const storageEngine = rawStorageEngine || null;
     const suiteProfiles = profileFilter ? [profileFilter] : profiles.filter(Boolean);
     for (const profile of suiteProfiles) {
       const baseRun = latestRun(runs, args.baseBranch, suite, storageEngine, profile);
