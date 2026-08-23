@@ -48,9 +48,9 @@ That means:
 
 Reads always come from local storage.
 
-In the browser, Jazz uses a dedicated worker reading from data stored locally in IndexedDB (Origin
-Private File System). When multiple tabs are open, Jazz elects one tab as the storage leader and
-routes follower tabs through it. If the leader tab closes, a new leader is elected.
+In the browser, Jazz uses a dedicated `SharedWorker` reading from data stored locally in
+IndexedDB. Multiple tabs connect directly to that one durable runtime through message ports; there
+is no tab leader election.
 
 Even without a network connection, your app can still read data it already has locally, whether
 that data was synced earlier or written locally on the device.

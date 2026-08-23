@@ -1399,6 +1399,7 @@ dependencies = [
  "idb-tree",
  "internment",
  "jazz-benchmark-guard",
+ "jazz-storage-rocksdb",
  "paste",
  "postcard",
  "rusqlite",

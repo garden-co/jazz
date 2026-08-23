@@ -11,7 +11,7 @@ use groove::records::{Value, VariantRecord};
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
 };
-use groove::storage::OrderedKvStorage;
+use groove::storage::{OrderedKvStorage, OwnedWriteOperation};
 use jazz_storage_rocksdb::RocksDbStorage;
 use serde_json::json;
 
@@ -260,4 +260,63 @@ async fn fresh_open_requires_dropping_the_original_exclusive_handle() {
             .as_deref(),
         Some(b"persisted".as_slice())
     );
+}
+
+#[futures_test::test]
+async fn durable_fresh_open_preserves_ordered_data_and_rejects_partial_batches() {
+    let dir = tempfile::tempdir().unwrap();
+    let column_families = vec!["records"];
+    let storage = RocksDbStorage::open(dir.path(), &column_families).unwrap();
+    storage
+        .set("records".to_owned(), b"item:2".to_vec(), b"two".to_vec())
+        .await
+        .unwrap();
+    storage
+        .set("records".to_owned(), b"item:1".to_vec(), b"one".to_vec())
+        .await
+        .unwrap();
+    let error = storage
+        .write_many(vec![
+            OwnedWriteOperation::Set {
+                cf: "records".to_owned(),
+                key: b"item:3".to_vec(),
+                value: b"three".to_vec(),
+            },
+            OwnedWriteOperation::Set {
+                cf: "missing".to_owned(),
+                key: b"item:4".to_vec(),
+                value: b"four".to_vec(),
+            },
+        ])
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        groove::storage::Error::ColumnFamilyNotFound(_)
+    ));
+    assert_eq!(
+        storage
+            .get("records".to_owned(), b"item:3".to_vec())
+            .await
+            .unwrap(),
+        None,
+        "a rejected batch must be atomic before the fresh open"
+    );
+
+    let reopened = fresh_open_after_exclusive_drop(storage, dir.path(), &column_families)
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(
+        reopened
+            .prefix("records".to_owned(), b"item:".to_vec())
+            .await
+            .unwrap(),
+        vec![
+            (b"item:1".to_vec(), b"one".to_vec()),
+            (b"item:2".to_vec(), b"two".to_vec()),
+        ],
+        "a new RocksDB process handle must retain ordered committed data only"
+    );
+    reopened.close().await.unwrap();
 }

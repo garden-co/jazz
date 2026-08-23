@@ -31,9 +31,6 @@ dev/benchmarks/receipt-adapters.sh realistic-browser W1
 # Raw native storage and in-memory B-tree Criterion targets.
 dev/benchmarks/receipt-adapters.sh storage-native
 
-# Real IndexedDB worker and separate WASM runtime probes.
-dev/benchmarks/receipt-adapters.sh IndexedDB-worker
-
 # This adapter expects the documented probe build artifact. Build it first:
 wasm-pack build crates/jazz-wasm --target web --release -- --features bench-probes
 dev/benchmarks/receipt-adapters.sh wasm-probes

@@ -88,7 +88,7 @@ function parseArgs(argv) {
   if (!["native", "browser", "jazz-sim"].includes(out.suite)) {
     fail("--suite must be one of: native, browser, jazz-sim");
   }
-  if (out.suite === "browser" && out.storageEngine && out.storageEngine !== "indexeddb-btree") {
+  if (out.suite === "browser" && out.storageEngine && out.storageEngine !== "idb-tree-indexeddb-page-store") {
     fail("--storage-engine is only supported for native suites");
   }
   if (out.suite === "jazz-sim" && out.storageEngine) {
@@ -1065,7 +1065,7 @@ async function main() {
     suite: args.suite,
     storage_engine:
       args.suite === "browser"
-        ? "indexeddb-btree"
+        ? "idb-tree-indexeddb-page-store"
         : args.suite === "native"
           ? args.storageEngine
           : null,
@@ -1083,7 +1083,7 @@ async function main() {
       args.timeoutSeconds,
       args.repeatCount,
       args.suite === "browser"
-        ? "indexeddb-btree"
+        ? "idb-tree-indexeddb-page-store"
         : args.suite === "native"
           ? args.storageEngine
           : "",
@@ -1095,7 +1095,7 @@ async function main() {
     suite: args.suite,
     storage_engine:
       args.suite === "browser"
-        ? "indexeddb-btree"
+        ? "idb-tree-indexeddb-page-store"
         : args.suite === "native"
           ? args.storageEngine
           : null,
@@ -1113,7 +1113,7 @@ async function main() {
       runner: "jazz-ts-browser-indexeddb",
       generated_at: generatedAt,
       profile: args.profile,
-      storage_engine: "indexeddb-btree",
+      storage_engine: "idb-tree-indexeddb-page-store",
       scenarios,
       benchmark_statuses: results.map(({ scenario, ...rest }) => rest),
     });

@@ -6,6 +6,7 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 
 const REPO_ROOT = path.resolve(new URL("../../..", import.meta.url).pathname);
+const CURRENT_BROWSER_ENGINE = "idb-tree-indexeddb-page-store";
 
 function writeJson(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -20,6 +21,34 @@ function writeText(file, value) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, value);
 }
+
+test("browser benchmark identity distinguishes the current page store from retained OPFS history", () => {
+  const runner = fs.readFileSync(
+    path.join(REPO_ROOT, "dev/benchmarks/realistic/run_ci_benchmarks.mjs"),
+    "utf8",
+  );
+  const workflow = fs.readFileSync(
+    path.join(REPO_ROOT, ".github/workflows/benchmarks.yml"),
+    "utf8",
+  );
+  const history = fs.readFileSync(
+    path.join(REPO_ROOT, "dev/benchmarks/realistic/history/bench_history.json"),
+    "utf8",
+  );
+  const internals = fs.readFileSync(
+    path.join(REPO_ROOT, "docs/content/docs/reference/internals.mdx"),
+    "utf8",
+  );
+
+  assert.match(runner, new RegExp(`storage_engine: "${CURRENT_BROWSER_ENGINE}"`));
+  assert.match(workflow, new RegExp(`"storage_engine": "${CURRENT_BROWSER_ENGINE}"`));
+  assert.doesNotMatch(runner, /indexeddb-btree/);
+  assert.doesNotMatch(workflow, /opfs-btree/);
+  assert.match(history, /"storage_engine": "opfs-btree"/);
+  assert.match(internals, /directly durable SharedWorker runtime/);
+  assert.match(internals, /IndexedDB page store/);
+  assert.match(internals, /no tab-leader election, Web Locks\s+dependency/);
+});
 
 test("update_history ingests engine-specific native and browser manifests from artifact roots", () => {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-bench-history-"));
@@ -143,17 +172,17 @@ test("update_history ingests engine-specific native and browser manifests from a
     ref: "refs/heads/main",
     branch: "main",
     profile: "s",
-    storage_engine: "indexeddb-btree",
+    storage_engine: "opfs-btree",
   });
   writeJson(path.join(browserRoot, "manifest.json"), {
     kind: "realistic-bench-browser",
     generated_at: "2026-04-08T10:00:00Z",
-    storage_engine: "indexeddb-btree",
+    storage_engine: "opfs-btree",
   });
   writeJson(path.join(browserRoot, "realistic.json"), {
     generated_at: "2026-04-08T10:00:00Z",
     profile: "s",
-    storage_engine: "indexeddb-btree",
+    storage_engine: "opfs-btree",
     scenarios: [
       {
         scenario_id: "W4",
@@ -193,7 +222,7 @@ test("update_history ingests engine-specific native and browser manifests from a
     ["native-criterion", "rocksdb"],
     ["native", "sqlite"],
     ["native-criterion", "sqlite"],
-    ["browser", "indexeddb-btree"],
+    ["browser", "opfs-btree"],
   ]);
 
   const nativeRocksdbRun = history.runs.find(
@@ -203,7 +232,7 @@ test("update_history ingests engine-specific native and browser manifests from a
     (run) => run.suite === "native-criterion" && run.storage_engine === "sqlite",
   );
   const browserRun = history.runs.find(
-    (run) => run.suite === "browser" && run.storage_engine === "indexeddb-btree",
+    (run) => run.suite === "browser" && run.storage_engine === "opfs-btree",
   );
 
   assert.ok(nativeRocksdbRun, "expected native RocksDB run");
@@ -213,8 +242,8 @@ test("update_history ingests engine-specific native and browser manifests from a
   assert.equal(nativeSqliteCriterionRun.id, "native-criterion:sqlite:100:1:abc123:s");
   assert.equal(nativeSqliteCriterionRun.scenarios[0].topology, "realistic_phase1/r1_crud");
 
-  assert.ok(browserRun, "expected browser indexeddb-btree run");
-  assert.equal(browserRun.id, "browser:indexeddb-btree:100:1:abc123:s");
+  assert.ok(browserRun, "expected browser opfs-btree run");
+  assert.equal(browserRun.id, "browser:opfs-btree:100:1:abc123:s");
 });
 
 test("update_history ingests jazz-sim JSONL metrics from manifest files", () => {

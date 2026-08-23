@@ -31,7 +31,6 @@ use thiserror::Error;
 
 pub use idb::IdbStorage;
 pub use memory::MemoryStorage;
-#[cfg(test)]
 #[cfg(any(test, feature = "test"))]
 pub use test::{TestStorage, TestStorageControl, TestStorageOperation, YieldingStorage};
 
@@ -3836,7 +3835,7 @@ mod tests {
     }
 
     #[futures_test::test]
-    async fn memory_storage_delta_append_survives_reopen() {
+    async fn memory_storage_delta_append_survives_in_process_rehydration() {
         fn record(time: u64, node: u8, payload: &[u8]) -> Vec<u8> {
             let mut bytes = Vec::new();
             bytes.extend(time.to_le_bytes());
