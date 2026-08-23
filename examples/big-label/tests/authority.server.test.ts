@@ -38,19 +38,39 @@ describe("BigLabel deployed tenant authority", () => {
 
     // A legitimate admin may admit a member; that member still cannot promote
     // themselves or mutate the tenant's operational rows.
-    admin.expectAllowed((db) =>
-      db.insert(app.memberships, {
+    await admin
+      .insert(app.memberships, {
         organizationId: seeded.org.id,
         personId: seeded.member.id,
         userId: "member",
         role: "editor",
-      }),
-    );
+      })
+      .wait({ tier: "edge" });
     await member.expectDenied((db) =>
       db.update(app.memberships, seeded.memberMembership.id, { role: "admin" }),
     );
+    // An admin cannot join records from two tenants merely by referencing
+    // them. Every relation carries/validates its tenant boundary.
+    await admin.expectDenied((db) =>
+      db.insert(app.releases, {
+        organizationId: seeded.org.id,
+        artistId: seeded.foreignArtist.id,
+        title: "Cross-tenant release",
+        releaseDate: new Date(),
+        status: "scheduled",
+      }),
+    );
+    await admin.expectDenied((db) =>
+      db.insert(app.releaseAssignments, {
+        organizationId: seeded.org.id,
+        releaseId: seeded.release.id,
+        membershipId: seeded.foreignMembership.id,
+        role: "owner",
+      }),
+    );
     await member.expectDenied((db) =>
       db.insert(app.releaseAssignments, {
+        organizationId: seeded.org.id,
         releaseId: seeded.release.id,
         membershipId: seeded.adminMembership.id,
         role: "owner",
@@ -128,6 +148,22 @@ async function seed(test: PolicyTestApp) {
       status: "scheduled",
     }),
   );
+  const foreignArtist = await test.seed((db) =>
+    db.insert(app.artists, {
+      organizationId: foreignOrg.id,
+      name: "Foreign artist",
+      genre: "Jazz",
+      status: "active",
+    }),
+  );
+  const foreignMembership = await test.seed((db) =>
+    db.insert(app.memberships, {
+      organizationId: foreignOrg.id,
+      personId: outsider.id,
+      userId: "outsider",
+      role: "admin",
+    }),
+  );
   return {
     org,
     foreignOrg,
@@ -139,5 +175,7 @@ async function seed(test: PolicyTestApp) {
     team,
     artist,
     release,
+    foreignArtist,
+    foreignMembership,
   };
 }

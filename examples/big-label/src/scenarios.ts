@@ -36,10 +36,3 @@ export function tenantOperations(profile: FixtureProfile = "smoke", seed = 17): 
     ],
   };
 }
-
-export function assertTenantIsolation(profile: FixtureProfile = "smoke") {
-  const receipt = tenantOperations(profile);
-  if (receipt.foreignRows !== 0)
-    throw new Error(`foreign tenant rows appeared: ${receipt.foreignRows}`);
-  return receipt;
-}
