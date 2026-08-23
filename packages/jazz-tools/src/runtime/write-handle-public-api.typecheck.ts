@@ -22,6 +22,20 @@ async function assertWriteHandleContract() {
   const updated: WriteHandle = db.update(todos, "todo-1", { done: true });
   const upserted: WriteHandle = db.upsert(todos, "todo-1", { title: "todo", done: false });
   const deleted: WriteHandle = db.delete(todos, "todo-1");
+  const streamed: Promise<WriteHandle<{ id: string }>> = db.insertStreaming(
+    todos,
+    { done: false },
+    "title",
+    (async function* () {
+      yield "streamed ";
+      yield new TextEncoder().encode("title");
+    })(),
+  );
+
+  // @ts-expect-error Every required non-streamed column remains required.
+  db.insertStreaming(todos, {}, "title", (async function* () {})());
+  // @ts-expect-error The streamed column must belong to the table initializer.
+  db.insertStreaming(todos, { title: "todo", done: false }, "missing", new ReadableStream());
 
   const batchId: Promise<string> = inserted.batchId;
 
@@ -50,6 +64,7 @@ async function assertWriteHandleContract() {
   void updated;
   void upserted;
   void deleted;
+  void streamed;
   void batchId;
   void mergeableCommit;
   void exclusiveCommit;

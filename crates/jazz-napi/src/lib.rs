@@ -36,6 +36,7 @@ use serde_json::Value as JsonValue;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::future::Future;
+use std::io::Write as IoWrite;
 use std::rc::Rc;
 use std::sync::Mutex;
 use std::task::{Context, Poll};
@@ -56,6 +57,7 @@ use jazz::db::{
     TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
     WireTransportAdapter as CoreWireTransportAdapter, WriteHandle, block_on as core_block_on,
 };
+use jazz::groove::large_values::LargeValueKind as CoreLargeValueKind;
 use jazz::groove::records::{
     BorrowedRecord as CoreBorrowedRecord, RecordDescriptor, Value as CoreValue,
 };
@@ -932,8 +934,125 @@ pub struct NapiDb {
     owns_runtime: bool,
 }
 
+/// Native bounded-memory sink used by the TypeScript async streaming-insert
+/// adapter. Host chunks are spooled to an unlink-on-drop file; `finish` then
+/// hands its reader to Jazz's Groove-backed streaming constructor. Dropping or
+/// aborting before finish publishes and stages nothing.
+#[napi(js_name = "StreamingInsert")]
+pub struct StreamingInsert {
+    db: NapiDbInner,
+    table: String,
+    row_id: CoreRowUuid,
+    cells: Option<CoreRowCells>,
+    column: String,
+    kind: CoreLargeValueKind,
+    file: Option<tempfile::NamedTempFile>,
+}
+
+#[napi]
+impl StreamingInsert {
+    #[napi]
+    pub fn push(&mut self, chunk: Uint8Array) -> napi::Result<()> {
+        let file = self
+            .file
+            .as_mut()
+            .ok_or_else(|| napi::Error::from_reason("streaming insert is closed"))?;
+        file.write_all(chunk.as_ref())
+            .map_err(|error| napi::Error::from_reason(error.to_string()))
+    }
+
+    #[napi]
+    pub fn finish(&mut self) -> napi::Result<Write> {
+        let mut file = self
+            .file
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("streaming insert is closed"))?;
+        file.flush()
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let reader = file
+            .reopen()
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let cells = self
+            .cells
+            .take()
+            .ok_or_else(|| napi::Error::from_reason("streaming insert is closed"))?;
+        let db = self.db.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                core_block_on(db.insert_streaming_value_with_id(
+                    &self.table,
+                    self.row_id,
+                    cells,
+                    &self.column,
+                    self.kind,
+                    reader,
+                ))
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                core_block_on(db.insert_streaming_value_with_id(
+                    &self.table,
+                    self.row_id,
+                    cells,
+                    &self.column,
+                    self.kind,
+                    reader,
+                ))
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi]
+    pub fn abort(&mut self) -> bool {
+        self.cells.take();
+        self.file.take().is_some()
+    }
+}
+
 #[napi]
 impl NapiDb {
+    #[napi(js_name = "beginStreamingInsertEncoded")]
+    pub fn begin_streaming_insert_encoded(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+        column: String,
+        kind: String,
+    ) -> napi::Result<StreamingInsert> {
+        if self.inner.borrow().is_none() {
+            return Err(napi::Error::from_reason("database is closed"));
+        }
+        let kind = match kind.as_str() {
+            "Text" => CoreLargeValueKind::String,
+            "Json" => CoreLargeValueKind::Json,
+            "Bytea" => CoreLargeValueKind::Bytes,
+            _ => {
+                return Err(napi::Error::from_reason(
+                    "streaming insert requires a Text, Json, or Bytea column",
+                ));
+            }
+        };
+        Ok(StreamingInsert {
+            db: Rc::clone(&self.inner),
+            table,
+            row_id: core_row_uuid_from_bytes(&row_id)?,
+            cells: Some(decode_core_cells(&cells)?),
+            column,
+            kind,
+            file: Some(
+                tempfile::NamedTempFile::new()
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        })
+    }
+
     #[napi(factory, js_name = "openMemory")]
     pub fn open_memory(schema: Uint8Array, config: Uint8Array) -> napi::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;

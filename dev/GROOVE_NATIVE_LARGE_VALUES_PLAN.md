@@ -408,10 +408,12 @@ large-value accounting.
 5. Document which operations may hydrate complete values while preserving exact
    semantics and which are naturally range/stream bounded.
 6. Expose native streaming create as a one-shot reader-to-insert operation over
-   Groove's bounded builder; add JavaScript/browser adapters only with explicit
-   async backpressure and cancellation. Keep streaming query deferred until the
-   primitive query machinery proves insufficient; do not require an object-like
-   mutable handle.
+   Groove's bounded builder. Expose the typed TypeScript operation through NAPI
+   using an async source, per-chunk backpressure, cancellation, and a bounded-V8
+   temporary-file spool; infer the physical kind from the runtime schema. Add
+   the browser/WASM bridge only when it preserves that contract without whole-
+   value buffering. Keep streaming query deferred until the primitive query
+   machinery proves insufficient; do not require an object-like mutable handle.
 7. Document bearer-locator limitations and operational proxy requirements.
 
 ## Canonical adversarial matrix

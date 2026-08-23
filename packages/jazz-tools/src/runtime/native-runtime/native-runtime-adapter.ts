@@ -18,6 +18,8 @@ import type {
   OpenBatchId,
   PermissionAdvice,
   Runtime,
+  StreamingInsertResult,
+  StreamingValueSource,
   TransactionKind,
 } from "../client.js";
 import type { Session } from "../context.js";
@@ -137,6 +139,13 @@ type NativeDb = {
     cells: Uint8Array,
     updatedAtMs?: number | null,
   ): Write;
+  beginStreamingInsertEncoded?(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    column: string,
+    kind: "Text" | "Json" | "Bytea",
+  ): NativeStreamingInsert;
   insertWithIdEncodedInBranch?(
     table: string,
     rowId: Uint8Array,
@@ -324,6 +333,12 @@ type NativeDb = {
   tick(): void | Promise<void>;
   close?(): void;
   free?(): void;
+};
+
+type NativeStreamingInsert = {
+  push(chunk: Uint8Array): void;
+  finish(): Write;
+  abort(): boolean;
 };
 
 type NativePermissionAdviceRequest = {
@@ -972,6 +987,75 @@ export class NativeRuntimeAdapter implements Runtime {
           : this.db.insertWithIdEncoded(table, rowId, cells, updatedAtMs),
     );
     return this.finishInsert(table, rowId, values, write);
+  }
+
+  async insertStreaming(
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    writeContext?: string | null,
+    objectId?: string | null,
+  ): Promise<StreamingInsertResult> {
+    const begin = this.db.beginStreamingInsertEncoded;
+    if (!begin) throw new Error("Native runtime does not expose streaming insert");
+    if (this.currentTx(writeContext, "Insert")) {
+      throw new Error("Streaming inserts are not supported inside a transaction");
+    }
+    const writeSession = sessionFromWriteContext(writeContext);
+    this.applySessionClaims(writeSession);
+    if (this.trustedWriteIdentity(writeSession)) {
+      throw new Error("Identity-attributed streaming inserts are not supported yet");
+    }
+    if (
+      branchViewFromWriteContext(writeContext) ||
+      updatedAtMsFromWriteContext(writeContext) != null
+    ) {
+      throw new Error("Branch and timestamp overrides are not supported for streaming inserts");
+    }
+
+    const definition = this.table(table);
+    const descriptor = definition.columns.find((candidate) => candidate.name === column);
+    const kind = descriptor?.column_type.type;
+    if (kind !== "Text" && kind !== "Json" && kind !== "Bytea") {
+      throw new Error(
+        `Streaming insert requires a Text, Json, or Bytea column: ${table}.${column}`,
+      );
+    }
+    const rowId = objectId ? parseUuid(objectId) : crypto.getRandomValues(new Uint8Array(16));
+    const cells = encodeCellsForStreamingRow(definition, values, column, table);
+    const upload = begin.call(this.db, table, rowId, cells, column, kind);
+    const encoder = new TextEncoder();
+    let pendingHighSurrogate = "";
+    try {
+      for await (const chunk of streamingChunks(source)) {
+        if (typeof chunk === "string") {
+          if (kind === "Bytea") throw new Error("Bytea streams require Uint8Array chunks");
+          let text = pendingHighSurrogate + chunk;
+          pendingHighSurrogate = "";
+          const trailing = text.charCodeAt(text.length - 1);
+          if (trailing >= 0xd800 && trailing <= 0xdbff) {
+            pendingHighSurrogate = text.slice(-1);
+            text = text.slice(0, -1);
+          }
+          if (text.length > 0) upload.push(encoder.encode(text));
+        } else if (chunk instanceof Uint8Array) {
+          if (pendingHighSurrogate) {
+            upload.push(encoder.encode(pendingHighSurrogate));
+            pendingHighSurrogate = "";
+          }
+          upload.push(chunk);
+        } else {
+          throw new Error("Streaming insert chunks must be strings or Uint8Array values");
+        }
+      }
+      if (pendingHighSurrogate) upload.push(encoder.encode(pendingHighSurrogate));
+      const receipt = this.finishMutation(upload.finish());
+      return { id: formatUuid(rowId), ...receipt };
+    } catch (error) {
+      upload.abort();
+      throw error;
+    }
   }
 
   restore(
@@ -4304,6 +4388,49 @@ export function encodeCellsForRow(
       (column.column_type.type === "Array" && column.default == null),
   );
   return encodeCells(columns, (column) => row[column.name], true);
+}
+
+function encodeCellsForStreamingRow(
+  definition: { columns: ColumnDescriptor[]; policies?: TablePolicies },
+  row: InsertValues,
+  streamedColumn: string,
+  table?: string,
+): Uint8Array {
+  assertRequiredRowColumnsPresent(
+    definition.columns.filter((column) => column.name !== streamedColumn),
+    row,
+    table,
+  );
+  const columns = definition.columns.filter(
+    (column) =>
+      column.name !== streamedColumn &&
+      (Object.hasOwn(row, column.name) ||
+        (column.column_type.type === "Array" && column.default == null)),
+  );
+  return encodeCells(columns, (column) => row[column.name], true);
+}
+
+async function* streamingChunks(source: StreamingValueSource): AsyncGenerator<Uint8Array | string> {
+  const readable = source as ReadableStream<Uint8Array | string>;
+  if (typeof readable.getReader !== "function") {
+    yield* source as AsyncIterable<Uint8Array | string>;
+    return;
+  }
+  const reader = readable.getReader();
+  let completed = false;
+  try {
+    while (true) {
+      const result = await reader.read();
+      if (result.done) {
+        completed = true;
+        return;
+      }
+      yield result.value;
+    }
+  } finally {
+    if (!completed) await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
 }
 
 export function encodeCellsForPatch(

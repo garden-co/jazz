@@ -12,6 +12,7 @@ export declare class JazzServer {
 }
 
 export declare class NapiDb {
+  beginStreamingInsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, kind: string): StreamingInsert
   static openMemory(schema: Uint8Array, config: Uint8Array): NapiDb
   static openPersistent(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
   /** Register and return a typed view backed by this same runtime owner. */
@@ -93,6 +94,18 @@ export declare class PreparedQuery {
 
 export declare class QueryAttachment {
 
+}
+
+/**
+ * Native bounded-memory sink used by the TypeScript async streaming-insert
+ * adapter. Host chunks are spooled to an unlink-on-drop file; `finish` then
+ * hands its reader to Jazz's Groove-backed streaming constructor. Dropping or
+ * aborting before finish publishes and stages nothing.
+ */
+export declare class StreamingInsert {
+  push(chunk: Uint8Array): void
+  finish(): Write
+  abort(): boolean
 }
 
 export declare class Subscription {

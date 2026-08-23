@@ -39,6 +39,7 @@ import {
   type OpenBatchId,
   type BatchId,
   type PermissionAdvice,
+  type StreamingValueSource,
 } from "./client.js";
 import { type RuntimeSource, type RuntimeTokenOptions } from "./runtime-source.js";
 import { DefaultRuntimeSource } from "./default-runtime-source.js";
@@ -1452,6 +1453,41 @@ export class Db {
       inserted.mapValue((row) =>
         transformOutputRow(table, transformRow(row, table._schema, table._table)),
       ),
+    );
+  }
+
+  /**
+   * Stream one Text, Json, or Bytea column into a new row. The column's runtime
+   * schema determines encoding; callers never pass a large-value kind.
+   *
+   * Unlike {@link insert}, this is asynchronous because it consumes the source
+   * before publishing. Its handle returns only the generated id so the complete
+   * streamed value is not copied back into JavaScript memory.
+   */
+  async insertStreaming<T, Init, Column extends keyof Init & string>(
+    table: TableProxy<T, Init>,
+    data: Omit<Init, Column>,
+    column: Column,
+    source: StreamingValueSource,
+    options?: InsertOptions,
+  ): Promise<WriteHandle<{ id: string }>> {
+    const client = this.getClient(table._schema);
+    const transformedData = transformInputColumns(table, data);
+    const values = toWriteRecordForOperation(
+      "Insert",
+      transformedData,
+      table._schema,
+      table._table,
+    );
+    const context = this.getRuntimeOperationContext();
+    return client.insertStreaming(
+      table._table,
+      values,
+      column,
+      source,
+      normalizeInsertOptions(table._schema, table._table, options),
+      context?.session,
+      context?.attribution,
     );
   }
 

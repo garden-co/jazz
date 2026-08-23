@@ -456,6 +456,44 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([]);
   });
 
+  it("streams a typed text column through NAPI before publishing the row", async () => {
+    const { NapiDb } = await loadNapiModule();
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+      TEST_SCHEMA,
+      deterministicBytes("jazz-napi-streaming-insert:node"),
+      deterministicBytes("jazz-napi-streaming-insert:author"),
+      1,
+      true,
+    );
+    runtimes.push(runtime);
+
+    const inserted = await runtime.insertStreaming(
+      "todos",
+      { done: { type: "Boolean", value: false } },
+      "title",
+      (async function* () {
+        yield "streamed ";
+        yield new TextEncoder().encode("through NAPI ");
+        yield "\ud83d";
+        yield "\ude80";
+      })(),
+      null,
+      "00000000-0000-4000-8000-000000000123",
+    );
+
+    await expect(runtime.query(JSON.stringify({ table: "todos" }))).resolves.toEqual([
+      {
+        id: inserted.id,
+        table: "todos",
+        values: [
+          { type: "Text", value: "streamed through NAPI 🚀" },
+          { type: "Boolean", value: false },
+        ],
+      },
+    ]);
+  });
+
   it("applies column defaults for direct napi inserts with omitted cells", async () => {
     const { NapiDb } = await loadNapiModule();
     const runtime = new NativeRuntimeAdapter(

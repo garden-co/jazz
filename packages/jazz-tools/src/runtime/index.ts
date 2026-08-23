@@ -12,6 +12,8 @@ export {
   type QueryVisibility,
   type Row,
   type SubscriptionCallback,
+  type StreamingValueChunk,
+  type StreamingValueSource,
   type WasmModule,
   WriteHandle,
   WriteResult,

@@ -125,8 +125,15 @@ The first high-level streaming-create API is native Rust
 `Db::insert_streaming_value`, backed directly by Groove's bounded streaming tree
 builder and incremental staging channel. It accepts the other ordinary row
 cells plus one streamed string, bytes, or JSON column and publishes only after
-the stream and validation finish. We deliberately do not expose a JavaScript
-method that accepts a pre-collected chunk array or invokes synchronous JS
-callbacks: both would undermine backpressure or block the runtime while
-claiming to stream. A browser/Node binding follows only with an explicit async
-producer, cancellation, and bounded-channel contract.
+the stream and validation finish.
+
+The TypeScript API is
+`await db.insertStreaming(table, otherData, column, source)`. Its generic shape
+infers the column from the table initializer and omits it from `otherData`; the
+runtime schema infers Text, JSON, or Bytea rather than trusting a caller tag.
+Node/NAPI accepts a `ReadableStream` or `AsyncIterable`, spools each awaited
+chunk to an unlink-on-drop temporary file, then finishes through the native
+reader API. Producer failure aborts before any root is staged. We still do not
+expose pre-collected arrays or synchronous JS callbacks. Browser/WASM remains a
+follow-up requiring the same explicit async producer, cancellation, and
+backpressure contract.

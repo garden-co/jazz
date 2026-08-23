@@ -458,6 +458,27 @@ where
     where
         R: std::io::Read + Send + 'static,
     {
+        let row = self.row_id_source.borrow_mut().next_row_id();
+        self.insert_streaming_value_with_id(table, row, cells, column, kind, reader)
+            .await
+    }
+
+    /// Stream one large scalar into a newly inserted row with an explicit row
+    /// id. Binding adapters use this to choose the public id before consuming
+    /// an asynchronous host stream.
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn insert_streaming_value_with_id<R>(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        column: &str,
+        kind: groove::large_values::LargeValueKind,
+        reader: R,
+    ) -> Result<WriteHandle<S>, Error>
+    where
+        R: std::io::Read + Send + 'static,
+    {
         if cells.contains_key(column) {
             return Err(Error::new(
                 ErrorCode::Schema,
@@ -492,7 +513,8 @@ where
         if !kind_matches {
             return Err(large_value_cell_type_error(table, column));
         }
-        let row = self.row_id_source.borrow_mut().next_row_id();
+        self.ensure_row_absent(table, row, self.identity.author)
+            .await?;
         let cells = self.apply_insert_defaults(table, cells)?;
         let (staged, _) = self
             .node

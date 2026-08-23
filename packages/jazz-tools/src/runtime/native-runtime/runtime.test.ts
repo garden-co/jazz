@@ -4162,6 +4162,102 @@ describe("NativeRuntimeAdapter server transport", () => {
   });
 });
 
+describe("NativeRuntimeAdapter streaming inserts", () => {
+  it("infers the physical kind and applies backpressure to async chunks", async () => {
+    const pushed: Uint8Array[] = [];
+    let finished = false;
+    const beginStreamingInsertEncoded = vi.fn(
+      (_table: string, _rowId: Uint8Array, _cells: Uint8Array, _column: string, _kind: string) => ({
+        push(chunk: Uint8Array) {
+          pushed.push(Uint8Array.from(chunk));
+        },
+        finish() {
+          finished = true;
+          return fakeWrite();
+        },
+        abort: vi.fn(),
+      }),
+    );
+    const schema = {
+      todos: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "done", column_type: { type: "Boolean" }, nullable: false },
+        ],
+      },
+    } satisfies WasmSchema;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ beginStreamingInsertEncoded }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      schema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    const result = await runtime.insertStreaming(
+      "todos",
+      { done: { type: "Boolean", value: false } },
+      "title",
+      (async function* () {
+        yield "hello ";
+        yield new TextEncoder().encode("world");
+      })(),
+      null,
+      "00000000-0000-0000-0000-000000000123",
+    );
+
+    expect(beginStreamingInsertEncoded).toHaveBeenCalledOnce();
+    expect(beginStreamingInsertEncoded.mock.calls[0]?.[3]).toBe("title");
+    expect(beginStreamingInsertEncoded.mock.calls[0]?.[4]).toBe("Text");
+    expect(pushed.map((chunk) => new TextDecoder().decode(chunk))).toEqual(["hello ", "world"]);
+    expect(finished).toBe(true);
+    expect(result.id).toBe("00000000-0000-0000-0000-000000000123");
+  });
+
+  it("aborts the native upload when the producer fails", async () => {
+    const abort = vi.fn();
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            beginStreamingInsertEncoded: () => ({
+              push: () => undefined,
+              finish: () => fakeWrite(),
+              abort,
+            }),
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await expect(
+      runtime.insertStreaming(
+        "todos",
+        {},
+        "title",
+        (async function* () {
+          yield "partial";
+          throw new Error("producer failed");
+        })(),
+      ),
+    ).rejects.toThrow("producer failed");
+    expect(abort).toHaveBeenCalledOnce();
+  });
+});
+
 describe("NativeRuntimeAdapter TS adapter perf canary", () => {
   it.skipIf(process.env.JAZZ_TS_ADAPTER_PERF !== "1")(
     "measures reset delivery for one large subscription and many small subscriptions",

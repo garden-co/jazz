@@ -112,6 +112,14 @@ export interface Runtime {
     write_context_json?: string | null,
     object_id?: string | null,
   ): InsertResult;
+  insertStreaming?(
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    write_context_json?: string | null,
+    object_id?: string | null,
+  ): Promise<StreamingInsertResult>;
   restore(
     table: string,
     object_id: string,
@@ -442,6 +450,11 @@ export type WriteReceipt =
   | { readonly kind: "staged"; readonly openBatchId: OpenBatchId };
 
 export type InsertResult = Row & WriteReceipt;
+export type StreamingValueChunk = Uint8Array | string;
+export type StreamingValueSource =
+  | ReadableStream<StreamingValueChunk>
+  | AsyncIterable<StreamingValueChunk>;
+export type StreamingInsertResult = { id: string } & WriteReceipt;
 export type MutationResult = WriteReceipt;
 
 interface WriteContextPayload {
@@ -1038,6 +1051,45 @@ export class JazzClient {
   ): WriteResult<Row> {
     const row = this.insertInternal(table, values, options, session, attribution);
     return new WriteResult(row, committedBatchId(row), this);
+  }
+
+  /**
+   * Consume one host byte/text stream and atomically insert the resulting
+   * scalar with the other row values. The streamed value is intentionally not
+   * copied back into the returned handle.
+   */
+  async insertStreaming(
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    options?: InsertOptions,
+    session?: Session,
+    attribution?: string,
+  ): Promise<WriteHandle<{ id: string }>> {
+    if (!this.runtime.insertStreaming) {
+      throw new Error("This runtime does not support streaming insert");
+    }
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    const writeContext = this.encodeWriteContext(
+      effectiveSession,
+      attribution,
+      undefined,
+      options?.updatedAt,
+      options?.branch ? { head: options.branch } : undefined,
+    );
+    const result = await this.runtime.insertStreaming(
+      table,
+      values,
+      column,
+      source,
+      writeContext,
+      options?.id,
+    );
+    if (result.kind !== "committed") {
+      throw new Error("Streaming inserts cannot be staged inside an open transaction");
+    }
+    return new WriteHandle(result.batchId, this, { id: result.id });
   }
 
   /**

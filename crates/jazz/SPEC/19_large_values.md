@@ -382,10 +382,23 @@ leave only an expiring unpublished staging claim. The API validates the target
 column and physical kind before consuming the reader and preserves a present
 nullable wrapper where required.
 
-This first streaming-create surface is native-only. WASM and JavaScript require
-an asynchronous stream adapter with explicit cancellation and backpressure; a
-synchronous callback or pre-collected chunk array would falsely claim bounded
-streaming and is therefore not exposed as the browser API.
+TypeScript exposes the same operation as
+`Db.insertStreaming(table, otherData, column, source)`. The table initializer
+type determines the omitted streamed column and continues to require every
+other required insert column. The runtime schema, rather than a caller-supplied
+physical tag, determines whether that column is Text, JSON, or Bytea. Sources
+are `ReadableStream<Uint8Array | string>` or
+`AsyncIterable<Uint8Array | string>`; Bytea accepts only byte chunks. The
+operation returns a promise for a write handle containing the generated row id,
+not a materialized copy of the streamed value.
+
+The NAPI adapter implements that async contract with an unlink-on-drop temporary
+file. Each host chunk is copied once into the spool before the producer is
+allowed to advance; `finish` passes a native reader to Jazz and `abort` drops
+the spool without staging a root. This bounds V8 memory, preserves producer
+backpressure, and avoids holding a Jazz transaction open while JavaScript is
+producing data. Browser/WASM support remains open: it requires an equivalent
+async producer bridge without first collecting the complete logical value.
 
 NAPI and WASM preserve the existing encoded-row boundary and copy completed
 results into host-owned buffers. No chunk lease crosses either binding. Complete
@@ -410,6 +423,6 @@ leases, retry tokens, partially materialized handles, or Groove request state.
 - Whether a future multipart/handle binding protocol should expose chunk-backed
   `Blob`/bytes results. It is outside the current design and would require host
   finalizers, external-memory accounting and lease-aware backpressure.
-- The exact cancellation/backpressure contract for adapting browser
-  `ReadableStream` and Node `AsyncIterable<Uint8Array>` inputs to Groove's
-  streaming-create producer without buffering the complete logical value.
+- The WASM implementation of the established asynchronous streaming-create
+  contract. It must preserve cancellation and producer backpressure without
+  buffering the complete logical value.
