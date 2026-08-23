@@ -27,15 +27,38 @@ fn row(byte: u8) -> RowUuid {
 }
 
 fn schema() -> JazzSchema {
+    // These topology tests are about identity-scoped delivery.  Keep their
+    // fixture writes intentionally public; declaring SELECT alone now closes
+    // the remaining operation clauses.
+    let policies = TablePolicies::new()
+        .with_select(session_eq("owner", &["claims", "sub"]))
+        .with_insert(jazz::tools::PolicyExpr::True)
+        .with_update(
+            Some(jazz::tools::PolicyExpr::True),
+            jazz::tools::PolicyExpr::True,
+        )
+        .with_delete(jazz::tools::PolicyExpr::True);
     compile_schema(
         &SchemaBuilder::new()
             .table(
                 TableSchemaBuilder::new("todos")
                     .column("title", ColumnType::Text)
                     .column("owner", ColumnType::Uuid)
-                    .policies(
-                        TablePolicies::new().with_select(session_eq("owner", &["claims", "sub"])),
-                    ),
+                    .policies(policies),
+            )
+            .build(),
+    )
+}
+
+/// A genuinely policy-free table is the public-write control case: it must
+/// settle at an edge without authorization support or deferral.
+fn public_write_schema() -> JazzSchema {
+    compile_schema(
+        &SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("todos")
+                    .column("title", ColumnType::Text)
+                    .column("owner", ColumnType::Uuid),
             )
             .build(),
     )
@@ -1089,7 +1112,7 @@ fn edge_restart_recovers_deferred_fate_from_client_outbox_redelivery() {
 
 #[test]
 fn edge_restart_preserves_edge_accepted_unit_without_redelivery() {
-    let schema = schema();
+    let schema = public_write_schema();
     let client_author = AuthorId::from_bytes([7; 16]);
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
@@ -1152,7 +1175,7 @@ fn edge_restart_preserves_edge_accepted_unit_without_redelivery() {
 
 #[test]
 fn edge_public_write_table_settles_without_deferral_or_scope() {
-    let schema = schema();
+    let schema = public_write_schema();
     let client_author = AuthorId::from_bytes([7; 16]);
 
     let (_client_dir, mut client) = open_node(node(1), schema.clone());
