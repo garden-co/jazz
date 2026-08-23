@@ -20,7 +20,7 @@ fn representative_loads_have_exact_cardinality_and_order() {
 
         let room_count = message_count / 16;
         let unread_rooms = (0..room_count as u64)
-            .filter(|room| room % 32 == 0)
+            .filter(|room| room % 64 == 0)
             .rev()
             .collect::<Vec<_>>();
         assert_eq!(fixture.unread_room_activity(), unread_rooms);

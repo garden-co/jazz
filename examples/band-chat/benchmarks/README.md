@@ -6,7 +6,8 @@ fixture helpers.
 
 At two scales (1,024 and 4,096 messages), the deterministic fixture creates 32
 users, one room per 16 messages, one membership per room, and a 100-message hot
-room. The measured prepared Jazz reads cover:
+room. Each member's successive room memberships alternate unread/read so the
+unread predicate selects a strict subset. The measured prepared Jazz reads cover:
 
 - the second 25-message page of a room timeline, newest first;
 - unread rooms for one member, ordered by recent activity;

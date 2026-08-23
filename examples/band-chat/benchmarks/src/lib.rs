@@ -67,7 +67,10 @@ impl Fixture {
                         "member".to_owned(),
                         Value::Uuid(row_id(1, room % AUTHORS).0),
                     ),
-                    ("unread".to_owned(), Value::Bool(room.is_multiple_of(2))),
+                    (
+                        "unread".to_owned(),
+                        Value::Bool((room / AUTHORS).is_multiple_of(2)),
+                    ),
                     ("last_activity".to_owned(), Value::U64(room as u64)),
                 ]),
             );
@@ -180,7 +183,7 @@ pub fn expected_counts(message_count: usize) -> (usize, usize, usize) {
     let room_count = message_count / MESSAGES_PER_ROOM;
     (
         TIMELINE_PAGE,
-        room_count.div_ceil(AUTHORS),
+        room_count.div_ceil(AUTHORS * 2),
         message_count.div_ceil(AUTHORS),
     )
 }
