@@ -15,7 +15,7 @@ use jazz::peer::PeerState;
 use jazz::protocol::SyncMessage;
 use jazz::schema::JazzSchema;
 use jazz::tools::OpenTransactionId;
-use jazz::tools::{ColumnType, SchemaBuilder, TablePolicies, TableSchemaBuilder};
+use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchemaBuilder};
 use jazz::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId};
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
 use support::{emit_json_line, insert_node_metrics, phase_fields, reset_phase_counters};
@@ -490,12 +490,21 @@ fn rows_owned_by(
 
 fn schema() -> JazzSchema {
     let owner = schema_fixture::session_user_id_column("owner");
+    // This fixture intentionally accepts writes from the UI author for rows
+    // owned by another identity, then checks that the client link does not see
+    // that row. Keep those write semantics explicit now that a table with any
+    // policy fails closed for unspecified operations.
+    let policies = TablePolicies::new()
+        .with_select(owner)
+        .with_insert(PolicyExpr::True)
+        .with_update(Some(PolicyExpr::True), PolicyExpr::True)
+        .with_delete(PolicyExpr::True);
     schema_fixture::compile(
         SchemaBuilder::new().table(
             TableSchemaBuilder::new(TABLE)
                 .column("title", ColumnType::Text)
                 .column("owner", ColumnType::Uuid)
-                .policies(TablePolicies::new().with_select(owner)),
+                .policies(policies),
         ),
     )
 }
