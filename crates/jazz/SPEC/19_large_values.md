@@ -172,6 +172,15 @@ chunks. Expiry is checked again when accepting the referencing row and may also
 be driven periodically by a host scheduler. If the receipt is missing or too
 old, the row write fails safely and the client must upload the value again.
 
+Jazz exposes the same policy setter and idempotent maintenance operation through
+Rust `Db`, server-shell, NAPI, and WASM boundaries. Native servers/NAPI runtimes
+invoke maintenance from their host timer; browser runtimes use a JavaScript
+timer or worker alarm. A timer merely requests `evictExpiredStagedLargeValues`:
+the host never receives staging ids, locators, chunks, or deletion authority.
+Maintenance does not have to run for acceptance safety because every referencing
+row rechecks receipt age; periodic work only bounds retention of abandoned
+uploads while a process is otherwise idle.
+
 Node/leaf uploads are immutable. Reusing a locator with different bytes is a
 hard integrity failure. The backend may deduplicate equal bytes internally.
 

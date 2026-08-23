@@ -2525,6 +2525,54 @@ impl WasmDb {
         })
     }
 
+    /// Configure Jazz-owned upload ingress and unpublished-tree expiry limits.
+    #[wasm_bindgen(js_name = setLargeValueStagingPolicy)]
+    pub fn set_large_value_staging_policy(
+        &self,
+        incoming_bytes_per_window: f64,
+        window_ms: f64,
+        max_age_ms: Option<f64>,
+    ) -> Result<(), JsValue> {
+        if !incoming_bytes_per_window.is_finite()
+            || incoming_bytes_per_window < 0.0
+            || !window_ms.is_finite()
+            || window_ms < 1.0
+            || max_age_ms.is_some_and(|value| !value.is_finite() || value < 0.0)
+        {
+            return Err(JsValue::from_str(
+                "large-value staging limits must be finite and nonnegative; windowMs must be at least 1",
+            ));
+        }
+        let policy = jazz::node::LargeValueStagingPolicy {
+            incoming_bytes_per_window: incoming_bytes_per_window as u64,
+            window_ms: window_ms as u64,
+            max_age_ms: max_age_ms.map(|value| value as u64),
+        };
+        match &self.inner {
+            WasmDbInner::Memory(db) => db.set_large_value_staging_policy(policy),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => db.set_large_value_staging_policy(policy),
+            WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+        }
+        Ok(())
+    }
+
+    /// Run one idempotent expiry pass; browser hosts normally call this from a timer.
+    #[wasm_bindgen(js_name = evictExpiredStagedLargeValues)]
+    pub fn evict_expired_staged_large_values(&self) -> js_sys::Promise {
+        let inner = self.inner.clone();
+        future_to_promise(async move {
+            let evicted = match &inner {
+                WasmDbInner::Memory(db) => db.evict_expired_staged_large_values().await,
+                #[cfg(target_arch = "wasm32")]
+                WasmDbInner::Browser(db) => db.evict_expired_staged_large_values().await,
+                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
+            }
+            .map_err(to_js_error)?;
+            Ok(JsValue::from_f64(evicted as f64))
+        })
+    }
+
     /// Configure this runtime as the optimistic in-memory side of a browser
     /// client/worker pair. Must be called before application writes begin.
     #[wasm_bindgen(js_name = setNonDurableClient)]

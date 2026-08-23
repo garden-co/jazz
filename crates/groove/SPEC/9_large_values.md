@@ -458,7 +458,9 @@ Chunk failure is scoped like chapter 8's node-evaluation failure:
 - Exact JSON formatting policy after semantic merges.
 - Exact Jazz ingress limits and host maintenance cadence for staging expiry.
   Groove persists receipt timestamps and performs requested eviction, but does
-  not choose policy or run a backend-specific expiry worker.
+  not choose policy or run a backend-specific expiry worker. Jazz exposes one
+  idempotent maintenance call across its Rust, server, NAPI, and WASM surfaces;
+  each environment supplies its ordinary native or JavaScript timer cadence.
 - Any future history truncation/thinning implementation MUST delete physical
   versions through Groove's refcount-aware record mutation path. Direct storage
   deletion would leak or prematurely reclaim large-value trees.

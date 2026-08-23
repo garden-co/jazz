@@ -271,6 +271,12 @@ type NativeDb = {
   ): void;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
   setNonDurableClient?(): void;
+  setLargeValueStagingPolicy?(
+    incomingBytesPerWindow: number,
+    windowMs: number,
+    maxAgeMs?: number | null,
+  ): void;
+  evictExpiredStagedLargeValues?(): number | Promise<number>;
   connectUpstream(): Transport;
   connectUpstreamWithSession?(
     protocolVersion: number,
@@ -660,6 +666,36 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     this.db.setNonDurableClient();
     this.nonDurableClient = true;
+  }
+
+  /** Configure Jazz-owned upload rate and unpublished-tree expiry policy. */
+  setLargeValueStagingPolicy(
+    incomingBytesPerWindow: number,
+    windowMs: number,
+    maxAgeMs?: number | null,
+  ): void {
+    if (this !== this.ownerRuntime) {
+      return this.ownerRuntime.setLargeValueStagingPolicy(
+        incomingBytesPerWindow,
+        windowMs,
+        maxAgeMs,
+      );
+    }
+    if (!this.db.setLargeValueStagingPolicy) {
+      throw new Error("Native runtime does not expose large-value staging policy");
+    }
+    this.db.setLargeValueStagingPolicy(incomingBytesPerWindow, windowMs, maxAgeMs);
+  }
+
+  /** Run one idempotent expiry pass from an environment-owned timer. */
+  async evictExpiredStagedLargeValues(): Promise<number> {
+    if (this !== this.ownerRuntime) {
+      return await this.ownerRuntime.evictExpiredStagedLargeValues();
+    }
+    if (!this.db.evictExpiredStagedLargeValues) {
+      throw new Error("Native runtime does not expose large-value staging maintenance");
+    }
+    return await this.db.evictExpiredStagedLargeValues();
   }
 
   acceptPeer(claims: Record<string, unknown> = {}): Transport {

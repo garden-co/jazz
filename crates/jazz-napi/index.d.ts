@@ -70,6 +70,10 @@ export declare class NapiDb {
   restoreEncodedInBranchForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue, author: Uint8Array): Write
   restoreEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
   tick(): void
+  /** Configure Jazz-owned upload ingress and unpublished-tree expiry limits. */
+  setLargeValueStagingPolicy(incomingBytesPerWindow: number, windowMs: number, maxAgeMs?: number | undefined | null): void
+  /** Run one idempotent expiry pass; native hosts normally call this on a timer. */
+  evictExpiredStagedLargeValues(): number
   setNonDurableClient(): void
   connectUpstream(): Transport
   connectUpstreamWithSession(protocolVersion: number, features: number, remoteNode: Buffer, remoteEpoch: bigint, localNode: Buffer, localEpoch: bigint): Transport
@@ -100,6 +104,9 @@ export declare class TestJwtIssuer {
 }
 
 export declare class Transport {
+  routeAuxiliaryWireFrame(frame: Uint8Array): Uint8Array | null
+  recvAuxiliaryWireFrames(): Array<Uint8Array>
+  auxiliaryOutboundReady(): boolean
   sendWireFrame(frame: Uint8Array): void
   sendWireFrames(frames: Array<Uint8Array>): void
   recvWireFrames(): Array<Uint8Array>

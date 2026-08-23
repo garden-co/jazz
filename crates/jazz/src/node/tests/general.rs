@@ -135,6 +135,11 @@ fn expired_staged_tree_requires_reupload_before_row_publication() {
     ))
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(3));
+    assert_eq!(
+        crate::db::block_on(node.evict_expired_staged_large_values()).unwrap(),
+        1,
+        "host maintenance evicts the abandoned staged root"
+    );
 
     assert!(matches!(
         node.commit_mergeable_settled(commit),

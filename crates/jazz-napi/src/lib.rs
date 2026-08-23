@@ -2339,6 +2339,57 @@ impl NapiDb {
             .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
+    /// Configure Jazz-owned upload ingress and unpublished-tree expiry limits.
+    #[napi(js_name = "setLargeValueStagingPolicy")]
+    pub fn set_large_value_staging_policy(
+        &self,
+        incoming_bytes_per_window: f64,
+        window_ms: f64,
+        max_age_ms: Option<f64>,
+    ) -> napi::Result<()> {
+        if !incoming_bytes_per_window.is_finite()
+            || incoming_bytes_per_window < 0.0
+            || !window_ms.is_finite()
+            || window_ms < 1.0
+            || max_age_ms.is_some_and(|value| !value.is_finite() || value < 0.0)
+        {
+            return Err(napi::Error::from_reason(
+                "large-value staging limits must be finite and nonnegative; windowMs must be at least 1",
+            ));
+        }
+        let policy = jazz::node::LargeValueStagingPolicy {
+            incoming_bytes_per_window: incoming_bytes_per_window as u64,
+            window_ms: window_ms as u64,
+            max_age_ms: max_age_ms.map(|value| value as u64),
+        };
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => db.set_large_value_staging_policy(policy),
+            NapiDbInnerStorage::Persistent(db) => db.set_large_value_staging_policy(policy),
+        }
+        Ok(())
+    }
+
+    /// Run one idempotent expiry pass; native hosts normally call this on a timer.
+    #[napi(js_name = "evictExpiredStagedLargeValues")]
+    pub fn evict_expired_staged_large_values(&self) -> napi::Result<u32> {
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let evicted = match db {
+            NapiDbInnerStorage::Memory(db) => core_block_on(db.evict_expired_staged_large_values()),
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.evict_expired_staged_large_values())
+            }
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        Ok(evicted.try_into().unwrap_or(u32::MAX))
+    }
+
     #[napi(js_name = "setNonDurableClient")]
     pub fn set_non_durable_client(&self) -> napi::Result<()> {
         let db = self.inner.borrow();

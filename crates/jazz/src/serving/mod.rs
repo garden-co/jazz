@@ -87,6 +87,8 @@ pub struct InMemoryServerShellConfig {
     pub row_id_seed: Option<u64>,
     /// Optional edge-cache byte budget. `None` disables automatic eviction.
     pub edge_cache_budget: Option<EdgeCacheBudget>,
+    /// Jazz-owned policy for unpublished large-value uploads and roots.
+    pub large_value_staging_policy: crate::node::LargeValueStagingPolicy,
     /// Server role used for client-link semantics.
     pub role: NodeRole,
     /// Whether startup should publish the constructor schema into the runtime
@@ -105,6 +107,7 @@ impl InMemoryServerShellConfig {
             identity,
             row_id_seed: None,
             edge_cache_budget: None,
+            large_value_staging_policy: crate::node::LargeValueStagingPolicy::default(),
             role: NodeRole::Core,
             bootstrap_runtime_schema: false,
             storage_factory: None,
@@ -120,6 +123,15 @@ impl InMemoryServerShellConfig {
     /// Configure automatic edge-cache eviction by byte budget.
     pub fn with_edge_cache_budget(mut self, budget: EdgeCacheBudget) -> Self {
         self.edge_cache_budget = Some(budget);
+        self
+    }
+
+    /// Configure incoming upload rate limits and staged-tree expiry.
+    pub fn with_large_value_staging_policy(
+        mut self,
+        policy: crate::node::LargeValueStagingPolicy,
+    ) -> Self {
+        self.large_value_staging_policy = policy;
         self
     }
 
@@ -152,6 +164,10 @@ impl fmt::Debug for InMemoryServerShellConfig {
             .field("identity", &self.identity)
             .field("row_id_seed", &self.row_id_seed)
             .field("edge_cache_budget", &self.edge_cache_budget)
+            .field(
+                "large_value_staging_policy",
+                &self.large_value_staging_policy,
+            )
             .field("role", &self.role)
             .field("bootstrap_runtime_schema", &self.bootstrap_runtime_schema)
             .field(
@@ -418,6 +434,26 @@ impl ShellDb {
         }
     }
 
+    fn set_large_value_staging_policy(&self, policy: crate::node::LargeValueStagingPolicy) {
+        match self {
+            Self::Memory(db) => db.set_large_value_staging_policy(policy),
+            Self::Durable(db) => db.set_large_value_staging_policy(policy),
+        }
+    }
+
+    async fn evict_expired_staged_large_values(&self) -> ShellResult<usize> {
+        match self {
+            Self::Memory(db) => db
+                .evict_expired_staged_large_values()
+                .await
+                .map_err(Into::into),
+            Self::Durable(db) => db
+                .evict_expired_staged_large_values()
+                .await
+                .map_err(Into::into),
+        }
+    }
+
     fn current_write_schema(&self) -> ShellResult<CurrentWriteSchema> {
         match self {
             Self::Memory(db) => db.current_write_schema().map_err(Into::into),
@@ -641,6 +677,7 @@ impl InMemoryServerShell {
         storage_config: StorageConfig,
     ) -> ShellResult<Self> {
         let edge_cache_budget = config.edge_cache_budget;
+        let large_value_staging_policy = config.large_value_staging_policy;
         let role = config.role;
         let bootstrap_runtime_schema = config.bootstrap_runtime_schema;
         let bootstrap_schema = config.schema.clone();
@@ -684,6 +721,7 @@ impl InMemoryServerShell {
             }
         };
         db.set_edge_cache_budget(edge_cache_budget);
+        db.set_large_value_staging_policy(large_value_staging_policy);
 
         let mut shell = Self {
             db,
@@ -1368,6 +1406,16 @@ impl InMemoryServerShell {
         self.metrics.tick_subscription_wakes += u64::from(stats.subscription_wakes);
         self.metrics.tick_write_wakes += u64::from(stats.write_wakes);
         Ok(())
+    }
+
+    /// Replace the Jazz-owned staging policy used by this server shell.
+    pub fn set_large_value_staging_policy(&self, policy: crate::node::LargeValueStagingPolicy) {
+        self.db.set_large_value_staging_policy(policy);
+    }
+
+    /// Run one expiry pass from the host's maintenance timer.
+    pub async fn evict_expired_staged_large_values(&self) -> ShellResult<usize> {
+        self.db.evict_expired_staged_large_values().await
     }
 
     /// Drain encoded wire frames ready to send to the host for a session.

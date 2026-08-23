@@ -137,6 +137,27 @@ where
         Rc::clone(&self.node)
     }
 
+    /// Configure Jazz-owned ingress and expiry policy for unpublished large
+    /// values. Groove persists timestamps and performs eviction, but does not
+    /// choose these product limits.
+    pub fn set_large_value_staging_policy(&self, policy: crate::node::LargeValueStagingPolicy) {
+        self.node
+            .borrow_mut()
+            .set_large_value_staging_policy(policy);
+    }
+
+    /// Run one host-driven staging-expiry maintenance pass.
+    ///
+    /// Browser, NAPI, and server hosts call this from their own timer cadence;
+    /// it is idempotent and does not make Groove own an executor or clock.
+    pub async fn evict_expired_staged_large_values(&self) -> Result<usize, Error> {
+        self.node
+            .borrow()
+            .evict_expired_staged_large_values()
+            .await
+            .map_err(Into::into)
+    }
+
     pub(super) fn set_non_durable_client(&self) {
         self.node.borrow_mut().set_non_durable_client();
         self.upstream_durability_floor.set(DurabilityTier::Local);
