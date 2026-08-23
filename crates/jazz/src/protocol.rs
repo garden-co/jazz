@@ -253,11 +253,10 @@ pub enum SyncMessage {
         /// Final authority result for the zero-support action.
         advice: PermissionAdvice,
     },
-    /// One bounded push-upload batch. Unlike chunk download traffic, uploads
-    /// enter Groove staging and therefore travel through semantic ingestion.
-    ChunkUploadBatch(ChunkUploadBatch),
-    /// Finish a push upload and create its persisted Groove staging receipt.
-    ChunkUploadFinish(ChunkUploadFinish),
+    /// Begin a root-first push upload with its complete immutable descriptor.
+    ChunkUploadStart(ChunkUploadStart),
+    /// Supply one bounded set of nodes requested by the receiver.
+    ChunkUploadNodes(ChunkUploadNodes),
     /// Receiver acknowledgement for a pushed upload.
     ChunkUploadResult(ChunkUploadResult),
 }
@@ -312,36 +311,29 @@ pub enum ChunkResponse {
     },
 }
 
-/// Sender-chosen identity for one hop-local push upload.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize,
-)]
-pub struct ChunkUploadId(pub [u8; 16]);
-
-/// A bounded collection of immutable Groove nodes pushed before its row.
+/// Root-first upload announcement. The descriptor, already carried by the
+/// later transaction, is the protocol identity.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct ChunkUploadBatch {
-    /// Sender-chosen hop-local upload identity.
-    pub upload_id: ChunkUploadId,
-    /// Immutable authenticated nodes in this bounded frame.
-    pub chunks: Vec<groove::large_values::StagedChunk>,
+pub struct ChunkUploadStart {
+    /// Exact immutable value whose root the receiver checks first.
+    pub value_ref: groove::large_values::LargeValueRef,
 }
 
-/// Complete one upload after all of its bounded batches were acknowledged.
+/// A bounded collection of receiver-requested immutable Groove nodes.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct ChunkUploadFinish {
-    /// Upload whose acknowledged batches are now complete.
-    pub upload_id: ChunkUploadId,
-    /// Descriptor the subsequent row version will contain.
+pub struct ChunkUploadNodes {
+    /// Descriptor whose current missing frontier requested these nodes.
     pub value_ref: groove::large_values::LargeValueRef,
+    /// Authenticated immutable nodes, bounded by the semantic frame limit.
+    pub chunks: Vec<groove::large_values::StagedChunk>,
 }
 
 /// Hop-local upload outcome. A rejected upload must be retried from its first
 /// batch; no referencing row may be sent before `Staged`.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ChunkUploadResult {
-    /// Upload being acknowledged.
-    pub upload_id: ChunkUploadId,
+    /// Descriptor whose derived receiver state changed.
+    pub value_ref: groove::large_values::LargeValueRef,
     /// Current receiver outcome.
     pub status: ChunkUploadStatus,
 }
@@ -349,13 +341,13 @@ pub struct ChunkUploadResult {
 /// Receiver outcome for one push-upload step.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum ChunkUploadStatus {
-    /// This bounded batch was durably installed.
-    BatchAccepted,
-    /// Finalization created the persisted staging receipt.
+    /// Authenticated nodes still absent from local Groove storage.
+    Need(Vec<groove::large_values::NodeRef>),
+    /// Groove derived graph closure and created a persisted retainer claim.
     Staged,
     /// Jazz rejected incoming bytes under its deployment policy.
     RateLimited,
-    /// Finalization did not name a live upload session.
+    /// The descriptor or a supplied node was invalid.
     Rejected,
 }
 
@@ -516,8 +508,8 @@ impl SyncMessage {
             }
             Self::ChunkRequestBatch(_)
             | Self::ChunkResponseBatch(_)
-            | Self::ChunkUploadBatch(_)
-            | Self::ChunkUploadFinish(_)
+            | Self::ChunkUploadStart(_)
+            | Self::ChunkUploadNodes(_)
             | Self::ChunkUploadResult(_) => crate::wire::FEATURE_AUXILIARY_CHUNKS,
             _ => crate::wire::FEATURE_NONE,
         }

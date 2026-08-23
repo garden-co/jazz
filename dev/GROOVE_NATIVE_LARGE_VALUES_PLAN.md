@@ -307,14 +307,17 @@ of scope.
 ### Jazz/Groove integration
 
 1. Route every complete-value and edit mutation through Groove preparation.
-2. Groove stages chunks before visible mutation and returns persisted accounting
-   receipts; Jazz applies product quotas and expiry policy to those receipts.
+2. Upload descriptor/root first. Groove authenticates nodes, derives a bounded
+   restartable missing frontier from persisted nodes, requests only absent descendants, and creates a timestamped
+   descriptor-keyed retainer claim when graph closure validates; Jazz applies
+   product quotas and expiry policy to the accounting receipts.
 3. Evaluate ordinary Jazz Insert/Update policy against the owning row mutation.
 4. Require the exact staged root to be complete and Groove-valid before row
    publication.
 5. Publish the descriptor as the ordinary atomic Jazz cell/version.
-6. Include Groove's opaque staged id in the authorized physical-record batch so
-   staging ownership becomes durable root ownership atomically with publication.
+6. Have the authorized physical-record batch consume any live retainer claim for
+   the exact descriptor so staging ownership becomes durable root ownership
+   atomically with publication. Upload-attempt ids never enter canonical state.
 7. Let Jazz enforce staging quotas/expiry by querying accounting receipts and
    invoking Groove's idempotent accept/evict APIs; Groove owns mechanics only.
    Expose the same policy setter and bounded maintenance operation through Rust

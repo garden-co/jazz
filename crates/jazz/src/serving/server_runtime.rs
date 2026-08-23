@@ -828,8 +828,8 @@ fn sync_message_name(message: &SyncMessage) -> &'static str {
     match message {
         SyncMessage::ChunkRequestBatch(_) => "ChunkRequestBatch",
         SyncMessage::ChunkResponseBatch(_) => "ChunkResponseBatch",
-        SyncMessage::ChunkUploadBatch(_) => "ChunkUploadBatch",
-        SyncMessage::ChunkUploadFinish(_) => "ChunkUploadFinish",
+        SyncMessage::ChunkUploadStart(_) => "ChunkUploadStart",
+        SyncMessage::ChunkUploadNodes(_) => "ChunkUploadNodes",
         SyncMessage::ChunkUploadResult(_) => "ChunkUploadResult",
         SyncMessage::SessionClaims { .. } => "SessionClaims",
         SyncMessage::CommitUnit { .. } => "CommitUnit",

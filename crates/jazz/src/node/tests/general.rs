@@ -185,45 +185,54 @@ fn pushed_chunks_must_be_staged_before_the_referencing_authority_commit() {
         Err(Error::LargeValueStageExpired)
     ));
 
-    let upload_id = crate::protocol::ChunkUploadId([0x7c; 16]);
-    let batch_result = receiver
+    let value_ref = prepared.value_ref.clone();
+    let mut upload_result = receiver
         .apply_sync_message_with_ingest_context(
-            SyncMessage::ChunkUploadBatch(crate::protocol::ChunkUploadBatch {
-                upload_id,
-                chunks: prepared.staged_chunks.clone(),
+            SyncMessage::ChunkUploadStart(crate::protocol::ChunkUploadStart {
+                value_ref: value_ref.clone(),
             }),
             context,
         )
         .resolve()
         .unwrap()
         .value;
-    assert_eq!(
-        batch_result,
-        vec![SyncMessage::ChunkUploadResult(
-            crate::protocol::ChunkUploadResult {
-                upload_id,
-                status: crate::protocol::ChunkUploadStatus::BatchAccepted,
+    loop {
+        let status = match upload_result.as_slice() {
+            [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                status,
+                ..
+            })] => status.clone(),
+            other => panic!("unexpected upload result: {other:?}"),
+        };
+        match status {
+            crate::protocol::ChunkUploadStatus::Need(nodes) => {
+                let chunks = nodes
+                    .into_iter()
+                    .map(|node_ref| {
+                        prepared
+                            .staged_chunks
+                            .iter()
+                            .find(|chunk| chunk.node_ref == node_ref)
+                            .expect("receiver requests a reachable prepared node")
+                            .clone()
+                    })
+                    .collect();
+                upload_result = receiver
+                    .apply_sync_message_with_ingest_context(
+                        SyncMessage::ChunkUploadNodes(crate::protocol::ChunkUploadNodes {
+                            value_ref: value_ref.clone(),
+                            chunks,
+                        }),
+                        context,
+                    )
+                    .resolve()
+                    .unwrap()
+                    .value;
             }
-        )]
-    );
-    let finish_result = receiver
-        .apply_sync_message_with_ingest_context(
-            SyncMessage::ChunkUploadFinish(crate::protocol::ChunkUploadFinish {
-                upload_id,
-                value_ref: prepared.value_ref,
-            }),
-            context,
-        )
-        .resolve()
-        .unwrap()
-        .value;
-    assert!(matches!(
-        finish_result.as_slice(),
-        [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
-            status: crate::protocol::ChunkUploadStatus::Staged,
-            ..
-        })]
-    ));
+            crate::protocol::ChunkUploadStatus::Staged => break,
+            other => panic!("upload failed: {other:?}"),
+        }
+    }
     let outcome = receiver
         .apply_sync_message_with_ingest_context(unit, context)
         .resolve()

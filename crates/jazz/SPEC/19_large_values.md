@@ -146,25 +146,31 @@ harmless and expire. The row MUST NOT publish unless its exact root is available
 and Groove can validate the bounded tree/descriptor. A failed/rejected mutation
 publishes neither the row version nor root reachability.
 
-Groove returns an opaque `StagedLargeValueId`, descriptor and accounting receipt.
-After ordinary Jazz write authorization, Jazz adds that id to the same Groove
-physical-record batch that inserts the owner version. Groove atomically verifies
-the descriptor match, consumes staging ownership and installs durable root
-references. Jazz rejection calls Groove's idempotent staging eviction API.
-Acceptance is never a separate transaction before or after row publication.
+Groove persists timestamped retainer claims keyed by the completed descriptor.
+After ordinary Jazz write authorization, the same Groove physical-record batch
+that inserts the owner version consumes any live matching claim and installs a
+durable root reference. Claims for the same immutable descriptor are fungible;
+upload-attempt identity is neither canonical row state nor publication authority.
+A rejected transaction consumes nothing, and its unclaimed retainer expires by
+ordinary TTL maintenance. Acceptance is never a separate transaction before or
+after row publication.
 
-Sync is intentionally asymmetric. Upload is push-before-row: the writer sends
-bounded `ChunkUploadBatch` messages, finalizes the upload into a persisted
-Groove staging receipt, waits for `Staged`, and only then sends the ordinary
-referencing `CommitUnit`. The receiving authority requires a live matching
-receipt and consumes it in the same Groove physical-record batch as the row.
+Sync is intentionally asymmetric. Upload is root-first push-before-row: the
+writer starts with the complete large-value descriptor, then sends only the
+bounded node batches the receiver reports missing. Groove authenticates the
+root and discovers branch children from authenticated nodes. Its bounded
+missing frontier is re-derived from persisted authenticated nodes after a
+restart. The upload becomes `Staged` only when every
+reachable node is locally present and the descriptor's kind, metrics, logical
+hash, depth and fan-out validate. Only then does the writer send the ordinary
+referencing `CommitUnit`. No sender `finish` assertion is trusted.
 Download remains locator-driven pull with `ChunkRequestBatch` and
 `ChunkResponseBatch`; download bytes are not upload ingress and do not consume
 the upload rate limit. Edges terminate or forward push uploads before forwarding
 the referencing row, just as missing pull requests may be relayed independently.
 
-Groove persists each opaque staging receipt's creation time and incoming
-byte/node accounting. Jazz charges every upload against a simple incoming-byte
+Groove persists each retainer claim's creation time and incoming byte/node
+accounting. Jazz charges every upload against a simple incoming-byte
 rate limit, including an idempotent upload whose immutable mappings already
 exist. This bounds ingress work rather than retained physical storage. Jazz
 queries opaque receipts to evict expired roots and never enumerates locators or

@@ -799,13 +799,6 @@ database.finish_persistence(persisted)?;
         self.local_chunk_reader.clone()
     }
 
-    pub(crate) fn large_value_upload_cursor(
-        &self,
-        value: &groove::large_values::LargeValueRef,
-    ) -> Result<groove::large_values::LargeValueUploadCursor, Error> {
-        Ok(self.database.large_value_upload_cursor(value)?)
-    }
-
     /// Stage the immutable chunks from a Groove preparation. This does not
     /// publish an owning Jazz row; normal commit authorization and publication
     /// remain a separate boundary.

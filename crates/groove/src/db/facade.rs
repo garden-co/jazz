@@ -350,6 +350,89 @@ impl Database {
         Ok(())
     }
 
+    fn descriptor_upload_id(
+        value_ref: &crate::large_values::LargeValueRef,
+    ) -> Result<crate::large_values::StagedLargeValueId, Error> {
+        let encoded = postcard::to_allocvec(value_ref).map_err(|error| {
+            Error::InvalidLargeValueMetadata(format!("cannot encode upload descriptor: {error}"))
+        })?;
+        let digest = blake3::derive_key("groove pending descriptor upload v1", &encoded);
+        let mut id = [0_u8; 16];
+        id.copy_from_slice(&digest[..16]);
+        Ok(crate::large_values::StagedLargeValueId(id))
+    }
+
+    /// Start or resume a descriptor-keyed root-first upload.
+    pub async fn begin_large_value_upload(
+        &self,
+        value_ref: crate::large_values::LargeValueRef,
+    ) -> Result<crate::large_values::LargeValueUploadProgress, Error> {
+        let upload_id = Self::descriptor_upload_id(&value_ref)?;
+        self.stage_large_value_chunk_batch(upload_id, Vec::new())
+            .await?;
+        self.large_value_upload_progress(upload_id, value_ref).await
+    }
+
+    /// Install receiver-requested nodes and derive the next missing frontier.
+    pub async fn continue_large_value_upload(
+        &self,
+        value_ref: crate::large_values::LargeValueRef,
+        chunks: Vec<crate::large_values::StagedChunk>,
+    ) -> Result<crate::large_values::LargeValueUploadProgress, Error> {
+        let upload_id = Self::descriptor_upload_id(&value_ref)?;
+        let requested =
+            crate::large_values::missing_upload_frontier(&value_ref, self.local_chunk_reader())
+                .await
+                .map_err(|error| match error {
+                    crate::large_values::ReachabilityError::LargeValue(error) => {
+                        crate::ivm::runtime::IvmRuntimeError::from(error)
+                    }
+                    crate::large_values::ReachabilityError::Chunk(error) => {
+                        crate::ivm::runtime::IvmRuntimeError::from(error)
+                    }
+                })?;
+        if chunks
+            .iter()
+            .any(|chunk| !requested.contains(&chunk.node_ref))
+        {
+            return Err(Error::InvalidLargeValueMetadata(
+                "upload supplied a node outside the authenticated missing frontier".to_owned(),
+            ));
+        }
+        self.stage_large_value_chunk_batch(upload_id, chunks)
+            .await?;
+        self.large_value_upload_progress(upload_id, value_ref).await
+    }
+
+    async fn large_value_upload_progress(
+        &self,
+        upload_id: crate::large_values::StagedLargeValueId,
+        value_ref: crate::large_values::LargeValueRef,
+    ) -> Result<crate::large_values::LargeValueUploadProgress, Error> {
+        let missing =
+            crate::large_values::missing_upload_frontier(&value_ref, self.local_chunk_reader())
+                .await
+                .map_err(|error| match error {
+                    crate::large_values::ReachabilityError::LargeValue(error) => {
+                        crate::ivm::runtime::IvmRuntimeError::from(error)
+                    }
+                    crate::large_values::ReachabilityError::Chunk(error) => {
+                        crate::ivm::runtime::IvmRuntimeError::from(error)
+                    }
+                })?;
+        if !missing.is_empty() {
+            return Ok(crate::large_values::LargeValueUploadProgress::Missing(
+                missing,
+            ));
+        }
+        let staged = self
+            .finalize_large_value_upload(upload_id, value_ref)
+            .await?;
+        Ok(crate::large_values::LargeValueUploadProgress::Staged(
+            staged,
+        ))
+    }
+
     /// Finalize a streamed push upload into an opaque persisted staging
     /// receipt. The later physical-record batch still validates reachability
     /// and consumes this receipt atomically.
@@ -359,33 +442,6 @@ impl Database {
         value_ref: crate::large_values::LargeValueRef,
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
         let key = pending_large_value_upload_key(upload_id);
-        if let Some(encoded) = self
-            .storage
-            .get(
-                LARGE_VALUE_METADATA_CF.to_owned(),
-                staged_large_value_key(upload_id),
-            )
-            .await?
-        {
-            let staged = postcard::from_bytes(&encoded).map_err(|error| {
-                Error::InvalidLargeValueMetadata(format!(
-                    "cannot decode finalized large-value upload: {error}"
-                ))
-            })?;
-            if let Some(pending) = self
-                .storage
-                .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
-                .await?
-            {
-                let upload = postcard::from_bytes(&pending).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot decode pending large-value upload: {error}"
-                    ))
-                })?;
-                self.release_pending_large_value_upload(key, upload).await?;
-            }
-            return Ok(staged);
-        }
         let encoded = self
             .storage
             .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
@@ -399,32 +455,8 @@ impl Database {
                 "cannot decode pending large-value upload: {error}"
             ))
         })?;
-        let mut cursor = self
-            .large_value_upload_cursor(&value_ref)
-            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
-        loop {
-            let reachable = cursor.next_batch(64).await.map_err(|error| match error {
-                crate::large_values::ReachabilityError::LargeValue(error) => {
-                    crate::ivm::runtime::IvmRuntimeError::from(error)
-                }
-                crate::large_values::ReachabilityError::Chunk(error) => {
-                    crate::ivm::runtime::IvmRuntimeError::from(error)
-                }
-            })?;
-            if reachable.is_empty() {
-                break;
-            }
-            if reachable
-                .iter()
-                .any(|chunk| !upload.chunks.contains(&chunk.node_ref))
-            {
-                return Err(Error::InvalidLargeValueMetadata(
-                    "finalized upload omitted a reachable chunk".to_owned(),
-                ));
-            }
-        }
         let staged = self
-            .register_staged_large_value_with_id(upload_id, value_ref, upload.accounting)
+            .register_staged_large_value(value_ref, upload.accounting)
             .await?;
         self.release_pending_large_value_upload(key, upload).await?;
         Ok(staged)

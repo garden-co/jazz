@@ -101,17 +101,17 @@ fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_evictio
         ("writer-to-upload-edge", writer_messages),
         ("upload-edge-to-core", upload_edge_messages),
     ] {
-        let finish = messages
+        let staged = messages
             .iter()
-            .position(|message| matches!(message, SyncMessage::ChunkUploadFinish(_)))
-            .unwrap_or_else(|| panic!("{leg} sends a chunk upload finish"));
+            .rposition(|message| matches!(message, SyncMessage::ChunkUploadNodes(_)))
+            .unwrap_or_else(|| panic!("{leg} sends receiver-requested chunk nodes"));
         let row = messages
             .iter()
             .position(|message| {
                 matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == write.tx_id)
             })
             .unwrap_or_else(|| panic!("{leg} sends the referencing row"));
-        assert!(finish < row, "{leg} stages the chunks before the row");
+        assert!(staged < row, "{leg} stages the chunks before the row");
     }
     assert_eq!(
         prepared_read(&upload_edge, &upload_edge.table("todos")).len(),

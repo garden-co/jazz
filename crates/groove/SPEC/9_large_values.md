@@ -374,18 +374,19 @@ Prepared chunks not yet present in a physical record use a separate persisted,
 expiring staging generation. Active reads use temporary leases. Neither is a
 durable record reference.
 
-Remote uploads append bounded node batches directly to that staging generation;
-Jazz does not buffer a whole tree. Finalization attaches the descriptor and
-produces the opaque receipt consumed by the later row batch. Partial and
-finalized upload generations carry persisted creation/accounting metadata so a
-restartable expiry worker can reclaim abandoned uploads without consulting Jazz
-row history.
+Remote uploads begin with the descriptor and traverse root-first. Groove
+authenticates each received node before using its child edges, derives the
+missing frontier from persisted nodes, and asks for only absent nodes; Jazz never buffers a whole
+tree. Completion is derived from an empty validated frontier rather than a
+sender finalization assertion. Partial uploads and completed timestamped
+retainer claims carry persisted creation/accounting metadata so host-driven
+expiry can reclaim abandoned uploads without consulting Jazz row history.
 
 The initial metadata layout reserves Groove's `__groove_large_values` logical
-storage family. Staging returns an opaque persisted `StagedLargeValueId` plus an
-accounting receipt. A `DatabaseBatch` consumes that id only when the same batch
-contains its descriptor; the row delta adds durable ownership while consuming
-the staging generation removes staging ownership. Root zero-crossings update
+storage family. Completed staging persists descriptor-keyed retainer claims plus
+accounting receipts. A `DatabaseBatch` consumes any live claim only when the
+same batch contains its exact descriptor; the row delta adds durable ownership
+while consuming the claim removes staging ownership. Root zero-crossings update
 recursive node counts and append exact `(locator, hash)` work to a persisted
 reclamation queue. The reclaimer removes metadata only after hash-guarded byte
 deletion succeeds, so crashes retry without walking row history.

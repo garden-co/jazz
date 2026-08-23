@@ -66,7 +66,28 @@ where
             .expand_version_carriers_for_receive()
             .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
         match message {
-            SyncMessage::ChunkUploadBatch(batch) => {
+            SyncMessage::ChunkUploadStart(start) => {
+                let progress = self
+                    .database
+                    .begin_large_value_upload(start.value_ref.clone())
+                    .await?;
+                let status = match progress {
+                    groove::large_values::LargeValueUploadProgress::Missing(mut nodes) => {
+                        nodes.truncate(64);
+                        crate::protocol::ChunkUploadStatus::Need(nodes)
+                    }
+                    groove::large_values::LargeValueUploadProgress::Staged(_) => {
+                        crate::protocol::ChunkUploadStatus::Staged
+                    }
+                };
+                Ok(PublicationOutcome::settled(vec![
+                    SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                        value_ref: start.value_ref,
+                        status,
+                    }),
+                ]))
+            }
+            SyncMessage::ChunkUploadNodes(batch) => {
                 let accounting = batch.chunks.iter().try_fold(
                     groove::large_values::StagedLargeValueAccounting::default(),
                     |mut total, chunk| {
@@ -87,50 +108,28 @@ where
                 if !self.admit_large_value_ingress(accounting.encoded_bytes) {
                     return Ok(PublicationOutcome::settled(vec![
                         SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
-                            upload_id: batch.upload_id,
+                            value_ref: batch.value_ref,
                             status: crate::protocol::ChunkUploadStatus::RateLimited,
                         }),
                     ]));
                 }
-                self.database
-                    .stage_large_value_chunk_batch(
-                        groove::large_values::StagedLargeValueId(batch.upload_id.0),
-                        batch.chunks,
-                    )
-                    .await?;
-                Ok(PublicationOutcome::settled(vec![
-                    SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
-                        upload_id: batch.upload_id,
-                        status: crate::protocol::ChunkUploadStatus::BatchAccepted,
-                    }),
-                ]))
-            }
-            SyncMessage::ChunkUploadFinish(finish) => {
-                let finalized = self
+                let progress = self
                     .database
-                    .finalize_large_value_upload(
-                        groove::large_values::StagedLargeValueId(finish.upload_id.0),
-                        finish.value_ref,
-                    )
-                    .await;
-                match finalized {
-                    Ok(_) => {}
-                    Err(GrooveDbError::InvalidLargeValueMetadata(message))
-                        if message == "pending upload is missing" =>
-                    {
-                        return Ok(PublicationOutcome::settled(vec![
-                            SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
-                                upload_id: finish.upload_id,
-                                status: crate::protocol::ChunkUploadStatus::Rejected,
-                            }),
-                        ]));
+                    .continue_large_value_upload(batch.value_ref.clone(), batch.chunks)
+                    .await?;
+                let status = match progress {
+                    groove::large_values::LargeValueUploadProgress::Missing(mut nodes) => {
+                        nodes.truncate(64);
+                        crate::protocol::ChunkUploadStatus::Need(nodes)
                     }
-                    Err(error) => return Err(error.into()),
-                }
+                    groove::large_values::LargeValueUploadProgress::Staged(_) => {
+                        crate::protocol::ChunkUploadStatus::Staged
+                    }
+                };
                 Ok(PublicationOutcome::settled(vec![
                     SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
-                        upload_id: finish.upload_id,
-                        status: crate::protocol::ChunkUploadStatus::Staged,
+                        value_ref: batch.value_ref,
+                        status,
                     }),
                 ]))
             }

@@ -162,6 +162,86 @@ async fn incomplete_push_upload_is_restart_persistent_and_reclaimable() {
 }
 
 #[futures_test::test]
+async fn root_first_upload_requests_only_authenticated_missing_frontier() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(Rc::new(crate::chunks::MemoryChunkStorage::new()));
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![5; crate::large_values::INLINE_VALUE_MAX_BYTES * 8],
+        |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
+    )
+    .unwrap();
+
+    let mut progress = database
+        .begin_large_value_upload(prepared.value_ref.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        progress,
+        crate::large_values::LargeValueUploadProgress::Missing(vec![
+            prepared.value_ref.root.clone()
+        ]),
+        "the receiver cannot discover children before authenticating the root"
+    );
+    let unsolicited = prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref != prepared.value_ref.root)
+        .expect("fixture contains a descendant")
+        .clone();
+    assert!(matches!(
+        database
+            .continue_large_value_upload(prepared.value_ref.clone(), vec![unsolicited])
+            .await,
+        Err(Error::InvalidLargeValueMetadata(message))
+            if message.contains("outside the authenticated missing frontier")
+    ));
+    while let crate::large_values::LargeValueUploadProgress::Missing(missing) = &progress {
+        let missing = missing.clone();
+        let chunks = missing
+            .into_iter()
+            .map(|node_ref| {
+                prepared
+                    .staged_chunks
+                    .iter()
+                    .find(|chunk| chunk.node_ref == node_ref)
+                    .expect("frontier contains a reachable prepared node")
+                    .clone()
+            })
+            .collect();
+        progress = database
+            .continue_large_value_upload(prepared.value_ref.clone(), chunks)
+            .await
+            .unwrap();
+    }
+
+    let first_claim = match progress {
+        crate::large_values::LargeValueUploadProgress::Staged(staged) => staged,
+        crate::large_values::LargeValueUploadProgress::Missing(_) => unreachable!(),
+    };
+    let second_claim = match database
+        .begin_large_value_upload(prepared.value_ref)
+        .await
+        .unwrap()
+    {
+        crate::large_values::LargeValueUploadProgress::Staged(staged) => staged,
+        crate::large_values::LargeValueUploadProgress::Missing(_) => {
+            panic!("the complete deduplicated tree needs no retransmission")
+        }
+    };
+    assert_ne!(first_claim.id, second_claim.id);
+}
+
+#[futures_test::test]
 async fn failed_persistence_does_not_retract_an_applied_subscription_delta() {
     let (storage, control) = TestStorage::controlled(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).await.unwrap();

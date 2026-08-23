@@ -1,5 +1,7 @@
 //! Canonical indirect representation for large logical scalar values.
 
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -134,6 +136,12 @@ pub struct PendingLargeValueUpload {
     pub accounting: StagedLargeValueAccounting,
     pub created_at_ms: u64,
     pub chunks: Vec<NodeRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LargeValueUploadProgress {
+    Missing(Vec<NodeRef>),
+    Staged(StagedLargeValue),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1385,6 +1393,82 @@ impl LargeValueUploadCursor {
         }
         Ok(batch)
     }
+}
+
+/// Authenticate the locally present prefix of a descriptor's tree and return
+/// its current missing frontier. Children are discovered only from verified
+/// branch nodes, so an empty result is a proof of graph closure.
+pub(crate) async fn missing_upload_frontier(
+    value: &LargeValueRef,
+    reader: crate::chunks::LocalChunkReader,
+) -> Result<Vec<NodeRef>, ReachabilityError> {
+    check_format(value.format_version)?;
+    let root_metrics = value.edit_tail.is_empty().then_some(NodeMetrics {
+        byte_length: value.byte_length,
+        utf16_length: value.utf16_length,
+    });
+    let mut pending = vec![(
+        value.root.clone(),
+        0_usize,
+        root_metrics,
+        value.logical_hash,
+    )];
+    let mut visited = BTreeSet::new();
+    let mut missing = Vec::new();
+    while let Some((node_ref, depth, expected_metrics, expected_logical_hash)) = pending.pop() {
+        if !visited.insert(node_ref.clone()) {
+            continue;
+        }
+        if depth > MAX_TREE_DEPTH {
+            return Err(Error::InvalidTree.into());
+        }
+        let encoded = match reader
+            .get(node_ref.locator.0.clone(), node_ref.object_hash)
+            .await
+        {
+            Ok(encoded) => encoded,
+            Err(crate::chunks::ChunkStorageError::Unavailable) => {
+                missing.push(node_ref);
+                continue;
+            }
+            Err(error) => return Err(crate::chunks::ChunkError::from(error).into()),
+        };
+        let node = decode_node(value.kind, node_ref.object_hash, &encoded)?;
+        if node_logical_hash(&node) != expected_logical_hash {
+            return Err(Error::DescriptorMismatch.into());
+        }
+        match &node {
+            ChunkNode::Leaf { bytes, .. } => {
+                if expected_metrics
+                    .is_some_and(|expected| metrics(value.kind, bytes).ok() != Some(expected))
+                {
+                    return Err(Error::DescriptorMismatch.into());
+                }
+            }
+            ChunkNode::Branch { children, .. } => {
+                if let Some(expected) = expected_metrics {
+                    let mut child_metrics = children.iter().map(|child| child.metrics);
+                    let Some(first) = child_metrics.next() else {
+                        return Err(Error::MalformedNode.into());
+                    };
+                    if child_metrics.try_fold(first, add_metrics)? != expected {
+                        return Err(Error::DescriptorMismatch.into());
+                    }
+                }
+            }
+        }
+        if let ChunkNode::Branch { children, .. } = node {
+            for child in children.into_iter().rev() {
+                pending.push((
+                    child.node_ref,
+                    depth + 1,
+                    Some(child.metrics),
+                    child.logical_hash,
+                ));
+            }
+        }
+    }
+    Ok(missing)
 }
 
 #[derive(Clone)]
