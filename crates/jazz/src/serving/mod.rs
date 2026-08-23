@@ -19,7 +19,8 @@ use std::time::SystemTime;
 
 use crate::db::{
     CommitUnitTrust, ConnectionSessionContext, Db, DbConfig, DbIdentity, Error as DbError,
-    PeerConnection, ResumeCursor, RowCells, SeededRowIdSource, Transport, WireTransportAdapter,
+    PeerConnection, ResumeCursor, RowCells, SeededRowIdSource, TickScheduler, Transport,
+    WireTransportAdapter,
 };
 use crate::groove::records::Value;
 use crate::groove::storage::{BoxedStorage, MemoryStorage, StorageFactory};
@@ -325,6 +326,13 @@ impl fmt::Debug for ServerSessionState {
 }
 
 impl ShellDb {
+    fn set_tick_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
+        match self {
+            Self::Memory(db) => db.set_tick_scheduler(scheduler),
+            Self::Durable(db) => db.set_tick_scheduler(scheduler),
+        }
+    }
+
     fn open_catalogue_uninitialized_edge(
         identity: DbIdentity,
         storage_config: StorageConfig,
@@ -1386,6 +1394,10 @@ impl InMemoryServerShell {
     /// Service the shell database's accepted subscriber connections once.
     pub fn tick(&mut self) -> ShellResult<()> {
         crate::db::block_on(self.tick_async())
+    }
+
+    pub(super) fn set_tick_scheduler(&self, scheduler: Option<Rc<dyn TickScheduler>>) {
+        self.db.set_tick_scheduler(scheduler);
     }
 
     /// Poll database evaluation without blocking the owner thread's local

@@ -1,10 +1,14 @@
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use crate::db::{CommitUnitTrust, ConnectionSessionContext, DbIdentity, Transport};
+use crate::db::{
+    CommitUnitTrust, ConnectionSessionContext, DbIdentity, TickScheduler, TickUrgency, Transport,
+};
 use crate::groove::records::Value;
 use crate::groove::storage::StorageFactory;
 use crate::ids::{AuthorId, NodeUuid, SchemaVersionId};
@@ -99,11 +103,69 @@ enum ServerShellCommand {
     Shutdown(std_mpsc::Sender<()>),
 }
 
+/// Bridges database-local progress requests back into the shell owner queue.
+///
+/// The database is intentionally thread-affine, so this scheduler is only
+/// installed and invoked on the owner thread. The command queue preserves that
+/// affinity while ensuring an Immediate request becomes a following shell turn
+/// instead of waiting for unrelated socket activity.
+struct ServerShellTickScheduler {
+    jobs: mpsc::UnboundedSender<ServerShellCommand>,
+    activity_tx: watch::Sender<u64>,
+    io_wakers: Arc<Mutex<Vec<mpsc::UnboundedSender<()>>>>,
+    state: Arc<ServerShellTickState>,
+}
+
+#[derive(Default)]
+struct ServerShellTickState {
+    queued: AtomicBool,
+}
+
+impl TickScheduler for ServerShellTickScheduler {
+    fn schedule_tick(&self, _urgency: TickUrgency) {
+        if self.state.queued.swap(true, Ordering::AcqRel) {
+            return;
+        }
+
+        let activity_tx = self.activity_tx.clone();
+        let io_wakers = Arc::clone(&self.io_wakers);
+        let state = Arc::clone(&self.state);
+        if self
+            .jobs
+            .unbounded_send(ServerShellCommand::RunAsync(Box::new(move |shell| {
+                Box::pin(async move {
+                    // Mark this turn consumed before ticking. Work discovered by
+                    // the tick itself queues one follow-up turn instead of being
+                    // lost behind the currently running command.
+                    state.queued.store(false, Ordering::Release);
+                    if shell.tick_async().await.is_ok() {
+                        notify_shell_activity(&activity_tx);
+                        if let Ok(mut wakers) = io_wakers.lock() {
+                            wakers.retain(|wake| wake.unbounded_send(()).is_ok());
+                        }
+                    }
+                })
+            })))
+            .is_err()
+        {
+            self.state.queued.store(false, Ordering::Release);
+        }
+    }
+}
+
 fn run_server_shell_owner(
     mut shell: InMemoryServerShell,
     mut receiver: mpsc::UnboundedReceiver<ServerShellCommand>,
+    jobs: mpsc::UnboundedSender<ServerShellCommand>,
+    activity_tx: watch::Sender<u64>,
     io_wakers: Arc<Mutex<Vec<mpsc::UnboundedSender<()>>>>,
 ) {
+    shell.set_tick_scheduler(Some(Rc::new(ServerShellTickScheduler {
+        jobs,
+        activity_tx,
+        io_wakers: Arc::clone(&io_wakers),
+        state: Arc::new(ServerShellTickState::default()),
+    })));
     let mut executor = futures::executor::LocalPool::new();
     let spawner = executor.spawner();
     executor.run_until(async move {
@@ -247,6 +309,8 @@ impl ServerRuntimeHandle {
         let (activity_tx, _) = watch::channel(0_u64);
         let io_wakers = Arc::new(Mutex::new(Vec::new()));
         let owner_io_wakers = Arc::clone(&io_wakers);
+        let owner_jobs = jobs.clone();
+        let owner_activity_tx = activity_tx.clone();
         let join = thread::Builder::new()
             .name("jazz-server-shell".to_owned())
             .spawn(move || {
@@ -272,7 +336,13 @@ impl ServerRuntimeHandle {
                         return;
                     }
                 };
-                run_server_shell_owner(shell, receiver, owner_io_wakers);
+                run_server_shell_owner(
+                    shell,
+                    receiver,
+                    owner_jobs,
+                    owner_activity_tx,
+                    owner_io_wakers,
+                );
             })
             .map_err(|error| format!("failed to spawn server shell thread: {error}"))?;
         let started = started_rx
@@ -302,6 +372,8 @@ impl ServerRuntimeHandle {
         let (activity_tx, _) = watch::channel(0_u64);
         let io_wakers = Arc::new(Mutex::new(Vec::new()));
         let owner_io_wakers = Arc::clone(&io_wakers);
+        let owner_jobs = jobs.clone();
+        let owner_activity_tx = activity_tx.clone();
 
         let join = thread::Builder::new()
             .name("jazz-server-shell".to_owned())
@@ -325,7 +397,13 @@ impl ServerRuntimeHandle {
                         return;
                     }
                 };
-                run_server_shell_owner(shell, receiver, owner_io_wakers);
+                run_server_shell_owner(
+                    shell,
+                    receiver,
+                    owner_jobs,
+                    owner_activity_tx,
+                    owner_io_wakers,
+                );
             })
             .map_err(|error| format!("failed to spawn server shell thread: {error}"))?;
 
@@ -454,6 +532,8 @@ impl ServerRuntimeHandle {
         let (activity_tx, _) = watch::channel(0_u64);
         let io_wakers = Arc::new(Mutex::new(Vec::new()));
         let owner_io_wakers = Arc::clone(&io_wakers);
+        let owner_jobs = jobs.clone();
+        let owner_activity_tx = activity_tx.clone();
 
         let join = thread::Builder::new()
             .name("jazz-server-shell".to_owned())
@@ -492,7 +572,13 @@ impl ServerRuntimeHandle {
                     }
                 };
 
-                run_server_shell_owner(shell, receiver, owner_io_wakers);
+                run_server_shell_owner(
+                    shell,
+                    receiver,
+                    owner_jobs,
+                    owner_activity_tx,
+                    owner_io_wakers,
+                );
             })
             .map_err(|error| format!("failed to spawn server shell thread: {error}"))?;
 
