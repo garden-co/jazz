@@ -2985,7 +2985,7 @@ mod tests {
     // Internal receipt: the regression is work performed inside the storage overlay and is not
     // observable through a higher-level public API except as elapsed time.
     #[futures_test::test]
-    #[ignore = "manual scaling receipt for narrow reads over a large staged transaction"]
+    #[ignore = "#1787: manual scaling receipt for narrow reads over a large staged transaction"]
     async fn staged_overlay_narrow_scan_scaling_receipt() {
         const UNRELATED_ROWS: usize = 20_000;
         const REPETITIONS: usize = 20;

@@ -556,7 +556,7 @@ async fn exists_outer_row_refs_grant_deny_and_track_related_row_mutations_inner(
 /// dave ──membership sales─────► query sees nothing
 /// ```
 #[tokio::test]
-#[ignore = "read-side ExistsRel join grants never become visible in integration"]
+#[ignore = "#1761: read-side ExistsRel join grants never become visible in integration"]
 async fn exists_rel_join_grants_and_denies_correctly() {
     tokio::task::LocalSet::new()
         .run_until(exists_rel_join_grants_and_denies_correctly_inner())
@@ -609,7 +609,7 @@ async fn exists_rel_join_grants_and_denies_correctly_inner() {
 /// Verifies that join queries apply `SELECT` policies to rows from joined
 /// tables, not only to the base table.
 #[tokio::test]
-#[ignore = "flat-join policy filtering hangs for more than 45 seconds without returning results"]
+#[ignore = "#1761: flat-join policy filtering hangs for more than 45 seconds without returning results"]
 async fn join_query_applies_policy_filter_on_joined_table() {
     tokio::task::LocalSet::new()
         .run_until(join_query_applies_policy_filter_on_joined_table_inner())
@@ -695,7 +695,7 @@ async fn join_query_applies_policy_filter_on_joined_table_inner() {
 /// dave ──hop via sales─────────► query sees nothing
 /// ```
 #[tokio::test]
-#[ignore = "read-side ExistsRel hop grants never become visible in integration"]
+#[ignore = "#1761: read-side ExistsRel hop grants never become visible in integration"]
 async fn exists_rel_hop_grants_and_denies_correctly() {
     tokio::task::LocalSet::new()
         .run_until(exists_rel_hop_grants_and_denies_correctly_inner())
@@ -757,7 +757,7 @@ async fn exists_rel_hop_grants_and_denies_correctly_inner() {
 /// alice(claims=sales) ───────────────────────────────► sees only sales-matching row
 /// ```
 #[tokio::test]
-#[ignore = "mixed SELECT policy stays closed once EXISTS / INHERITS composition is involved"]
+#[ignore = "#1761: mixed SELECT policy stays closed once EXISTS / INHERITS composition is involved"]
 async fn mixed_predicates_claims_exists_and_inherits_fail_closed() {
     tokio::task::LocalSet::new()
         .run_until(mixed_predicates_claims_exists_and_inherits_fail_closed_inner())
@@ -914,7 +914,7 @@ async fn mixed_predicates_claims_exists_and_inherits_fail_closed_inner() {
 /// observer ──EdgeServer query────────────────────────────► sees renamed chat, protected fields unchanged
 /// ```
 #[tokio::test]
-#[ignore = "same-table EXISTS WITH CHECK incorrectly accepts a protected is_public field change"]
+#[ignore = "#1759: same-table EXISTS WITH CHECK incorrectly accepts a protected is_public field change"]
 async fn update_with_check_exists_allows_chat_name_updates_and_rejects_protected_field_changes() {
     tokio::task::LocalSet::new().run_until(update_with_check_exists_allows_chat_name_updates_and_rejects_protected_field_changes_inner()).await;
 }

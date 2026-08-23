@@ -65,6 +65,10 @@ For ordinary Rust/core work, the full gate set is:
   unescaped pipe silently shreds a row.
 - `node dev/gates/spec-open-questions.mjs` keeps every unresolved SPEC open
   question linked to a GitHub Issue while remaining fully offline.
+- `node dev/gates/ignored-tests.mjs` validates the exact compiled Rust ignored
+  inventory and all TypeScript quarantine markers directly from source. Every
+  ignore annotation must state `#NNNN: reason`; there is no separate burndown
+  manifest.
 - `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
   for maintained-vs-one-shot equivalence coverage (Anselm-approved 2026-07-08)
 - `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact`

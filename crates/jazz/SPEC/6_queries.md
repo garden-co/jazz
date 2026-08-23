@@ -875,5 +875,6 @@ parallel query identities.
 
 - 🔶 [#1783](https://github.com/garden-co/jazz/issues/1783) — Read settling, cancellation, offline authority-tier behavior, and relay coverage.
 - 🔶 [#1776](https://github.com/garden-co/jazz/issues/1776) — Query IDs, aggregates, SQL boundary, and ordered windows.
+- 🔶 [#1810](https://github.com/garden-co/jazz/issues/1810) — Typed membership filters and literal coercion boundaries.
 - 🔶 [#1765](https://github.com/garden-co/jazz/issues/1765) — Array subquery maintenance and sharing.
 - 🔶 [#1776](https://github.com/garden-co/jazz/issues/1776) — Public physical-row-id query spelling and array subset/superset predicates.

@@ -124,7 +124,7 @@ async fn offline_durable_write_keeps_global_target_and_replays_on_reconnect() {
 ///   └── wait(Global) resolves (no upstream will ever confirm)
 /// ```
 #[test]
-#[ignore = "detaching the upstream leaves a global-tier durability wait pending forever; the write's settlement expectation never collapses to the local tier"]
+#[ignore = "#1766: detaching the upstream leaves a global-tier durability wait pending forever; the write's settlement expectation never collapses to the local tier"]
 fn detaching_the_upstream_resolves_pending_global_wait() {
     use std::cell::Cell;
     use std::rc::Rc;

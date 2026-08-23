@@ -347,7 +347,7 @@ async fn owner_policy_still_denies_v1_documents_to_other_sessions_after_migratio
 /// fresh alice (v2) ──query──► owner + folder columns intact
 /// ```
 #[tokio::test]
-#[ignore = "alice's v2 update of her v1-authored row never settles at the edge (neither accepted nor rejected) when the published read policy is session-scoped; the same update settles under an allow-all head and a v2-authored row updates fine"]
+#[ignore = "#1779: alice's v2 update of her v1-authored row never settles at the edge (neither accepted nor rejected) when the published read policy is session-scoped; the same update settles under an allow-all head and a v2-authored row updates fine"]
 async fn v2_update_of_v1_document_preserves_untouched_columns() {
     tokio::task::LocalSet::new()
         .run_until(v2_update_of_v1_document_preserves_untouched_columns_impl())

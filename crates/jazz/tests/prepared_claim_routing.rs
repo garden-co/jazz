@@ -1444,7 +1444,7 @@ fn prepared_join_handle_recompiles_after_catalogue_runtime_rebuild() {
 }
 
 #[test]
-#[ignore = "future shared-prepared-descriptor claim-name/type collision guard; INV-RLS-21 keeps dependency-policy descriptors separate today"]
+#[ignore = "#1760: future shared-prepared-descriptor claim-name/type collision guard; INV-RLS-21 keeps dependency-policy descriptors separate today"]
 fn prepared_binding_rejects_conflicting_claim_types_across_policies() {
     let root_policy = PublicPolicyExpr::And(vec![
         session_eq("team", &["claims", "shared_scope"]),

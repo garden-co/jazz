@@ -827,7 +827,7 @@ test("CI runs the workflow contract test through its package script", () => {
   const lint = job("lint");
   assert.equal(
     packageJson.scripts["test:ci-workflow"],
-    "node --test dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/ci-tool-bundle.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs && node dev/gates/test-burndown-ts.mjs",
+    "node --test dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/ci-tool-bundle.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs && node dev/gates/ignored-tests.mjs --self-test",
   );
   assert.match(lint, /run: pnpm test:ci-workflow/);
 });

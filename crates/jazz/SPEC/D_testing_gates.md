@@ -65,7 +65,7 @@ replacing the former fixed `-j 2` guidance.
   is the canonical randomized equivalence gate; `JAZZ_SEED_COUNT=2000` is the
   wide soak form. The test is currently Rust-ignored because canonical seed 47
   fails at fuzz-step-1 and seed 4,372,288 at fuzz-step-2; both are tracked in
-  `TEST_BURNDOWN.md`. Replay either bounded failure with `JAZZ_SEED=<seed>
+  source ignore annotation. Replay either bounded failure with `JAZZ_SEED=<seed>
   JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000 JAZZ_DIFFERENTIAL_STEP_COUNT=3` and
   the fully qualified command below with `--exact --ignored`. CI compiles only
   the `--lib` test binary before separately bounding its semantic execution,
@@ -172,7 +172,7 @@ was handed the expected projected row is not evidence for this design.
 | 8. Aggregate boundary                        | Count/sum/min/max and ordered/windowed aggregates converge only from their complete admitted input multiset and deterministic witnesses; removing any input proves the terminal was locally recomputed. A privacy-preserving or otherwise non-reconstructible aggregate is rejected rather than carried as an authority summary.                                                                                                                                                                                                                                                                     | New focused maintained-subscription tests; existing aggregate terminal coverage is not reconstruction coverage.                                                                                                           |
 | 9. Differential and fault injection          | Seeded multi-node runs vary manifest/epoch changes, lens arrival, duplicate/reordered closure facts, reconnect, policy changes, branch views, joins, arrays, and aggregate inputs; receiver `ResultTree` equals authority one-shot at each settled frontier.                                                                                                                                                                                                                                                                                                                                         | Extends `m3_maintained_one_shot_differential_oracle`; its present shared-source-only comparison is insufficient under §D.4.1.                                                                                             |
 
-The named `TEST_BURNDOWN.md` rows above remain failures to be burned down, not
+The named source ignore annotations above remain failures to be burned down, not
 coverage claims. Rungs 1–8 should become focused deterministic tests first;
 rung 9 becomes the property/oracle gate only after their failure diagnostics can
 name the missing closure component.

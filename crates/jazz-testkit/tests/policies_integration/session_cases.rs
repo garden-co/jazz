@@ -1128,7 +1128,7 @@ async fn ownership_transfer_allowed_only_for_unarchived_documents_inner() {
 ///   result:          [Bob Org]
 /// ```
 #[tokio::test]
-#[ignore = "policy-filtered nested join queries hang for more than 60 seconds"]
+#[ignore = "#1761: policy-filtered nested join queries hang for more than 60 seconds"]
 async fn select_policy_excludes_rows_from_join_results() {
     tokio::task::LocalSet::new()
         .run_until(select_policy_excludes_rows_from_join_results_inner())
@@ -1222,7 +1222,7 @@ async fn select_policy_excludes_rows_from_join_results_inner() {
 /// bob claims:   [team_b] ──query──► [team_b row]
 /// ```
 #[tokio::test]
-#[ignore = "IN session-claim array visibility queries hang for more than 60 seconds"]
+#[ignore = "#1760: IN session-claim array visibility queries hang for more than 60 seconds"]
 async fn in_session_array_policy_gates_visibility_by_membership() {
     tokio::task::LocalSet::new()
         .run_until(in_session_array_policy_gates_visibility_by_membership_inner())
@@ -1951,7 +1951,7 @@ async fn delete_policies_block_unauthorized_server_mutations_inner() {
 ///   broken:   owner=super::BOB_ID, title="nope"      (out-of-order: title accepted before lockout)
 /// ```
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "queuing 500 post-lockout updates currently overflows the Rust policy/sync stack"]
+#[ignore = "#1763: queuing 500 post-lockout updates currently overflows the Rust policy/sync stack"]
 async fn single_client_operations_reach_server_in_causal_order() {
     tokio::task::LocalSet::new()
         .run_until(single_client_operations_reach_server_in_causal_order_inner())

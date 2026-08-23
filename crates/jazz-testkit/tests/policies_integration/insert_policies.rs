@@ -131,7 +131,7 @@ async fn permissive_local_runtime_without_loaded_policies_allows_sync_pending_wr
 /// Verifies that an enforcing local runtime with an empty loaded permissions
 /// bundle denies writes that lack an explicit INSERT policy.
 #[tokio::test]
-#[ignore = "the server currently allows INSERT when a table has no explicit policy bundle"]
+#[ignore = "#1794: the server currently allows INSERT when a table has no explicit policy bundle"]
 async fn loaded_empty_permissions_bundle_denies_sync_pending_write_without_explicit_policy() {
     tokio::task::LocalSet::new()
         .run_until(
