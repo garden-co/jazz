@@ -28,6 +28,52 @@ use thiserror::Error;
 /// incompatible.
 pub const NATIVE_RELAY_ABI_VERSION: u16 = 1;
 
+/// Inclusive ABI-version range understood by a native host wrapper.
+///
+/// This is deliberately independent of any particular binding generator. The
+/// TurboModule, Swift, and Kotlin wrappers all perform the same check before
+/// they open a relay scope, so an OTA JavaScript update cannot accidentally
+/// issue commands to an incompatible embedded native library.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeRelayAbiRange {
+    pub minimum: u16,
+    pub maximum: u16,
+}
+
+impl NativeRelayAbiRange {
+    pub const fn includes(self, version: u16) -> bool {
+        self.minimum <= version && version <= self.maximum
+    }
+
+    pub fn validate(self) -> Result<(), RelayError> {
+        if self.minimum > self.maximum {
+            return Err(RelayError::InvalidAbiRange {
+                minimum: self.minimum,
+                maximum: self.maximum,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Check the native relay ABI before opening storage or allocating an owner
+/// thread. Bindings should surface the resulting error unchanged: users need a
+/// new native development or release build, rather than a cache reset.
+pub fn ensure_native_relay_abi_compatible(
+    wrapper_range: NativeRelayAbiRange,
+) -> Result<u16, RelayError> {
+    wrapper_range.validate()?;
+    if wrapper_range.includes(NATIVE_RELAY_ABI_VERSION) {
+        Ok(NATIVE_RELAY_ABI_VERSION)
+    } else {
+        Err(RelayError::IncompatibleAbi {
+            native: NATIVE_RELAY_ABI_VERSION,
+            minimum: wrapper_range.minimum,
+            maximum: wrapper_range.maximum,
+        })
+    }
+}
+
 /// Explicit process-local persistence/synchronization scope.
 ///
 /// Authentication material is intentionally absent. `auth_scope` is an opaque
@@ -379,6 +425,14 @@ impl NativeRelay {
         NATIVE_RELAY_ABI_VERSION
     }
 
+    /// Verify that a host wrapper understands this embedded native relay before
+    /// opening a scope. This is also available as
+    /// [`ensure_native_relay_abi_compatible`] for wrappers that must check
+    /// before constructing a relay.
+    pub fn ensure_abi_compatible(wrapper_range: NativeRelayAbiRange) -> Result<u16, RelayError> {
+        ensure_native_relay_abi_compatible(wrapper_range)
+    }
+
     pub fn wire(&self) -> NativeRelayWire {
         self.inner.wire.clone()
     }
@@ -459,6 +513,16 @@ impl NativeRelayRegistry {
 
 #[derive(Debug, Error)]
 pub enum RelayError {
+    #[error("invalid native relay ABI range {minimum}..={maximum}")]
+    InvalidAbiRange { minimum: u16, maximum: u16 },
+    #[error(
+        "native relay ABI {native} is incompatible with wrapper range {minimum}..={maximum}; a new native development/release build is required"
+    )]
+    IncompatibleAbi {
+        native: u16,
+        minimum: u16,
+        maximum: u16,
+    },
     #[error("invalid native relay scope: {0}")]
     InvalidScope(String),
     #[error("failed to open native relay owner thread: {0}")]
@@ -568,5 +632,46 @@ mod tests {
             })
             .unwrap();
         first.pump().unwrap();
+    }
+
+    #[test]
+    fn abi_handshake_accepts_supported_versions_before_storage_opens() {
+        assert_eq!(
+            ensure_native_relay_abi_compatible(NativeRelayAbiRange {
+                minimum: NATIVE_RELAY_ABI_VERSION,
+                maximum: NATIVE_RELAY_ABI_VERSION,
+            })
+            .unwrap(),
+            NATIVE_RELAY_ABI_VERSION
+        );
+        assert_eq!(
+            NativeRelay::ensure_abi_compatible(NativeRelayAbiRange {
+                minimum: 0,
+                maximum: NATIVE_RELAY_ABI_VERSION,
+            })
+            .unwrap(),
+            NATIVE_RELAY_ABI_VERSION
+        );
+    }
+
+    #[test]
+    fn abi_handshake_rejects_invalid_and_incompatible_ranges() {
+        assert!(matches!(
+            ensure_native_relay_abi_compatible(NativeRelayAbiRange {
+                minimum: 2,
+                maximum: 1,
+            }),
+            Err(RelayError::InvalidAbiRange {
+                minimum: 2,
+                maximum: 1,
+            })
+        ));
+        assert!(matches!(
+            ensure_native_relay_abi_compatible(NativeRelayAbiRange {
+                minimum: NATIVE_RELAY_ABI_VERSION.saturating_add(1),
+                maximum: u16::MAX,
+            }),
+            Err(RelayError::IncompatibleAbi { native, .. }) if native == NATIVE_RELAY_ABI_VERSION
+        ));
     }
 }
