@@ -51,7 +51,6 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures::lock::Mutex as LocalMutex;
-use jazz::db::StreamingMutationKind as CoreStreamingMutationKind;
 use jazz::db::{
     ConnectionSessionContext as CoreConnectionSessionContext, Db as CoreDb,
     DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,
@@ -63,6 +62,9 @@ use jazz::db::{
     StreamingValueUpload as CoreStreamingValueUpload, SubscriptionEvent as CoreSubscriptionEvent,
     SubscriptionStream, TickScheduler as CoreTickScheduler, TickUrgency as CoreTickUrgency,
     WireTransportAdapter as CoreWireTransportAdapter, WriteHandle, block_on as core_block_on,
+};
+use jazz::db::{
+    LargeValueUpdate as CoreLargeValueUpdate, StreamingMutationKind as CoreStreamingMutationKind,
 };
 use jazz::groove::records::{
     BorrowedRecord as CoreBorrowedRecord, RecordDescriptor, Value as CoreValue,
@@ -1142,6 +1144,59 @@ impl NapiDb {
                 Rc::clone(db),
                 core_block_on(db.update(&table, row_id, patch, options))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    /// Binding-only entrypoint for typed partial-value updates. The public
+    /// TypeScript API validates column-kind-specific descriptors before they
+    /// reach this encoded boundary.
+    #[napi(js_name = "updateLargeValuesEncoded")]
+    pub fn update_large_values_encoded(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        patch: Uint8Array,
+        mutations: JsonValue,
+        updated_at_ms: Option<f64>,
+    ) -> napi::Result<Write> {
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let patch = decode_core_cells(&patch)?;
+        let mutations: Vec<CoreLargeValueUpdate> =
+            serde_json::from_value(mutations).map_err(|error| {
+                napi::Error::from_reason(format!(
+                    "invalid partial-value update descriptor: {error}"
+                ))
+            })?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        let updated_at_ms = updated_at_ms.map(|value| value as u64);
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                match updated_at_ms {
+                    Some(now_ms) => core_block_on(db.update_with_large_value_mutations_at_ms(
+                        &table, row_id, patch, mutations, now_ms,
+                    )),
+                    None => core_block_on(
+                        db.update_with_large_value_mutations(&table, row_id, patch, mutations),
+                    ),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                match updated_at_ms {
+                    Some(now_ms) => core_block_on(db.update_with_large_value_mutations_at_ms(
+                        &table, row_id, patch, mutations, now_ms,
+                    )),
+                    None => core_block_on(
+                        db.update_with_large_value_mutations(&table, row_id, patch, mutations),
+                    ),
+                }
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
     }

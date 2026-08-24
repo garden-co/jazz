@@ -147,6 +147,14 @@ export interface Runtime {
     values: Record<string, Value>,
     write_context_json?: string | null,
   ): MutationResult;
+  /** Internal binding entrypoint for the typed page-edit update DSL. */
+  updateLargeValues?(
+    table: string,
+    objectId: string,
+    updates: Record<string, Value>,
+    descriptors: readonly unknown[],
+    writeContextJson?: string | null,
+  ): MutationResult;
   upsert(
     table: string,
     object_id: string,
@@ -1302,6 +1310,60 @@ export class JazzClient {
       options?.branch,
     );
     return new WriteHandle(committedBatchId(result), this);
+  }
+
+  /** @internal Typed `Db.update` lowering; not exposed as an imperative API. */
+  updateLargeValues(
+    table: string,
+    objectId: string,
+    updates: Record<string, Value>,
+    descriptors: readonly unknown[],
+    options?: UpdateOptions,
+    session?: Session,
+    attribution?: string,
+  ): WriteHandle {
+    const result = this.updateLargeValuesInternal(
+      table,
+      objectId,
+      updates,
+      descriptors,
+      options?.updatedAt,
+      session,
+      attribution,
+      undefined,
+      options?.branch,
+    );
+    return new WriteHandle(committedBatchId(result), this);
+  }
+
+  /** @internal */
+  updateLargeValuesInternal(
+    table: string,
+    objectId: string,
+    updates: Record<string, Value>,
+    descriptors: readonly unknown[],
+    updatedAt?: number,
+    session?: Session,
+    attribution?: string,
+    openBatchId?: OpenBatchId,
+    branch?: BranchView,
+  ): MutationResult {
+    if (openBatchId || branch) {
+      throw new Error(
+        "Large-value partial updates are not yet supported inside transactions or branch views.",
+      );
+    }
+    const effectiveSession = this.resolveWriteSession(session, attribution);
+    const writeContext = this.encodeWriteContext(
+      effectiveSession,
+      attribution,
+      undefined,
+      updatedAt,
+    );
+    if (!this.runtime.updateLargeValues) {
+      throw new Error("Native runtime does not support typed large-value updates.");
+    }
+    return this.runtime.updateLargeValues(table, objectId, updates, descriptors, writeContext);
   }
 
   /**

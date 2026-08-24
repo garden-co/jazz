@@ -215,6 +215,13 @@ declare module "jazz-wasm" {
       patch: Uint8Array,
       options?: UpdateOptions,
     ): WasmWrite;
+    updateLargeValuesEncoded(
+      table: string,
+      rowId: Uint8Array,
+      patch: Uint8Array,
+      descriptors: unknown,
+      updatedAtMs?: number | null,
+    ): WasmWrite;
     requestUpdatePermissionAdviceEncoded(
       table: string,
       rowId: Uint8Array,

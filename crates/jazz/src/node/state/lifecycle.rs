@@ -1109,6 +1109,19 @@ where
             .await?)
     }
 
+    /// Keep UTF-16-to-byte lowering inside Groove. Jazz supplies only a
+    /// page-relative coordinate from the binding descriptor.
+    pub(crate) async fn large_text_utf16_offset_to_byte(
+        &self,
+        value: &groove::large_values::LargeValueRef,
+        offset: u64,
+    ) -> Result<u64, Error> {
+        Ok(self
+            .database
+            .large_text_utf16_offset_to_byte(value, offset)
+            .await?)
+    }
+
     pub(crate) async fn read_large_json_pointer(
         &self,
         value: &groove::large_values::LargeValueRef,

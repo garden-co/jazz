@@ -593,6 +593,84 @@ describe("NativeRuntimeAdapter server transport", () => {
     ]);
   });
 
+  it("routes typed large-value update descriptors only for ordinary update contexts", () => {
+    const calls: unknown[][] = [];
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => Uint8Array.from([0]),
+            prepareQuery: () => ({}),
+            updateLargeValuesEncoded: (...args: unknown[]) => {
+              calls.push(args);
+              return fakeWrite();
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const descriptors = [
+      {
+        kind: "splice",
+        column: "title",
+        within: { kind: "text_utf16", from: 0, to: 4 },
+        splices: [{ at: 0, delete: 0, insert: [120] }],
+      },
+    ];
+
+    const receipt = runtime.updateLargeValues(
+      "todos",
+      "00000000-0000-0000-0000-000000000001",
+      {},
+      descriptors,
+      JSON.stringify({ updated_at: 43_000 }),
+    );
+
+    expect(receipt.kind).toBe("committed");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.[0]).toBe("todos");
+    expect(formatUuid(calls[0]?.[1] as Uint8Array)).toBe("00000000-0000-0000-0000-000000000001");
+    expect(calls[0]?.[3]).toBe(descriptors);
+    expect(calls[0]?.[4]).toBe(43);
+
+    expect(() =>
+      runtime.updateLargeValues(
+        "todos",
+        "00000000-0000-0000-0000-000000000001",
+        {},
+        descriptors,
+        JSON.stringify({ batch_id: "00000000000000000000000000000001" }),
+      ),
+    ).toThrow("Update failed: WriteError");
+    expect(() =>
+      runtime.updateLargeValues(
+        "todos",
+        "00000000-0000-0000-0000-000000000001",
+        {},
+        descriptors,
+        JSON.stringify({ branch_view: { head: { values: {} } } }),
+      ),
+    ).toThrow("Typed large-value updates are not supported in branch views.");
+    expect(() =>
+      runtime.updateLargeValues(
+        "todos",
+        "00000000-0000-0000-0000-000000000001",
+        {},
+        descriptors,
+        JSON.stringify({ user_id: "00000000-0000-0000-0000-000000000009" }),
+      ),
+    ).toThrow("Typed large-value updates do not yet support an attributed identity.");
+    expect(calls).toHaveLength(1);
+  });
+
   it("serves default and local queries from fresh local state", async () => {
     const insertedRowIds: Uint8Array[] = [];
     const write = {

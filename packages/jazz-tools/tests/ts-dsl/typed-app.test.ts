@@ -80,6 +80,17 @@ const graphSchema = {
 type GraphAppSchema = s.Schema<typeof graphSchema>;
 const graphApp: s.App<GraphAppSchema> = s.defineApp(graphSchema);
 
+const largeValueUpdateSchema = {
+  documents: s.table({
+    title: s.string(),
+    payload: s.bytes(),
+    metadata: s.json(),
+    done: s.boolean(),
+  }),
+};
+type LargeValueUpdateAppSchema = s.Schema<typeof largeValueUpdateSchema>;
+const largeValueUpdateApp: s.App<LargeValueUpdateAppSchema> = s.defineApp(largeValueUpdateSchema);
+
 const largeSchema = {
   accounts: s.table({
     name: s.string(),
@@ -471,6 +482,66 @@ describe("typed app prototype", () => {
         done: null,
       };
       void invalidDefaultedNull;
+    }
+  });
+
+  it("infers update payloads with column-specific large-value descriptors", () => {
+    type DocumentUpdate = s.LargeValueUpdateOf<typeof largeValueUpdateApp.documents>;
+    const update = {
+      title: {
+        within: { from: 0, to: 4 },
+        splices: [{ at: 1, delete: 2, insert: "ee" }],
+      },
+      payload: {
+        within: { from: 0, to: 3 },
+        splices: [{ at: 1, delete: 1, insert: new Uint8Array([9]) }],
+      },
+      metadata: {
+        edits: [{ op: "set", at: "/selected/answer", value: 43 }],
+      },
+      done: true,
+    } satisfies DocumentUpdate;
+
+    const utf8TextUpdate = {
+      title: {
+        within: { fromUtf8: 0, toUtf8: 4 },
+        splices: [{ atUtf8: 0, deleteUtf8: 4, insert: "text" }],
+      },
+    } satisfies DocumentUpdate;
+
+    void update;
+    void utf8TextUpdate;
+
+    if ((globalThis as { __typecheck_only__?: boolean }).__typecheck_only__) {
+      const byteUpdateWithText = {
+        payload: {
+          within: { from: 0, to: 1 },
+          splices: [
+            {
+              at: 0,
+              delete: 0,
+              // @ts-expect-error byte splice inserts must be Uint8Array
+              insert: "x",
+            },
+          ],
+        },
+      } satisfies DocumentUpdate;
+      void byteUpdateWithText;
+
+      const textUpdateWithBytes = {
+        title: {
+          within: { fromUtf8: 0, toUtf8: 1 },
+          splices: [
+            {
+              atUtf8: 0,
+              deleteUtf8: 0,
+              // @ts-expect-error text splice inserts must be strings
+              insert: new Uint8Array([1]),
+            },
+          ],
+        },
+      } satisfies DocumentUpdate;
+      void textUpdateWithBytes;
     }
   });
 

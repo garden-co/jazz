@@ -3,6 +3,82 @@
 use super::*;
 use crate::node::{ContributionMergeRequest, ContributionMergeRow};
 use crate::protocol::{BranchSelector, BranchViewBase};
+use serde::{Deserialize, Serialize};
+
+/// Coordinate space for a partial large-value update. This is the binding
+/// boundary shared by native runtimes; application code reaches it only
+/// through the typed `Db.update` patch DSL.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LargeValueUpdatePage {
+    /// Byte page for a bytes scalar.
+    Bytes {
+        /// Inclusive byte offset.
+        from: u64,
+        /// Exclusive byte offset.
+        to: u64,
+    },
+    /// UTF-16 code-unit page for a text scalar.
+    TextUtf16 {
+        /// Inclusive UTF-16 offset.
+        from: u64,
+        /// Exclusive UTF-16 offset.
+        to: u64,
+    },
+    /// UTF-8 byte page for a text scalar.
+    TextUtf8 {
+        /// Inclusive UTF-8 byte offset.
+        from: u64,
+        /// Exclusive UTF-8 byte offset.
+        to: u64,
+    },
+}
+
+/// One sequential splice, expressed in the coordinate space of its page.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LargeValueUpdateSplice {
+    /// Page-relative start position.
+    pub at: u64,
+    /// Number of page-coordinate units to remove.
+    pub delete: u64,
+    /// Replacement bytes, UTF-8 for text pages.
+    pub insert: Vec<u8>,
+}
+
+/// An RFC 6901 JSON replacement. Missing parents and array members are not
+/// implicitly created; that keeps a typo from silently changing document
+/// shape.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct JsonSetEdit {
+    /// RFC 6901 path of an existing member or array element.
+    pub at: String,
+    /// Replacement logical JSON value.
+    pub value: serde_json::Value,
+}
+
+/// Opaque-to-TypeScript wire descriptor for one field in an ordinary row
+/// update. Values deliberately contain bytes instead of host strings so the
+/// binding, rather than a JavaScript helper, owns the text encoding boundary.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LargeValueUpdate {
+    /// Apply a sequential splice list within one selected page.
+    Splice {
+        /// Target row column.
+        column: String,
+        /// Coordinate page shared by the splice list.
+        within: LargeValueUpdatePage,
+        /// Ordered logical replacements.
+        splices: Vec<LargeValueUpdateSplice>,
+    },
+    /// Replace existing JSON values by RFC 6901 pointer.
+    JsonSet {
+        /// Target row column.
+        column: String,
+        /// Ordered JSON replacements.
+        edits: Vec<JsonSetEdit>,
+    },
+}
 
 /// Ordinary row mutation completed with one Groove-staged scalar.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -124,6 +200,230 @@ fn splice_owned_bytes(
     }
     bytes.splice(start..end, insert);
     Ok(())
+}
+
+fn checked_range(from: u64, to: u64, length: u64, coordinate: &str) -> Result<(), Error> {
+    if from > to || to > length {
+        return Err(Error::new(
+            ErrorCode::Query,
+            format!("{coordinate} page is out of bounds"),
+        ));
+    }
+    Ok(())
+}
+
+fn apply_json_set(
+    value: &mut serde_json::Value,
+    pointer: &str,
+    replacement: serde_json::Value,
+) -> Result<(), Error> {
+    if pointer.is_empty() {
+        *value = replacement;
+        return Ok(());
+    }
+    if !pointer.starts_with('/') {
+        return Err(Error::new(
+            ErrorCode::Query,
+            "JSON pointer must be empty or begin with '/'",
+        ));
+    }
+    let tokens = pointer[1..]
+        .split('/')
+        .map(|token| {
+            let mut decoded = String::with_capacity(token.len());
+            let mut chars = token.chars();
+            while let Some(character) = chars.next() {
+                if character != '~' {
+                    decoded.push(character);
+                    continue;
+                }
+                match chars.next() {
+                    Some('0') => decoded.push('~'),
+                    Some('1') => decoded.push('/'),
+                    _ => {
+                        return Err(Error::new(
+                            ErrorCode::Query,
+                            "JSON pointer has an invalid escape",
+                        ));
+                    }
+                }
+            }
+            Ok(decoded)
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    let (last, parents) = tokens
+        .split_last()
+        .ok_or_else(|| Error::new(ErrorCode::Query, "JSON pointer is missing a target"))?;
+    let mut current = value;
+    for token in parents {
+        current = match current {
+            serde_json::Value::Object(object) => object
+                .get_mut(token)
+                .ok_or_else(|| Error::new(ErrorCode::Query, "JSON set path does not exist"))?,
+            serde_json::Value::Array(array) => {
+                let index = token.parse::<usize>().map_err(|_| {
+                    Error::new(ErrorCode::Query, "JSON array pointer token is not an index")
+                })?;
+                array
+                    .get_mut(index)
+                    .ok_or_else(|| Error::new(ErrorCode::Query, "JSON set path does not exist"))?
+            }
+            _ => {
+                return Err(Error::new(
+                    ErrorCode::Query,
+                    "JSON set path has a scalar parent",
+                ));
+            }
+        };
+    }
+    match current {
+        serde_json::Value::Object(object) => {
+            let target = object
+                .get_mut(last)
+                .ok_or_else(|| Error::new(ErrorCode::Query, "JSON set path does not exist"))?;
+            *target = replacement;
+        }
+        serde_json::Value::Array(array) => {
+            let index = last.parse::<usize>().map_err(|_| {
+                Error::new(ErrorCode::Query, "JSON array pointer token is not an index")
+            })?;
+            let target = array
+                .get_mut(index)
+                .ok_or_else(|| Error::new(ErrorCode::Query, "JSON set path does not exist"))?;
+            *target = replacement;
+        }
+        _ => {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "JSON set path has a scalar parent",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn apply_inline_splices(
+    value: Value,
+    page: &LargeValueUpdatePage,
+    splices: &[LargeValueUpdateSplice],
+) -> Result<Value, Error> {
+    let (mut bytes, is_text, nullable) = match unwrap_present_nullable(value) {
+        (Value::Bytes(bytes), nullable) => (bytes, false, nullable),
+        (Value::String(text), nullable) => (text.into_bytes(), true, nullable),
+        _ => {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                "partial splice requires a bytes or string cell",
+            ));
+        }
+    };
+    let (page_start, mut page_length) = match page {
+        LargeValueUpdatePage::Bytes { from, to } if !is_text => {
+            checked_range(*from, *to, bytes.len() as u64, "byte")?;
+            (*from, to - from)
+        }
+        LargeValueUpdatePage::TextUtf8 { from, to } if is_text => {
+            checked_range(*from, *to, bytes.len() as u64, "UTF-8")?;
+            let text = std::str::from_utf8(&bytes)
+                .map_err(|_| Error::new(ErrorCode::Schema, "stored text is not valid UTF-8"))?;
+            let start = checked_usize(*from, "UTF-8 page start")?;
+            let end = checked_usize(*to, "UTF-8 page end")?;
+            if !text.is_char_boundary(start) || !text.is_char_boundary(end) {
+                return Err(Error::new(
+                    ErrorCode::Query,
+                    "UTF-8 page splits a code point",
+                ));
+            }
+            (*from, to - from)
+        }
+        LargeValueUpdatePage::TextUtf16 { from, to } if is_text => {
+            let text = std::str::from_utf8(&bytes)
+                .map_err(|_| Error::new(ErrorCode::Schema, "stored text is not valid UTF-8"))?;
+            let total = text.encode_utf16().count() as u64;
+            checked_range(*from, *to, total, "UTF-16")?;
+            owned_utf16_range(text, 0..*from)?;
+            owned_utf16_range(text, 0..*to)?;
+            // Keep this coordinate in UTF-16. Each later sequential splice is
+            // resolved against the text produced by its predecessors.
+            (*from, to - from)
+        }
+        LargeValueUpdatePage::Bytes { .. } => {
+            return Err(large_value_cell_type_error("row", "column"));
+        }
+        LargeValueUpdatePage::TextUtf16 { .. } | LargeValueUpdatePage::TextUtf8 { .. } => {
+            return Err(Error::new(
+                ErrorCode::Schema,
+                "text splice requires a string cell",
+            ));
+        }
+    };
+    for splice in splices {
+        let end = splice
+            .at
+            .checked_add(splice.delete)
+            .ok_or_else(|| Error::new(ErrorCode::Query, "splice range overflows"))?;
+        if splice.at > page_length || end > page_length {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "splice deletion leaves the selected page",
+            ));
+        }
+        let (absolute, delete_bytes, inserted_units) = match page {
+            LargeValueUpdatePage::Bytes { .. } | LargeValueUpdatePage::TextUtf8 { .. } => {
+                let absolute = page_start
+                    .checked_add(splice.at)
+                    .ok_or_else(|| Error::new(ErrorCode::Query, "splice offset overflows"))?;
+                (absolute, splice.delete, splice.insert.len() as u64)
+            }
+            LargeValueUpdatePage::TextUtf16 { .. } => {
+                let text = std::str::from_utf8(&bytes)
+                    .map_err(|_| Error::new(ErrorCode::Schema, "stored text is not valid UTF-8"))?;
+                let start_utf16 = page_start.checked_add(splice.at).ok_or_else(|| {
+                    Error::new(ErrorCode::Query, "UTF-16 splice offset overflows")
+                })?;
+                let end_utf16 = start_utf16
+                    .checked_add(splice.delete)
+                    .ok_or_else(|| Error::new(ErrorCode::Query, "UTF-16 splice range overflows"))?;
+                let absolute = owned_utf16_range(text, 0..start_utf16)?.len() as u64;
+                let end = owned_utf16_range(text, 0..end_utf16)?.len() as u64;
+                let inserted = std::str::from_utf8(&splice.insert).map_err(|_| {
+                    Error::new(ErrorCode::Query, "text splice insert is not valid UTF-8")
+                })?;
+                (
+                    absolute,
+                    end - absolute,
+                    inserted.encode_utf16().count() as u64,
+                )
+            }
+        };
+        splice_owned_bytes(&mut bytes, absolute, delete_bytes, splice.insert.clone())?;
+        if is_text && std::str::from_utf8(&bytes).is_err() {
+            return Err(Error::new(
+                ErrorCode::Query,
+                "text splice is not valid UTF-8",
+            ));
+        }
+        page_length = page_length
+            .checked_sub(splice.delete)
+            .and_then(|length| length.checked_add(inserted_units))
+            .ok_or_else(|| Error::new(ErrorCode::Query, "splice page length overflows"))?;
+    }
+    let result = if is_text {
+        Value::String(
+            String::from_utf8(bytes)
+                .map_err(|_| Error::new(ErrorCode::Query, "text splice is not valid UTF-8"))?,
+        )
+    } else {
+        Value::Bytes(bytes)
+    };
+    Ok(preserve_nullable(result, nullable))
+}
+
+fn is_utf16_coordinate_lowering_error(error: &crate::node::Error) -> bool {
+    let message = error.to_string();
+    message.contains("MalformedScalar")
+        || message.contains("InvalidUtf8")
+        || message.contains("malformed physical scalar encoding")
 }
 
 fn unwrap_present_nullable(value: Value) -> (Value, bool) {
@@ -337,6 +637,375 @@ where
             }
             _ => Err(large_value_cell_type_error(table, column)),
         }
+    }
+
+    /// Apply typed partial large-value descriptors together with an ordinary
+    /// row patch. All descriptor staging completes before the single row
+    /// version is published; a failed field leaves every other field and the
+    /// row history unchanged.
+    pub async fn update_with_large_value_mutations(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        mutations: Vec<LargeValueUpdate>,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.update_with_large_value_mutations_at_ms_option(table, row, patch, mutations, None)
+            .await
+    }
+
+    /// As [`Self::update_with_large_value_mutations`] with caller-provided
+    /// provenance time, matching ordinary `Db.update_at_ms`.
+    pub async fn update_with_large_value_mutations_at_ms(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        mutations: Vec<LargeValueUpdate>,
+        now_ms: u64,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.update_with_large_value_mutations_at_ms_option(
+            table,
+            row,
+            patch,
+            mutations,
+            Some(now_ms),
+        )
+        .await
+    }
+
+    async fn update_with_large_value_mutations_at_ms_option(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        mutations: Vec<LargeValueUpdate>,
+        now_ms: Option<u64>,
+    ) -> Result<WriteHandle<S>, Error> {
+        if mutations.is_empty() {
+            return self.update(table, row, patch).await;
+        }
+        let (mut cells, parent, mut authored_columns) =
+            self.merge_existing_cells(table, row, patch).await?;
+        let mut staged = Vec::<(String, groove::large_values::StagedLargeValue)>::new();
+        let mut cleanup = Vec::<groove::large_values::StagedLargeValueId>::new();
+        let result = async {
+            let mut touched = BTreeSet::new();
+            for mutation in mutations {
+                let column = match &mutation {
+                    LargeValueUpdate::Splice { column, .. }
+                    | LargeValueUpdate::JsonSet { column, .. } => column.clone(),
+                };
+                if !touched.insert(column.clone()) {
+                    return Err(Error::new(
+                        ErrorCode::Query,
+                        "a large-value field may have one descriptor per update",
+                    ));
+                }
+                if authored_columns.contains(&column) {
+                    return Err(Error::new(
+                        ErrorCode::Query,
+                        "a large-value field cannot be both patched and partially updated",
+                    ));
+                }
+                let current = cells.get(&column).cloned().ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::Schema,
+                        format!("unknown column {table}.{column}"),
+                    )
+                })?;
+                let (next, column_staged, obsolete) = match mutation {
+                    LargeValueUpdate::Splice {
+                        within, splices, ..
+                    } => {
+                        self.apply_large_value_splices(current, &within, &splices)
+                            .await?
+                    }
+                    LargeValueUpdate::JsonSet { edits, .. } => {
+                        self.apply_large_value_json_set(current, &edits).await?
+                    }
+                };
+                cleanup.extend(obsolete);
+                if let Some(staged_value) = column_staged {
+                    cleanup.push(staged_value.id);
+                    staged.push((column.clone(), staged_value));
+                }
+                cells.insert(column.clone(), next);
+                authored_columns.insert(column);
+            }
+            let commit =
+                MergeableCommit::new(table, row, now_ms.unwrap_or_else(|| self.next_now_ms()))
+                    .made_by(self.identity.author)
+                    .parents(parent.into_iter().collect())
+                    .cells(cells)
+                    .authored_columns(authored_columns);
+            let published = {
+                let mut node = self.node.node.lock().await;
+                let commit = if staged.is_empty() {
+                    node.seal_inherited_large_values(commit, self.schema_version_id)
+                        .await?
+                } else {
+                    node.seal_large_value_updates(commit, &staged, self.schema_version_id)
+                        .await?
+                };
+                node.commit_mergeable_in_schema(self.schema_version_id, commit)
+                    .await?
+            };
+            Ok::<_, Error>(published)
+        }
+        .await;
+        // Every intermediate descriptor has been restaged by its successor;
+        // retaining its claim would merely postpone collectible bytes. The
+        // final claim is consumed by `seal_large_value_updates` on success.
+        if result.is_ok() {
+            let consumed = staged
+                .iter()
+                .map(|(_, value)| value.id)
+                .collect::<BTreeSet<_>>();
+            cleanup.retain(|id| !consumed.contains(id));
+        }
+        for id in cleanup {
+            let _ = self
+                .node
+                .node
+                .lock()
+                .await
+                .evict_staged_large_value(id)
+                .await;
+        }
+        self.finish_published_write(row, result?).await
+    }
+
+    async fn apply_large_value_splices(
+        &self,
+        value: Value,
+        page: &LargeValueUpdatePage,
+        splices: &[LargeValueUpdateSplice],
+    ) -> Result<
+        (
+            Value,
+            Option<groove::large_values::StagedLargeValue>,
+            Vec<groove::large_values::StagedLargeValueId>,
+        ),
+        Error,
+    > {
+        let (value, nullable) = unwrap_present_nullable(value);
+        let Value::Large(mut current) = value else {
+            return Ok((
+                apply_inline_splices(preserve_nullable(value, nullable), page, splices)?,
+                None,
+                Vec::new(),
+            ));
+        };
+        let text = matches!(current.kind, groove::large_values::LargeValueKind::String);
+        let (page_start, mut page_length) = match page {
+            LargeValueUpdatePage::Bytes { from, to } if !text => {
+                checked_range(*from, *to, current.byte_length, "byte")?;
+                (*from, to - from)
+            }
+            LargeValueUpdatePage::TextUtf8 { from, to } if text => {
+                checked_range(*from, *to, current.byte_length, "UTF-8")?;
+                // The edit primitive validates both endpoints before it admits
+                // a text tail. Probe the page endpoints even for an empty
+                // splice list so invalid selected pages never become no-ops.
+                for boundary in [*from, *to] {
+                    if boundary < current.byte_length {
+                        let byte = self
+                            .node
+                            .node
+                            .lock()
+                            .await
+                            .read_large_value_range(&current, boundary..boundary + 1)
+                            .await?;
+                        if byte
+                            .first()
+                            .is_some_and(|byte| byte & 0b1100_0000 == 0b1000_0000)
+                        {
+                            return Err(Error::new(
+                                ErrorCode::Query,
+                                "UTF-8 page splits a code point",
+                            ));
+                        }
+                    }
+                }
+                (*from, to - from)
+            }
+            LargeValueUpdatePage::TextUtf16 { from, to } if text => {
+                let total = current.utf16_length.ok_or_else(|| {
+                    Error::new(ErrorCode::Schema, "text descriptor lacks UTF-16 metrics")
+                })?;
+                checked_range(*from, *to, total, "UTF-16")?;
+                (*from, to - from)
+            }
+            LargeValueUpdatePage::Bytes { .. } => {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    "byte splice requires a bytes cell",
+                ));
+            }
+            LargeValueUpdatePage::TextUtf16 { .. } | LargeValueUpdatePage::TextUtf8 { .. } => {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    "text splice requires a string cell",
+                ));
+            }
+        };
+        let mut prior_claims = Vec::new();
+        let mut final_staged = None;
+        for splice in splices {
+            let end = splice
+                .at
+                .checked_add(splice.delete)
+                .ok_or_else(|| Error::new(ErrorCode::Query, "splice range overflows"))?;
+            if splice.at > page_length || end > page_length {
+                return Err(Error::new(
+                    ErrorCode::Query,
+                    "splice deletion leaves the selected page",
+                ));
+            }
+            let (offset, delete_length, inserted_units) = match page {
+                LargeValueUpdatePage::Bytes { .. } | LargeValueUpdatePage::TextUtf8 { .. } => {
+                    let offset = page_start
+                        .checked_add(splice.at)
+                        .ok_or_else(|| Error::new(ErrorCode::Query, "splice offset overflows"))?;
+                    (offset, splice.delete, splice.insert.len() as u64)
+                }
+                LargeValueUpdatePage::TextUtf16 { .. } => {
+                    let offset_utf16 = page_start.checked_add(splice.at).ok_or_else(|| {
+                        Error::new(ErrorCode::Query, "UTF-16 splice offset overflows")
+                    })?;
+                    let end_utf16 = offset_utf16.checked_add(splice.delete).ok_or_else(|| {
+                        Error::new(ErrorCode::Query, "UTF-16 splice range overflows")
+                    })?;
+                    let node = self.node.node.lock().await;
+                    let offset = match node
+                        .large_text_utf16_offset_to_byte(&current, offset_utf16)
+                        .await
+                    {
+                        Ok(offset) => offset,
+                        Err(error) if is_utf16_coordinate_lowering_error(&error) => {
+                            return Err(Error::new(
+                                ErrorCode::Query,
+                                "UTF-16 splice splits a surrogate pair",
+                            ));
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                    let end = match node
+                        .large_text_utf16_offset_to_byte(&current, end_utf16)
+                        .await
+                    {
+                        Ok(end) => end,
+                        Err(error) if is_utf16_coordinate_lowering_error(&error) => {
+                            return Err(Error::new(
+                                ErrorCode::Query,
+                                "UTF-16 splice splits a surrogate pair",
+                            ));
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                    let inserted = std::str::from_utf8(&splice.insert).map_err(|_| {
+                        Error::new(ErrorCode::Query, "text splice insert is not valid UTF-8")
+                    })?;
+                    (offset, end - offset, inserted.encode_utf16().count() as u64)
+                }
+            };
+            let staged = self
+                .node
+                .node
+                .lock()
+                .await
+                .edit_and_stage_large_value(current, offset, delete_length, splice.insert.clone())
+                .await?;
+            if let Some(previous) = final_staged.replace(staged) {
+                prior_claims.push(previous.id);
+            }
+            current = final_staged
+                .as_ref()
+                .expect("staged splice")
+                .value_ref
+                .clone();
+            page_length = page_length
+                .checked_sub(splice.delete)
+                .and_then(|length| length.checked_add(inserted_units))
+                .ok_or_else(|| Error::new(ErrorCode::Query, "splice page length overflows"))?;
+        }
+        Ok((
+            preserve_nullable(Value::Large(current), nullable),
+            final_staged,
+            prior_claims,
+        ))
+    }
+
+    async fn apply_large_value_json_set(
+        &self,
+        value: Value,
+        edits: &[JsonSetEdit],
+    ) -> Result<
+        (
+            Value,
+            Option<groove::large_values::StagedLargeValue>,
+            Vec<groove::large_values::StagedLargeValueId>,
+        ),
+        Error,
+    > {
+        let (value, nullable) = unwrap_present_nullable(value);
+        let (source, large) = match value {
+            Value::String(text) => (text.into_bytes(), None),
+            Value::Large(value_ref)
+                if matches!(
+                    value_ref.kind,
+                    groove::large_values::LargeValueKind::String
+                        | groove::large_values::LargeValueKind::Json
+                ) =>
+            {
+                let bytes = self
+                    .node
+                    .node
+                    .lock()
+                    .await
+                    .read_large_value_range(&value_ref, 0..value_ref.byte_length)
+                    .await?;
+                (bytes, Some(value_ref))
+            }
+            _ => {
+                return Err(Error::new(
+                    ErrorCode::Schema,
+                    "JSON set requires a JSON cell",
+                ));
+            }
+        };
+        let mut json: serde_json::Value = serde_json::from_slice(&source)
+            .map_err(|_| Error::new(ErrorCode::Query, "stored JSON is invalid"))?;
+        for edit in edits {
+            apply_json_set(&mut json, &edit.at, edit.value.clone())?;
+        }
+        let replacement = serde_json::to_vec(&json)
+            .map_err(|_| Error::new(ErrorCode::Query, "JSON set result cannot be encoded"))?;
+        let Some(large) = large else {
+            return Ok((
+                preserve_nullable(
+                    Value::String(
+                        String::from_utf8(replacement).expect("JSON serialization is UTF-8"),
+                    ),
+                    nullable,
+                ),
+                None,
+                Vec::new(),
+            ));
+        };
+        let staged = self
+            .node
+            .node
+            .lock()
+            .await
+            .edit_and_stage_large_value(large.clone(), 0, large.byte_length, replacement)
+            .await?;
+        Ok((
+            preserve_nullable(Value::Large(staged.value_ref.clone()), nullable),
+            Some(staged),
+            Vec::new(),
+        ))
     }
 
     async fn authorized_physical_cell(

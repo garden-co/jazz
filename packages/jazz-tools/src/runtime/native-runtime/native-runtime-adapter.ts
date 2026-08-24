@@ -318,6 +318,13 @@ type NativeDb = {
     deleteLength: number,
     insert: Uint8Array,
   ): Write | Promise<Write>;
+  updateLargeValuesEncoded?(
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    descriptors: unknown,
+    updatedAtMs?: number | null,
+  ): Write;
   connectUpstream(): Transport;
   connectUpstreamWithSession?(
     protocolVersion: number,
