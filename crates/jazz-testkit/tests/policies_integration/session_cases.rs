@@ -1160,7 +1160,9 @@ async fn select_policy_excludes_rows_from_join_results_inner() {
     let bob = TestingClient::builder()
         .with_server(&server)
         .with_schema(schema)
-        .with_user_id(super::BOB_ID)
+        // Keep the authenticated subject identical: only the claim-array
+        // route may separate these concurrent prepared-policy sessions.
+        .with_user_id(super::ALICE_ID)
         .as_user()
         .ready_on("team_memberships", READY_TIMEOUT)
         .connect()
