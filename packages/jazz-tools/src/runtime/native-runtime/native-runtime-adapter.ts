@@ -122,7 +122,12 @@ type NativeDb = {
   // owns idempotence, so callers never observe that implementation detail.
   close?(): void | boolean | Promise<void | boolean>;
   registerSchema(schema: Uint8Array): NativeDb;
-  beginTransaction(openBatchId: string, kind: TransactionKind, author?: Uint8Array): void;
+  beginTransaction(
+    openBatchId: string,
+    kind: TransactionKind,
+    author?: Uint8Array,
+    attribution?: Uint8Array,
+  ): void;
   commitTransaction(openBatchId: string, kind?: TransactionKind): Write;
   rollbackTransaction(openBatchId: string): void;
   attachMergeableTx(openBatchId: string): Tx;
@@ -187,6 +192,19 @@ type NativeDb = {
     kind: "Text" | "Json" | "Bytea",
     mutation?: StreamingMutationKind,
     author?: Uint8Array,
+    updatedAtMs?: number,
+    head?: unknown,
+    base?: unknown,
+  ): NativeStreamingMutation;
+  beginStreamingMutationAttributedEncoded?(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    column: string,
+    kind: "Text" | "Json" | "Bytea",
+    mutation: StreamingMutationKind | undefined,
+    author: Uint8Array | undefined,
+    attribution: Uint8Array,
     updatedAtMs?: number,
     head?: unknown,
     base?: unknown,
@@ -490,6 +508,7 @@ type PendingTx = {
   kind: TransactionKind;
   txByView: Map<NativeRuntimeAdapter, Tx>;
   identity?: Uint8Array;
+  attribution?: Uint8Array;
   writes: PendingTxWrite[];
 };
 
@@ -1143,6 +1162,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const attribution = this.backendAttribution(writeContext, writeSession);
     const branchView = branchViewFromWriteContext(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
 
@@ -1159,19 +1179,37 @@ export class NativeRuntimeAdapter implements Runtime {
       mutation === "insert"
         ? encodeCellsForStreamingRow(definition, values, column, table)
         : encodeCellsForStreamingPatch(definition, values, column);
-    const upload = begin.call(
-      this.db,
-      table,
-      rowId,
-      cells,
-      column,
-      kind,
-      mutation,
-      writeIdentity,
-      updatedAtMs ?? undefined,
-      branchView?.head,
-      branchView?.base,
-    );
+    const upload = attribution
+      ? requireAttributionMethod(
+          this.db.beginStreamingMutationAttributedEncoded,
+          "backend-attributed streaming mutations",
+        ).call(
+          this.db,
+          table,
+          rowId,
+          cells,
+          column,
+          kind,
+          mutation,
+          writeIdentity,
+          attribution,
+          updatedAtMs ?? undefined,
+          branchView?.head,
+          branchView?.base,
+        )
+      : begin.call(
+          this.db,
+          table,
+          rowId,
+          cells,
+          column,
+          kind,
+          mutation,
+          writeIdentity,
+          updatedAtMs ?? undefined,
+          branchView?.head,
+          branchView?.base,
+        );
     const encoder = new TextEncoder();
     const pushBounded = async (bytes: Uint8Array): Promise<void> => {
       const hostWindowBytes = 64 * 1024;
@@ -1555,8 +1593,12 @@ export class NativeRuntimeAdapter implements Runtime {
     // the trusted-serving subject here so every staged operation and its
     // commit are authorized as that one subject.
     const identity = this.trustedWriteIdentity(session);
-    this.db.beginTransaction(id, kind, identity);
-    this.pendingTxs.set(id, { id, kind, identity, writes: [], txByView: new Map() });
+    const attribution = this.backendAttribution(sessionJson, session);
+    if (attribution && kind !== "mergeable") {
+      throw new Error("Backend-attributed transactions currently require mergeable kind");
+    }
+    this.db.beginTransaction(id, kind, identity, attribution);
+    this.pendingTxs.set(id, { id, kind, identity, attribution, writes: [], txByView: new Map() });
     return id;
   }
 
