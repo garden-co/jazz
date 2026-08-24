@@ -284,7 +284,7 @@ impl Backend {
         table: &str,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
-        let write = crate::db::block_on(self.0.insert(table, cells))?;
+        let write = crate::db::block_on(self.0.insert(table, cells, Default::default()))?;
         Ok((write.row_uuid(), write.mergeable_tx_id()))
     }
 
@@ -294,7 +294,14 @@ impl Backend {
         table: &str,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(CoreRowUuid, CoreTxId), CoreDbError> {
-        let write = crate::db::block_on(self.0.insert_for_identity(identity, table, cells))?;
+        let write = crate::db::block_on(self.0.insert(
+            table,
+            cells,
+            crate::db::InsertOptions {
+                identity: crate::db::WriteIdentity::Session(identity),
+                ..Default::default()
+            },
+        ))?;
         Ok((write.row_uuid(), write.mergeable_tx_id()))
     }
 
@@ -304,7 +311,15 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::db::block_on(self.0.insert_with_id(table, row_id, cells))?.mergeable_tx_id())
+        Ok(crate::db::block_on(self.0.insert(
+            table,
+            cells,
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                ..Default::default()
+            },
+        ))?
+        .mergeable_tx_id())
     }
 
     fn insert_with_id_for_identity(
@@ -314,10 +329,15 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::db::block_on(
-            self.0
-                .insert_with_id_for_identity(identity, table, row_id, cells),
-        )?
+        Ok(crate::db::block_on(self.0.insert(
+            table,
+            cells,
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                identity: crate::db::WriteIdentity::Session(identity),
+                ..Default::default()
+            },
+        ))?
         .mergeable_tx_id())
     }
 
@@ -327,7 +347,10 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::db::block_on(self.0.upsert(table, row_id, cells))?.mergeable_tx_id())
+        Ok(
+            crate::db::block_on(self.0.upsert(table, row_id, cells, Default::default()))?
+                .mergeable_tx_id(),
+        )
     }
 
     fn upsert_for_identity(
@@ -337,10 +360,16 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(
-            crate::db::block_on(self.0.upsert_for_identity(identity, table, row_id, cells))?
-                .mergeable_tx_id(),
-        )
+        Ok(crate::db::block_on(self.0.upsert(
+            table,
+            row_id,
+            cells,
+            crate::db::UpsertOptions {
+                identity: crate::db::WriteIdentity::Session(identity),
+                ..Default::default()
+            },
+        ))?
+        .mergeable_tx_id())
     }
 
     fn update(
@@ -349,7 +378,10 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::db::block_on(self.0.update(table, row_id, cells))?.mergeable_tx_id())
+        Ok(
+            crate::db::block_on(self.0.update(table, row_id, cells, Default::default()))?
+                .mergeable_tx_id(),
+        )
     }
 
     fn delete_for_identity(
@@ -358,10 +390,15 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(
-            crate::db::block_on(self.0.delete_for_identity(identity, table, row_id))?
-                .mergeable_tx_id(),
-        )
+        Ok(crate::db::block_on(self.0.delete(
+            table,
+            row_id,
+            crate::db::DeleteOptions {
+                identity: crate::db::WriteIdentity::Session(identity),
+                ..Default::default()
+            },
+        ))?
+        .mergeable_tx_id())
     }
 
     fn delete(
@@ -369,7 +406,10 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(crate::db::block_on(self.0.delete(table, row_id))?.mergeable_tx_id())
+        Ok(
+            crate::db::block_on(self.0.delete(table, row_id, Default::default()))?
+                .mergeable_tx_id(),
+        )
     }
 
     fn prepare_query(
@@ -453,11 +493,15 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(), CoreDbError> {
-        crate::db::block_on(
-            self.0
-                .exclusive_tx_ref(tx_id)
-                .insert_with_id(table, row_id, cells),
-        )
+        crate::db::block_on(self.0.exclusive_tx_ref(tx_id).insert(
+            table,
+            cells,
+            crate::db::InsertOptions {
+                row_id: Some(row_id),
+                ..Default::default()
+            },
+        ))
+        .map(|_| ())
     }
 
     fn exclusive_update(
@@ -467,7 +511,12 @@ impl Backend {
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
     ) -> std::result::Result<(), CoreDbError> {
-        crate::db::block_on(self.0.exclusive_tx_ref(tx_id).update(table, row_id, cells))
+        crate::db::block_on(self.0.exclusive_tx_ref(tx_id).update(
+            table,
+            row_id,
+            cells,
+            Default::default(),
+        ))
     }
 
     fn exclusive_delete(
@@ -476,7 +525,11 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
     ) -> std::result::Result<(), CoreDbError> {
-        crate::db::block_on(self.0.exclusive_tx_ref(tx_id).delete(table, row_id))
+        crate::db::block_on(self.0.exclusive_tx_ref(tx_id).delete(
+            table,
+            row_id,
+            Default::default(),
+        ))
     }
 
     fn commit_exclusive_handle(

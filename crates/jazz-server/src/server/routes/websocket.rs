@@ -1798,6 +1798,7 @@ mod tests {
                     ("title".to_owned(), CoreValue::String(title.to_owned())),
                     ("done".to_owned(), CoreValue::Bool(false)),
                 ]),
+                Default::default(),
             ))
             .expect("insert client row")
             .row_uuid()
@@ -1810,6 +1811,7 @@ mod tests {
                     ("title".to_owned(), CoreValue::String(title.to_owned())),
                     ("done".to_owned(), CoreValue::Bool(false)),
                 ]),
+                Default::default(),
             ))
             .expect("insert client row")
             .mergeable_tx_id()
@@ -1823,6 +1825,7 @@ mod tests {
                     ("title".to_owned(), CoreValue::String(title.to_owned())),
                     ("owner".to_owned(), CoreValue::String(owner)),
                 ]),
+                Default::default(),
             ))
             .expect("insert client doc")
             .row_uuid()

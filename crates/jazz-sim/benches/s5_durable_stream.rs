@@ -421,10 +421,13 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
     let mut edge_acceptance = Histogram::new(3).unwrap();
     let mut contents = vec![Vec::<u8>::new(); config.streams];
     for stream in 0..config.streams {
-        let stream_write = block_on(db.insert_with_id(
+        let stream_write = block_on(db.insert(
             STREAMS,
-            stream_row(stream),
             cells([("name", Value::String(format!("stream-{stream}")))]),
+            jazz::db::InsertOptions {
+                row_id: Some(stream_row(stream)),
+                ..Default::default()
+            },
         ))
         .expect("db stream insert");
         block_on(stream_write.wait(DurabilityTier::Local)).expect("db stream local wait");
@@ -437,13 +440,16 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
             &mut core,
             &mut edge_acceptance,
         );
-        let doc_write = block_on(db.insert_with_id(
+        let doc_write = block_on(db.insert(
             STREAM_DOCS,
-            stream_doc_row(stream),
             cells([
                 ("stream", Value::Uuid(stream_row(stream).0)),
                 ("content", Value::Bytes(Vec::new())),
             ]),
+            jazz::db::InsertOptions {
+                row_id: Some(stream_doc_row(stream)),
+                ..Default::default()
+            },
         ))
         .expect("db stream doc insert");
         block_on(doc_write.wait(DurabilityTier::Local)).expect("db stream doc local wait");
@@ -498,6 +504,7 @@ fn run_db_surface(config: &Config) -> DbSurfaceSummary {
                 STREAM_DOCS,
                 stream_doc_row(stream),
                 cells([("content", Value::Bytes(content))]),
+                Default::default(),
             ))
             .expect("db stream doc update");
             update_latencies.push(update_start.elapsed().as_micros() as u64);

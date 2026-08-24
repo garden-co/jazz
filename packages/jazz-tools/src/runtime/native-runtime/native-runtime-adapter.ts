@@ -84,6 +84,28 @@ type NativeDbConstructor = {
   openPersistent?(dataPath: string, schema: Uint8Array, config: Uint8Array): NativeDb;
 };
 
+type NativeWriteOptions = {
+  author?: Uint8Array;
+  updatedAtMs?: number;
+};
+
+type NativeInsertOptions = NativeWriteOptions & {
+  rowId?: Uint8Array;
+  branch?: unknown;
+};
+
+type NativeUpdateOptions = NativeWriteOptions & {
+  head?: unknown;
+  base?: unknown;
+};
+
+type NativeUpsertOptions = NativeWriteOptions & {
+  branch?: unknown;
+};
+
+type NativeDeleteOptions = NativeUpdateOptions;
+type NativeRestoreOptions = NativeUpsertOptions;
+
 type NativeDb = {
   // Native runtime adapters may close synchronously or asynchronously and may
   // report whether they transitioned state. The adapter awaits either form and
@@ -127,33 +149,25 @@ type NativeDb = {
     author: Uint8Array,
     opts: unknown,
   ): ReadableStream<unknown> | Subscription;
-  insertEncoded(table: string, cells: Uint8Array, updatedAtMs?: number | null): Write;
-  insertEncodedForIdentity(
+  insertEncoded(table: string, cells: Uint8Array, options?: NativeInsertOptions): Write;
+  updateEncoded(
     table: string,
-    cells: Uint8Array,
-    author: Uint8Array,
-    updatedAtMs?: number | null,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    options?: NativeUpdateOptions,
   ): Write;
-  insertEncodedInBranch?(table: string, cells: Uint8Array, branch: unknown): Write;
-  insertEncodedInBranchForIdentity?(
-    table: string,
-    cells: Uint8Array,
-    branch: unknown,
-    author: Uint8Array,
-  ): Write;
-  insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): Write;
-  insertWithIdEncodedForIdentity(
+  upsertEncoded(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
-    author: Uint8Array,
-    updatedAtMs?: number | null,
+    options?: NativeUpsertOptions,
   ): Write;
-  insertWithIdEncoded(
+  deleteEncoded(table: string, rowId: Uint8Array, options?: NativeDeleteOptions): Write;
+  restoreEncoded(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
-    updatedAtMs?: number | null,
+    options?: NativeRestoreOptions,
   ): Write;
   beginStreamingMutationEncoded?(
     table: string,
@@ -167,112 +181,6 @@ type NativeDb = {
     head?: unknown,
     base?: unknown,
   ): NativeStreamingMutation;
-  insertWithIdEncodedInBranch?(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    branch: unknown,
-  ): Write;
-  insertWithIdEncodedInBranchForIdentity?(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    branch: unknown,
-    author: Uint8Array,
-  ): Write;
-  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): Write;
-  restoreEncodedForIdentity(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    author: Uint8Array,
-    updatedAtMs?: number | null,
-  ): Write;
-  restoreEncoded(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    updatedAtMs?: number | null,
-  ): Write;
-  restoreInBranch?(table: string, rowId: Uint8Array, branch: unknown): Write;
-  restoreEncodedInBranch?(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    branch: unknown,
-  ): Write;
-  restoreEncodedInBranchForIdentity?(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    branch: unknown,
-    author: Uint8Array,
-  ): Write;
-  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): Write;
-  updateEncodedForIdentity(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    author: Uint8Array,
-    updatedAtMs?: number | null,
-  ): Write;
-  updateEncoded(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    updatedAtMs?: number | null,
-  ): Write;
-  updateEncodedInBranch?(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    branch: unknown,
-  ): Write;
-  updateEncodedInBranchView?(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    head: unknown,
-    base?: unknown,
-  ): Write;
-  updateEncodedInBranchViewForIdentity?(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    head: unknown,
-    base: unknown,
-    author: Uint8Array,
-  ): Write;
-  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array): Write;
-  upsertEncodedForIdentity(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    author: Uint8Array,
-    updatedAtMs?: number | null,
-  ): Write;
-  upsertEncoded(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    updatedAtMs?: number | null,
-  ): Write;
-  delete(table: string, rowId: Uint8Array, updatedAtMs?: number | null): Write;
-  deleteForIdentity(
-    table: string,
-    rowId: Uint8Array,
-    author: Uint8Array,
-    updatedAtMs?: number | null,
-  ): Write;
-  deleteInBranch?(table: string, rowId: Uint8Array, branch: unknown): Write;
-  deleteInBranchView?(table: string, rowId: Uint8Array, head: unknown, base?: unknown): Write;
-  deleteInBranchViewForIdentity?(
-    table: string,
-    rowId: Uint8Array,
-    head: unknown,
-    base: unknown,
-    author: Uint8Array,
-  ): Write;
   requestInsertPermissionAdviceEncoded?(
     table: string,
     cells: Uint8Array,
@@ -381,53 +289,26 @@ type Write = {
 type Tx = {
   commit(): Write;
   rollback(): void;
-  insertEncoded(table: string, cells: Uint8Array, updatedAtMs?: number | null): Uint8Array;
-  insertEncodedInBranch?(table: string, cells: Uint8Array, branch: unknown): Uint8Array;
-  insertWithIdEncoded(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    updatedAtMs?: number | null,
-  ): void;
-  insertWithIdEncodedInBranch?(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    branch: unknown,
-  ): void;
-  restoreEncoded(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    updatedAtMs?: number | null,
-  ): void;
-  restoreEncodedInBranch?(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    branch: unknown,
-  ): void;
+  insertEncoded(table: string, cells: Uint8Array, options?: NativeInsertOptions): Uint8Array;
   updateEncoded(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
-    updatedAtMs?: number | null,
-  ): void;
-  updateEncodedInBranchView?(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    head: unknown,
-    base?: unknown,
+    options?: NativeUpdateOptions,
   ): void;
   upsertEncoded(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
-    updatedAtMs?: number | null,
+    options?: NativeUpsertOptions,
   ): void;
-  delete(table: string, rowId: Uint8Array, updatedAtMs?: number | null): void;
-  deleteInBranchView?(table: string, rowId: Uint8Array, head: unknown, base?: unknown): void;
+  deleteEncoded(table: string, rowId: Uint8Array, options?: NativeDeleteOptions): void;
+  restoreEncoded(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    options?: NativeRestoreOptions,
+  ): void;
 };
 
 export type Transport = {
@@ -974,26 +855,11 @@ export class NativeRuntimeAdapter implements Runtime {
     const tx = this.currentTx(_writeContext, "Insert");
     if (tx) {
       const nativeTx = this.txForWrite(tx, writeIdentity);
-      let rowId: Uint8Array;
-      if (branchView) {
-        if (suppliedRowId) {
-          rowId = suppliedRowId;
-          requireBranchMethod(
-            nativeTx.insertWithIdEncodedInBranch,
-            "transaction branch inserts",
-          ).call(nativeTx, table, rowId, cells, branchView.head);
-        } else {
-          rowId = requireBranchMethod(
-            nativeTx.insertEncodedInBranch,
-            "transaction generated-id branch inserts",
-          ).call(nativeTx, table, cells, branchView.head);
-        }
-      } else {
-        rowId = suppliedRowId ?? nativeTx.insertEncoded(table, cells, updatedAtMs);
-        if (suppliedRowId) {
-          nativeTx.insertWithIdEncoded(table, rowId, cells, updatedAtMs);
-        }
-      }
+      const rowId = nativeTx.insertEncoded(table, cells, {
+        rowId: suppliedRowId,
+        branch: branchView?.head,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
       const row = this.rowStateFromValues(table, rowId, values);
       tx.writes.push({ table, rowId, row });
       return {
@@ -1004,45 +870,14 @@ export class NativeRuntimeAdapter implements Runtime {
       };
     }
     const write = writeOrNormalizeRejection("Insert", () =>
-      branchView
-        ? suppliedRowId
-          ? writeIdentity
-            ? requireBranchMethod(
-                this.db.insertWithIdEncodedInBranchForIdentity,
-                "identity-scoped branch inserts",
-              ).call(this.db, table, suppliedRowId, cells, branchView.head, writeIdentity)
-            : requireBranchMethod(this.db.insertWithIdEncodedInBranch, "branch inserts").call(
-                this.db,
-                table,
-                suppliedRowId,
-                cells,
-                branchView.head,
-              )
-          : writeIdentity
-            ? requireBranchMethod(
-                this.db.insertEncodedInBranchForIdentity,
-                "identity-scoped generated-id branch inserts",
-              ).call(this.db, table, cells, branchView.head, writeIdentity)
-            : requireBranchMethod(
-                this.db.insertEncodedInBranch,
-                "generated-id branch inserts",
-              ).call(this.db, table, cells, branchView.head)
-        : writeIdentity
-          ? suppliedRowId
-            ? this.db.insertWithIdEncodedForIdentity(
-                table,
-                suppliedRowId,
-                cells,
-                writeIdentity,
-                updatedAtMs,
-              )
-            : this.db.insertEncodedForIdentity(table, cells, writeIdentity, updatedAtMs)
-          : suppliedRowId
-            ? this.db.insertWithIdEncoded(table, suppliedRowId, cells, updatedAtMs)
-            : this.db.insertEncoded(table, cells, updatedAtMs),
+      this.db.insertEncoded(table, cells, {
+        rowId: suppliedRowId,
+        author: writeIdentity,
+        branch: branchView?.head,
+        updatedAtMs: updatedAtMs ?? undefined,
+      }),
     );
-    const rowId = suppliedRowId ?? write.rowId;
-    return this.finishInsert(table, rowId, values, write);
+    return this.finishInsert(table, suppliedRowId ?? write.rowId, values, write);
   }
 
   async streamingMutation(
@@ -1148,17 +983,10 @@ export class NativeRuntimeAdapter implements Runtime {
     const tx = this.currentTx(writeContext, "Restore");
     if (tx) {
       const nativeTx = this.txForWrite(tx, writeIdentity);
-      if (branchView) {
-        requireBranchMethod(nativeTx.restoreEncodedInBranch, "transaction branch restores").call(
-          nativeTx,
-          table,
-          rowId,
-          cells,
-          branchView.head,
-        );
-      } else {
-        nativeTx.restoreEncoded(table, rowId, cells, updatedAtMs);
-      }
+      nativeTx.restoreEncoded(table, rowId, cells, {
+        branch: branchView?.head,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
       const row = this.rowStateFromValues(table, rowId, values);
       tx.writes.push({ table, rowId, row });
       return {
@@ -1169,22 +997,11 @@ export class NativeRuntimeAdapter implements Runtime {
       };
     }
     const write = writeOrNormalizeRejection("Restore", () =>
-      branchView
-        ? writeIdentity
-          ? requireBranchMethod(
-              this.db.restoreEncodedInBranchForIdentity,
-              "identity-scoped branch restores",
-            ).call(this.db, table, rowId, cells, branchView.head, writeIdentity)
-          : requireBranchMethod(this.db.restoreEncodedInBranch, "branch restores").call(
-              this.db,
-              table,
-              rowId,
-              cells,
-              branchView.head,
-            )
-        : writeIdentity
-          ? this.db.restoreEncodedForIdentity(table, rowId, cells, writeIdentity, updatedAtMs)
-          : this.db.restoreEncoded(table, rowId, cells, updatedAtMs),
+      this.db.restoreEncoded(table, rowId, cells, {
+        author: writeIdentity,
+        branch: branchView?.head,
+        updatedAtMs: updatedAtMs ?? undefined,
+      }),
     );
     return this.finishInsert(table, rowId, values, write);
   }
@@ -1205,18 +1022,11 @@ export class NativeRuntimeAdapter implements Runtime {
     const tx = this.currentTx(writeContext, "Update");
     if (tx) {
       const nativeTx = this.txForWrite(tx, writeIdentity);
-      if (branchView) {
-        requireBranchMethod(nativeTx.updateEncodedInBranchView, "transaction branch updates").call(
-          nativeTx,
-          table,
-          rowId,
-          patch,
-          branchView.head,
-          branchView.base,
-        );
-      } else {
-        nativeTx.updateEncoded(table, rowId, patch, updatedAtMs);
-      }
+      nativeTx.updateEncoded(table, rowId, patch, {
+        head: branchView?.head,
+        base: branchView?.base,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
       tx.writes.push({
         table,
         rowId,
@@ -1225,31 +1035,12 @@ export class NativeRuntimeAdapter implements Runtime {
       return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Update", () =>
-      branchView
-        ? writeIdentity
-          ? requireBranchMethod(
-              this.db.updateEncodedInBranchViewForIdentity,
-              "identity-scoped branch updates",
-            ).call(this.db, table, rowId, patch, branchView.head, branchView.base, writeIdentity)
-          : branchView.base === undefined
-            ? requireBranchMethod(this.db.updateEncodedInBranch, "exact branch updates").call(
-                this.db,
-                table,
-                rowId,
-                patch,
-                branchView.head,
-              )
-            : requireBranchMethod(this.db.updateEncodedInBranchView, "branch-view updates").call(
-                this.db,
-                table,
-                rowId,
-                patch,
-                branchView.head,
-                branchView.base,
-              )
-        : writeIdentity
-          ? this.db.updateEncodedForIdentity(table, rowId, patch, writeIdentity, updatedAtMs)
-          : this.db.updateEncoded(table, rowId, patch, updatedAtMs),
+      this.db.updateEncoded(table, rowId, patch, {
+        author: writeIdentity,
+        head: branchView?.head,
+        base: branchView?.base,
+        updatedAtMs: updatedAtMs ?? undefined,
+      }),
     );
     return this.finishMutation(write);
   }
@@ -1266,6 +1057,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.applySessionClaims(writeSession);
     const writeIdentity = this.trustedWriteIdentity(writeSession);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
+    const branchView = branchViewFromWriteContext(writeContext);
     const tx = this.currentTx(writeContext, "Upsert");
     const existing = tx
       ? (this.stagedRowForWriteMerge(tx, table, rowId) ?? this.readRowForWriteMerge(table, rowId))
@@ -1279,7 +1071,10 @@ export class NativeRuntimeAdapter implements Runtime {
       throw writeError("Upsert", normalizeWriteSetupMessage(errorMessage(error)));
     }
     if (tx) {
-      this.txForWrite(tx, writeIdentity).upsertEncoded(table, rowId, cells, updatedAtMs);
+      this.txForWrite(tx, writeIdentity).upsertEncoded(table, rowId, cells, {
+        branch: branchView?.head,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
       tx.writes.push({
         table,
         rowId,
@@ -1290,9 +1085,11 @@ export class NativeRuntimeAdapter implements Runtime {
       return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Upsert", () =>
-      writeIdentity
-        ? this.db.upsertEncodedForIdentity(table, rowId, cells, writeIdentity, updatedAtMs)
-        : this.db.upsertEncoded(table, rowId, cells, updatedAtMs),
+      this.db.upsertEncoded(table, rowId, cells, {
+        author: writeIdentity,
+        branch: branchView?.head,
+        updatedAtMs: updatedAtMs ?? undefined,
+      }),
     );
     return this.finishMutation(write);
   }
@@ -1308,44 +1105,21 @@ export class NativeRuntimeAdapter implements Runtime {
     const tx = this.currentTx(writeContext, "Delete");
     if (tx) {
       const nativeTx = this.txForWrite(tx, writeIdentity);
-      if (branchView) {
-        requireBranchMethod(nativeTx.deleteInBranchView, "transaction branch deletes").call(
-          nativeTx,
-          table,
-          rowId,
-          branchView.head,
-          branchView.base,
-        );
-      } else {
-        nativeTx.delete(table, rowId, updatedAtMs);
-      }
+      nativeTx.deleteEncoded(table, rowId, {
+        head: branchView?.head,
+        base: branchView?.base,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
       tx.writes.push({ table, rowId, deleted: true });
       return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Delete", () =>
-      branchView
-        ? writeIdentity
-          ? requireBranchMethod(
-              this.db.deleteInBranchViewForIdentity,
-              "identity-scoped branch deletes",
-            ).call(this.db, table, rowId, branchView.head, branchView.base, writeIdentity)
-          : branchView.base === undefined
-            ? requireBranchMethod(this.db.deleteInBranch, "exact branch deletes").call(
-                this.db,
-                table,
-                rowId,
-                branchView.head,
-              )
-            : requireBranchMethod(this.db.deleteInBranchView, "branch-view deletes").call(
-                this.db,
-                table,
-                rowId,
-                branchView.head,
-                branchView.base,
-              )
-        : writeIdentity
-          ? this.db.deleteForIdentity(table, rowId, writeIdentity, updatedAtMs)
-          : this.db.delete(table, rowId, updatedAtMs),
+      this.db.deleteEncoded(table, rowId, {
+        author: writeIdentity,
+        head: branchView?.head,
+        base: branchView?.base,
+        updatedAtMs: updatedAtMs ?? undefined,
+      }),
     );
     return this.finishMutation(write);
   }
@@ -3048,11 +2822,6 @@ function branchViewFromWriteContext(writeContext?: string | null): EncodedBranch
   } catch {
     return undefined;
   }
-}
-
-function requireBranchMethod<T>(method: T | undefined, name: string): T {
-  if (method === undefined) throw new Error(`native runtime does not support ${name}`);
-  return method;
 }
 
 function sessionFromWriteContext(writeContext?: string | null): RuntimeSession | null {

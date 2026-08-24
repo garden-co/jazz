@@ -82,6 +82,7 @@ fn concurrent_cold_reads_and_subscription_wait_for_the_async_node_owner() {
     block_on(db.insert(
         "todos",
         [("title".to_owned(), Value::String("cold read".to_owned()))].into(),
+        Default::default(),
     ))
     .expect("seed todo");
     let prepared = db

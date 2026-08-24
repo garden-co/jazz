@@ -50,19 +50,25 @@ fn row_provenance_preserves_created_fields_and_advances_updated_at() {
     let row = RowUuid::from_bytes([0x33; 16]);
     let db = open_db(alice);
 
-    jazz::block_on(db.insert_with_id_at_ms(
+    jazz::block_on(db.insert(
         "todos",
-        row,
         BTreeMap::from([("title".to_owned(), Value::String("first".to_owned()))]),
-        1_000,
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            updated_at_ms: Some(1_000),
+            ..Default::default()
+        },
     ))
     .expect("insert row");
 
-    jazz::block_on(db.update_at_ms(
+    jazz::block_on(db.update(
         "todos",
         row,
         BTreeMap::from([("title".to_owned(), Value::String("second".to_owned()))]),
-        2_000,
+        jazz::db::UpdateOptions {
+            updated_at_ms: Some(2_000),
+            ..Default::default()
+        },
     ))
     .expect("update row");
 
@@ -109,14 +115,25 @@ fn deletion_advances_updated_provenance_without_replacing_creation_provenance() 
     let row = RowUuid::from_bytes([0x44; 16]);
     let db = open_db(alice);
 
-    jazz::block_on(db.insert_with_id_at_ms(
+    jazz::block_on(db.insert(
         "todos",
-        row,
         BTreeMap::from([("title".to_owned(), Value::String("first".to_owned()))]),
-        1_000,
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            updated_at_ms: Some(1_000),
+            ..Default::default()
+        },
     ))
     .expect("insert row");
-    jazz::block_on(db.delete_at_ms("todos", row, 3_000)).expect("delete row");
+    jazz::block_on(db.delete(
+        "todos",
+        row,
+        jazz::db::DeleteOptions {
+            updated_at_ms: Some(3_000),
+            ..Default::default()
+        },
+    ))
+    .expect("delete row");
 
     let prepared = db.prepare_query(&db.table("todos")).expect("prepare query");
     let rows = jazz::block_on(db.all(
@@ -159,6 +176,7 @@ fn empty_batched_update_still_validates_handle_and_target() {
         "todos",
         row,
         BTreeMap::new(),
+        Default::default(),
     ))
     .expect_err("stale batch handle must be rejected");
     assert!(stale_error.message.contains("open transaction"));
@@ -169,6 +187,7 @@ fn empty_batched_update_still_validates_handle_and_target() {
         "todos",
         row,
         BTreeMap::new(),
+        Default::default(),
     ))
     .expect_err("absent target must be rejected");
     assert!(
