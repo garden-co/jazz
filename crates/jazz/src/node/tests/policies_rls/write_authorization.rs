@@ -287,6 +287,7 @@ fn attributed_write_retry_preserves_permission_subject_after_rejection_error() {
         .collect::<Vec<_>>();
     let storage = FailTransactionReadMemoryStorage::new(&column_family_refs);
     let mut core = NodeState::new(node(0x90), schema, storage.clone()).unwrap();
+    install_test_uuid_sub_claim(&mut core, backend);
 
     let tx_id = core
         .commit_mergeable_settled(
@@ -343,6 +344,7 @@ fn attributed_write_checkpoint_error_cleans_up_terminal_permission_subject() {
         .collect::<Vec<_>>();
     let storage = FailTransactionReadMemoryStorage::new(&column_family_refs);
     let mut core = NodeState::new(node(0x90), schema, storage.clone()).unwrap();
+    install_test_uuid_sub_claim(&mut core, backend);
 
     let tx_id = core
         .commit_mergeable_settled(
@@ -419,6 +421,12 @@ fn session_owner_string_uuid_write_policy_accepts_matching_author() {
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let author = user(0xa1);
+    let claims = BTreeMap::from([(
+        "user_id".to_owned(),
+        Value::String(author.test_uuid().to_string()),
+    )]);
+    writer.set_session_claims(author, claims.clone());
+    core.set_session_claims(author, claims);
     let row_uuid = row(0x51);
     let (tx_id, unit) = writer
         .commit_mergeable_unit_settled(
