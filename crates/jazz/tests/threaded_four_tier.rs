@@ -135,11 +135,17 @@ fn open_node(
 fn cells(title: impl Into<String>, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.into())),
-        (
-            "owner".to_owned(),
-            Value::String(owner.canonical().to_owned()),
-        ),
+        ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
     ])
+}
+
+fn install_uuid_sub_claim(node: &mut NodeState<RocksDbStorage>, identity: AuthorSubject) {
+    if identity != AuthorSubject::SYSTEM {
+        node.admit_test_session_claims(
+            identity,
+            BTreeMap::from([("sub".to_owned(), Value::Uuid(identity.test_uuid()))]),
+        );
+    }
 }
 
 fn peer_summary(peer: &PeerState) -> LinkSummary {
@@ -171,6 +177,7 @@ fn commit_unit(
 }
 
 fn send_view(node: &mut NodeState<RocksDbStorage>, peer: &mut PeerState, tx: &Sender<Wire>) {
+    install_uuid_sub_claim(node, peer.identity());
     let update = block_on(peer.current_rows_update(node, TABLE)).unwrap();
     send_sync(tx, update);
 }
@@ -179,6 +186,9 @@ fn relay_ingest(node: &mut NodeState<RocksDbStorage>, message: &SyncMessage) {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
+    if let Some(identity) = tx.permission_subject {
+        install_uuid_sub_claim(node, identity);
+    }
     block_on(node.ingest_relay_commit_unit(tx.clone(), versions.clone())).unwrap();
 }
 
@@ -244,6 +254,9 @@ fn core_thread(
                     panic!("core expected commit unit");
                 };
                 tx_ids.push(tx.tx_id);
+                if let Some(identity) = tx.permission_subject {
+                    install_uuid_sub_claim(&mut core, identity);
+                }
                 let updates = block_on(async {
                     let outcome = core
                         .ingest_commit_unit(tx, versions, u64::MAX - SKEW_TOLERANCE_MS)
@@ -391,7 +404,7 @@ fn ui_thread(
             drain_ui_downstream(&mut ui, &from_worker);
             let row_uuid = row(40 + ((idx / 18) % 8) as u8);
             let tx_id = OpenTransactionId::new();
-            block_on(ui.open_exclusive(tx_id)).unwrap();
+            block_on(ui.open_exclusive_for_test(tx_id, ui_author)).unwrap();
             let _ = block_on(ui.tx_read(tx_id, TABLE, row_uuid)).unwrap();
             let title = format!("exclusive-{idx}");
             block_on(ui.tx_write(tx_id, TABLE, row_uuid, cells(title, ui_owner), None)).unwrap();
@@ -537,9 +550,11 @@ fn threaded_four_tier_converges_with_fifo_links() {
 
     let ui_policy_rows = &ui_result.receipt.subscription_rows;
     assert!(!ui_policy_rows.is_empty());
-    assert!(ui_policy_rows.values().all(|cells| {
-        cells.get("owner") == Some(&Value::String(ui_author.canonical().to_owned()))
-    }));
+    assert!(
+        ui_policy_rows
+            .values()
+            .all(|cells| { cells.get("owner") == Some(&Value::Uuid(ui_author.test_uuid())) })
+    );
 
     for tx_id in ui_result.tx_ids {
         let core_fact = core_result.transaction_states.get(&tx_id).unwrap();

@@ -721,6 +721,19 @@ where
         self.query.policy_authorization_graph_cache.clear();
     }
 
+    /// Install claims through the same local-admission path used by a trusted
+    /// subscriber connection. This exists only for synthetic topology tests
+    /// that exercise `NodeState`/`PeerState` directly and therefore have no
+    /// serving transport on which to perform normal session admission.
+    #[cfg(feature = "testing")]
+    pub fn admit_test_session_claims(
+        &mut self,
+        identity: AuthorSubject,
+        claims: BTreeMap<String, Value>,
+    ) {
+        self.set_session_claims(identity, claims);
+    }
+
     /// Return the revision of process-local claims for `identity`.
     pub(crate) fn session_claim_revision(&self, identity: AuthorSubject) -> u64 {
         self.session_claim_revisions

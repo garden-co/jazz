@@ -1136,7 +1136,7 @@ mod tests {
             schema,
             DbIdentity {
                 node: NodeUuid::from_bytes([0x73; 16]),
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
             },
         ))
         .unwrap();
@@ -1178,7 +1178,7 @@ mod tests {
 
         let wire = QueuedWireTransport::default();
         wire.push_inbound(encode_message(SyncMessage::SessionClaims {
-            identity: AuthorId::from_bytes([0x74; 16]),
+            identity: AuthorSubject::for_test_bytes([0x74; 16]),
             claims: BTreeMap::new(),
         }));
         let (_wake_tx, wake_rx) = mpsc::unbounded();

@@ -22,16 +22,39 @@ use common::{
 const TEAMS: &str = "teams";
 const MEMBERSHIPS: &str = "team_memberships";
 const DOCUMENTS: &str = "documents";
+const TEST_ISSUER: &str = "urn:jazz:test";
+const WRITER_SUB: &str = "writer";
+const READER_SUB: &str = "reader";
+const MAINTAINER_SUB: &str = "maintainer";
+
 fn writer() -> AuthorSubject {
-    AuthorSubject::authenticated("urn:jazz:test", "writer").unwrap()
+    AuthorSubject::authenticated(TEST_ISSUER, WRITER_SUB).unwrap()
 }
 
 fn reader() -> AuthorSubject {
-    AuthorSubject::authenticated("urn:jazz:test", "reader").unwrap()
+    AuthorSubject::authenticated(TEST_ISSUER, READER_SUB).unwrap()
 }
 
 fn maintainer() -> AuthorSubject {
-    AuthorSubject::authenticated("urn:jazz:test", "maintainer").unwrap()
+    AuthorSubject::authenticated(TEST_ISSUER, MAINTAINER_SUB).unwrap()
+}
+
+fn raw_claims_for(identity: AuthorSubject) -> BTreeMap<String, Value> {
+    let sub = if identity == reader() {
+        READER_SUB
+    } else if identity == maintainer() {
+        MAINTAINER_SUB
+    } else if identity == writer() {
+        WRITER_SUB
+    } else {
+        panic!("unknown authorization re-entry fixture user {identity:?}")
+    };
+    BTreeMap::from([
+        ("iss".to_owned(), Value::String(TEST_ISSUER.to_owned())),
+        ("issuer".to_owned(), Value::String(TEST_ISSUER.to_owned())),
+        ("sub".to_owned(), Value::String(sub.to_owned())),
+        ("user_id".to_owned(), Value::String(sub.to_owned())),
+    ])
 }
 
 fn row(seed: u8) -> RowUuid {
@@ -77,7 +100,7 @@ fn open_db() -> Db<TestStorage> {
     let schema = schema();
     let families = schema.column_families();
     let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-    block_on(Db::open(
+    let db = block_on(Db::open(
         DbConfig::new(
             schema,
             TestStorage::new(&family_refs),
@@ -88,7 +111,11 @@ fn open_db() -> Db<TestStorage> {
         )
         .with_id_source(SeededRowIdSource::new(0x8100)),
     ))
-    .expect("open authorization scope re-entry db")
+    .expect("open authorization scope re-entry db");
+    for identity in [writer(), reader(), maintainer()] {
+        db.set_identity_claims(identity, raw_claims_for(identity));
+    }
+    db
 }
 
 fn opts() -> ReadOpts {
@@ -114,15 +141,21 @@ fn insert_document(db: &Db<TestStorage>, id: RowUuid, team: RowUuid, rank: u64) 
 }
 
 fn insert_membership(db: &Db<TestStorage>, id: RowUuid, team: RowUuid, user: AuthorSubject) {
+    let user_sub = if user == reader() {
+        READER_SUB
+    } else if user == maintainer() {
+        MAINTAINER_SUB
+    } else if user == writer() {
+        WRITER_SUB
+    } else {
+        panic!("unknown authorization re-entry fixture user {user:?}")
+    };
     block_on(db.insert_with_id(
         MEMBERSHIPS,
         id,
         BTreeMap::from([
             ("team".to_owned(), Value::Uuid(team.0)),
-            (
-                "user".to_owned(),
-                Value::String(user.canonical().to_owned()),
-            ),
+            ("user".to_owned(), Value::String(user_sub.to_owned())),
         ]),
     ))
     .expect("insert membership");
