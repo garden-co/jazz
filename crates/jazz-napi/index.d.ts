@@ -126,6 +126,7 @@ export declare class Transport {
   routeAuxiliaryWireFrame(frame: Uint8Array): Uint8Array | null
   recvAuxiliaryWireFrames(): Array<Uint8Array>
   auxiliaryOutboundReady(): boolean
+  nextAuxiliaryRetryDelayMs(): number | null
   sendWireFrame(frame: Uint8Array): void
   sendWireFrames(frames: Array<Uint8Array>): void
   recvWireFrames(): Array<Uint8Array>

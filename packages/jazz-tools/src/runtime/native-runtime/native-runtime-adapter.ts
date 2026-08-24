@@ -423,6 +423,7 @@ export type Transport = {
   routeAuxiliaryWireFrame?(frame: Uint8Array): unknown | Promise<unknown>;
   recvAuxiliaryWireFrames?(): unknown[];
   auxiliaryOutboundReady?(): boolean | Promise<void>;
+  nextAuxiliaryRetryDelayMs?(): number | null;
   tick(): number | Promise<number>;
   updateAuthenticatedClaims?(claims: Record<string, unknown>): void | Promise<void>;
   free?(): void;
@@ -2782,7 +2783,14 @@ export class NativeRuntimeAdapter implements Runtime {
       generation === this.serverConnectionGeneration
     ) {
       const readiness = transport.auxiliaryOutboundReady?.();
-      if (!readiness || typeof readiness === "boolean") return;
+      if (!readiness || typeof readiness === "boolean") {
+        const delay = transport.nextAuxiliaryRetryDelayMs?.();
+        if (delay == null) return;
+        await new Promise<void>((resolve) => setTimeout(resolve, delay));
+        await transport.tick();
+        this.flushAuxiliaryOutbound(transport, carrier, generation);
+        continue;
+      }
       await readiness;
       if (transport !== this.serverTransport || carrier !== this.serverCarrier) return;
       this.flushAuxiliaryOutbound(transport, carrier, generation);
