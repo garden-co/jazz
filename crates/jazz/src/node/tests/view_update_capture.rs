@@ -179,10 +179,19 @@ fn maintained_view_capture_schema() -> JazzSchema {
             .policies(
                 PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
                     "owner",
-                    vec!["claims".to_owned(), "sub".to_owned()],
+                    vec!["user_id".to_owned()],
                 )),
             ),
     ))
+}
+
+fn install_test_provider_claims(core: &mut NodeState<RocksDbStorage>, identity: AuthorSubject) {
+    if matches!(identity, AuthorSubject::Authenticated(_)) {
+        core.set_session_claims(
+            identity,
+            BTreeMap::from([("user_id".to_owned(), Value::Uuid(identity.test_uuid()))]),
+        );
+    }
 }
 
 fn accept_owner_capture_row(
@@ -556,6 +565,7 @@ fn assert_retraction_without_replacement_leak(
 fn seeded_maintained_subscription_view_subscription_capture(seed: u64, identity: AuthorSubject) {
     let schema = maintained_view_capture_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(0x82), schema.clone());
+    install_test_provider_claims(&mut core, identity);
     let alice = user(0xa1);
     let bob = user(0xb2);
     let base = (seed as u8).wrapping_mul(8);
@@ -809,7 +819,7 @@ fn maintained_view_multitable_capture_schema() -> JazzSchema {
     let owner_read = || {
         PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
             "owner",
-            vec!["claims".to_owned(), "sub".to_owned()],
+            vec!["user_id".to_owned()],
         ))
     };
     build_public_test_schema(
@@ -867,7 +877,7 @@ fn recursive_rls_capture_schema() -> JazzSchema {
         &[],
         "teams",
         "id",
-        &["claims", "sub"],
+        &["user_id"],
         "id",
     );
     build_public_test_schema(
@@ -962,6 +972,7 @@ fn delete_recursive_row(
 fn seeded_maintained_subscription_view_recursive_rls_capture(seed: u64, identity: AuthorSubject) {
     let schema = recursive_rls_capture_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(0x82), schema.clone());
+    install_test_provider_claims(&mut core, identity);
     let alice = user(0xa1);
     let parent_team = user(0xc3);
     let other_team = user(0xd4);
@@ -1193,6 +1204,7 @@ fn seeded_maintained_subscription_view_multitable_capture(
 ) {
     let schema = maintained_view_multitable_capture_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(0x82), schema.clone());
+    install_test_provider_claims(&mut core, identity);
     let alice = user(0xa1);
     let bob = user(0xb2);
     let base = (seed as u8).wrapping_mul(16);
@@ -1488,6 +1500,7 @@ fn seeded_maintained_subscription_view_multitable_capture(
 fn seeded_real_peer_maintained_subscription_view_capture(seed: u64, identity: AuthorSubject) {
     let schema = maintained_view_capture_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(0x82), schema.clone());
+    install_test_provider_claims(&mut core, identity);
     let alice = user(0xa1);
     let bob = user(0xb2);
     let base = (seed as u8).wrapping_mul(8);
@@ -1711,6 +1724,7 @@ fn maintained_subscription_view_incremental_tick_avoids_per_reader_rematerializa
     let schema = maintained_view_capture_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(0x82), schema.clone());
     let alice = user(0xa1);
+    install_test_provider_claims(&mut core, alice);
     let bob = user(0xb2);
     let mut parents = BTreeMap::<RowUuid, TxId>::new();
 

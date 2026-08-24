@@ -14,7 +14,7 @@ fn recursive_doc_access_policy() -> PublicPolicyExpr {
         &[],
         "teams",
         "id",
-        &["claims", "sub"],
+        &["user_id"],
         "id",
     )
 }
@@ -72,6 +72,10 @@ fn recursive_reachable_write_policy_allows_direct_and_closure_docs() {
     let schema = recursive_doc_write_policy_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let reader = user(0xb2);
+    core.set_session_claims(
+        reader,
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(reader.test_uuid()))]),
+    );
     let direct_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000001"));
     let closure_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000002"));
     let hidden_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000003"));
@@ -178,6 +182,10 @@ fn recursive_reachable_insert_policy_allows_direct_and_closure_docs() {
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
     let reader = user(0xb2);
+    core.set_session_claims(
+        reader,
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(reader.test_uuid()))]),
+    );
     let direct_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000011"));
     let closure_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000012"));
     let hidden_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000013"));
@@ -263,6 +271,10 @@ fn recursive_reachable_read_policy_claim_seed_rehydrates_through_query_engine() 
     let schema = recursive_doc_policy_schema(recursive_doc_access_policy());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let reader = user(0xb2);
+    core.set_session_claims(
+        reader,
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(reader.test_uuid()))]),
+    );
     let direct_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000001"));
     let closure_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000002"));
     let hidden_doc = RowUuid(uuid::uuid!("10000000-0000-0000-0000-000000000003"));
