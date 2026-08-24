@@ -16,7 +16,6 @@ import {
   uniqueDbName,
   waitForCondition,
   waitForQuery,
-  withTimeout,
 } from "../../../../packages/jazz-tools/tests/browser/support.js";
 import {
   blockJazzServerNetwork,
@@ -36,30 +35,12 @@ const PHASE_COUNT = 6;
 const FAULT_COUNT = 7;
 const TEST_TIMEOUT_MS =
   PHASE_COUNT * PHASE_TIMEOUT_MS + FAULT_COUNT * FAULT_TIMEOUT_MS + FAULT_TIMEOUT_MS + 10_000;
-let unblockNetworkAfterTest: (() => Promise<void>) | undefined;
 
 function topologyTest(name: string, run: () => Promise<void>): void {
   it(name, run, TEST_TIMEOUT_MS);
 }
 
-afterEach(async () => {
-  let networkCleanupError: unknown;
-  try {
-    if (unblockNetworkAfterTest) {
-      await withTimeout(
-        unblockNetworkAfterTest(),
-        FAULT_TIMEOUT_MS,
-        "WorldTour afterEach network unblock timed out",
-      );
-    }
-  } catch (error) {
-    networkCleanupError = error;
-  } finally {
-    unblockNetworkAfterTest = undefined;
-    await ctx.cleanup();
-  }
-  if (networkCleanupError) throw networkCleanupError;
-});
+afterEach(async () => ctx.cleanup());
 
 describe("WorldTour cross-topology itinerary recovery", () => {
   topologyTest("keeps the bounded itinerary convergent through topology faults", async () => {
@@ -88,10 +69,6 @@ describe("WorldTour cross-topology itinerary recovery", () => {
       await unblockJazzServerNetwork(server.serverUrl);
       networkBlocked = false;
     };
-    // The scenario cleanup is the primary path. afterEach invokes this same
-    // idempotent closure again if that bounded cleanup failed or timed out.
-    unblockNetworkAfterTest = ensureServerNetworkUnblocked;
-
     const itineraryQuery = (bandId: string) =>
       app.stops
         .where({
@@ -125,10 +102,13 @@ describe("WorldTour cross-topology itinerary recovery", () => {
             },
           },
           serverNetwork: {
-            disconnect: async () => {
-              // Mark the cleanup obligation before invoking the command: a
-              // partially applied route block must still be undone if the
-              // command rejects after installing it.
+            disconnect: async ({ defer }) => {
+              // Register the inverse before acquiring any fault state. The
+              // harness retains and drains this operation-local obligation if
+              // blocking fails partway through or a later phase times out.
+              defer("unblock WorldTour Jazz server network", async () => {
+                await ensureServerNetworkUnblocked();
+              });
               networkBlocked = true;
               await blockJazzServerNetwork(server!.serverUrl);
             },
@@ -164,7 +144,6 @@ describe("WorldTour cross-topology itinerary recovery", () => {
             },
           },
         },
-        cleanup: ensureServerNetworkUnblocked,
         phases: [
           {
             name: "edge bootstrap and itinerary query shape",
