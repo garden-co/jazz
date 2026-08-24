@@ -677,7 +677,7 @@ impl Subscription {
             .as_mut()
             .ok_or_else(|| napi::Error::from_reason("subscription is closed"))?;
         let published_terminal_layouts = &mut self.published_terminal_layouts;
-        match subscription {
+        let result = match subscription {
             NapiSubscription::Memory {
                 db,
                 stream,
@@ -685,10 +685,7 @@ impl Subscription {
             } => read_subscription_batch(
                 pending_events,
                 || stream.try_next_event(),
-                |event| {
-                    core_block_on(db.hydrate_subscription_event_for_binding(event))
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))
-                },
+                |event| hydrate_subscription_event_for_napi(db, event),
                 published_terminal_layouts,
             ),
             NapiSubscription::Persistent {
@@ -698,12 +695,22 @@ impl Subscription {
             } => read_subscription_batch(
                 pending_events,
                 || stream.try_next_event(),
-                |event| {
-                    core_block_on(db.hydrate_subscription_event_for_binding(event))
-                        .map_err(|error| napi::Error::from_reason(error.to_string()))
-                },
+                |event| hydrate_subscription_event_for_napi(db, event),
                 published_terminal_layouts,
             ),
+        };
+        match result {
+            Ok(events) => Ok(events),
+            Err(NapiSubscriptionBatchError::Retryable(error)) => Err(error),
+            Err(NapiSubscriptionBatchError::Fatal(error)) => {
+                // A malformed/integrity/backend hydration failure cannot be
+                // repaired by replaying the same retained source batch. Drop
+                // the stream exactly once so its cleanup releases the batch
+                // and callers observe one terminal error rather than an
+                // unbounded `readAll` loop.
+                self.inner.take();
+                Err(error)
+            }
         }
     }
 
@@ -724,12 +731,42 @@ impl Subscription {
 /// have no way to recover that prefix. Keep every source event until both
 /// hydration and encoding of the entire batch succeed, so retry is lossless
 /// and preserves source order.
+enum NapiSubscriptionBatchError {
+    /// Peer-backed chunk demand is in flight. Retain the batch for a later
+    /// pull after the binding has driven its auxiliary transport.
+    Retryable(napi::Error),
+    /// Replaying cannot change this error and must not retain memory forever.
+    Fatal(napi::Error),
+}
+
+fn hydrate_subscription_event_for_napi<S>(
+    db: &Rc<CoreDb<S>>,
+    event: &mut CoreSubscriptionEvent,
+) -> std::result::Result<(), NapiSubscriptionBatchError>
+where
+    S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
+{
+    match core_block_on(db.hydrate_subscription_event_for_binding_outcome(event)) {
+        Ok(()) => Ok(()),
+        Err(jazz::db::BindingHydrationError::ChunkUnavailable) => {
+            Err(NapiSubscriptionBatchError::Retryable(
+                napi::Error::from_reason("large-value chunk is not locally available"),
+            ))
+        }
+        Err(jazz::db::BindingHydrationError::Error(error)) => Err(
+            NapiSubscriptionBatchError::Fatal(napi::Error::from_reason(error.to_string())),
+        ),
+    }
+}
+
 fn read_subscription_batch<F>(
     pending_events: &mut VecDeque<CoreSubscriptionEvent>,
     mut next: F,
-    mut hydrate: impl FnMut(&mut CoreSubscriptionEvent) -> napi::Result<()>,
+    mut hydrate: impl FnMut(
+        &mut CoreSubscriptionEvent,
+    ) -> std::result::Result<(), NapiSubscriptionBatchError>,
     published_terminal_layouts: &mut HashSet<String>,
-) -> napi::Result<Vec<SubscriptionEvent>>
+) -> std::result::Result<Vec<SubscriptionEvent>, NapiSubscriptionBatchError>
 where
     F: FnMut() -> Option<CoreSubscriptionEvent>,
 {
@@ -741,7 +778,9 @@ where
     }
     for event in &mut batch {
         if let Err(error) = hydrate(event) {
-            pending_events.extend(batch);
+            if matches!(error, NapiSubscriptionBatchError::Retryable(_)) {
+                pending_events.extend(batch);
+            }
             return Err(error);
         }
     }
@@ -752,7 +791,7 @@ where
             Ok(event) => output.push(event),
             Err(error) => {
                 pending_events.extend(batch);
-                return Err(error);
+                return Err(NapiSubscriptionBatchError::Fatal(error));
             }
         }
     }
