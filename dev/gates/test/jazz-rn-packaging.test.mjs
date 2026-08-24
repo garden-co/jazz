@@ -59,10 +59,7 @@ test("the canonical Expo scaffold really prebuilds both relay-only platforms", (
     androidAutolink.dependencies["jazz-rn"].platforms.android.packageInstance,
     "new JazzRelayPackage()",
   );
-  assert.match(
-    iosAutolink.dependencies["jazz-rn"].platforms.ios.podspecPath,
-    /JazzRn\.podspec$/,
-  );
+  assert.match(iosAutolink.dependencies["jazz-rn"].platforms.ios.podspecPath, /JazzRn\.podspec$/);
 
   const expoRoot = new URL("../../../examples/todo-client-localfirst-expo/", import.meta.url);
   const androidProperties = readFile(new URL("android/gradle.properties", expoRoot), "utf8");
@@ -84,17 +81,17 @@ test("the canonical Expo scaffold really prebuilds both relay-only platforms", (
 test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts", async () => {
   const [podspec, androidPackage, androidBuild, iosRelay, packageRoot, rootCargo, legacyConfig] =
     await Promise.all([
-    readFile(new URL("../../../crates/jazz-rn/JazzRn.podspec", import.meta.url), "utf8"),
-    readFile(
-      new URL(
-        "../../../crates/jazz-rn/android/src/main/java/com/jazzrn/JazzRelayPackage.kt",
-        import.meta.url,
+      readFile(new URL("../../../crates/jazz-rn/JazzRn.podspec", import.meta.url), "utf8"),
+      readFile(
+        new URL(
+          "../../../crates/jazz-rn/android/src/main/java/com/jazzrn/JazzRelayPackage.kt",
+          import.meta.url,
+        ),
+        "utf8",
       ),
-      "utf8",
-    ),
-    readFile(new URL("../../../crates/jazz-rn/android/build.gradle", import.meta.url), "utf8"),
-    readFile(new URL("../../../crates/jazz-rn/ios/JazzRelay.mm", import.meta.url), "utf8"),
-    readFile(new URL("../../../crates/jazz-rn/src/index.tsx", import.meta.url), "utf8"),
+      readFile(new URL("../../../crates/jazz-rn/android/build.gradle", import.meta.url), "utf8"),
+      readFile(new URL("../../../crates/jazz-rn/ios/JazzRelay.mm", import.meta.url), "utf8"),
+      readFile(new URL("../../../crates/jazz-rn/src/index.tsx", import.meta.url), "utf8"),
       readFile(new URL("../../../Cargo.toml", import.meta.url), "utf8"),
       readFile(new URL("../../../crates/jazz-rn/ubrn.config.yaml", import.meta.url), "utf8").catch(
         () => null,
