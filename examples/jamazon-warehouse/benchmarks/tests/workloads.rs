@@ -5,7 +5,7 @@ fn pending_order_access_path_is_bounded() {
     assert_eq!(fixture.warehouse_district_count(), 2);
     assert_eq!(fixture.district_customer_count(), 1);
     assert_eq!(fixture.pending_order_count(), 20);
-    assert_eq!(fixture.low_stock_count(), 1);
+    assert_eq!(fixture.low_stock_count(), 2);
 }
 
 #[test]
@@ -26,6 +26,17 @@ fn exclusive_purchase_commits_every_operational_row_together() {
     assert_eq!(fixture.order_count(), 3);
     assert_eq!(fixture.order_line_count(), 1);
     assert_eq!(fixture.payment_count(), 1);
+    assert_eq!(
+        fixture.purchase_artifacts(),
+        jazz_example_jamazon_warehouse_benchmark::PurchaseArtifacts {
+            line_quantity: 3,
+            line_amount_cents: 7_500,
+            payment_amount_cents: 7_500,
+            line_references_item: true,
+            payment_references_customer: true,
+            payment_references_order: true,
+        }
+    );
 }
 
 #[test]

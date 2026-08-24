@@ -54,6 +54,8 @@ impl Fixture {
         let stock = row(5, 0);
         let adequate_item = row(4, 1);
         let adequate_stock = row(5, 1);
+        let low_item = row(4, 2);
+        let low_stock = row(5, 2);
         insert(
             &db,
             "warehouses",
@@ -83,6 +85,27 @@ impl Fixture {
                 ("item_id", Value::Uuid(adequate_item.0)),
                 ("on_hand", Value::I32(20)),
                 ("reorder_level", Value::I32(5)),
+            ],
+        );
+        insert(
+            &db,
+            "items",
+            low_item,
+            [
+                ("sku", Value::String("JAM-003".into())),
+                ("name", Value::String("Picks".into())),
+                ("unit_price_cents", Value::I32(500)),
+            ],
+        );
+        insert(
+            &db,
+            "stock",
+            low_stock,
+            [
+                ("warehouse_id", Value::Uuid(warehouse.0)),
+                ("item_id", Value::Uuid(low_item.0)),
+                ("on_hand", Value::I32(2)),
+                ("reorder_level", Value::I32(4)),
             ],
         );
         insert(
@@ -212,14 +235,14 @@ impl Fixture {
             .expect("prepare all payments");
         // Jazz does not yet lower `on_hand < reorder_level` field-to-field
         // predicates (the capability report says exactly that). Keep the
-        // bounded indexed candidate read honest and apply that predicate here
-        // until the query engine gains the missing lowering.
+        // complete candidate read honest and apply that predicate here until
+        // #1864 adds the missing lowering. Do not limit before this filter:
+        // correctness wins over the eventual indexed scaling path.
         let low_stock_candidates = db
             .prepare_query(
                 &Query::from("stock")
                     .filter(eq(col("warehouse_id"), lit(warehouse.0)))
-                    .order_by("on_hand", OrderDirection::Asc)
-                    .limit(20),
+                    .order_by("on_hand", OrderDirection::Asc),
             )
             .expect("prepare low-stock candidates");
         Self {
@@ -278,8 +301,17 @@ impl Fixture {
     ) -> Result<PurchaseReceipt, &'static str> {
         block_on(async {
             let tx = self.db.exclusive_tx().await.map_err(|_| "open purchase")?;
+            let idempotency_lookup = self
+                .db
+                .prepare_query(
+                    &Query::from("orders")
+                        .filter(eq(col("warehouse_id"), lit(self.warehouse.0)))
+                        .filter(eq(col("idempotency_key"), lit(request_key)))
+                        .limit(1),
+                )
+                .map_err(|_| "prepare idempotency lookup")?;
             let prior_orders = tx
-                .all_prepared(&self.all_orders)
+                .all_prepared(&idempotency_lookup)
                 .await
                 .map_err(|_| "read orders")?;
             if let Some(order) = prior_orders.into_iter().find(|order| {
@@ -441,6 +473,41 @@ impl Fixture {
     pub fn payment_count(&self) -> usize {
         self.db.read(&self.all_payments).expect("payments").len()
     }
+    pub fn purchase_artifacts(&self) -> PurchaseArtifacts {
+        let line = self
+            .db
+            .read(&self.all_order_lines)
+            .expect("order lines")
+            .pop()
+            .expect("order line exists");
+        let payment = self
+            .db
+            .read(&self.all_payments)
+            .expect("payments")
+            .pop()
+            .expect("payment exists");
+        let order_id = match line.cell_at(0) {
+            Some(Value::Uuid(id)) => id,
+            other => panic!("invalid order-line relation: {other:?}"),
+        };
+        PurchaseArtifacts {
+            line_quantity: match line.cell_at(2) {
+                Some(Value::I32(value)) => value,
+                other => panic!("invalid line quantity: {other:?}"),
+            },
+            line_amount_cents: match line.cell_at(3) {
+                Some(Value::I32(value)) => value,
+                other => panic!("invalid line amount: {other:?}"),
+            },
+            payment_amount_cents: match payment.cell_at(2) {
+                Some(Value::I32(value)) => value,
+                other => panic!("invalid payment amount: {other:?}"),
+            },
+            line_references_item: line.cell_at(1) == Some(Value::Uuid(self.item.0)),
+            payment_references_customer: payment.cell_at(0) == Some(Value::Uuid(self.customer.0)),
+            payment_references_order: matches!(payment.cell_at(1), Some(Value::Nullable(Some(value))) if *value == Value::Uuid(order_id)),
+        }
+    }
     pub fn customer_balance(&self) -> i32 {
         let customer = block_on(self.db.exclusive_tx()).expect("open customer read");
         let cells = block_on(customer.read("customers", self.customer))
@@ -482,6 +549,16 @@ impl Fixture {
 pub struct PurchaseReceipt {
     pub order_number: i32,
     pub total_cents: i32,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct PurchaseArtifacts {
+    pub line_quantity: i32,
+    pub line_amount_cents: i32,
+    pub payment_amount_cents: i32,
+    pub line_references_item: bool,
+    pub payment_references_customer: bool,
+    pub payment_references_order: bool,
 }
 
 fn schema() -> JazzSchema {
@@ -531,7 +608,8 @@ fn schema() -> JazzSchema {
                     .column("status", ColumnType::Text)
                     .column("total_cents", ColumnType::Integer)
                     .column("idempotency_key", ColumnType::Text)
-                    .index_only(["district_id", "status", "order_number", "idempotency_key"]),
+                    .index_only(["warehouse_id", "idempotency_key"])
+                    .index_only(["district_id", "status", "order_number"]),
             )
             .table(
                 TableSchemaBuilder::new("order_lines")
@@ -543,7 +621,7 @@ fn schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("payments")
                     .fk_column("customer_id", "customers")
-                    .nullable_column("order_id", ColumnType::Uuid)
+                    .nullable_fk_column("order_id", "orders")
                     .column("amount_cents", ColumnType::Integer)
                     .column("idempotency_key", ColumnType::Text),
             )
