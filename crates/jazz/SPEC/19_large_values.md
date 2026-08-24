@@ -143,14 +143,22 @@ Groove prepares descriptor + chunks without visible mutation
 The row mutation remains the atomic Jazz value/conflict/history operation. Blob
 staging before it is intentionally not atomic: unreachable immutable chunks are
 harmless and expire. The row MUST NOT publish unless its exact root is available
-and Groove can validate the bounded tree/descriptor. A failed/rejected mutation
-publishes neither the row version nor root reachability.
+and Groove can validate the bounded tree/descriptor. Finalization itself is
+that admission boundary: regardless of prior staging call order, it validates
+the complete authenticated reachable tree and final logical scalar, and binds
+the pending upload to the exact canonical descriptor before issuing a receipt.
+A pending upload's chunk journal or accounting cannot be reused to finalize a
+different descriptor. A failed/rejected mutation publishes neither the row
+version nor root reachability.
 
 Groove persists timestamped retainer claims keyed by the completed descriptor.
 After ordinary Jazz write authorization, the same Groove physical-record batch
 that inserts the owner version consumes any live matching claim and installs a
-durable root reference. Claims for the same immutable descriptor are fungible;
-upload-attempt identity is neither canonical row state nor publication authority.
+durable root reference. Claims for the same immutable descriptor are fungible; a
+descriptor-keyed concurrent upload may reuse already-local exact nodes after
+its own pending record is bound to that descriptor. Upload-attempt identity is
+neither canonical row state nor publication authority, and it cannot authorize
+a different descriptor.
 A rejected transaction consumes nothing, and its unclaimed retainer expires by
 ordinary TTL maintenance. Acceptance is never a separate transaction before or
 after row publication.

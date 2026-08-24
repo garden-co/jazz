@@ -309,6 +309,119 @@ async fn incomplete_push_upload_is_restart_persistent_and_reclaimable() {
     assert_eq!(chunks.len(), 0);
 }
 
+// This facade-level test is intentionally below Jazz's public mutation API:
+// only a hostile peer can call the raw chunk/finalization split directly. It
+// proves finalization is its own admission boundary rather than trusting the
+// earlier staging call order.
+#[futures_test::test]
+async fn raw_finalization_rejects_dishonest_or_unrelated_descriptors_and_survives_reopen() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::String),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema.clone(), storage.clone())
+        .await
+        .unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::String,
+        b"trusted upload",
+        |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
+    )
+    .unwrap();
+    let unrelated = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::String,
+        b"other upload",
+        |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
+    )
+    .unwrap();
+    let upload_id = crate::large_values::StagedLargeValueId([0x84; 16]);
+    let unrelated_upload_id = crate::large_values::StagedLargeValueId([0x85; 16]);
+    database
+        .stage_large_value_chunk_batch(upload_id, prepared.value_ref.kind, prepared.staged_chunks)
+        .await
+        .unwrap();
+    database
+        .stage_large_value_chunk_batch(
+            unrelated_upload_id,
+            unrelated.value_ref.kind,
+            unrelated.staged_chunks,
+        )
+        .await
+        .unwrap();
+
+    let mut dishonest_metrics = prepared.value_ref.clone();
+    dishonest_metrics.byte_length += 1;
+    dishonest_metrics.utf16_length = Some(dishonest_metrics.utf16_length.unwrap() + 1);
+    let mut dishonest_hash = prepared.value_ref.clone();
+    dishonest_hash.logical_hash = crate::large_values::ContentHash([0x21; 32]);
+    let mut dishonest_tail = prepared.value_ref.clone();
+    dishonest_tail.byte_length += 1;
+    dishonest_tail.utf16_length = Some(dishonest_tail.utf16_length.unwrap() + 1);
+    dishonest_tail
+        .edit_tail
+        .push(crate::large_values::ReplaceEdit {
+            offset: prepared.value_ref.byte_length,
+            delete_length: 0,
+            insert_bytes: vec![0xff],
+            utf16_offset: prepared.value_ref.utf16_length.unwrap(),
+            delete_utf16_length: 0,
+            insert_utf16_length: 1,
+        });
+
+    for descriptor in [
+        dishonest_metrics,
+        dishonest_hash,
+        dishonest_tail,
+        unrelated.value_ref,
+    ] {
+        assert!(
+            database
+                .finalize_large_value_upload(upload_id, descriptor)
+                .await
+                .is_err(),
+            "a raw finalizer must reject every malformed or unrelated descriptor"
+        );
+    }
+    assert_eq!(
+        database.pending_large_value_uploads().await.unwrap().len(),
+        2,
+        "a rejected final descriptor leaves the real pending upload retryable"
+    );
+    assert!(database.staged_large_values().await.unwrap().is_empty());
+
+    // The malicious attempts must not poison a durable upload. Reopening also
+    // proves that the unbound journal was not accidentally promoted.
+    drop(database);
+    let mut reopened = Database::new(schema, storage).await.unwrap();
+    reopened.set_chunk_storage(chunks);
+    let staged = reopened
+        .finalize_large_value_upload(upload_id, prepared.value_ref)
+        .await
+        .unwrap();
+    assert!(
+        reopened
+            .pending_large_value_uploads()
+            .await
+            .unwrap()
+            .iter()
+            .all(|upload| upload.id != upload_id)
+    );
+    assert!(
+        reopened
+            .staged_large_values()
+            .await
+            .unwrap()
+            .contains(&staged)
+    );
+}
+
 // The chunk backend is deliberately separate from metadata storage here. Each
 // injected backend error represents a process loss at the exact boundary after
 // metadata intent is durable, but before the indicated next blob put returns.
