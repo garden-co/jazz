@@ -46,7 +46,21 @@ afterEach(restoreNetworkAndCleanup);
 
 const trackNames = ["Kick", "Snare", "Closed hat", "Bass"];
 const stepsPerTrack = 16;
-const OUTER_TIMEOUT_MS = 6 * 25_000 + 5 * 15_000 + 10_000 + 15_000;
+const PHASE_TIMEOUT_MS = 25_000;
+const FAULT_TIMEOUT_MS = 15_000;
+const CLEANUP_TIMEOUT_MS = 10_000;
+const PHASE_COUNT = 6;
+const FAULT_COUNT = 5;
+const COMPENSATION_COUNT = 1;
+const SCHEDULER_COUNT = 1;
+const OUTER_BUFFER_MS = 15_000;
+const OUTER_TIMEOUT_MS =
+  PHASE_COUNT * PHASE_TIMEOUT_MS +
+  FAULT_COUNT * FAULT_TIMEOUT_MS +
+  COMPENSATION_COUNT * CLEANUP_TIMEOUT_MS +
+  CLEANUP_TIMEOUT_MS +
+  SCHEDULER_COUNT * FAULT_TIMEOUT_MS +
+  OUTER_BUFFER_MS;
 const TOPOLOGY_TEST_NAME =
   "converges sequencer edits, retryable transport, reconnect, reopen, and revocation";
 declare const __JAZZ_EXAMPLE_TOPOLOGY_SEED__: string;
@@ -89,8 +103,8 @@ describe("Wequencer cross-topology recovery", () => {
         id: "wequencer-browser-edge-core-recovery",
         topology: ["browser", "edge", "core"],
         seed,
-        phaseTimeoutMs: 25_000,
-        faultTimeoutMs: 15_000,
+        phaseTimeoutMs: PHASE_TIMEOUT_MS,
+        faultTimeoutMs: FAULT_TIMEOUT_MS,
         replay: `JAZZ_EXAMPLE_TOPOLOGY_SEED=${seed} pnpm --dir examples/wequencer/apps/next-betterauth test:browser:focused -- tests/browser/topology.e2e.test.ts`,
         envelopeSchedulers: [scheduler],
         targets: {
@@ -509,8 +523,8 @@ describe("Wequencer cross-topology recovery", () => {
             },
           },
         ],
-        cleanup: restoreNetworkAndCleanup,
-        cleanupTimeoutMs: 10_000,
+        cleanup: async () => ctx.cleanup(),
+        cleanupTimeoutMs: CLEANUP_TIMEOUT_MS,
       },
       browserTopologyReporter,
     );
