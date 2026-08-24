@@ -141,14 +141,6 @@ type NativeDb = {
     cells: Uint8Array,
     updatedAtMs?: number | null,
   ): Write;
-  insertWithIdEncodedAsync?(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    author?: Uint8Array,
-    updatedAtMs?: number,
-    branch?: unknown,
-  ): Promise<Write>;
   beginStreamingMutationEncoded?(
     table: string,
     rowId: Uint8Array,
@@ -962,13 +954,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const updatedAtMs = effectiveUpdatedAtMs(_writeContext);
     const branchView = branchViewFromWriteContext(_writeContext);
     const tx = this.currentTx(_writeContext, "Insert");
-    const oversizedScalar = rowContainsOversizedScalar(this.table(table), values);
     if (tx) {
-      if (oversizedScalar && this.db.insertWithIdEncodedAsync) {
-        throw new Error(
-          "Oversized values cannot be inserted inside a WASM transaction; use insertStreaming outside the transaction",
-        );
-      }
       const nativeTx = this.txForWrite(tx, writeIdentity);
       if (branchView) {
         requireBranchMethod(
@@ -986,27 +972,6 @@ export class NativeRuntimeAdapter implements Runtime {
         kind: "staged",
         openBatchId: txIdFromContext(_writeContext)!,
       };
-    }
-    if (oversizedScalar) {
-      const insertAsync = this.db.insertWithIdEncodedAsync;
-      if (insertAsync) {
-        const write = insertAsync.call(
-          this.db,
-          table,
-          rowId,
-          cells,
-          writeIdentity,
-          updatedAtMs ?? undefined,
-          branchView?.head,
-        );
-        const batchId = write.then((completed) => {
-          const receipt = this.finishMutation(completed);
-          if (receipt.kind !== "committed") throw new Error("Async insert did not commit");
-          return receipt.batchId;
-        });
-        const row = this.rowStateFromValues(table, rowId, values);
-        return { id: row.id, values: row.values, kind: "committed", batchId };
-      }
     }
     const write = writeOrNormalizeRejection("Insert", () =>
       branchView
@@ -1455,6 +1420,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.pendingTxs.delete(openBatchId);
     this.completedTxs.set(openBatchId, { kind: pending.kind, state: "committed" });
     this.pumpSubscriptions();
+    this.scheduleCoreTick();
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
     const batchId = recordWrite(write, this.writes);
@@ -1471,6 +1437,11 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!write) {
       throw new Error(`Wait for transaction failed: unknown transaction ${batchId}`);
     }
+    // A host-side write can return at the resident local-lane boundary while
+    // its owned storage work is queued.  Waiting is an explicit observation
+    // point, so also drive that queued core work rather than depending on an
+    // unrelated transport wakeup to make local durability observable.
+    await this.runCoreTick();
     for (;;) {
       this.throwServerTransportErrorForTier(tier);
       const observedServerWorkEpoch = this.serverTransportWorkEpoch;
@@ -1874,6 +1845,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const batchId = recordWrite(write, this.writes);
     if (this.nonDurableClient) this.trackLocalSettlement(batchId);
     this.pumpSubscriptions();
+    this.scheduleCoreTick();
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
     const row = this.rowStateFromValues(table, rowId, values);
@@ -1884,6 +1856,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const batchId = recordWrite(write, this.writes);
     if (this.nonDurableClient) this.trackLocalSettlement(batchId);
     this.pumpSubscriptions();
+    this.scheduleCoreTick();
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
     return { kind: "committed", batchId };
@@ -2973,52 +2946,6 @@ export class NativeRuntimeAdapter implements Runtime {
       if (waiter.active) waiter.resolve();
     }
   }
-}
-
-const LARGE_VALUE_INLINE_BYTES = 64 * 1024;
-
-function rowContainsOversizedScalar(
-  definition: { columns: ColumnDescriptor[] },
-  values: InsertValues,
-): boolean {
-  return definition.columns.some((column) => {
-    const value = values[column.name];
-    if (!value || value.type === "Null") return false;
-    switch (column.column_type.type) {
-      case "Text":
-      case "Json":
-        return (
-          value.type === "Text" &&
-          oversizedScalarUtf8ByteLength(value.value) > LARGE_VALUE_INLINE_BYTES
-        );
-      case "Bytea":
-        return value.type === "Bytea" && value.value.byteLength > LARGE_VALUE_INLINE_BYTES;
-      default:
-        return false;
-    }
-  });
-}
-
-function oversizedScalarUtf8ByteLength(value: string): number {
-  let bytes = 0;
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code < 0x80) bytes += 1;
-    else if (code < 0x800) bytes += 2;
-    else if (code >= 0xd800 && code <= 0xdbff && index + 1 < value.length) {
-      const next = value.charCodeAt(index + 1);
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        bytes += 4;
-        index += 1;
-      } else {
-        bytes += 3;
-      }
-    } else {
-      bytes += 3;
-    }
-    if (bytes > LARGE_VALUE_INLINE_BYTES) return bytes;
-  }
-  return bytes;
 }
 
 function closeSubscriptionSourceState(subscription: SubscriptionState): void {

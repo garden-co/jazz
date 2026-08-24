@@ -46,7 +46,315 @@ fn large_value_now_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+/// Cloneable ownership of Groove's durable large-value lifecycle.  Unlike a
+/// `Database` borrow this can travel with an [`AppliedBatch`], allowing the
+/// already-visible resident publication to suspend on journal/blob work while
+/// ordinary local reads continue.
+#[derive(Clone)]
+pub(crate) struct LargeValueStager {
+    storage: Rc<LayoutStorage>,
+    chunk_storage: Rc<dyn crate::chunks::ChunkStorage>,
+    lifecycle: Rc<AsyncMutex<()>>,
+}
+
+impl LargeValueStager {
+    pub(crate) async fn stage_and_finalize_resident(
+        &self,
+        stage: &crate::large_values::ResidentLargeValueStage,
+        resident_chunks: &crate::chunks::ResidentChunkStorage,
+    ) -> Result<(), Error> {
+        let chunks = stage
+            .node_refs()
+            .iter()
+            .map(|node_ref| resident_chunks.staged_chunk(node_ref))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(crate::chunks::ChunkError::from)
+            .map_err(crate::ivm::runtime::IvmRuntimeError::from)
+            .map_err(Error::from)?;
+        self.stage_chunk_batch(stage.id(), stage.value_ref().kind, chunks)
+            .await?;
+        self.finalize_with_id(stage.id(), stage.value_ref().clone())
+            .await?;
+        Ok(())
+    }
+
+    /// The shared upload journal path.  Metadata intent commits before a
+    /// separate blob put, so recovery/expiry can find every possible blob.
+    async fn stage_chunk_batch(
+        &self,
+        upload_id: crate::large_values::StagedLargeValueId,
+        kind: crate::large_values::LargeValueKind,
+        chunks: Vec<crate::large_values::StagedChunk>,
+    ) -> Result<(), Error> {
+        let _lifecycle = self.lifecycle.lock().await;
+        crate::large_values::validate_staged_chunk_batch(kind, &chunks)
+            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+        let key = pending_large_value_upload_key(upload_id);
+        let mut upload = match self
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
+            .await?
+        {
+            Some(encoded) => postcard::from_bytes(&encoded).map_err(|error| {
+                Error::InvalidLargeValueMetadata(format!(
+                    "cannot decode pending large-value upload: {error}"
+                ))
+            })?,
+            None => crate::large_values::PendingLargeValueUpload {
+                id: upload_id,
+                accounting: crate::large_values::StagedLargeValueAccounting::default(),
+                created_at_ms: large_value_now_ms(),
+                chunks: Vec::new(),
+            },
+        };
+        let mut new_members = BTreeSet::new();
+        for chunk in &chunks {
+            if !upload.chunks.contains(&chunk.node_ref) {
+                upload.accounting.encoded_bytes = upload
+                    .accounting
+                    .encoded_bytes
+                    .checked_add(chunk.encoded.len() as u64)
+                    .ok_or_else(|| {
+                        Error::InvalidLargeValueMetadata("upload byte count overflow".to_owned())
+                    })?;
+                upload.accounting.node_count =
+                    upload.accounting.node_count.checked_add(1).ok_or_else(|| {
+                        Error::InvalidLargeValueMetadata("upload node count overflow".to_owned())
+                    })?;
+                upload.chunks.push(chunk.node_ref.clone());
+                new_members.insert(chunk.node_ref.clone());
+            }
+        }
+        let mut operations = vec![OwnedWriteOperation::Set {
+            cf: LARGE_VALUE_METADATA_CF.to_owned(),
+            key,
+            value: postcard::to_allocvec(&upload).map_err(|error| {
+                Error::InvalidLargeValueMetadata(format!(
+                    "cannot encode pending large-value upload: {error}"
+                ))
+            })?,
+        }];
+        for chunk in &chunks {
+            if !new_members.remove(&chunk.node_ref) {
+                continue;
+            }
+            let node_key = large_value_node_key(&chunk.node_ref)?;
+            let metadata = match self
+                .storage
+                .get(LARGE_VALUE_METADATA_CF.to_owned(), node_key.clone())
+                .await?
+            {
+                Some(encoded) => {
+                    let mut metadata: LargeValueNodeReferences = postcard::from_bytes(&encoded)
+                        .map_err(|error| {
+                            Error::InvalidLargeValueMetadata(format!(
+                                "cannot decode pushed chunk metadata: {error}"
+                            ))
+                        })?;
+                    metadata.upload_references =
+                        metadata.upload_references.checked_add(1).ok_or_else(|| {
+                            Error::InvalidLargeValueMetadata(
+                                "upload reference count overflow".to_owned(),
+                            )
+                        })?;
+                    metadata
+                }
+                None => {
+                    let node: crate::large_values::ChunkNode = postcard::from_bytes(&chunk.encoded)
+                        .map_err(|error| {
+                            Error::InvalidLargeValueMetadata(format!(
+                                "cannot decode pushed chunk metadata: {error}"
+                            ))
+                        })?;
+                    LargeValueNodeReferences {
+                        references: 0,
+                        upload_references: 1,
+                        children: match node {
+                            crate::large_values::ChunkNode::Leaf { .. } => Vec::new(),
+                            crate::large_values::ChunkNode::Branch { children, .. } => {
+                                children.into_iter().map(|child| child.node_ref).collect()
+                            }
+                        },
+                    }
+                }
+            };
+            operations.push(OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: node_key,
+                value: postcard::to_allocvec(&metadata).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot encode pushed chunk metadata: {error}"
+                    ))
+                })?,
+            });
+        }
+        self.storage.write_many(operations).await?;
+        self.chunk_storage
+            .stage(chunks)
+            .await
+            .map_err(crate::chunks::ChunkError::from)
+            .map_err(crate::ivm::runtime::IvmRuntimeError::from)
+            .map_err(Error::from)
+            .map(|_| ())
+    }
+
+    /// Promote a fully journaled upload to the ordinary persisted staging
+    /// receipt.  This is deliberately the same root/node accounting lifecycle
+    /// used by remote and streaming uploads.
+    async fn finalize_with_id(
+        &self,
+        id: crate::large_values::StagedLargeValueId,
+        value_ref: crate::large_values::LargeValueRef,
+    ) -> Result<(), Error> {
+        let _lifecycle = self.lifecycle.lock().await;
+        let pending_key = pending_large_value_upload_key(id);
+        let encoded = self
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), pending_key.clone())
+            .await?
+            .ok_or_else(|| {
+                Error::InvalidLargeValueMetadata("pending upload is missing".to_owned())
+            })?;
+        let upload: crate::large_values::PendingLargeValueUpload = postcard::from_bytes(&encoded)
+            .map_err(|error| {
+            Error::InvalidLargeValueMetadata(format!(
+                "cannot decode pending large-value upload: {error}"
+            ))
+        })?;
+        let staged = crate::large_values::StagedLargeValue {
+            id,
+            value_ref: value_ref.clone(),
+            accounting: upload.accounting,
+            created_at_ms: large_value_now_ms(),
+        };
+        let root_key = large_value_root_key(&value_ref.root)?;
+        let mut root = match self
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), root_key.clone())
+            .await?
+        {
+            Some(encoded) => postcard::from_bytes(&encoded).map_err(|error| {
+                Error::InvalidLargeValueMetadata(format!("cannot decode root references: {error}"))
+            })?,
+            None => LargeValueRootReferences::default(),
+        };
+        let activate_root = root.durable == 0 && root.staged == 0;
+        root.staged = root.staged.checked_add(1).ok_or_else(|| {
+            Error::InvalidLargeValueMetadata("staged root count overflow".to_owned())
+        })?;
+        if activate_root {
+            root.node_active = true;
+        }
+        let mut operations = vec![
+            OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: staged_large_value_key(id),
+                value: postcard::to_allocvec(&staged).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!("cannot encode staged root: {error}"))
+                })?,
+            },
+            OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: root_key,
+                value: postcard::to_allocvec(&root).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot encode root references: {error}"
+                    ))
+                })?,
+            },
+            OwnedWriteOperation::Delete {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: pending_key,
+            },
+        ];
+        let mut updates = BTreeMap::<crate::large_values::NodeRef, LargeValueNodeReferences>::new();
+        let mut pending = if activate_root {
+            vec![value_ref.root.clone()]
+        } else {
+            Vec::new()
+        };
+        while let Some(node_ref) = pending.pop() {
+            let mut metadata = if let Some(metadata) = updates.remove(&node_ref) {
+                metadata
+            } else {
+                let node_key = large_value_node_key(&node_ref)?;
+                let encoded = self
+                    .storage
+                    .get(LARGE_VALUE_METADATA_CF.to_owned(), node_key)
+                    .await?
+                    .ok_or_else(|| {
+                        Error::InvalidLargeValueMetadata(
+                            "journaled node metadata is missing".to_owned(),
+                        )
+                    })?;
+                postcard::from_bytes(&encoded).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot decode node references: {error}"
+                    ))
+                })?
+            };
+            let activate_children = metadata.references == 0;
+            metadata.references = metadata.references.checked_add(1).ok_or_else(|| {
+                Error::InvalidLargeValueMetadata("node reference count overflow".to_owned())
+            })?;
+            if activate_children {
+                pending.extend(metadata.children.iter().cloned());
+            }
+            updates.insert(node_ref, metadata);
+        }
+        // Release the upload retainers in the same metadata write as receipt
+        // registration; the final row batch then consumes the receipt.
+        for node_ref in upload.chunks {
+            let mut metadata = if let Some(metadata) = updates.remove(&node_ref) {
+                metadata
+            } else {
+                let encoded = self
+                    .storage
+                    .get(
+                        LARGE_VALUE_METADATA_CF.to_owned(),
+                        large_value_node_key(&node_ref)?,
+                    )
+                    .await?
+                    .ok_or_else(|| {
+                        Error::InvalidLargeValueMetadata(
+                            "upload node metadata is missing".to_owned(),
+                        )
+                    })?;
+                postcard::from_bytes(&encoded).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot decode upload node metadata: {error}"
+                    ))
+                })?
+            };
+            metadata.upload_references =
+                metadata.upload_references.checked_sub(1).ok_or_else(|| {
+                    Error::InvalidLargeValueMetadata("upload reference count underflow".to_owned())
+                })?;
+            updates.insert(node_ref, metadata);
+        }
+        for (node_ref, metadata) in updates {
+            operations.push(OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: large_value_node_key(&node_ref)?,
+                value: postcard::to_allocvec(&metadata).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot encode node references: {error}"
+                    ))
+                })?,
+            });
+        }
+        self.storage.write_many(operations).await?;
+        Ok(())
+    }
 impl Database {
+    pub(crate) fn large_value_stager(&self) -> LargeValueStager {
+        LargeValueStager {
+            storage: Rc::clone(&self.storage),
+            chunk_storage: Rc::clone(&self.chunk_storage),
+            lifecycle: Rc::clone(&self.large_value_lifecycle),
+        }
+    }
+
     /// Open a schema-aware database over an ordered key/value store.
     ///
     /// `Database::new` does not create storage column families itself. The

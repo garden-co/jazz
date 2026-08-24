@@ -2684,7 +2684,12 @@ where
             // own suspendable persistence and later peer visibility.
             self.refresh_subscriptions().await?;
             self.node.queue_local_publication(published, None);
-            DurabilityTier::None
+            // A resident publication is the local-lane commit boundary even
+            // while its owned durable persistence may suspend.  `wait(Local)`
+            // therefore observes the same immediate contract as an inline
+            // write; edge/global tiers remain pending until the queued receipt
+            // settles and normal sync progresses.
+            DurabilityTier::Local
         } else {
             self.finish_publication_outcome(PublicationOutcome::published((), published))
                 .await?;
@@ -2713,11 +2718,16 @@ where
                     self.refresh_subscriptions().await?;
                     let mut persisted = Vec::with_capacity(publications.len());
                     for publication in &publications {
-                        persisted.push((publication.tx_id(), publication.persist().await));
+                        persisted.push((
+                            publication.tx_id(),
+                            publication.retracts_on_failed_persistence(),
+                            publication.persist().await,
+                        ));
                     }
                     let mut node = self.node.node.lock().await;
-                    for (tx_id, persistence) in persisted {
-                        node.settle_published_transaction(tx_id, persistence)?;
+                    for (tx_id, retract_on_failure, persistence) in persisted {
+                        node.settle_published_transaction(tx_id, persistence, retract_on_failure)
+                            .await?;
                     }
                 }
                 let Some(message) = post_settlement_work.pop_front() else {

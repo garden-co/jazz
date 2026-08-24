@@ -537,6 +537,9 @@ impl Database {
             tick,
             notifications_deferred: defer_notifications_until_durable,
             retractable,
+            resident_large_values,
+            resident_chunks: self.resident_chunks.clone(),
+            large_value_stager: self.large_value_stager(),
             lifecycle: Rc::new(Cell::new(AppliedBatchLifecycle::Applied)),
             abandoned_application: Rc::clone(&self.abandoned_application),
         })

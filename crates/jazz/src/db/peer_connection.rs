@@ -54,11 +54,17 @@ where
             }
             let mut persisted = Vec::with_capacity(publications.len());
             for publication in &publications {
-                persisted.push((publication.tx_id(), publication.persist().await));
+                persisted.push((
+                    publication.tx_id(),
+                    publication.retracts_on_failed_persistence(),
+                    publication.persist().await,
+                ));
             }
             let mut state = node.lock().await;
-            for (tx_id, persistence) in persisted {
-                state.settle_published_transaction(tx_id, persistence)?;
+            for (tx_id, retract_on_failure, persistence) in persisted {
+                state
+                    .settle_published_transaction(tx_id, persistence, retract_on_failure)
+                    .await?;
             }
         }
         let Some(message) = post_settlement_work.pop_front() else {
@@ -1965,11 +1971,17 @@ where
                         .await?;
                         let mut persisted = Vec::with_capacity(publications.len());
                         for publication in &publications {
-                            persisted.push((publication.tx_id(), publication.persist().await));
+                            persisted.push((
+                                publication.tx_id(),
+                                publication.retracts_on_failed_persistence(),
+                                publication.persist().await,
+                            ));
                         }
                         let mut node = self.node.lock().await;
-                        for (tx_id, persistence) in persisted {
-                            node.settle_published_transaction(tx_id, persistence)?;
+                        for (tx_id, retract_on_failure, persistence) in persisted {
+                            node
+                                .settle_published_transaction(tx_id, persistence, retract_on_failure)
+                                .await?;
                         }
                         let authoritative_reset_deferred = node.has_pending_authoritative_reset();
                         drop(node);

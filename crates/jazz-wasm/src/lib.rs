@@ -1705,44 +1705,6 @@ enum WasmTxKind {
     Exclusive,
 }
 
-async fn insert_with_id_async<S: OrderedKvStorage + ReopenableStorage + 'static>(
-    db: &Db<S>,
-    table: &str,
-    row_id: RowUuid,
-    cells: RowCells,
-    author: Option<AuthorId>,
-    updated_at_ms: Option<u64>,
-    branch: Option<BranchSelector>,
-) -> Result<WriteHandle<S>, jazz::db::Error> {
-    if let Some(branch) = branch {
-        return match author {
-            Some(author) => {
-                db.insert_with_id_in_branch_for_identity(author, table, branch, row_id, cells)
-                    .await
-            }
-            None => {
-                db.insert_with_id_in_branch(table, branch, row_id, cells)
-                    .await
-            }
-        };
-    }
-    match (author, updated_at_ms) {
-        (Some(author), Some(updated_at_ms)) => {
-            db.insert_with_id_for_identity_at_ms(author, table, row_id, cells, updated_at_ms)
-                .await
-        }
-        (Some(author), None) => {
-            db.insert_with_id_for_identity(author, table, row_id, cells)
-                .await
-        }
-        (None, Some(updated_at_ms)) => {
-            db.insert_with_id_at_ms(table, row_id, cells, updated_at_ms)
-                .await
-        }
-        (None, None) => db.insert_with_id(table, row_id, cells).await,
-    }
-}
-
 #[wasm_bindgen]
 impl WasmDb {
     #[wasm_bindgen(js_name = openMemory)]
@@ -2278,51 +2240,6 @@ impl WasmDb {
             cells,
             updated_at_ms.map(|value| value as u64),
         )
-    }
-
-    /// Publish an ordinary insert without synchronously polling storage-backed
-    /// large-value lowering. The TypeScript adapter selects this path only
-    /// when at least one scalar exceeds Groove's inline threshold.
-    #[wasm_bindgen(js_name = insertWithIdEncodedAsync)]
-    pub fn insert_with_id_encoded_async(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        author: Option<Vec<u8>>,
-        updated_at_ms: Option<f64>,
-        branch: Option<JsValue>,
-    ) -> Result<js_sys::Promise, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let cells = decode_cells(&cells)?;
-        let author = author.as_deref().map(author_id_from_bytes).transpose()?;
-        let updated_at_ms = updated_at_ms
-            .map(|value| checked_js_u64(value, "updatedAtMs"))
-            .transpose()?;
-        let branch = branch
-            .filter(|value| !value.is_null() && !value.is_undefined())
-            .map(|value| serde_wasm_bindgen::from_value(value).map_err(to_js_error))
-            .transpose()?;
-        let inner = self.inner.clone();
-        Ok(future_to_promise(async move {
-            let write = match &inner {
-                WasmDbInner::Memory(db) => wasm_write_memory(
-                    Rc::clone(db),
-                    insert_with_id_async(db, &table, row_id, cells, author, updated_at_ms, branch)
-                        .await
-                        .map_err(to_js_error)?,
-                ),
-                #[cfg(target_arch = "wasm32")]
-                WasmDbInner::Browser(db) => wasm_write_browser(
-                    Rc::clone(db),
-                    insert_with_id_async(db, &table, row_id, cells, author, updated_at_ms, branch)
-                        .await
-                        .map_err(to_js_error)?,
-                ),
-                WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
-            }?;
-            Ok(write.into())
-        }))
     }
 
     #[wasm_bindgen(js_name = insertWithIdEncodedInBranch)]
