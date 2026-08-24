@@ -858,6 +858,14 @@ export function TableDataGrid() {
     setSelectedRowIds(new Set());
   }, [gridAnimationScopeKey]);
 
+  useEffect(() => {
+    setQueuedEdits({});
+    setStagedInserts([]);
+    setQueuedDeletes(new Set());
+    setQueuedSaveError(null);
+    setPendingScrollToRowId(null);
+  }, [table]);
+
   const handleSortColumnsChange = (nextSortColumns: SortColumn[]): void => {
     const nextSort =
       nextSortColumns.length === 0
