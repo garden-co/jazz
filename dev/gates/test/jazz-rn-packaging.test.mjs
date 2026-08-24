@@ -3,7 +3,9 @@ import { execFileSync } from "node:child_process";
 import test from "node:test";
 import { createRequire } from "node:module";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 
 const require = createRequire(import.meta.url);
 const packageJson = JSON.parse(
@@ -186,4 +188,43 @@ test("relay artifact staging targets every Android ABI and iOS framework slice",
   assert.match(script, /JazzNativeRelay\.xcframework/);
   assert.match(script, /aarch64-apple-ios-sim x86_64-apple-ios/);
   assert.match(script, /nativeRelayAbi/);
+});
+
+test("a dry package includes every staged native relay artifact class", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "jazz-rn-pack-"));
+  try {
+    const staged = [
+      "native/include/jazz_native_relay.h",
+      "android/src/main/jniLibs/arm64-v8a/libjazz_native_relay.a",
+      "JazzNativeRelay.xcframework/Info.plist",
+    ];
+    const manifest = {
+      ...packageJson,
+      scripts: {},
+      main: undefined,
+      types: undefined,
+      exports: undefined,
+    };
+    await writeFile(join(directory, "package.json"), `${JSON.stringify(manifest)}\n`);
+    for (const path of staged) {
+      const destination = join(directory, path);
+      await mkdir(dirname(destination), { recursive: true });
+      await writeFile(destination, "staged-native-artifact\n");
+    }
+    const receipt = JSON.parse(
+      execFileSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts"], {
+        cwd: directory,
+        encoding: "utf8",
+      }),
+    );
+    const packed = new Set(receipt[0].files.map(({ path }) => path));
+    for (const path of staged) {
+      assert.ok(
+        packed.has(path),
+        `dry package omitted staged artifact ${path}; packed: ${[...packed].join(", ")}`,
+      );
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
