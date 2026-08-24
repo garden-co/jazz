@@ -31,6 +31,8 @@ class TestDb extends Db {
   protected override getRuntimeOperationContext(): { session?: Session } | null {
     return this.testContext;
   }
+
+  protected override async ensureReady(): Promise<void> {}
 }
 
 function makeHandleClient(): JazzClient {
@@ -71,9 +73,9 @@ describe("Db runtime schema order", () => {
       Uint8Array.from([2, 3]),
     );
     await expect(db.readTextUtf16Range(app.notes, id, "body", 5, 7)).resolves.toBe("🙂");
-    await expect(db.appendValue(app.notes, id, "attachment", Uint8Array.of(4))).resolves.toBe(
-      append,
-    );
+    const appendResult = await db.appendValue(app.notes, id, "attachment", Uint8Array.of(4));
+    expect(appendResult).toBe(append);
+    await expect(appendResult.wait({ tier: "local" })).resolves.toBeUndefined();
     await expect(
       db.spliceValue(app.notes, id, "attachment", 9, 3, Uint8Array.of(5, 6)),
     ).resolves.toBe(splice);

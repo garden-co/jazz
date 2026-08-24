@@ -6,6 +6,7 @@ import type {
   WriteHandle,
   WriteResult,
 } from "../index.js";
+import { schema as s } from "../index.js";
 
 type Todo = { id: string; title: string; done: boolean };
 type TodoInit = { title: string; done: boolean };
@@ -19,6 +20,13 @@ type TodoStreamingUpdate =
 declare const db: Db;
 declare const todos: TableProxy<Todo, TodoInit, TodoStreamingInit, TodoStreamingUpdate>;
 
+const largeValueApp = s.defineApp({
+  notes: s.table({
+    body: s.string(),
+    attachment: s.bytes(),
+  }),
+});
+
 async function assertWriteHandleContract() {
   const inserted: WriteResult<Todo> = db.insert(todos, { title: "todo", done: false });
   const restored: WriteResult<Todo> = db.restore(todos, "todo-1", {
@@ -28,6 +36,24 @@ async function assertWriteHandleContract() {
   const updated: WriteHandle = db.update(todos, "todo-1", { done: true });
   const upserted: WriteHandle = db.upsert(todos, "todo-1", { title: "todo", done: false });
   const deleted: WriteHandle = db.delete(todos, "todo-1");
+  const appended: Promise<WriteHandle> = db.appendValue(
+    largeValueApp.notes,
+    "note-1",
+    "attachment",
+    Uint8Array.of(1),
+  );
+  const spliced: Promise<WriteHandle> = db.spliceValue(
+    largeValueApp.notes,
+    "note-1",
+    "attachment",
+    0,
+    0,
+    Uint8Array.of(1),
+  );
+  const appendWait: void = await (await appended).wait({ tier: "local" });
+  const spliceWait: void = await (await spliced).wait({ tier: "edge" });
+  // @ts-expect-error Appending an existing row does not produce an inserted id.
+  const appendWithId: Promise<WriteHandle<{ id: string }>> = appended;
   const streamed: Promise<WriteHandle<{ id: string }>> = db.insertStreaming(todos, {
     done: false,
     title: (async function* () {
@@ -75,6 +101,9 @@ async function assertWriteHandleContract() {
   void updated;
   void upserted;
   void deleted;
+  void appendWait;
+  void spliceWait;
+  void appendWithId;
   void streamed;
   void streamedUpdate;
   void streamedUpsert;

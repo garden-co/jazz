@@ -900,7 +900,7 @@ export class JazzClient {
     objectId: string,
     column: string,
     bytes: Uint8Array,
-  ): Promise<WriteHandle<{ id: string }>> {
+  ): Promise<WriteHandle> {
     if (!this.runtime.appendValue) throw new Error("Runtime does not support value append");
     const result = await this.runtime.appendValue(table, objectId, column, bytes);
     return new WriteHandle(committedBatchId(result), this);
@@ -913,7 +913,7 @@ export class JazzClient {
     offset: number,
     deleteLength: number,
     insert: Uint8Array,
-  ): Promise<WriteHandle<{ id: string }>> {
+  ): Promise<WriteHandle> {
     if (!this.runtime.spliceValue) throw new Error("Runtime does not support value splice");
     const result = await this.runtime.spliceValue(
       table,

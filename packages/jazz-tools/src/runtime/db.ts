@@ -1672,7 +1672,7 @@ export class Db {
     id: string,
     column: TableBytesColumn<TSchema, Extract<TTable, string>>,
     bytes: Uint8Array,
-  ): Promise<WriteHandle<{ id: string }>> {
+  ): Promise<WriteHandle> {
     const client = this.getClient(table._schema);
     return this.wrapWriteWait(await client.appendValue(table._table, id, column, bytes));
   }
@@ -1691,7 +1691,7 @@ export class Db {
     offset: number,
     deleteLength: number,
     insert: Uint8Array,
-  ): Promise<WriteHandle<{ id: string }>> {
+  ): Promise<WriteHandle> {
     const client = this.getClient(table._schema);
     return this.wrapWriteWait(
       await client.spliceValue(table._table, id, column, offset, deleteLength, insert),
