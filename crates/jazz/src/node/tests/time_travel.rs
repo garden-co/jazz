@@ -113,6 +113,8 @@ fn query_rows_at_for_link_evaluates_read_policy_at_historical_cut() {
     let schema = owner_read_schema("todos");
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(2), schema);
+    install_test_uuid_sub_claim(&mut core, alice);
+    install_test_uuid_sub_claim(&mut core, bob);
     let shape = Query::from("todos").validate(&core.catalogue.schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     let row_uuid = row(2);
