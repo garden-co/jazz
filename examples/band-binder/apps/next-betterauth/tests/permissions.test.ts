@@ -17,9 +17,7 @@ const session = (user_id: string) => ({
 });
 
 describe("BandBinder workspace roles", () => {
-  // Remove `.fails` as part of the required restack onto the correlated-policy
-  // carrier fix (84bc4f441); LEARNINGS.md records the exact base failure.
-  it.fails("admits stage-manager writes, limits members to suggestions, and revokes both exactly", async () => {
+  it("admits stage-manager writes, limits members to suggestions, and revokes both exactly", async () => {
     const owner = testApp.as(session("owner"));
     const manager = testApp.as(session("manager"));
     const member = testApp.as(session("member"));

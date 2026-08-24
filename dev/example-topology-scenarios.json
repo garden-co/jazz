@@ -6,6 +6,12 @@
       "topology": ["fixture"],
       "cwd": ".",
       "argv": ["pnpm", "--filter", "jazz-tools", "test:topology-fixture"]
+    },
+    {
+      "id": "band-binder.workspace-recovery",
+      "topology": ["browser", "edge", "core"],
+      "cwd": "examples/band-binder/apps/next-betterauth",
+      "argv": ["pnpm", "test:browser:focused", "--", "tests/browser/topology.e2e.test.tsx"]
     }
   ]
 }
