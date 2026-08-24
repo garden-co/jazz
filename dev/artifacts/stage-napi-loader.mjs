@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 export function stageNapiLoader(root, platform) {
   if (!platform) throw new Error("usage: stage-napi-loader.mjs <platform>");
   const packageDir = join(root, "crates/jazz-napi");
-  const pointer = readFileSync(join(packageDir, "native-binding.cjs"), "utf8");
+  const pointer = readFileSync(join(packageDir, "native-binding.pointer.cjs"), "utf8");
   const generation = /\.native-artifacts\/(generation-[A-Za-z0-9.-]+)\/index\.js/.exec(
     pointer,
   )?.[1];

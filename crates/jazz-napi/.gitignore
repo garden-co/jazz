@@ -5,3 +5,4 @@ index.js
 .native-artifacts/
 .napi-stage-*/
 native-loader.cjs
+native-binding.pointer.cjs

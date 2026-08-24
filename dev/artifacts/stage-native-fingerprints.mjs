@@ -19,7 +19,7 @@ export function stageNativeFingerprints(root, { local = false } = {}) {
           root,
           "crates/jazz-napi/.native-artifacts",
           /generation-[A-Za-z0-9.-]+/.exec(
-            readFileSync(join(root, "crates/jazz-napi/native-binding.cjs"), "utf8"),
+            readFileSync(join(root, "crates/jazz-napi/native-binding.pointer.cjs"), "utf8"),
           )?.[0] ?? "missing",
           ".jazz-artifact-manifest.json",
         ),

@@ -283,6 +283,7 @@ export function publishNapiGeneration(
   { lease = undefined } = {},
 ) {
   const held = lease ? { lease: verifyArtifactBuildLease(lease) } : acquireArtifactLease();
+  let generationPath;
   try {
     if (
       !existsSync(stagePath) ||
@@ -304,7 +305,7 @@ export function publishNapiGeneration(
       );
     const generationRoot = join(packageDir, ".native-artifacts");
     mkdirSync(generationRoot, { recursive: true });
-    const generationPath = join(
+    generationPath = join(
       generationRoot,
       `generation-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     );
@@ -314,10 +315,14 @@ export function publishNapiGeneration(
     if (process.env.JAZZ_NAPI_BUILD_FAULT === "pointer-write")
       throw new Error("planted NAPI final-pointer failure");
     atomicWrite(
-      join(packageDir, "native-binding.cjs"),
+      join(packageDir, "native-binding.pointer.cjs"),
       napiGenerationPointer(packageDir, generationPath, fingerprint),
     );
     return generationPath;
+  } catch (error) {
+    if (generationPath && existsSync(generationPath))
+      rmSync(generationPath, { recursive: true, force: true });
+    throw error;
   } finally {
     held.release?.();
   }
