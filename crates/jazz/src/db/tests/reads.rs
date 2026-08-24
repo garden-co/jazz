@@ -28,7 +28,7 @@ fn negated_membership_uses_two_valued_null_semantics() {
                 .nullable_column("blocked_option", PublicColumnType::Text),
         ),
     );
-    let db = open_db(0xb8, AuthorId::SYSTEM, &schema);
+    let db = open_db(0xb8, AuthorSubject::SYSTEM, &schema);
     for (id, label) in [
         (row(1), Value::Nullable(None)),
         (
@@ -43,7 +43,7 @@ fn negated_membership_uses_two_valued_null_semantics() {
         db.seed_settled_mergeable_for_bootstrap(
             "items",
             id,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
             BTreeMap::from([
                 ("label".to_owned(), label),
                 ("null_option".to_owned(), Value::Nullable(None)),

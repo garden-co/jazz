@@ -43,7 +43,7 @@ fn negated_null_membership_policy_does_not_authorize_null_rows() {
     ] {
         node.commit_mergeable_unit_settled(
             MergeableCommit::new("documents", id, timestamp)
-                .made_by(AuthorId::SYSTEM)
+                .made_by(AuthorSubject::SYSTEM)
                 .cells(BTreeMap::from([
                     ("classification".to_owned(), classification),
                     ("null_option".to_owned(), Value::Nullable(None)),
