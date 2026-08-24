@@ -13,6 +13,10 @@ export class BrowserWorkerTransportPump {
   private runAgain = false;
   private closed = false;
   private outboundDrainScheduled = false;
+  // A MessagePort can deliver several batches before a WASM auxiliary routing
+  // promise settles. Keep their wire order: a later semantic frame must not
+  // overtake an earlier chunk response that wakes a suspended evaluator.
+  private inboundRouting: Promise<void> = Promise.resolve();
   private requestedGeneration = 0;
   private completedGeneration = 0;
   private readonly flushWaiters = new Set<{ target: number; resolve: () => void }>();
@@ -33,15 +37,10 @@ export class BrowserWorkerTransportPump {
 
   receive(frames: readonly Uint8Array[]): void {
     if (this.closed || frames.length === 0) return;
-    if (this.transport.sendWireFrames) {
-      this.transport.sendWireFrames(frames);
-    } else {
-      for (const frame of frames) this.transport.sendWireFrame(frame);
-    }
-    // Coverage waiters need evidence of a peer response, not merely evidence
-    // that our own pump ran after sending a request.
-    this.runtime.notifyPeerTransportActivity?.();
-    this.schedule();
+    const operation = this.inboundRouting.then(() => this.routeInboundFrames(frames));
+    this.inboundRouting = operation.catch((error) => {
+      if (!this.closed) this.onError(error);
+    });
   }
 
   schedule(runAgainIfRunning = true): void {
@@ -118,6 +117,30 @@ export class BrowserWorkerTransportPump {
       this.schedule();
     }
   }
+
+  private async routeInboundFrames(frames: readonly Uint8Array[]): Promise<void> {
+    if (this.closed) return;
+    const canonical: Uint8Array[] = [];
+    for (const frame of frames) {
+      const routed = this.transport.routeAuxiliaryWireFrame
+        ? await this.transport.routeAuxiliaryWireFrame(frame)
+        : frame;
+      if (routed != null) canonical.push(normalizeTransportFrame(routed));
+    }
+    if (this.closed) return;
+    if (canonical.length > 0) {
+      if (this.transport.sendWireFrames) {
+        this.transport.sendWireFrames(canonical);
+      } else {
+        for (const frame of canonical) this.transport.sendWireFrame(frame);
+      }
+    }
+    // Coverage waiters need evidence of a peer response, not merely evidence
+    // that our own pump ran after sending a request. Auxiliary frames count:
+    // they can be the response that resumes a blocked query evaluation.
+    this.runtime.notifyPeerTransportActivity?.();
+    this.schedule();
+  }
 }
 
 export function transferableFrames(frames: readonly Uint8Array[]): Uint8Array[] {
@@ -125,12 +148,14 @@ export function transferableFrames(frames: readonly Uint8Array[]): Uint8Array[] 
 }
 
 function normalizeTransportFrames(frames: unknown[]): Uint8Array[] {
-  return frames.map((frame) => {
-    if (frame instanceof Uint8Array) return frame;
-    if (frame instanceof ArrayBuffer) return new Uint8Array(frame);
-    if (ArrayBuffer.isView(frame)) {
-      return new Uint8Array(frame.buffer, frame.byteOffset, frame.byteLength);
-    }
-    throw new Error("Browser worker transport received a non-binary wire frame");
-  });
+  return frames.map(normalizeTransportFrame);
+}
+
+function normalizeTransportFrame(frame: unknown): Uint8Array {
+  if (frame instanceof Uint8Array) return frame;
+  if (frame instanceof ArrayBuffer) return new Uint8Array(frame);
+  if (ArrayBuffer.isView(frame)) {
+    return new Uint8Array(frame.buffer, frame.byteOffset, frame.byteLength);
+  }
+  throw new Error("Browser worker transport received a non-binary wire frame");
 }

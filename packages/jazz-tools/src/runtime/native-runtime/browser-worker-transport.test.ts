@@ -72,6 +72,29 @@ describe("BrowserWorkerTransportPump", () => {
     pump.close();
   });
 
+  it("routes worker chunk responses through the auxiliary lane", async () => {
+    const chunkResponse = Uint8Array.from([7, 7]);
+    const semanticFrame = Uint8Array.from([8, 8]);
+    const sendWireFrame = vi.fn();
+    const routeAuxiliaryWireFrame = vi.fn(async (frame: Uint8Array) => {
+      if (frame[0] === 7) return undefined;
+      return frame;
+    });
+    const peer = transport({
+      routeAuxiliaryWireFrame,
+      sendWireFrame,
+    });
+    const pump = new BrowserWorkerTransportPump(runtime(peer), peer, () => undefined, vi.fn());
+
+    // The chunk response is consumed by the dedicated auxiliary lane; only
+    // the following canonical frame reaches the normal transport queue.
+    pump.receive([chunkResponse, semanticFrame]);
+
+    await vi.waitFor(() => expect(routeAuxiliaryWireFrame).toHaveBeenCalledTimes(2));
+    expect(sendWireFrame).toHaveBeenCalledWith(semanticFrame);
+    pump.close();
+  });
+
   it("publishes an already-produced peer request before awaiting suspended evaluation", async () => {
     let release!: () => void;
     const request = Uint8Array.from([9, 3]);
