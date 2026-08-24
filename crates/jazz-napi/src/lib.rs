@@ -5355,6 +5355,7 @@ mod tests {
                 &owner,
             ))))),
             owns_runtime: false,
+            trusted_backend: false,
         };
         let alice = CoreAuthorSubject::for_test_bytes([0xa6; 16]);
         let bound = CoreOpenBatchId::new();
@@ -5363,6 +5364,7 @@ mod tests {
                 bound.to_string(),
                 "exclusive".to_owned(),
                 Some(Uint8Array::new(alice.canonical().as_bytes().to_vec())),
+                None,
             )
             .unwrap();
         let tx = binding.attach_exclusive_tx(bound.to_string()).unwrap();
@@ -5378,6 +5380,7 @@ mod tests {
                 &view,
             ))))),
             owns_runtime: false,
+            trusted_backend: false,
         };
         let view_query = PreparedQuery {
             inner: view.prepare_query(&view.table("items")).unwrap(),
@@ -5405,12 +5408,14 @@ mod tests {
                 &other_owner,
             ))))),
             owns_runtime: false,
+            trusted_backend: false,
         };
         other_binding
             .begin_transaction(
                 bound.to_string(),
                 "exclusive".to_owned(),
                 Some(Uint8Array::new(alice.canonical().as_bytes().to_vec())),
+                None,
             )
             .unwrap();
         core_block_on(other_owner.exclusive_tx_ref(bound).insert_with_id(
