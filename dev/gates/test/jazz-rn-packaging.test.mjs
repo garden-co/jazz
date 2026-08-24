@@ -107,14 +107,18 @@ test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts",
       ),
     ]);
 
-  assert.doesNotMatch(podspec, /vendored_frameworks|uniffi-bindgen-react-native/);
+  assert.match(podspec, /JazzNativeRelay\.xcframework/);
+  assert.doesNotMatch(podspec, /uniffi-bindgen-react-native/);
   assert.match(podspec, /requires the React Native New Architecture/);
-  assert.doesNotMatch(androidBuild, /externalNativeBuild|jniLibs|CMakeLists/);
+  assert.match(androidBuild, /relayNativeArtifactsPresent/);
+  assert.match(androidBuild, /externalNativeBuild/);
   assert.doesNotMatch(androidBuild, /AndroidManifestNew/);
   assert.match(androidBuild, /requires the React Native New Architecture/);
   assert.match(androidPackage, /class JazzRelayPackage/);
   assert.doesNotMatch(androidPackage, /JazzRnModule/);
   assert.match(iosRelay, /RCT_EXPORT_MODULE\(JazzRelay\)/);
+  assert.match(iosRelay, /JAZZ_RELAY_ARTIFACT_AVAILABLE/);
+  assert.match(iosRelay, /jazz_native_relay_host_execute/);
   assert.match(iosRelay, /E_JAZZ_RELAY_UNAVAILABLE/);
   assert.match(iosRelay, /NativeJazzRelaySpecJSI/);
   assert.doesNotMatch(packageRoot, /NativeJazzRn|uniffi/);
@@ -151,7 +155,8 @@ test("jazz-rn reserves a thin binary relay TurboModule boundary for matching nat
   assert.match(relay, /matching native development or release build/);
   assert.match(codegenGate, /for platform in android ios/);
   assert.match(codegenGate, /NativeJazzRelay/);
-  assert.match(androidRelay, /getAbiVersion\(\): Double = 0\.0/);
+  assert.match(androidRelay, /JazzRelayBridge/);
+  assert.match(androidRelay, /getAbiVersion\(\): Double = bridge\?\.abiVersion\(\) \?: 0\.0/);
   assert.match(androidRelay, /E_JAZZ_RELAY_UNAVAILABLE/);
 });
 

@@ -3,8 +3,10 @@
   "version": "2.0.0-alpha.53",
   "description": "React Native native-relay bridge for Jazz (development builds only)",
   "keywords": [
+    "JazzNativeRelay.xcframework",
     "android",
     "ios",
+    "native",
     "react-native"
   ],
   "homepage": "https://github.com/antoniomuso/jazz-rn#readme",

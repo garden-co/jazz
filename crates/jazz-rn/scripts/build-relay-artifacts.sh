@@ -28,13 +28,18 @@ const visit = root => {
   for (const name of readdirSync(root)) {
     const path = join(root, name), stat = statSync(path);
     if (stat.isDirectory()) visit(path);
-    else if (name.endsWith(".a")) files.push([path, createHash("sha256").update(readFileSync(path)).digest("hex")]);
+    else files.push([path, createHash("sha256").update(readFileSync(path)).digest("hex")]);
   }
 };
 for (const root of roots) visit(root);
 if (!files.length) throw new Error("relay artifact build produced no static libraries");
 writeFileSync(destination, JSON.stringify({ nativeRelayAbi: Number(abi), files }, null, 2) + "\n");
 NODE
+}
+
+stage_header() {
+  mkdir -p "$package/native/include"
+  cp "$root/crates/jazz-native-relay/include/jazz_native_relay.h" "$package/native/include/"
 }
 
 case "$platform" in
@@ -44,6 +49,7 @@ case "$platform" in
       exit 1
     }
     stage="$package/android/src/main/jniLibs"
+    stage_header
     rm -rf "$stage"
     mkdir -p "$stage"
     declare -A rust_targets=(
@@ -66,6 +72,7 @@ case "$platform" in
       exit 1
     }
     device_target=aarch64-apple-ios
+    stage_header
     simulator_targets=(aarch64-apple-ios-sim x86_64-apple-ios)
     for target in "$device_target" "${simulator_targets[@]}"; do
       cargo build --manifest-path "$relay_manifest" --target "$target" --release
