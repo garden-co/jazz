@@ -898,8 +898,8 @@ fn collect_root_input_for_value(
     layout: &CollectLayout,
     value: &NormalizedValueRef,
 ) -> CapabilityResult<String> {
-    match value {
-        NormalizedValueRef::SourceField { field, .. } => layout
+    match collect_source_field_for_value(value) {
+        Some(field) => layout
             .root_fields
             .iter()
             .find(|candidate| {
@@ -910,7 +910,7 @@ fn collect_root_input_for_value(
                         .is_some_and(|source| logical_user_column(source) == field)
             })
             .map(|candidate| candidate.input.clone()),
-        NormalizedValueRef::RowId(RowIdRef::Source(_)) => layout
+        None if matches!(value, NormalizedValueRef::RowId(RowIdRef::Source(_))) => layout
             .root_fields
             .iter()
             .find(|field| field.is_row_id)
@@ -928,8 +928,8 @@ fn collect_slot_input_for_value(
     slot: &CollectSlotLayout,
     value: &NormalizedValueRef,
 ) -> CapabilityResult<String> {
-    match value {
-        NormalizedValueRef::SourceField { field, .. } => slot
+    match collect_source_field_for_value(value) {
+        Some(field) => slot
             .fields
             .iter()
             .find(|candidate| {
@@ -940,7 +940,9 @@ fn collect_slot_input_for_value(
                         .is_some_and(|source| logical_user_column(source) == field)
             })
             .map(|candidate| candidate.input.clone()),
-        NormalizedValueRef::RowId(RowIdRef::Source(_)) => Some(slot.row_id_input.clone()),
+        None if matches!(value, NormalizedValueRef::RowId(RowIdRef::Source(_))) => {
+            Some(slot.row_id_input.clone())
+        }
         _ => None,
     }
     .ok_or_else(|| {
@@ -948,6 +950,22 @@ fn collect_slot_input_for_value(
             "collector window key {value:?} is not present in the child projection"
         )))
     })
+}
+
+/// Map a normalized field reference to the canonical name retained by a
+/// resolved source. Provenance is source metadata, not a public projection
+/// field, but ordered and sliced collectors still need it as an internal key.
+fn collect_source_field_for_value(value: &NormalizedValueRef) -> Option<&str> {
+    match value {
+        NormalizedValueRef::SourceField { field, .. } => Some(field),
+        NormalizedValueRef::Provenance { field, .. } => Some(match field {
+            ProvenanceField::CreatedAt => "$createdAt",
+            ProvenanceField::CreatedBy => "$createdBy",
+            ProvenanceField::UpdatedAt => "$updatedAt",
+            ProvenanceField::UpdatedBy => "$updatedBy",
+        }),
+        _ => None,
+    }
 }
 
 pub(super) fn root_join_occurrence_fields(

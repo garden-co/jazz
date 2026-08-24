@@ -679,6 +679,7 @@ impl SourceGraphPreparer for FakeSourceResolver {
 pub(super) struct InlineCollectorResolver {
     pub(super) requests: Vec<SourceRequest>,
     pub(super) denied_child_title: Option<&'static str>,
+    root_rows: Vec<(u8, &'static str, u64)>,
 }
 
 impl InlineCollectorResolver {
@@ -686,6 +687,17 @@ impl InlineCollectorResolver {
         Self {
             requests: Vec::new(),
             denied_child_title,
+            root_rows: vec![(0xd1, "parent", 10)],
+        }
+    }
+
+    pub(super) fn with_root_rows(
+        root_rows: impl IntoIterator<Item = (u8, &'static str, u64)>,
+    ) -> Self {
+        Self {
+            requests: Vec::new(),
+            denied_child_title: None,
+            root_rows: root_rows.into_iter().collect(),
         }
     }
 }
@@ -708,17 +720,21 @@ impl SourceGraphPreparer for InlineCollectorResolver {
         ]);
         let parent = row(0xd1).0;
         let rows = match request.source.table.as_str() {
-            "todos" => vec![
-                descriptor
-                    .create(&[
-                        Value::Uuid(parent),
-                        Value::Nullable(Some(Box::new(Value::String("parent".to_owned())))),
-                        Value::Nullable(None),
-                        Value::U64(10),
-                        Value::U64(11),
-                    ])
-                    .expect("inline parent"),
-            ],
+            "todos" => self
+                .root_rows
+                .iter()
+                .map(|(id, title, created_at)| {
+                    descriptor
+                        .create(&[
+                            Value::Uuid(row(*id).0),
+                            Value::Nullable(Some(Box::new(Value::String((*title).to_owned())))),
+                            Value::Nullable(None),
+                            Value::U64(*created_at),
+                            Value::U64(*created_at + 1),
+                        ])
+                        .expect("inline parent")
+                })
+                .collect(),
             "todo_tags" => [(0xd2, "allowed"), (0xd3, "denied")]
                 .into_iter()
                 .filter(|(_, title)| {
