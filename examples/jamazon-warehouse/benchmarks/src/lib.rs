@@ -608,8 +608,13 @@ fn schema() -> JazzSchema {
                     .column("status", ColumnType::Text)
                     .column("total_cents", ColumnType::Integer)
                     .column("idempotency_key", ColumnType::Text)
-                    .index_only(["warehouse_id", "idempotency_key"])
-                    .index_only(["district_id", "status", "order_number"]),
+                    .index_only([
+                        "warehouse_id",
+                        "idempotency_key",
+                        "district_id",
+                        "status",
+                        "order_number",
+                    ]),
             )
             .table(
                 TableSchemaBuilder::new("order_lines")
@@ -656,4 +661,31 @@ fn insert<const N: usize>(db: &BenchDb, table: &str, id: RowUuid, cells: [(&str,
     )
     .expect("seed row");
     block_on(write.wait(DurabilityTier::Local)).expect("local seed");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn orders_schema_keeps_the_idempotency_lookup_indexed() {
+        let warehouse_schema = schema();
+        let orders = warehouse_schema
+            .tables()
+            .iter()
+            .find(|table| table.name == "orders")
+            .expect("orders table");
+        for column in [
+            "warehouse_id",
+            "idempotency_key",
+            "district_id",
+            "status",
+            "order_number",
+        ] {
+            assert!(
+                orders.indexed_columns.contains(column),
+                "orders index must retain {column}"
+            );
+        }
+    }
 }
