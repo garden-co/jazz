@@ -3299,6 +3299,7 @@ mod tests {
             .encode(r#"{"alg":"none","typ":"JWT"}"#);
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
             serde_json::to_vec(&json!({
+                "iss": "https://issuer.example",
                 "sub": sub,
                 "claims": claims,
             }))
@@ -3310,8 +3311,13 @@ mod tests {
     fn make_test_jwt_without_claims(sub: &str) -> String {
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(r#"{"alg":"none","typ":"JWT"}"#);
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(&json!({ "sub": sub })).expect("serialize jwt payload"));
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&json!({
+                "iss": "https://issuer.example",
+                "sub": sub,
+            }))
+            .expect("serialize jwt payload"),
+        );
         format!("{header}.{payload}.sig")
     }
     #[test]

@@ -278,6 +278,9 @@ fn relay_ingest(node: &mut NodeState<RocksDbStorage>, message: &SyncMessage) {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
+    if let Some(identity) = tx.permission_subject {
+        install_uuid_sub_claim(node, identity);
+    }
     block_on(async {
         node.ingest_relay_commit_unit(tx.clone(), versions.clone())
             .await
@@ -306,6 +309,7 @@ fn edge_ingest(
     versions: Vec<jazz::protocol::VersionRecord>,
     now_ms: u64,
 ) -> Vec<SyncMessage> {
+    install_uuid_sub_claim(node, peer.identity());
     block_on(async {
         let outcome = peer
             .ingest_edge_mergeable_commit_unit(node, tx, versions, now_ms)
@@ -334,6 +338,9 @@ fn core_ingest(
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
+    if let Some(identity) = tx.permission_subject {
+        install_uuid_sub_claim(node, identity);
+    }
     let [fate] = block_on(async {
         let outcome = node
             .ingest_commit_unit(tx.clone(), versions.clone(), now)
@@ -344,6 +351,15 @@ fn core_ingest(
     .try_into()
     .unwrap();
     fate
+}
+
+fn install_uuid_sub_claim(node: &mut NodeState<RocksDbStorage>, identity: AuthorSubject) {
+    if identity != AuthorSubject::SYSTEM {
+        node.admit_test_session_claims(
+            identity,
+            BTreeMap::from([("sub".to_owned(), Value::Uuid(identity.test_uuid()))]),
+        );
+    }
 }
 
 fn apply_fate(node: &mut NodeState<RocksDbStorage>, fate: &SyncMessage) {
@@ -357,6 +373,7 @@ fn refresh(
     downstream: &mut NodeState<RocksDbStorage>,
     peer: &mut PeerState,
 ) {
+    install_uuid_sub_claim(upstream, peer.identity());
     let update = block_on(peer.current_rows_update(upstream, "todos")).unwrap();
     apply_message(downstream, update);
 }
@@ -450,7 +467,7 @@ fn four_tier_topology_relays_pending_units_and_core_fates() {
     refresh(&mut worker, &mut ui, &mut worker_to_ui);
 
     let tx_id = OpenTransactionId::new();
-    block_on(ui.open_exclusive(tx_id)).unwrap();
+    block_on(ui.open_exclusive_for_test(tx_id, ui_author)).unwrap();
     assert_eq!(
         block_on(ui.tx_read(tx_id, "todos", exclusive_row)).unwrap(),
         Some(cells("exclusive base", ui_owner))

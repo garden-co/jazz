@@ -268,7 +268,9 @@ impl SyncBench {
     fn next_exclusive(&mut self, step: usize) -> (TxId, SyncMessage, u64) {
         let row_uuid = row(120 + (step % 12) as u8);
         let tx_id = OpenTransactionId::new();
-        self.ui.open_exclusive(tx_id).expect("open exclusive");
+        self.ui
+            .open_exclusive_for_test(tx_id, self.ui_author)
+            .expect("open exclusive");
         let _ = self.ui.tx_read(tx_id, TABLE, row_uuid).expect("read");
         self.ui
             .tx_write(
@@ -424,6 +426,9 @@ fn relay_ingest(node: &mut NodeState<RocksDbStorage>, message: &SyncMessage) {
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
+    if let Some(identity) = tx.permission_subject {
+        install_uuid_user_claim(node, identity);
+    }
     node.ingest_relay_commit_unit(tx.clone(), versions.clone())
         .expect("relay ingest");
 }
@@ -436,6 +441,7 @@ fn core_ingest(
     let SyncMessage::CommitUnit { tx, versions } = message else {
         panic!("expected commit unit");
     };
+    install_uuid_user_claim(core, tx.permission_subject.unwrap_or(tx.made_by));
     let outcome = core
         .ingest_commit_unit(tx.clone(), versions.clone(), now_ms)
         .expect("core ingest");
@@ -450,10 +456,24 @@ fn refresh(
     downstream: &mut NodeState<RocksDbStorage>,
     peer: &mut PeerState,
 ) {
+    install_uuid_user_claim(upstream, peer.identity());
     let update = peer
         .current_rows_update(upstream, TABLE)
         .expect("view update");
     support::apply_and_settle(downstream, update);
+}
+
+fn install_uuid_user_claim(node: &mut NodeState<RocksDbStorage>, identity: AuthorSubject) {
+    if identity != AuthorSubject::SYSTEM {
+        let raw = identity.test_uuid().to_string();
+        node.admit_test_session_claims(
+            identity,
+            BTreeMap::from([
+                ("sub".to_owned(), Value::String(raw.clone())),
+                ("user_id".to_owned(), Value::String(raw)),
+            ]),
+        );
+    }
 }
 
 fn content_unit_row(unit: &SyncMessage) -> Option<RowUuid> {

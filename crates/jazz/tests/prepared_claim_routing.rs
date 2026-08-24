@@ -35,16 +35,46 @@ const GROUP_MEMBERS: &str = "group_members";
 const GROUP_EDGES: &str = "group_edges";
 const CYCLE_A: &str = "cycle_a";
 const CYCLE_B: &str = "cycle_b";
+const TEST_ISSUER: &str = "urn:jazz:test";
+const WRITER_SUB: &str = "writer";
+const USER_A_SUB: &str = "user-a";
+const USER_B_SUB: &str = "user-b";
+
 fn writer() -> AuthorSubject {
-    AuthorSubject::authenticated("urn:jazz:test", "writer").unwrap()
+    AuthorSubject::authenticated(TEST_ISSUER, WRITER_SUB).unwrap()
 }
 
 fn user_a() -> AuthorSubject {
-    AuthorSubject::authenticated("urn:jazz:test", "user-a").unwrap()
+    AuthorSubject::authenticated(TEST_ISSUER, USER_A_SUB).unwrap()
 }
 
 fn user_b() -> AuthorSubject {
-    AuthorSubject::authenticated("urn:jazz:test", "user-b").unwrap()
+    AuthorSubject::authenticated(TEST_ISSUER, USER_B_SUB).unwrap()
+}
+
+fn raw_subject_for(identity: AuthorSubject) -> &'static str {
+    if identity == writer() {
+        WRITER_SUB
+    } else if identity == user_a() {
+        USER_A_SUB
+    } else if identity == user_b() {
+        USER_B_SUB
+    } else {
+        panic!("unknown prepared-claim fixture identity {identity:?}")
+    }
+}
+
+fn set_fixture_identity_claims(
+    db: &BenchDb,
+    identity: AuthorSubject,
+    mut claims: BTreeMap<String, Value>,
+) {
+    let sub = raw_subject_for(identity);
+    claims.insert("iss".to_owned(), Value::String(TEST_ISSUER.to_owned()));
+    claims.insert("issuer".to_owned(), Value::String(TEST_ISSUER.to_owned()));
+    claims.insert("sub".to_owned(), Value::String(sub.to_owned()));
+    claims.insert("user_id".to_owned(), Value::String(sub.to_owned()));
+    db.set_identity_claims(identity, claims);
 }
 
 type BenchDb = Db<TestStorage>;
@@ -135,7 +165,7 @@ fn schema_with_membership_policy(membership_policy: Option<PublicPolicyExpr>) ->
             .table(
                 TableSchemaBuilder::new(MEMBERSHIPS)
                     .fk_column("team", TEAMS)
-                    .column("user", PublicColumnType::Uuid)
+                    .column("user", PublicColumnType::Text)
                     .column("region", PublicColumnType::Text)
                     .policies(membership_policies),
             )
@@ -285,7 +315,7 @@ fn two_hop_seeded_policy_schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new(GROUP_MEMBERS)
                     .fk_column("group", GROUPS)
-                    .column("user", PublicColumnType::Uuid)
+                    .column("user", PublicColumnType::Text)
                     .policies(allow_all_policies()),
             )
             .table(
@@ -434,7 +464,7 @@ fn seed(db: &BenchDb, team_a: RowUuid, team_b: RowUuid, region_a: &str, region_b
                 ("team".to_owned(), Value::Uuid(team.0)),
                 (
                     "user".to_owned(),
-                    Value::String(user.canonical().to_owned()),
+                    Value::String(raw_subject_for(user).to_owned()),
                 ),
                 ("region".to_owned(), Value::String(region.to_owned())),
             ]),
@@ -455,6 +485,9 @@ fn seed(db: &BenchDb, team_a: RowUuid, team_b: RowUuid, region_a: &str, region_b
 }
 
 fn seed_two_hop_reachability_policy(db: &BenchDb) -> (RowUuid, RowUuid, RowUuid, RowUuid) {
+    set_fixture_identity_claims(db, user_a(), BTreeMap::new());
+    set_fixture_identity_claims(db, user_b(), BTreeMap::new());
+
     let project_a = row(0x51);
     let project_b = row(0x52);
     let document_a = row(0x61);
@@ -530,7 +563,7 @@ fn seed_two_hop_reachability_policy(db: &BenchDb) -> (RowUuid, RowUuid, RowUuid,
                 ("group".to_owned(), Value::Uuid(group.0)),
                 (
                     "user".to_owned(),
-                    Value::String(user.canonical().to_owned()),
+                    Value::String(raw_subject_for(user).to_owned()),
                 ),
             ]),
         ))
@@ -550,11 +583,13 @@ fn assert_call_order(
     let team_a = row(0x11);
     let team_b = row(0x12);
     seed(&db, team_a, team_b, region_a, region_b);
-    db.set_identity_claims(
+    set_fixture_identity_claims(
+        &db,
         user_a(),
         BTreeMap::from([("region".to_owned(), Value::String(region_a.to_owned()))]),
     );
-    db.set_identity_claims(
+    set_fixture_identity_claims(
+        &db,
         user_b(),
         BTreeMap::from([("region".to_owned(), Value::String(region_b.to_owned()))]),
     );
@@ -625,7 +660,7 @@ fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
             .table(
                 TableSchemaBuilder::new(DOCUMENTS)
                     .column("visibility", PublicColumnType::Text)
-                    .column("owner", PublicColumnType::Uuid)
+                    .column("owner", PublicColumnType::Text)
                     .column("region", PublicColumnType::Text)
                     .policies(read_and_allow_all_writes(policy)),
             )
@@ -635,11 +670,13 @@ fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
     let public = row(0x51);
     let private = row(0x52);
     let regional = row(0x53);
-    db.set_identity_claims(
+    set_fixture_identity_claims(
+        &db,
         user_a(),
         BTreeMap::from([("region".to_owned(), Value::String("region-a".to_owned()))]),
     );
-    db.set_identity_claims(
+    set_fixture_identity_claims(
+        &db,
         user_b(),
         BTreeMap::from([("region".to_owned(), Value::String("region-b".to_owned()))]),
     );
@@ -648,10 +685,7 @@ fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
         public,
         BTreeMap::from([
             ("visibility".to_owned(), Value::String("public".to_owned())),
-            (
-                "owner".to_owned(),
-                Value::String(writer().canonical().to_owned()),
-            ),
+            ("owner".to_owned(), Value::String(WRITER_SUB.to_owned())),
             ("region".to_owned(), Value::String("other".to_owned())),
         ]),
     ))
@@ -661,10 +695,7 @@ fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
         private,
         BTreeMap::from([
             ("visibility".to_owned(), Value::String("private".to_owned())),
-            (
-                "owner".to_owned(),
-                Value::String(user_a().canonical().to_owned()),
-            ),
+            ("owner".to_owned(), Value::String(USER_A_SUB.to_owned())),
             ("region".to_owned(), Value::String("other".to_owned())),
         ]),
     ))
@@ -674,10 +705,7 @@ fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
         regional,
         BTreeMap::from([
             ("visibility".to_owned(), Value::String("private".to_owned())),
-            (
-                "owner".to_owned(),
-                Value::String(writer().canonical().to_owned()),
-            ),
+            ("owner".to_owned(), Value::String(WRITER_SUB.to_owned())),
             ("region".to_owned(), Value::String("region-a".to_owned())),
         ]),
     ))
@@ -725,11 +753,13 @@ fn assert_retained_subscription_regions(region_a: &str, region_b: &str) {
     let team_a = row(0x11);
     let team_b = row(0x12);
     seed(&db, team_a, team_b, region_a, region_b);
-    db.set_identity_claims(
+    set_fixture_identity_claims(
+        &db,
         user_a(),
         BTreeMap::from([("region".to_owned(), Value::String(region_a.to_owned()))]),
     );
-    db.set_identity_claims(
+    set_fixture_identity_claims(
+        &db,
         user_b(),
         BTreeMap::from([("region".to_owned(), Value::String(region_b.to_owned()))]),
     );
@@ -820,8 +850,8 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
     let chat_b = row(0xc2);
     let join_code_a = "invite-a";
     let join_code_b = "invite-b";
-    let user_id_a = "member-a";
-    let user_id_b = "member-b";
+    let user_id_a = USER_A_SUB;
+    let user_id_b = USER_B_SUB;
     for (chat, name, join_code) in [
         (chat_a, "chat-a", join_code_a),
         (chat_b, "chat-b", join_code_b),
@@ -839,19 +869,14 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
         ))
         .expect("seed invite chat");
     }
-    for (identity, join_code, user_id) in [
-        (user_a(), join_code_a, user_id_a),
-        (user_b(), join_code_b, user_id_b),
-    ] {
-        db.set_identity_claims(
+    for (identity, join_code) in [(user_a(), join_code_a), (user_b(), join_code_b)] {
+        set_fixture_identity_claims(
+            &db,
             identity,
-            BTreeMap::from([
-                (
-                    "join_code".to_owned(),
-                    Value::Nullable(Some(Box::new(Value::String(join_code.to_owned())))),
-                ),
-                ("user_id".to_owned(), Value::String(user_id.to_owned())),
-            ]),
+            BTreeMap::from([(
+                "join_code".to_owned(),
+                Value::Nullable(Some(Box::new(Value::String(join_code.to_owned())))),
+            )]),
         );
     }
     let query = Query::from(CHATS).filter(eq(col("id"), param("id")));
@@ -949,7 +974,8 @@ fn policy_dependency_reads_do_not_expose_dependency_rows() {
     let team_a = row(0x11);
     let team_b = row(0x12);
     seed(&db, team_a, team_b, "region-a", "region-b");
-    db.set_identity_claims(
+    set_fixture_identity_claims(
+        &db,
         user_a(),
         BTreeMap::from([
             ("region".to_owned(), Value::String("region-a".to_owned())),
@@ -959,7 +985,8 @@ fn policy_dependency_reads_do_not_expose_dependency_rows() {
             ),
         ]),
     );
-    db.set_identity_claims(
+    set_fixture_identity_claims(
+        &db,
         user_b(),
         BTreeMap::from([
             ("region".to_owned(), Value::String("region-b".to_owned())),
@@ -1111,11 +1138,13 @@ fn prepared_binding_reprepares_claim_routing_after_schema_change() {
     let document_a = row(0x41);
     let document_b = row(0x42);
     seed(&db, team_a, team_b, "region-a", "region-b");
-    db.set_identity_claims(
+    set_fixture_identity_claims(
+        &db,
         user_a(),
         BTreeMap::from([("region".to_owned(), Value::String("region-a".to_owned()))]),
     );
-    db.set_identity_claims(
+    set_fixture_identity_claims(
+        &db,
         user_b(),
         BTreeMap::from([("region".to_owned(), Value::String("region-b".to_owned()))]),
     );
@@ -1250,11 +1279,13 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
     let team_a = row(0x11);
     let team_b = row(0x12);
     seed(&db, team_a, team_b, "region-a", "region-b");
-    db.set_identity_claims(
+    set_fixture_identity_claims(
+        &db,
         user_a(),
         BTreeMap::from([("region".to_owned(), Value::String("region-a".to_owned()))]),
     );
-    db.set_identity_claims(
+    set_fixture_identity_claims(
+        &db,
         user_b(),
         BTreeMap::from([("region".to_owned(), Value::String("region-b".to_owned()))]),
     );
@@ -1487,7 +1518,7 @@ fn prepared_binding_rejects_conflicting_claim_types_across_policies() {
             .table(
                 TableSchemaBuilder::new(MEMBERSHIPS)
                     .fk_column("team", TEAMS)
-                    .column("user", PublicColumnType::Uuid)
+                    .column("user", PublicColumnType::Text)
                     .column("region", PublicColumnType::Text)
                     .policies(TablePolicies::new().with_select(membership_policy)),
             )
@@ -1499,7 +1530,8 @@ fn prepared_binding_rejects_conflicting_claim_types_across_policies() {
             .build(),
     );
     let db = open_db_with_schema(schema);
-    db.set_identity_claims(
+    set_fixture_identity_claims(
+        &db,
         user_a(),
         BTreeMap::from([("shared_scope".to_owned(), Value::Uuid(row(0x11).0))]),
     );
