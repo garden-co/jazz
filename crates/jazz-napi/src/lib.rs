@@ -2427,6 +2427,36 @@ impl NapiDb {
         }
     }
 
+    #[napi(js_name = "upsertEncodedAttributed")]
+    pub fn upsert_encoded_attributed(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+        author: Uint8Array,
+    ) -> napi::Result<Write> {
+        self.require_trusted_backend()?;
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        let author = core_author_id_from_bytes(&author)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                core_block_on(db.upsert_attributed(author, &table, row_id, cells))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                core_block_on(db.upsert_attributed(author, &table, row_id, cells))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
     #[napi(js_name = "delete")]
     pub fn delete_encoded(
         &self,
@@ -2781,6 +2811,36 @@ impl NapiDb {
                     db.restore_for_identity(author, &table, row_id, cells)
                 )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "restoreEncodedAttributed")]
+    pub fn restore_encoded_attributed(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+        author: Uint8Array,
+    ) -> napi::Result<Write> {
+        self.require_trusted_backend()?;
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        let author = core_author_id_from_bytes(&author)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                core_block_on(db.restore_attributed(author, &table, row_id, cells))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                core_block_on(db.restore_attributed(author, &table, row_id, cells))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
     }
