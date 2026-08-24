@@ -30,7 +30,6 @@ fn auxiliary_pump_completes_a_suspended_groove_chunk_read_without_a_semantic_tic
         let prepared = groove::large_values::prepare(
             groove::large_values::LargeValueKind::Bytes,
             &vec![7; 32 * 1024],
-            |_| groove::large_values::Locator::random(),
         )
         .unwrap();
         source.stage(prepared.staged_chunks.clone()).await.unwrap();

@@ -47,14 +47,13 @@ impl Locator {
     /// Allocate a fresh random 256-bit retrieval capability.
     pub fn random() -> Self {
         let mut locator = [0_u8; LOCATOR_BYTES];
-        locator[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
-        locator[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
+        getrandom::fill(&mut locator).expect("OS CSPRNG unavailable for chunk capability");
         Self(locator)
     }
 
-    /// Deterministically derive a test-only capability from fixture bytes.
-    /// Production allocation must use [`Self::random`].
-    pub fn from_seed(seed: &[u8]) -> Self {
+    /// Deterministically derive a capability for crate-internal fixtures.
+    #[cfg(test)]
+    pub(crate) fn from_seed(seed: &[u8]) -> Self {
         Self(*blake3::hash(seed).as_bytes())
     }
 }
@@ -460,11 +459,19 @@ impl LogicalValueValidator {
 /// A failed text/JSON validation never returns a publishable descriptor.
 pub fn prepare_streaming<R: std::io::Read>(
     kind: LargeValueKind,
+    reader: R,
+    stage: impl FnMut(StagedChunk) -> Result<(), Error>,
+) -> Result<(LargeValueRef, StreamingPrepareStats), Error> {
+    prepare_streaming_with_locator(kind, reader, random_locator, stage)
+}
+
+fn prepare_streaming_with_locator<R: std::io::Read>(
+    kind: LargeValueKind,
     mut reader: R,
     locator_for: impl FnMut(ContentHash) -> Locator,
     stage: impl FnMut(StagedChunk) -> Result<(), Error>,
 ) -> Result<(LargeValueRef, StreamingPrepareStats), Error> {
-    let mut builder = PushStreamingPreparation::new(kind, locator_for, stage);
+    let mut builder = PushStreamingPreparation::new_with_locator(kind, locator_for, stage);
     let mut read_buffer = vec![0_u8; LEAF_MIN_BYTES];
     loop {
         let count = reader
@@ -494,7 +501,7 @@ where
     L: FnMut(ContentHash) -> Locator,
     S: FnMut(StagedChunk) -> Result<(), Error>,
 {
-    pub fn new(kind: LargeValueKind, locator_for: L, stage: S) -> Self {
+    fn new_with_locator(kind: LargeValueKind, locator_for: L, stage: S) -> Self {
         Self {
             builder: StreamingTreeBuilder::new(kind, locator_for, stage),
             json: (kind == LargeValueKind::Json).then(StreamingJsonValidator::new),
@@ -513,6 +520,19 @@ where
             json.finish().map_err(|()| Error::InvalidJson)?;
         }
         self.builder.finish()
+    }
+}
+
+fn random_locator(_: ContentHash) -> Locator {
+    Locator::random()
+}
+
+impl<S> PushStreamingPreparation<fn(ContentHash) -> Locator, S>
+where
+    S: FnMut(StagedChunk) -> Result<(), Error>,
+{
+    pub fn new(kind: LargeValueKind, stage: S) -> Self {
+        Self::new_with_locator(kind, random_locator, stage)
     }
 }
 
@@ -781,7 +801,6 @@ impl ConsolidationContinuation {
     pub(crate) fn step(
         &mut self,
         inputs: &mut EvaluationInputs,
-        mut fresh_locator: impl FnMut(ContentHash) -> Locator,
     ) -> Result<Option<PreparedLargeValue>, IvmRuntimeError> {
         if self.current.is_none() {
             let node = load_authenticated_node_attempt(
@@ -815,7 +834,8 @@ impl ConsolidationContinuation {
             else {
                 return Err(Error::MalformedScalar.into());
             };
-            let prepared = consolidate_single_edit_attempt(&with_tail, inputs, &mut fresh_locator)?;
+            let prepared =
+                consolidate_single_edit_attempt(&with_tail, inputs, &mut random_locator)?;
             for chunk in &prepared.staged_chunks {
                 inputs.install_chunk(
                     ChunkRequest {
@@ -1659,7 +1679,7 @@ struct LocatedLeaf {
 
 /// Construct the canonical tree, assigning a fresh opaque locator to each new
 /// immutable node. Boundary decisions never inspect those locators.
-pub fn prepare(
+fn prepare_with_locator(
     kind: LargeValueKind,
     logical_bytes: &[u8],
     mut locator_for: impl FnMut(ContentHash) -> Locator,
@@ -1742,6 +1762,12 @@ pub fn prepare(
     })
 }
 
+/// Construct a canonical tree with fresh random capabilities for every new
+/// immutable node.
+pub fn prepare(kind: LargeValueKind, logical_bytes: &[u8]) -> Result<PreparedLargeValue, Error> {
+    prepare_with_locator(kind, logical_bytes, |_| Locator::random())
+}
+
 /// Rebuild while preserving the exact retrieval identity of every byte-equal
 /// node from a previous preparation. Local consolidation uses the same reuse
 /// rule while avoiding traversal of unaffected subtrees.
@@ -1749,17 +1775,13 @@ pub fn prepare_reusing(
     kind: LargeValueKind,
     logical_bytes: &[u8],
     previous: &[StagedChunk],
-    mut fresh_locator: impl FnMut(ContentHash) -> Locator,
 ) -> Result<PreparedLargeValue, Error> {
     let existing = previous
         .iter()
         .map(|chunk| (chunk.node_ref.object_hash, chunk.node_ref.locator))
         .collect::<std::collections::BTreeMap<_, _>>();
-    prepare(kind, logical_bytes, |hash| {
-        existing
-            .get(&hash)
-            .cloned()
-            .unwrap_or_else(|| fresh_locator(hash))
+    prepare_with_locator(kind, logical_bytes, |hash| {
+        existing.get(&hash).cloned().unwrap_or_else(Locator::random)
     })
 }
 
@@ -3262,6 +3284,26 @@ mod tests {
     }
 
     #[test]
+    fn public_preparation_allocates_fresh_full_width_capabilities() {
+        let prepare_signature: fn(LargeValueKind, &[u8]) -> Result<PreparedLargeValue, Error> =
+            prepare;
+        let first = prepare_signature(LargeValueKind::Bytes, b"same logical bytes").unwrap();
+        let second = prepare_signature(LargeValueKind::Bytes, b"same logical bytes").unwrap();
+
+        assert_eq!(first.value_ref.logical_hash, second.value_ref.logical_hash);
+        assert_ne!(first.value_ref.root.locator, second.value_ref.root.locator);
+
+        let samples = (0..256).map(|_| Locator::random()).collect::<Vec<_>>();
+        for byte in 0..LOCATOR_BYTES {
+            for bit in 0..8 {
+                let mask = 1 << bit;
+                assert!(samples.iter().any(|locator| locator.0[byte] & mask == 0));
+                assert!(samples.iter().any(|locator| locator.0[byte] & mask != 0));
+            }
+        }
+    }
+
+    #[test]
     fn reachability_traversal_authenticates_and_visits_the_complete_tree() {
         let mut state = 0x4d59_5df4_d0f3_3173_u64;
         let logical = (0..LEAF_TARGET_BYTES * (BRANCH_MAX_CHILDREN + 5))
@@ -3272,7 +3314,8 @@ mod tests {
                 state as u8
             })
             .collect::<Vec<_>>();
-        let prepared = prepare(LargeValueKind::Bytes, &logical, deterministic_locator).unwrap();
+        let prepared =
+            prepare_with_locator(LargeValueKind::Bytes, &logical, deterministic_locator).unwrap();
         let provider = PreparedProvider::new(&prepared);
         let mut visited = std::collections::BTreeSet::new();
         let count = futures::executor::block_on(visit_reachable_chunks(
@@ -3335,10 +3378,10 @@ mod tests {
             ),
         ];
         for (kind, bytes) in cases {
-            let expected = prepare(kind, &bytes, deterministic_locator).unwrap();
+            let expected = prepare_with_locator(kind, &bytes, deterministic_locator).unwrap();
             for seed in 1..=12 {
                 let mut staged = Vec::new();
-                let (actual, stats) = prepare_streaming(
+                let (actual, stats) = prepare_streaming_with_locator(
                     kind,
                     WindowReader {
                         bytes: &bytes,
@@ -3373,13 +3416,17 @@ mod tests {
     #[test]
     fn push_streaming_json_does_not_buffer_one_large_string_token() {
         let bytes = format!("{{\"body\":\"{}\"}}", "x".repeat(LEAF_MAX_BYTES * 8)).into_bytes();
-        let expected = prepare(LargeValueKind::Json, &bytes, deterministic_locator).unwrap();
+        let expected =
+            prepare_with_locator(LargeValueKind::Json, &bytes, deterministic_locator).unwrap();
         let mut staged = Vec::new();
-        let mut preparation =
-            PushStreamingPreparation::new(LargeValueKind::Json, deterministic_locator, |chunk| {
+        let mut preparation = PushStreamingPreparation::new_with_locator(
+            LargeValueKind::Json,
+            deterministic_locator,
+            |chunk| {
                 staged.push(chunk);
                 Ok(())
-            });
+            },
+        );
         for byte in &bytes {
             preparation.push(std::slice::from_ref(byte)).unwrap();
         }
@@ -3395,7 +3442,7 @@ mod tests {
         invalid_json.extend(std::iter::repeat_n(b' ', LEAF_MAX_BYTES + 1));
         invalid_json.extend_from_slice(br#"{"ok":true}, invalid]"#);
         let mut staged = 0;
-        let result = prepare_streaming(
+        let result = prepare_streaming_with_locator(
             LargeValueKind::Json,
             std::io::Cursor::new(&invalid_json),
             deterministic_locator,
@@ -3411,7 +3458,7 @@ mod tests {
         );
 
         let mut attempts = 0;
-        let result = prepare_streaming(
+        let result = prepare_streaming_with_locator(
             LargeValueKind::Bytes,
             std::io::Cursor::new(vec![7; LEAF_MAX_BYTES * 3]),
             deterministic_locator,
@@ -3434,13 +3481,13 @@ mod tests {
     #[test]
     fn construction_is_deterministic_and_text_metrics_are_exact() {
         let text = "a😀é".repeat(100_000);
-        let first = prepare(
+        let first = prepare_with_locator(
             LargeValueKind::String,
             text.as_bytes(),
             deterministic_locator,
         )
         .unwrap();
-        let second = prepare(
+        let second = prepare_with_locator(
             LargeValueKind::String,
             text.as_bytes(),
             deterministic_locator,
@@ -3466,7 +3513,7 @@ mod tests {
     #[test]
     fn append_tail_updates_metrics_without_changing_base_identity_or_reading_chunks() {
         let base = "base 😀 ".repeat(20_000);
-        let prepared = prepare(
+        let prepared = prepare_with_locator(
             LargeValueKind::String,
             base.as_bytes(),
             deterministic_locator,
@@ -3492,7 +3539,8 @@ mod tests {
 
     #[test]
     fn append_tail_reports_consolidation_before_exceeding_its_hard_bound() {
-        let prepared = prepare(LargeValueKind::Bytes, b"base", deterministic_locator).unwrap();
+        let prepared =
+            prepare_with_locator(LargeValueKind::Bytes, b"base", deterministic_locator).unwrap();
         let mut value = prepared.value_ref;
         for _ in 0..MAX_EDIT_COUNT {
             let TailAppendOutcome::Updated(updated) = append_tail(&value, vec![1]).unwrap() else {
@@ -3508,7 +3556,7 @@ mod tests {
 
     #[test]
     fn byte_replacement_enters_tail_without_fetching_the_base_tree() {
-        let prepared = prepare(
+        let prepared = prepare_with_locator(
             LargeValueKind::Bytes,
             &vec![3; LEAF_TARGET_BYTES * 4],
             deterministic_locator,
@@ -3537,7 +3585,7 @@ mod tests {
     #[test]
     fn text_replacement_reads_only_its_range_and_preserves_exact_utf16_metrics() {
         let base = "zero 😀 one é two ".repeat(30_000);
-        let prepared = prepare(
+        let prepared = prepare_with_locator(
             LargeValueKind::String,
             base.as_bytes(),
             deterministic_locator,
@@ -3597,7 +3645,7 @@ mod tests {
                 state as u8
             })
             .collect::<Vec<_>>();
-        let prepared = prepare(LargeValueKind::Bytes, &base, |hash| {
+        let prepared = prepare_with_locator(LargeValueKind::Bytes, &base, |hash| {
             let mut locator = b"old/".to_vec();
             locator.extend_from_slice(&hash.0[..20]);
             Locator::from_seed(&locator)
@@ -3644,7 +3692,7 @@ mod tests {
         };
         let mut final_bytes = base;
         final_bytes.extend_from_slice(&suffix);
-        let fresh = prepare(LargeValueKind::Bytes, &final_bytes, |hash| {
+        let fresh = prepare_with_locator(LargeValueKind::Bytes, &final_bytes, |hash| {
             let mut locator = b"fresh/".to_vec();
             locator.extend_from_slice(&hash.0[..20]);
             Locator::from_seed(&locator)
@@ -3717,7 +3765,7 @@ mod tests {
                 state as u8
             })
             .collect::<Vec<_>>();
-        let prepared = prepare(LargeValueKind::Bytes, &base, |hash| {
+        let prepared = prepare_with_locator(LargeValueKind::Bytes, &base, |hash| {
             let mut locator = b"old/".to_vec();
             locator.extend_from_slice(&hash.0[..20]);
             Locator::from_seed(&locator)
@@ -3771,7 +3819,7 @@ mod tests {
         };
         let mut expected = base;
         expected.splice(offset as usize..(offset + delete_length) as usize, insert);
-        let fresh = prepare(LargeValueKind::Bytes, &expected, |hash| {
+        let fresh = prepare_with_locator(LargeValueKind::Bytes, &expected, |hash| {
             let mut locator = b"fresh/".to_vec();
             locator.extend_from_slice(&hash.0[..20]);
             Locator::from_seed(&locator)
@@ -3841,7 +3889,8 @@ mod tests {
                 state as u8
             })
             .collect::<Vec<_>>();
-        let prepared = prepare(LargeValueKind::Bytes, &base, deterministic_locator).unwrap();
+        let prepared =
+            prepare_with_locator(LargeValueKind::Bytes, &base, deterministic_locator).unwrap();
         let available = prepared
             .staged_chunks
             .iter()
@@ -3894,7 +3943,9 @@ mod tests {
             };
             let mut expected = base.clone();
             expected.splice(offset..offset + delete, insert);
-            let fresh = prepare(LargeValueKind::Bytes, &expected, deterministic_locator).unwrap();
+            let fresh =
+                prepare_with_locator(LargeValueKind::Bytes, &expected, deterministic_locator)
+                    .unwrap();
             assert_eq!(
                 consolidated.value_ref.logical_hash, fresh.value_ref.logical_hash,
                 "case {case}: offset={offset} delete={delete} insert={insert_len}"
@@ -3913,7 +3964,8 @@ mod tests {
                 state as u8
             })
             .collect::<Vec<_>>();
-        let prepared = prepare(LargeValueKind::Bytes, &base, deterministic_locator).unwrap();
+        let prepared =
+            prepare_with_locator(LargeValueKind::Bytes, &base, deterministic_locator).unwrap();
         let available = prepared
             .staged_chunks
             .iter()
@@ -3951,7 +4003,7 @@ mod tests {
         let mut inputs = EvaluationInputs::default();
         let mut max_completed_before_block = 0_usize;
         let consolidated = loop {
-            match continuation.step(&mut inputs, deterministic_locator) {
+            match continuation.step(&mut inputs) {
                 Ok(Some(value)) => break value,
                 Ok(None) => unreachable!(),
                 Err(IvmRuntimeError::EvaluationBlocked) => {
@@ -3964,7 +4016,8 @@ mod tests {
                 Err(error) => panic!("unexpected continuation failure: {error}"),
             }
         };
-        let fresh = prepare(LargeValueKind::Bytes, &logical, deterministic_locator).unwrap();
+        let fresh =
+            prepare_with_locator(LargeValueKind::Bytes, &logical, deterministic_locator).unwrap();
 
         assert_eq!(
             consolidated.value_ref.logical_hash,
@@ -3980,8 +4033,9 @@ mod tests {
     #[test]
     fn locator_changes_do_not_change_logical_identity_or_tree_shape() {
         let bytes = vec![42; LEAF_MAX_BYTES * 3];
-        let first = prepare(LargeValueKind::Bytes, &bytes, deterministic_locator).unwrap();
-        let second = prepare(LargeValueKind::Bytes, &bytes, |hash| {
+        let first =
+            prepare_with_locator(LargeValueKind::Bytes, &bytes, deterministic_locator).unwrap();
+        let second = prepare_with_locator(LargeValueKind::Bytes, &bytes, |hash| {
             let mut locator = hash.0;
             locator[0] ^= 0xff;
             Locator::from_seed(&locator)
@@ -4030,7 +4084,8 @@ mod tests {
     #[test]
     fn object_hash_authenticates_locator_bearing_branch_bytes() {
         let bytes = vec![9; LEAF_MAX_BYTES * 2];
-        let prepared = prepare(LargeValueKind::Bytes, &bytes, deterministic_locator).unwrap();
+        let prepared =
+            prepare_with_locator(LargeValueKind::Bytes, &bytes, deterministic_locator).unwrap();
         let root = prepared.staged_chunks.last().unwrap();
         let mut corrupted = root.encoded.clone();
         *corrupted.last_mut().unwrap() ^= 1;
@@ -4043,10 +4098,11 @@ mod tests {
     #[test]
     fn json_preserves_literal_source_and_rejects_invalid_input() {
         let source = br#"{ "b": 2, "a": [1, true, null] }"#;
-        let prepared = prepare(LargeValueKind::Json, source, deterministic_locator).unwrap();
+        let prepared =
+            prepare_with_locator(LargeValueKind::Json, source, deterministic_locator).unwrap();
         assert_ne!(prepared.value_ref.logical_hash, ContentHash([0; 32]));
         assert_eq!(
-            prepare(LargeValueKind::Json, b"{broken", deterministic_locator),
+            prepare_with_locator(LargeValueKind::Json, b"{broken", deterministic_locator),
             Err(Error::InvalidJson)
         );
     }
@@ -4056,7 +4112,8 @@ mod tests {
         let logical = (0..(LEAF_MAX_BYTES * 3))
             .map(|index| (index.wrapping_mul(31) & 0xff) as u8)
             .collect::<Vec<_>>();
-        let prepared = prepare(LargeValueKind::Bytes, &logical, deterministic_locator).unwrap();
+        let prepared =
+            prepare_with_locator(LargeValueKind::Bytes, &logical, deterministic_locator).unwrap();
         let available = prepared
             .staged_chunks
             .iter()
@@ -4100,7 +4157,7 @@ mod tests {
         let original = (0..(LEAF_MAX_BYTES * 12))
             .map(|index| (index.wrapping_mul(17) & 0xff) as u8)
             .collect::<Vec<_>>();
-        let first = prepare(LargeValueKind::Bytes, &original, |hash| {
+        let first = prepare_with_locator(LargeValueKind::Bytes, &original, |hash| {
             let mut locator = hash.0;
             locator[0] ^= 0x55;
             Locator::from_seed(&locator)
@@ -4108,17 +4165,7 @@ mod tests {
         .unwrap();
         let mut edited = original;
         edited.splice(LEAF_MAX_BYTES * 6..LEAF_MAX_BYTES * 6, [1, 2, 3, 4]);
-        let second = prepare_reusing(
-            LargeValueKind::Bytes,
-            &edited,
-            &first.staged_chunks,
-            |hash| {
-                let mut locator = hash.0;
-                locator[0] ^= 0xaa;
-                Locator::from_seed(&locator)
-            },
-        )
-        .unwrap();
+        let second = prepare_reusing(LargeValueKind::Bytes, &edited, &first.staged_chunks).unwrap();
 
         let old = first
             .staged_chunks
@@ -4169,13 +4216,15 @@ mod tests {
                 state as u8
             })
             .collect::<Vec<_>>();
-        let first = prepare(LargeValueKind::Bytes, &original, deterministic_locator).unwrap();
+        let first =
+            prepare_with_locator(LargeValueKind::Bytes, &original, deterministic_locator).unwrap();
         let mut edited = original;
         edited.splice(
             edited.len() / 2..edited.len() / 2,
             b"localized edit".iter().copied(),
         );
-        let second = prepare(LargeValueKind::Bytes, &edited, deterministic_locator).unwrap();
+        let second =
+            prepare_with_locator(LargeValueKind::Bytes, &edited, deterministic_locator).unwrap();
         let old_hashes = first
             .staged_chunks
             .iter()
@@ -4205,7 +4254,8 @@ mod tests {
                 state as u8
             })
             .collect::<Vec<_>>();
-        let prepared = prepare(LargeValueKind::Bytes, &base, deterministic_locator).unwrap();
+        let prepared =
+            prepare_with_locator(LargeValueKind::Bytes, &base, deterministic_locator).unwrap();
         let available = prepared
             .staged_chunks
             .iter()

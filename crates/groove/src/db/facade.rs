@@ -208,17 +208,13 @@ impl Database {
         self.chunk_resolver = resolver;
     }
 
-    fn fresh_chunk_locator(_: crate::large_values::ContentHash) -> crate::large_values::Locator {
-        crate::large_values::Locator::random()
-    }
-
     /// Prepare and stage a complete logical value entirely inside Groove.
     pub async fn prepare_and_stage_large_value(
         &self,
         kind: crate::large_values::LargeValueKind,
         bytes: &[u8],
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
-        let prepared = crate::large_values::prepare(kind, bytes, Self::fresh_chunk_locator)
+        let prepared = crate::large_values::prepare(kind, bytes)
             .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
         self.stage_large_value_preparation(prepared).await
     }
@@ -1061,19 +1057,18 @@ impl Database {
     }
 
     /// Consolidate a bounded edit tail inside one Groove-owned resumable
-    /// preparation. The host supplies fresh opaque locators but never drives a
-    /// missing-chunk retry loop; this future retains completed local splices.
+    /// preparation. Groove allocates fresh capabilities and retains completed
+    /// local splices while it drives any missing-chunk retry loop.
     pub async fn consolidate_large_value(
         &self,
         value: crate::large_values::LargeValueRef,
-        mut fresh_locator: impl FnMut(crate::large_values::ContentHash) -> crate::large_values::Locator,
     ) -> Result<crate::large_values::PreparedLargeValue, Error> {
         let mut continuation = crate::large_values::ConsolidationContinuation::new(value)
             .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
         let mut inputs = crate::ivm::runtime::evaluation_session::EvaluationInputs::default();
         let provider = self.ivm_runtime.chunk_provider();
         loop {
-            match continuation.step(&mut inputs, &mut fresh_locator) {
+            match continuation.step(&mut inputs) {
                 Ok(Some(prepared)) => return Ok(prepared),
                 Ok(None) => continue,
                 Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked) => {
@@ -1100,9 +1095,7 @@ impl Database {
         &self,
         value: crate::large_values::LargeValueRef,
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
-        let prepared = self
-            .consolidate_large_value(value, Self::fresh_chunk_locator)
-            .await?;
+        let prepared = self.consolidate_large_value(value).await?;
         self.stage_large_value_preparation(prepared).await
     }
 
@@ -1112,7 +1105,6 @@ impl Database {
         &self,
         value: crate::large_values::LargeValueRef,
         bytes: Vec<u8>,
-        fresh_locator: impl FnMut(crate::large_values::ContentHash) -> crate::large_values::Locator,
     ) -> Result<crate::large_values::PreparedLargeValue, Error> {
         match crate::large_values::append_tail(&value, bytes)
             .map_err(crate::ivm::runtime::IvmRuntimeError::from)?
@@ -1124,7 +1116,7 @@ impl Database {
                 })
             }
             crate::large_values::TailAppendOutcome::ConsolidationRequired(transient) => {
-                self.consolidate_large_value(transient, fresh_locator).await
+                self.consolidate_large_value(transient).await
             }
         }
     }
@@ -1135,9 +1127,7 @@ impl Database {
         value: crate::large_values::LargeValueRef,
         bytes: Vec<u8>,
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
-        let prepared = self
-            .append_large_value(value, bytes, Self::fresh_chunk_locator)
-            .await?;
+        let prepared = self.append_large_value(value, bytes).await?;
         self.stage_large_value_preparation(prepared).await
     }
 
@@ -1150,7 +1140,6 @@ impl Database {
         offset: u64,
         delete_length: u64,
         insert_bytes: Vec<u8>,
-        fresh_locator: impl FnMut(crate::large_values::ContentHash) -> crate::large_values::Locator,
     ) -> Result<crate::large_values::PreparedLargeValue, Error> {
         let mut inputs = crate::ivm::runtime::evaluation_session::EvaluationInputs::default();
         let provider = self.ivm_runtime.chunk_provider();
@@ -1187,7 +1176,7 @@ impl Database {
                 })
             }
             crate::large_values::TailEditOutcome::ConsolidationRequired(transient) => {
-                self.consolidate_large_value(transient, fresh_locator).await
+                self.consolidate_large_value(transient).await
             }
         }
     }
@@ -1201,13 +1190,7 @@ impl Database {
         insert_bytes: Vec<u8>,
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
         let prepared = self
-            .edit_large_value(
-                value,
-                offset,
-                delete_length,
-                insert_bytes,
-                Self::fresh_chunk_locator,
-            )
+            .edit_large_value(value, offset, delete_length, insert_bytes)
             .await?;
         self.stage_large_value_preparation(prepared).await
     }

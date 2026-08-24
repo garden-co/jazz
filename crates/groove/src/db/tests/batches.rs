@@ -232,7 +232,6 @@ async fn idempotent_restaging_reports_incoming_bytes_for_each_upload() {
     let prepared = crate::large_values::prepare(
         crate::large_values::LargeValueKind::Bytes,
         &vec![4; crate::large_values::INLINE_VALUE_MAX_BYTES + 1],
-        |hash| crate::large_values::Locator(hash.0),
     )
     .unwrap();
 
@@ -269,7 +268,6 @@ async fn incomplete_push_upload_is_restart_persistent_and_reclaimable() {
     let prepared = crate::large_values::prepare(
         crate::large_values::LargeValueKind::Bytes,
         &vec![5; crate::large_values::INLINE_VALUE_MAX_BYTES + 1],
-        |hash| crate::large_values::Locator(hash.0),
     )
     .unwrap();
     let upload_id = crate::large_values::StagedLargeValueId([0x55; 16]);
@@ -327,7 +325,6 @@ async fn upload_intent_reclaims_crash_window_chunks_and_promotes_completed_uploa
         &(0..crate::large_values::INLINE_VALUE_MAX_BYTES * 8)
             .map(|index| (index % 251) as u8)
             .collect::<Vec<_>>(),
-        |hash| crate::large_values::Locator(hash.0),
     )
     .unwrap();
 
@@ -436,7 +433,6 @@ fn eviction_and_reclamation_wait_for_an_inflight_blob_stage() {
     let prepared = crate::large_values::prepare(
         crate::large_values::LargeValueKind::Bytes,
         &vec![3; crate::large_values::INLINE_VALUE_MAX_BYTES + 1],
-        |hash| crate::large_values::Locator(hash.0),
     )
     .unwrap();
     let mut pool = LocalPool::new();
@@ -531,7 +527,6 @@ async fn orphan_reclamation_defers_for_active_chunk_requests_and_leases() {
     let prepared = crate::large_values::prepare(
         crate::large_values::LargeValueKind::Bytes,
         &vec![8; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
-        |hash| crate::large_values::Locator(hash.0),
     )
     .unwrap();
     let staged = database
@@ -678,7 +673,6 @@ async fn root_first_upload_requests_only_authenticated_missing_frontier() {
     let prepared = crate::large_values::prepare(
         crate::large_values::LargeValueKind::Bytes,
         &vec![5; crate::large_values::INLINE_VALUE_MAX_BYTES * 8],
-        |hash| crate::large_values::Locator(hash.0),
     )
     .unwrap();
 
@@ -790,10 +784,7 @@ async fn malformed_json_tail_upload_is_rejected_and_reclaimed_before_staging() {
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks.clone());
     let prepared =
-        crate::large_values::prepare(crate::large_values::LargeValueKind::Json, b"[]", |hash| {
-            crate::large_values::Locator(hash.0)
-        })
-        .unwrap();
+        crate::large_values::prepare(crate::large_values::LargeValueKind::Json, b"[]").unwrap();
     let mut malformed = prepared.value_ref.clone();
     malformed.byte_length += 1;
     malformed.utf16_length = Some(malformed.utf16_length.unwrap() + 1);
@@ -866,7 +857,6 @@ async fn malformed_later_upload_child_has_no_durable_partial_write_after_reopen(
     let mut prepared = crate::large_values::prepare(
         crate::large_values::LargeValueKind::Bytes,
         &vec![7; crate::large_values::INLINE_VALUE_MAX_BYTES * 8],
-        |hash| crate::large_values::Locator(hash.0),
     )
     .unwrap();
     let root_index = prepared
@@ -981,12 +971,9 @@ async fn utf8_boundary_tail_upload_is_rejected_and_reclaimed_before_staging() {
     let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
     let mut database = Database::new(schema, storage).await.unwrap();
     database.set_chunk_storage(chunks.clone());
-    let prepared = crate::large_values::prepare(
-        crate::large_values::LargeValueKind::String,
-        "é".as_bytes(),
-        |hash| crate::large_values::Locator(hash.0),
-    )
-    .unwrap();
+    let prepared =
+        crate::large_values::prepare(crate::large_values::LargeValueKind::String, "é".as_bytes())
+            .unwrap();
     let mut malformed = prepared.value_ref.clone();
     malformed.byte_length += 1;
     malformed.utf16_length = Some(malformed.utf16_length.unwrap() + 1);
@@ -1053,7 +1040,6 @@ async fn root_first_upload_resumes_from_the_persisted_authenticated_frontier() {
     let prepared = crate::large_values::prepare(
         crate::large_values::LargeValueKind::Bytes,
         &vec![6; crate::large_values::INLINE_VALUE_MAX_BYTES * 8],
-        |hash| crate::large_values::Locator(hash.0),
     )
     .unwrap();
     let root = prepared

@@ -16,7 +16,7 @@ pub enum StreamingMutationKind {
 }
 
 type PushPreparation = groove::large_values::PushStreamingPreparation<
-    Box<dyn FnMut(groove::large_values::ContentHash) -> groove::large_values::Locator>,
+    fn(groove::large_values::ContentHash) -> groove::large_values::Locator,
     Box<dyn FnMut(groove::large_values::StagedChunk) -> Result<(), groove::large_values::Error>>,
 >;
 
@@ -604,7 +604,6 @@ where
         let emitted_for_stage = Rc::clone(&emitted);
         let preparation = groove::large_values::PushStreamingPreparation::new(
             kind,
-            Box::new(|_| groove::large_values::Locator::random()) as Box<dyn FnMut(_) -> _>,
             Box::new(move |chunk| {
                 emitted_for_stage.borrow_mut().push(chunk);
                 Ok(())

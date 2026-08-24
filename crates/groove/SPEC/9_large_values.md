@@ -56,6 +56,12 @@ treats object hashes and locators as non-semantic:
 changing only the retrieval graph cannot change logical equality, ordering,
 grouping, an IVM node id, an index key, or query output.
 
+Groove allocates every new locator internally from 32 unmodified bytes supplied
+by the operating system CSPRNG. Production construction, streaming,
+consolidation, append, and edit APIs do not accept locator allocators from
+callers; tests may inject deterministic allocators only through crate-private
+test helpers.
+
 Small logical values remain inline. Above a versioned threshold, Groove emits a
 large descriptor and immutable chunks. Once indirect, a value may remain
 indirect below the threshold; demotion is representation-only compaction.
