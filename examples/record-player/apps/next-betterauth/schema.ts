@@ -1,6 +1,8 @@
 import { schema as s } from "jazz-tools";
+import { betterAuthSchema } from "./auth-schema";
 
 const schema = {
+  ...betterAuthSchema,
   albums: s.table({ title: s.string(), artist: s.string(), cover_locator: s.string().optional() }),
   tracks: s.table({
     album_id: s.ref("albums"),
@@ -11,7 +13,7 @@ const schema = {
     // intentionally outside this adapter until the typed Db gains that API.
     audio_bytes: s.bytes().optional(),
   }),
-  playlists: s.table({ name: s.string(), owner_subject: s.string() }),
+  playlists: s.table({ name: s.string() }),
   playlist_entries: s.table({
     playlist_id: s.ref("playlists"),
     track_id: s.ref("tracks"),

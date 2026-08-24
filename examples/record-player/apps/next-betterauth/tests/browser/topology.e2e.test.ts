@@ -16,6 +16,7 @@ import {
   getJazzServerInfo,
   getJazzServerJwtForUser,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
+import { betterAuthSchema } from "../../auth-schema.js";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
 import { PLAYLIST_WINDOW_LIMIT, PLAYLIST_WINDOW_OFFSET } from "../../src/record-player.js";
@@ -47,6 +48,7 @@ const recipientPermissions = s.definePermissions(recipientApp, ({ policy, sessio
 // This adds exactly the branch which distinguishes RecordPlayer from the
 // scalar control: a correlated owner path through a referenced playlist.
 const relationalRecipientApp = s.defineApp({
+  ...betterAuthSchema,
   albums: s.table({
     title: s.string(),
     artist: s.string(),
@@ -59,7 +61,7 @@ const relationalRecipientApp = s.defineApp({
     duration_ms: s.int(),
     audio_bytes: s.bytes().optional(),
   }),
-  playlists: s.table({ name: s.string(), owner_subject: s.string() }),
+  playlists: s.table({ name: s.string() }),
   playlist_entries: s.table({
     playlist_id: s.ref("playlists"),
     track_id: s.ref("tracks"),
@@ -173,7 +175,6 @@ describe("RecordPlayer authenticated playlist topology", () => {
     const playlist = await owner
       .insert(app.playlists, {
         name: "recipient settlement receipt",
-        owner_subject: "record-player-recipient-owner",
       })
       .wait({ tier: "edge" });
     const invitation = await owner
@@ -230,7 +231,6 @@ describe("RecordPlayer authenticated playlist topology", () => {
     const playlist = await owner
       .insert(app.playlists, {
         name: "acceptance settlement receipt",
-        owner_subject: "record-player-acceptance-owner",
       })
       .wait({ tier: "edge" });
     const invitation = await owner
@@ -277,7 +277,6 @@ describe("RecordPlayer authenticated playlist topology", () => {
     const stop = db.onMutationError((event) => errors.push(event));
     const write = db.insert(app.playlists, {
       name: "owner settlement receipt",
-      owner_subject: "record-player-owner-settlement",
     });
     await withTimeout(write.wait({ tier: "local" }), 5_000, "playlist did not settle locally");
     try {
@@ -386,7 +385,6 @@ describe("RecordPlayer authenticated playlist topology", () => {
     const playlist = await owner
       .insert(relationalRecipientApp.playlists, {
         name: "recipient relation receipt",
-        owner_subject: "record-player-relation-owner",
       })
       .wait({ tier: "edge" });
     const invite = await owner
@@ -495,7 +493,6 @@ describe("RecordPlayer authenticated playlist topology", () => {
               );
               const playlistWrite = owner.insert(relationalRecipientApp.playlists, {
                 name: "phase relation receipt",
-                owner_subject: "record-player-phase-owner",
               });
               await withTimeout(
                 playlistWrite.wait({ tier: "local" }),
@@ -611,7 +608,6 @@ describe("RecordPlayer authenticated playlist topology", () => {
               });
               const playlistWrite = owner.insert(app.playlists, {
                 name: "Road tape",
-                owner_subject: "record-player-owner",
               });
               const playlistBatchId = await playlistWrite.batchId;
               console.info("[record-player-topology] playlist transaction", {

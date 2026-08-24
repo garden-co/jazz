@@ -1,3 +1,8 @@
+"use client";
+
+import { RecordPlayerClient } from "./record-player-client";
+import { RecordPlayerProvider } from "./record-player-provider";
+
 export default function Home() {
   return (
     <main>
@@ -10,8 +15,9 @@ export default function Home() {
         <li>Ordered, collaboratively edited playlists</li>
         <li>Partial audio buffering and durable playback position</li>
       </ul>
-      <RecordPlayerClient />
+      <RecordPlayerProvider>
+        <RecordPlayerClient />
+      </RecordPlayerProvider>
     </main>
   );
 }
-import { RecordPlayerClient } from "./record-player-client";

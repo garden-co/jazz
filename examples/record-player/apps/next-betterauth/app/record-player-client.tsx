@@ -28,7 +28,7 @@ function LiveRecordPlayer({ playlistId }: { playlistId?: string }) {
   );
 
   async function createPlaylist() {
-    await db.insert(app.playlists, { name: "New playlist", owner_subject: "" });
+    await db.insert(app.playlists, { name: "New playlist" });
   }
 
   return (
