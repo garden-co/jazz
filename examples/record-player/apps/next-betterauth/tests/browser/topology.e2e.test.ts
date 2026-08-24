@@ -17,6 +17,7 @@ import {
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
+import { PLAYLIST_WINDOW_LIMIT, PLAYLIST_WINDOW_OFFSET } from "../../src/record-player.js";
 
 const ctx = new TestCleanup();
 afterEach(async () => ctx.cleanup());
@@ -68,6 +69,9 @@ describe("RecordPlayer authenticated playlist topology", () => {
     let playlist: { id: string };
     let editorInvite: { id: string };
     let listenerInvite: { id: string };
+    let editorToken: string;
+    let editorDbName: string;
+    let streamedTrackId: string;
     const seed = Number(import.meta.env.JAZZ_EXAMPLE_TOPOLOGY_SEED ?? 41);
 
     const receipt = await runTopologyScenario(
@@ -103,15 +107,17 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 permissions,
               });
               console.info("[record-player-topology] issue session JWTs");
-              const [ownerToken, editorToken, listenerToken] = await Promise.all([
+              const [ownerToken, issuedEditorToken, listenerToken] = await Promise.all([
                 getJazzServerJwtForUser("record-player-owner", undefined, server.appId),
                 getJazzServerJwtForUser("record-player-editor", undefined, server.appId),
                 getJazzServerJwtForUser("record-player-listener", undefined, server.appId),
               ]);
+              editorToken = issuedEditorToken;
+              editorDbName = uniqueDbName("record-player-editor-persistent");
               console.info("[record-player-topology] open owner edge");
               owner = await openClient(server, "owner", ownerToken);
               console.info("[record-player-topology] open editor edge");
-              editor = await openClient(server, "editor", editorToken);
+              editor = await openClient(server, "editor", editorToken, editorDbName);
               console.info("[record-player-topology] open listener edge");
               listener = await openClient(server, "listener", listenerToken);
               console.info("[record-player-topology] create playlist");
@@ -170,6 +176,109 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   .update(app.invitations, listenerInvite.id, { status: "accepted" })
                   .wait({ tier: "edge" }),
               ]);
+
+              // This uses precisely the public streaming API that the app's
+              // persistence adapter uses. The list screens must remain useful
+              // without eagerly materializing the audio field.
+              const streamedTrack = await owner.insertStreaming(app.tracks, {
+                album_id: (
+                  await owner
+                    .insert(app.albums, { title: "A streamed record", artist: "Jazz" })
+                    .wait({ tier: "edge" })
+                ).value.id,
+                title: "Streaming receipt",
+                ordinal: 0,
+                duration_ms: 2,
+                audio_bytes: audioStream([0x52, 0x50, 0x2d, 0x31]),
+              });
+              streamedTrackId = (
+                await withTimeout(
+                  streamedTrack.wait({ tier: "edge" }),
+                  15_000,
+                  "streamed audio track did not settle at edge",
+                )
+              ).id;
+            },
+          },
+          {
+            name: "exercise metadata and window queries used by the rendered screens",
+            run: async () => {
+              const windowAlbum = (
+                await owner
+                  .insert(app.albums, { title: "Window catalogue", artist: "Jazz" })
+                  .wait({ tier: "edge" })
+              ).value;
+              const windowTracks: Array<{ id: string }> = [];
+              for (let position = 0; position < PLAYLIST_WINDOW_OFFSET + 2; position += 1) {
+                const track = (
+                  await owner
+                    .insert(app.tracks, {
+                      album_id: windowAlbum.id,
+                      title: `Window ${position}`,
+                      ordinal: position,
+                      duration_ms: position + 1,
+                    })
+                    .wait({ tier: "edge" })
+                ).value;
+                await owner
+                  .insert(app.playlist_entries, {
+                    playlist_id: playlist.id,
+                    track_id: track.id,
+                    position,
+                  })
+                  .wait({ tier: "edge" });
+                windowTracks.push(track);
+              }
+
+              // Keep this query structurally identical to RecordPlayerClient's
+              // metadata catalogue hook: title ordering and bounded materialization.
+              const catalogue = await waitForQuery(
+                listener,
+                app.albums.orderBy("title", "asc").limit(20),
+                (rows) => rows.length >= 2,
+                "listener catalogue visibility",
+                15_000,
+                "edge",
+              );
+              expect(catalogue.map((row) => row.title)).toEqual(
+                catalogue.map((row) => row.title).sort(),
+              );
+
+              // This is the literal playlist-screen access path, including its
+              // deliberately nonzero window offset. Verify the offset rather than
+              // merely an unbounded equivalent query.
+              const visibleWindow = await waitForQuery(
+                listener,
+                app.playlist_entries
+                  .where({ playlist_id: playlist.id })
+                  .orderBy("position", "asc")
+                  .offset(PLAYLIST_WINDOW_OFFSET)
+                  .limit(PLAYLIST_WINDOW_LIMIT),
+                (rows) =>
+                  rows.length === 2 &&
+                  rows.map((row) => row.position).join(",") ===
+                    `${PLAYLIST_WINDOW_OFFSET},${PLAYLIST_WINDOW_OFFSET + 1}`,
+                "listener rendered playlist window",
+                15_000,
+                "edge",
+              );
+              expect(visibleWindow.map((row) => row.track_id)).toEqual(
+                windowTracks.slice(PLAYLIST_WINDOW_OFFSET).map((track) => track.id),
+              );
+
+              // A metadata-only projection proves the streamed byte field does
+              // not force an eager payload read merely because it belongs to a
+              // visible catalogue row.
+              await waitForQuery(
+                listener,
+                app.tracks
+                  .where({ id: streamedTrackId })
+                  .select("id", "album_id", "title", "ordinal", "duration_ms"),
+                (rows) => rows[0]?.id === streamedTrackId && rows[0]?.title === "Streaming receipt",
+                "streamed track metadata without audio materialization",
+                15_000,
+                "edge",
+              );
             },
           },
           {
@@ -261,14 +370,14 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   .insert(app.playlist_entries, {
                     playlist_id: playlist.id,
                     track_id: ownerTrack.id,
-                    position: 2,
+                    position: 20,
                   })
                   .wait({ tier: "local" }),
                 editor
                   .insert(app.playlist_entries, {
                     playlist_id: playlist.id,
                     track_id: editorTrack.id,
-                    position: 1,
+                    position: 21,
                   })
                   .wait({ tier: "local" }),
               ]);
@@ -282,7 +391,8 @@ describe("RecordPlayer authenticated playlist topology", () => {
             name: "converge, then owner revokes editor",
             run: async () => {
               const expected = (rows: Array<{ position: number }>) =>
-                rows.length === 2 && rows.map((row) => row.position).join(",") === "1,2";
+                rows.length === PLAYLIST_WINDOW_OFFSET + 4 &&
+                rows.map((row) => row.position).join(",") === "0,1,2,3,4,5,6,7,8,9,20,21";
               await Promise.all([
                 waitForQuery(
                   owner,
@@ -306,6 +416,18 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 ),
               ]);
               await owner.delete(app.invitations, editorInvite.id).wait({ tier: "edge" });
+              await waitForQuery(
+                editor,
+                app.playlist_entries
+                  .where({ playlist_id: playlist.id })
+                  .orderBy("position", "asc")
+                  .offset(PLAYLIST_WINDOW_OFFSET)
+                  .limit(PLAYLIST_WINDOW_LIMIT),
+                (rows) => rows.length === 0,
+                "revoked editor loses rendered playlist window",
+                15_000,
+                "edge",
+              );
               await expect(
                 editor
                   .insert(app.playlist_entries, {
@@ -317,25 +439,60 @@ describe("RecordPlayer authenticated playlist topology", () => {
               ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
             },
           },
+          {
+            name: "reopen persistent editor storage without restoring revoked access",
+            run: async () => {
+              // Reopening a second Db instance over the exact persistent name
+              // exercises IndexedDB recovery rather than a fresh in-memory view.
+              ctx.untrack(editor);
+              await editor.shutdown();
+              editor = await openClient(server, "editor-reopened", editorToken, editorDbName);
+              await waitForQuery(
+                editor,
+                app.playlist_entries
+                  .where({ playlist_id: playlist.id })
+                  .orderBy("position", "asc")
+                  .offset(PLAYLIST_WINDOW_OFFSET)
+                  .limit(PLAYLIST_WINDOW_LIMIT),
+                (rows) => rows.length === 0,
+                "persistent reopen retains revocation",
+                15_000,
+                "edge",
+              );
+            },
+          },
         ],
       },
       browserTopologyReporter,
     );
     expect(receipt.status).toBe("passed");
-  }, 90_000);
+  }, 120_000);
 });
 
 async function openClient(
   server: { appId: string; serverUrl: string },
   label: string,
   jwtToken: string,
+  dbName = uniqueDbName(`record-player-${label}`),
 ): Promise<Db> {
   return ctx.track(
     await createDb({
       appId: server.appId,
       serverUrl: server.serverUrl,
       jwtToken,
-      driver: { type: "persistent", dbName: uniqueDbName(`record-player-${label}`) },
+      driver: { type: "persistent", dbName },
     }),
   );
+}
+
+function audioStream(bytes: readonly number[]): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      // Deliberately split the payload so this test covers stream consumption,
+      // not only a one-chunk convenience path.
+      controller.enqueue(new Uint8Array(bytes.slice(0, 2)));
+      controller.enqueue(new Uint8Array(bytes.slice(2)));
+      controller.close();
+    },
+  });
 }
