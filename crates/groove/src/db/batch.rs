@@ -49,6 +49,7 @@ pub struct DatabaseBatch {
     pub(super) txn_indexed_operations: Cell<usize>,
     pub(super) notification_timing: NotificationTiming,
     pub(super) accepted_large_values: Vec<crate::large_values::StagedLargeValueId>,
+    pub(super) resident_large_values: Vec<crate::large_values::ResidentLargeValueStage>,
     pub(super) resident_publication: ResidentPublicationPolicy,
 }
 
@@ -57,6 +58,7 @@ impl PartialEq for DatabaseBatch {
         self.operations == other.operations
             && self.notification_timing == other.notification_timing
             && self.accepted_large_values == other.accepted_large_values
+            && self.resident_large_values == other.resident_large_values
             && self.resident_publication == other.resident_publication
     }
 }
@@ -112,6 +114,25 @@ impl DatabaseBatch {
     pub fn accept_large_value(&mut self, id: crate::large_values::StagedLargeValueId) {
         if !self.accepted_large_values.contains(&id) {
             self.accepted_large_values.push(id);
+        }
+    }
+
+    /// Attach a direct value whose chunks are resident but not durable yet.
+    /// The enclosing batch is made retractable because its row and IVM delta
+    /// become visible before [`AppliedBatch::persist`](super::AppliedBatch::persist)
+    /// journal-stages the immutable chunks and atomically consumes the receipt.
+    pub fn accept_resident_large_value(
+        &mut self,
+        stage: crate::large_values::ResidentLargeValueStage,
+    ) {
+        self.retract_if_persistence_fails();
+        self.accept_large_value(stage.id());
+        if !self
+            .resident_large_values
+            .iter()
+            .any(|existing| existing.id() == stage.id())
+        {
+            self.resident_large_values.push(stage);
         }
     }
 

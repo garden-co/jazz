@@ -273,6 +273,118 @@ pub struct MemoryChunkStorage {
     chunks: Rc<RefCell<MemoryChunks>>,
 }
 
+/// Process-resident immutable chunks owned by one not-yet-durable database
+/// publication.  They are never exposed through [`LocalChunkReader`] or
+/// retained across a database reopen; a layered evaluator provider can consult
+/// them only while their owner row is resident.
+#[derive(Clone, Default)]
+pub(crate) struct ResidentChunkStorage {
+    chunks: Rc<RefCell<MemoryChunks>>,
+}
+
+impl ResidentChunkStorage {
+    pub(crate) fn install(&self, chunk: StagedChunk) -> Result<(), ChunkStorageError> {
+        if chunk.encoded.len() > crate::large_values::MAX_ENCODED_NODE_BYTES
+            || object_hash(&chunk.encoded) != chunk.node_ref.object_hash
+        {
+            return Err(ChunkStorageError::Integrity);
+        }
+        let mut chunks = self.chunks.borrow_mut();
+        match chunks.entry(chunk.node_ref.locator.0) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert((chunk.node_ref.object_hash, Bytes::from(chunk.encoded)));
+                Ok(())
+            }
+            std::collections::btree_map::Entry::Occupied(entry)
+                if entry.get().0 == chunk.node_ref.object_hash
+                    && entry.get().1.as_ref() == chunk.encoded.as_slice() =>
+            {
+                Ok(())
+            }
+            std::collections::btree_map::Entry::Occupied(_) => {
+                Err(ChunkStorageError::LocatorConflict)
+            }
+        }
+    }
+
+    pub(crate) fn get_exact(&self, locator: &[u8], hash: ContentHash) -> Option<Bytes> {
+        self.chunks
+            .borrow()
+            .get(locator)
+            .filter(|(stored_hash, _)| *stored_hash == hash)
+            .map(|(_, bytes)| bytes.clone())
+    }
+
+    pub(crate) fn staged_chunk(
+        &self,
+        node_ref: &crate::large_values::NodeRef,
+    ) -> Result<StagedChunk, ChunkStorageError> {
+        let encoded = self
+            .get_exact(&node_ref.locator.0, node_ref.object_hash)
+            .ok_or(ChunkStorageError::Unavailable)?;
+        Ok(StagedChunk {
+            node_ref: node_ref.clone(),
+            encoded: encoded.to_vec(),
+        })
+    }
+
+    pub(crate) fn release(&self, node_refs: &[crate::large_values::NodeRef]) {
+        let mut chunks = self.chunks.borrow_mut();
+        for node_ref in node_refs {
+            if chunks
+                .get(&node_ref.locator.0)
+                .is_some_and(|(hash, _)| *hash == node_ref.object_hash)
+            {
+                chunks.remove(&node_ref.locator.0);
+            }
+        }
+    }
+}
+
+/// Read resident publication chunks first, then the durable blob store.
+/// Writes always target the durable store; resident data becomes durable only
+/// through Groove's journaled staging lifecycle.
+#[derive(Clone)]
+pub(crate) struct LayeredChunkStorage {
+    resident: ResidentChunkStorage,
+    durable: Rc<dyn ChunkStorage>,
+}
+
+impl LayeredChunkStorage {
+    pub(crate) fn new(resident: ResidentChunkStorage, durable: Rc<dyn ChunkStorage>) -> Self {
+        Self { resident, durable }
+    }
+}
+
+impl ChunkStorage for LayeredChunkStorage {
+    fn get(
+        &self,
+        locator: Vec<u8>,
+        expected_hash: ContentHash,
+    ) -> ChunkFuture<'_, Result<Bytes, ChunkStorageError>> {
+        if let Some(bytes) = self.resident.get_exact(&locator, expected_hash) {
+            return Box::pin(async move { Ok(bytes) });
+        }
+        self.durable.get(locator, expected_hash)
+    }
+
+    fn stage(
+        &self,
+        chunks: Vec<StagedChunk>,
+    ) -> ChunkFuture<'_, Result<crate::large_values::StagedLargeValueAccounting, ChunkStorageError>>
+    {
+        self.durable.stage(chunks)
+    }
+
+    fn delete(
+        &self,
+        locator: Vec<u8>,
+        expected_hash: ContentHash,
+    ) -> ChunkFuture<'_, Result<(), ChunkStorageError>> {
+        self.durable.delete(locator, expected_hash)
+    }
+}
+
 impl MemoryChunkStorage {
     pub fn new() -> Self {
         Self::default()

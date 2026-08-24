@@ -114,6 +114,44 @@ pub struct PreparedLargeValue {
     pub staged_chunks: Vec<StagedChunk>,
 }
 
+/// A complete direct value constructed in Groove's process-resident chunk
+/// layer.  Its descriptor may enter the normal resident row/IVM path before
+/// its immutable chunks are journaled and staged durably.  The opaque upload
+/// id is reserved now so the later ordinary physical-record batch can consume
+/// the exact receipt atomically.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResidentLargeValueStage {
+    id: StagedLargeValueId,
+    value_ref: LargeValueRef,
+    node_refs: Vec<NodeRef>,
+}
+
+impl ResidentLargeValueStage {
+    pub(crate) fn new(
+        id: StagedLargeValueId,
+        value_ref: LargeValueRef,
+        node_refs: Vec<NodeRef>,
+    ) -> Self {
+        Self {
+            id,
+            value_ref,
+            node_refs,
+        }
+    }
+
+    pub fn id(&self) -> StagedLargeValueId {
+        self.id
+    }
+
+    pub fn value_ref(&self) -> &LargeValueRef {
+        &self.value_ref
+    }
+
+    pub(crate) fn node_refs(&self) -> &[NodeRef] {
+        &self.node_refs
+    }
+}
+
 /// Opaque identity for a persisted Groove staging root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct StagedLargeValueId(pub [u8; 16]);
