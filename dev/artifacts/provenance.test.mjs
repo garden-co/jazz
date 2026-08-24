@@ -207,6 +207,8 @@ test("assembled NAPI packages carry only matching manifests and reject stale or 
   mkdirSync(join(root, "crates/jazz-napi/artifacts"), { recursive: true });
   for (const [platform, target] of Object.entries(platforms)) {
     const manifest = expectedManifest(root, "napi", "release", target);
+    manifest.nativeArtifactFingerprint = "a".repeat(64);
+    manifest.packageInputs = "b".repeat(64);
     writeFileSync(
       join(root, "crates/jazz-napi/artifacts", `jazz-napi.${platform}.manifest.json`),
       JSON.stringify(manifest),

@@ -15,6 +15,11 @@ const stage = join(packageDir, ".native-artifacts", generation);
 const binding = join(stage, `jazz-napi.${platform}.node`);
 for (const path of [binding, join(stage, "index.js"), join(stage, ".jazz-artifact-manifest.json")])
   if (!existsSync(path)) throw new Error(`active NAPI generation is missing ${path}`);
+const manifest = JSON.parse(readFileSync(join(stage, ".jazz-artifact-manifest.json"), "utf8"));
+if (manifest.kind !== "napi" || manifest.profile !== "release")
+  throw new Error("active NAPI generation manifest has the wrong kind/profile");
+if (manifest.nativeArtifactFingerprint !== fingerprint)
+  throw new Error("active NAPI pointer fingerprint does not match its sealed manifest");
 copyFileSync(binding, join(packageDir, `jazz-napi.${platform}.node`));
 copyFileSync(join(stage, "index.js"), join(packageDir, "native-loader.cjs"));
 copyFileSync(
