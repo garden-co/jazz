@@ -97,7 +97,11 @@ function hasCallableImport(importObject, name) {
     if (importObject[cursor] !== ":") continue;
     cursor++;
     while (/\s/.test(importObject[cursor])) cursor++;
-    if (/^(?:async\s+)?(?:function\b|(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>)/.test(importObject.slice(cursor)))
+    if (
+      /^(?:async\s+)?(?:function\b|(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*=>)/.test(
+        importObject.slice(cursor),
+      )
+    )
       return true;
   }
   return false;
@@ -112,8 +116,7 @@ export function verifyWasmGlueAbi(wasmBytes, glueSource) {
   }
 
   const importObject = generatedImportObject(glueSource);
-  if (!importObject)
-    return "WASM glue does not expose wasm-bindgen's generated import object";
+  if (!importObject) return "WASM glue does not expose wasm-bindgen's generated import object";
 
   const missing = imports
     .filter(
