@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createResettablePromise } from "./secret-promise-cache.ts";
+import { createResettablePromise, loadSecret, SecretLoadError } from "./secret-promise-cache.ts";
 
 test("render retries reuse one pending secret load", async () => {
   let loadCount = 0;
@@ -45,4 +45,13 @@ test("an explicit reset starts one new load after an error", async () => {
 
   assert.equal(await secret.get(), "recovered-secret");
   assert.equal(loadCount, 2);
+});
+
+test("secret-load failures are distinguishable from descendant errors", async () => {
+  const failure = new Error("secure storage unavailable");
+
+  await assert.rejects(
+    loadSecret(() => Promise.reject(failure)),
+    (error) => error instanceof SecretLoadError && error.cause === failure,
+  );
 });
