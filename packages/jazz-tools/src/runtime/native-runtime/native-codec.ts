@@ -125,7 +125,6 @@ export function openConfig(
   sourceId?: number,
   historyComplete = false,
   initialSyncFlushEvery?: number,
-  backendCredential?: string,
 ): Uint8Array {
   const writer = new PostcardWriter();
   writer.bytes(node);
@@ -141,8 +140,9 @@ export function openConfig(
   } else {
     writer.some((value) => value.u64(initialSyncFlushEvery));
   }
-  if (backendCredential == null) writer.none();
-  else writer.some((value) => value.string(backendCredential));
+  // The native binding keeps a trailing `backend_credential` slot solely to
+  // reject legacy raw ingress. New configs must never serialize one.
+  writer.none();
   return writer.finish();
 }
 

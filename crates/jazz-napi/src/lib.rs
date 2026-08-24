@@ -2528,15 +2528,10 @@ fn core_open_identity(
             author,
         });
     }
-    if config
-        .backend_credential
-        .as_deref()
-        .is_some_and(|credential| !credential.is_empty())
-    {
-        return Ok(CoreDbIdentity {
-            node: config.identity.node,
-            author: CoreAuthorSubject::SYSTEM,
-        });
+    if config.backend_credential.is_some() {
+        return Err(napi::Error::from_reason(
+            "ordinary NapiDb open configuration cannot carry a backend credential; use a verified identity entrypoint",
+        ));
     }
     Ok(CoreDbIdentity {
         node: config.identity.node,
@@ -3807,7 +3802,58 @@ mod tests {
         assert_ne!(
             core_open_identity(&external_config, None).unwrap().author,
             CoreAuthorSubject::SYSTEM,
-            "the ordinary legacy open config cannot become SYSTEM without its explicit credential"
+            "the ordinary raw-open path cannot become SYSTEM"
+        );
+
+        for credential in ["arbitrary-backend-secret", "malformed.backend.credential"] {
+            let bytes = encode_config(external_author, Some(credential.to_owned()));
+            let config = postcard::from_bytes::<CoreOpenDbConfig>(&bytes).unwrap();
+            assert!(
+                core_open_identity(&config, None).is_err(),
+                "ordinary raw config must reject {credential:?}, never promote it to SYSTEM"
+            );
+        }
+
+        let memory_credential =
+            encode_config(external_author, Some("arbitrary-backend-secret".to_owned()));
+        assert!(
+            NapiDb::open_memory(
+                Uint8Array::from(b"{}".to_vec()),
+                Uint8Array::from(memory_credential),
+            )
+            .is_err(),
+            "openMemory must reject an unverified backend credential before opening the DB"
+        );
+
+        let persistent_path = std::env::temp_dir().join(format!(
+            "jazz-unverified-backend-open-{}",
+            std::process::id()
+        ));
+        assert!(
+            !persistent_path.exists(),
+            "test path must be fresh: {}",
+            persistent_path.display()
+        );
+        let persistent_credential = encode_config(
+            external_author,
+            Some("malformed.backend.credential".to_owned()),
+        );
+        let result = NapiDb::open_persistent(
+            persistent_path.to_string_lossy().into_owned(),
+            Uint8Array::from(b"{}".to_vec()),
+            Uint8Array::from(persistent_credential),
+        );
+        let created_storage = persistent_path.exists();
+        if created_storage {
+            std::fs::remove_dir_all(&persistent_path).unwrap();
+        }
+        assert!(
+            result.is_err(),
+            "openPersistent must reject an unverified backend credential"
+        );
+        assert!(
+            !created_storage,
+            "openPersistent must reject an unverified backend credential before creating storage"
         );
 
         for issuer in [

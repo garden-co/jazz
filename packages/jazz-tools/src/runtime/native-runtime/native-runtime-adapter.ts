@@ -618,7 +618,6 @@ export class NativeRuntimeAdapter implements Runtime {
       undefined,
       historyComplete,
       opts?.initialSyncFlushEvery,
-      opts?.backendCredential,
     );
     this.peerIdentity = author;
     this.schemaHash = serializeRuntimeSchema(schema);
