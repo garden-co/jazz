@@ -110,6 +110,7 @@ enum ServerShellCommand {
 /// installed and invoked on the owner thread. The command queue preserves that
 /// affinity while ensuring an Immediate request becomes a following shell turn
 /// instead of waiting for unrelated socket activity.
+#[derive(Clone)]
 struct ServerShellTickScheduler {
     jobs: mpsc::UnboundedSender<ServerShellCommand>,
     activity_tx: watch::Sender<u64>,
@@ -191,12 +192,13 @@ fn run_server_shell_owner(
     activity_tx: watch::Sender<u64>,
     io_wakers: Arc<Mutex<Vec<mpsc::UnboundedSender<()>>>>,
 ) {
-    shell.set_tick_scheduler(Some(Rc::new(ServerShellTickScheduler {
+    let scheduler = ServerShellTickScheduler {
         jobs,
         activity_tx,
         io_wakers: Arc::clone(&io_wakers),
         state: Arc::new(ServerShellTickState::default()),
-    })));
+    };
+    shell.set_tick_scheduler(Some(Rc::new(scheduler.clone())));
     let mut executor = futures::executor::LocalPool::new();
     let spawner = executor.spawner();
     executor.run_until(async move {
@@ -247,8 +249,12 @@ fn run_server_shell_owner(
                     if let Ok(mut wakers) = io_wakers.lock() {
                         wakers.push(wake_tx);
                     }
-                    let spawn_result =
-                        spawner.spawn_local(drive_upstream_wire(transport, io, wake_rx));
+                    let spawn_result = spawner.spawn_local(drive_upstream_wire(
+                        transport,
+                        io,
+                        wake_rx,
+                        scheduler.clone(),
+                    ));
                     let _ = reply.send(spawn_result.map_err(|error| {
                         format!("failed to spawn local upstream wire pump: {error}")
                     }));
@@ -294,22 +300,33 @@ async fn drive_upstream_wire(
     mut wire: Box<dyn WireTransport + Send>,
     io: super::ServerUpstreamIo,
     mut wake_rx: mpsc::UnboundedReceiver<()>,
+    scheduler: ServerShellTickScheduler,
 ) {
     loop {
+        let mut staged_semantic_input = false;
         while let Some(frame) = wire.try_recv_frame() {
             match io.pump.route_incoming_wire_frame(frame, io.features).await {
-                Ok(Some(canonical)) => io
-                    .transport
-                    .queues
-                    .borrow_mut()
-                    .inbound
-                    .push_back(canonical),
+                Ok(Some(canonical)) => {
+                    io.transport
+                        .queues
+                        .borrow_mut()
+                        .inbound
+                        .push_back(canonical);
+                    staged_semantic_input = true;
+                }
                 Ok(None) => {}
                 Err(_) => {
                     io.pump.disconnect();
                     return;
                 }
             }
+        }
+        // The socket callback can notify the host before this local pump gets
+        // a turn to stage its frame. Schedule only after canonical input is
+        // actually visible to the shell, otherwise a downstream activity tick
+        // may observe an empty queue and leave the edge dormant indefinitely.
+        if staged_semantic_input {
+            scheduler.schedule_tick(TickUrgency::Immediate);
         }
         loop {
             let frame = io.transport.queues.borrow_mut().outbound.pop_front();
