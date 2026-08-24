@@ -18,8 +18,10 @@ import {
   waitForQuery,
 } from "../../../../packages/jazz-tools/tests/browser/support.js";
 import {
+  blockJazzServerNetwork,
   getJazzServerInfo,
   getJazzServerJwtForUser,
+  unblockJazzServerNetwork,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
@@ -39,13 +41,27 @@ describe("WorldTour cross-topology itinerary recovery", () => {
     let server: Awaited<ReturnType<typeof getJazzServerInfo>> | undefined;
     let alice: Db | undefined;
     let bob: Db | undefined;
+    let outsider: Db | undefined;
     let tour: { id: string } | undefined;
     let firstStop: { id: string } | undefined;
+    let secondStop: { id: string } | undefined;
     let protectedStop: { id: string } | undefined;
     let offlineStop: { id: string } | undefined;
     let fallbackVenueId: string | undefined;
     let observedWindow: string[] = [];
+    let outsiderObservedPublicIds: string[] = [];
+    let networkBlocked = false;
     const aliceDbName = uniqueDbName("world-tour-alice");
+
+    const itineraryQuery = (bandId: string) =>
+      app.stops
+        .where({
+          bandId,
+          date: { gte: new Date("2026-08-01"), lte: new Date("2026-08-07") },
+        })
+        .include({ venue: true })
+        .orderBy("date", "asc")
+        .limit(2);
 
     const receipt = await runTopologyScenario(
       {
@@ -54,22 +70,34 @@ describe("WorldTour cross-topology itinerary recovery", () => {
         seed,
         phaseTimeoutMs: 25_000,
         faultTimeoutMs: 15_000,
-        replay: `JAZZ_EXAMPLE_TOPOLOGY_SEED=${seed} pnpm --dir examples/world-tour test -- topology.e2e.test.ts`,
+        replay: `JAZZ_EXAMPLE_TOPOLOGY_SEED=${seed} pnpm --dir examples/world-tour test`,
         targets: {
           alice: {
             disconnect: async () => alice!.disconnect(),
             reconnect: async () => alice!.reconnect(),
             restart: async () => {
               // A browser refresh must retain the same persisted namespace,
-              // while creating a fresh client and connection.
+              // while creating a fresh client. The scenario blocks its server
+              // first, so the subsequent local-tier receipt can only have
+              // come from this IndexedDB namespace.
               ctx.untrack(alice!);
               await alice!.shutdown();
               alice = await openClient(server!, "alice-reopened", "world-tour-alice", aliceDbName);
             },
           },
+          serverNetwork: {
+            disconnect: async () => {
+              await blockJazzServerNetwork(server!.serverUrl);
+              networkBlocked = true;
+            },
+            reconnect: async () => {
+              await unblockJazzServerNetwork(server!.serverUrl);
+              networkBlocked = false;
+            },
+          },
           authorization: {
             failure: async () => {
-              const outsider = await openClient(server!, "outsider", "world-tour-outsider");
+              outsider = await openClient(server!, "outsider", "world-tour-outsider");
               await expect(
                 outsider.one(app.stops.where({ id: firstStop!.id }), { tier: "edge" }),
               ).resolves.toMatchObject({ id: firstStop!.id, status: "confirmed" });
@@ -83,8 +111,25 @@ describe("WorldTour cross-topology itinerary recovery", () => {
                   .update(app.stops, firstStop!.id, { status: "cancelled" })
                   .wait({ tier: "edge" }),
               ).rejects.toThrow();
+
+              const unsubscribe = outsider.subscribeAll(itineraryQuery(tour!.id), (snapshot) => {
+                outsiderObservedPublicIds = (snapshot.all ?? []).map((stop) => stop.id);
+              });
+              ctx.trackSubscription(unsubscribe);
+              await waitForCondition(
+                async () =>
+                  outsiderObservedPublicIds.join(",") === [firstStop!.id, secondStop!.id].join(","),
+                10_000,
+                "outsider receives the initial public bounded itinerary",
+              );
             },
           },
+        },
+        cleanup: async () => {
+          if (networkBlocked) {
+            await unblockJazzServerNetwork(server!.serverUrl);
+            networkBlocked = false;
+          }
         },
         phases: [
           {
@@ -176,17 +221,11 @@ describe("WorldTour cross-topology itinerary recovery", () => {
                 })
                 .wait({ tier: "edge" });
               firstStop = first;
+              secondStop = second;
               protectedStop = third;
               fallbackVenueId = london.id;
 
-              const itinerary = app.stops
-                .where({
-                  bandId: createdTour.id,
-                  date: { gte: new Date("2026-08-01"), lte: new Date("2026-08-07") },
-                })
-                .include({ venue: true })
-                .orderBy("date", "asc")
-                .limit(2);
+              const itinerary = itineraryQuery(createdTour.id);
               const unsubscribe = bob.subscribeAll(itinerary, (snapshot) => {
                 observedWindow = (snapshot.all ?? []).map(
                   (stop) => `${stop.date.toISOString()}:${stop.venue?.name}`,
@@ -236,6 +275,16 @@ describe("WorldTour cross-topology itinerary recovery", () => {
                 20_000,
                 "concurrent per-field itinerary edits converge at edge",
               );
+              await waitForCondition(
+                async () =>
+                  outsiderObservedPublicIds.length === 1 &&
+                  outsiderObservedPublicIds[0] === secondStop!.id,
+                15_000,
+                "tentative transition revokes the outsider's public row and recomputes its bounded window",
+              );
+              await expect(
+                outsider!.one(app.stops.where({ id: firstStop!.id }), { tier: "edge" }),
+              ).resolves.toBeNull();
             },
             faultsAfter: [{ kind: "disconnect", target: "alice" }],
           },
@@ -260,14 +309,7 @@ describe("WorldTour cross-topology itinerary recovery", () => {
               });
               expect(local?.publicDescription).toBe("offline routing note");
 
-              const itinerary = app.stops
-                .where({
-                  bandId: tour!.id,
-                  date: { gte: new Date("2026-08-01"), lte: new Date("2026-08-07") },
-                })
-                .include({ venue: true })
-                .orderBy("date", "asc")
-                .limit(2);
+              const itinerary = itineraryQuery(tour!.id);
               const localWindow = await waitForQuery(
                 alice!,
                 itinerary,
@@ -295,14 +337,7 @@ describe("WorldTour cross-topology itinerary recovery", () => {
           {
             name: "peer convergence and ordered subscription receipt",
             run: async () => {
-              const itinerary = app.stops
-                .where({
-                  bandId: tour!.id,
-                  date: { gte: new Date("2026-08-01"), lte: new Date("2026-08-07") },
-                })
-                .include({ venue: true })
-                .orderBy("date", "asc")
-                .limit(2);
+              const itinerary = itineraryQuery(tour!.id);
               const rows = await waitForQuery(
                 bob!,
                 itinerary,
@@ -326,19 +361,15 @@ describe("WorldTour cross-topology itinerary recovery", () => {
               expect(rows.map((stop) => stop.id)).not.toContain(protectedStop!.id);
               expect(rows.map((stop) => stop.venue?.name)).toEqual(["London Hall", "London Hall"]);
             },
-            faultsAfter: [{ kind: "restart", target: "alice" }],
+            faultsAfter: [
+              { kind: "disconnect", target: "serverNetwork" },
+              { kind: "restart", target: "alice" },
+            ],
           },
           {
-            name: "persistent client restart retains the current local itinerary window",
+            name: "persistent client restart rehydrates calendar and map projections offline",
             run: async () => {
-              const itinerary = app.stops
-                .where({
-                  bandId: tour!.id,
-                  date: { gte: new Date("2026-08-01"), lte: new Date("2026-08-07") },
-                })
-                .include({ venue: true })
-                .orderBy("date", "asc")
-                .limit(2);
+              const itinerary = itineraryQuery(tour!.id);
               const rows = await waitForQuery(
                 alice!,
                 itinerary,
@@ -350,8 +381,60 @@ describe("WorldTour cross-topology itinerary recovery", () => {
                 15_000,
                 "local",
               );
+              expect(networkBlocked).toBe(true);
               expect(rows.map((stop) => stop.id)).toEqual([firstStop!.id, offlineStop!.id]);
               expect(rows.map((stop) => stop.venue?.name)).toEqual(["London Hall", "London Hall"]);
+
+              // These are the two immutable projections consumed by
+              // TourCalendar and MapController. Keeping the assertions on the
+              // bounded query result catches both accidental over-fetch and a
+              // missing relation include after an offline IndexedDB reopen.
+              expect(
+                rows.map((stop) => ({
+                  id: stop.id,
+                  date: stop.date.toISOString(),
+                  venue: { name: stop.venue!.name },
+                })),
+              ).toEqual([
+                {
+                  id: firstStop!.id,
+                  date: "2026-08-01T00:00:00.000Z",
+                  venue: { name: "London Hall" },
+                },
+                {
+                  id: offlineStop!.id,
+                  date: "2026-08-01T12:00:00.000Z",
+                  venue: { name: "London Hall" },
+                },
+              ]);
+              expect(
+                rows.map((stop) => ({ id: stop.id, lat: stop.venue!.lat, lng: stop.venue!.lng })),
+              ).toEqual([
+                { id: firstStop!.id, lat: 51.5, lng: -0.1 },
+                { id: offlineStop!.id, lat: 51.5, lng: -0.1 },
+              ]);
+            },
+            faultsAfter: [
+              { kind: "reconnect", target: "serverNetwork" },
+              { kind: "reconnect", target: "alice" },
+            ],
+          },
+          {
+            name: "reopened persistent client resumes edge settlement",
+            run: async () => {
+              const rows = await waitForQuery(
+                alice!,
+                itineraryQuery(tour!.id),
+                (value) =>
+                  value.length === 2 &&
+                  value.map((stop) => stop.id).join(",") ===
+                    [firstStop!.id, offlineStop!.id].join(","),
+                "reopened persistent client settles the same bounded itinerary at edge",
+                20_000,
+                "edge",
+              );
+              expect(networkBlocked).toBe(false);
+              expect(rows.map((stop) => stop.id)).toEqual([firstStop!.id, offlineStop!.id]);
             },
           },
         ],
@@ -364,7 +447,10 @@ describe("WorldTour cross-topology itinerary recovery", () => {
       ["failure", "completed"],
       ["disconnect", "completed"],
       ["reconnect", "completed"],
+      ["disconnect", "completed"],
       ["restart", "completed"],
+      ["reconnect", "completed"],
+      ["reconnect", "completed"],
     ]);
   }, 90_000);
 });
