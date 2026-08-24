@@ -104,18 +104,25 @@ function matches(path, hashes) {
     return false;
   }
 }
-function acquireArtifactLease() {
+function inheritedArtifactLease() {
   const token = process.env.JAZZ_ARTIFACT_BUILD_LEASE;
-  if (token) {
-    verifyArtifactBuildLease({ token, lockPath: process.env.JAZZ_ARTIFACT_BUILD_LOCK_PATH });
-    return undefined;
-  }
+  const lockPath = process.env.JAZZ_ARTIFACT_BUILD_LOCK_PATH;
+  if (!token && !lockPath) return undefined;
+  return verifyArtifactBuildLease({ token, lockPath });
+}
+function acquireArtifactLease() {
+  const inherited = inheritedArtifactLease();
+  if (inherited) return { lease: inherited };
   // Direct producers are command-line entrypoints; a short synchronous wait is
   // preferable to failing a valid concurrent `pnpm build:core` invocation.
   const deadline = Date.now() + 60_000;
   for (;;) {
     try {
-      return acquireArtifactBuildLock(artifactLockPath(root));
+      const lock = acquireArtifactBuildLock(artifactLockPath(root));
+      return {
+        lease: { token: lock.token, lockPath: lock.lockPath },
+        release: () => lock.release(),
+      };
     } catch (error) {
       if (!String(error.message).includes("active artifact lock") || Date.now() >= deadline)
         throw error;
@@ -123,7 +130,6 @@ function acquireArtifactLease() {
     }
   }
 }
-const acquireWasmLease = acquireArtifactLease;
 function journalChild(packageDir, name, prefix) {
   if (
     typeof name !== "string" ||
@@ -204,10 +210,10 @@ export function recoverWasmPackageTransaction(packageDir) {
 export function publishWasmPackage(
   stagePath,
   packagePath,
-  { profile = "release", alreadyLocked = false } = {},
+  { profile = "release", lease = undefined } = {},
 ) {
   const packageDir = resolve(packagePath, "..");
-  const lock = alreadyLocked ? undefined : acquireWasmLease();
+  const held = lease ? { lease: verifyArtifactBuildLease(lease) } : acquireArtifactLease();
   try {
     recoverWasmPackageTransaction(packageDir);
     realDirectory(stagePath, "stage", { required: true });
@@ -244,7 +250,7 @@ export function publishWasmPackage(
     throw new Error(`WASM package publish transaction failed: ${error.message}`);
   } finally {
     if (existsSync(stagePath)) rmSync(stagePath, { recursive: true, force: true });
-    lock?.release();
+    held.release?.();
   }
 }
 export function writeWasmStageManifest(stagePath, profile) {
@@ -274,9 +280,9 @@ export function publishNapiGeneration(
   stagePath,
   packageDir,
   fingerprint,
-  { alreadyLocked = false } = {},
+  { lease = undefined } = {},
 ) {
-  const lock = alreadyLocked ? undefined : acquireArtifactLease();
+  const held = lease ? { lease: verifyArtifactBuildLease(lease) } : acquireArtifactLease();
   try {
     if (
       !existsSync(stagePath) ||
@@ -313,7 +319,7 @@ export function publishNapiGeneration(
     );
     return generationPath;
   } finally {
-    lock?.release();
+    held.release?.();
   }
 }
 export function validateNapiStage(
@@ -402,7 +408,7 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
       writeWasmStageManifest(wasmStage.path, profile);
       publishWasmPackage(wasmStage.path, join(root, "crates", "jazz-wasm", "pkg"), {
         profile,
-        alreadyLocked: true,
+        lease: artifactLock.lease,
       });
       publishExpectedFingerprint(kind, fingerprint);
       const problem = verifyManifest(root, kind, profile);
@@ -422,7 +428,7 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
       if (process.env.JAZZ_NAPI_BUILD_FAULT === "switch-boundary")
         throw new Error("planted NAPI publication-boundary failure");
       publishNapiGeneration(napiStage, join(root, "crates", "jazz-napi"), fingerprint, {
-        alreadyLocked: true,
+        lease: artifactLock.lease,
       });
       publishExpectedFingerprint(kind, fingerprint);
     }
@@ -430,7 +436,7 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
     if (wasmStage && existsSync(wasmStage.path))
       rmSync(wasmStage.path, { recursive: true, force: true });
     if (napiStage && existsSync(napiStage)) rmSync(napiStage, { recursive: true, force: true });
-    artifactLock.release();
+    artifactLock.release?.();
   }
 }
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

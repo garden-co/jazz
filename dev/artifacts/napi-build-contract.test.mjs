@@ -62,9 +62,7 @@ test("NAPI pointer publication gives CJS and real ESM named imports the same gua
   const root = fixture();
   try {
     const fingerprint = "current";
-    publishNapiGeneration(stage(root, ".napi-stage-current", fingerprint), root, fingerprint, {
-      alreadyLocked: true,
-    });
+    publishNapiGeneration(stage(root, ".napi-stage-current", fingerprint), root, fingerprint);
     const cjs = receipt(
       root,
       "const b=require(process.argv[1]); if (typeof b.NapiDb !== 'function' || b.nativeArtifactFingerprint() !== 'current') process.exit(12)",
@@ -85,9 +83,7 @@ test("missing, stale, mismatch, and partial staged generations fail closed witho
   const root = fixture();
   try {
     const good = "good";
-    publishNapiGeneration(stage(root, ".napi-stage-good", good), root, good, {
-      alreadyLocked: true,
-    });
+    publishNapiGeneration(stage(root, ".napi-stage-good", good), root, good);
     const prior = readFileSync(join(root, "native-binding.cjs"), "utf8");
     assert.throws(
       () =>
@@ -95,7 +91,6 @@ test("missing, stale, mismatch, and partial staged generations fail closed witho
           stage(root, ".napi-stage-partial", "partial", { complete: false }),
           root,
           "partial",
-          { alreadyLocked: true },
         ),
       /missing its generated loader, declarations, or sealed manifest/,
     );
@@ -103,7 +98,7 @@ test("missing, stale, mismatch, and partial staged generations fail closed witho
     const stale = receipt(root, "require(process.argv[1]);");
     assert.equal(stale.status, 0, stale.stderr);
     const mismatchStage = stage(root, ".napi-stage-mismatch", "expected", { actual: "old" });
-    publishNapiGeneration(mismatchStage, root, "expected", { alreadyLocked: true });
+    publishNapiGeneration(mismatchStage, root, "expected");
     const mismatch = receipt(root, "require(process.argv[1]);");
     assert.notEqual(mismatch.status, 0);
     assert.match(mismatch.stderr, /ABI mismatch/);
@@ -119,9 +114,7 @@ test("a planted final-pointer failure leaves readers and sealed metadata unchang
   const root = fixture();
   const prior = "prior";
   try {
-    publishNapiGeneration(stage(root, ".napi-stage-good", prior), root, prior, {
-      alreadyLocked: true,
-    });
+    publishNapiGeneration(stage(root, ".napi-stage-good", prior), root, prior);
     const pointer = readFileSync(join(root, "native-binding.cjs"), "utf8");
     const marker = "marker";
     const manifest = "manifest";
@@ -129,10 +122,7 @@ test("a planted final-pointer failure leaves readers and sealed metadata unchang
     writeFileSync(join(root, "manifest"), manifest);
     process.env.JAZZ_NAPI_BUILD_FAULT = "pointer-write";
     assert.throws(
-      () =>
-        publishNapiGeneration(stage(root, ".napi-stage-next", "next"), root, "next", {
-          alreadyLocked: true,
-        }),
+      () => publishNapiGeneration(stage(root, ".napi-stage-next", "next"), root, "next"),
       /final-pointer failure/,
     );
     assert.equal(readFileSync(join(root, "native-binding.cjs"), "utf8"), pointer);
