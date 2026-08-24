@@ -286,6 +286,9 @@ where
             for staged_id in &commit.staged_large_values {
                 batch.accept_large_value(*staged_id);
             }
+            for stage in &commit.resident_large_values {
+                batch.accept_resident_large_value(stage.clone());
+            }
         }
         batch.insert(
             "jazz_transactions",
@@ -480,8 +483,10 @@ where
         Ok(PublishedTransaction { tx_id, persistence })
     }
 
-    /// Lower oversized ordinary scalar cells through Groove and atomically
-    /// stage their immutable nodes before row publication begins.
+    /// Lower oversized ordinary scalar cells through Groove. Complete direct
+    /// values become resident stages first so their ordinary row write retains
+    /// the same local-lane contract as inline scalars; `AppliedBatch::persist`
+    /// later runs the shared journal/blob/receipt lifecycle.
     async fn prepare_and_stage_large_commit_values(
         &mut self,
         commits: &mut [(SchemaVersionId, MergeableCommit)],
@@ -516,13 +521,12 @@ where
                     commit.prepared_large_columns.insert(column.clone());
                     continue;
                 }
-                let Some(staged) = self
-                    .prepare_and_stage_large_scalar(value, expected_kind)
-                    .await?
+                let Some(stage) = self
+                    .prepare_resident_large_scalar(value, expected_kind)?
                 else {
                     continue;
                 };
-                commit.staged_large_values.push(staged.id);
+                commit.resident_large_values.push(stage);
             }
         }
         Ok(())
@@ -599,6 +603,67 @@ where
         Ok(Some(staged))
     }
 
+    fn prepare_resident_large_scalar(
+        &mut self,
+        value: &mut Value,
+        expected_kind: Option<groove::large_values::LargeValueKind>,
+    ) -> Result<Option<groove::large_values::ResidentLargeValueStage>, Error> {
+        use groove::large_values::{INLINE_VALUE_MAX_BYTES, LargeValueKind};
+
+        fn candidate(value: &Value) -> Option<(LargeValueKind, &[u8], bool)> {
+            match value {
+                Value::String(text) if text.len() > INLINE_VALUE_MAX_BYTES => {
+                    Some((LargeValueKind::String, text.as_bytes(), false))
+                }
+                Value::Bytes(bytes) if bytes.len() > INLINE_VALUE_MAX_BYTES => {
+                    Some((LargeValueKind::Bytes, bytes.as_slice(), false))
+                }
+                Value::Nullable(Some(inner)) => match inner.as_ref() {
+                    Value::String(text) if text.len() > INLINE_VALUE_MAX_BYTES => {
+                        Some((LargeValueKind::String, text.as_bytes(), true))
+                    }
+                    Value::Bytes(bytes) if bytes.len() > INLINE_VALUE_MAX_BYTES => {
+                        Some((LargeValueKind::Bytes, bytes.as_slice(), true))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        let Some((inferred_kind, bytes, nullable)) = candidate(value) else {
+            return Ok(None);
+        };
+        let kind = match expected_kind {
+            Some(LargeValueKind::Bytes) if inferred_kind != LargeValueKind::Bytes => {
+                return Err(Error::InvalidMergeableCommit(
+                    "oversized scalar value does not match its logical column",
+                ));
+            }
+            Some(expected @ (LargeValueKind::String | LargeValueKind::Json))
+                if inferred_kind == LargeValueKind::String =>
+            {
+                expected
+            }
+            Some(LargeValueKind::String | LargeValueKind::Json)
+                if inferred_kind == LargeValueKind::Bytes =>
+            {
+                return Err(Error::InvalidMergeableCommit(
+                    "oversized scalar value does not match its logical column",
+                ));
+            }
+            Some(expected) => expected,
+            None => inferred_kind,
+        };
+        let stage = self.database.prepare_resident_large_value(kind, bytes)?;
+        let descriptor = Value::Large(stage.value_ref().clone());
+        *value = if nullable {
+            Value::Nullable(Some(Box::new(descriptor)))
+        } else {
+            descriptor
+        };
+        Ok(Some(stage))
+    }
+
     pub(crate) fn large_value_kind_for_column(
         &self,
         schema_version: SchemaVersionId,
@@ -661,12 +726,17 @@ where
     }
 
     /// Settle a completed persistence receipt and release its storage boundary.
-    pub fn settle_published_transaction(
+    pub async fn settle_published_transaction(
         &mut self,
         tx_id: TxId,
         persistence: PersistedBatch,
+        retract_on_failure: bool,
     ) -> Result<(), Error> {
-        self.database.finish_persistence(persistence)?;
+        if retract_on_failure && persistence.failed() {
+            self.database.retract_failed_persistence(persistence).await?;
+        } else {
+            self.database.finish_persistence(persistence)?;
+        }
         self.pending_persistence.remove(&tx_id);
         Ok(())
     }
@@ -677,8 +747,10 @@ where
         published: PublishedTransaction,
     ) -> Result<TxId, Error> {
         let tx_id = published.tx_id;
+        let retract_on_failure = published.retracts_on_failed_persistence();
         let persistence = published.persist().await;
-        self.settle_published_transaction(tx_id, persistence)?;
+        self.settle_published_transaction(tx_id, persistence, retract_on_failure)
+            .await?;
         Ok(tx_id)
     }
 
@@ -694,7 +766,12 @@ where
         loop {
             for publication in publications {
                 let persistence = publication.persist().await;
-                self.settle_published_transaction(publication.tx_id(), persistence)?;
+                self.settle_published_transaction(
+                    publication.tx_id(),
+                    persistence,
+                    publication.retracts_on_failed_persistence(),
+                )
+                .await?;
             }
             let Some(message) = work.pop_front() else {
                 break;

@@ -1474,6 +1474,7 @@ pub struct MergeableCommit {
     /// provenance prevents callers from handcrafting physical descriptors.
     prepared_large_columns: BTreeSet<String>,
     staged_large_values: Vec<groove::large_values::StagedLargeValueId>,
+    resident_large_values: Vec<groove::large_values::ResidentLargeValueStage>,
 }
 
 impl MergeableCommit {
@@ -1493,6 +1494,7 @@ impl MergeableCommit {
             user_metadata_json: None,
             prepared_large_columns: BTreeSet::new(),
             staged_large_values: Vec::new(),
+            resident_large_values: Vec::new(),
         }
     }
 
@@ -1719,6 +1721,10 @@ impl PublishedTransaction {
     /// Persist the resident publication in storage order.
     pub async fn persist(&self) -> PersistedBatch {
         self.persistence.persist().await
+    }
+
+    pub(crate) fn retracts_on_failed_persistence(&self) -> bool {
+        self.persistence.is_retractable()
     }
 }
 

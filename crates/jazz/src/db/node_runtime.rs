@@ -224,11 +224,13 @@ where
                 return Ok(());
             };
             let tx_id = published.tx_id();
+            let retract_on_failure = published.retracts_on_failed_persistence();
             let persistence = published.persist().await;
             self.node
                 .lock()
                 .await
-                .settle_published_transaction(tx_id, persistence)?;
+                .settle_published_transaction(tx_id, persistence, retract_on_failure)
+                .await?;
             let settled = self
                 .pending_local_publications
                 .borrow_mut()

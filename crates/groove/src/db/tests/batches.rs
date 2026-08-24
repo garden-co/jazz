@@ -218,6 +218,61 @@ async fn staged_large_value_is_consumed_atomically_with_its_referencing_row() {
 }
 
 #[futures_test::test]
+async fn resident_large_value_is_visible_before_its_journaled_promotion() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    database.set_chunk_storage(chunks.clone());
+    let bytes = vec![7; crate::large_values::INLINE_VALUE_MAX_BYTES + 1];
+    let stage = database
+        .prepare_resident_large_value(crate::large_values::LargeValueKind::Bytes, &bytes)
+        .unwrap();
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "objects",
+        vec![Value::U64(1), Value::Large(stage.value_ref().clone())],
+    );
+    batch.accept_resident_large_value(stage.clone());
+    let applied = database.apply_batch(batch).await.unwrap();
+    assert_eq!(
+        database
+            .primary_key_scan("objects", &[Value::U64(1)])
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the descriptor is locally readable before any async durable staging"
+    );
+    assert!(
+        chunks.is_empty(),
+        "resident construction must not touch blobs"
+    );
+
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted).unwrap();
+    assert!(
+        !chunks.is_empty(),
+        "promotion stages the resident nodes durably"
+    );
+    assert_eq!(
+        database
+            .read_large_value_range(stage.value_ref(), 0..bytes.len() as u64)
+            .await
+            .unwrap(),
+        bytes
+    );
+}
+
+#[futures_test::test]
 async fn idempotent_restaging_reports_incoming_bytes_for_each_upload() {
     let schema = DatabaseSchema::new([TableSchema::new(
         "objects",

@@ -283,6 +283,9 @@ pub struct AppliedBatch {
     tick: TickMetrics,
     notifications_deferred: bool,
     retractable: bool,
+    resident_large_values: Vec<crate::large_values::ResidentLargeValueStage>,
+    resident_chunks: crate::chunks::ResidentChunkStorage,
+    large_value_stager: crate::db::facade::LargeValueStager,
     lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
     abandoned_application: Rc<Cell<bool>>,
 }
@@ -325,7 +328,26 @@ impl AppliedBatch {
         .await;
         let storage_start = Instant::now();
         let result = match turn {
-            Ok(()) => self.storage.write_many(self.operations.clone()).await,
+            Ok(()) => {
+                let mut staging_error = None;
+                for stage in &self.resident_large_values {
+                    if let Err(error) = self
+                        .large_value_stager
+                        .stage_and_finalize_resident(stage, &self.resident_chunks)
+                        .await
+                    {
+                        staging_error = Some(error);
+                        break;
+                    }
+                }
+                match staging_error {
+                    Some(error) => Err(crate::storage::Error::Backend {
+                        backend: "resident large-value staging",
+                        message: error.to_string(),
+                    }),
+                    None => self.storage.write_many(self.operations.clone()).await,
+                }
+            }
             Err(error) => Err(error),
         };
         let storage_write_time = storage_start.elapsed();
@@ -423,6 +445,14 @@ pub struct PersistedBatch {
     notifications_deferred: bool,
     metrics: CommitMetrics,
     receipt: PersistenceReceipt,
+}
+
+impl PersistedBatch {
+    /// Whether the owned ordered durability attempt failed.  Retractable
+    /// resident publications use this to select exact inverse settlement.
+    pub fn failed(&self) -> bool {
+        self.result.is_err()
+    }
 }
 
 struct PersistenceReceipt {
