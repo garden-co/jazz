@@ -102,6 +102,26 @@ where
             .map_err(Into::into)
     }
 
+    /// Open a mergeable transaction admitted as this trusted Db while keeping
+    /// every staged write and the committed unit attributed to `made_by`.
+    /// The open transaction already carries separate provenance and policy
+    /// fields; expose that existing split rather than rewriting CRUD staging.
+    #[doc(hidden)]
+    pub async fn begin_mergeable_attributed(
+        &self,
+        id: OpenTransactionId,
+        made_by: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.check_attribution_allowed(made_by)?;
+        self.node
+            .node
+            .lock()
+            .await
+            .open_mergeable(id, made_by, Some(self.identity.author))
+            .await
+            .map_err(Into::into)
+    }
+
     /// Return a non-owning operations handle for an already-open mergeable transaction.
     ///
     /// This handle never closes the transaction when dropped, so it is suitable
