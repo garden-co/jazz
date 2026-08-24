@@ -1133,6 +1133,10 @@ fn edge_query_rehydrate_applies_session_user_id_read_policy() {
     let bob_id = user(0xb2);
     let alice_user_id = alice_id.test_uuid().to_string();
     let bob_user_id = bob_id.test_uuid().to_string();
+    core.set_session_claims(
+        bob_id,
+        BTreeMap::from([("user_id".to_owned(), v(bob_user_id.clone()))]),
+    );
     let alice_private_chat_tx = commit_mergeable_global(
         &mut alice,
         &mut core,
