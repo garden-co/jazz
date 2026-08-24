@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { DeterministicMusicAgent, MemoryMusicStore, chunks } from "../src/music-agent.js";
+import { DeterministicMusicAgent, MemoryMusicStore, byteChunks } from "../src/music-agent.js";
 
 describe("MusicAgent deterministic E2E", () => {
   test("streams one assistant turn, records its tool call, and preserves ordering", async () => {
@@ -26,7 +26,7 @@ describe("MusicAgent deterministic E2E", () => {
     });
     const attachment = await store.addAttachment(
       { turnId, filename: "clip.raw", mediaType: "audio/raw", byteLength: 6 },
-      chunks(["ab", "cdef"]),
+      byteChunks([new TextEncoder().encode("ab"), new TextEncoder().encode("cdef")]),
     );
 
     expect(Array.from(await store.readAttachmentRange(attachment, 2, 5))).toEqual([99, 100, 101]);
