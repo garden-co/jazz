@@ -1591,6 +1591,179 @@ fn client_attributed_insert_to_different_user_is_rejected() {
     assert_eq!(prepared_read(&client, &client.table("todos")).len(), 0);
 }
 
+/// A trusted backend admits a write as its own policy subject while recording
+/// the external author as durable provenance; an ordinary Db cannot mint that
+/// split. Alice's row is deliberately owned by the backend, not Alice, so the
+/// positive path proves that authorization did not accidentally follow
+/// provenance.
+///
+/// ```text
+/// trusted backend ──admit as backend──► owner policy ──allow──► row made_by=alice
+/// ordinary client ──claim made_by=alice──────────────────────► rejected locally
+/// ```
+#[test]
+fn backend_attribution_separates_owner_policy_from_external_provenance() {
+    let schema = owner_write_schema();
+    let backend_author = AuthorSubject::for_test_bytes([0xb0; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let trusted_backend = block_on(unsafe {
+        // SAFETY: this integration fixture represents the private capability
+        // minted only by an explicitly opened, authenticated backend runtime.
+        Db::open_with_backend_attribution(DbConfig {
+            schema: schema.clone(),
+            storage: rocks_storage(&schema),
+            identity: DbIdentity {
+                node: NodeUuid::from_bytes([0xb0; 16]),
+                author: backend_author,
+            },
+            id_source: Some(Box::new(SeededRowIdSource::new(0xb0))),
+        })
+    })
+    .unwrap();
+
+    let write = trusted_backend
+        .insert_with_id_attributed(
+            alice,
+            "todos",
+            row(0xb1),
+            cells(
+                "admitted by backend, credited to alice",
+                false,
+                backend_author,
+            ),
+        )
+        .unwrap();
+    let unit = trusted_backend
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(write.mergeable_tx_id())
+        .unwrap();
+    let SyncMessage::CommitUnit { tx, .. } = unit else {
+        panic!("backend-attributed write must publish a commit unit");
+    };
+    assert_eq!(
+        tx.made_by, alice,
+        "external canonical subject is provenance"
+    );
+    assert_eq!(
+        prepared_read(&trusted_backend, &trusted_backend.table("todos")).len(),
+        1,
+        "the backend-owned policy row proves admission used backend_author rather than alice"
+    );
+
+    let ordinary_runtime = open_db(0xb2, backend_author, &schema);
+    let err = match ordinary_runtime
+        .insert(
+            "todos",
+            cells("forged external provenance", false, backend_author),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xb2)),
+                identity: crate::db::WriteIdentity::Attribution(alice),
+                ..Default::default()
+            },
+        )
+        .resolve()
+    {
+        Ok(_) => panic!("an ordinary Db must not gain backend attribution from its author value"),
+        Err(err) => err,
+    };
+    assert_eq!(err.code, ErrorCode::WriteRejected);
+    assert!(prepared_read(&ordinary_runtime, &ordinary_runtime.table("todos")).is_empty());
+}
+
+/// Backend-attributed mergeable batches and resumable large-value uploads retain
+/// one external provenance subject for their final commit while each admission
+/// check remains the trusted backend's. Alice is never granted ownership of the
+/// backend-owned rows in this fixture.
+///
+/// ```text
+/// backend ──open attributed batch / finish streamed upload──► policy as backend
+///                                                       └──► committed made_by=alice
+/// ```
+#[test]
+fn backend_attribution_survives_mergeable_and_streaming_publication() {
+    let schema = owner_write_schema();
+    let backend_author = AuthorSubject::for_test_bytes([0xb6; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xa6; 16]);
+    let backend = block_on(unsafe {
+        // SAFETY: this fixture stands in for the binding's explicit backend
+        // constructor, the only production issuer of this capability.
+        Db::open_with_backend_attribution(DbConfig {
+            schema: schema.clone(),
+            storage: rocks_storage(&schema),
+            identity: DbIdentity {
+                node: NodeUuid::from_bytes([0xb6; 16]),
+                author: backend_author,
+            },
+            id_source: Some(Box::new(SeededRowIdSource::new(0xb6))),
+        })
+    })
+    .unwrap();
+
+    let batch = OpenTransactionId::new();
+    block_on(backend.begin_mergeable_attributed(batch, alice)).unwrap();
+    block_on(backend.mergeable_tx_ref(batch).insert(
+        "todos",
+        cells("mergeable provenance", false, backend_author),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xb7)),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let batch_tx = block_on(backend.commit_mergeable_handle(batch)).unwrap();
+    let SyncMessage::CommitUnit { tx, .. } = backend
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(batch_tx)
+        .unwrap()
+    else {
+        panic!("mergeable batch must publish a commit unit");
+    };
+    assert_eq!(tx.made_by, alice);
+
+    let streaming_cells = BTreeMap::from([
+        ("done".to_owned(), Value::Bool(false)),
+        ("owner".to_owned(), Value::Uuid(backend_author.test_uuid())),
+    ]);
+    let mut upload = backend
+        .begin_streaming_value_upload(
+            "todos",
+            &streaming_cells,
+            "title",
+            groove::large_values::LargeValueKind::String,
+        )
+        .unwrap();
+    block_on(backend.push_streaming_value_upload(&mut upload, b"streamed provenance")).unwrap();
+    let streamed = block_on(backend.finish_streaming_value_upload(
+        upload,
+        crate::db::StreamingMutationKind::Insert,
+        "todos",
+        row(0xb8),
+        streaming_cells,
+        "title",
+        None,
+        None,
+        None,
+        None,
+        Some(alice),
+    ))
+    .unwrap();
+    let SyncMessage::CommitUnit { tx, .. } = backend
+        .node
+        .node
+        .borrow_mut()
+        .commit_unit_for(streamed.mergeable_tx_id())
+        .unwrap()
+    else {
+        panic!("streamed attributed write must publish a commit unit");
+    };
+    assert_eq!(tx.made_by, alice);
+    assert_eq!(prepared_read(&backend, &backend.table("todos")).len(), 2);
+}
+
 #[test]
 fn default_insert_keeps_subject_and_made_by_equal() {
     let schema = owner_write_schema();

@@ -1008,6 +1008,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const attribution = this.backendAttribution(_writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(_writeContext);
     const branchView = branchViewFromWriteContext(_writeContext);
+    rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(_writeContext, "Insert");
     if (tx) {
       const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
@@ -1065,6 +1066,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const attribution = this.backendAttribution(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
+    rejectAttributedBranchWrite(attribution, branchView);
 
     const definition = this.table(table);
     const descriptor = definition.columns.find((candidate) => candidate.name === column);
@@ -1159,6 +1161,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
+    rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(writeContext, "Restore");
     if (tx) {
       const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
@@ -1201,6 +1204,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
+    rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(writeContext, "Update");
     if (tx) {
       const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
@@ -1243,6 +1247,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
+    rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(writeContext, "Upsert");
     const existing = tx
       ? (this.stagedRowForWriteMerge(tx, table, rowId) ?? this.readRowForWriteMerge(table, rowId))
@@ -1295,6 +1300,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const attribution = this.backendAttribution(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
+    rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(writeContext, "Delete");
     if (tx) {
       const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
@@ -3052,6 +3058,15 @@ function branchViewFromWriteContext(writeContext?: string | null): EncodedBranch
     return view.head == null ? undefined : { head: view.head, base: view.base };
   } catch {
     return undefined;
+  }
+}
+
+function rejectAttributedBranchWrite(
+  attribution: Uint8Array | undefined,
+  branchView: EncodedBranchView | undefined,
+): void {
+  if (attribution && branchView) {
+    throw new Error("Backend-attributed writes do not support branch views");
   }
 }
 
