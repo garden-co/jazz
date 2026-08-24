@@ -3015,8 +3015,8 @@ describe("NativeRuntimeAdapter server transport", () => {
                   table: "todos",
                   rowId: uuidBytes(rowId),
                   title: "native provenance",
-                  createdAt: (BigInt(createdAtMs) << 16n) | 17n,
-                  updatedAt: (BigInt(updatedAtMs) << 16n) | 23n,
+                  createdAt: createdAtMs,
+                  updatedAt: updatedAtMs,
                 },
               ]),
             prepareQuery: () => ({}),
@@ -3969,7 +3969,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.close();
   });
 
-  it("decodes nonzero provenance HLC bits once before preserving public subscription microseconds", () => {
+  it("preserves physical provenance timestamps as public subscription microseconds", () => {
     const schema = {
       notes: {
         columns: [
@@ -5037,8 +5037,8 @@ type EncodedTestRow = {
   rowId: Uint8Array;
   title: string;
   txTime?: number;
-  createdAt?: number | bigint;
-  updatedAt?: number | bigint;
+  createdAt?: number;
+  updatedAt?: number;
 };
 
 function encodeRows(rows: EncodedTestRow[]): Uint8Array {
@@ -5450,7 +5450,7 @@ function encodeUserWrappedSubscriptionDelta(row: {
           presentBytes(inlineScalar(row.title)),
           presentBytes(presentBytes(inlineScalar(row.note))),
           uuidBytes("00000000-0000-0000-0000-0000000000aa"),
-          txTimeBytes(123, 17),
+          u64Bytes(123),
         ]),
       );
     }, 1);
@@ -5717,13 +5717,13 @@ function doubleBytes(value: number): Uint8Array {
   return bytes;
 }
 
-function txTimeBytes(value: number, logical = 0): Uint8Array {
+function txTimeBytes(value: number): Uint8Array {
   const bytes = new Uint8Array(8);
-  new DataView(bytes.buffer).setBigUint64(0, (BigInt(value) << 16n) | BigInt(logical), true);
+  new DataView(bytes.buffer).setBigUint64(0, BigInt(value) << 16n, true);
   return bytes;
 }
 
-function u64Bytes(value: number | bigint): Uint8Array {
+function u64Bytes(value: number): Uint8Array {
   const bytes = new Uint8Array(8);
   new DataView(bytes.buffer).setBigUint64(0, BigInt(value), true);
   return bytes;

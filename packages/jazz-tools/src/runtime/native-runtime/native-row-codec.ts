@@ -1395,13 +1395,10 @@ function decodeArrayElements<T>(
 
 export function decodeNativeTimestamp(bytes: Uint8Array, columnName?: string): number {
   const raw = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getBigUint64(0, true);
-  if (columnName && isProvenanceMagicTimestampColumn(columnName)) {
-    // Native provenance is a packed TxTime: 48-bit physical milliseconds followed
-    // by a 16-bit logical counter. Expose only the physical component in Jazz's
-    // public microsecond timestamp representation.
-    return Number(raw >> 16n) * 1_000;
-  }
-  return Number(raw);
+  // Rust emits physical milliseconds for provenance fields. Jazz's public
+  // provenance representation is microseconds; ordinary timestamps remain
+  // milliseconds.
+  return Number(raw) * (columnName && isProvenanceMagicTimestampColumn(columnName) ? 1_000 : 1);
 }
 
 function timestampToDate(value: number, columnName?: string): Date {

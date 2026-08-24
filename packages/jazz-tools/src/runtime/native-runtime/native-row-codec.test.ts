@@ -236,7 +236,7 @@ describe("native row codec", () => {
         name: column.name,
         valueType: storageColumnValueType(column),
       })),
-      [u64Bytes((BigInt(physicalMs) << 16n) | 17n), u64Bytes(physicalMs)],
+      [u64Bytes(physicalMs), u64Bytes(physicalMs)],
     );
 
     expect(decodeNativeRowObject(undefined, columns, raw)).toEqual({
@@ -638,7 +638,7 @@ function uuidBytes(id: string): Uint8Array {
   );
 }
 
-function u64Bytes(value: number | bigint): Uint8Array {
+function u64Bytes(value: number): Uint8Array {
   const bytes = new Uint8Array(8);
   new DataView(bytes.buffer).setBigUint64(0, BigInt(value), true);
   return bytes;

@@ -1194,7 +1194,7 @@ describe("SubscriptionManager", () => {
     expect(result.all).toEqual([{ id, name: "layout", count: 9 }]);
   });
 
-  it("distinguishes packed provenance HLCs from ordinary timestamps in terminal roots", () => {
+  it("scales provenance timestamps while preserving ordinary timestamps in terminal roots", () => {
     const id = "00000000-0000-4000-8000-000000000001";
     const author = "00000000-0000-4000-8000-0000000000aa";
     const key = [10, ...uuidBytes(id)];
@@ -1219,7 +1219,7 @@ describe("SubscriptionManager", () => {
       ...uuidBytes(id),
       ...encodeNativeRowValues(producerColumns, [
         { type: "Uuid", value: author },
-        { type: "Timestamp", value: (42 << 16) | 17 },
+        { type: "Timestamp", value: 42 },
         { type: "Timestamp", value: 42 },
       ]),
     ]);
@@ -1266,7 +1266,7 @@ describe("SubscriptionManager", () => {
     ]);
   });
 
-  it("decodes packed provenance HLCs in terminal child rows", () => {
+  it("scales provenance timestamps in terminal child rows", () => {
     const rootId = "00000000-0000-4000-8000-000000000001";
     const childId = "00000000-0000-4000-8000-000000000002";
     const rootKey = [10, ...uuidBytes(rootId)];
@@ -1300,12 +1300,13 @@ describe("SubscriptionManager", () => {
     );
     const childPayload = Uint8Array.from([
       ...uuidBytes(childId),
-      ...encodeNativeRowValues(childColumns, [
-        { type: "Timestamp", value: (physicalMs << 16) | 23 },
-      ]),
+      ...encodeNativeRowValues(childColumns, [{ type: "Timestamp", value: physicalMs }]),
     ]);
 
-    const result = new SubscriptionManager<{ childUpdatedAt: Date | null }>().handleDelta(
+    const result = new SubscriptionManager<{
+      id: string;
+      childUpdatedAt: Date | null;
+    }>().handleDelta(
       {
         __jazzNativeRowDelta: true,
         added: new Uint8Array(),
@@ -1336,13 +1337,14 @@ describe("SubscriptionManager", () => {
             ? (child.value.values[0] as { type: "Timestamp"; value: number }).value
             : undefined;
         return {
+          id: row.id,
           childUpdatedAt: timestamp === undefined ? null : new Date(Math.trunc(timestamp / 1_000)),
         };
       },
       rootColumns,
     );
 
-    expect(result.all).toEqual([{ childUpdatedAt: new Date(physicalMs) }]);
+    expect(result.all).toEqual([{ id: rootId, childUpdatedAt: new Date(physicalMs) }]);
   });
 
   it("decodes logical collector roots and rejects the wrong carrier kind", () => {
