@@ -2734,10 +2734,8 @@ where
     ) -> Result<(), Error> {
         ensure_transaction_identity(options.identity)?;
         ensure_exclusive_view_target(&options.target)?;
-        let mut cells = self.read(table, row).await?.unwrap_or_default();
-        cells.extend(patch);
         self.db()
-            .stage_exclusive_insert(self.tx_id(), table, row, cells)
+            .stage_exclusive_update(self.tx_id(), table, row, patch, options.updated_at_ms)
             .await
     }
 

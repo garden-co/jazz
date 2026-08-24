@@ -623,6 +623,34 @@ where
             .map_err(Into::into)
     }
 
+    pub(super) async fn stage_exclusive_update(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        updated_at_ms: Option<u64>,
+    ) -> Result<(), Error> {
+        let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
+        let mut node = self.node.node.lock().await;
+        let mut cells = node
+            .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
+            .await?
+            .unwrap_or_default();
+        cells.extend(patch);
+        node.tx_write_in_schema_at_ms(
+            tx_id,
+            self.schema_version_id,
+            table,
+            row,
+            cells,
+            None,
+            Some(now_ms),
+        )
+        .await?;
+        Ok(())
+    }
+
     pub(super) async fn stage_exclusive_delete(
         &self,
         tx_id: OpenTransactionId,
