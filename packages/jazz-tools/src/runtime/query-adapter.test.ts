@@ -11,6 +11,9 @@ const app = s.defineApp({
   }),
   todos: s.table({
     title: s.string(),
+    body: s.string(),
+    attachment: s.bytes(),
+    metadata: s.json(),
     done: s.boolean(),
     projectId: s.ref("projects"),
     ownerId: s.ref("users").optional(),
@@ -43,13 +46,36 @@ describe("translateQuery", () => {
         { column: "done", op: "eq", value: false },
         { column: "ownerId", op: "isNull", value: true },
       ],
-      select_columns: ["title"],
+      select_columns: [{ kind: "full", column: "title" }],
       order_by: [{ column: "title", direction: "Desc" }],
       limit: 5,
       offset: 2,
     });
     expect(translated.relation_ir).toBeUndefined();
     expect(translated.array_subqueries).toHaveLength(1);
+  });
+
+  it("lowers partial select descriptors to the native projection contract", () => {
+    const translated = JSON.parse(
+      translateQuery(
+        app.todos
+          .select({
+            attachment: { from: 1_000_000, to: 2_000_000 },
+            body: { from: 4, to: 124 },
+            title: { fromUtf8: 4, toUtf8: 67 },
+            metadata: { at: "/someKey/11/otherKey" },
+          })
+          ._build(),
+        app.wasmSchema,
+      ),
+    );
+
+    expect(translated.select_columns).toEqual([
+      { kind: "bytes", column: "attachment", from: 1_000_000, to: 2_000_000 },
+      { kind: "text_utf16", column: "body", from: 4, to: 124 },
+      { kind: "text_utf8", column: "title", from: 4, to: 67 },
+      { kind: "json_pointer", column: "metadata", at: "/someKey/11/otherKey" },
+    ]);
   });
 
   it("keeps native relation IR for relation traversal queries", () => {
