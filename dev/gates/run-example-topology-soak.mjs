@@ -1,0 +1,96 @@
+#!/usr/bin/env node
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+
+const root = resolve(import.meta.dirname, "../..");
+const registry = JSON.parse(
+  readFileSync(resolve(root, "dev/example-topology-scenarios.json"), "utf8"),
+);
+let output = "target/example-topology-soak";
+let seedCount = 3;
+let watchdogSeconds = 90;
+let selected = [];
+for (let index = 2; index < process.argv.length; index++) {
+  const option = process.argv[index];
+  if (option === "--output") output = process.argv[++index];
+  else if (option === "--seed-count") seedCount = positiveInteger(process.argv[++index], option);
+  else if (option === "--watchdog-seconds")
+    watchdogSeconds = positiveInteger(process.argv[++index], option);
+  else if (option === "--scenario") selected.push(process.argv[++index]);
+  else if (option === "--list") {
+    for (const scenario of registry.scenarios) console.log(scenario.id);
+    process.exit(0);
+  } else usage(`unknown option: ${option}`);
+}
+if (seedCount > 100 || watchdogSeconds > 900) usage("seed/watchdog cap exceeded");
+const scenarios = registry.scenarios.filter(
+  ({ id }) => selected.length === 0 || selected.includes(id),
+);
+if (scenarios.length === 0 || selected.some((id) => !scenarios.some((item) => item.id === id))) {
+  usage("unknown or empty scenario selection");
+}
+
+const outputDir = resolve(root, output);
+mkdirSync(resolve(outputDir, "logs"), { recursive: true });
+const fixedSeeds = [11, 29, 47, 83, 32676, 40595, 2234158, 3715011, 4372288];
+const cases = [];
+for (const scenario of scenarios) {
+  for (let index = 0; index < seedCount; index++) {
+    const seed = fixedSeeds[index] ?? 1000 + (index - fixedSeeds.length) * 7919;
+    const logName = `${scenario.id.replaceAll(/[^a-zA-Z0-9.-]/g, "-")}-seed-${seed}.log`;
+    const replay = [`JAZZ_EXAMPLE_TOPOLOGY_SEED=${seed}`, ...scenario.argv.map(shellQuote)].join(
+      " ",
+    );
+    const started = Date.now();
+    const result = spawnSync(scenario.argv[0], scenario.argv.slice(1), {
+      cwd: resolve(root, scenario.cwd),
+      env: { ...process.env, JAZZ_EXAMPLE_TOPOLOGY_SEED: String(seed) },
+      encoding: "utf8",
+      timeout: watchdogSeconds * 1000,
+      killSignal: "SIGKILL",
+    });
+    const status =
+      result.error?.code === "ETIMEDOUT" ? "timeout" : result.status === 0 ? "passed" : "failed";
+    writeFileSync(
+      resolve(outputDir, "logs", logName),
+      `${result.stdout ?? ""}${result.stderr ?? ""}`,
+    );
+    cases.push({
+      scenario: scenario.id,
+      topology: scenario.topology,
+      seed,
+      status,
+      exitCode: result.status,
+      elapsedMs: Date.now() - started,
+      log: `logs/${logName}`,
+      replay,
+    });
+    console.log(`${scenario.id} seed=${seed} status=${status}; replay: ${replay}`);
+  }
+}
+const summary = {
+  schemaVersion: 1,
+  sha: spawnSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).stdout.trim(),
+  cases,
+  failures: cases.filter(({ status }) => status !== "passed"),
+};
+writeFileSync(resolve(outputDir, "summary.json"), `${JSON.stringify(summary, null, 2)}\n`);
+process.exitCode = summary.failures.length === 0 ? 0 : 1;
+
+function positiveInteger(value, option) {
+  if (!/^[1-9][0-9]*$/.test(value ?? "")) usage(`${option} requires a positive integer`);
+  return Number(value);
+}
+
+function shellQuote(value) {
+  return /^[a-zA-Z0-9_./:@=-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+function usage(error) {
+  if (error) console.error(error);
+  console.error(
+    "Usage: run-example-topology-soak.mjs [--list] [--scenario ID] [--seed-count N] [--watchdog-seconds N] [--output DIR]",
+  );
+  process.exit(2);
+}

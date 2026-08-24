@@ -90,6 +90,9 @@ export default defineConfig({
         },
       ],
       commands: {
+        jazzBrowserTopologyLog: async (_context, status, label, elapsedMs) => {
+          console.info(`[jazz-browser-topology] ${status} ${label} (${elapsedMs}ms)`);
+        },
         jazzServerInfo: async (_context, appId, schema) => jazzServerInfo(appId, schema),
         jazzServerBlockNetwork: async ({ context }, serverUrl) =>
           blockJazzServerNetwork(context, serverUrl),
