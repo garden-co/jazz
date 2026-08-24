@@ -19,6 +19,70 @@ fn indexed_documents_schema() -> JazzSchema {
 }
 
 #[test]
+fn negated_membership_uses_two_valued_null_semantics() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("items")
+                .nullable_column("label", PublicColumnType::Text)
+                .nullable_column("null_option", PublicColumnType::Text)
+                .nullable_column("blocked_option", PublicColumnType::Text),
+        ),
+    );
+    let db = open_db(0xb8, AuthorId::SYSTEM, &schema);
+    for (id, label) in [
+        (row(1), Value::Nullable(None)),
+        (
+            row(2),
+            Value::Nullable(Some(Box::new(Value::String("blocked".to_owned())))),
+        ),
+        (
+            row(3),
+            Value::Nullable(Some(Box::new(Value::String("allowed".to_owned())))),
+        ),
+    ] {
+        db.seed_settled_mergeable_for_bootstrap(
+            "items",
+            id,
+            AuthorId::SYSTEM,
+            BTreeMap::from([
+                ("label".to_owned(), label),
+                ("null_option".to_owned(), Value::Nullable(None)),
+                (
+                    "blocked_option".to_owned(),
+                    Value::Nullable(Some(Box::new(Value::String("blocked".to_owned())))),
+                ),
+            ]),
+        )
+        .unwrap();
+    }
+
+    let matching_ids = |options: &[&str]| {
+        let query = Query::from("items")
+            .filter(not(in_list(col("label"), options.iter().copied().map(col))));
+        let prepared = db.prepare_query(&query).unwrap();
+        row_ids(&db.read(&prepared).unwrap())
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    };
+
+    assert_eq!(
+        matching_ids(&["null_option"]),
+        BTreeSet::from([row(2), row(3)]),
+        "NOT(null IN [null]) is false, while non-null values differ from null"
+    );
+    assert_eq!(
+        matching_ids(&["blocked_option"]),
+        BTreeSet::from([row(1), row(3)]),
+        "a null value differs from every non-null membership option"
+    );
+    assert_eq!(
+        matching_ids(&["null_option", "blocked_option"]),
+        BTreeSet::from([row(3)]),
+        "mixed options exclude both null and matching non-null values"
+    );
+}
+
+#[test]
 fn prepared_query_discards_graph_handle_when_runtime_changes() {
     let schema = issue_schema();
     let db = open_db(0xb7, AuthorSubject::SYSTEM, &schema);

@@ -214,6 +214,41 @@ describe("jazzAdapter", () => {
           ],
         }),
       ).resolves.toBe(3);
+
+      const withoutFirst = await adapter.findMany<any>({
+        model: "user",
+        where: [
+          {
+            field: "id",
+            operator: "not_in",
+            value: [createdUsers[0]!.id],
+            connector: "AND",
+          },
+        ],
+        sortBy: { field: "id", direction: "asc" },
+      });
+      expect(withoutFirst.map((row) => row.id)).toEqual(
+        createdUsers
+          .slice(1)
+          .map((row) => row.id)
+          .sort(),
+      );
+
+      const withoutOneEmail = await adapter.findMany<any>({
+        model: "user",
+        where: [
+          {
+            field: "email",
+            operator: "not_in",
+            value: [createdUsers[1]!.email],
+            connector: "AND",
+          },
+        ],
+        sortBy: { field: "id", direction: "asc" },
+      });
+      expect(withoutOneEmail.map((row) => row.id)).toEqual(
+        [createdUsers[0]!.id, createdUsers[2]!.id].sort(),
+      );
     });
 
     it("backend access can update and delete despite deny-all client policies", async () => {
