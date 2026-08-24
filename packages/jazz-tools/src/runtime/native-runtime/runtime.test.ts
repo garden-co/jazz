@@ -4057,6 +4057,94 @@ describe("NativeRuntimeAdapter server transport", () => {
     ]);
   });
 
+  it.each([
+    {
+      name: "arbitrary text",
+      provenanceBytes: new TextEncoder().encode("not-json"),
+    },
+    {
+      name: "double stored-scalar wrapper",
+      provenanceBytes: Uint8Array.from([
+        0,
+        ...inlineScalar(JSON.stringify(["https://issuer.example", "user-1"])),
+      ]),
+    },
+    {
+      name: "noncanonical JSON whitespace",
+      provenanceBytes: new TextEncoder().encode(`[ "https://issuer.example", "user-1" ]`),
+    },
+    {
+      name: "ASCII-blank component",
+      provenanceBytes: inlineScalar(JSON.stringify(["https://issuer.example", " "])),
+    },
+  ])("rejects malformed public provenance author bytes: $name", ({ provenanceBytes }) => {
+    const schema = {
+      notes: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "note", column_type: { type: "Text" }, nullable: true },
+        ],
+      },
+    } satisfies WasmSchema;
+    const publicColumns = [
+      ...schema.notes.columns,
+      { name: "$createdBy", column_type: { type: "Text" }, nullable: false },
+      { name: "$createdAt", column_type: { type: "Timestamp" }, nullable: false },
+    ] as const;
+    const nativeDelta = readNativeSubscriptionDelta(
+      new PostcardReader(
+        encodeUserWrappedSubscriptionDelta({
+          table: "notes",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000321"),
+          title: "public title",
+          note: "public note",
+          provenanceBytes,
+        }),
+      ),
+    );
+
+    expect(() =>
+      applySubscriptionDeltaWithWireDelta([], new Map(), nativeDelta, schema, true, {
+        rootTable: "notes",
+        rootColumns: publicColumns,
+      }),
+    ).toThrow(/canonical author subject/);
+  });
+
+  it("keeps ordinary text decoding strict while validating provenance specially", () => {
+    const schema = {
+      notes: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "note", column_type: { type: "Text" }, nullable: true },
+        ],
+      },
+    } satisfies WasmSchema;
+    const publicColumns = [
+      ...schema.notes.columns,
+      { name: "$createdBy", column_type: { type: "Text" }, nullable: false },
+      { name: "$createdAt", column_type: { type: "Timestamp" }, nullable: false },
+    ] as const;
+    const nativeDelta = readNativeSubscriptionDelta(
+      new PostcardReader(
+        encodeUserWrappedSubscriptionDelta({
+          table: "notes",
+          rowId: uuidBytes("00000000-0000-0000-0000-000000000321"),
+          title: "public title",
+          titleBytes: new TextEncoder().encode("unwrapped ordinary text"),
+          note: "public note",
+        }),
+      ),
+    );
+
+    expect(() =>
+      applySubscriptionDeltaWithWireDelta([], new Map(), nativeDelta, schema, true, {
+        rootTable: "notes",
+        rootColumns: publicColumns,
+      }),
+    ).toThrow("indirect scalar crossed a logical binding boundary");
+  });
+
   it("encodes range id comparisons into prepared native queries", async () => {
     let preparedBytes: Uint8Array | undefined;
     const runtime = new NativeRuntimeAdapter(
@@ -4385,6 +4473,62 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     expect(call[7]).toBe(1234);
     expect(call[8]).toEqual(head);
     expect(call[9]).toEqual(base);
+  });
+
+  it.each([
+    {
+      name: "valid canonical attribution",
+      attribution: JSON.stringify(["https://issuer.example", "user-1"]),
+      expectedAuthor: JSON.stringify(["https://issuer.example", "user-1"]),
+    },
+    {
+      name: "noncanonical JSON whitespace",
+      attribution: `[ "https://issuer.example", "user-1" ]`,
+      expectedAuthor: undefined,
+    },
+    {
+      name: "blank subject",
+      attribution: JSON.stringify(["https://issuer.example", " "]),
+      expectedAuthor: undefined,
+    },
+  ])("strictly parses write-context canonical author attribution: $name", async (testCase) => {
+    const ownerAuthor = JSON.stringify(["urn:jazz:test", "owner"]);
+    const beginStreamingMutationEncoded = vi.fn(() => ({
+      push: () => undefined,
+      finish: () => fakeWrite(),
+      abort: vi.fn(),
+    }));
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ beginStreamingMutationEncoded }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new TextEncoder().encode(ownerAuthor),
+      1,
+      true,
+      { readAuthorizationHost: "trusted-serving" },
+    );
+
+    await runtime.streamingMutation(
+      "update",
+      "todos",
+      {},
+      "title",
+      (async function* () {
+        yield "updated";
+      })(),
+      JSON.stringify({ attribution: testCase.attribution }),
+      "00000000-0000-0000-0000-000000000123",
+    );
+
+    const author = beginStreamingMutationEncoded.mock.calls[0]?.[6];
+    expect(author instanceof Uint8Array ? new TextDecoder().decode(author) : undefined).toBe(
+      testCase.expectedAuthor ?? ownerAuthor,
+    );
   });
 
   it("aborts the native upload when the producer fails", async () => {
@@ -5479,7 +5623,9 @@ function encodeUserWrappedSubscriptionDelta(row: {
   table: string;
   rowId: Uint8Array;
   title: string;
+  titleBytes?: Uint8Array;
   note: string;
+  provenanceBytes?: Uint8Array;
 }): Uint8Array {
   const descriptor = [
     { name: "row_uuid", valueType: { tag: 10 } },
@@ -5498,9 +5644,9 @@ function encodeUserWrappedSubscriptionDelta(row: {
       encodedRow.bytes(
         createRecord(descriptor, [
           row.rowId,
-          presentBytes(inlineScalar(row.title)),
+          presentBytes(row.titleBytes ?? inlineScalar(row.title)),
           presentBytes(presentBytes(inlineScalar(row.note))),
-          inlineScalar(JSON.stringify(["https://issuer.example", "user-1"])),
+          row.provenanceBytes ?? inlineScalar(JSON.stringify(["https://issuer.example", "user-1"])),
           u64Bytes(123),
         ]),
       );
