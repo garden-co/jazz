@@ -819,6 +819,39 @@ describe("permissions DSL", () => {
     expect(JSON.stringify(rel.input.right)).toContain('"personBId"');
   });
 
+  it("keeps distinct filtered RHS scopes and binds the next join to the previous RHS", () => {
+    const compiled = definePermissions(socialApp, ({ policy, session }) => [
+      policy.profiles.allowRead.where((profile) =>
+        policy.exists(
+          policy.people
+            .where({ profileId: profile.id })
+            .join(policy.friendships.where({ personAId: session.personId }), {
+              left: "id",
+              right: "personAId",
+            })
+            .join(policy.profiles.where({ id: session.personId }), {
+              left: "personBId",
+              right: "id",
+            }),
+        ),
+      ),
+    ]);
+
+    const using = compiled.profiles!.select?.using;
+    expect(using?.type).toBe("ExistsRel");
+    if (!using || using.type !== "ExistsRel") {
+      throw new Error("Expected filtered join policy to compile to ExistsRel.");
+    }
+    const rel = toAssertionRelExprForTest(using.rel);
+    expect(rel.type).toBe("Filter");
+    if (rel.type !== "Filter" || rel.input.type !== "Join") {
+      throw new Error("Expected correlated filter over the second filtered join.");
+    }
+    expect(rel.input.on[0]?.left.scope).toBe("friendships");
+    expect(rel.input.on[0]?.right.scope).toBe("profiles");
+    expect(rel.input.right.type).toBe("Filter");
+  });
+
   it("rejects filtered join RHS shapes the relation lowering cannot alias safely", () => {
     expect(() =>
       definePermissions(socialApp, ({ policy }) => [
@@ -843,7 +876,26 @@ describe("permissions DSL", () => {
           ),
         ),
       ]),
-    ).toThrow(/same-table RHS without an alias/i);
+    ).toThrow(/scope "people".*already present in the left relation/i);
+
+    expect(() =>
+      definePermissions(socialApp, ({ policy, session }) => [
+        policy.profiles.allowRead.where(
+          policy.exists(
+            policy.people
+              .where({})
+              .join(policy.friendships.where({ personBId: session.personId }), {
+                left: "id",
+                right: "personAId",
+              })
+              .join(policy.friendships.where({ personAId: session.personId }), {
+                left: "personBId",
+                right: "personAId",
+              }),
+          ),
+        ),
+      ]),
+    ).toThrow(/scope "friendships".*already present in the left relation/i);
 
     expect(() =>
       definePermissions(socialApp, ({ policy, session }) => [

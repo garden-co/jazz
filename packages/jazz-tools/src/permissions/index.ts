@@ -1299,9 +1299,9 @@ function validateFilteredJoinRelation(
       "join(...) relation RHS must include where(...); pass policy.<table> directly for an unfiltered join.",
     );
   }
-  if (state.initialScope === leftState.initialScope) {
+  if (accumulatedRelationScopes(leftState).has(state.initialScope)) {
     throw new Error(
-      `join(...) cannot use filtered relation "${state.outputTable}" as a same-table RHS without an alias. Use a distinct table or wait for aliased relation joins.`,
+      `join(...) cannot use filtered relation scope "${state.initialScope}" because that scope is already present in the left relation. Use a distinct scope or wait for aliased relation joins.`,
     );
   }
   return state;
@@ -1345,7 +1345,28 @@ function currentRelationScope(state: RelationExprState): string {
 
   const joinIndex = state.joins.length - 1;
   const join = state.joins[joinIndex]!;
-  return relationJoinAlias(state.kind, join, joinIndex);
+  return relationJoinScope(state, join, joinIndex);
+}
+
+function relationJoinScope(
+  state: RelationExprState,
+  join: RelationJoinSpec,
+  index: number,
+): string {
+  return join.relation
+    ? currentRelationScope(getRelationState(join.relation))
+    : relationJoinAlias(state.kind, join, index);
+}
+
+function accumulatedRelationScopes(state: RelationExprState): Set<string> {
+  const scopes = new Set<string>();
+  if (state.initialScope) {
+    scopes.add(state.initialScope);
+  }
+  state.joins.forEach((join, index) => {
+    scopes.add(relationJoinScope(state, join, index));
+  });
+  return scopes;
 }
 
 function extractRelationFilters(
