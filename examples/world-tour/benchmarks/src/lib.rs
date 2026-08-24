@@ -10,7 +10,7 @@ use jazz::db::{Db, DbConfig, DbIdentity, PreparedQuery, block_on};
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::{OrderDirection, Query, col, gte, lit, lte};
+use jazz::query::{OrderDirection, Query, col, eq, gte, lit, lte};
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
@@ -26,6 +26,7 @@ const WINDOW_LIMIT: usize = 12;
 pub struct Fixture {
     db: BenchDb,
     stops_table: TableSchema,
+    venues_table: TableSchema,
     calendar_window: PreparedQuery,
     map_viewport: PreparedQuery,
 }
@@ -40,6 +41,12 @@ impl Fixture {
             .iter()
             .find(|table| table.name == "stops")
             .expect("WorldTour benchmark schema has stops")
+            .clone();
+        let venues_table = schema
+            .tables()
+            .iter()
+            .find(|table| table.name == "venues")
+            .expect("WorldTour benchmark schema has venues")
             .clone();
         let families = schema.column_families();
         let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
@@ -83,10 +90,7 @@ impl Fixture {
                 BTreeMap::from([
                     ("bandId".into(), Value::Uuid(band.0)),
                     ("venueId".into(), Value::Uuid(venue.0)),
-                    (
-                        "date".into(),
-                        Value::U64(WINDOW_START - DAY_SECONDS + stop as u64 * DAY_SECONDS),
-                    ),
+                    ("date".into(), Value::U64(stop_date(stop))),
                     ("status".into(), Value::String("confirmed".into())),
                     (
                         "publicDescription".into(),
@@ -121,6 +125,7 @@ impl Fixture {
         Self {
             db,
             stops_table,
+            venues_table,
             calendar_window,
             map_viewport,
         }
@@ -143,6 +148,46 @@ impl Fixture {
             .map(|row| match row.cell(&self.stops_table, "date") {
                 Some(Value::U64(value)) => value,
                 other => panic!("unexpected date value: {other:?}"),
+            })
+            .collect()
+    }
+
+    /// Included venue names in the root-row order used by the app result.
+    pub fn calendar_window_venue_names(&self) -> Vec<String> {
+        assert_eq!(
+            self.calendar_window
+                .shape()
+                .query()
+                .includes
+                .iter()
+                .map(|include| include.path.as_str())
+                .collect::<Vec<_>>(),
+            ["venueId"],
+            "calendar workload must retain the app's venue include"
+        );
+        self.db
+            .read(&self.calendar_window)
+            .expect("read calendar window with included venues")
+            .into_iter()
+            .map(|stop| {
+                let Some(Value::Uuid(venue_id)) = stop.cell(&self.stops_table, "venueId") else {
+                    panic!("calendar stop has a venueId")
+                };
+                let venue_query = self
+                    .db
+                    .prepare_query(&Query::from("venues").filter(eq(col("id"), lit(venue_id))))
+                    .expect("prepare included venue lookup");
+                let venue = self
+                    .db
+                    .read(&venue_query)
+                    .expect("read included venue")
+                    .into_iter()
+                    .next()
+                    .expect("included venue is materialized");
+                match venue.cell(&self.venues_table, "name") {
+                    Some(Value::String(name)) => name,
+                    other => panic!("unexpected included venue name: {other:?}"),
+                }
             })
             .collect()
     }
@@ -193,4 +238,12 @@ fn row_id(kind: u8, index: usize) -> RowUuid {
     bytes[0] = kind;
     bytes[8..].copy_from_slice(&(index as u64).to_be_bytes());
     RowUuid::from_bytes(bytes)
+}
+
+fn stop_date(stop: usize) -> u64 {
+    match stop {
+        0 => WINDOW_START - DAY_SECONDS,
+        1..=11 => WINDOW_START + (stop as u64 - 1) * DAY_SECONDS,
+        _ => WINDOW_START + (stop as u64 + 9) * DAY_SECONDS,
+    }
 }
