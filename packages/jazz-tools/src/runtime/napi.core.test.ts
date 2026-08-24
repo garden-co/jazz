@@ -9,6 +9,10 @@ import { WebSocket } from "undici";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SubscriptionEvent as NapiSubscriptionEvent } from "jazz-napi";
 import type { ColumnType, Value, WasmSchema } from "../drivers/types.js";
+import {
+  TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
+  trustedReservedSessionToken,
+} from "./client-session.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
 import { webSocketUrl } from "./native-runtime/websocket.js";
 import { openConfig } from "./native-runtime/native-codec.js";
@@ -20,6 +24,7 @@ import {
 import { encodeSchema } from "./native-runtime/native-runtime-adapter.js";
 import { hasJazzNapiBuild, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 import { SubscriptionManager } from "./subscription-manager.js";
+import { SYSTEM_READ_SESSION } from "./system-identity.js";
 import type { WasmRow } from "../drivers/types.js";
 import { createOpenBatchId, type BatchId, type OpenBatchId, type WriteReceipt } from "./client.js";
 
@@ -240,6 +245,96 @@ it("gates direct NAPI provenance writes on a credentialed backend and preserves 
       },
     ]),
   );
+  await runtime.close();
+});
+
+it("runs every supported backend-attributed mutation family through real NAPI provenance", async () => {
+  const { NapiDb } = await loadNapiModule();
+  const runtime = new NativeRuntimeAdapter(
+    { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+    TEST_SCHEMA,
+    deterministicBytes("napi-attribution:matrix-node"),
+    testAuthorBytes("napi-attribution:matrix-owner"),
+    1,
+    true,
+    { backendCredential: "test-backend-credential" },
+  );
+  const provenance = JSON.stringify(["https://issuer.example", "matrix-author"]);
+  const context = (batchId?: string) =>
+    JSON.stringify({
+      session: {
+        ...SYSTEM_READ_SESSION,
+        [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: trustedReservedSessionToken(SYSTEM_READ_SESSION),
+      },
+      attribution: provenance,
+      ...(batchId ? { batch_id: batchId } : {}),
+    });
+  const direct = "00000000-0000-0000-0000-000000000121";
+  const restored = "00000000-0000-0000-0000-000000000122";
+  const upserted = "00000000-0000-0000-0000-000000000123";
+  const transactional = "00000000-0000-0000-0000-000000000124";
+
+  const directInsert = runtime.insert(
+    "todos",
+    { title: { type: "Text", value: "direct" }, done: { type: "Boolean", value: false } },
+    context(),
+    direct,
+  );
+  await runtime.waitForTransaction(await committedBatchId(directInsert), "local");
+  const directUpdate = runtime.update(
+    "todos",
+    direct,
+    { title: { type: "Text", value: "updated" } },
+    context(),
+  );
+  await runtime.waitForTransaction(await committedBatchId(directUpdate), "local");
+  const upsert = runtime.upsert(
+    "todos",
+    upserted,
+    { title: { type: "Text", value: "upserted" }, done: { type: "Boolean", value: false } },
+    context(),
+  );
+  await runtime.waitForTransaction(await committedBatchId(upsert), "local");
+  const insertedForRestore = runtime.insert(
+    "todos",
+    { title: { type: "Text", value: "restore" }, done: { type: "Boolean", value: false } },
+    context(),
+    restored,
+  );
+  await runtime.waitForTransaction(await committedBatchId(insertedForRestore), "local");
+  const deleted = runtime.delete("todos", restored, context());
+  await runtime.waitForTransaction(await committedBatchId(deleted), "local");
+  const restore = runtime.restore(
+    "todos",
+    restored,
+    { title: { type: "Text", value: "restored" }, done: { type: "Boolean", value: true } },
+    context(),
+  );
+  await runtime.waitForTransaction(await committedBatchId(restore), "local");
+
+  const batch = createOpenBatchId();
+  runtime.beginTransaction("mergeable", batch, context(batch));
+  runtime.insert(
+    "todos",
+    { title: { type: "Text", value: "transactional" }, done: { type: "Boolean", value: false } },
+    context(batch),
+    transactional,
+  );
+  const committed = runtime.commitTransaction(batch);
+  await runtime.waitForTransaction(committed, "local");
+
+  const rows = await runtime.query(
+    JSON.stringify({ table: "todos", select_columns: ["title", "$createdBy", "$updatedBy"] }),
+    null,
+    "local",
+  );
+  const expectedAuthor = { type: "Text", value: provenance };
+  for (const title of ["updated", "upserted", "restored", "transactional"]) {
+    const row = rows.find((candidate) => candidate.values[0]?.value === title);
+    expect(row).toMatchObject({
+      values: [{ type: "Text", value: title }, expectedAuthor, expectedAuthor],
+    });
+  }
   await runtime.close();
 });
 
