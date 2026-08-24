@@ -41,7 +41,8 @@
     "typecheck:consumer": "tsc --project tests/types/tsconfig.json"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3"
+    "@napi-rs/cli": "^3",
+    "@types/node": "catalog:default"
   },
   "napi": {
     "binaryName": "jazz-napi",
