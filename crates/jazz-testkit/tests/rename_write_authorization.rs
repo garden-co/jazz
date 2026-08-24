@@ -40,7 +40,7 @@ fn v1_schema() -> JazzSchema {
             TableSchemaBuilder::new("users")
                 .column("id", ColumnType::Uuid)
                 .column("email", ColumnType::Text)
-                .column("owner", ColumnType::Uuid)
+                .column("owner", ColumnType::Text)
                 .policies(owner_write_policies(PolicyExpr::True)),
         ),
     )
@@ -53,7 +53,7 @@ fn v2_schema() -> JazzSchema {
             TableSchemaBuilder::new("people")
                 .column("id", ColumnType::Uuid)
                 .column("email", ColumnType::Text)
-                .column("owner", ColumnType::Uuid)
+                .column("owner", ColumnType::Text)
                 .policies(
                     TablePolicies::new()
                         .with_select(PolicyExpr::True)
@@ -71,6 +71,27 @@ fn compile_public_schema(builder: SchemaBuilder) -> JazzSchema {
 
 fn owner_policy() -> PolicyExpr {
     PolicyExpr::eq_session("owner", vec!["claims".to_owned(), "sub".to_owned()])
+}
+
+fn install_claims(node: &mut NodeState<MemoryStorage>, author: AuthorSubject) {
+    node.admit_test_session_claims(
+        author,
+        BTreeMap::from([
+            ("iss".to_owned(), Value::String("urn:jazz:test".to_owned())),
+            (
+                "issuer".to_owned(),
+                Value::String("urn:jazz:test".to_owned()),
+            ),
+            (
+                "sub".to_owned(),
+                Value::String(author.test_uuid().to_string()),
+            ),
+            (
+                "user_id".to_owned(),
+                Value::String(author.test_uuid().to_string()),
+            ),
+        ]),
+    );
 }
 
 fn owner_write_policies(select: PolicyExpr) -> TablePolicies {
@@ -110,7 +131,7 @@ fn cells(id: RowUuid, email: &str, owner: AuthorSubject) -> BTreeMap<String, Val
         ("email".to_string(), Value::String(email.to_string())),
         (
             "owner".to_string(),
-            Value::String(owner.canonical().to_owned()),
+            Value::String(owner.test_uuid().to_string()),
         ),
     ])
 }
@@ -170,6 +191,8 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
 
     let mut authority = open_node(node(0x90), v1.schema.clone());
     let mut writer_v1 = open_node(node(0x10), v1.schema.clone());
+    install_claims(&mut authority, alice);
+    install_claims(&mut writer_v1, alice);
     let user_row = row(0x77);
 
     let (insert_tx, insert_unit) = block_on(async {
@@ -245,6 +268,8 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
 
     let mallory = author(0xa2);
     let mut non_owner_writer_v2 = open_node(node(0x11), v2.schema.clone());
+    install_claims(&mut authority, mallory);
+    install_claims(&mut non_owner_writer_v2, mallory);
     let (_rejected_tx, rejected_unit) = block_on(async {
         let (published, unit) = non_owner_writer_v2
             .commit_mergeable_unit(
@@ -287,6 +312,7 @@ fn renamed_table_update_policy_uses_projected_parent_version() {
     }));
 
     let mut writer_v2 = open_node(node(0x10), v2.schema.clone());
+    install_claims(&mut writer_v2, alice);
     let (_update_tx, update_unit) = block_on(async {
         let (published, unit) = writer_v2
             .commit_mergeable_unit(
