@@ -18,6 +18,7 @@ import {
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
+import { bandChatFixtureUsers } from "../../src/fixture.js";
 import { createSmokeScenario } from "../../src/scenario.js";
 
 declare module "vitest/internal/browser" {
@@ -69,7 +70,7 @@ describe("BandChat cross-topology recovery", () => {
           authorization: {
             failure: async () => {
               const token = await getJazzServerJwtForUser(
-                "band-chat-outsider",
+                bandChatFixtureUsers.outsider,
                 undefined,
                 server!.appId,
               );
@@ -99,8 +100,8 @@ describe("BandChat cross-topology recovery", () => {
                 permissions,
               });
               const [ownerToken, peerToken] = await Promise.all([
-                getJazzServerJwtForUser("band-chat-owner", undefined, server.appId),
-                getJazzServerJwtForUser("band-chat-peer", undefined, server.appId),
+                getJazzServerJwtForUser(bandChatFixtureUsers.owner, undefined, server.appId),
+                getJazzServerJwtForUser(bandChatFixtureUsers.peer, undefined, server.appId),
               ]);
               owner = await openClient(server, "owner", ownerToken);
               peer = await openClient(server, "peer", peerToken);
@@ -110,35 +111,45 @@ describe("BandChat cross-topology recovery", () => {
               await expect(
                 untrustedOwner
                   .insert(app.profiles, {
-                    userId: "band-chat-owner",
+                    userId: bandChatFixtureUsers.owner,
                     displayName: "forged browser profile",
                   })
                   .wait({ tier: "edge" }),
               ).rejects.toThrow(/permission_denied/i);
-              await Promise.all([
-                commands.jazzBandChatBootstrapProfile(server, "band-chat-owner", "Owner"),
-                commands.jazzBandChatBootstrapProfile(server, "band-chat-peer", "Peer"),
-              ]);
-              ownerProfile = await owner.one(app.profiles.where({ userId: "band-chat-owner" }), {
-                tier: "edge",
-              });
-              peerProfile = await peer.one(app.profiles.where({ userId: "band-chat-peer" }), {
-                tier: "edge",
-              });
+              await commands.jazzBandChatBootstrapProfile(
+                server,
+                bandChatFixtureUsers.owner,
+                "Owner",
+              );
+              await commands.jazzBandChatBootstrapProfile(
+                server,
+                bandChatFixtureUsers.peer,
+                "Peer",
+              );
+              ownerProfile = await owner.one(
+                app.profiles.where({ userId: bandChatFixtureUsers.owner }),
+                { tier: "edge" },
+              );
+              peerProfile = await peer.one(
+                app.profiles.where({ userId: bandChatFixtureUsers.peer }),
+                {
+                  tier: "edge",
+                },
+              );
               if (!ownerProfile || !peerProfile)
                 throw new Error("trusted profile bootstrap did not persist");
-              expect(ownerProfile).toMatchObject({ userId: "band-chat-owner" });
-              expect(peerProfile).toMatchObject({ userId: "band-chat-peer" });
+              expect(ownerProfile).toMatchObject({ userId: bandChatFixtureUsers.owner });
+              expect(peerProfile).toMatchObject({ userId: bandChatFixtureUsers.peer });
               room = (
                 await owner
                   .insert(app.rooms, { name: scenario.assertion.visibleText })
                   .wait({ tier: "edge" })
               ).value;
               await owner
-                .insert(app.roomMembers, { roomId: room.id, userId: "band-chat-owner" })
+                .insert(app.roomMembers, { roomId: room.id, userId: bandChatFixtureUsers.owner })
                 .wait({ tier: "edge" });
               await owner
-                .insert(app.roomMembers, { roomId: room.id, userId: "band-chat-peer" })
+                .insert(app.roomMembers, { roomId: room.id, userId: bandChatFixtureUsers.peer })
                 .wait({ tier: "edge" });
               await waitForQuery(
                 peer,
@@ -185,14 +196,14 @@ describe("BandChat cross-topology recovery", () => {
                 owner!
                   .insert(app.reactions, {
                     messageId: ownerMessage.id,
-                    userId: "band-chat-owner",
+                    userId: bandChatFixtureUsers.owner,
                     emoji: "🎸",
                   })
                   .wait({ tier: "edge" }),
                 peer!
                   .insert(app.reactions, {
                     messageId: ownerMessage.id,
-                    userId: "band-chat-peer",
+                    userId: bandChatFixtureUsers.peer,
                     emoji: "🔥",
                   })
                   .wait({ tier: "edge" }),
@@ -305,24 +316,25 @@ describe("BandChat cross-topology recovery", () => {
       permissions,
     });
     const [ownerToken, peerToken] = await Promise.all([
-      getJazzServerJwtForUser("band-chat-large-owner", undefined, server.appId),
-      getJazzServerJwtForUser("band-chat-large-peer", undefined, server.appId),
+      getJazzServerJwtForUser(bandChatFixtureUsers.largeOwner, undefined, server.appId),
+      getJazzServerJwtForUser(bandChatFixtureUsers.largePeer, undefined, server.appId),
     ]);
     const owner = await openClient(server, "large-owner", ownerToken);
     const peer = await openClient(server, "large-peer", peerToken);
-    const profile = (
-      await owner
-        .insert(app.profiles, { userId: "band-chat-large-owner", displayName: "Owner" })
-        .wait({ tier: "edge" })
-    ).value;
+    await commands.jazzBandChatBootstrapProfile(server, bandChatFixtureUsers.largeOwner, "Owner");
+    const profile = await owner.one(
+      app.profiles.where({ userId: bandChatFixtureUsers.largeOwner }),
+      { tier: "edge" },
+    );
+    if (!profile) throw new Error("trusted profile bootstrap did not persist");
     const room = (
       await owner.insert(app.rooms, { name: "large-value receipt" }).wait({ tier: "edge" })
     ).value;
     await owner
-      .insert(app.roomMembers, { roomId: room.id, userId: "band-chat-large-owner" })
+      .insert(app.roomMembers, { roomId: room.id, userId: bandChatFixtureUsers.largeOwner })
       .wait({ tier: "edge" });
     await owner
-      .insert(app.roomMembers, { roomId: room.id, userId: "band-chat-large-peer" })
+      .insert(app.roomMembers, { roomId: room.id, userId: bandChatFixtureUsers.largePeer })
       .wait({ tier: "edge" });
     const bytes = new Uint8Array(256 * 1024).fill(7);
     await owner

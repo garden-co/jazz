@@ -19,3 +19,10 @@ export function authJazzContext(): JazzContext {
     tier: "global",
   }));
 }
+
+/** Release the server-side singleton after an isolated test command. */
+export async function shutdownAuthJazzContext(): Promise<void> {
+  const context = globalThis.__bandChatAuthContext;
+  globalThis.__bandChatAuthContext = undefined;
+  await context?.shutdown();
+}

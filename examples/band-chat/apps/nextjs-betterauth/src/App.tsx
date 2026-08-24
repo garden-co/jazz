@@ -66,7 +66,7 @@ function SessionShell() {
         </p>
       </header>
       {session?.user_id ? (
-        <RoomWorkspace userId={session.user_id} />
+        <RoomWorkspace userId={session.user_id} authMode={session.authMode} />
       ) : (
         <section className="empty">
           <h2>Identity unavailable</h2>
@@ -76,12 +76,26 @@ function SessionShell() {
     </main>
   );
 }
-function RoomWorkspace({ userId }: { userId: string }) {
+function RoomWorkspace({
+  userId,
+  authMode,
+}: {
+  userId: string;
+  authMode: "external" | "local-first" | "anonymous";
+}) {
   const { data: rooms = [] } = useAll(app.rooms);
   const { data: profiles = [] } = useAll(app.profiles.where({ userId }));
   const db = useDb();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selected = rooms.find((room) => room.id === selectedId) ?? rooms[0];
+  if (authMode === "external" && !profiles[0]) {
+    return (
+      <section className="empty">
+        <h2>Loading your profile…</h2>
+        <p>Your trusted account bootstrap is syncing from Jazz.</p>
+      </section>
+    );
+  }
   const provision = () =>
     setSelectedId(provisionDemo(db, userId, { profileId: profiles[0]?.id, roomId: selected?.id }));
   if (!selected)

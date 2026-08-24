@@ -19,6 +19,26 @@ async function expectAcceptedAtEdge<T>(write: {
 }
 
 describe("BandChat admission and authorship boundary", () => {
+  it("keeps external profile bootstrap backend-only", async () => {
+    const external = testApp.as({
+      issuer: "https://bandchat.example.test",
+      user_id: "external-user",
+      claims: {},
+      authMode: "external",
+    });
+    await external.expectDenied((db) =>
+      db.insert(app.profiles, { userId: "external-user", displayName: "Browser forged" }),
+    );
+
+    const externalProfile = await testApp.seed((db) =>
+      db.insert(app.profiles, { userId: "external-user", displayName: "Backend provisioned" }),
+    );
+    await external.expectDenied((db) =>
+      db.update(app.profiles, externalProfile.id, { displayName: "Browser changed" }),
+    );
+    await external.expectDenied((db) => db.delete(app.profiles, externalProfile.id));
+  });
+
   it("persists owner bootstrap/invite/send and rejects self-admission and forged authorship at edge", async () => {
     const ownerId = "019d4349-24b0-72a9-ae86-8ed24a7e3a90";
     const guestId = "019d4349-24b0-72a9-ae86-8ed24a7e3a91";

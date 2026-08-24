@@ -50,7 +50,12 @@ export default defineConfig({
           process.env.NEXT_PUBLIC_JAZZ_SERVER_URL = server.serverUrl;
           process.env.BACKEND_SECRET = "jazz-browser-test-backend";
           const { ensureProfile } = await import("./src/lib/bootstrap.ts");
-          await ensureProfile(userId, displayName);
+          const { shutdownAuthJazzContext } = await import("./src/lib/auth-jazz-context.ts");
+          try {
+            await ensureProfile(userId, displayName);
+          } finally {
+            await shutdownAuthJazzContext();
+          }
         },
       },
     },

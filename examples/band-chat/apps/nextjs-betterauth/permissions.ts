@@ -4,6 +4,7 @@ import { app, type Room } from "./schema.js";
 export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedTo }) => {
   const isMember = (room: RowContext<Room>) =>
     policy.roomMembers.exists.where({ roomId: room.id, userId: session.user_id });
+  const isLocalFirst = session.where({ authMode: "local-first" });
 
   // Better Auth persistence is backend-only. State every deny explicitly so
   // this example stays closed even on authorities predating omitted-policy deny.
@@ -21,11 +22,13 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
   }
 
   policy.profiles.allowRead.where({});
-  policy.profiles.allowInsert.where({ userId: session.user_id });
+  // Better Auth provisions external profiles through its trusted backend
+  // route. The standalone local-first variant remains self-contained.
+  policy.profiles.allowInsert.where(allOf([isLocalFirst, { userId: session.user_id }]));
   policy.profiles.allowUpdate
-    .whereOld({ userId: session.user_id })
+    .whereOld(allOf([isLocalFirst, { userId: session.user_id }]))
     .whereNew({ userId: session.user_id });
-  policy.profiles.allowDelete.where({ userId: session.user_id });
+  policy.profiles.allowDelete.where(allOf([isLocalFirst, { userId: session.user_id }]));
 
   // The creator must be able to recover the room before its bootstrap
   // membership row has replicated; other identities require membership.

@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { act } from "react";
+import { commands } from "vitest/browser";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
 import { createSmokeScenario } from "../../src/scenario.js";
-import type { DbConfig } from "jazz-tools";
+import { bandChatFixtureUsers } from "../../src/fixture.js";
+import { createDb, type DbConfig } from "jazz-tools";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
@@ -67,6 +69,43 @@ afterEach(async () => {
 });
 
 describe("BandChat browser smoke", () => {
+  it("allows only the authenticated local-first subject to self-provision a profile", async () => {
+    const server = await getJazzServerInfo(
+      `019d4a17-4591-7c0a-a320-${crypto.randomUUID().slice(0, 12)}`,
+    );
+    await deploy({
+      appId: server.appId,
+      serverUrl: server.serverUrl,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions,
+    });
+    const local = await createDb({
+      appId: server.appId,
+      serverUrl: server.serverUrl,
+      secret,
+      driver: { type: "memory" },
+    });
+    try {
+      const userId = local.getAuthState().session?.user_id;
+      expect(userId).toBeTruthy();
+      const profile = await local
+        .insert(app.profiles, { userId: userId!, displayName: "Local musician" })
+        .wait({ tier: "edge" });
+      await expect(
+        local
+          .insert(app.profiles, { userId: "someone-else", displayName: "Forged" })
+          .wait({ tier: "edge" }),
+      ).rejects.toThrow(/permission_denied/i);
+      await local
+        .update(app.profiles, profile.value.id, { displayName: "Local musician renamed" })
+        .wait({ tier: "edge" });
+      await local.delete(app.profiles, profile.value.id).wait({ tier: "edge" });
+    } finally {
+      await local.shutdown();
+    }
+  });
+
   it("creates its synthetic member room and sends locally in memory", async () => {
     const scenario = createSmokeScenario();
     const element = await mount({ type: "memory" });
@@ -140,8 +179,25 @@ describe("BandChat browser smoke", () => {
       schema: app,
       permissions,
     });
-    const jwtToken = await getJazzServerJwtForUser("band-chat-owner", undefined, server.appId);
+    const jwtToken = await getJazzServerJwtForUser(
+      bandChatFixtureUsers.owner,
+      undefined,
+      server.appId,
+    );
     const dbName = `band-chat-offline-${crypto.randomUUID()}`;
+    await commands.jazzBandChatBootstrapProfile(server, bandChatFixtureUsers.owner, "Owner");
+    const primed = await mount(
+      { type: "persistent", dbName },
+      { appId: server.appId, jwtToken, serverUrl: server.serverUrl },
+    );
+    await waitFor(
+      () => primed.textContent?.includes("Start the soundcheck") ?? false,
+      "trusted profile bootstrap should reach the browser before it goes offline",
+      10000,
+    );
+    const online = mounts.pop()!;
+    await act(async () => online.root.unmount());
+    online.element.remove();
     await blockJazzServerNetwork(server.serverUrl);
     const offline = await mount(
       { type: "persistent", dbName },
