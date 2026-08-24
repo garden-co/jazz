@@ -5,8 +5,8 @@ use super::*;
 #[test]
 fn large_write_pushes_staging_before_syncing_its_referencing_row() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xc1; 16]);
-    let core = open_core(0xc0, AuthorId::SYSTEM, &schema);
+    let author = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let core = open_core(0xc0, AuthorSubject::SYSTEM, &schema);
     let writer = open_db(0xc1, author, &schema);
     let (writer_transport, core_transport) = duplex();
     let _upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
@@ -18,7 +18,7 @@ fn large_write_pushes_staging_before_syncing_its_referencing_row() {
             BTreeMap::from([
                 ("title".to_owned(), Value::String(title.clone())),
                 ("done".to_owned(), Value::Bool(false)),
-                ("owner".to_owned(), Value::Uuid(author.0)),
+                ("owner".to_owned(), Value::Uuid(author.test_uuid())),
             ]),
         )
         .unwrap();
@@ -43,9 +43,9 @@ fn large_write_pushes_staging_before_syncing_its_referencing_row() {
 #[test]
 fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_eviction() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xc4; 16]);
-    let core = open_core(0xc5, AuthorId::SYSTEM, &schema);
-    let upload_edge = open_db(0xc6, AuthorId::SYSTEM, &schema);
+    let author = AuthorSubject::for_test_bytes([0xc4; 16]);
+    let core = open_core(0xc5, AuthorSubject::SYSTEM, &schema);
+    let upload_edge = open_db(0xc6, AuthorSubject::SYSTEM, &schema);
     let writer = open_db(0xc7, author, &schema);
 
     let (upload_edge_transport, core_upload_transport, upload_edge_to_core) =
@@ -54,7 +54,7 @@ fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_evictio
         crate::db::block_on(upload_edge.connect_upstream(upload_edge_transport));
     let _core_upload_edge = core.accept_subscriber_with_trust(
         core_upload_transport,
-        AuthorId::SYSTEM,
+        AuthorSubject::SYSTEM,
         CommitUnitTrust::TrustedBackend,
     );
     let (writer_transport, upload_edge_client_transport, writer_to_upload_edge) =
@@ -69,7 +69,7 @@ fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_evictio
             BTreeMap::from([
                 ("title".to_owned(), Value::String(title.clone())),
                 ("done".to_owned(), Value::Bool(false)),
-                ("owner".to_owned(), Value::Uuid(author.0)),
+                ("owner".to_owned(), Value::Uuid(author.test_uuid())),
             ]),
         )
         .unwrap();
@@ -187,8 +187,8 @@ impl UploadRetryClock for PausedUploadRetryClock {
 #[test]
 fn rate_limited_push_waits_then_retries_the_exact_batch_without_rejecting_the_write() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xc2; 16]);
-    let core = open_core(0xc3, AuthorId::SYSTEM, &schema);
+    let author = AuthorSubject::for_test_bytes([0xc2; 16]);
+    let core = open_core(0xc3, AuthorSubject::SYSTEM, &schema);
     core.node()
         .borrow_mut()
         .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
@@ -224,7 +224,7 @@ fn rate_limited_push_waits_then_retries_the_exact_batch_without_rejecting_the_wr
                     Value::String("rate-limited/".repeat(8_000)),
                 ),
                 ("done".to_owned(), Value::Bool(false)),
-                ("owner".to_owned(), Value::Uuid(author.0)),
+                ("owner".to_owned(), Value::Uuid(author.test_uuid())),
             ]),
         )
         .unwrap();
@@ -331,8 +331,8 @@ fn rate_limited_push_waits_then_retries_the_exact_batch_without_rejecting_the_wr
 #[test]
 fn unauthenticated_reconnect_restarts_after_deadline_and_does_not_prevent_ttl_cleanup() {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xc8; 16]);
-    let core = open_core(0xc9, AuthorId::SYSTEM, &schema);
+    let author = AuthorSubject::for_test_bytes([0xc8; 16]);
+    let core = open_core(0xc9, AuthorSubject::SYSTEM, &schema);
     core.node()
         .borrow_mut()
         .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
@@ -359,7 +359,7 @@ fn unauthenticated_reconnect_restarts_after_deadline_and_does_not_prevent_ttl_cl
                     Value::String("expired-rate-limited/".repeat(8_000)),
                 ),
                 ("done".to_owned(), Value::Bool(false)),
-                ("owner".to_owned(), Value::Uuid(author.0)),
+                ("owner".to_owned(), Value::Uuid(author.test_uuid())),
             ]),
         )
         .unwrap();
@@ -441,13 +441,13 @@ fn unauthenticated_reconnect_restarts_after_deadline_and_does_not_prevent_ttl_cl
 
 fn assert_different_authenticated_destination_restarts_upload(
     reconnect_remote_node: NodeUuid,
-    reconnect_link_identity: AuthorId,
+    reconnect_link_identity: AuthorSubject,
 ) {
     let schema = schema();
-    let author = AuthorId::from_bytes([0xd2; 16]);
+    let author = AuthorSubject::for_test_bytes([0xd2; 16]);
     let writer_node = NodeUuid::from_bytes([0xd2; 16]);
     let core_node = NodeUuid::from_bytes([0xd3; 16]);
-    let core = open_core(0xd3, AuthorId::SYSTEM, &schema);
+    let core = open_core(0xd3, AuthorSubject::SYSTEM, &schema);
     core.node()
         .borrow_mut()
         .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
@@ -476,7 +476,7 @@ fn assert_different_authenticated_destination_restarts_upload(
             BTreeMap::from([
                 ("title".to_owned(), Value::String("isolated/".repeat(8_000))),
                 ("done".to_owned(), Value::Bool(false)),
-                ("owner".to_owned(), Value::Uuid(author.0)),
+                ("owner".to_owned(), Value::Uuid(author.test_uuid())),
             ]),
         )
         .unwrap();
@@ -532,7 +532,7 @@ fn assert_different_authenticated_destination_restarts_upload(
 fn reconnect_to_different_authenticated_node_never_replays_upload_frontier() {
     assert_different_authenticated_destination_restarts_upload(
         NodeUuid::from_bytes([0xd4; 16]),
-        AuthorId::from_bytes([0xd2; 16]),
+        AuthorSubject::for_test_bytes([0xd2; 16]),
     );
 }
 
@@ -540,7 +540,7 @@ fn reconnect_to_different_authenticated_node_never_replays_upload_frontier() {
 fn reconnect_with_different_authenticated_link_never_replays_upload_frontier() {
     assert_different_authenticated_destination_restarts_upload(
         NodeUuid::from_bytes([0xd3; 16]),
-        AuthorId::from_bytes([0xd5; 16]),
+        AuthorSubject::for_test_bytes([0xd5; 16]),
     );
 }
 
