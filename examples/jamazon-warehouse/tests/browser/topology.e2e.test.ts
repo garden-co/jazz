@@ -174,28 +174,86 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
           {
             name: "duplicate a checkout request and recover a dropped edge-to-core handoff",
             run: async () => {
-              const receipts: PurchaseReceipt[] = [];
+              const duplicateCheckouts: Array<ReturnType<typeof purchase>> = [];
               scheduler.duplicateNext();
               await scheduler.intercept(
                 { from: "browser", to: "edge", label: "checkout-request" },
                 undefined,
-                async () => {
-                  const checkout = await purchase(publicDb(owner), {
-                    warehouseId: warehouse.id,
-                    districtId: district.id,
-                    customerId: customer.id,
-                    itemId: item.id,
-                    quantity: 3,
-                    idempotencyKey: "checkout-17",
-                  });
-                  receipts.push(
-                    await withTimeout(checkout.wait(), 15_000, "exclusive checkout did not settle"),
+                () => {
+                  // Do not await here: the scheduler deterministically starts
+                  // both duplicated deliveries before either preflight or
+                  // exclusive transaction can settle. This is the real
+                  // same-key overlap that a double submit or retry can cause.
+                  duplicateCheckouts.push(
+                    purchase(publicDb(owner), {
+                      warehouseId: warehouse.id,
+                      districtId: district.id,
+                      customerId: customer.id,
+                      itemId: item.id,
+                      quantity: 3,
+                      idempotencyKey: "checkout-17",
+                    }),
                   );
                 },
+              );
+              expect(duplicateCheckouts).toHaveLength(2);
+              const receipts = await Promise.all(
+                (await Promise.all(duplicateCheckouts)).map((checkout) =>
+                  withTimeout(checkout.wait(), 15_000, "exclusive checkout did not settle"),
+                ),
               );
               expect(receipts).toHaveLength(2);
               expect(receipts[0]).toEqual(receipts[1]);
               expect(receipts[0]).toMatchObject({ orderNumber: 17, totalCents: 7_500 });
+
+              const queries = warehouseQueries({
+                warehouseId: warehouse.id,
+                districtId: district.id,
+              });
+              await waitForQuery(
+                observer,
+                queries.pendingOrders,
+                (rows) => rows.length === 1 && rows[0]?.id === receipts[0]?.orderId,
+                "observer sees exactly one concurrently duplicated checkout",
+                20_000,
+                "edge",
+              );
+              const afterConcurrentDuplicate = await checkoutSnapshot(observer, {
+                warehouseId: warehouse.id,
+                districtId: district.id,
+                customerId: customer.id,
+                stockId: stock.id,
+              });
+              expect(afterConcurrentDuplicate).toEqual({
+                orders: [
+                  {
+                    id: receipts[0]!.orderId,
+                    orderNumber: 17,
+                    status: "pending",
+                    totalCents: 7_500,
+                    idempotencyKey: "checkout-17",
+                  },
+                ],
+                orderLines: [
+                  {
+                    orderId: receipts[0]!.orderId,
+                    itemId: item.id,
+                    quantity: 3,
+                    amountCents: 7_500,
+                  },
+                ],
+                payments: [
+                  {
+                    orderId: receipts[0]!.orderId,
+                    customerId: customer.id,
+                    amountCents: 7_500,
+                    idempotencyKey: "checkout-17",
+                  },
+                ],
+                stockOnHand: 7,
+                nextOrderNumber: 18,
+                customerBalanceCents: -7_500,
+              });
 
               // This is an app-owned checkout relay boundary, not an attempt to
               // instrument Jazz's transport.  The first handoff is dropped and
@@ -225,13 +283,21 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                 },
               );
               expect(recoveredReceipt).toBeUndefined();
+              // The scheduler has dropped the app-owned handoff, so the
+              // observer must still see the sole accepted duplicate checkout.
+              // This catches accidentally starting the authority write before
+              // the relay has delivered its retry.
+              expect(
+                await checkoutSnapshot(observer, {
+                  warehouseId: warehouse.id,
+                  districtId: district.id,
+                  customerId: customer.id,
+                  stockId: stock.id,
+                }),
+              ).toEqual(afterConcurrentDuplicate);
               await scheduler.advance();
               expect(recoveredReceipt).toMatchObject({ orderNumber: 18, totalCents: 2_500 });
 
-              const queries = warehouseQueries({
-                warehouseId: warehouse.id,
-                districtId: district.id,
-              });
               const orders = await waitForQuery(
                 observer,
                 queries.pendingOrders,
@@ -247,6 +313,62 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                 [17, 7_500],
                 [18, 2_500],
               ]);
+              expect(
+                await checkoutSnapshot(observer, {
+                  warehouseId: warehouse.id,
+                  districtId: district.id,
+                  customerId: customer.id,
+                  stockId: stock.id,
+                }),
+              ).toEqual({
+                orders: [
+                  {
+                    id: receipts[0]!.orderId,
+                    orderNumber: 17,
+                    status: "pending",
+                    totalCents: 7_500,
+                    idempotencyKey: "checkout-17",
+                  },
+                  {
+                    id: recoveredReceipt!.orderId,
+                    orderNumber: 18,
+                    status: "pending",
+                    totalCents: 2_500,
+                    idempotencyKey: "checkout-edge-core-loss",
+                  },
+                ],
+                orderLines: [
+                  {
+                    orderId: receipts[0]!.orderId,
+                    itemId: item.id,
+                    quantity: 3,
+                    amountCents: 7_500,
+                  },
+                  {
+                    orderId: recoveredReceipt!.orderId,
+                    itemId: item.id,
+                    quantity: 1,
+                    amountCents: 2_500,
+                  },
+                ],
+                payments: [
+                  {
+                    orderId: receipts[0]!.orderId,
+                    customerId: customer.id,
+                    amountCents: 7_500,
+                    idempotencyKey: "checkout-17",
+                  },
+                  {
+                    orderId: recoveredReceipt!.orderId,
+                    customerId: customer.id,
+                    amountCents: 2_500,
+                    idempotencyKey: "checkout-edge-core-loss",
+                  },
+                ],
+                stockOnHand: 6,
+                nextOrderNumber: 19,
+                customerBalanceCents: -10_000,
+              });
 
               // Fill one page plus one row through the public operational
               // model. This makes the console query's order and `limit(20)`
@@ -280,6 +402,14 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
               );
               expect(boundedOrders.at(-1)?.order_number).toBe(117);
               expect(boundedOrders.some((order) => order.order_number === 118)).toBe(false);
+              await waitForQuery(
+                observer,
+                queries.allOrders,
+                (rows) => rows.length === 21 && rows.at(-1)?.order_number === 118,
+                "observer converges the complete concurrently seeded operational set",
+                20_000,
+                "edge",
+              );
               expect(
                 await observer.all(app.order_lines.where({ order_id: receipts[0]!.orderId }), {
                   tier: "edge",
@@ -306,6 +436,12 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                 }),
               ).toMatchObject([{ balance_cents: -10_000 }]);
 
+              const beforeRejectedCheckout = await checkoutSnapshot(observer, {
+                warehouseId: warehouse.id,
+                districtId: district.id,
+                customerId: customer.id,
+                stockId: stock.id,
+              });
               await expect(
                 purchase(publicDb(owner), {
                   warehouseId: warehouse.id,
@@ -316,35 +452,14 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                   idempotencyKey: "insufficient-stock",
                 }),
               ).rejects.toThrow("insufficient stock");
-              const [
-                ordersAfterRejectedCheckout,
-                stockAfterRejectedCheckout,
-                districtAfterRejectedCheckout,
-                customerAfterRejectedCheckout,
-                linesAfterRejectedCheckout,
-                paymentsAfterRejectedCheckout,
-              ] = await Promise.all([
-                observer.all(app.orders.where({ warehouse_id: warehouse.id }), { tier: "edge" }),
-                observer.all(app.stock.where({ id: stock.id }).limit(1), { tier: "edge" }),
-                observer.all(app.districts.where({ id: district.id }).limit(1), {
-                  tier: "edge",
+              expect(
+                await checkoutSnapshot(observer, {
+                  warehouseId: warehouse.id,
+                  districtId: district.id,
+                  customerId: customer.id,
+                  stockId: stock.id,
                 }),
-                observer.all(app.customers.where({ id: customer.id }).limit(1), {
-                  tier: "edge",
-                }),
-                observer.all(app.order_lines.where({ order_id: receipts[0]!.orderId }), {
-                  tier: "edge",
-                }),
-                observer.all(app.payments.where({ order_id: receipts[0]!.orderId }), {
-                  tier: "edge",
-                }),
-              ]);
-              expect(ordersAfterRejectedCheckout).toHaveLength(21);
-              expect(stockAfterRejectedCheckout).toMatchObject([{ on_hand: 6 }]);
-              expect(districtAfterRejectedCheckout).toMatchObject([{ next_order_number: 19 }]);
-              expect(customerAfterRejectedCheckout).toMatchObject([{ balance_cents: -10_000 }]);
-              expect(linesAfterRejectedCheckout).toHaveLength(1);
-              expect(paymentsAfterRejectedCheckout).toHaveLength(1);
+              ).toEqual(beforeRejectedCheckout);
             },
             faultsAfter: [{ kind: "disconnect", target: "owner" }],
           },
@@ -467,6 +582,76 @@ function publicDb(db: Db): PublicDb {
   // bundle, while the application workflow imports the public package. Both
   // paths resolve to the same database instance at runtime.
   return db as unknown as PublicDb;
+}
+
+/**
+ * Read the complete mutable checkout footprint from a separate browser. The
+ * unique deployed app makes unscoped child reads safe here, and deliberately
+ * keeps an orphaned line or payment observable after a rejected transaction.
+ */
+async function checkoutSnapshot(
+  db: Db,
+  {
+    warehouseId,
+    districtId,
+    customerId,
+    stockId,
+  }: {
+    warehouseId: string;
+    districtId: string;
+    customerId: string;
+    stockId: string;
+  },
+) {
+  const [orders, orderLines, payments, stockRows, districtRows, customerRows] = await Promise.all([
+    db.all(app.orders.where({ warehouse_id: warehouseId }), { tier: "edge" }),
+    db.all(app.order_lines.where({}), { tier: "edge" }),
+    db.all(app.payments.where({}), { tier: "edge" }),
+    db.all(app.stock.where({ id: stockId }).limit(1), { tier: "edge" }),
+    db.all(app.districts.where({ id: districtId }).limit(1), { tier: "edge" }),
+    db.all(app.customers.where({ id: customerId }).limit(1), { tier: "edge" }),
+  ]);
+  const [stock] = stockRows;
+  const [district] = districtRows;
+  const [customer] = customerRows;
+  if (!stock || !district || !customer) throw new Error("checkout state rows are missing");
+  const orderNumberById = new Map(orders.map((order) => [order.id, order.order_number]));
+  const orderPosition = (orderId: string | null) =>
+    orderNumberById.get(orderId ?? "") ?? Number.MAX_SAFE_INTEGER;
+
+  return {
+    orders: orders
+      .map((order) => ({
+        id: order.id,
+        orderNumber: order.order_number,
+        status: order.status,
+        totalCents: order.total_cents,
+        idempotencyKey: order.idempotency_key,
+      }))
+      .sort((left, right) => left.orderNumber - right.orderNumber),
+    orderLines: orderLines
+      .map((line) => ({
+        orderId: line.order_id,
+        itemId: line.item_id,
+        quantity: line.quantity,
+        amountCents: line.amount_cents,
+      }))
+      .sort((left, right) => orderPosition(left.orderId) - orderPosition(right.orderId)),
+    payments: payments
+      .map((payment) => ({
+        orderId: payment.order_id,
+        customerId: payment.customer_id,
+        amountCents: payment.amount_cents,
+        idempotencyKey: payment.idempotency_key,
+      }))
+      .sort((left, right) => {
+        const byOrder = orderPosition(left.orderId) - orderPosition(right.orderId);
+        return byOrder || left.idempotencyKey.localeCompare(right.idempotencyKey);
+      }),
+    stockOnHand: stock.on_hand,
+    nextOrderNumber: district.next_order_number,
+    customerBalanceCents: customer.balance_cents,
+  };
 }
 
 function topologySeed(): number {
