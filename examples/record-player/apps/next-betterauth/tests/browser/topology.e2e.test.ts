@@ -19,7 +19,11 @@ import {
 import { betterAuthSchema } from "../../auth-schema.js";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
-import { PLAYLIST_WINDOW_LIMIT, PLAYLIST_WINDOW_OFFSET } from "../../src/record-player.js";
+import {
+  JazzRecordPlayerStore,
+  PLAYLIST_WINDOW_LIMIT,
+  PLAYLIST_WINDOW_OFFSET,
+} from "../../src/record-player.js";
 
 const ctx = new TestCleanup();
 afterEach(async () => ctx.cleanup());
@@ -548,6 +552,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
     let editorToken: string;
     let editorDbName: string;
     let streamedTrackId: string;
+    let streamedTrackAlbumId: string;
     const seed = Number(import.meta.env.JAZZ_EXAMPLE_TOPOLOGY_SEED ?? 41);
 
     const receipt = await runTopologyScenario(
@@ -764,6 +769,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
               const streamedTrackAlbum = await owner
                 .insert(app.albums, { title: "A streamed record", artist: "Jazz" })
                 .wait({ tier: "edge" });
+              streamedTrackAlbumId = streamedTrackAlbum.id;
               console.info("[record-player-topology] create streamed track");
               const streamedTrack = await owner.insertStreaming(app.tracks, {
                 album_id: streamedTrackAlbum.id,
@@ -856,6 +862,30 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 "streamed track metadata without audio materialization",
                 15_000,
                 "edge",
+              );
+
+              // Exercise the app's actual persistence boundary after the
+              // observer has received the metadata. This deliberately avoids
+              // reading `audio_bytes`: the public list API must keep streamed
+              // payloads out of the normal catalogue and playlist paths.
+              const listenerStore = new JazzRecordPlayerStore(listener);
+              await expect(listenerStore.tracksForAlbum(streamedTrackAlbumId)).resolves.toEqual([
+                {
+                  id: streamedTrackId,
+                  albumId: streamedTrackAlbumId,
+                  title: "Streaming receipt",
+                  ordinal: 0,
+                  durationMs: 2,
+                },
+              ]);
+              await expect(
+                listenerStore.playlistWindow(playlist.id, PLAYLIST_WINDOW_OFFSET, 2),
+              ).resolves.toMatchObject(
+                windowTracks.slice(PLAYLIST_WINDOW_OFFSET).map((track, index) => ({
+                  trackId: track.id,
+                  playlistId: playlist.id,
+                  position: PLAYLIST_WINDOW_OFFSET + index,
+                })),
               );
             },
           },
@@ -986,18 +1016,36 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 ),
               ]);
               await owner.delete(app.invitations, editorInvite.id).wait({ tier: "edge" });
-              await waitForQuery(
-                editor,
-                app.playlist_entries
-                  .where({ playlist_id: playlist.id })
-                  .orderBy("position", "asc")
-                  .offset(PLAYLIST_WINDOW_OFFSET)
-                  .limit(PLAYLIST_WINDOW_LIMIT),
-                (rows) => rows.length === 0,
-                "revoked editor loses rendered playlist window",
-                15_000,
-                "edge",
-              );
+              await Promise.all([
+                waitForQuery(
+                  editor,
+                  app.playlist_entries
+                    .where({ playlist_id: playlist.id })
+                    .orderBy("position", "asc")
+                    .offset(PLAYLIST_WINDOW_OFFSET)
+                    .limit(PLAYLIST_WINDOW_LIMIT),
+                  (rows) => rows.length === 0,
+                  "revoked editor loses rendered playlist window",
+                  15_000,
+                  "edge",
+                ),
+                waitForQuery(
+                  editor,
+                  app.playlists.where({ id: playlist.id }),
+                  (rows) => rows.length === 0,
+                  "revoked editor loses the playlist root",
+                  15_000,
+                  "edge",
+                ),
+                waitForQuery(
+                  editor,
+                  app.invitations.where({ id: editorInvite.id }),
+                  (rows) => rows.length === 0,
+                  "revoked editor loses the revoked invitation",
+                  15_000,
+                  "edge",
+                ),
+              ]);
               await expect(
                 editor
                   .insert(app.playlist_entries, {
@@ -1017,18 +1065,36 @@ describe("RecordPlayer authenticated playlist topology", () => {
               ctx.untrack(editor);
               await editor.shutdown();
               editor = await openClient(server, "editor-reopened", editorToken, editorDbName);
-              await waitForQuery(
-                editor,
-                app.playlist_entries
-                  .where({ playlist_id: playlist.id })
-                  .orderBy("position", "asc")
-                  .offset(PLAYLIST_WINDOW_OFFSET)
-                  .limit(PLAYLIST_WINDOW_LIMIT),
-                (rows) => rows.length === 0,
-                "persistent reopen retains revocation",
-                15_000,
-                "edge",
-              );
+              await Promise.all([
+                waitForQuery(
+                  editor,
+                  app.playlist_entries
+                    .where({ playlist_id: playlist.id })
+                    .orderBy("position", "asc")
+                    .offset(PLAYLIST_WINDOW_OFFSET)
+                    .limit(PLAYLIST_WINDOW_LIMIT),
+                  (rows) => rows.length === 0,
+                  "persistent reopen retains playlist-entry revocation",
+                  15_000,
+                  "edge",
+                ),
+                waitForQuery(
+                  editor,
+                  app.playlists.where({ id: playlist.id }),
+                  (rows) => rows.length === 0,
+                  "persistent reopen retains root-row revocation",
+                  15_000,
+                  "edge",
+                ),
+                waitForQuery(
+                  editor,
+                  app.invitations.where({ id: editorInvite.id }),
+                  (rows) => rows.length === 0,
+                  "persistent reopen retains invitation revocation",
+                  15_000,
+                  "edge",
+                ),
+              ]);
             },
           },
         ],
