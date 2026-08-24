@@ -15,7 +15,7 @@ fn required_include_rls_schema() -> JazzSchema {
                     .policies(
                         PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
                             "owner",
-                            vec!["claims".to_owned(), "sub".to_owned()],
+                            vec!["user_id".to_owned()],
                         )),
                     ),
             ),
@@ -91,6 +91,10 @@ fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
             ),
     ));
     let (_core_dir, mut core) = open_node_with_schema(node(0xa9), schema);
+    core.set_session_claims(
+        alice,
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(alice.test_uuid()))]),
+    );
     let physical_row = row(0xc1);
     let declared_id = row(0xd1);
     let tx = core
@@ -132,11 +136,24 @@ fn required_include_rows(
     identity: AuthorSubject,
 ) -> Vec<CurrentRow> {
     let binding = shape.bind(BTreeMap::new()).unwrap();
+    if matches!(identity, AuthorSubject::Authenticated(_)) {
+        core.set_session_claims(
+            identity,
+            BTreeMap::from([("user_id".to_owned(), Value::Uuid(identity.test_uuid()))]),
+        );
+    }
     core.query_rows_for_link(shape, &binding, DurabilityTier::Global, identity)
         .unwrap()
 }
 
 fn seed_required_include_fixture(core: &mut NodeState<RocksDbStorage>, readable_owner: AuthorSubject) {
+    core.set_session_claims(
+        readable_owner,
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::Uuid(readable_owner.test_uuid()),
+        )]),
+    );
     let unreadable_owner = user(0xb2);
     let target_tx = core
         .commit_mergeable_many_settled(vec![
@@ -217,7 +234,7 @@ fn multi_segment_required_include_rls_schema() -> JazzSchema {
                     .policies(
                         PublicTablePolicies::new().with_select(PublicPolicyExpr::eq_session(
                             "owner",
-                            vec!["claims".to_owned(), "sub".to_owned()],
+                            vec!["user_id".to_owned()],
                         )),
                     ),
             ),
@@ -228,6 +245,13 @@ fn seed_multi_segment_include_fixture(
     core: &mut NodeState<RocksDbStorage>,
     readable_owner: AuthorSubject,
 ) {
+    core.set_session_claims(
+        readable_owner,
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::Uuid(readable_owner.test_uuid()),
+        )]),
+    );
     let unreadable_owner = user(0xb2);
     let tx = core
         .commit_mergeable_many_settled(vec![
