@@ -92,7 +92,7 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
       return state;
     },
 
-    applyJwtToken(jwtToken?: string): AuthState {
+    applyJwtToken(jwtToken?: string, trustedReservedSession?: Session): AuthState {
       if (options?.lockAuthenticatedState) {
         return state;
       }
@@ -101,6 +101,7 @@ export function createAuthStateStore(input: ClientSessionInput, options?: AuthSt
         appId: input.appId,
         jwtToken,
         cookieSession: input.cookieSession,
+        trustedReservedSession,
       });
 
       const currentAuthor = state.session ? [state.session.issuer, state.session.user_id] : null;
