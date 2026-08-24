@@ -50,13 +50,23 @@ describe("BigLabel browser edge/core topology", () => {
       });
     });
     const org = await browserTopologyPhase(
-      "bootstrap BigLabel admin through backend authority",
-      () =>
-        bootstrapBigLabelOrganization(
-          { appId, serverUrl, adminSecret, backendSecret },
-          "admin",
-          "Admin",
-        ),
+      "concurrently ensure one BigLabel admin tenant through backend authority",
+      async () => {
+        const [first, second] = await Promise.all([
+          bootstrapBigLabelOrganization(
+            { appId, serverUrl, adminSecret, backendSecret },
+            "admin",
+            "Admin",
+          ),
+          bootstrapBigLabelOrganization(
+            { appId, serverUrl, adminSecret, backendSecret },
+            "admin",
+            "Admin",
+          ),
+        ]);
+        expect(second.id).toBe(first.id);
+        return first;
+      },
     );
     // A user legitimately provisions their own person record before an
     // organization admin admits them to this label. This keeps the role grant
@@ -82,12 +92,23 @@ describe("BigLabel browser edge/core topology", () => {
       }),
     );
     const adminMembership = await browserTopologyPhase(
-      "read bootstrapped admin membership",
+      "prove concurrent bootstrap produced one complete tenant graph",
       async () => {
+        const organizations = await writer.all(
+          app.organizations.where({ slug: "personal-admin" }),
+          {
+            tier: "edge",
+          },
+        );
+        const people = await writer.all(app.people.where({ userId: "admin" }), { tier: "edge" });
         const memberships = await writer.all(app.memberships.where({ organizationId: org.id }), {
           tier: "edge",
         });
+        expect(organizations).toHaveLength(1);
+        expect(organizations[0]!.id).toBe(org.id);
+        expect(people).toHaveLength(1);
         expect(memberships).toHaveLength(1);
+        expect(memberships[0]!.personId).toBe(people[0]!.id);
         return memberships[0]!;
       },
     );
