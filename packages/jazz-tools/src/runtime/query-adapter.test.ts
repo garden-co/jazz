@@ -52,6 +52,39 @@ describe("translateQuery", () => {
     expect(translated.array_subqueries).toHaveLength(1);
   });
 
+  it("keeps provenance order keys internal unless the caller selects them", () => {
+    const hidden = JSON.parse(
+      translateQuery(
+        app.projects.orderBy("$createdAt", "asc").limit(4).offset(2)._build(),
+        app.wasmSchema,
+      ),
+    );
+    const selected = JSON.parse(
+      translateQuery(
+        app.projects
+          .select("name", "$createdAt")
+          .orderBy("$createdAt", "desc")
+          .limit(4)
+          .offset(2)
+          ._build(),
+        app.wasmSchema,
+      ),
+    );
+
+    expect(hidden).toMatchObject({
+      order_by: [{ column: "$createdAt", direction: "Asc" }],
+      limit: 4,
+      offset: 2,
+    });
+    expect(hidden.select_columns).toBeUndefined();
+    expect(selected).toMatchObject({
+      select_columns: ["name", "$createdAt"],
+      order_by: [{ column: "$createdAt", direction: "Desc" }],
+      limit: 4,
+      offset: 2,
+    });
+  });
+
   it("keeps native relation IR for relation traversal queries", () => {
     const translated = JSON.parse(
       translateQuery(app.todos.where({ done: false }).hopTo("owner")._build(), app.wasmSchema),
