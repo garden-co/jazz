@@ -281,10 +281,10 @@ where
                 SyncMessage::RegisterShape {
                     shape_id,
                     ast,
-                    opts: _,
+                    opts,
                 } => {
-                    validate_shape_ast_size(&ast).map_err(|_| {
-                        Error::UnsupportedSyncMessage("shape AST exceeds byte limit")
+                    validate_shape_registration_size(&ast, &opts).map_err(|_| {
+                        Error::UnsupportedSyncMessage("shape registration exceeds byte limit")
                     })?;
                     self.register_shape(shape_id, ast)?;
                     Ok(PublicationOutcome::settled(Vec::new()))
