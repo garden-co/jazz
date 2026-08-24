@@ -279,6 +279,23 @@ fn todos_member_read_schema() -> JazzSchema {
 fn user(byte: u8) -> AuthorSubject {
     AuthorSubject::for_test_bytes([byte; 16])
 }
+
+/// Attach the application-owned UUID `sub` used by legacy fixture schemas.
+///
+/// Authorship is deliberately separate: callers opt in at the exact fixture
+/// boundary instead of deriving a provider claim from `AuthorSubject` in core.
+pub(super) fn install_test_uuid_sub_claim(
+    node: &mut NodeState<RocksDbStorage>,
+    identity: AuthorSubject,
+) {
+    if identity == AuthorSubject::SYSTEM {
+        return;
+    }
+    node.set_session_claims(
+        identity,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(identity.test_uuid()))]),
+    );
+}
 fn publish_schema_lineage<S>(
     core: &mut NodeState<S>,
     schema: SchemaVersion,
@@ -1367,6 +1384,8 @@ fn commit_owner_policy_global(
     title: &str,
     now_ms: u64,
 ) -> TxId {
+    install_test_uuid_sub_claim(writer, made_by);
+    install_test_uuid_sub_claim(core, made_by);
     let (published, unit) = writer
         .commit_mergeable_unit(
             MergeableCommit::new("todos", row_uuid, now_ms)
@@ -1399,6 +1418,7 @@ fn commit_core_owner_fixture(
     title: &str,
     now_ms: u64,
 ) -> TxId {
+    install_test_uuid_sub_claim(core, owner);
     let published = core
         .commit_mergeable(
             MergeableCommit::new("todos", row_uuid, now_ms)

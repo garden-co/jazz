@@ -23,6 +23,16 @@ fn assert_lowered_write_policy_case(
     identity: AuthorSubject,
     expected: bool,
 ) {
+    // These fixture policies intentionally exercise an application-owned `sub`
+    // claim.  It is no longer derived from authorship, so each simulated
+    // session supplies the raw claim explicitly.
+    if identity != AuthorSubject::SYSTEM {
+        let mut claims = core.session_claims.get(&identity).cloned().unwrap_or_default();
+        claims
+            .entry("sub".to_owned())
+            .or_insert_with(|| Value::Uuid(identity.test_uuid()));
+        core.set_session_claims(identity, claims);
+    }
     let (cells, insert_candidate) = match operation {
         WritePolicyOperation::Insert => (
             candidate
