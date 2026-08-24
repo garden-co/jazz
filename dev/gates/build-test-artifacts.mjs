@@ -396,6 +396,11 @@ export async function buildTestArtifacts(
     await scope.drain();
     throw firstBuildError ?? error;
   }
+  await guardedRun(
+    "node",
+    ["dev/artifacts/stage-native-fingerprints.mjs", "--local"],
+    "derive local artifact expectations",
+  );
   // The atomic WASM producer seals its matching manifest before publication.
   await guardedRun(
     "pnpm",
