@@ -1295,6 +1295,91 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(setIdentityClaims).not.toHaveBeenCalled();
   });
 
+  it("routes backend SYSTEM reads and subscriptions through non-public native entrypoints", async () => {
+    const calls: string[] = [];
+    let sharedDb: NativeDbForTest;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => {
+          sharedDb = fakeDb({
+            all: () => {
+              calls.push("all");
+              return encodeRows([]);
+            },
+            allRelationQuery: () => {
+              calls.push("allRelationQuery");
+              return encodeRows([]);
+            },
+            allRelationSnapshot: () => {
+              calls.push("allRelationSnapshot");
+              return encodeRelationSnapshot([]);
+            },
+            prepareQuery: () => ({}),
+            subscribe: () => {
+              calls.push("subscribe");
+              return { readAll: () => [], close: () => true };
+            },
+            subscribeRelationQuery: () => {
+              calls.push("subscribeRelationQuery");
+              return { readAll: () => [], close: () => true };
+            },
+            tick: () => undefined,
+          });
+          // A schema view must inherit the same backend capability and keep
+          // taking these non-public paths as well.
+          sharedDb.registerSchema = () => sharedDb;
+          return sharedDb;
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new TextEncoder().encode(JSON.stringify(["urn:jazz:test", "backend"])),
+      1,
+      true,
+      {
+        backendCredential: "backend-only-test-capability",
+        readAuthorizationHost: "trusted-serving",
+      },
+    );
+    const session = JSON.stringify({
+      ...SYSTEM_READ_SESSION,
+      [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: trustedReservedSessionToken(SYSTEM_READ_SESSION),
+    });
+    await runtime.query(JSON.stringify({ table: "todos" }), session, "local");
+    await runtime.query(
+      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      session,
+      "local",
+    );
+    await runtime.query(
+      JSON.stringify({
+        table: "todos",
+        array_subqueries: [
+          { column_name: "children", table: "todos", inner_column: "id", outer_column: "todos.id" },
+        ],
+      }),
+      session,
+      "local",
+    );
+    runtime.createSubscription(JSON.stringify({ table: "todos" }), session, "local");
+    runtime.createSubscription(
+      JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
+      session,
+      "local",
+    );
+    const view = runtime.registerSchemaView(testSchema);
+    await view.query(JSON.stringify({ table: "todos" }), session, "local");
+
+    expect(calls).toEqual([
+      "all",
+      "allRelationQuery",
+      "allRelationSnapshot",
+      "subscribe",
+      "subscribeRelationQuery",
+      "all",
+    ]);
+  });
+
   it("decodes fixed-width array columns from native row batches", async () => {
     const runtime = new NativeRuntimeAdapter(
       {
