@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
@@ -87,7 +88,7 @@ test("timeout terminates descendants", async () => {
   const program = `
     const { spawn } = require("node:child_process");
     const { writeFileSync } = require("node:fs");
-    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" });
     writeFileSync(${JSON.stringify(childPid)}, String(child.pid));
     setInterval(() => {}, 1000);
   `;
@@ -118,6 +119,34 @@ test("timeout terminates descendants", async () => {
   const pid = Number(readFileSync(childPid, "utf8"));
   await assertProcessGone(pid);
   rmSync(temporary, { recursive: true });
+});
+
+test("rejects an output path that escapes through a symlink", () => {
+  const temporary = mkdtempSync(resolve(root, "target/jazz-topology-soak-"));
+  const outside = mkdtempSync(resolve(tmpdir(), "jazz-topology-outside-"));
+  const registry = resolve(temporary, "registry.json");
+  const link = resolve(temporary, "outside-link");
+  symlinkSync(outside, link, "dir");
+  writeFileSync(
+    registry,
+    JSON.stringify({
+      schemaVersion: 1,
+      scenarios: [
+        { id: "planted.pass", topology: ["fixture"], cwd: ".", argv: ["node", "-e", ""] },
+      ],
+    }),
+  );
+  const escapedOutput = resolve(link, "should-not-exist");
+  const result = spawnSync("node", [runner, "--seed-count", "1", "--output", escapedOutput], {
+    cwd: root,
+    env: { ...process.env, JAZZ_EXAMPLE_TOPOLOGY_REGISTRY: registry },
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /output must remain inside the repository/);
+  assert.equal(existsSync(resolve(outside, "should-not-exist")), false);
+  rmSync(temporary, { recursive: true });
+  rmSync(outside, { recursive: true });
 });
 
 async function assertProcessGone(pid) {

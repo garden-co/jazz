@@ -95,4 +95,44 @@ describe("shared example topology harness", () => {
     expect(cleanedUp).toBe(true);
     expect(postTimeoutEffect).toBe(false);
   });
+
+  it("aborts timed-out cleanup before it can mutate", async () => {
+    let postTimeoutEffect = false;
+    await expect(
+      runTopologyScenario({
+        id: "harness.fixture.cleanup-timeout",
+        topology: ["fixture"],
+        seed: 11,
+        phaseTimeoutMs: 50,
+        faultTimeoutMs: 50,
+        cleanupTimeoutMs: 5,
+        targets: {},
+        phases: [],
+        replay: "cleanup-timeout-fixture",
+        cleanup: ({ signal }) =>
+          new Promise<void>((resolve) => {
+            const timer = setTimeout(() => {
+              postTimeoutEffect = true;
+              resolve();
+            }, 30);
+            signal.addEventListener(
+              "abort",
+              () => {
+                clearTimeout(timer);
+                resolve();
+              },
+              { once: true },
+            );
+          }),
+      }),
+    ).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof TopologyScenarioError &&
+        error.receipt.cleanup?.status === "failed" &&
+        error.receipt.cleanup.elapsedMs >= 5 &&
+        error.receipt.cleanup.error?.includes("cleanup timed out"),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(postTimeoutEffect).toBe(false);
+  });
 });

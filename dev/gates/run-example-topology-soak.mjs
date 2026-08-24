@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
-const root = resolve(import.meta.dirname, "../..");
+const root = realpathSync(resolve(import.meta.dirname, "../.."));
 const registryPath = process.env.JAZZ_EXAMPLE_TOPOLOGY_REGISTRY
-  ? confinedPath(process.env.JAZZ_EXAMPLE_TOPOLOGY_REGISTRY, "scenario registry")
-  : resolve(root, "dev/example-topology-scenarios.json");
+  ? confinedExistingPath(process.env.JAZZ_EXAMPLE_TOPOLOGY_REGISTRY, "scenario registry")
+  : confinedExistingPath("dev/example-topology-scenarios.json", "scenario registry");
 const registry = JSON.parse(readFileSync(registryPath, "utf8"));
 validateRegistry(registry);
 let output = "target/example-topology-soak";
@@ -33,7 +33,7 @@ if (scenarios.length === 0 || selected.some((id) => !scenarios.some((item) => it
   usage("unknown or empty scenario selection");
 }
 
-const outputDir = confinedPath(output, "output");
+const outputDir = confinedCreatablePath(output, "output");
 mkdirSync(resolve(outputDir, "logs"), { recursive: true });
 const fixedSeeds = [11, 29, 47, 83, 32676, 40595, 2234158, 3715011, 4372288];
 const cases = [];
@@ -47,7 +47,7 @@ for (const scenario of scenarios) {
     const replay = scenario.cwd === "." ? command : `cd ${shellQuote(scenario.cwd)} && ${command}`;
     const started = Date.now();
     const result = await runProcess(scenario.argv[0], scenario.argv.slice(1), {
-      cwd: confinedPath(scenario.cwd, `scenario ${scenario.id} cwd`),
+      cwd: confinedExistingPath(scenario.cwd, `scenario ${scenario.id} cwd`),
       env: { ...process.env, JAZZ_EXAMPLE_TOPOLOGY_SEED: String(seed) },
       timeoutMs: watchdogSeconds * 1000,
     });
@@ -87,13 +87,34 @@ function shellQuote(value) {
   return /^[a-zA-Z0-9_./:@=-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
-function confinedPath(value, label) {
+function lexicalConfinedPath(value, label) {
   const path = resolve(root, value);
+  assertConfined(path, label);
+  return path;
+}
+
+function confinedExistingPath(value, label) {
+  const path = realpathSync(lexicalConfinedPath(value, label));
+  assertConfined(path, label);
+  return path;
+}
+
+function confinedCreatablePath(value, label) {
+  const path = lexicalConfinedPath(value, label);
+  let existing = path;
+  while (!existsSync(existing)) existing = dirname(existing);
+  assertConfined(realpathSync(existing), label);
+  mkdirSync(path, { recursive: true });
+  const canonical = realpathSync(path);
+  assertConfined(canonical, label);
+  return canonical;
+}
+
+function assertConfined(path, label) {
   const fromRoot = relative(root, path);
   if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
     usage(`${label} must remain inside the repository`);
   }
-  return path;
 }
 
 function runProcess(command, args, { cwd, env, timeoutMs }) {
@@ -131,8 +152,38 @@ function terminateProcessTree(pid) {
     spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
     return;
   }
+  const descendants = descendantPids(pid);
+  for (const descendant of descendants.reverse()) killPid(descendant);
   try {
     process.kill(-pid, "SIGKILL");
+  } catch (error) {
+    if (error?.code !== "ESRCH") throw error;
+  }
+  killPid(pid);
+}
+
+function descendantPids(rootPid) {
+  const processList = spawnSync("ps", ["-eo", "pid=,ppid="], { encoding: "utf8" });
+  if (processList.status !== 0) return [];
+  const children = new Map();
+  for (const line of processList.stdout.trim().split("\n")) {
+    const [pid, parentPid] = line.trim().split(/\s+/).map(Number);
+    if (!children.has(parentPid)) children.set(parentPid, []);
+    children.get(parentPid).push(pid);
+  }
+  const found = [];
+  const pending = [...(children.get(rootPid) ?? [])];
+  while (pending.length > 0) {
+    const pid = pending.pop();
+    found.push(pid);
+    pending.push(...(children.get(pid) ?? []));
+  }
+  return found;
+}
+
+function killPid(pid) {
+  try {
+    process.kill(pid, "SIGKILL");
   } catch (error) {
     if (error?.code !== "ESRCH") throw error;
   }

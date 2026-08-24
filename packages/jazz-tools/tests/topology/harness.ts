@@ -41,7 +41,7 @@ export interface TopologyScenario {
   targets: Readonly<Record<string, TopologyFaultTarget>>;
   phases: readonly TopologyPhase[];
   replay: string;
-  cleanup?: () => Promise<void>;
+  cleanup?: (context: TopologyOperationContext) => Promise<void>;
   cleanupTimeoutMs?: number;
 }
 
@@ -62,6 +62,7 @@ export interface TopologyReceipt {
   elapsedMs: number;
   phases: Array<TopologyActivityReceipt & { name: string }>;
   faults: Array<TopologyActivityReceipt & { kind: TopologyFaultKind; target: string }>;
+  cleanup?: TopologyActivityReceipt;
   replay: string;
   error?: string;
 }
@@ -134,7 +135,7 @@ export async function runTopologyScenario(
             throw new Error(`topology target ${fault.target} does not support ${fault.kind}`);
           }
           await withTopologyTimeout(
-            operation,
+            (signal) => operation({ signal }),
             fault.timeoutMs ?? scenario.faultTimeoutMs,
             `topology fault timed out: ${fault.kind} ${fault.target}`,
           );
@@ -155,14 +156,23 @@ export async function runTopologyScenario(
     scenarioError = error;
   } finally {
     if (scenario.cleanup) {
+      const started = now();
+      const activity: TopologyActivityReceipt = { status: "attempted", elapsedMs: 0 };
+      receipt.cleanup = activity;
       try {
         await withTopologyTimeout(
-          () => scenario.cleanup!(),
+          (signal) => scenario.cleanup!({ signal }),
           scenario.cleanupTimeoutMs ?? scenario.faultTimeoutMs,
           "topology scenario cleanup timed out",
         );
+        Object.assign(activity, { status: "completed", elapsedMs: elapsed(started) });
       } catch (cleanupError) {
         const message = `cleanup failed: ${errorMessage(cleanupError)}`;
+        Object.assign(activity, {
+          status: "failed",
+          elapsedMs: elapsed(started),
+          error: errorMessage(cleanupError),
+        });
         receipt.status = "failed";
         receipt.error = receipt.error ? `${receipt.error}; ${message}` : message;
         scenarioError ??= cleanupError;
