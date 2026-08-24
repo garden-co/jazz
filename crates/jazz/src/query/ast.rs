@@ -53,7 +53,7 @@ pub struct Query {
 /// The descriptor is part of the query shape (and therefore subscription
 /// identity), rather than a client-side post-processing hint.
 #[allow(missing_docs)]
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Deserialize, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SelectProjection {
     Full { column: String },
