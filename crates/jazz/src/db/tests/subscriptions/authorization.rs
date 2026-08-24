@@ -317,7 +317,7 @@ fn uuid_string_grant_role_schema(role: uuid::Uuid) -> JazzSchema {
         &[],
         "teams",
         "identity_key",
-        &["claims", "sub"],
+        &["user_id"],
         "id",
     );
     let access_policy = public_recursive_access_policy(
@@ -333,7 +333,7 @@ fn uuid_string_grant_role_schema(role: uuid::Uuid) -> JazzSchema {
         &[],
         "teams",
         "identity_key",
-        &["claims", "sub"],
+        &["user_id"],
         "id",
     );
     build_public_db_test_schema(
@@ -369,6 +369,10 @@ fn string_grant_role_access_filter_matches_uuid_literal_in_list() {
     let schema = uuid_string_grant_role_schema(role);
     let server = open_core(0x6d, AuthorSubject::SYSTEM, &schema);
     let member = AuthorSubject::for_test_bytes([0x6e; 16]);
+    server
+        .node()
+        .borrow_mut()
+        .set_session_claims(member, test_provider_claims(member));
     let member_team = row(0x61);
     let resource_team = row(0x62);
     let doc = row(0x63);
@@ -437,6 +441,7 @@ fn string_grant_role_access_filter_matches_uuid_literal_in_list() {
         id_source: Some(Box::new(SeededRowIdSource::new(0x6f))),
     }))
     .unwrap();
+    db.set_identity_claims(member, test_provider_claims(member));
     for (table, row_id, cells) in [
         (
             "teams",
@@ -581,6 +586,9 @@ fn direct_multi_identity_subscribe_reuses_shared_seeded_fragments_without_leakin
     let member = AuthorSubject::for_test_bytes([0x12; 16]);
     let other = AuthorSubject::for_test_bytes([0x13; 16]);
     let spy = AuthorSubject::for_test_bytes([0x99; 16]);
+    db.set_identity_claims(member, test_provider_claims(member));
+    db.set_identity_claims(other, test_provider_claims(other));
+    db.set_identity_claims(spy, test_provider_claims(spy));
     db.insert_with_id(
         "org",
         row(0x01),
@@ -691,6 +699,7 @@ fn direct_same_identity_subscribe_reuses_shared_seeded_fragments_across_shapes()
     let schema = customer_two_resource_policy_minimal_schema();
     let db = open_db(0x6a, AuthorSubject::SYSTEM, &schema);
     let member = AuthorSubject::for_test_bytes([0x12; 16]);
+    db.set_identity_claims(member, test_provider_claims(member));
     db.insert_with_id(
         "org",
         row(0x01),
@@ -1658,7 +1667,12 @@ fn served_subscription_rows_for_author(
     author: AuthorSubject,
     table: &str,
 ) -> Vec<RowUuid> {
-    let client = open_db(author.test_uuid().as_bytes()[0], author, schema);
+    let node_byte = match author {
+        AuthorSubject::System => 0,
+        AuthorSubject::Authenticated(_) => author.test_uuid().as_bytes()[0],
+    };
+    let client = open_db(node_byte, author, schema);
+    client.set_identity_claims(author, test_provider_claims(author));
     let (client_transport, server_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);
@@ -1701,11 +1715,12 @@ fn served_many_subscription_rows_for_author(
     author: AuthorSubject,
     tables: &[&str],
 ) -> BTreeMap<String, Vec<RowUuid>> {
-    let client = open_db(
-        author.test_uuid().as_bytes()[0].wrapping_add(0x40),
-        author,
-        schema,
-    );
+    let node_byte = match author {
+        AuthorSubject::System => 0x40,
+        AuthorSubject::Authenticated(_) => author.test_uuid().as_bytes()[0].wrapping_add(0x40),
+    };
+    let client = open_db(node_byte, author, schema);
+    client.set_identity_claims(author, test_provider_claims(author));
     let (client_transport, server_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber(server_transport, author);

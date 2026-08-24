@@ -987,16 +987,10 @@ fn mergeable_transaction_identity_reads_are_not_forced_to_begin_author() {
     let bob = AuthorId::from_bytes([0xb3; 16]);
     let open = OpenTransactionId::new();
     let prepared = db
-        .prepare_query(&db.table("todos").filter(eq(col("owner"), claim("sub"))))
+        .prepare_query(&db.table("todos").filter(eq(col("owner"), claim("user_id"))))
         .unwrap();
-    db.set_identity_claims(
-        alice,
-        BTreeMap::from([("sub".to_owned(), Value::Uuid(alice.0))]),
-    );
-    db.set_identity_claims(
-        bob,
-        BTreeMap::from([("sub".to_owned(), Value::Uuid(bob.0))]),
-    );
+    db.set_identity_claims(alice, test_provider_claims(alice));
+    db.set_identity_claims(bob, test_provider_claims(bob));
     let alice_row = row(0xa3);
     let bob_row = row(0xb3);
     db.insert_with_id("todos", alice_row, cells("alice", false, alice))

@@ -1151,6 +1151,9 @@ fn trusted_backend_upload_uses_backend_policy_and_stores_user_made_by() {
         backend_author,
         CommitUnitTrust::TrustedBackend,
     );
+    backend.set_identity_claims(attributed_user, test_provider_claims(attributed_user));
+    backend.tick().unwrap();
+    server.tick().unwrap();
 
     let tx_id = backend
         .node
@@ -1274,6 +1277,11 @@ fn trusted_backend_delete_uses_permission_subject_parent_for_write_policy() {
         backend_author,
         CommitUnitTrust::TrustedBackend,
     );
+    // The trusted backend may attribute a mutation to this admitted provider
+    // session, but its UUID owner policy still reads the raw provider claim.
+    backend.set_identity_claims(attributed_user, test_provider_claims(attributed_user));
+    backend.tick().unwrap();
+    server.tick().unwrap();
 
     let insert = backend
         .insert_with_id_for_identity(
@@ -1309,6 +1317,8 @@ fn client_insert_advice_is_unknown_without_writing() {
     let other = AuthorSubject::for_test_bytes([0xb2; 16]);
     let owner_db = open_db(0xa1, owner, &schema);
     let other_db = open_db(0xb2, other, &schema);
+    owner_db.set_identity_claims(owner, test_provider_claims(owner));
+    other_db.set_identity_claims(other, test_provider_claims(other));
 
     assert_eq!(
         owner_db
@@ -1345,6 +1355,8 @@ fn client_delete_advice_is_unknown_without_mutating() {
     let other = AuthorSubject::for_test_bytes([0xb2; 16]);
     let owner_db = open_db(0xa1, owner, &schema);
     let other_db = open_db(0xb2, other, &schema);
+    owner_db.set_identity_claims(owner, test_provider_claims(owner));
+    other_db.set_identity_claims(other, test_provider_claims(other));
     let row = row(1);
     let write = owner_db
         .insert_with_id("todos", row, cells("owned", false, owner))
@@ -1385,7 +1397,7 @@ fn client_delete_advice_is_unknown_without_mutating() {
         PermissionAdvice::Denied,
     );
     assert_eq!(prepared_read(&owner_db, &owner_db.table("todos")).len(), 1);
-    assert_eq!(prepared_read(&other_db, &other_db.table("todos")).len(), 1);
+    assert_eq!(prepared_read(&other_db, &other_db.table("todos")).len(), 0);
 }
 
 #[test]
