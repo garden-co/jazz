@@ -220,6 +220,30 @@ describe("NativeRuntimeAdapter server transport", () => {
     ).toThrow("Native runtime requires db.setTickScheduler");
   });
 
+  it("surfaces a failing core tick through explicit progress", async () => {
+    const failure = new Error("core tick failure");
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            tick: () => {
+              throw failure;
+            },
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    await expect(runtime.progressPeerTransport()).rejects.toBe(failure);
+  });
+
   it("reports websocket auth failures through the auth failure callback", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
@@ -5629,12 +5653,10 @@ function fakeDb<T extends object>(db: T): T & NativeDbForTest {
       return upstream;
     };
   }
-  if (implementation.tick) {
-    result.tick = async () => {
-      await implementation.tick!();
-      await upstream?.tick();
-    };
-  }
+  result.tick = async () => {
+    await implementation.tick?.();
+    await upstream?.tick();
+  };
   return result as T & NativeDbForTest;
 }
 
