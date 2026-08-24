@@ -440,12 +440,12 @@ enum NapiSubscription {
     Memory {
         db: Rc<CoreDb<CoreMemoryStorage>>,
         stream: SubscriptionStream,
-        pending_event: Option<CoreSubscriptionEvent>,
+        pending_events: VecDeque<CoreSubscriptionEvent>,
     },
     Persistent {
         db: Rc<CoreDb<CoreRocksDbStorage>>,
         stream: SubscriptionStream,
-        pending_event: Option<CoreSubscriptionEvent>,
+        pending_events: VecDeque<CoreSubscriptionEvent>,
     },
 }
 
@@ -669,50 +669,35 @@ impl Subscription {
             .inner
             .as_mut()
             .ok_or_else(|| napi::Error::from_reason("subscription is closed"))?;
-        let mut events = Vec::new();
-        loop {
-            let event = match subscription {
-                NapiSubscription::Memory {
-                    db,
-                    stream,
-                    pending_event,
-                } => {
-                    let Some(mut event) = pending_event.take().or_else(|| stream.try_next_event())
-                    else {
-                        break;
-                    };
-                    if let Err(error) =
-                        core_block_on(db.hydrate_subscription_event_for_binding(&mut event))
-                    {
-                        *pending_event = Some(event);
-                        return Err(napi::Error::from_reason(error.to_string()));
-                    }
-                    event
-                }
-                NapiSubscription::Persistent {
-                    db,
-                    stream,
-                    pending_event,
-                } => {
-                    let Some(mut event) = pending_event.take().or_else(|| stream.try_next_event())
-                    else {
-                        break;
-                    };
-                    if let Err(error) =
-                        core_block_on(db.hydrate_subscription_event_for_binding(&mut event))
-                    {
-                        *pending_event = Some(event);
-                        return Err(napi::Error::from_reason(error.to_string()));
-                    }
-                    event
-                }
-            };
-            events.push(core_subscription_event_to_napi(
-                &event,
-                &mut self.published_terminal_layouts,
-            )?);
+        let published_terminal_layouts = &mut self.published_terminal_layouts;
+        match subscription {
+            NapiSubscription::Memory {
+                db,
+                stream,
+                pending_events,
+            } => read_subscription_batch(
+                pending_events,
+                || stream.try_next_event(),
+                |event| {
+                    core_block_on(db.hydrate_subscription_event_for_binding(event))
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                },
+                published_terminal_layouts,
+            ),
+            NapiSubscription::Persistent {
+                db,
+                stream,
+                pending_events,
+            } => read_subscription_batch(
+                pending_events,
+                || stream.try_next_event(),
+                |event| {
+                    core_block_on(db.hydrate_subscription_event_for_binding(event))
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                },
+                published_terminal_layouts,
+            ),
         }
-        Ok(events)
     }
 
     #[napi]
@@ -724,6 +709,48 @@ impl Subscription {
     pub fn close(&mut self) -> bool {
         self.inner.take().is_some()
     }
+}
+
+/// Drain a subscription batch atomically at the JavaScript boundary.
+///
+/// A binding cannot return a prefix and then report an error: JavaScript would
+/// have no way to recover that prefix. Keep every source event until both
+/// hydration and encoding of the entire batch succeed, so retry is lossless
+/// and preserves source order.
+fn read_subscription_batch<F>(
+    pending_events: &mut VecDeque<CoreSubscriptionEvent>,
+    mut next: F,
+    mut hydrate: impl FnMut(&mut CoreSubscriptionEvent) -> napi::Result<()>,
+    published_terminal_layouts: &mut HashSet<String>,
+) -> napi::Result<Vec<SubscriptionEvent>>
+where
+    F: FnMut() -> Option<CoreSubscriptionEvent>,
+{
+    let mut batch = std::mem::take(pending_events)
+        .into_iter()
+        .collect::<Vec<_>>();
+    while let Some(event) = next() {
+        batch.push(event);
+    }
+    for event in &mut batch {
+        if let Err(error) = hydrate(event) {
+            pending_events.extend(batch);
+            return Err(error);
+        }
+    }
+    let mut prospective_layouts = published_terminal_layouts.clone();
+    let mut output = Vec::with_capacity(batch.len());
+    for event in &batch {
+        match core_subscription_event_to_napi(event, &mut prospective_layouts) {
+            Ok(event) => output.push(event),
+            Err(error) => {
+                pending_events.extend(batch);
+                return Err(error);
+            }
+        }
+    }
+    *published_terminal_layouts = prospective_layouts;
+    Ok(output)
 }
 
 #[napi]
@@ -1810,13 +1837,13 @@ impl NapiDb {
                 db: Rc::clone(db),
                 stream: core_block_on(db.subscribe(&query.inner, opts))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                pending_event: None,
+                pending_events: VecDeque::new(),
             },
             NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
                 db: Rc::clone(db),
                 stream: core_block_on(db.subscribe(&query.inner, opts))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                pending_event: None,
+                pending_events: VecDeque::new(),
             },
         };
         Ok(Subscription {
@@ -1846,13 +1873,13 @@ impl NapiDb {
                 db: Rc::clone(db),
                 stream: core_block_on(db.subscribe_for_identity(&query.inner, opts, author))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                pending_event: None,
+                pending_events: VecDeque::new(),
             },
             NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
                 db: Rc::clone(db),
                 stream: core_block_on(db.subscribe_for_identity(&query.inner, opts, author))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                pending_event: None,
+                pending_events: VecDeque::new(),
             },
         };
         Ok(Subscription {
@@ -1881,13 +1908,13 @@ impl NapiDb {
                 db: Rc::clone(db),
                 stream: core_block_on(db.subscribe_relation_query(&query, opts))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                pending_event: None,
+                pending_events: VecDeque::new(),
             },
             NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
                 db: Rc::clone(db),
                 stream: core_block_on(db.subscribe_relation_query(&query, opts))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                pending_event: None,
+                pending_events: VecDeque::new(),
             },
         };
         Ok(Subscription {
@@ -1920,7 +1947,7 @@ impl NapiDb {
                     db.subscribe_relation_query_for_identity(&query, opts, author),
                 )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                pending_event: None,
+                pending_events: VecDeque::new(),
             },
             NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
                 db: Rc::clone(db),
@@ -1928,7 +1955,7 @@ impl NapiDb {
                     db.subscribe_relation_query_for_identity(&query, opts, author),
                 )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-                pending_event: None,
+                pending_events: VecDeque::new(),
             },
         };
         Ok(Subscription {
@@ -4198,14 +4225,14 @@ pub fn verify_local_first_identity_proof_napi(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashSet};
+    use std::collections::{BTreeMap, HashSet, VecDeque};
     use std::rc::Rc;
 
     use crate::{
         NapiDb, NapiDbInnerStorage, NapiTxKind, PreparedQuery, Tx, authority_epoch_from_bigint,
         core_block_on, core_claim_value_from_json, core_read_opts_from_json,
-        core_subscription_event_to_napi, encode_core_subscription_delta, terminal_bytes_to_numbers,
-        unknown_transaction_kind_message,
+        core_subscription_event_to_napi, encode_core_subscription_delta, read_subscription_batch,
+        terminal_bytes_to_numbers, unknown_transaction_kind_message,
     };
 
     #[test]
@@ -4482,6 +4509,56 @@ mod tests {
         assert!(!payload.delta.is_empty());
         assert!(payload.terminal_operations.is_empty());
         assert_eq!(payload.tier, "Local");
+    }
+
+    #[test]
+    fn subscription_batch_retry_preserves_success_prefix_before_hydration_failure() {
+        let mut pending = VecDeque::new();
+        let mut source = VecDeque::from([
+            CoreSubscriptionEvent::Closed,
+            CoreSubscriptionEvent::Rejected {
+                reason: jazz::protocol::SubscribeRejectReason::UnsupportedShapeCapability {
+                    detail: "deliberately unavailable descriptor".to_owned(),
+                },
+            },
+        ]);
+        let mut published = HashSet::new();
+        let fail_second = true;
+        let error = match read_subscription_batch(
+            &mut pending,
+            || source.pop_front(),
+            |event| {
+                if fail_second && matches!(event, CoreSubscriptionEvent::Rejected { .. }) {
+                    return Err(napi::Error::from_reason("planned hydration failure"));
+                }
+                Ok(())
+            },
+            &mut published,
+        ) {
+            Ok(_) => panic!("planned hydration failure must abort the batch"),
+            Err(error) => error,
+        };
+        assert_eq!(error.reason, "planned hydration failure");
+        assert_eq!(pending.len(), 2, "successful prefix is retained for retry");
+        assert!(
+            source.is_empty(),
+            "all source events were captured in the retry queue"
+        );
+
+        let replayed = read_subscription_batch(
+            &mut pending,
+            || source.pop_front(),
+            |_| Ok(()),
+            &mut published,
+        )
+        .expect("retry succeeds");
+        assert!(pending.is_empty());
+        assert_eq!(replayed.len(), 2);
+        assert!(matches!(replayed[0], Either3::C(_)), "A keeps its position");
+        assert!(
+            matches!(replayed[1], Either3::B(_)),
+            "B follows A exactly once"
+        );
     }
 
     #[test]
