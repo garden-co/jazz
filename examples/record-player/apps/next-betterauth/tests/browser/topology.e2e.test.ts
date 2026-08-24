@@ -47,6 +47,8 @@ const recipientPermissions = s.definePermissions(recipientApp, ({ policy, sessio
 // This adds exactly the branch which distinguishes RecordPlayer from the
 // scalar control: a correlated owner path through a referenced playlist.
 const relationalRecipientApp = s.defineApp({
+  albums: s.table({ title: s.string() }),
+  tracks: s.table({ album_id: s.ref("albums"), title: s.string() }),
   playlists: s.table({ name: s.string() }),
   invitations: s.table({
     playlist_id: s.ref("playlists"),
@@ -55,11 +57,19 @@ const relationalRecipientApp = s.defineApp({
     role: s.enum("listener", "editor"),
     status: s.enum("pending", "accepted"),
   }),
-  playlist_entries: s.table({ playlist_id: s.ref("playlists"), label: s.string() }),
+  playlist_entries: s.table({
+    playlist_id: s.ref("playlists"),
+    track_id: s.ref("tracks"),
+    label: s.string(),
+  }),
 });
 const relationalRecipientPermissions = s.definePermissions(
   relationalRecipientApp,
   ({ policy, session, anyOf, allowedTo }) => {
+    policy.albums.allowRead.where({});
+    policy.albums.allowInsert.always();
+    policy.tracks.allowRead.where({});
+    policy.tracks.allowInsert.always();
     const canEditPlaylist = (playlistId: RowRefValue) =>
       anyOf([
         { $createdBy: session.author },
