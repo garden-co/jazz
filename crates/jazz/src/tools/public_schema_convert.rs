@@ -1464,6 +1464,16 @@ fn append_exists_rel_policy_clause(
         // so `member.workspace = outer.workspace` constrains the root block's
         // workspace without publishing any proof carrier.
         for nested in &mut lowered.joins {
+            if nested
+                .nested_joins
+                .iter()
+                .any(|child| !child.correlated_filters.is_empty())
+            {
+                return Err(err(
+                    format!("$.{}.{}", table.as_str(), path),
+                    "core schema ExistsRel does not yet support outer correlations beyond one nested join",
+                ));
+            }
             let source_column = nested.source_column.clone().ok_or_else(|| {
                 err(
                     format!("$.{}.{}", table.as_str(), path),
