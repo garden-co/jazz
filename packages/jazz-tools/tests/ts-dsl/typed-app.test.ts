@@ -463,6 +463,7 @@ describe("typed app prototype", () => {
           eq?: boolean;
           ne?: boolean;
           in?: boolean[];
+          notIn?: boolean[];
         }
       | undefined
     >();
@@ -473,6 +474,7 @@ describe("typed app prototype", () => {
           ne?: string[];
           contains?: string;
           in?: string[][];
+          notIn?: string[][];
         }
       | undefined
     >();
@@ -482,6 +484,7 @@ describe("typed app prototype", () => {
           eq?: Uint8Array;
           ne?: Uint8Array;
           in?: (Uint8Array | number[])[];
+          notIn?: (Uint8Array | number[])[];
         }
       | undefined
     >();
@@ -507,6 +510,7 @@ describe("typed app prototype", () => {
           lt?: number;
           lte?: number;
           in?: number[];
+          notIn?: number[];
         }
       | undefined
     >();
