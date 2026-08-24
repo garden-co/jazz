@@ -777,4 +777,33 @@ mod tests {
                 .contains("plaintext ws:// bootstrap")
         );
     }
+
+    #[tokio::test]
+    async fn outbound_queue_returns_backpressure_at_a_finite_byte_budget() {
+        const EXPECTED_OUTBOUND_QUEUE_BYTES: usize = 8 << 20;
+        let (_inbound_sender, inbound) = mpsc::channel(1);
+        let (outbound, _outbound_receiver) = mpsc::unbounded_channel();
+        let task = tokio::spawn(std::future::pending());
+        let mut transport = WebSocketTransport {
+            inbound: Arc::new(Mutex::new(inbound)),
+            inbound_error: Arc::new(Mutex::new(None)),
+            inbound_notify: Arc::new(Notify::new()),
+            outbound,
+            task,
+            protocol_version: WIRE_PROTOCOL_VERSION,
+            features: FEATURE_SYNC_MESSAGE_PAYLOAD,
+            session_context: None,
+        };
+        let frame = vec![0; MAX_WIRE_FRAME_BYTES];
+        for _ in 0..(EXPECTED_OUTBOUND_QUEUE_BYTES / MAX_WIRE_FRAME_BYTES) {
+            transport
+                .send_frame(frame.clone())
+                .expect("frames within the queue budget are accepted");
+        }
+
+        assert!(matches!(
+            transport.send_frame(frame),
+            Err(TransportError::Backpressure)
+        ));
+    }
 }
