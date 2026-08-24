@@ -41,6 +41,52 @@ fn branch_column_reference_policy_schema() -> JazzSchema {
     )
 }
 
+fn large_value_update_schema() -> JazzSchema {
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .column("title", PublicColumnType::Text)
+                .column("payload", PublicColumnType::Bytea)
+                .column("metadata", PublicColumnType::Json { schema: None })
+                .column("done", PublicColumnType::Boolean)
+                .nullable_column("note", PublicColumnType::Text)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(PublicPolicyExpr::True)
+                        .with_insert(PublicPolicyExpr::True)
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True)
+                        .with_delete(PublicPolicyExpr::True),
+                ),
+        ),
+    )
+}
+
+fn document_cells(title: String, payload: Vec<u8>, metadata: String, done: bool) -> RowCells {
+    BTreeMap::from([
+        ("title".to_owned(), Value::String(title)),
+        ("payload".to_owned(), Value::Bytes(payload)),
+        ("metadata".to_owned(), Value::String(metadata)),
+        ("done".to_owned(), Value::Bool(done)),
+        ("note".to_owned(), Value::Nullable(None)),
+    ])
+}
+
+fn expect_large_value_update_error<S>(
+    result: Result<WriteHandle<S>, Error>,
+    expected: ErrorCode,
+) -> Error
+where
+    S: OrderedKvStorage + ReopenableStorage + 'static,
+{
+    match result {
+        Ok(_) => panic!("large-value update unexpectedly succeeded"),
+        Err(error) => {
+            assert_eq!(error.code, expected, "{}", error.message);
+            error
+        }
+    }
+}
+
 #[test]
 fn admitted_server_authorizes_branch_write_through_referenced_application_row() {
     let schema = branch_column_reference_policy_schema();
@@ -256,6 +302,383 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
     assert_eq!(
         block_on(db.read_json_pointer("todos", json_row, "title", "/selected/answer")).unwrap(),
         Some(serde_json::json!(42))
+    );
+}
+
+#[test]
+fn update_descriptor_applies_sequential_utf16_splices_and_commits_with_ordinary_cells() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let mut title = "a".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 512);
+    title.push_str("🙂bc");
+    let write = db
+        .insert("todos", doctest_support::todo_cells(&title, false))
+        .unwrap();
+    let row = write.row_uuid();
+    block_on(write.wait(DurabilityTier::Local)).unwrap();
+
+    let start = title.encode_utf16().count() as u64 - 4;
+    let write = block_on(db.update_with_large_value_mutations(
+        "todos",
+        row,
+        BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        vec![LargeValueUpdate::Splice {
+            column: "title".to_owned(),
+            within: LargeValueUpdatePage::TextUtf16 {
+                from: start,
+                to: start + 4,
+            },
+            splices: vec![
+                LargeValueUpdateSplice {
+                    at: 2,
+                    delete: 1,
+                    insert: "XY".as_bytes().to_vec(),
+                },
+                LargeValueUpdateSplice {
+                    at: 4,
+                    delete: 1,
+                    insert: "Z".as_bytes().to_vec(),
+                },
+            ],
+        }],
+    ))
+    .unwrap();
+    block_on(write.wait(DurabilityTier::Local)).unwrap();
+
+    title.replace_range(title.len() - 2..title.len() - 1, "XY");
+    title.replace_range(title.len() - 1..title.len(), "Z");
+    let rows = prepared_read(&db, &db.table("todos"));
+    let table = &doctest_support::schema().tables[0];
+    assert_eq!(rows[0].cell(table, "title"), Some(Value::String(title)));
+    assert_eq!(rows[0].cell(table, "done"), Some(Value::Bool(true)));
+}
+
+#[test]
+fn update_descriptors_apply_byte_utf8_json_and_nullable_splices_atomically() {
+    let schema = large_value_update_schema();
+    let db = open_db(0x41, AuthorId::SYSTEM, &schema);
+    let row = row(0x41);
+    let mut title = "t".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 256);
+    title.push_str("a🙂bc");
+    let mut payload = vec![7_u8; groove::large_values::INLINE_VALUE_MAX_BYTES + 256];
+    payload.extend_from_slice(&[1, 2, 3, 4, 5]);
+    let metadata = format!(
+        "{{\"padding\":\"{}\",\"selected\":{{\"answer\":42,\"items\":[\"a\",\"b\"]}}}}",
+        "p".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES)
+    );
+    db.insert_with_id(
+        "documents",
+        row,
+        document_cells(title.clone(), payload.clone(), metadata, false),
+    )
+    .unwrap();
+
+    let text_start = title.find("a🙂bc").unwrap() as u64;
+    let payload_start = payload.len() as u64 - 5;
+    let write = block_on(db.update_with_large_value_mutations(
+        "documents",
+        row,
+        BTreeMap::from([(
+            "note".to_owned(),
+            Value::Nullable(Some(Box::new(Value::String("ready".to_owned())))),
+        )]),
+        vec![
+            LargeValueUpdate::Splice {
+                column: "title".to_owned(),
+                within: LargeValueUpdatePage::TextUtf8 {
+                    from: text_start,
+                    to: text_start + "a🙂bc".len() as u64,
+                },
+                splices: vec![
+                    LargeValueUpdateSplice {
+                        at: 1,
+                        delete: "🙂".len() as u64,
+                        insert: "XY".as_bytes().to_vec(),
+                    },
+                    LargeValueUpdateSplice {
+                        at: 3,
+                        delete: 1,
+                        insert: "Z".as_bytes().to_vec(),
+                    },
+                ],
+            },
+            LargeValueUpdate::Splice {
+                column: "payload".to_owned(),
+                within: LargeValueUpdatePage::Bytes {
+                    from: payload_start,
+                    to: payload_start + 5,
+                },
+                splices: vec![
+                    LargeValueUpdateSplice {
+                        at: 1,
+                        delete: 2,
+                        insert: vec![8, 9, 10],
+                    },
+                    LargeValueUpdateSplice {
+                        at: 4,
+                        delete: 1,
+                        insert: vec![11],
+                    },
+                ],
+            },
+            LargeValueUpdate::JsonSet {
+                column: "metadata".to_owned(),
+                edits: vec![
+                    JsonSetEdit {
+                        at: "/selected/answer".to_owned(),
+                        value: serde_json::json!(43),
+                    },
+                    JsonSetEdit {
+                        at: "/selected/items/1".to_owned(),
+                        value: serde_json::json!("bee"),
+                    },
+                ],
+            },
+        ],
+    ))
+    .unwrap();
+    block_on(write.wait(DurabilityTier::Local)).unwrap();
+
+    title.replace_range(
+        text_start as usize + 1..text_start as usize + 1 + "🙂".len(),
+        "XY",
+    );
+    title.replace_range(text_start as usize + 3..text_start as usize + 4, "Z");
+    payload.splice(
+        payload_start as usize + 1..payload_start as usize + 3,
+        [8, 9, 10],
+    );
+    payload.splice(payload_start as usize + 4..payload_start as usize + 5, [11]);
+    let rows = prepared_read(&db, &Query::from("documents"));
+    let table = &schema.tables[0];
+    assert_eq!(rows[0].cell(table, "title"), Some(Value::String(title)));
+    assert_eq!(rows[0].cell(table, "payload"), Some(Value::Bytes(payload)));
+    assert_eq!(
+        rows[0].cell(table, "note"),
+        Some(Value::Nullable(Some(Box::new(Value::String(
+            "ready".to_owned()
+        )))))
+    );
+    assert_eq!(
+        block_on(db.read_json_pointer("documents", row, "metadata", "/selected/answer")).unwrap(),
+        Some(serde_json::json!(43))
+    );
+    assert_eq!(
+        block_on(db.read_json_pointer("documents", row, "metadata", "/selected/items/1")).unwrap(),
+        Some(serde_json::json!("bee"))
+    );
+}
+
+#[test]
+fn failed_update_descriptor_leaves_large_values_and_ordinary_cells_unchanged() {
+    let schema = large_value_update_schema();
+    let db = open_db(0x42, AuthorId::SYSTEM, &schema);
+    let row = row(0x42);
+    let title = "title/".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES / 6 + 64);
+    let mut payload = vec![3_u8; groove::large_values::INLINE_VALUE_MAX_BYTES + 64];
+    payload.extend_from_slice(&[1, 2, 3]);
+    db.insert_with_id(
+        "documents",
+        row,
+        document_cells(
+            title.clone(),
+            payload.clone(),
+            "{\"selected\":{\"answer\":42}}".to_owned(),
+            false,
+        ),
+    )
+    .unwrap();
+
+    expect_large_value_update_error(
+        block_on(db.update_with_large_value_mutations(
+            "documents",
+            row,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            vec![
+                LargeValueUpdate::Splice {
+                    column: "payload".to_owned(),
+                    within: LargeValueUpdatePage::Bytes {
+                        from: payload.len() as u64 - 3,
+                        to: payload.len() as u64,
+                    },
+                    splices: vec![LargeValueUpdateSplice {
+                        at: 1,
+                        delete: 1,
+                        insert: vec![9],
+                    }],
+                },
+                LargeValueUpdate::Splice {
+                    column: "title".to_owned(),
+                    within: LargeValueUpdatePage::TextUtf16 { from: 0, to: 2 },
+                    splices: vec![LargeValueUpdateSplice {
+                        at: 2,
+                        delete: 1,
+                        insert: "x".as_bytes().to_vec(),
+                    }],
+                },
+            ],
+        )),
+        ErrorCode::Query,
+    );
+
+    let rows = prepared_read(&db, &Query::from("documents"));
+    let table = &schema.tables[0];
+    assert_eq!(rows[0].cell(table, "title"), Some(Value::String(title)));
+    assert_eq!(rows[0].cell(table, "payload"), Some(Value::Bytes(payload)));
+    assert_eq!(rows[0].cell(table, "done"), Some(Value::Bool(false)));
+}
+
+#[test]
+fn update_descriptors_reject_kind_bounds_duplicate_and_null_targets() {
+    let schema = large_value_update_schema();
+    let db = open_db(0x43, AuthorId::SYSTEM, &schema);
+    let row = row(0x43);
+    let title = format!(
+        "{}🙂",
+        "large-title/".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES / 12 + 32)
+    );
+    db.insert_with_id(
+        "documents",
+        row,
+        document_cells(
+            title.clone(),
+            vec![5_u8; groove::large_values::INLINE_VALUE_MAX_BYTES + 32],
+            "{\"selected\":{\"answer\":42}}".to_owned(),
+            false,
+        ),
+    )
+    .unwrap();
+
+    let surrogate_split = expect_large_value_update_error(
+        block_on(db.update_with_large_value_mutations(
+            "documents",
+            row,
+            BTreeMap::new(),
+            vec![LargeValueUpdate::Splice {
+                column: "title".to_owned(),
+                within: LargeValueUpdatePage::TextUtf16 {
+                    from: title.encode_utf16().count() as u64 - 2,
+                    to: title.encode_utf16().count() as u64,
+                },
+                splices: vec![LargeValueUpdateSplice {
+                    at: 1,
+                    delete: 0,
+                    insert: "x".as_bytes().to_vec(),
+                }],
+            }],
+        )),
+        ErrorCode::Query,
+    );
+    assert!(surrogate_split.message.contains("surrogate pair"));
+
+    expect_large_value_update_error(
+        block_on(db.update_with_large_value_mutations(
+            "documents",
+            row,
+            BTreeMap::new(),
+            vec![LargeValueUpdate::Splice {
+                column: "title".to_owned(),
+                within: LargeValueUpdatePage::Bytes { from: 0, to: 1 },
+                splices: vec![LargeValueUpdateSplice {
+                    at: 0,
+                    delete: 0,
+                    insert: vec![1],
+                }],
+            }],
+        )),
+        ErrorCode::Schema,
+    );
+
+    expect_large_value_update_error(
+        block_on(db.update_with_large_value_mutations(
+            "documents",
+            row,
+            BTreeMap::new(),
+            vec![LargeValueUpdate::Splice {
+                column: "payload".to_owned(),
+                within: LargeValueUpdatePage::Bytes { from: 0, to: 1 },
+                splices: vec![LargeValueUpdateSplice {
+                    at: 1,
+                    delete: 1,
+                    insert: vec![1],
+                }],
+            }],
+        )),
+        ErrorCode::Query,
+    );
+
+    expect_large_value_update_error(
+        block_on(db.update_with_large_value_mutations(
+            "documents",
+            row,
+            BTreeMap::new(),
+            vec![LargeValueUpdate::JsonSet {
+                column: "metadata".to_owned(),
+                edits: vec![JsonSetEdit {
+                    at: "/missing".to_owned(),
+                    value: serde_json::json!(1),
+                }],
+            }],
+        )),
+        ErrorCode::Query,
+    );
+
+    expect_large_value_update_error(
+        block_on(db.update_with_large_value_mutations(
+            "documents",
+            row,
+            BTreeMap::new(),
+            vec![LargeValueUpdate::Splice {
+                column: "note".to_owned(),
+                within: LargeValueUpdatePage::TextUtf16 { from: 0, to: 0 },
+                splices: vec![LargeValueUpdateSplice {
+                    at: 0,
+                    delete: 0,
+                    insert: "x".as_bytes().to_vec(),
+                }],
+            }],
+        )),
+        ErrorCode::Schema,
+    );
+
+    expect_large_value_update_error(
+        block_on(db.update_with_large_value_mutations(
+            "documents",
+            row,
+            BTreeMap::new(),
+            vec![
+                LargeValueUpdate::JsonSet {
+                    column: "metadata".to_owned(),
+                    edits: vec![JsonSetEdit {
+                        at: "/selected/answer".to_owned(),
+                        value: serde_json::json!(1),
+                    }],
+                },
+                LargeValueUpdate::JsonSet {
+                    column: "metadata".to_owned(),
+                    edits: vec![JsonSetEdit {
+                        at: "/selected/answer".to_owned(),
+                        value: serde_json::json!(2),
+                    }],
+                },
+            ],
+        )),
+        ErrorCode::Query,
+    );
+
+    expect_large_value_update_error(
+        block_on(db.update_with_large_value_mutations(
+            "documents",
+            row,
+            BTreeMap::from([("metadata".to_owned(), Value::String("{}".to_owned()))]),
+            vec![LargeValueUpdate::JsonSet {
+                column: "metadata".to_owned(),
+                edits: vec![JsonSetEdit {
+                    at: "/selected/answer".to_owned(),
+                    value: serde_json::json!(1),
+                }],
+            }],
+        )),
+        ErrorCode::Query,
     );
 }
 

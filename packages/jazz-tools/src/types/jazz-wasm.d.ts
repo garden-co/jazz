@@ -180,6 +180,13 @@ declare module "jazz-wasm" {
       cells: Uint8Array,
       author: Uint8Array,
     ): WasmWrite;
+    updateLargeValuesEncoded(
+      table: string,
+      rowId: Uint8Array,
+      patch: Uint8Array,
+      mutations: unknown,
+      updatedAtMs?: number | null,
+    ): WasmWrite;
     updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): WasmWrite;
     updateEncodedForIdentity(
       table: string,

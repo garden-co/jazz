@@ -195,6 +195,13 @@ type NativeDb = {
     author: Uint8Array,
   ): Write;
   updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array): Write;
+  updateLargeValuesEncoded?(
+    table: string,
+    rowId: Uint8Array,
+    patch: Uint8Array,
+    mutations: unknown,
+    updatedAtMs?: number | null,
+  ): Write;
   updateEncodedForIdentity(
     table: string,
     rowId: Uint8Array,
@@ -1199,6 +1206,50 @@ export class NativeRuntimeAdapter implements Runtime {
         : writeIdentity
           ? this.db.updateEncodedForIdentity(table, rowId, patch, writeIdentity, updatedAtMs)
           : this.db.updateEncoded(table, rowId, patch, updatedAtMs),
+    );
+    return this.finishMutation(write);
+  }
+
+  updateLargeValues(
+    table: string,
+    objectId: string,
+    values: Record<string, Value>,
+    descriptors: readonly unknown[],
+    writeContext?: string | null,
+  ): MutationResult {
+    if (this !== this.ownerRuntime) {
+      return this.ownerRuntime.updateLargeValues(
+        table,
+        objectId,
+        values,
+        descriptors,
+        writeContext,
+      );
+    }
+    const rowId = parseUuid(objectId);
+    const patch = encodeCellsForPatch(this.table(table), values);
+    const writeSession = sessionFromWriteContext(writeContext);
+    this.applySessionClaims(writeSession);
+    if (this.currentTx(writeContext, "Update")) {
+      throw new Error("Typed large-value updates are not supported inside an open transaction.");
+    }
+    if (branchViewFromWriteContext(writeContext)) {
+      throw new Error("Typed large-value updates are not supported in branch views.");
+    }
+    if (writeSession || this.trustedWriteIdentity(writeSession)) {
+      throw new Error("Typed large-value updates do not yet support an attributed identity.");
+    }
+    if (!this.db.updateLargeValuesEncoded) {
+      throw new Error("Native runtime does not expose typed large-value updates");
+    }
+    const write = writeOrNormalizeRejection("Update", () =>
+      this.db.updateLargeValuesEncoded!(
+        table,
+        rowId,
+        patch,
+        descriptors,
+        effectiveUpdatedAtMs(writeContext),
+      ),
     );
     return this.finishMutation(write);
   }

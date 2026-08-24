@@ -11,9 +11,9 @@ use futures_util::{Stream, StreamExt};
 use idb_tree::IndexedDbPageStore;
 use jazz::db::{
     block_on, ConnectionSessionContext, Db, DbConfig, DbIdentity, ExclusiveTxOps,
-    InitialSyncFlushCadence, LocalUpdates, MergeableTxOps, MutationErrorCallback, PeerConnection,
-    PermissionAdvice, PreparedQuery, Propagation, QueryAttachment, ReadOpts, RowCells,
-    SeededRowIdSource, StreamingMutationKind, StreamingValueUpload, SubscriptionEvent,
+    InitialSyncFlushCadence, LargeValueUpdate, LocalUpdates, MergeableTxOps, MutationErrorCallback,
+    PeerConnection, PermissionAdvice, PreparedQuery, Propagation, QueryAttachment, ReadOpts,
+    RowCells, SeededRowIdSource, StreamingMutationKind, StreamingValueUpload, SubscriptionEvent,
     TickScheduler, TickUrgency, WireTransportAdapter, WriteHandle,
 };
 use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
@@ -1225,6 +1225,44 @@ impl WasmDbInner {
         }
     }
 
+    fn update_large_values(
+        &self,
+        table: &str,
+        row_id: RowUuid,
+        patch: RowCells,
+        mutations: Vec<LargeValueUpdate>,
+        updated_at_ms: Option<u64>,
+    ) -> Result<WasmWrite, JsValue> {
+        match self {
+            Self::Memory(db) => wasm_write_memory(
+                Rc::clone(db),
+                match updated_at_ms {
+                    Some(now_ms) => block_on(db.update_with_large_value_mutations_at_ms(
+                        table, row_id, patch, mutations, now_ms,
+                    )),
+                    None => block_on(
+                        db.update_with_large_value_mutations(table, row_id, patch, mutations),
+                    ),
+                }
+                .map_err(to_js_error)?,
+            ),
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                match updated_at_ms {
+                    Some(now_ms) => block_on(db.update_with_large_value_mutations_at_ms(
+                        table, row_id, patch, mutations, now_ms,
+                    )),
+                    None => block_on(
+                        db.update_with_large_value_mutations(table, row_id, patch, mutations),
+                    ),
+                }
+                .map_err(to_js_error)?,
+            ),
+            Self::Closed => panic!("WasmDb is closed"),
+        }
+    }
+
     fn update_in_branch(
         &self,
         table: &str,
@@ -2313,6 +2351,28 @@ impl WasmDb {
             &table,
             row_id,
             patch,
+            updated_at_ms.map(|value| value as u64),
+        )
+    }
+
+    #[wasm_bindgen(js_name = updateLargeValuesEncoded)]
+    pub fn update_large_values_encoded(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        patch: Vec<u8>,
+        mutations: JsValue,
+        updated_at_ms: Option<f64>,
+    ) -> Result<WasmWrite, JsValue> {
+        let mutations: Vec<LargeValueUpdate> =
+            serde_wasm_bindgen::from_value(mutations).map_err(|error| {
+                JsValue::from_str(&format!("invalid large-value update descriptor: {error}"))
+            })?;
+        self.inner.update_large_values(
+            &table,
+            row_uuid_from_bytes(&row_id)?,
+            decode_cells(&patch)?,
+            mutations,
             updated_at_ms.map(|value| value as u64),
         )
     }

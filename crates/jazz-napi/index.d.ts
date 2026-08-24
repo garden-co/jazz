@@ -56,6 +56,7 @@ export declare class NapiDb {
   insertWithIdEncodedInBranchForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue, author: Uint8Array): Write
   insertWithIdEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
   updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, updatedAtMs?: number | undefined | null): Write
+  updateLargeValuesEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, mutations: JsonValue, updatedAtMs?: number | undefined | null): Write
   updateEncodedInBranch(table: string, rowId: Uint8Array, patch: Uint8Array, branch: JsonValue): Write
   updateEncodedInBranchView(table: string, rowId: Uint8Array, patch: Uint8Array, head: JsonValue, base?: JsonValue | undefined | null): Write
   updateEncodedInBranchViewForIdentity(table: string, rowId: Uint8Array, patch: Uint8Array, head: JsonValue, base: JsonValue | undefined | null, author: Uint8Array): Write

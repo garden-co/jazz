@@ -1612,7 +1612,10 @@ impl Drop for PermissionAdviceFuture {
 mod catalogue;
 mod lifecycle;
 mod mutations;
-pub use mutations::{StreamingMutationKind, StreamingValueUpload};
+pub use mutations::{
+    JsonSetEdit, LargeValueUpdate, LargeValueUpdatePage, LargeValueUpdateSplice,
+    StreamingMutationKind, StreamingValueUpload,
+};
 mod reads;
 mod subscriptions;
 mod transactions;
