@@ -125,31 +125,10 @@ pub(super) fn record_deltas_digest(deltas: &RecordDeltas) -> u64 {
 }
 
 pub(super) fn builder_contains_recursive(graph: &GraphBuilder) -> bool {
-    match graph {
-        GraphBuilder::Recursive { .. } => true,
-        GraphBuilder::Filter { input, .. }
-        | GraphBuilder::Project { input, .. }
-        | GraphBuilder::StreamingChecksum { input, .. }
-        | GraphBuilder::UnwrapNullable { input, .. }
-        | GraphBuilder::Unnest { input, .. }
-        | GraphBuilder::VariantProject { input, .. }
-        | GraphBuilder::ArgMaxBy { input, .. }
-        | GraphBuilder::ArgMinBy { input, .. }
-        | GraphBuilder::TopBy { input, .. }
-        | GraphBuilder::CollectBy { input, .. }
-        | GraphBuilder::Aggregate { input, .. } => builder_contains_recursive(input),
-        GraphBuilder::Union { inputs } => inputs.iter().any(builder_contains_recursive),
-        GraphBuilder::Join { left, right, .. }
-        | GraphBuilder::SemiJoin { left, right, .. }
-        | GraphBuilder::AntiJoin { left, right, .. } => {
-            builder_contains_recursive(left) || builder_contains_recursive(right)
-        }
-        GraphBuilder::Table { .. }
-        | GraphBuilder::InlineRecords { .. }
-        | GraphBuilder::Index { .. }
-        | GraphBuilder::FrontierSource { .. }
-        | GraphBuilder::BindingSource { .. } => false,
-    }
+    graph
+        .postorder()
+        .iter()
+        .any(|node| matches!(node, GraphBuilder::Recursive { .. }))
 }
 
 pub(super) fn validate_arg_by_primary_key_indices(
