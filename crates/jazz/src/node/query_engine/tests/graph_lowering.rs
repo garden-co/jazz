@@ -534,6 +534,25 @@ fn current_join_via_lowers_as_left_deep_semijoin() {
 
 #[test]
 fn current_join_via_can_use_union_relation_input() {
+    assert_current_join_via_union_relation_input(
+        source("todo_tags", SourceRole::Policy("direct".to_owned())),
+        source("todo_tags", SourceRole::Policy("inherited".to_owned())),
+    );
+}
+
+/// A UNION may have a common aliased source even when each arm has different
+/// predicates. The root source is then available, but must not be mistaken
+/// for a non-union join occurrence.
+#[test]
+fn current_join_via_shared_alias_union_keeps_arm_and_row_carriers() {
+    let shared = source("todo_tags", SourceRole::Alias("policy_branch".to_owned()));
+    assert_current_join_via_union_relation_input(shared.clone(), shared);
+}
+
+fn assert_current_join_via_union_relation_input(
+    direct_source: SourceId,
+    inherited_source: SourceId,
+) {
     let root = RowSetNodeId("root".to_owned());
     let direct_source_node = RowSetNodeId("direct-source".to_owned());
     let direct_project = RowSetNodeId("direct-project".to_owned());
@@ -542,8 +561,6 @@ fn current_join_via_can_use_union_relation_input() {
     let union_node = RowSetNodeId("authorized-union".to_owned());
     let join_node = RowSetNodeId("join".to_owned());
     let root_source = source("todos", SourceRole::Root);
-    let direct_source = source("todo_tags", SourceRole::Policy("direct".to_owned()));
-    let inherited_source = source("todo_tags", SourceRole::Policy("inherited".to_owned()));
     let request = QueryProgramRequest {
         authorization_mode: QueryAuthorizationMode::TrustedServing,
         reads: QueryReadSet::primary(ReadView {
