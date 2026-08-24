@@ -8,6 +8,7 @@
     "build": "next build",
     "start": "next start",
     "test:browser": "vitest run --config vitest.config.browser.ts",
+    "test:schema": "vitest run schema.test.ts --environment node",
     "typecheck:browser-config": "tsc --project tsconfig.browser.json"
   },
   "dependencies": {
