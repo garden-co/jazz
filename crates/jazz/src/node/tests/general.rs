@@ -213,7 +213,7 @@ fn pushed_chunks_must_be_staged_before_the_referencing_authority_commit() {
     .unwrap();
     let (_, unit) = writer.commit_mergeable_unit_settled(commit).unwrap();
     let context = Some(CommitUnitIngestContext {
-        identity: AuthorId::SYSTEM,
+        identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
         edge_authority: false,
     });
@@ -290,7 +290,7 @@ fn corrupt_root_first_upload_is_rejected_without_poisoning_the_receiver() {
     )
     .unwrap();
     let context = Some(CommitUnitIngestContext {
-        identity: AuthorId::SYSTEM,
+        identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
         edge_authority: false,
     });
@@ -351,7 +351,7 @@ fn rate_limited_upload_preserves_pending_claim_for_retry() {
     )
     .unwrap();
     let context = Some(CommitUnitIngestContext {
-        identity: AuthorId::SYSTEM,
+        identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
         edge_authority: false,
     });
@@ -475,7 +475,7 @@ fn maintenance_evicts_pending_upload_after_the_configured_age() {
     )
     .unwrap();
     let context = Some(CommitUnitIngestContext {
-        identity: AuthorId::SYSTEM,
+        identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
         edge_authority: false,
     });

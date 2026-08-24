@@ -72,10 +72,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
                         Value::String("updated title".to_owned()),
                     ),
                     ("state".to_owned(), Value::String("open".to_owned())),
-                    (
-                        "assignee".to_owned(),
-                        Value::Uuid(AuthorSubject::SYSTEM.test_uuid()),
-                    ),
+                    ("assignee".to_owned(), Value::Uuid(uuid::Uuid::nil())),
                     ("priority".to_owned(), Value::U64(0)),
                 ])),
         )

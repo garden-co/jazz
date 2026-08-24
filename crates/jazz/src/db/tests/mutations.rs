@@ -278,7 +278,7 @@ fn high_level_large_value_reads_authorize_before_descriptor_lookup() {
                 ),
         ),
     );
-    let reader = AuthorId::from_bytes([0x4e; 16]);
+    let reader = AuthorSubject::for_test_bytes([0x4e; 16]);
     let db = open_db(0x4e, reader, &schema);
     let visible = row(0x4e);
     let hidden = row(0x4f);
@@ -311,7 +311,7 @@ fn nullable_large_text_uses_the_same_high_level_read_and_edit_surface() {
     let schema = build_public_db_test_schema(PublicSchemaBuilder::new().table(
         PublicTableSchemaBuilder::new("notes").nullable_column("body", PublicColumnType::Text),
     ));
-    let db = open_db(0x4d, AuthorId::SYSTEM, &schema);
+    let db = open_db(0x4d, AuthorSubject::SYSTEM, &schema);
     let row = row(0x4d);
     let body = "n".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 73);
     db.insert_with_id(
