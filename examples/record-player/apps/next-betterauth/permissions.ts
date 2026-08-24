@@ -50,6 +50,15 @@ export default s.definePermissions(app, ({ policy, anyOf, allowedTo, session }) 
   // other invitation change (including revoke) remains owner-controlled.
   policy.invitations.allowUpdate
     .whereOld({ subject: session.user_id, status: "pending" })
+    .whereNew((invite) =>
+      policy.invitations.exists.where({
+        id: invite.id,
+        playlist_id: invite.playlist_id,
+        subject: invite.subject,
+        role: invite.role,
+        status: "pending",
+      }),
+    )
     .whereNew({ subject: session.user_id, status: "accepted" });
   policy.invitations.allowDelete.where((invite) =>
     policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.user_id }),

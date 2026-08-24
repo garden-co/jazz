@@ -10,6 +10,8 @@ export default function Home() {
         <li>Ordered, collaboratively edited playlists</li>
         <li>Partial audio buffering and durable playback position</li>
       </ul>
+      <RecordPlayerClient />
     </main>
   );
 }
+import { RecordPlayerClient } from "./record-player-client";
