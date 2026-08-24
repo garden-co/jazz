@@ -1,5 +1,45 @@
 import { defineConfig } from "vitest/config";
+import wasm from "vite-plugin-wasm";
+import topLevelAwait from "vite-plugin-top-level-await";
+import react from "@vitejs/plugin-react";
+import { playwright } from "@vitest/browser-playwright";
+import {
+  jazzServerInfo,
+  jazzServerJwtForUser,
+} from "../../../../packages/jazz-tools/tests/browser/testing-server-node.js";
+
+function jazzBrowserTopologyLog(
+  _context: unknown,
+  status: "start" | "complete" | "failed",
+  label: string,
+  elapsedMs: number,
+) {
+  console.info(`[jazz-browser-topology] ${status} ${label} (${elapsedMs}ms)`);
+}
 
 export default defineConfig({
-  test: { include: ["tests/browser/**/*.test.ts"], testTimeout: 90_000 },
+  define: {
+    "process.env.NEXT_PUBLIC_JAZZ_APP_ID": JSON.stringify("record-player-browser-tests"),
+    "process.env.NEXT_PUBLIC_JAZZ_SERVER_URL": "undefined",
+  },
+  plugins: [wasm(), topLevelAwait(), react()],
+  worker: { plugins: () => [wasm(), topLevelAwait()] },
+  test: {
+    include: ["tests/browser/**/*.test.ts"],
+    globalSetup: ["../../../../packages/jazz-tools/tests/browser/global-setup.ts"],
+    browser: {
+      enabled: true,
+      provider: playwright(),
+      instances: [{ browser: "chromium", headless: true }],
+      commands: {
+        jazzBrowserTopologyLog,
+        jazzServerInfo: async (_context, appId, schema) => jazzServerInfo(appId, schema),
+        jazzServerJwtForUser: async (_context, userId, claims, appId) =>
+          jazzServerJwtForUser(userId, claims, appId),
+      },
+    },
+    setupFiles: ["tests/browser/setup-react.ts"],
+    testTimeout: 90_000,
+    sequence: { concurrent: false },
+  },
 });

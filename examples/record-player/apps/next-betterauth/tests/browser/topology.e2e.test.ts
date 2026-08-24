@@ -29,7 +29,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
     let playlist: { id: string };
     let editorInvite: { id: string };
     let listenerInvite: { id: string };
-    const seed = Number(process.env.JAZZ_EXAMPLE_TOPOLOGY_SEED ?? 41);
+    const seed = Number(import.meta.env.JAZZ_EXAMPLE_TOPOLOGY_SEED ?? 41);
 
     const receipt = await runTopologyScenario(
       {
@@ -66,11 +66,9 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 getJazzServerJwtForUser("record-player-editor", undefined, server.appId),
                 getJazzServerJwtForUser("record-player-listener", undefined, server.appId),
               ]);
-              [owner, editor, listener] = await Promise.all([
-                openClient(server, "owner", ownerToken),
-                openClient(server, "editor", editorToken),
-                openClient(server, "listener", listenerToken),
-              ]);
+              owner = await openClient(server, "owner", ownerToken);
+              editor = await openClient(server, "editor", editorToken);
+              listener = await openClient(server, "listener", listenerToken);
               playlist = (
                 await owner
                   .insert(app.playlists, {

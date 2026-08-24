@@ -7,7 +7,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "vitest run --exclude tests/browser/**",
+    "test": "vitest run tests/record-player.test.ts",
     "test:browser": "vitest run --config vitest.config.browser.ts"
   },
   "dependencies": {
@@ -21,7 +21,12 @@
     "@types/node": "catalog:default",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "catalog:default",
+    "@vitest/browser": "catalog:default",
+    "@vitest/browser-playwright": "catalog:default",
     "typescript": "catalog:default",
+    "vite-plugin-top-level-await": "catalog:default",
+    "vite-plugin-wasm": "catalog:default",
     "vitest": "catalog:default"
   }
 }
