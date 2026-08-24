@@ -207,6 +207,46 @@ fn push_streaming_stops_at_the_ingress_limit_and_closes_the_upload() {
     assert!(db.read(&query).expect("read rows").is_empty());
 }
 
+/// An ordinary local Db cannot convert a streamed value into a write attributed
+/// to another author, even when the upload itself was accepted locally.
+///
+/// ```text
+/// local Db ──begin/push──► staged value
+/// local Db ──finish as mallory──► WriteRejected; no row is published
+/// ```
+#[test]
+fn ordinary_db_cannot_forge_streaming_provenance() {
+    let db = open_db();
+    let cells = BTreeMap::from([("done".to_owned(), Value::Bool(false))]);
+    let mut upload = db
+        .begin_streaming_value_upload("todos", &cells, "title", LargeValueKind::String)
+        .expect("begin upload");
+    jazz::block_on(db.push_streaming_value_upload(&mut upload, b"forged"))
+        .expect("stage upload before terminal admission");
+
+    let result = jazz::block_on(db.finish_streaming_value_upload(
+        upload,
+        StreamingMutationKind::Insert,
+        "todos",
+        RowUuid::from_bytes([0x88; 16]),
+        cells,
+        "title",
+        None,
+        None,
+        None,
+        None,
+        Some(AuthorSubject::for_test_bytes([0xb2; 16])),
+    ));
+    let error = match result {
+        Ok(_) => panic!("ordinary Db must reject attributed streaming finalization"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("trusted serving node"));
+
+    let query = db.prepare_query(&db.table("todos")).expect("prepare query");
+    assert!(db.read(&query).expect("read rows").is_empty());
+}
+
 /// Two local streams establish pending journals, maintenance expires them,
 /// and neither stale handle may recreate its journal through push or finish.
 ///

@@ -13,6 +13,11 @@ export declare class JazzServer {
 
 export declare class NapiDb {
   beginStreamingMutationEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, kind: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
+  /**
+   * Backend-only counterpart which leaves policy admission on the runtime's
+   * SYSTEM Db while carrying a distinct provenance author into finalization.
+   */
+  beginStreamingMutationAttributedEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, kind: string, mutation: string | undefined | null, author: Uint8Array | undefined | null, attribution: Uint8Array, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
   static openMemory(schema: Uint8Array, config: Uint8Array): NapiDb
   static openMemoryWithSelfSignedProof(schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
   static openPersistent(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
@@ -27,7 +32,7 @@ export declare class NapiDb {
   /** Attach a schema view to an existing owner-wide exclusive batch. */
   attachExclusiveTx(openBatchId: string): Tx
   /** Begin one owner-wide transaction without creating an owning per-schema Tx. */
-  beginTransaction(openBatchId: string, kind: string, author?: Uint8Array | undefined | null): void
+  beginTransaction(openBatchId: string, kind: string, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null): void
   /** Commit an owner-wide transaction by id and optional kind. */
   commitTransaction(openBatchId: string, kind?: string | undefined | null): Write
   /** Roll back an owner-wide open transaction by id. */
@@ -54,17 +59,26 @@ export declare class NapiDb {
   subscribeRelationQuery(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
   subscribeRelationQueryForIdentity(queryJson: string, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Subscription
   insertWithIdEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): Write
+  /**
+   * Admit as the backend runtime while storing `author` as provenance.
+   * The credential check is intentionally in NAPI, not merely in the TS
+   * adapter, so direct consumers cannot forge another author's receipts.
+   */
+  insertWithIdEncodedAttributed(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): Write
   insertWithIdEncodedInBranch(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue): Write
   insertWithIdEncodedInBranchForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue, author: Uint8Array): Write
   insertWithIdEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
   updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, updatedAtMs?: number | undefined | null): Write
+  updateEncodedAttributed(table: string, rowId: Uint8Array, patch: Uint8Array, author: Uint8Array): Write
   updateEncodedInBranch(table: string, rowId: Uint8Array, patch: Uint8Array, branch: JsonValue): Write
   updateEncodedInBranchView(table: string, rowId: Uint8Array, patch: Uint8Array, head: JsonValue, base?: JsonValue | undefined | null): Write
   updateEncodedInBranchViewForIdentity(table: string, rowId: Uint8Array, patch: Uint8Array, head: JsonValue, base: JsonValue | undefined | null, author: Uint8Array): Write
   updateEncodedForIdentity(table: string, rowId: Uint8Array, patch: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
   upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, updatedAtMs?: number | undefined | null): Write
   upsertEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
+  upsertEncodedAttributed(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): Write
   delete(table: string, rowId: Uint8Array, updatedAtMs?: number | undefined | null): Write
+  deleteAttributed(table: string, rowId: Uint8Array, author: Uint8Array): Write
   deleteInBranch(table: string, rowId: Uint8Array, branch: JsonValue): Write
   deleteInBranchView(table: string, rowId: Uint8Array, head: JsonValue, base?: JsonValue | undefined | null): Write
   deleteInBranchViewForIdentity(table: string, rowId: Uint8Array, head: JsonValue, base: JsonValue | undefined | null, author: Uint8Array): Write
@@ -74,6 +88,7 @@ export declare class NapiDb {
   restoreEncodedInBranch(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue): Write
   restoreEncodedInBranchForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue, author: Uint8Array): Write
   restoreEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
+  restoreEncodedAttributed(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): Write
   tick(): void
   /** Configure Jazz-owned upload ingress and unpublished-tree expiry limits. */
   setLargeValueStagingPolicy(incomingBytesPerWindow: number, windowMs: number, maxAgeMs?: number | undefined | null): void
