@@ -34,7 +34,7 @@ use jazz::tools::public_schema::AuthMode;
 const WS_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
 const WS_HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const WS_PER_IDENTITY_CONNECTION_CAP: usize = crate::server::PER_CLIENT_CONNECTION_CAP;
-const WS_MAX_FRAME_BYTES: usize = 1 << 20;
+const WS_MAX_FRAME_BYTES: usize = MAX_WIRE_FRAME_BYTES;
 const WS_MAX_MESSAGE_BYTES: usize = WS_MAX_FRAME_BYTES;
 
 static WS_NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
