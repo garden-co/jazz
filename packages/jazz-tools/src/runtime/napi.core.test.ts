@@ -12,7 +12,11 @@ import type { ColumnType, Value, WasmSchema } from "../drivers/types.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
 import { webSocketUrl } from "./native-runtime/websocket.js";
 import { openConfig } from "./native-runtime/native-codec.js";
-import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
+import {
+  encodeCellsForPatch,
+  encodeCellsForRow,
+  NativeRuntimeAdapter,
+} from "./native-runtime/native-runtime-adapter.js";
 import { encodeSchema } from "./native-runtime/native-runtime-adapter.js";
 import { hasJazzNapiBuild, loadNapiModule } from "./testing/napi-runtime-test-utils.js";
 import { SubscriptionManager } from "./subscription-manager.js";
@@ -94,6 +98,149 @@ it("round-trips legacy and canonical authors through the NAPI open-config codec"
     );
     db.close?.();
   }
+});
+
+it("gates direct NAPI provenance writes on a credentialed backend and preserves the author", async () => {
+  const { NapiDb } = await loadNapiModule();
+  const rowId = deterministicBytes("napi-attribution:row");
+  const provenance = testAuthorBytes("napi-attribution:external-author");
+  const cells = encodeCellsForRow(TEST_SCHEMA.todos, {
+    title: { type: "Text", value: "backend-admitted" },
+    done: { type: "Boolean", value: false },
+  });
+  const ordinary = NapiDb.openMemory(
+    encodeSchema(TEST_SCHEMA),
+    openConfig(
+      deterministicBytes("napi-attribution:ordinary-node"),
+      testAuthorBytes("napi-attribution:ordinary-author"),
+      1,
+      true,
+    ),
+  );
+  const attributedInsert = ordinary.insertWithIdEncodedAttributed as (
+    table: string,
+    id: Uint8Array,
+    values: Uint8Array,
+    author: Uint8Array,
+  ) => unknown;
+  expect(() => attributedInsert.call(ordinary, "todos", rowId, cells, provenance)).toThrow(
+    "backend-credential runtime",
+  );
+  const attributedStreaming = ordinary.beginStreamingMutationAttributedEncoded as (
+    table: string,
+    id: Uint8Array,
+    values: Uint8Array,
+    column: string,
+    kind: string,
+    mutation: string | undefined,
+    author: Uint8Array | undefined,
+    attribution: Uint8Array,
+    updatedAtMs: number | undefined,
+    head: unknown,
+    base: unknown,
+  ) => unknown;
+  expect(() =>
+    attributedStreaming.call(
+      ordinary,
+      "todos",
+      rowId,
+      cells,
+      "title",
+      "Text",
+      undefined,
+      undefined,
+      provenance,
+      undefined,
+      undefined,
+      undefined,
+    ),
+  ).toThrow("backend-credential runtime");
+  ordinary.close?.();
+
+  const backend = NapiDb.openMemory(
+    encodeSchema(TEST_SCHEMA),
+    openConfig(
+      deterministicBytes("napi-attribution:backend-node"),
+      testAuthorBytes("napi-attribution:backend-owner"),
+      1,
+      true,
+      undefined,
+      "test-backend-credential",
+    ),
+  );
+  const backendInsert = backend.insertWithIdEncodedAttributed as typeof attributedInsert;
+  backendInsert.call(backend, "todos", rowId, cells, provenance);
+  const backendStreaming =
+    backend.beginStreamingMutationAttributedEncoded as typeof attributedStreaming;
+  expect(() =>
+    backendStreaming.call(
+      backend,
+      "todos",
+      rowId,
+      cells,
+      "title",
+      "Text",
+      undefined,
+      provenance,
+      provenance,
+      undefined,
+      undefined,
+      undefined,
+    ),
+  ).toThrow("must not override backend admission identity");
+  const streamed = backendStreaming.call(
+    backend,
+    "todos",
+    deterministicBytes("napi-attribution:streamed-row"),
+    encodeCellsForPatch(TEST_SCHEMA.todos, { done: { type: "Boolean", value: false } }),
+    "title",
+    "Text",
+    "insert",
+    undefined,
+    provenance,
+    undefined,
+    undefined,
+    undefined,
+  ) as { push(chunk: Uint8Array): void; finish(): unknown };
+  streamed.push(new TextEncoder().encode("streamed backend-admitted"));
+  streamed.finish();
+  const runtime = NativeRuntimeAdapter.fromDb(
+    backend as never,
+    TEST_SCHEMA,
+    deterministicBytes("napi-attribution:backend-node"),
+    testAuthorBytes("napi-attribution:backend-owner"),
+    1,
+    true,
+  );
+  const author = JSON.stringify(["urn:jazz:test", "napi-attribution:external-author"]);
+  const rows = await runtime.query(
+    JSON.stringify({ table: "todos", select_columns: ["title", "$createdBy", "$updatedBy"] }),
+    null,
+    "local",
+  );
+  expect(rows).toEqual(
+    expect.arrayContaining([
+      {
+        table: "todos",
+        id: expect.any(String),
+        values: [
+          { type: "Text", value: "backend-admitted" },
+          { type: "Text", value: author },
+          { type: "Text", value: author },
+        ],
+      },
+      {
+        table: "todos",
+        id: expect.any(String),
+        values: [
+          { type: "Text", value: "streamed backend-admitted" },
+          { type: "Text", value: author },
+          { type: "Text", value: author },
+        ],
+      },
+    ]),
+  );
+  await runtime.close();
 });
 
 const SIGNED_DEFAULT_CASES: Array<{
