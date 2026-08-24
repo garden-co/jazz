@@ -12,7 +12,21 @@ export function isInsideBrowserRoot(fileRelative, pathApi = { isAbsolute }) {
   );
 }
 
-export function parseArgs(argv) {
+const defaultPackageRoot = fileURLToPath(new URL("..", import.meta.url));
+
+/**
+ * Build a deliberately narrow browser-Vitest invocation.
+ *
+ * Jazz-tools owns the argument validation and artifact preflight, while example
+ * apps supply their own test root and Vitest config. This keeps an app's
+ * focused topology receipt in its real browser environment instead of trying
+ * to route it through jazz-tools' browser-only test directory.
+ */
+export function parseFocusedBrowserArgs(argv, {
+  cwd = defaultPackageRoot,
+  browserRoot = resolve(cwd, "tests/browser"),
+  config = "vitest.config.browser.ts",
+} = {}) {
   const positional = [];
   let testNamePattern;
   for (let i = 0; i < argv.length; i += 1) {
@@ -30,9 +44,12 @@ export function parseArgs(argv) {
   if (positional.length !== 1) {
     throw new Error("expected exactly one browser test file");
   }
-  const packageRoot = fileURLToPath(new URL("..", import.meta.url));
-  const browserRoot = realpathSync(resolve(packageRoot, "tests/browser"));
-  const requestedFile = resolve(positional[0]);
+  const canonicalBrowserRoot = realpathSync(browserRoot);
+  // Resolve the forwarded path in the Vitest project's directory, not in the
+  // caller's shell directory. The latter is usually equivalent for jazz-tools,
+  // but is wrong when the same runner is used by an example app from the repo
+  // root or by the topology soak harness.
+  const requestedFile = resolve(cwd, positional[0]);
   let file;
   try {
     file = realpathSync(requestedFile);
@@ -41,28 +58,39 @@ export function parseArgs(argv) {
   }
   if (!statSync(file).isFile())
     throw new Error(`browser test path is not a file: ${requestedFile}`);
-  const fileRelative = relative(browserRoot, file);
+  const fileRelative = relative(canonicalBrowserRoot, file);
   if (!isInsideBrowserRoot(fileRelative)) {
     throw new Error("file must be inside tests/browser");
   }
-  const args = ["exec", "vitest", "run", "--config", "vitest.config.browser.ts", file];
+  const args = ["exec", "vitest", "run", "--config", config, file];
   if (testNamePattern) args.push("--testNamePattern", testNamePattern);
   return { file, args };
 }
 
-export function run(argv, spawn = spawnSync) {
-  const { file, args } = parseArgs(argv);
-  const preflight = spawn("node", ["../../dev/artifacts/verify-correctness-test-artifacts.mjs"], {
-    cwd: fileURLToPath(new URL("..", import.meta.url)),
+export function runFocusedBrowserTest(argv, spawn = spawnSync, {
+  cwd = defaultPackageRoot,
+  browserRoot = resolve(cwd, "tests/browser"),
+  config = "vitest.config.browser.ts",
+  artifactPreflight = resolve(defaultPackageRoot, "../../dev/artifacts/verify-correctness-test-artifacts.mjs"),
+  artifactPreflightCwd = defaultPackageRoot,
+} = {}) {
+  const { file, args } = parseFocusedBrowserArgs(argv, { cwd, browserRoot, config });
+  const preflight = spawn("node", [artifactPreflight], {
+    cwd: artifactPreflightCwd,
     stdio: "inherit",
   });
   if ((preflight.status ?? 1) !== 0) return preflight.status ?? 1;
   const result = spawn("pnpm", args, {
-    cwd: fileURLToPath(new URL("..", import.meta.url)),
+    cwd,
     stdio: "inherit",
   });
   return result.status ?? 1;
 }
+
+// Keep the package's public focused-test helpers stable while allowing other
+// workspace apps to use the same validation and stale-artifact preflight.
+export const parseArgs = (argv) => parseFocusedBrowserArgs(argv);
+export const run = (argv, spawn = spawnSync) => runFocusedBrowserTest(argv, spawn);
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   try {
