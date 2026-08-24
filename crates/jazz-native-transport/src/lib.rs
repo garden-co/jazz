@@ -177,23 +177,6 @@ struct BoundedOutbound {
     backpressured: Arc<AtomicBool>,
 }
 
-/// A producer which received `Backpressure` relies on the pump's wake callback
-/// to retry its send. Keep that contract true when the pump terminates too:
-/// the retry then observes the closed channel instead of waiting forever for
-/// capacity that can no longer be released.
-struct OutboundTerminationWake {
-    backpressured: Arc<AtomicBool>,
-    wake: Arc<dyn Fn() + Send + Sync>,
-}
-
-impl Drop for OutboundTerminationWake {
-    fn drop(&mut self) {
-        if self.backpressured.swap(false, Ordering::AcqRel) {
-            (self.wake)();
-        }
-    }
-}
-
 impl BoundedOutbound {
     fn channel() -> (
         Self,
@@ -215,18 +198,33 @@ impl BoundedOutbound {
     }
 
     fn send(&self, bytes: Vec<u8>) -> Result<(), TransportError> {
+        self.send_after_backpressure_arm(bytes, || {})
+    }
+
+    fn send_after_backpressure_arm(
+        &self,
+        bytes: Vec<u8>,
+        after_backpressure_arm: impl FnOnce(),
+    ) -> Result<(), TransportError> {
         let charge = bytes.len().max(1);
-        if self
-            .queued_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current
-                    .checked_add(charge)
-                    .filter(|next| *next <= WS_CLIENT_MAX_OUTBOUND_QUEUED_BYTES)
-            })
-            .is_err()
-        {
+        let reserve = || {
+            self.queued_bytes
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    current
+                        .checked_add(charge)
+                        .filter(|next| *next <= WS_CLIENT_MAX_OUTBOUND_QUEUED_BYTES)
+                })
+        };
+        if reserve().is_err() {
+            // Arm before checking capacity again. If the pump drains between
+            // the failed reservation and this store, the second reservation
+            // succeeds; if it drains afterwards, it observes this flag and
+            // wakes the producer. Neither ordering loses the wake.
             self.backpressured.store(true, Ordering::Release);
-            return Err(TransportError::Backpressure);
+            after_backpressure_arm();
+            if reserve().is_err() {
+                return Err(TransportError::Backpressure);
+            }
         }
         let frame = QueuedOutboundFrame {
             bytes,
@@ -616,6 +614,20 @@ async fn receive_server_hello(
     Ok(hello)
 }
 
+fn finish_outbound_pump(
+    outbound: mpsc::UnboundedReceiver<QueuedOutboundFrame>,
+    backpressured: &AtomicBool,
+    wake: &(dyn Fn() + Send + Sync),
+) {
+    // A backpressured producer retries when woken. Make the terminal channel
+    // state visible first, so that retry fails rather than re-entering the
+    // still-full queue with no pump left to wake it again.
+    drop(outbound);
+    if backpressured.swap(false, Ordering::AcqRel) {
+        wake();
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_ws_pump(
     mut ws: tokio_tungstenite::WebSocketStream<
@@ -630,14 +642,8 @@ async fn run_ws_pump(
     wake: Arc<dyn Fn() + Send + Sync>,
     bootstrap_catalogue: bool,
 ) {
-    // This deliberately lives for the entire pump. Every terminal path,
-    // including a failed `ws.send`, drops the receiver then wakes a producer
-    // already blocked on the finite outbound budget.
-    let _outbound_termination_wake = OutboundTerminationWake {
-        backpressured: Arc::clone(&outbound_backpressured),
-        wake: Arc::clone(&wake),
-    };
-    loop {
+    async {
+      loop {
         tokio::select! {
             maybe_frame = outbound.recv() => {
                 let Some(first_frame) = maybe_frame else {
@@ -725,7 +731,10 @@ async fn run_ws_pump(
                 }
             }
         }
+      }
     }
+    .await;
+    finish_outbound_pump(outbound, &outbound_backpressured, wake.as_ref());
 }
 
 fn decode_inbound_batch(bytes: &[u8], bootstrap_catalogue: bool) -> Result<Vec<Vec<u8>>, String> {
@@ -940,10 +949,24 @@ mod tests {
     fn terminal_outbound_failure_wakes_backpressured_producer_to_observe_closed_pump() {
         let (outbound, receiver, backpressured) = BoundedOutbound::channel();
         let wake_count = Arc::new(AtomicUsize::new(0));
+        let retry_saw_closed_pump = Arc::new(AtomicBool::new(false));
         let wake: Arc<dyn Fn() + Send + Sync> = {
             let wake_count = Arc::clone(&wake_count);
+            let retry_saw_closed_pump = Arc::clone(&retry_saw_closed_pump);
+            let retry_outbound = BoundedOutbound {
+                sender: outbound.sender.clone(),
+                queued_bytes: Arc::clone(&outbound.queued_bytes),
+                backpressured: Arc::clone(&outbound.backpressured),
+            };
             Arc::new(move || {
                 wake_count.fetch_add(1, Ordering::AcqRel);
+                retry_saw_closed_pump.store(
+                    matches!(
+                        retry_outbound.send(vec![1]),
+                        Err(TransportError::Failed(message)) if message == "websocket pump is closed"
+                    ),
+                    Ordering::Release,
+                );
             })
         };
 
@@ -956,18 +979,37 @@ mod tests {
             Err(TransportError::Backpressure)
         ));
 
-        // A failed websocket send ends the pump and drops this receiver. The
-        // termination guard must wake the producer that saw Backpressure.
-        drop(receiver);
-        drop(OutboundTerminationWake {
-            backpressured: Arc::clone(&backpressured),
-            wake,
-        });
+        // A failed websocket send ends the pump. The finish path drops the
+        // receiver before waking the producer that saw Backpressure.
+        finish_outbound_pump(receiver, &backpressured, wake.as_ref());
 
         assert_eq!(wake_count.load(Ordering::Acquire), 1);
+        assert!(retry_saw_closed_pump.load(Ordering::Acquire));
         assert!(matches!(
             outbound.send(vec![1]),
             Err(TransportError::Failed(message)) if message == "websocket pump is closed"
         ));
+    }
+
+    #[test]
+    fn draining_between_backpressure_reservation_and_arm_is_rechecked() {
+        let (outbound, mut receiver, _backpressured) = BoundedOutbound::channel();
+        let frame = vec![0; MAX_WIRE_FRAME_BYTES];
+        for _ in 0..(WS_CLIENT_MAX_OUTBOUND_QUEUED_BYTES / MAX_WIRE_FRAME_BYTES) {
+            outbound.send(frame.clone()).expect("fill outbound budget");
+        }
+
+        // Deterministically model the pump releasing one frame in the former
+        // reservation-failure -> arm race window. The recheck accepts it
+        // instead of returning an unwakeable Backpressure result.
+        outbound
+            .send_after_backpressure_arm(frame, || {
+                drop(
+                    receiver
+                        .try_recv()
+                        .expect("pump drains a queued frame after producer arms"),
+                );
+            })
+            .expect("recheck observes capacity released after arming");
     }
 }
