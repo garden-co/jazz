@@ -482,6 +482,15 @@ fn edge_read_policy_joins_use_edge_visible_dependency_rows() {
             ),
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    for identity in [member, other, bob] {
+        core.set_session_claims(
+            identity,
+            BTreeMap::from([(
+                "user_id".to_owned(),
+                Value::String(identity.test_uuid().to_string()),
+            )]),
+        );
+    }
     for commit in [
         MergeableCommit::new("chats", public_chat, 10).cells(BTreeMap::from([
             ("title".to_owned(), Value::String("public".to_owned())),
@@ -611,6 +620,15 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
     let bob_membership = row(0x1b);
     let schema = private_message_membership_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    for identity in [alice, bob] {
+        core.set_session_claims(
+            identity,
+            BTreeMap::from([(
+                "user_id".to_owned(),
+                Value::String(identity.test_uuid().to_string()),
+            )]),
+        );
+    }
     for commit in [
         MergeableCommit::new("chats", chat, 10).cells(BTreeMap::from([
             ("isPublic".to_owned(), Value::Bool(false)),
@@ -708,6 +726,15 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
     let bob_membership = row(0x1b);
     let schema = private_message_membership_schema();
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    for identity in [alice, bob] {
+        core.set_session_claims(
+            identity,
+            BTreeMap::from([(
+                "user_id".to_owned(),
+                Value::String(identity.test_uuid().to_string()),
+            )]),
+        );
+    }
     for commit in [
         MergeableCommit::new("chats", chat, 10).cells(BTreeMap::from([
             ("isPublic".to_owned(), Value::Bool(false)),
