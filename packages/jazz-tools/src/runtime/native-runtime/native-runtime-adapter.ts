@@ -1253,7 +1253,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const tx = this.currentTx(writeContext, "Upsert");
     const existing = tx
       ? (this.stagedRowForWriteMerge(tx, table, rowId) ?? this.readRowForWriteMerge(table, rowId))
-      : this.readRow(table, rowId, writeIdentity);
+      : this.readRowForWriteMerge(table, rowId);
     let cells: Uint8Array;
     try {
       cells = existing
@@ -1893,35 +1893,6 @@ export class NativeRuntimeAdapter implements Runtime {
     this.scheduleServerPump();
     this.notifyPeerTransportWork();
     return { kind: "committed", batchId };
-  }
-
-  private resultForRow(
-    table: string,
-    rowId: Uint8Array,
-    receipt: { kind: "committed"; batchId: BatchId } | { kind: "staged"; openBatchId: OpenBatchId },
-    identity?: Uint8Array,
-  ): InsertResult {
-    const row = this.readRow(table, rowId, identity);
-    return { id: formatUuid(rowId), values: row?.values ?? [], ...receipt };
-  }
-
-  private readRow(table: string, rowId: Uint8Array, identity?: Uint8Array): RowState | undefined {
-    if (!identity) return this.readRowForWriteMerge(table, rowId);
-    const query = this.prepareQuery(JSON.stringify({ table }));
-    const rows = this.db.allForIdentity(query, identity, readOptions());
-    if (rows instanceof Promise) {
-      throw new Error(
-        "write result inspection cannot synchronously await an asynchronous binding read",
-      );
-    }
-    if (isPendingNativeRead(rows)) {
-      throw new Error(
-        "write result inspection cannot synchronously hydrate a remote large value; read it after transport progress",
-      );
-    }
-    return rowsFromBatches(readRowBatches(rows), this.schema).find(
-      (row) => row.table === table && row.id === formatUuid(rowId),
-    );
   }
 
   private readRowForWriteMerge(table: string, rowId: Uint8Array): RowState | undefined {
