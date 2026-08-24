@@ -4615,11 +4615,24 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     },
   ])("strictly parses write-context canonical author attribution: $name", async (testCase) => {
     const ownerAuthor = JSON.stringify(["urn:jazz:test", "owner"]);
-    const beginStreamingMutationEncoded = vi.fn(() => ({
-      push: () => undefined,
-      finish: () => fakeWrite(),
-      abort: vi.fn(),
-    }));
+    const beginStreamingMutationEncoded = vi.fn(
+      (
+        _table: string,
+        _rowId: Uint8Array,
+        _cells: Uint8Array,
+        _column: string,
+        _kind: "Text" | "Json" | "Bytea",
+        _mutation?: "insert" | "update" | "upsert",
+        _author?: Uint8Array,
+        _updatedAtMs?: number,
+        _head?: unknown,
+        _base?: unknown,
+      ) => ({
+        push: () => undefined,
+        finish: () => fakeWrite(),
+        abort: vi.fn(),
+      }),
+    );
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () => fakeDb({ beginStreamingMutationEncoded }),
@@ -4726,11 +4739,24 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
   });
 
   it("admits verified reserved write-context sessions carrying the runtime capability", async () => {
-    const beginStreamingMutationEncoded = vi.fn(() => ({
-      push: () => undefined,
-      finish: () => fakeWrite(),
-      abort: vi.fn(),
-    }));
+    const beginStreamingMutationEncoded = vi.fn(
+      (
+        _table: string,
+        _rowId: Uint8Array,
+        _cells: Uint8Array,
+        _column: string,
+        _kind: "Text" | "Json" | "Bytea",
+        _mutation?: "insert" | "update" | "upsert",
+        _author?: Uint8Array,
+        _updatedAtMs?: number,
+        _head?: unknown,
+        _base?: unknown,
+      ) => ({
+        push: () => undefined,
+        finish: () => fakeWrite(),
+        abort: vi.fn(),
+      }),
+    );
     const trustedSession = sessionFromVerifiedReservedJwtPayload(
       { iss: LOCAL_FIRST_JWT_ISSUER, sub: "verified-writer" },
       "local-first",
