@@ -20,6 +20,9 @@ function jazzBrowserTopologyLog(
 }
 
 export default defineConfig({
+  optimizeDeps: {
+    include: ["react", "react-dom/client", "react/jsx-dev-runtime"],
+  },
   define: {
     "process.env.NEXT_PUBLIC_JAZZ_APP_ID": JSON.stringify("record-player-browser-tests"),
     "process.env.NEXT_PUBLIC_JAZZ_SERVER_URL": "undefined",
@@ -27,7 +30,7 @@ export default defineConfig({
   plugins: [wasm(), topLevelAwait(), react()],
   worker: { plugins: () => [wasm(), topLevelAwait()] },
   test: {
-    include: ["tests/browser/**/*.test.ts"],
+    include: ["tests/browser/**/*.test.{ts,tsx}"],
     globalSetup: ["../../../../packages/jazz-tools/tests/browser/global-setup.ts"],
     browser: {
       enabled: true,

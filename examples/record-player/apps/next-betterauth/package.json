@@ -7,7 +7,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "vitest run tests/record-player.test.ts",
+    "test": "vitest run tests/*.test.ts",
     "test:browser": "vitest run --config vitest.config.browser.ts"
   },
   "dependencies": {
