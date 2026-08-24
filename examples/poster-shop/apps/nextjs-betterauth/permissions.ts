@@ -20,7 +20,7 @@ export default definePermissions(app, ({ policy, session, anyOf, allOf, allowedT
       allowedTo.update("canvasId"),
       allOf([
         { userId: session.user_id, role: "admin" },
-        policy.canvases.exists.where({ id: member.canvasId, $createdBy: session.user_id }),
+        policy.canvases.exists.where({ id: member.canvasId, $createdBy: session.author }),
       ]),
     ]),
   );
