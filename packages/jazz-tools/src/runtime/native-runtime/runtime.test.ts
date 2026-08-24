@@ -160,6 +160,74 @@ describe("NativeRuntimeAdapter server transport", () => {
     ]);
   });
 
+  it("re-polls one pending native read after its routed chunk response", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+
+    let chunkArrived = false;
+    let polls = 0;
+    let allCalls = 0;
+    const transport = Object.assign(new FakeTransport([]), {
+      routeAuxiliaryWireFrame: () => {
+        chunkArrived = true;
+        return null;
+      },
+    });
+    const pendingRead = {
+      poll: () => {
+        polls += 1;
+        return chunkArrived ? new Uint8Array([0]) : null;
+      },
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => {
+              allCalls += 1;
+              return pendingRead;
+            },
+            connectUpstream: () => transport,
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+
+    const read = runtime.query(JSON.stringify({ table: "todos" }), undefined, "local");
+    await Promise.resolve();
+    expect(polls).toBe(1);
+
+    // This is the native host's concrete wake: the websocket response enters
+    // the adapter, is routed through the owned transport, and only then
+    // resumes the exact retained pending read.
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([0x42])]));
+
+    await expect(read).resolves.toEqual([]);
+    // Inbound routing intentionally publishes arrival and post-evaluation
+    // work edges. Both re-poll the *same* retained future; no fresh all()
+    // call may restart a large-value hydration attempt.
+    expect(polls).toBe(3);
+    expect(allCalls).toBe(1);
+    await runtime.close();
+  });
+
   it("pumps the newly owned transport before auth-refresh reconnect readiness", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
