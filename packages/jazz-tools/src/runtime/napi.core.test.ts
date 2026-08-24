@@ -168,7 +168,7 @@ it("gates direct NAPI provenance writes on a credentialed backend and preserves 
       deterministicBytes("napi-attribution:backend-node"),
       testAuthorBytes("napi-attribution:backend-owner"),
       1,
-      true,
+      false,
       undefined,
       "test-backend-credential",
     ),
