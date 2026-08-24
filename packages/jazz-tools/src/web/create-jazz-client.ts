@@ -1,4 +1,5 @@
 import type { Session } from "../runtime/context.js";
+import { serializeClientConfig } from "../runtime/client-config-key.js";
 import { acquireClient, releaseClient } from "../runtime/client-registry.js";
 import type { Db, DbConfig } from "../runtime/db.js";
 import { createDb } from "../runtime/db.js";
@@ -45,7 +46,7 @@ async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
 function configKey(config: DbConfig): string {
   // The React provider also uses the generic client registry. Namespace this
   // runtime lease so its wrapper cannot collide with the underlying client.
-  return `web:${JSON.stringify(config)}`;
+  return `web:${serializeClientConfig(config)}`;
 }
 
 export function createJazzClient(config: DbConfig): Promise<JazzClient> {

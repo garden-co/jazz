@@ -18,9 +18,9 @@ afterEach(() => {
 
 describe("JazzProvider — stable config deps", () => {
   /**
-   * Regression: passing a fresh config object with the same JSON shape must not
-   * trigger a cleanup→reacquire cycle. The useEffect must only re-fire when the
-   * configKey (JSON.stringify of config) or createJazzClient changes.
+   * Regression: passing a fresh, structurally equivalent config object must not
+   * trigger a cleanup→reacquire cycle, regardless of property insertion order.
+   * The useEffect must only re-fire when the canonical config key or factory changes.
    *
    * Before the fix, `config` was in the dep array. A new reference caused:
    *   cleanup → releaseClient (schedules setTimeout(0) to shut down the client)
