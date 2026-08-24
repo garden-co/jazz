@@ -7,7 +7,7 @@ const schema = {
   }),
   turns: s.table({
     conversation_id: s.ref("conversations"),
-    role: s.enum(["user", "assistant", "tool"]),
+    role: s.enum("user", "assistant", "tool"),
     ordinal: s.int(),
     // Streamed assistant prose is still an ordinary logical Text column.
     body: s.string(),
