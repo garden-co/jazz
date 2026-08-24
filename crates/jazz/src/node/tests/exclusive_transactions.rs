@@ -1429,6 +1429,8 @@ fn exclusive_view_shipping_is_view_atomic_per_recipient() {
     let (_reader_system_dir, mut reader_system) = open_node_with_schema(node(4), schema);
     let author_a = user(0xa1);
     let author_b = user(0xb2);
+    install_test_uuid_sub_claim(&mut core, author_a);
+    install_test_uuid_sub_claim(&mut core, author_b);
 
     let tx = OpenTransactionId::new();
     writer.open_exclusive(tx).unwrap();
