@@ -119,6 +119,11 @@ describe("shared example topology harness", () => {
     expect(deliveryFinished).toBe(true);
     expect(receipt.envelopes[0]).toMatchObject({ closed: true, pending: 0, inFlight: 0 });
     expect(receipt.envelopes[0]?.cleanup?.status).toBe("completed");
+    expect(
+      receipt.envelopes[0]?.activities.filter(({ action }) =>
+        ["deliveryAborted", "delivered", "deliveryFailed"].includes(action),
+      ),
+    ).toMatchObject([{ action: "deliveryAborted" }]);
   });
 
   it("records a rejected delivery without retaining it for cleanup", async () => {
@@ -127,13 +132,16 @@ describe("shared example topology harness", () => {
       scheduler.intercept({ from: "a", to: "b", label: "reject" }, "reject", () =>
         Promise.reject(new Error("planted delivery rejection")),
       ),
-    ).rejects.toThrow("planted delivery rejection");
-    await scheduler.close(20);
+    ).rejects.toThrow("topology-envelope-delivery-callback-rejected");
+    await expect(scheduler.close(20)).rejects.toThrow(
+      "topology-envelope-delivery-callback-rejected",
+    );
     const receipt = scheduler.receipt();
     expect(receipt).toMatchObject({ closed: true, pending: 0, inFlight: 0 });
-    expect(receipt.activities.find(({ action }) => action === "deliveryFailed")?.error).toContain(
-      "planted delivery rejection",
+    expect(receipt.activities.find(({ action }) => action === "deliveryFailed")?.error).toBe(
+      "delivery-callback-rejected",
     );
+    expect(JSON.stringify(receipt)).not.toContain("planted delivery rejection");
   });
 
   it("bounds a delivery that ignores cancellation and retains an explicit timeout receipt", async () => {
@@ -169,6 +177,81 @@ describe("shared example topology harness", () => {
     await delivery;
   });
 
+  it("fails scenario cleanup when an aborted callback genuinely rejects", async () => {
+    const scheduler = new TopologyEnvelopeScheduler(33);
+    const delivery = scheduler
+      .intercept(
+        { from: "a", to: "b", label: "rejects-on-close" },
+        "value",
+        (_, { signal }) =>
+          new Promise<void>((_, reject) => {
+            signal.addEventListener(
+              "abort",
+              () => reject(new Error("private callback detail must be redacted")),
+              { once: true },
+            );
+          }),
+      )
+      .catch(() => undefined);
+    await Promise.resolve();
+    await expect(
+      runTopologyScenario({
+        id: "harness.fixture.close-rejection",
+        topology: ["fixture"],
+        seed: 33,
+        phaseTimeoutMs: 50,
+        faultTimeoutMs: 50,
+        targets: {},
+        replay: "close-rejection-fixture",
+        envelopeSchedulers: [scheduler],
+        phases: [],
+      }),
+    ).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof TopologyScenarioError &&
+        error.receipt.error?.includes("delivery-callback-rejected") === true &&
+        !JSON.stringify(error.receipt).includes("private callback detail"),
+    );
+    await delivery;
+    const terminal = scheduler
+      .receipt()
+      .activities.filter(({ action }) =>
+        ["deliveryAborted", "delivered", "deliveryFailed"].includes(action),
+      );
+    expect(terminal).toMatchObject([
+      { action: "deliveryFailed", error: "delivery-callback-rejected" },
+    ]);
+  });
+
+  it("treats rejecting with the abort reason as cooperative cancellation", async () => {
+    const scheduler = new TopologyEnvelopeScheduler(34);
+    const delivery = scheduler.intercept(
+      { from: "a", to: "b", label: "cooperative-abort" },
+      "value",
+      (_, { signal }) =>
+        new Promise<void>((_, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        }),
+    );
+    await Promise.resolve();
+    await scheduler.close(50);
+    await delivery;
+    const receipt = scheduler.receipt();
+    expect(receipt.cleanup?.status).toBe("completed");
+    expect(
+      receipt.activities.filter(({ action }) =>
+        ["deliveryAborted", "delivered", "deliveryFailed"].includes(action),
+      ),
+    ).toMatchObject([{ action: "deliveryAborted" }]);
+  });
+
+  it("rejects impractical cleanup timers without starting close", async () => {
+    const scheduler = new TopologyEnvelopeScheduler(35);
+    await expect(scheduler.close(Number.MAX_SAFE_INTEGER)).rejects.toThrow("at most 300000ms");
+    expect(scheduler.receipt().closed).toBe(false);
+    await scheduler.close(20);
+  });
+
   it("serializes concurrent intercepts and permits a delivery to enqueue a follow-up", async () => {
     const scheduler = new TopologyEnvelopeScheduler(37);
     let releaseFirst!: () => void;
@@ -190,19 +273,27 @@ describe("shared example topology harness", () => {
       "second",
       () => void delivered.push("second"),
     );
+    let secondSettled = false;
+    void second.then(() => (secondSettled = true));
+    await Promise.resolve();
     expect(delivered).toEqual([]);
+    expect(secondSettled).toBe(false);
     releaseFirst();
     await Promise.all([first, second]);
     expect(delivered).toEqual(["first", "second"]);
 
-    await scheduler.intercept({ from: "a", to: "b", label: "parent" }, "parent", async () => {
-      await scheduler.intercept(
-        { from: "a", to: "b", label: "child" },
-        "child",
-        () => void delivered.push("child"),
-      );
-      delivered.push("parent");
-    });
+    await scheduler.intercept(
+      { from: "a", to: "b", label: "parent" },
+      "parent",
+      (_, { enqueue }) => {
+        enqueue(
+          { from: "a", to: "b", label: "child" },
+          "child",
+          () => void delivered.push("child"),
+        );
+        delivered.push("parent");
+      },
+    );
     expect(delivered).toEqual(["first", "second", "parent", "child"]);
     expect(
       scheduler
@@ -252,13 +343,27 @@ describe("shared example topology harness", () => {
       scheduler.intercept({ from: "a", to: "b", label: "fail" }, "value", () => {
         throw new Error("planted terminal delivery failure");
       }),
-    ).rejects.toThrow("planted terminal delivery failure");
+    ).rejects.toThrow("topology-envelope-delivery-callback-rejected");
     const receipt = scheduler.receipt();
     expect(receipt.activities.filter(({ action }) => action === "deliveryFailed")).toHaveLength(1);
     expect(receipt.activities.filter(({ action }) => action === "discarded")).toHaveLength(2);
     await expect(
       scheduler.intercept({ from: "a", to: "b" }, "later", () => undefined),
     ).rejects.toThrow("scheduler is failed");
+  });
+
+  it("keeps terminal cleanup receipts after activity history truncates", async () => {
+    const scheduler = new TopologyEnvelopeScheduler(47);
+    for (let index = 0; index < 2_100; index++) {
+      await scheduler.intercept({ from: "a", to: "b", label: "fill" }, index, () => undefined);
+    }
+    scheduler.delayNext(10);
+    await scheduler.intercept({ from: "a", to: "b", label: "held" }, "held", () => undefined);
+    await scheduler.close(20);
+    const receipt = scheduler.receipt();
+    expect(receipt.activitiesTruncated).toBeGreaterThan(0);
+    expect(receipt.activities.at(-1)).toMatchObject({ action: "discarded", label: "held" });
+    expect(receipt).toMatchObject({ closed: true, pending: 0, inFlight: 0 });
   });
 
   it("runs deterministic phases and every fault callback with a replayable receipt", async () => {
