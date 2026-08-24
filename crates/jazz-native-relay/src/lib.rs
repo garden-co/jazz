@@ -1166,6 +1166,7 @@ mod tests {
     // Here we prove the native host does not accidentally create one durable
     // store per UI runtime or share it across explicit auth scopes.
     use super::*;
+    use jazz::db::InsertOptions;
     use jazz::ids::{AuthorId, NodeUuid, RowUuid};
     use jazz::protocol_limits::MAX_LOGICAL_MESSAGE_BYTES;
     use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -1243,10 +1244,13 @@ mod tests {
 
         first_client
             .with_db(|db| {
-                let write = block_on(db.insert_with_id(
+                let write = block_on(db.insert(
                     "todos",
-                    RowUuid::from_bytes([0xd1; 16]),
                     BTreeMap::from([("title".to_owned(), Value::String("native".to_owned()))]),
+                    InsertOptions {
+                        row_id: Some(RowUuid::from_bytes([0xd1; 16])),
+                        ..Default::default()
+                    },
                 ))
                 .map_err(RelayError::Db)?;
                 block_on(write.wait(DurabilityTier::Local)).map_err(RelayError::Db)?;
@@ -1255,10 +1259,13 @@ mod tests {
             .unwrap();
         second_client
             .with_db(|db| {
-                let write = block_on(db.insert_with_id(
+                let write = block_on(db.insert(
                     "todos",
-                    RowUuid::from_bytes([0xd2; 16]),
                     BTreeMap::from([("title".to_owned(), Value::String("second".to_owned()))]),
+                    InsertOptions {
+                        row_id: Some(RowUuid::from_bytes([0xd2; 16])),
+                        ..Default::default()
+                    },
                 ))
                 .map_err(RelayError::Db)?;
                 block_on(write.wait(DurabilityTier::Local)).map_err(RelayError::Db)?;
