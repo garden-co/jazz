@@ -51,11 +51,14 @@ describe("RecordPlayer authenticated playlist topology", () => {
       "one-table write did not settle locally",
     );
     try {
-      await withTimeout(
+      const settled = await withTimeout(
         write.wait({ tier: "edge" }),
         10_000,
         `one-table edge settlement mutationErrors=${JSON.stringify(errors)}`,
       );
+      // This is the public WriteResult contract, independent of RecordPlayer
+      // policy shape: durability waits on inserts retain the inserted row.
+      expect(settled).toEqual(write.value);
     } finally {
       stop();
     }
