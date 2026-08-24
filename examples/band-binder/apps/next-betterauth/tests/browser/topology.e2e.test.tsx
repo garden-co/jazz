@@ -23,7 +23,25 @@ import { app } from "../../schema.js";
 const PAGE_SIZE = 12;
 
 const cleanup = new TestCleanup();
-afterEach(async () => cleanup.cleanup());
+let pendingServerUnblock: string | undefined;
+
+afterEach(async () => {
+  let networkError: unknown;
+  if (pendingServerUnblock) {
+    try {
+      await unblockJazzServerNetwork(pendingServerUnblock);
+      pendingServerUnblock = undefined;
+    } catch (error) {
+      networkError = error;
+    }
+  }
+  await cleanup.cleanup();
+  if (networkError) {
+    throw new Error("failed to restore BandBinder test network after scenario cleanup", {
+      cause: networkError,
+    });
+  }
+});
 
 async function settle<T>(
   label: string,
@@ -71,7 +89,6 @@ describe("BandBinder cross-topology recovery", () => {
     let nestedPageId = "";
     let nestedBlockId = "";
     let nestedAttachmentId = "";
-    let networkBlocked = false;
     const expectedChildPages: { id: string; title: string }[] = [];
     let expectedChildPagesBeforeReconnect: { id: string; title: string }[] = [];
     const ownerMutationErrors: unknown[] = [];
@@ -103,8 +120,8 @@ describe("BandBinder cross-topology recovery", () => {
             // transport reconnect: this exercises IndexedDB rehydration.
             restart: async () => {
               managerChildPageWindowSubscriptionSnapshots.length = 0;
+              pendingServerUnblock = server!.serverUrl;
               await blockJazzServerNetwork(server!.serverUrl);
-              networkBlocked = true;
               await manager!.disconnect();
               await manager!.shutdown();
               cleanup.untrack(manager!);
@@ -114,7 +131,7 @@ describe("BandBinder cross-topology recovery", () => {
           serverNetwork: {
             reconnect: async () => {
               await unblockJazzServerNetwork(server!.serverUrl);
-              networkBlocked = false;
+              pendingServerUnblock = undefined;
             },
           },
           authorization: {
@@ -489,7 +506,7 @@ describe("BandBinder cross-topology recovery", () => {
                   [
                     childPageWindowSubscriptionSnapshots,
                     managerChildPageWindowSubscriptionSnapshots,
-                  ].every((snapshots) => snapshots.some(isExpectedChildPageWindow)),
+                  ].every((snapshots) => isExpectedChildPageWindow(snapshots.at(-1) ?? [])),
                 15_000,
                 "both child-page subscriptions start with the exact bounded window",
               );
@@ -637,7 +654,10 @@ describe("BandBinder cross-topology recovery", () => {
               );
               expect(tasks.map((task) => task.id)).toEqual([offlineTaskId]);
               await waitForCondition(
-                async () => taskSubscriptionSnapshots.some((ids) => ids.includes(offlineTaskId)),
+                async () => {
+                  const latest = taskSubscriptionSnapshots.at(-1);
+                  return latest?.length === 1 && latest[0] === offlineTaskId;
+                },
                 15_000,
                 "owner task subscription publishes the converged offline task",
               );
@@ -651,13 +671,24 @@ describe("BandBinder cross-topology recovery", () => {
               );
               expect(shiftedChildWindow[0]).toMatchObject({ id: offlineChildPageId });
               await waitForCondition(
-                async () => childPageWindowSubscriptionSnapshots.some(isExpectedChildPageWindow),
+                async () =>
+                  isExpectedChildPageWindow(childPageWindowSubscriptionSnapshots.at(-1) ?? []),
                 15_000,
                 "owner child-page subscription publishes the recovered bounded-window shift",
               );
+              await waitForQuery(
+                manager!,
+                childPageWindow(workspaceId, pageId),
+                isExpectedChildPageWindow,
+                "manager settles the recovered bounded-window shift at edge",
+                15_000,
+                "edge",
+              );
               await waitForCondition(
                 async () =>
-                  managerChildPageWindowSubscriptionSnapshots.some(isExpectedChildPageWindow),
+                  isExpectedChildPageWindow(
+                    managerChildPageWindowSubscriptionSnapshots.at(-1) ?? [],
+                  ),
                 15_000,
                 "manager child-page subscription publishes the recovered bounded-window shift",
               );
@@ -704,7 +735,7 @@ describe("BandBinder cross-topology recovery", () => {
               expect(persistedChildPages.map(({ id, title }) => ({ id, title }))).toEqual(
                 expectedChildPages,
               );
-              expect(networkBlocked).toBe(true);
+              expect(pendingServerUnblock).toBe(server!.serverUrl);
             },
             faultsAfter: [
               { kind: "reconnect", target: "serverNetwork" },
@@ -745,7 +776,9 @@ describe("BandBinder cross-topology recovery", () => {
               );
               await waitForCondition(
                 async () =>
-                  managerChildPageWindowSubscriptionSnapshots.some(isExpectedChildPageWindow),
+                  isExpectedChildPageWindow(
+                    managerChildPageWindowSubscriptionSnapshots.at(-1) ?? [],
+                  ),
                 15_000,
                 "rehydrated manager subscription starts with the exact bounded window",
               );
@@ -814,9 +847,8 @@ describe("BandBinder cross-topology recovery", () => {
               ]);
               await waitForCondition(
                 async () =>
-                  managerChildPageWindowSubscriptionSnapshots
-                    .slice(revocationSnapshotCursor)
-                    .some((rows) => rows.length === 0),
+                  managerChildPageWindowSubscriptionSnapshots.length > revocationSnapshotCursor &&
+                  managerChildPageWindowSubscriptionSnapshots.at(-1)?.length === 0,
                 15_000,
                 "revocation publishes an empty bounded child-page subscription to the manager",
               );
@@ -825,10 +857,10 @@ describe("BandBinder cross-topology recovery", () => {
         ],
         cleanup: async () => {
           const errors: Error[] = [];
-          if (networkBlocked && server) {
+          if (pendingServerUnblock) {
             try {
-              await unblockJazzServerNetwork(server.serverUrl);
-              networkBlocked = false;
+              await unblockJazzServerNetwork(pendingServerUnblock);
+              pendingServerUnblock = undefined;
             } catch (error) {
               errors.push(new Error("failed to unblock BandBinder test network", { cause: error }));
             }
