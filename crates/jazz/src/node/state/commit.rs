@@ -1302,14 +1302,15 @@ where
         .await
     }
 
-    /// Seal a high-level partial-value update after verifying that every
-    /// indirect descriptor is either the freshly staged target or an exact
-    /// descriptor inherited from the current physical row.
-    pub(crate) async fn seal_large_value_update(
+    /// Seal several independently staged large values into one ordinary row
+    /// commit. This is the atomic publication boundary used by the public
+    /// partial-update DSL: every indirect descriptor in the patch must be one
+    /// of the freshly staged targets, and all remaining descriptors must be
+    /// inherited verbatim from the observed row.
+    pub(crate) async fn seal_large_value_updates(
         &mut self,
         mut commit: MergeableCommit,
-        target_column: &str,
-        staged: groove::large_values::StagedLargeValue,
+        staged: &[(String, groove::large_values::StagedLargeValue)],
         schema_version: SchemaVersionId,
     ) -> Result<MergeableCommit, Error> {
         let inherited = self
@@ -1327,12 +1328,17 @@ where
             if !value_contains_indirect_descriptor(value) {
                 continue;
             }
-            let valid = if column == target_column {
-                let mut descriptors = Vec::new();
-                collect_indirect_descriptors(value, &mut descriptors);
-                descriptors.as_slice() == [staged.value_ref.clone()]
-            } else {
-                inherited.get(column) == Some(value)
+            let staged_value = staged
+                .iter()
+                .find(|(target, _)| target == column)
+                .map(|(_, staged)| &staged.value_ref);
+            let valid = match staged_value {
+                Some(target) => {
+                    let mut descriptors = Vec::new();
+                    collect_indirect_descriptors(value, &mut descriptors);
+                    descriptors.as_slice() == [target.clone()]
+                }
+                None => inherited.get(column) == Some(value),
             };
             if !valid {
                 return Err(Error::InvalidMergeableCommit(
@@ -1341,7 +1347,9 @@ where
             }
             commit.prepared_large_columns.insert(column.clone());
         }
-        commit.staged_large_values.push(staged.id);
+        commit
+            .staged_large_values
+            .extend(staged.iter().map(|(_, value)| value.id));
         Ok(commit)
     }
 
