@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import test from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -185,7 +193,10 @@ test("recovery refuses external stage or backup symlinks", () => {
         markers(external),
         wasmPackageFiles.map((file) => `external:${file}`),
       );
-      rmSync(link, { force: true });
+      // Node 24 treats a symlink-to-directory as a directory for rmSync unless
+      // recursive deletion is requested. Unlink the link itself so cleanup can
+      // never traverse the external directory this receipt protects.
+      unlinkSync(link);
       rmSync(join(wasmRoot, ".pkg-transaction.json"), { force: true });
       rmSync(stage.path, { recursive: true, force: true });
     }
