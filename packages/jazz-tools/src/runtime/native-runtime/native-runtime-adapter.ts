@@ -3573,6 +3573,9 @@ function coerceQueryPredicate(
       ),
     };
   }
+  if (filter.op === "Not") {
+    return { op: "Not", predicate: coerceQueryPredicate(table, filter.predicate, schema) };
+  }
   if (filter.op === "In") {
     const columnType =
       filter.column === "id"
@@ -3649,6 +3652,9 @@ function coerceEnumPayloadPredicate(
       ...predicate,
       predicates: predicate.predicates.map((child) => coerceEnumPayloadPredicate(child, fields)),
     };
+  }
+  if (predicate.op === "Not") {
+    return { ...predicate, predicate: coerceEnumPayloadPredicate(predicate.predicate, fields) };
   }
   if (predicate.op === "EnumMatch") {
     throw new Error("payload enum matches cannot be nested");
@@ -3800,6 +3806,8 @@ function readArraySubqueryFilters(
 }
 
 function arraySubqueryFilterToPredicates(value: unknown): QueryPredicate[] | null {
+  const canonical = predicateToFilterTree(value);
+  if (canonical) return [canonical];
   if (!value || typeof value !== "object") return null;
   const record = value as Record<string, unknown>;
   for (const [key, op] of [
@@ -3965,6 +3973,11 @@ function readFlatConditions(conditions: unknown): QueryPredicate[] | null {
   const predicates: QueryPredicate[] = [];
   for (const condition of conditions) {
     if (!condition || typeof condition !== "object") return null;
+    const canonical = predicateToFilterTree(condition);
+    if (canonical) {
+      predicates.push(canonical);
+      continue;
+    }
     const record = condition as { column?: unknown; op?: unknown; value?: unknown };
     if (typeof record.column !== "string" || typeof record.op !== "string") return null;
     const column = record.column.split(".").at(-1) ?? record.column;
@@ -4032,7 +4045,10 @@ function predicateToFilters(predicate: unknown): QueryPredicate[] | null {
     return filters;
   }
   if (Array.isArray(record.Or)) return null;
-  if (record.Not) return null;
+  if (record.Not) {
+    const predicate = predicateToFilterTree(record.Not);
+    return predicate ? [{ op: "Not", predicate }] : null;
+  }
   const enumMatch = record.EnumMatch;
   if (enumMatch && typeof enumMatch === "object") {
     const match = enumMatch as { column?: unknown; case?: unknown; payload?: unknown };
@@ -4092,7 +4108,10 @@ function predicateToFilterTree(predicate: unknown): QueryPredicate | null {
       ? { op, predicates }
       : null;
   }
-  if (record.Not) return null;
+  if (record.Not) {
+    const predicate = predicateToFilterTree(record.Not);
+    return predicate ? { op: "Not", predicate } : null;
+  }
   const filters = predicateToFilters(predicate);
   return filters?.length === 1 ? filters[0]! : null;
 }
