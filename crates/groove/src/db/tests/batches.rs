@@ -2393,7 +2393,7 @@ async fn persistence_receipts_cannot_settle_another_database() {
         "albums",
         vec![Value::U64(2), Value::String("second".to_owned())],
     );
-    let _second_applied = second.apply_batch(second_batch).await.unwrap();
+    let second_applied = second.apply_batch(second_batch).await.unwrap();
 
     let foreign_persistence = first_applied.persist().await;
     assert!(matches!(
@@ -2402,6 +2402,16 @@ async fn persistence_receipts_cannot_settle_another_database() {
     ));
     assert_eq!(first.durable_publication_frontier(), None);
     assert_eq!(second.durable_publication_frontier(), None);
+
+    let second_persistence = second_applied.persist().await;
+    assert_eq!(
+        second.finish_persistence(second_persistence).unwrap(),
+        PublicationId(1)
+    );
+    assert_eq!(
+        second.durable_publication_frontier(),
+        Some(PublicationId(1))
+    );
     assert_eq!(
         second
             .query_graph(GraphBuilder::table("albums"))
