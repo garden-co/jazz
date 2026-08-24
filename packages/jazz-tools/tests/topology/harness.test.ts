@@ -254,20 +254,17 @@ describe("shared example topology harness", () => {
 
   it("serializes concurrent intercepts and permits a delivery to enqueue a follow-up", async () => {
     const scheduler = new TopologyEnvelopeScheduler(37);
+    let signalFirstEntered!: () => void;
+    const firstEntered = new Promise<void>((resolve) => (signalFirstEntered = resolve));
     let releaseFirst!: () => void;
+    const firstReleased = new Promise<void>((resolve) => (releaseFirst = resolve));
     const delivered: string[] = [];
-    const first = scheduler.intercept(
-      { from: "a", to: "b", label: "first" },
-      "first",
-      () =>
-        new Promise<void>((resolve) => {
-          releaseFirst = () => {
-            delivered.push("first");
-            resolve();
-          };
-        }),
-    );
-    await Promise.resolve();
+    const first = scheduler.intercept({ from: "a", to: "b", label: "first" }, "first", async () => {
+      signalFirstEntered();
+      await firstReleased;
+      delivered.push("first");
+    });
+    await firstEntered;
     const second = scheduler.intercept(
       { from: "a", to: "b", label: "second" },
       "second",
@@ -275,7 +272,7 @@ describe("shared example topology harness", () => {
     );
     let secondSettled = false;
     void second.then(() => (secondSettled = true));
-    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(delivered).toEqual([]);
     expect(secondSettled).toBe(false);
     releaseFirst();

@@ -26,8 +26,10 @@ Arm faults before the next intercepted envelope with
 `dropNextThenRetry(ticks)`. `partition(a, b)` holds traffic in both directions;
 `heal(a, b)` releases ready traffic. `advance(ticks)` moves only virtual time,
 so tests never need wall-clock sleeps to reproduce a schedule. Delivery order,
-attempt number, virtual tick, endpoint names, labels, and every fault action
-are retained in the payload-free scheduler receipt. Pass each scheduler through
+attempt number, virtual tick, endpoint names, labels, and fault actions are
+retained in a bounded recent-history window in the payload-free scheduler
+receipt. `activitiesTruncated` reports how many older activities were evicted.
+Pass each scheduler through
 `envelopeSchedulers` on `runTopologyScenario`; the runner closes it after app
 cleanup and records discarded held envelopes, preventing a test fault from
 leaking into another scenario. Delivery callbacks receive an `AbortSignal` and
@@ -45,12 +47,13 @@ Envelope descriptors are deliberately narrow, immutable snapshots of
 `{ from, to, label? }`: endpoint names and labels are bounded, unknown metadata
 and NUL-containing endpoint names are rejected, and payloads are never recorded.
 Only one fault kind can be armed for an envelope (multiple duplicate copies are
-the sole composable case). The scheduler also bounds copies, virtual ticks, and
-outstanding work, partition links, and receipt activities to keep a bad randomized soak schedule finite. A logical
-envelope id remains stable across copies/retry while each actual delivery has a
-separate sequence and attempt; retry is recorded when the retry is delivered,
-not merely scheduled. A callback failure fail-stops the scheduler and records
-discarded remaining deliveries deterministically.
+the sole composable case). The scheduler also bounds copies, virtual ticks,
+outstanding work, partition links, and receipt activities to keep a bad
+randomized soak schedule finite. A logical envelope id remains stable across
+copies/retry while each actual delivery has a separate sequence and attempt;
+retry is recorded when the retry is delivered, not merely scheduled. A callback
+failure fail-stops the scheduler and records discarded remaining deliveries
+deterministically.
 
 The scheduler deliberately models message delivery only. Connection lifecycle,
 real transport retry policy, and application assertions remain app-owned. An
