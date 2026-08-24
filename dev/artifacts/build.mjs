@@ -65,15 +65,28 @@ function acquireWasmLease() {
     }
   }
 }
+function journalChild(packageDir, name, prefix) {
+  if (typeof name !== "string" || name.includes("/") || name.includes("\\") || !name.startsWith(prefix))
+    throw new Error(`WASM package transaction journal has unsafe ${prefix} path`);
+  const path = resolve(packageDir, name);
+  if (resolve(path, "..") !== resolve(packageDir))
+    throw new Error(`WASM package transaction journal ${prefix} is outside its package directory`);
+  return path;
+}
 /** Recover an interrupted old→new directory swap. Must run while holding the clone lock. */
 export function recoverWasmPackageTransaction(packageDir) {
   const journal = readJournal(journalPath(packageDir));
   if (!journal) return;
   const pkg = join(packageDir, "pkg");
-  const stage = join(packageDir, journal.stage);
-  const backup = journal.backup && join(packageDir, journal.backup);
+  const stage = journalChild(packageDir, journal.stage, ".pkg-stage-");
+  const backup = journal.backup ? journalChild(packageDir, journal.backup, ".pkg-backup-") : undefined;
   try {
     if (existsSync(pkg) && matches(pkg, journal.hashes)) { if (backup && existsSync(backup)) rmSync(backup, { recursive: true, force: true }); }
+    // `prepared` is journaled before the first rename. A crash here leaves the
+    // complete prior pkg in place and no backup; do not mistake it for loss.
+    else if (journal.state === "prepared" && journal.hadCurrent && existsSync(pkg) && (!backup || !existsSync(backup))) {
+      // Retain old pkg; only the uncommitted stage/journal are discarded below.
+    }
     else if (backup && existsSync(backup)) { if (existsSync(pkg)) rmSync(pkg, { recursive: true, force: true }); renameSync(backup, pkg); }
     else if (journal.hadCurrent) throw new Error("old package is absent and no recoverable backup remains");
     if (existsSync(stage)) rmSync(stage, { recursive: true, force: true });

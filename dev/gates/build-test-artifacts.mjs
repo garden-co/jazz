@@ -177,8 +177,11 @@ export function artifactBuildLease(lock) {
 
 /** Reject forged/nested leases instead of silently racing the aggregate builder. */
 export function verifyArtifactBuildLease({ token, lockPath }) {
+  const expectedPath = artifactLockPath(root);
+  if (!lockPath || resolve(lockPath) !== resolve(expectedPath))
+    throw new Error("test-artifacts: inherited artifact lease is for a different clone lock.");
   const owner = readLockOwner(lockPath);
-  if (!owner || owner.token !== token)
+  if (!owner || owner.token !== token || !ownerIsAlive(owner))
     throw new Error("test-artifacts: inherited artifact lease is missing or no longer owned.");
   return { token, lockPath };
 }
@@ -377,14 +380,7 @@ export async function buildTestArtifacts(run = command, scope = createBuildScope
     await scope.drain();
     throw firstBuildError ?? error;
   }
-  // The parallel CLI Cargo process can overlap the WASM build's first receipt.
-  // Seal the completed (or signed-cache-restored) artifact against the stable
-  // post-build checkout before any consumer uses it.
-  await guardedRun(
-    "node",
-    ["dev/artifacts/provenance.mjs", "write", "wasm", "fast"],
-    "seal fast WASM provenance",
-  );
+  // The atomic WASM producer seals its matching manifest before publication.
   await guardedRun(
     "pnpm",
     ["exec", "turbo", "run", "build", "--filter=jazz-tools", "--only"],
