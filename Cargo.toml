@@ -30,6 +30,7 @@ members = [
   "examples/music-agent/benchmarks",
   "examples/poster-shop/benchmarks",
   "examples/jamazon-warehouse/benchmarks",
+  "examples/band-binder/benchmarks",
   "examples/benchmarks/smoke",
   "examples/benchmarks/w1",
   "dev/benchmarks/storage/bench-core",
