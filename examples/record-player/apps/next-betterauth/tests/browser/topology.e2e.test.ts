@@ -249,26 +249,50 @@ describe("RecordPlayer authenticated playlist topology", () => {
       })
       .wait({ tier: "edge" });
 
-    await expect(
-      Promise.all([
-        waitForQuery(
-          recipient,
-          relationalRecipientApp.invitations.where({ subject: "record-player-relation-recipient" }),
-          (rows) => rows.length === 1 && rows[0]?.id === invite.id,
-          "external-JWT recipient receives scalar grant with correlated owner branch",
-          15_000,
-          "edge",
-        ),
-        waitForQuery(
-          secondRecipient,
-          relationalRecipientApp.invitations.where({ subject: "record-player-relation-listener" }),
-          (rows) => rows.length === 1 && rows[0]?.id === secondInvite.id,
-          "second external-JWT recipient receives scalar grant with correlated owner branch",
-          15_000,
-          "edge",
-        ),
-      ]),
-    ).resolves.toHaveLength(2);
+    const receipt = await runTopologyScenario(
+      {
+        id: "record-player.relational-recipient-control",
+        topology: ["browser", "edge", "core"],
+        seed: 1,
+        phaseTimeoutMs: 25_000,
+        faultTimeoutMs: 15_000,
+        targets: {},
+        replay: "pnpm --filter record-player-next-betterauth test:browser -- topology.e2e.test.ts",
+        phases: [
+          {
+            name: "recipients observe pending scalar grants",
+            run: async () => {
+              await expect(
+                Promise.all([
+                  waitForQuery(
+                    recipient,
+                    relationalRecipientApp.invitations.where({
+                      subject: "record-player-relation-recipient",
+                    }),
+                    (rows) => rows.length === 1 && rows[0]?.id === invite.id,
+                    "external-JWT recipient receives scalar grant with correlated owner branch",
+                    15_000,
+                    "edge",
+                  ),
+                  waitForQuery(
+                    secondRecipient,
+                    relationalRecipientApp.invitations.where({
+                      subject: "record-player-relation-listener",
+                    }),
+                    (rows) => rows.length === 1 && rows[0]?.id === secondInvite.id,
+                    "second external-JWT recipient receives scalar grant with correlated owner branch",
+                    15_000,
+                    "edge",
+                  ),
+                ]),
+              ).resolves.toHaveLength(2);
+            },
+          },
+        ],
+      },
+      browserTopologyReporter,
+    );
+    expect(receipt.status).toBe("passed");
   }, 30_000);
 
   it("rejects forged acceptance and converges two offline playlist editors exactly", async () => {
