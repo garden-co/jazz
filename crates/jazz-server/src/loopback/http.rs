@@ -32,6 +32,8 @@ use sha2::{Digest, Sha256};
 
 use jazz::serving::{InMemoryServerShell, InMemoryServerShellConfig, MetricsSnapshot, ShellError};
 
+const MAX_LOOPBACK_HTTP_REQUEST_BODY_BYTES: usize = 8 << 20;
+
 /// Result type returned by loopback HTTP helpers.
 pub type LoopbackHttpResult<T> = std::result::Result<T, LoopbackHttpError>;
 
@@ -373,9 +375,19 @@ fn read_request(stream: &mut TcpStream) -> std::result::Result<HttpRequest, Stri
         .transpose()
         .map_err(|_| "invalid content-length".to_owned())?
         .unwrap_or(0);
+    if content_length > MAX_LOOPBACK_HTTP_REQUEST_BODY_BYTES {
+        return Err(format!(
+            "request body too large: {content_length} bytes exceeds {MAX_LOOPBACK_HTTP_REQUEST_BODY_BYTES}"
+        ));
+    }
 
-    let body_start = header_end + 4;
-    while bytes.len() < body_start + content_length {
+    let body_start = header_end
+        .checked_add(4)
+        .ok_or_else(|| "request body offset overflow".to_owned())?;
+    let body_end = body_start
+        .checked_add(content_length)
+        .ok_or_else(|| "request body length overflow".to_owned())?;
+    while bytes.len() < body_end {
         let read = stream
             .read(&mut buffer)
             .map_err(|error| error.to_string())?;
@@ -389,7 +401,7 @@ fn read_request(stream: &mut TcpStream) -> std::result::Result<HttpRequest, Stri
         method,
         path,
         headers,
-        body: bytes[body_start..body_start + content_length].to_vec(),
+        body: bytes[body_start..body_end].to_vec(),
     })
 }
 
@@ -1008,27 +1020,27 @@ mod tests {
 
     #[test]
     fn request_parser_rejects_oversized_content_length_before_reading_body() {
-        const EXPECTED_MAX_REQUEST_BODY_BYTES: usize = 8 << 20;
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
-        let address = listener.local_addr().expect("listener address");
-        let sender = thread::spawn(move || {
-            let mut stream = TcpStream::connect(address).expect("connect test client");
-            write!(
-                stream,
-                "POST /sessions/1/frames HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
-                EXPECTED_MAX_REQUEST_BODY_BYTES + 1
-            )
-            .expect("write oversized request headers");
-            stream
-                .shutdown(std::net::Shutdown::Write)
-                .expect("finish test request");
-        });
-        let (mut stream, _) = listener.accept().expect("accept test connection");
+        for content_length in [MAX_LOOPBACK_HTTP_REQUEST_BODY_BYTES + 1, usize::MAX] {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+            let address = listener.local_addr().expect("listener address");
+            let sender = thread::spawn(move || {
+                let mut stream = TcpStream::connect(address).expect("connect test client");
+                write!(
+                    stream,
+                    "POST /sessions/1/frames HTTP/1.1\r\nContent-Length: {content_length}\r\n\r\n"
+                )
+                .expect("write oversized request headers");
+                stream
+                    .shutdown(std::net::Shutdown::Write)
+                    .expect("finish test request");
+            });
+            let (mut stream, _) = listener.accept().expect("accept test connection");
 
-        let error = read_request(&mut stream).expect_err("oversized request must be rejected");
+            let error = read_request(&mut stream).expect_err("oversized request must be rejected");
 
-        sender.join().expect("test client exits");
-        assert!(error.contains("body too large"), "{error}");
+            sender.join().expect("test client exits");
+            assert!(error.contains("body too large"), "{error}");
+        }
     }
 
     fn response_status(response: &[u8]) -> u16 {
