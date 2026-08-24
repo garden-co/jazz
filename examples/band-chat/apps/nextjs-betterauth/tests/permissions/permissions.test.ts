@@ -22,8 +22,9 @@ describe("BandChat admission and authorship boundary", () => {
   it("persists owner bootstrap/invite/send and rejects self-admission and forged authorship at edge", async () => {
     const ownerId = "019d4349-24b0-72a9-ae86-8ed24a7e3a90";
     const guestId = "019d4349-24b0-72a9-ae86-8ed24a7e3a91";
-    const owner = testApp.as({ user_id: ownerId, claims: {}, authMode: "external" });
-    const guest = testApp.as({ user_id: guestId, claims: {}, authMode: "external" });
+    const issuer = "https://bandchat.example.test";
+    const owner = testApp.as({ issuer, user_id: ownerId, claims: {}, authMode: "external" });
+    const guest = testApp.as({ issuer, user_id: guestId, claims: {}, authMode: "external" });
     const ownerProfile = await testApp.seed((db) =>
       db.insert(app.profiles, { userId: ownerId, displayName: "Owner" }),
     );
