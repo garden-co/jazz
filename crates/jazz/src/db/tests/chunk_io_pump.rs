@@ -175,14 +175,18 @@ fn retryable_chunk_response_preserves_retry_delay_and_allows_a_later_fulfillment
             .route_incoming(SyncMessage::ChunkResponseBatch(ChunkResponseBatch {
                 responses: vec![ChunkResponseEntry {
                     request_id: first_id,
-                    result: ChunkResponse::Retryable { retry_after_ms: 25 },
+                    result: ChunkResponse::Retryable {
+                        retry_after_ms: 10_000,
+                    },
                 }],
             }))
             .await
             .unwrap();
         assert_eq!(
             first.await,
-            Err(groove::chunks::ChunkError::Retryable { retry_after_ms: 25 }),
+            Err(groove::chunks::ChunkError::Retryable {
+                retry_after_ms: 10_000
+            }),
             "the binding must distinguish a retry instruction from permanent unavailability"
         );
 

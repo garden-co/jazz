@@ -2979,10 +2979,7 @@ fn subscription_stream_to_js(
                         // ReadableStream pull without enqueueing does not cause a
                         // new pull at HWM 0, so wait for a real delayed wake before
                         // retrying rather than returning an empty chunk or spinning.
-                        let delay_ms = retry_delay_ms(retry_attempt).max(
-                            retry_after_ms
-                                .clamp(INITIAL_SUBSCRIPTION_RETRY_MS, MAX_SUBSCRIPTION_RETRY_MS),
-                        );
+                        let delay_ms = subscription_retry_delay_ms(retry_attempt, retry_after_ms);
                         if let Err(error) = wait_for_subscription_retry(delay_ms).await {
                             return Some((Err(error), (db, source, layouts)));
                         }
@@ -3007,10 +3004,17 @@ fn subscription_stream_to_js(
 const INITIAL_SUBSCRIPTION_RETRY_MS: u32 = 25;
 const MAX_SUBSCRIPTION_RETRY_MS: u32 = 1_000;
 
-fn retry_delay_ms(attempt: u8) -> u32 {
+fn local_retry_delay_ms(attempt: u8) -> u32 {
     INITIAL_SUBSCRIPTION_RETRY_MS
         .saturating_mul(1_u32 << attempt.min(6))
         .min(MAX_SUBSCRIPTION_RETRY_MS)
+}
+
+/// The peer's retry hint is a minimum, not a suggestion to cap. Local backoff
+/// only protects against immediate repeated failures when the peer supplies a
+/// shorter delay (or zero).
+fn subscription_retry_delay_ms(attempt: u8, peer_retry_after_ms: u32) -> u32 {
+    local_retry_delay_ms(attempt).max(peer_retry_after_ms)
 }
 
 async fn wait_for_subscription_retry(delay_ms: u32) -> Result<(), JsValue> {
@@ -3302,10 +3306,23 @@ mod dynamic_schema_view_tests {
 
     #[test]
     fn subscription_chunk_retry_uses_a_bounded_nonzero_backoff() {
-        assert_eq!(retry_delay_ms(0), 25);
-        assert_eq!(retry_delay_ms(1), 50);
-        assert_eq!(retry_delay_ms(5), 800);
-        assert_eq!(retry_delay_ms(u8::MAX), 1_000);
+        assert_eq!(local_retry_delay_ms(0), 25);
+        assert_eq!(local_retry_delay_ms(1), 50);
+        assert_eq!(local_retry_delay_ms(5), 800);
+        assert_eq!(local_retry_delay_ms(u8::MAX), 1_000);
+        assert_eq!(
+            subscription_retry_delay_ms(0, 10_000),
+            10_000,
+            "a peer retry minimum must never be capped downward"
+        );
+    }
+
+    #[test]
+    fn canceling_a_pending_subscription_retry_drops_it_without_waiting() {
+        let (abort, registration) = AbortHandle::new_pair();
+        let wait = Abortable::new(futures_util::future::pending::<()>(), registration);
+        abort.abort();
+        assert!(matches!(block_on(wait), Err(_)));
     }
 
     #[cfg(target_arch = "wasm32")]
