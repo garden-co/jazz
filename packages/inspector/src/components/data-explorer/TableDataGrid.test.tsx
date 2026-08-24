@@ -893,6 +893,25 @@ describe("TableDataGrid", () => {
     expect(screen.getByRole("button", { name: "Save changes" })).not.toBeNull();
   });
 
+  it("admits only one same-table save before React disables the button", async () => {
+    let resolveSave: (() => void) | undefined;
+    mockUpdateWait.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    renderGrid();
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.change(screen.getByLabelText("Edit title"), { target: { value: "draft" } });
+    fireEvent.blur(screen.getByLabelText("Edit title"));
+    const save = screen.getByRole("button", { name: "Save changes" });
+    fireEvent.click(save);
+    fireEvent.click(save);
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(1));
+    await act(async () => resolveSave?.());
+  });
+
   it("keeps a failed save error scoped to its originating table after navigation", async () => {
     let rejectSave: ((error: Error) => void) | undefined;
     mockUpdateWait.mockImplementationOnce(

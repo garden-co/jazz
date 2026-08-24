@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { NavLink, Outlet, useNavigate, useOutletContext, useParams } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
@@ -79,10 +79,27 @@ export function DataExplorer() {
   const [mutationStateByTable, setMutationStateByTable] = useState<
     Record<string, TableMutationState>
   >({});
+  const activeSaveTokens = useRef(new Map<string, symbol>());
   const outletContext: {
     mutationStateByTable: Record<string, TableMutationState>;
     setMutationStateByTable: Dispatch<SetStateAction<Record<string, TableMutationState>>>;
-  } = { mutationStateByTable, setMutationStateByTable };
+    beginSave: (table: string) => symbol | null;
+    finishSave: (table: string, token: symbol) => boolean;
+  } = {
+    mutationStateByTable,
+    setMutationStateByTable,
+    beginSave: (table) => {
+      if (activeSaveTokens.current.has(table)) return null;
+      const token = Symbol(table);
+      activeSaveTokens.current.set(table, token);
+      return token;
+    },
+    finishSave: (table, token) => {
+      if (activeSaveTokens.current.get(table) !== token) return false;
+      activeSaveTokens.current.delete(table);
+      return true;
+    },
+  };
 
   return (
     <Group

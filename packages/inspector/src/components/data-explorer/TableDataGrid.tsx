@@ -758,14 +758,32 @@ export function TableDataGrid() {
   const explorerContext = useOutletContext<{
     mutationStateByTable: Record<string, TableMutationState>;
     setMutationStateByTable: Dispatch<SetStateAction<Record<string, TableMutationState>>>;
+    beginSave: (table: string) => symbol | null;
+    finishSave: (table: string, token: symbol) => boolean;
   } | null>();
   const [fallbackMutationStateByTable, setFallbackMutationStateByTable] = useState<
     Record<string, TableMutationState>
   >({});
+  const fallbackSaveTokens = useRef(new Map<string, symbol>());
   const mutationStateByTable =
     explorerContext?.mutationStateByTable ?? fallbackMutationStateByTable;
   const setMutationStateByTable =
     explorerContext?.setMutationStateByTable ?? setFallbackMutationStateByTable;
+  const beginSave =
+    explorerContext?.beginSave ??
+    ((targetTable: string) => {
+      if (fallbackSaveTokens.current.has(targetTable)) return null;
+      const token = Symbol(targetTable);
+      fallbackSaveTokens.current.set(targetTable, token);
+      return token;
+    });
+  const finishSave =
+    explorerContext?.finishSave ??
+    ((targetTable: string, token: symbol) => {
+      if (fallbackSaveTokens.current.get(targetTable) !== token) return false;
+      fallbackSaveTokens.current.delete(targetTable);
+      return true;
+    });
   const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(new Set());
   const mutationState = mutationStateByTable[table] ?? createTableMutationState();
   const updateCurrentTableMutationState = (update: SetStateAction<TableMutationState>) => {
@@ -1058,6 +1076,8 @@ export function TableDataGrid() {
     }
 
     const mutationTable = table;
+    const saveToken = beginSave(mutationTable);
+    if (!saveToken) return;
     const submittedQueuedEdits = queuedEdits;
     const submittedStagedInserts = stagedInserts;
     const submittedQueuedDeletes = queuedDeletes;
@@ -1174,6 +1194,7 @@ export function TableDataGrid() {
           isQueuedSavePending: false,
         },
       }));
+      finishSave(mutationTable, saveToken);
     }
   };
 
