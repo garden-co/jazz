@@ -1271,7 +1271,29 @@ fn lower_linear_plan_steps_cached(
                         }
                     }
                     if *mode == JoinMode::Inner && !omits_public_occurrence_carriers(request) {
-                        if let Some(right_source_id) = right.root_source() {
+                        // A union's root source is one of its arms, but its
+                        // public occurrence is the `(arm, row)` pair. Check
+                        // the relation shape before inspecting that source so
+                        // an aliased common arm cannot make us drop the union
+                        // carrier that result-membership terminals require.
+                        if matches!(right.as_ref(), RelationInputPlan::Union(_)) {
+                            if let Some((arm_field, row_field)) =
+                                &lowered_right.union_occurrence_carrier
+                            {
+                                let arm_output = format!("__root_join_arm_{step_index}");
+                                let row_output = format!("__root_join_row_{step_index}");
+                                projection.push(ProjectField::renamed(
+                                    right_field(arm_field),
+                                    arm_output.clone(),
+                                ));
+                                projection.push(ProjectField::renamed(
+                                    right_field(row_field),
+                                    row_output.clone(),
+                                ));
+                                occurrence_fields.insert(arm_output);
+                                occurrence_fields.insert(row_output);
+                            }
+                        } else if let Some(right_source_id) = right.root_source() {
                             let right_source = resolved_sources.get(right_source_id).ok_or_else(|| {
                                 UnsupportedReason::Operator(format!(
                                     "inner join occurrence source {right_source_id:?} was not resolved"
@@ -1294,21 +1316,6 @@ fn lower_linear_plan_steps_cached(
                                 ));
                                 occurrence_fields.insert(output);
                             }
-                        } else if let Some((arm_field, row_field)) =
-                            &lowered_right.union_occurrence_carrier
-                        {
-                            let arm_output = format!("__root_join_arm_{step_index}");
-                            let row_output = format!("__root_join_row_{step_index}");
-                            projection.push(ProjectField::renamed(
-                                right_field(arm_field),
-                                arm_output.clone(),
-                            ));
-                            projection.push(ProjectField::renamed(
-                                right_field(row_field),
-                                row_output.clone(),
-                            ));
-                            occurrence_fields.insert(arm_output);
-                            occurrence_fields.insert(row_output);
                         }
                     }
                     graph = graph.project_fields(projection);
