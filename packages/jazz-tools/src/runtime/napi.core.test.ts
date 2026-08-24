@@ -81,6 +81,21 @@ const BYTEA_SCHEMA: WasmSchema = {
   },
 };
 
+it("round-trips legacy and canonical authors through the NAPI open-config codec", async () => {
+  const { NapiDb } = await loadNapiModule();
+  const authors = [
+    deterministicBytes("napi-open-config:legacy-author"),
+    new TextEncoder().encode('["https://issuer.example","canonical-author"]'),
+  ];
+  for (const author of authors) {
+    const db = NapiDb.openMemory(
+      encodeSchema(TEST_SCHEMA),
+      openConfig(deterministicBytes("napi-open-config:node"), author, 1, true),
+    );
+    db.close?.();
+  }
+});
+
 const SIGNED_DEFAULT_CASES: Array<{
   name: string;
   columnType: ColumnType;
