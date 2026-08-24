@@ -294,6 +294,214 @@ describe("BandChat cross-topology recovery", () => {
     ]);
   }, 75_000);
 
+  /**
+   * A member's bounded, projected chat window remains bounded across a network
+   * handoff and browser restart, while revoking that membership removes every
+   * previously delivered message.
+   *
+   * owner ──messages──► core ──window──► member
+   *   │                    │                 │
+   *   ├──remove member────►├──revoke─────────┘
+   *   └──membership delete─┘
+   */
+  it("rehydrates a bounded message projection after reconnect and removes it on revocation", async () => {
+    const seed = Number(process.env.JAZZ_EXAMPLE_TOPOLOGY_SEED ?? 41);
+    let server: Awaited<ReturnType<typeof getJazzServerInfo>> | undefined;
+    let owner: Db | undefined;
+    let peer: Db | undefined;
+    let room: { id: string } | undefined;
+    let peerMembership: { id: string } | undefined;
+    let ownerProfile: { id: string } | undefined;
+    const peerDbName = uniqueDbName("band-chat-window-restart");
+    const projectedWindow = () =>
+      app.messages
+        .where({ roomId: room!.id })
+        .select("id", "text", "$createdAt")
+        .orderBy("$createdAt", "asc")
+        .limit(2);
+    const receipt = await runTopologyScenario(
+      {
+        id: "band-chat.topology.bounded-window-revocation",
+        topology: ["browser", "core"],
+        seed: Number.isSafeInteger(seed) ? seed : 41,
+        phaseTimeoutMs: 25_000,
+        faultTimeoutMs: 15_000,
+        replay: `JAZZ_EXAMPLE_TOPOLOGY_SEED=${seed} pnpm --dir examples/band-chat/apps/nextjs-betterauth test:browser:focused -- tests/browser/topology.e2e.test.tsx`,
+        targets: {
+          member: {
+            disconnect: async () => peer!.disconnect(),
+            reconnect: async () => peer!.reconnect(),
+          },
+        },
+        phases: [
+          {
+            name: "trusted member bootstrap",
+            run: async () => {
+              server = await getJazzServerInfo(uniqueDbName("band-chat-window"));
+              await deploy({
+                appId: server.appId,
+                serverUrl: server.serverUrl,
+                adminSecret: server.adminSecret,
+                schema: app,
+                permissions,
+              });
+              const [ownerToken, peerToken] = await Promise.all([
+                getJazzServerJwtForUser(bandChatFixtureUsers.owner, undefined, server.appId),
+                getJazzServerJwtForUser(bandChatFixtureUsers.peer, undefined, server.appId),
+              ]);
+              owner = await openClient(server, "window-owner", ownerToken);
+              peer = await openClient(server, "window-peer", peerToken, peerDbName);
+              await bandChatBrowserCommands().jazzBandChatBootstrapProfile(
+                server,
+                bandChatFixtureUsers.owner,
+                "Owner",
+              );
+              await bandChatBrowserCommands().jazzBandChatBootstrapProfile(
+                server,
+                bandChatFixtureUsers.peer,
+                "Peer",
+              );
+              ownerProfile = await owner.one(
+                app.profiles.where({ userId: bandChatFixtureUsers.owner }),
+                { tier: "edge" },
+              );
+              if (!ownerProfile) throw new Error("trusted owner profile did not persist");
+              const roomInsert = owner.insert(app.rooms, { name: "bounded window receipt" });
+              await roomInsert.wait({ tier: "edge" });
+              room = roomInsert.value;
+              await owner
+                .insert(app.roomMembers, {
+                  roomId: room.id,
+                  userId: bandChatFixtureUsers.owner,
+                })
+                .wait({ tier: "edge" });
+              const memberInsert = owner.insert(app.roomMembers, {
+                roomId: room.id,
+                userId: bandChatFixtureUsers.peer,
+              });
+              await memberInsert.wait({ tier: "edge" });
+              peerMembership = memberInsert.value;
+              await waitForQuery(
+                peer,
+                app.rooms.where({ id: room.id }),
+                (rows) => rows.length === 1,
+                "member receives room before querying its message window",
+                15_000,
+                "edge",
+              );
+            },
+          },
+          {
+            name: "bounded projected delivery",
+            run: async () => {
+              for (const [text, attachment] of [
+                ["first projected message", undefined],
+                ["second projected message", new Uint8Array([6, 7, 8])],
+                ["outside projected window", undefined],
+              ] as const) {
+                await owner!
+                  .insert(app.messages, {
+                    roomId: room!.id,
+                    senderId: ownerProfile!.id,
+                    text,
+                    ...(attachment ? { attachment, attachmentName: "projected-away.bin" } : {}),
+                  })
+                  .wait({ tier: "edge" });
+              }
+              const window = await waitForQuery(
+                peer!,
+                projectedWindow(),
+                (rows) => rows.length === 2,
+                "member receives exactly its bounded message window",
+                15_000,
+                "edge",
+              );
+              expect(window.map((message) => message.text)).toEqual([
+                "first projected message",
+                "second projected message",
+              ]);
+              expect(window.every((message) => !("attachment" in message))).toBe(true);
+            },
+            faultsAfter: [{ kind: "disconnect", target: "member" }],
+          },
+          {
+            name: "write while member is disconnected",
+            run: async () => {
+              await owner!
+                .insert(app.messages, {
+                  roomId: room!.id,
+                  senderId: ownerProfile!.id,
+                  text: "after member disconnect",
+                })
+                .wait({ tier: "edge" });
+            },
+            faultsAfter: [{ kind: "reconnect", target: "member" }],
+          },
+          {
+            name: "reconnect then restart and rehydrate",
+            run: async () => {
+              const recovered = await waitForQuery(
+                peer!,
+                projectedWindow(),
+                (rows) => rows.length === 2,
+                "member reconnects with its bounded projection intact",
+                15_000,
+                "edge",
+              );
+              expect(recovered.map((message) => message.text)).toEqual([
+                "first projected message",
+                "second projected message",
+              ]);
+              ctx.untrack(peer!);
+              await peer!.shutdown();
+              const peerToken = await getJazzServerJwtForUser(
+                bandChatFixtureUsers.peer,
+                undefined,
+                server!.appId,
+              );
+              peer = await openClient(server!, "window-peer-restarted", peerToken, peerDbName);
+              const rehydrated = await waitForQuery(
+                peer,
+                projectedWindow(),
+                (rows) => rows.length === 2,
+                "restarted member rehydrates its bounded projection",
+                15_000,
+                "edge",
+              );
+              expect(rehydrated.map((message) => message.text)).toEqual([
+                "first projected message",
+                "second projected message",
+              ]);
+            },
+          },
+          {
+            name: "membership revocation retracts delivered rows",
+            run: async () => {
+              await owner!.delete(app.roomMembers, peerMembership!.id).wait({ tier: "edge" });
+              const revoked = await waitForQuery(
+                peer!,
+                app.messages.where({ roomId: room!.id }),
+                (rows) => rows.length === 0,
+                "revoked member no longer reads prior room messages",
+                15_000,
+                "edge",
+              );
+              expect(revoked).toEqual([]);
+            },
+          },
+        ],
+        cleanup: async () => ctx.cleanup(),
+        cleanupTimeoutMs: 10_000,
+      },
+      browserTopologyReporter,
+    );
+    expect(receipt.status).toBe("passed");
+    expect(receipt.faults.map((fault) => [fault.kind, fault.status])).toEqual([
+      ["disconnect", "completed"],
+      ["reconnect", "completed"],
+    ]);
+  }, 90_000);
+
   // #1844 (reproducing PRs #1830 and #1838): do not convert this to an inline
   // fixture or skip it. It is the adopter-facing receipt for indirect large-value
   // materialization at a receiving browser through the shared server path.
@@ -357,13 +565,14 @@ async function openClient(
   server: { appId: string; serverUrl: string },
   label: string,
   jwtToken: string,
+  dbName = uniqueDbName(`band-chat-${label}`),
 ): Promise<Db> {
   return ctx.track(
     await createDb({
       appId: server.appId,
       serverUrl: server.serverUrl,
       jwtToken,
-      driver: { type: "persistent", dbName: uniqueDbName(`band-chat-${label}`) },
+      driver: { type: "persistent", dbName },
     }),
   );
 }
