@@ -95,6 +95,37 @@ describe("BrowserWorkerTransportPump", () => {
     pump.close();
   });
 
+  it("preserves FIFO across MessagePort batches while auxiliary routing is pending", async () => {
+    const auxiliary = Uint8Array.from([7, 7]);
+    const semantic = Uint8Array.from([8, 8]);
+    const sendWireFrame = vi.fn();
+    let releaseAuxiliaryRoute!: () => void;
+    const routeAuxiliaryWireFrame = vi.fn((frame: Uint8Array) => {
+      if (frame[0] === 7) {
+        return new Promise<undefined>((resolve) => (releaseAuxiliaryRoute = resolve));
+      }
+      return Promise.resolve(frame);
+    });
+    const peer = transport({ routeAuxiliaryWireFrame, sendWireFrame });
+    const pump = new BrowserWorkerTransportPump(runtime(peer), peer, () => undefined, vi.fn());
+
+    // A later port delivery must not overtake an earlier chunk response while
+    // the latter is still resolving through the dedicated auxiliary lane.
+    pump.receive([auxiliary]);
+    await vi.waitFor(() => expect(routeAuxiliaryWireFrame).toHaveBeenCalledWith(auxiliary));
+    pump.receive([semantic]);
+    await Promise.resolve();
+    expect(sendWireFrame).not.toHaveBeenCalled();
+
+    releaseAuxiliaryRoute();
+    await vi.waitFor(() => expect(sendWireFrame).toHaveBeenCalledWith(semantic));
+    expect(routeAuxiliaryWireFrame.mock.calls.map(([frame]) => frame)).toEqual([
+      auxiliary,
+      semantic,
+    ]);
+    pump.close();
+  });
+
   it("publishes an auxiliary chunk request while semantic evaluation is suspended", async () => {
     const request = Uint8Array.from([9, 4]);
     const sendFrames = vi.fn();
