@@ -2,6 +2,7 @@ import React from "react";
 import { act, render, type RenderResult } from "@testing-library/react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createClientConfigKey } from "../runtime/client-config-key.js";
 import type { DbConfig } from "../runtime/db.js";
 import { JazzProvider } from "./provider.js";
 import { makeFakeClient } from "./test-utils.js";
@@ -84,8 +85,8 @@ describe("JazzProvider client acquisition lifecycle", () => {
       serverUrl: "https://jazz.example.com",
       jwtToken: "token",
     };
-    const initialKey = `react:${JSON.stringify(initialConfig)}`;
-    const replacementKey = `react:${JSON.stringify(replacementConfig)}`;
+    const initialKey = createClientConfigKey("react", initialConfig);
+    const replacementKey = createClientConfigKey("react", replacementConfig);
     const createJazzClient = vi.fn(async () =>
       makeFakeClient({ authMode: "local-first", userId: "browser", claims: {} }),
     );
@@ -156,7 +157,7 @@ describe("JazzProvider client acquisition lifecycle", () => {
       serverUrl: "https://jazz.example.com",
       jwtToken: "token",
     };
-    const initialKey = `react:${JSON.stringify(initialConfig)}`;
+    const initialKey = createClientConfigKey("react", initialConfig);
     let resolveRelease!: () => void;
     const releaseGate = new Promise<void>((resolve) => {
       resolveRelease = resolve;

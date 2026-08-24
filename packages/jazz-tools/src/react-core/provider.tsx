@@ -7,7 +7,7 @@ import React, {
   type ReactNode,
 } from "react";
 import type { AuthState } from "../runtime/auth-state.js";
-import { serializeClientConfig } from "../runtime/client-config-key.js";
+import { createClientConfigKey } from "../runtime/client-config-key.js";
 import {
   acquireClient as registryAcquireClient,
   releaseClient as registryReleaseClient,
@@ -209,7 +209,7 @@ export function JazzProvider({
   // Keep the framework-level lease distinct from createJazzClient's own shared
   // client lease. Both use the generic registry; sharing an unqualified key
   // makes provider teardown recursively release itself instead of the runtime.
-  const configKey = `react:${serializeClientConfig(config)}`;
+  const configKey = createClientConfigKey("react", config);
 
   const [clientLease, setClientLease] = useState<{
     configKey: string;

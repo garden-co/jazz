@@ -79,3 +79,8 @@ function canonicalizeConfigValue(value: unknown, active: WeakSet<object>): strin
 export function serializeClientConfig(config: DbConfig): string {
   return canonicalizeConfigValue(config, new WeakSet())!;
 }
+
+/** Namespaced registry identity for a client configuration. */
+export function createClientConfigKey(namespace: string, config: DbConfig): string {
+  return `${namespace}:${serializeClientConfig(config)}`;
+}
