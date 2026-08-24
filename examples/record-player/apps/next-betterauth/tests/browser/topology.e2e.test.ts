@@ -51,6 +51,7 @@ const relationalRecipientApp = s.defineApp({
     playlist_id: s.ref("playlists"),
     subject: s.string(),
     label: s.string(),
+    role: s.enum("listener", "editor"),
     status: s.enum("pending", "accepted"),
   }),
   playlist_entries: s.table({ playlist_id: s.ref("playlists"), label: s.string() }),
@@ -89,6 +90,7 @@ const relationalRecipientPermissions = s.definePermissions(
           id: invite.id,
           playlist_id: invite.playlist_id,
           subject: invite.subject,
+          role: invite.role,
           status: "pending",
         }),
       )
@@ -193,6 +195,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
         playlist_id: playlist.id,
         subject: "record-player-relation-recipient",
         label: "recipient relation receipt",
+        role: "listener",
         status: "pending",
       })
       .wait({ tier: "edge" });
