@@ -36,6 +36,11 @@ the scenario's bounded fault timeout. A callback that ignores cancellation
 causes a visible cleanup-timeout receipt and scenario failure rather than a
 quiet cross-test leak.
 
+If a delivery itself produces another envelope, use the callback context's
+`enqueue(...)` function. That adds the follow-up to the same serialized drain
+without recursively waiting for the active callback. Ordinary concurrent calls
+to `intercept(...)` continue to resolve only after their deliveries settle.
+
 Envelope descriptors are deliberately narrow, immutable snapshots of
 `{ from, to, label? }`: endpoint names and labels are bounded, unknown metadata
 and NUL-containing endpoint names are rejected, and payloads are never recorded.

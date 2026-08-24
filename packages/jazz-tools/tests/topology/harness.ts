@@ -190,7 +190,7 @@ export async function runTopologyScenario(
       try {
         await scheduler.close(scenario.envelopeCleanupTimeoutMs ?? scenario.faultTimeoutMs);
       } catch (closeError) {
-        const message = `envelope scheduler cleanup failed: ${errorMessage(closeError)}`;
+        const message = `envelope scheduler cleanup failed: ${stableSchedulerError(closeError)}`;
         receipt.status = "failed";
         receipt.error = receipt.error ? `${receipt.error}; ${message}` : message;
         scenarioError ??= closeError;
@@ -217,6 +217,12 @@ export interface TopologyEnvelopeDeliveryContext {
   tick: number;
   sequence: number;
   signal: AbortSignal;
+  /** Enqueue follow-up delivery without recursively awaiting the active drain. */
+  enqueue<T>(
+    envelope: TopologyTransportEnvelope,
+    value: T,
+    deliver: TopologyEnvelopeDelivery<T>,
+  ): void;
 }
 
 export type TopologyEnvelopeDelivery<T> = (
@@ -258,6 +264,7 @@ export interface TopologyEnvelopeSchedulerReceipt {
   pending: number;
   inFlight: number;
   cleanup?: TopologyActivityReceipt;
+  activitiesTruncated: number;
   activities: readonly TopologyEnvelopeActivity[];
 }
 
@@ -314,8 +321,8 @@ export class TopologyEnvelopeScheduler {
   #closePromise: Promise<void> | undefined;
   #cleanup: TopologyActivityReceipt | undefined;
   #pumpPromise: Promise<void> | undefined;
-  #deliveryDepth = 0;
   #failure: unknown;
+  #activitiesTruncated = 0;
 
   constructor(seed: number) {
     if (!Number.isSafeInteger(seed) || seed < 0 || seed > 0xffff_ffff) {
@@ -411,6 +418,15 @@ export class TopologyEnvelopeScheduler {
     value: T,
     deliver: TopologyEnvelopeDelivery<T>,
   ): Promise<void> {
+    this.enqueueEnvelope(envelope, value, deliver);
+    await this.pump();
+  }
+
+  private enqueueEnvelope<T>(
+    envelope: TopologyTransportEnvelope,
+    value: T,
+    deliver: TopologyEnvelopeDelivery<T>,
+  ): void {
     this.assertOpen();
     const descriptor = snapshotEnvelope(envelope);
     const pending: PendingEnvelope<T> = {
@@ -459,7 +475,6 @@ export class TopologyEnvelopeScheduler {
         this.#pending.push(duplicate as PendingEnvelope<unknown>);
       }
     }
-    await this.pump();
   }
 
   /**
@@ -469,8 +484,12 @@ export class TopologyEnvelopeScheduler {
    */
   close(timeoutMs: number): Promise<void> {
     if (this.#closePromise) return this.#closePromise;
-    if (!Number.isFinite(timeoutMs) || timeoutMs < 1) {
-      return Promise.reject(new Error("envelope cleanup timeout must be positive"));
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TOPOLOGY_TIMEOUT_MS) {
+      return Promise.reject(
+        new Error(
+          `envelope cleanup timeout must be a positive integer at most ${MAX_TOPOLOGY_TIMEOUT_MS}ms`,
+        ),
+      );
     }
     this.#closePromise = this.closeInternal(timeoutMs);
     return this.#closePromise;
@@ -484,6 +503,7 @@ export class TopologyEnvelopeScheduler {
       pending: this.#pending.length + Number(this.#heldForReorder !== undefined),
       inFlight: this.#inFlight.size,
       cleanup: this.#cleanup && { ...this.#cleanup },
+      activitiesTruncated: this.#activitiesTruncated,
       activities: this.#activities.map((activity) => ({ ...activity })),
     };
   }
@@ -510,31 +530,30 @@ export class TopologyEnvelopeScheduler {
     const abort = new Error("topology envelope scheduler closed");
     for (const inFlight of this.#inFlight.values()) {
       inFlight.controller.abort(abort);
-      this.recordPending("deliveryAborted", inFlight.pending, abort);
     }
     try {
       await waitForSettlement(
         [...this.#inFlight.values()].map(({ promise }) => promise),
         timeoutMs,
       );
+      if (this.#failure !== undefined) throw this.#failure;
       Object.assign(this.#cleanup, { status: "completed", elapsedMs: elapsed(started) });
     } catch (error) {
-      const message = errorMessage(error);
+      const message = stableSchedulerError(error);
       Object.assign(this.#cleanup, {
         status: "failed",
         elapsedMs: elapsed(started),
         error: message,
       });
-      this.record({ action: "closeTimedOut", error: message });
+      if (error instanceof TopologyEnvelopeCleanupTimeoutError) {
+        this.record({ action: "closeTimedOut", error: message });
+      }
       throw error;
     }
   }
 
   private async pump(): Promise<void> {
-    // A delivery callback may await `intercept` to enqueue a follow-up. Do not
-    // make it await its own serialized drain; the outer drain will pick up the
-    // follow-up after the callback returns. Other callers still join the drain.
-    if (this.#pumpPromise) return this.#deliveryDepth > 0 ? undefined : this.#pumpPromise;
+    if (this.#pumpPromise) return this.#pumpPromise;
     this.#pumpPromise = this.pumpInternal();
     try {
       await this.#pumpPromise;
@@ -557,27 +576,36 @@ export class TopologyEnvelopeScheduler {
 
   private async deliver(pending: PendingEnvelope<unknown>): Promise<void> {
     const controller = new AbortController();
-    const promise = Promise.resolve().then(async () => {
-      this.#deliveryDepth++;
-      try {
-        await pending.deliver(pending.value, {
+    const promise = Promise.resolve()
+      .then(() =>
+        pending.deliver(pending.value, {
           envelopeId: pending.envelopeId,
           attempt: pending.attempt,
           tick: this.#tick,
           sequence: pending.sequence,
           signal: controller.signal,
-        });
-      } finally {
-        this.#deliveryDepth--;
-      }
-    });
+          enqueue: (envelope, value, deliver) => this.enqueueEnvelope(envelope, value, deliver),
+        }),
+      )
+      .then(
+        () => {
+          this.recordPending(controller.signal.aborted ? "deliveryAborted" : "delivered", pending);
+        },
+        (error: unknown) => {
+          if (isCooperativeAbort(controller.signal, error)) {
+            this.recordPending("deliveryAborted", pending);
+            return;
+          }
+          const failure = new TopologyEnvelopeDeliveryError(error);
+          this.recordPending("deliveryFailed", pending, failure);
+          throw failure;
+        },
+      );
     this.#inFlight.set(pending.sequence, { pending, controller, promise });
     try {
       if (pending.retry) this.recordPending("retried", pending);
       await promise;
-      this.recordPending("delivered", pending);
     } catch (error) {
-      this.recordPending("deliveryFailed", pending, error);
       this.failStop(error);
       throw error;
     } finally {
@@ -602,15 +630,14 @@ export class TopologyEnvelopeScheduler {
       from: pending.envelope.from,
       to: pending.envelope.to,
       ...(pending.envelope.label === undefined ? {} : { label: pending.envelope.label }),
-      ...(error === undefined ? {} : { error: errorMessage(error) }),
+      ...(error === undefined ? {} : { error: stableSchedulerError(error) }),
     });
   }
 
   private record(activity: Omit<TopologyEnvelopeActivity, "tick">): void {
     if (this.#activities.length >= MAX_TOPOLOGY_ACTIVITIES) {
-      throw new Error(
-        `topology envelope scheduler activity capacity is ${MAX_TOPOLOGY_ACTIVITIES}`,
-      );
+      this.#activities.shift();
+      this.#activitiesTruncated++;
     }
     this.#activities.push({ ...activity, tick: this.#tick });
   }
@@ -618,7 +645,9 @@ export class TopologyEnvelopeScheduler {
   private assertOpen(): void {
     if (this.#closed) throw new Error("topology envelope scheduler is closed");
     if (this.#failure !== undefined) {
-      throw new Error(`topology envelope scheduler is failed: ${errorMessage(this.#failure)}`);
+      throw new Error(
+        `topology envelope scheduler is failed: ${stableSchedulerError(this.#failure)}`,
+      );
     }
   }
 
@@ -686,7 +715,8 @@ const MAX_TOPOLOGY_COPIES = 16;
 const MAX_TOPOLOGY_TICKS = 1_000_000;
 const MAX_TOPOLOGY_ENVELOPES = 4_096;
 const MAX_TOPOLOGY_PARTITIONS = 4_096;
-const MAX_TOPOLOGY_ACTIVITIES = 32_768;
+const MAX_TOPOLOGY_ACTIVITIES = 4_096;
+const MAX_TOPOLOGY_TIMEOUT_MS = 300_000;
 const ENVELOPE_KEYS = new Set(["from", "to", "label"]);
 
 function snapshotEnvelope(envelope: TopologyTransportEnvelope): TopologyTransportEnvelope {
@@ -742,18 +772,44 @@ async function waitForSettlement(
   if (promises.length === 0) return;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await Promise.race([
-      Promise.allSettled(promises).then(() => undefined),
+    const results = await Promise.race([
+      Promise.allSettled(promises),
       new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`topology envelope cleanup timed out after ${timeoutMs}ms`)),
-          timeoutMs,
-        );
+        timer = setTimeout(() => reject(new TopologyEnvelopeCleanupTimeoutError()), timeoutMs);
       }),
     ]);
+    const rejected = results.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (rejected) throw rejected.reason;
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+class TopologyEnvelopeCleanupTimeoutError extends Error {
+  constructor() {
+    super("topology-envelope-cleanup-timeout");
+  }
+}
+
+class TopologyEnvelopeDeliveryError extends Error {
+  constructor(cause: unknown) {
+    super("topology-envelope-delivery-callback-rejected", { cause });
+  }
+}
+
+function isCooperativeAbort(signal: AbortSignal, error: unknown): boolean {
+  return (
+    signal.aborted &&
+    (error === signal.reason || (error instanceof DOMException && error.name === "AbortError"))
+  );
+}
+
+function stableSchedulerError(error: unknown): string {
+  if (error instanceof TopologyEnvelopeCleanupTimeoutError) return "cleanup-timeout";
+  if (error instanceof TopologyEnvelopeDeliveryError) return "delivery-callback-rejected";
+  return "scheduler-failed";
 }
 
 export class TopologyScenarioError extends Error {
