@@ -783,6 +783,215 @@ describe("permissions DSL", () => {
     }
   });
 
+  it("keeps a filtered join RHS inside the ExistsRel relation", () => {
+    const compiled = definePermissions(socialApp, ({ policy, session }) => [
+      policy.profiles.allowRead.where((profile) =>
+        policy.exists(
+          policy.people
+            .where({ profileId: profile.id })
+            .join(policy.friendships.where({ personBId: session.personId }), {
+              left: "id",
+              right: "personAId",
+            }),
+        ),
+      ),
+    ]);
+
+    const using = compiled.profiles!.select?.using;
+    expect(using?.type).toBe("ExistsRel");
+    if (!using || using.type !== "ExistsRel") {
+      throw new Error("Expected filtered join policy to compile to ExistsRel.");
+    }
+    const rel = toAssertionRelExprForTest(using.rel);
+    expect(rel.type).toBe("Filter");
+    if (rel.type !== "Filter") {
+      throw new Error("Expected outer profile correlation filter.");
+    }
+    expect(rel.input.type).toBe("Join");
+    if (rel.input.type !== "Join") {
+      throw new Error("Expected joined relation.");
+    }
+    expect(rel.input.right.type).toBe("Filter");
+    if (rel.input.right.type !== "Filter") {
+      throw new Error("Expected filtered RHS relation to remain nested.");
+    }
+    expect(rel.input.right.predicate.type).toBe("Cmp");
+    expect(JSON.stringify(rel.input.right)).toContain('"personBId"');
+  });
+
+  it("keeps distinct filtered RHS scopes and binds the next join to the previous RHS", () => {
+    const compiled = definePermissions(socialApp, ({ policy, session }) => [
+      policy.profiles.allowRead.where((profile) =>
+        policy.exists(
+          policy.people
+            .where({ profileId: profile.id })
+            .join(policy.friendships.where({ personAId: session.personId }), {
+              left: "id",
+              right: "personAId",
+            })
+            .join(policy.profiles.where({ id: session.personId }), {
+              left: "personBId",
+              right: "id",
+            }),
+        ),
+      ),
+    ]);
+
+    const using = compiled.profiles!.select?.using;
+    expect(using?.type).toBe("ExistsRel");
+    if (!using || using.type !== "ExistsRel") {
+      throw new Error("Expected filtered join policy to compile to ExistsRel.");
+    }
+    const rel = toAssertionRelExprForTest(using.rel);
+    expect(rel.type).toBe("Filter");
+    if (rel.type !== "Filter" || rel.input.type !== "Join") {
+      throw new Error("Expected correlated filter over the second filtered join.");
+    }
+    expect(rel.input.on[0]?.left.scope).toBe("friendships");
+    expect(rel.input.on[0]?.right.scope).toBe("profiles");
+    expect(rel.input.right.type).toBe("Filter");
+  });
+
+  it("binds qualified filters after a filtered RHS to that relation's real scope", () => {
+    const compiled = definePermissions(socialApp, ({ policy, session }) => [
+      policy.profiles.allowRead.where((profile) =>
+        policy.exists(
+          policy.people
+            .where({ profileId: profile.id })
+            .join(policy.friendships.where({ personAId: session.personId }), {
+              left: "id",
+              right: "personAId",
+            })
+            .where({ "friendships.personBId": session.personId }),
+        ),
+      ),
+    ]);
+
+    const using = compiled.profiles!.select?.using;
+    expect(using?.type).toBe("ExistsRel");
+    if (!using || using.type !== "ExistsRel") {
+      throw new Error("Expected filtered join policy to compile to ExistsRel.");
+    }
+    const relation = JSON.stringify(toAssertionRelExprForTest(using.rel));
+    expect(relation).toContain('"scope":"friendships","column":"personBId"');
+    expect(relation).not.toContain('"scope":"__join_0","column":"personBId"');
+  });
+
+  it("rejects filtered join RHS shapes the relation lowering cannot alias safely", () => {
+    expect(() =>
+      definePermissions(socialApp, ({ policy }) => [
+        policy.profiles.allowRead.where(
+          policy.exists(
+            policy.people
+              .where({})
+              .join(policy.friendships.where({}), { left: "id", right: "personAId" }),
+          ),
+        ),
+      ]),
+    ).toThrow(/must include where\(\.\.\.\).*pass policy\.<table> directly/i);
+
+    expect(() =>
+      definePermissions(socialApp, ({ policy, session }) => [
+        policy.profiles.allowRead.where(
+          policy.exists(
+            policy.people.where({}).join(policy.people.where({ profileId: session.personId }), {
+              left: "id",
+              right: "id",
+            }),
+          ),
+        ),
+      ]),
+    ).toThrow(/scope "people".*already present in the left relation/i);
+
+    expect(() =>
+      definePermissions(socialApp, ({ policy, session }) => [
+        policy.profiles.allowRead.where(
+          policy.exists(
+            policy.people
+              .where({})
+              .join(policy.friendships.where({ personBId: session.personId }), {
+                left: "id",
+                right: "personAId",
+              })
+              .join(policy.friendships.where({ personAId: session.personId }), {
+                left: "personBId",
+                right: "personAId",
+              }),
+          ),
+        ),
+      ]),
+    ).toThrow(/scope "friendships".*already present in the left relation/i);
+
+    expect(() =>
+      definePermissions(socialApp, ({ policy, session }) => [
+        policy.profiles.allowRead.where(
+          policy.exists(
+            policy.people
+              .where({})
+              .join(
+                policy.friendships
+                  .where({ personBId: session.personId })
+                  .join(policy.people, { left: "personAId", right: "id" }),
+                { left: "id", right: "personAId" },
+              ),
+          ),
+        ),
+      ]),
+    ).toThrow(/nested join\(\.\.\.\) and hopTo\(\.\.\.\) RHS are unsupported/i);
+
+    expect(() =>
+      definePermissions(socialApp, ({ policy, session }) => [
+        policy.profiles.allowRead.where(
+          policy.exists(
+            policy.people
+              .where({})
+              .join(
+                policy.friendships
+                  .where({ personBId: session.personId })
+                  .select({ friend: "personAId" }),
+                { left: "id", right: "personAId" },
+              ),
+          ),
+        ),
+      ]),
+    ).toThrow(/select\(\.\.\.\) RHS are unsupported/i);
+
+    expect(() =>
+      definePermissions(socialApp, ({ policy, session }) => [
+        policy.profiles.allowRead.where(
+          policy.exists(
+            policy.people
+              .where({})
+              .join(
+                policy.union([
+                  policy.friendships.where({ personAId: session.personId }),
+                  policy.friendships.where({ personBId: session.personId }),
+                ]),
+                { left: "id", right: "personAId" },
+              ),
+          ),
+        ),
+      ]),
+    ).toThrow(/union\(\.\.\.\) and gather\(\.\.\.\) RHS are unsupported/i);
+
+    expect(() =>
+      definePermissions(app, ({ policy }) => {
+        const reachableTeams = policy.teams.gather({
+          start: { kind: "individual" },
+          step: ({ current }) =>
+            policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+        });
+        return [
+          policy.todos.allowRead.where(
+            policy.exists(
+              policy.projects.where({}).join(reachableTeams, { left: "id", right: "id" }),
+            ),
+          ),
+        ];
+      }),
+    ).toThrow(/union\(\.\.\.\) and gather\(\.\.\.\) RHS are unsupported/i);
+  });
+
   it("supports one-clause friend-profile chain style using hopTo(...).where(...)", () => {
     const compiled = definePermissions(socialApp, ({ policy, anyOf, session }) => [
       policy.profiles.allowRead.where((profile) =>
