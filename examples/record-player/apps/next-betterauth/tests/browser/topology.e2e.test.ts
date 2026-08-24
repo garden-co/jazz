@@ -140,6 +140,100 @@ const relationalRecipientPermissions = s.definePermissions(
 );
 
 describe("RecordPlayer authenticated playlist topology", () => {
+  it("delivers RecordPlayer pending invitations outside the scenario envelope", async () => {
+    const server = await getJazzServerInfo(uniqueDbName("record-player-recipient-settlement"));
+    await deploy({
+      appId: server.appId,
+      serverUrl: server.serverUrl,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions,
+    });
+    const [ownerToken, recipientToken, secondRecipientToken] = await Promise.all([
+      getJazzServerJwtForUser("record-player-recipient-owner", undefined, server.appId),
+      getJazzServerJwtForUser("record-player-recipient-editor", undefined, server.appId),
+      getJazzServerJwtForUser("record-player-recipient-listener", undefined, server.appId),
+    ]);
+    const owner = await openClient(server, "recipient-owner", ownerToken);
+    const recipient = await openClient(server, "recipient-editor", recipientToken);
+    const secondRecipient = await openClient(server, "recipient-listener", secondRecipientToken);
+    const playlist = await owner
+      .insert(app.playlists, {
+        name: "recipient settlement receipt",
+        owner_subject: "record-player-recipient-owner",
+      })
+      .wait({ tier: "edge" });
+    const invitation = await owner
+      .insert(app.invitations, {
+        playlist_id: playlist.id,
+        subject: "record-player-recipient-editor",
+        role: "editor",
+        status: "pending",
+      })
+      .wait({ tier: "edge" });
+    const secondInvitation = await owner
+      .insert(app.invitations, {
+        playlist_id: playlist.id,
+        subject: "record-player-recipient-listener",
+        role: "listener",
+        status: "pending",
+      })
+      .wait({ tier: "edge" });
+    await Promise.all([
+      waitForQuery(
+        recipient,
+        app.invitations.where({ subject: "record-player-recipient-editor" }),
+        (rows) => rows[0]?.id === invitation.id && rows[0]?.status === "pending",
+        "RecordPlayer recipient observes pending invitation",
+        15_000,
+        "edge",
+      ),
+      waitForQuery(
+        secondRecipient,
+        app.invitations.where({ subject: "record-player-recipient-listener" }),
+        (rows) => rows[0]?.id === secondInvitation.id && rows[0]?.status === "pending",
+        "second RecordPlayer recipient observes pending invitation",
+        15_000,
+        "edge",
+      ),
+    ]);
+  });
+
+  it("settles a RecordPlayer owner playlist at edge outside the scenario envelope", async () => {
+    const server = await getJazzServerInfo(uniqueDbName("record-player-owner-settlement"));
+    await deploy({
+      appId: server.appId,
+      serverUrl: server.serverUrl,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions,
+    });
+    const token = await getJazzServerJwtForUser(
+      "record-player-owner-settlement",
+      undefined,
+      server.appId,
+    );
+    const db = await openClient(server, "owner-settlement", token);
+    const errors: unknown[] = [];
+    const stop = db.onMutationError((event) => errors.push(event));
+    const write = db.insert(app.playlists, {
+      name: "owner settlement receipt",
+      owner_subject: "record-player-owner-settlement",
+    });
+    await withTimeout(write.wait({ tier: "local" }), 5_000, "playlist did not settle locally");
+    try {
+      expect(
+        await withTimeout(
+          write.wait({ tier: "edge" }),
+          10_000,
+          `playlist did not settle at edge: ${JSON.stringify(errors)}`,
+        ),
+      ).toEqual(write.value);
+    } finally {
+      stop();
+    }
+  });
+
   it("settles an identical one-table write at edge", async () => {
     const server = await getJazzServerInfo(uniqueDbName("record-player-ack-probe"));
     await deploy({
