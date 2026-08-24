@@ -81,19 +81,25 @@ const BYTEA_SCHEMA: WasmSchema = {
   },
 };
 
-it("round-trips legacy and canonical authors through the NAPI open-config codec", async () => {
+it("accepts only canonical authors through the NAPI open-config codec", async () => {
   const { NapiDb } = await loadNapiModule();
-  const authors = [
-    deterministicBytes("napi-open-config:legacy-author"),
-    new TextEncoder().encode('["https://issuer.example","canonical-author"]'),
-  ];
-  for (const author of authors) {
-    const db = NapiDb.openMemory(
+  const canonical = new TextEncoder().encode('["https://issuer.example","canonical-author"]');
+  const db = NapiDb.openMemory(
+    encodeSchema(TEST_SCHEMA),
+    openConfig(deterministicBytes("napi-open-config:node"), canonical, 1, true),
+  );
+  db.close?.();
+  expect(() =>
+    NapiDb.openMemory(
       encodeSchema(TEST_SCHEMA),
-      openConfig(deterministicBytes("napi-open-config:node"), author, 1, true),
-    );
-    db.close?.();
-  }
+      openConfig(
+        deterministicBytes("napi-open-config:legacy-node"),
+        deterministicBytes("napi-open-config:legacy-author"),
+        1,
+        true,
+      ),
+    ),
+  ).toThrow(/canonical UTF-8 JSON/i);
 });
 
 const SIGNED_DEFAULT_CASES: Array<{

@@ -898,7 +898,6 @@ pub fn resolve_verified_jwt_session(
     let issuer = verified
         .issuer
         .as_deref()
-        .map(str::trim)
         .filter(|v| !v.is_empty())
         .ok_or_else(|| UnauthenticatedResponse::invalid("JWT iss claim is required"))?
         .to_owned();
@@ -1378,6 +1377,19 @@ mod tests {
         assert_eq!(session.auth_mode, jazz::tools::AuthMode::External);
         assert_eq!(session.claims["subject"], "user-42");
         assert_eq!(session.claims["issuer"], "https://issuer.example");
+    }
+
+    #[test]
+    fn resolve_verified_jwt_session_preserves_issuer_bytes_exactly() {
+        let session = resolve_verified_jwt_session(VerifiedJwt {
+            subject: "user".to_owned(),
+            issuer: Some(" https://issuer.example ".to_owned()),
+            claims: serde_json::json!({}),
+            exp: None,
+        })
+        .expect("non-empty issuer is retained exactly");
+        assert_eq!(session.issuer, " https://issuer.example ");
+        assert_eq!(session.claims["issuer"], " https://issuer.example ");
     }
 
     #[tokio::test]

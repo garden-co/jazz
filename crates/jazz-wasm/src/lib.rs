@@ -1044,7 +1044,7 @@ impl WasmDb {
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let db =
-            block_on(open_db(schema, MemoryStorage::new(&refs), config, false)).map_err(to_js_error)?;
+            block_on(open_db(schema, MemoryStorage::new(&refs), config)).map_err(to_js_error)?;
         db.set_deferred_local_persistence(true);
         Ok(Self {
             inner: WasmDbInner::Memory(Rc::new(db)),
@@ -1065,10 +1065,12 @@ impl WasmDb {
     ) -> Result<WasmDb, JsValue> {
         console_error_panic_hook::set_once();
         let (schema, mut config) = decode_open_args(&schema, &config)?;
-        config.identity.author = verify_self_signed_runtime_author(&token, &app_id, &claimed_author)?;
+        config.identity.author =
+            verify_self_signed_runtime_author(&token, &app_id, &claimed_author)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let db = block_on(open_db(schema, MemoryStorage::new(&refs), config, true)).map_err(to_js_error)?;
+        let db =
+            block_on(open_db(schema, MemoryStorage::new(&refs), config)).map_err(to_js_error)?;
         db.set_deferred_local_persistence(true);
         Ok(Self {
             inner: WasmDbInner::Memory(Rc::new(db)),
@@ -1091,7 +1093,7 @@ impl WasmDb {
         let storage = BrowserStorage::open(IndexedDbPageStore::from_js(page_store), &refs)
             .await
             .map_err(to_js_error)?;
-        let db = open_db(schema, storage, config, false)
+        let db = open_db(schema, storage, config)
             .await
             .map_err(to_js_error)?;
         db.set_deferred_local_persistence(true);
@@ -1113,13 +1115,16 @@ impl WasmDb {
     ) -> Result<WasmDb, JsValue> {
         console_error_panic_hook::set_once();
         let (schema, mut config) = decode_open_args(&schema, &config)?;
-        config.identity.author = verify_self_signed_runtime_author(&token, &app_id, &claimed_author)?;
+        config.identity.author =
+            verify_self_signed_runtime_author(&token, &app_id, &claimed_author)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = BrowserStorage::open(IndexedDbPageStore::from_js(page_store), &refs)
             .await
             .map_err(to_js_error)?;
-        let db = open_db(schema, storage, config, true).await.map_err(to_js_error)?;
+        let db = open_db(schema, storage, config)
+            .await
+            .map_err(to_js_error)?;
         db.set_deferred_local_persistence(true);
         Ok(Self {
             inner: WasmDbInner::Browser(Rc::new(db)),
@@ -2645,7 +2650,6 @@ async fn open_db<S>(
     schema: JazzSchema,
     storage: S,
     config: WasmOpenDbConfig,
-    _verified_self_signed_author: bool,
 ) -> Result<Db<S>, jazz::db::Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
@@ -2667,9 +2671,14 @@ where
 }
 
 fn validate_untrusted_open_author(config: &WasmOpenDbConfig) -> Result<(), JsValue> {
-    AuthorSubject::from_untrusted_canonical(config.identity.author.canonical())
-        .map(|_| ())
+    validate_untrusted_open_author_core(config)
         .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+fn validate_untrusted_open_author_core(
+    config: &WasmOpenDbConfig,
+) -> Result<(), jazz::ids::AuthorSubjectError> {
+    AuthorSubject::from_untrusted_canonical(config.identity.author.canonical()).map(|_| ())
 }
 
 fn verify_self_signed_runtime_author(
@@ -2677,8 +2686,16 @@ fn verify_self_signed_runtime_author(
     app_id: &str,
     claimed_author: &str,
 ) -> Result<AuthorSubject, JsValue> {
-    jazz::tools::identity::verify_client_runtime_author(token, app_id, claimed_author)
+    verify_self_signed_runtime_author_core(token, app_id, claimed_author)
         .map_err(|error| JsValue::from_str(&error))
+}
+
+fn verify_self_signed_runtime_author_core(
+    token: &str,
+    app_id: &str,
+    claimed_author: &str,
+) -> Result<AuthorSubject, String> {
+    jazz::tools::identity::verify_client_runtime_author(token, app_id, claimed_author)
 }
 
 fn configure_initial_sync_flush_cadence<S>(
@@ -3208,6 +3225,78 @@ mod dynamic_schema_view_tests {
             unknown_transaction_kind_message("invalid"),
             "unknown transaction kind invalid"
         );
+    }
+
+    #[test]
+    fn public_wasm_open_config_rejects_every_reserved_author() {
+        for issuer in [
+            AuthorSubject::SYSTEM_ISSUER,
+            AuthorSubject::LOCAL_FIRST_ISSUER,
+            AuthorSubject::ANONYMOUS_ISSUER,
+            AuthorSubject::STATIC_BEARER_ISSUER,
+        ] {
+            let author = if issuer == AuthorSubject::SYSTEM_ISSUER {
+                AuthorSubject::SYSTEM
+            } else {
+                AuthorSubject::from_canonical(&serde_json::to_string(&(issuer, "caller")).unwrap())
+                    .unwrap()
+            };
+            let config = WasmOpenDbConfig {
+                identity: WasmDbIdentity {
+                    node: NodeUuid::from_bytes([0x7a; 16]),
+                    author,
+                },
+                row_id_seed: None,
+                history_complete: false,
+                initial_sync_flush_every: None,
+            };
+            assert!(
+                validate_untrusted_open_author_core(&config).is_err(),
+                "ordinary WasmDb.openMemory must reject reserved issuer {issuer}"
+            );
+        }
+    }
+
+    #[test]
+    fn wasm_self_signed_open_verifier_binds_exact_proof_author() {
+        let seed = [0x51; 32];
+        let app_id = "wasm-proof-test";
+        let token = jazz::tools::identity::mint_jazz_self_signed_token(
+            &seed,
+            AuthorSubject::LOCAL_FIRST_ISSUER,
+            app_id,
+            60,
+        )
+        .unwrap();
+        let verified =
+            jazz::tools::identity::verify_jazz_self_signed_proof(&token, app_id).unwrap();
+        let claimed = AuthorSubject::from_canonical(
+            &serde_json::to_string(&(verified.issuer, verified.user_id)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            verify_self_signed_runtime_author_core(&token, app_id, claimed.canonical()).unwrap(),
+            claimed
+        );
+        assert!(
+            verify_self_signed_runtime_author_core(&token, "wrong-app", claimed.canonical())
+                .is_err()
+        );
+        assert!(verify_self_signed_runtime_author_core(
+            &token,
+            app_id,
+            AuthorSubject::SYSTEM_CANONICAL
+        )
+        .is_err());
+        let mut bad_signature = token.into_bytes();
+        let last = bad_signature.len() - 1;
+        bad_signature[last] ^= 1;
+        assert!(verify_self_signed_runtime_author_core(
+            std::str::from_utf8(&bad_signature).unwrap(),
+            app_id,
+            claimed.canonical(),
+        )
+        .is_err());
     }
 
     #[test]
