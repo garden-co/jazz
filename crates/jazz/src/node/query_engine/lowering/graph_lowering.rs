@@ -1654,18 +1654,6 @@ fn lower_value_source(
                         .filter(|param| !projected.contains(*param))
                         .map(ProjectField::named),
                 )
-                .chain(
-                    domain
-                        .claim_route_tokens
-                        .values()
-                        .map(|token| {
-                            Ok(ProjectField::literal(
-                                token.clone(),
-                                Value::String("claim-route".to_owned()),
-                            ))
-                        })
-                        .collect::<Result<Vec<_>, UnsupportedReason>>()?,
-                )
                 .collect::<Vec<_>>();
             Ok(
                 GraphBuilder::binding_source(shape.to_owned(), input_descriptor).project_fields(

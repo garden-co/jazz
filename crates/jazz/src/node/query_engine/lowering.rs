@@ -7,7 +7,7 @@ use groove::ivm::{
     PlanExpr as GroovePlanExpr, PredicateExpr as GroovePredicateExpr, PredicateKind, ProjectField,
     TopByLimit, TopByOrder,
 };
-use groove::records::ValueType;
+use groove::records::{ValueType, collect_by_ordered_scalar};
 
 mod closure;
 use closure::{
@@ -42,8 +42,6 @@ pub(crate) struct ParameterDomain {
     pub(crate) user_params: BTreeMap<String, ColumnType>,
     /// Trusted claim parameters supplied by the runtime policy context.
     pub(crate) claim_params: BTreeMap<String, ClaimParameter>,
-    /// Scalar, hidden routing carriers for typed claim values.
-    pub(crate) claim_route_tokens: BTreeMap<String, String>,
     /// Parameters retained in terminal rows for usage-site routing.
     pub(crate) routing_params: BTreeSet<String>,
 }
@@ -512,9 +510,9 @@ fn parameter_domain(shape: &NormalizedRowSetShape) -> ParameterDomain {
                                 ty: column.ty.clone(),
                             },
                         );
-                        let token = claim_route_token_field(path);
-                        domain.claim_route_tokens.insert(param, token.clone());
-                        domain.routing_params.insert(token);
+                        if claim_route_is_ordered_scalar(&column.ty) {
+                            domain.routing_params.insert(param);
+                        }
                     }
                 }
             }
@@ -538,6 +536,17 @@ fn parameter_domain(shape: &NormalizedRowSetShape) -> ParameterDomain {
         }
     }
     domain
+}
+
+#[cfg(test)]
+pub(crate) fn parameter_domain_for_shape_for_test(
+    shape: &NormalizedRowSetShape,
+) -> ParameterDomain {
+    parameter_domain(shape)
+}
+
+fn claim_route_is_ordered_scalar(ty: &ColumnType) -> bool {
+    collect_by_ordered_scalar(ty)
 }
 
 fn parameter_domain_for_request(
@@ -656,11 +665,9 @@ fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDom
                             path: path.clone(),
                             ty: field.value_type.clone(),
                         });
-                    let token = claim_route_token_field(&path);
-                    domain
-                        .claim_route_tokens
-                        .insert(name.to_owned(), token.clone());
-                    domain.routing_params.insert(token);
+                    if claim_route_is_ordered_scalar(&field.value_type) {
+                        domain.routing_params.insert(name.to_owned());
+                    }
                 } else {
                     domain
                         .user_params
