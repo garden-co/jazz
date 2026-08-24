@@ -1026,7 +1026,7 @@ fn correlated_inherited_insert_policy_accepts_owner_and_denies_cross_tenant_memb
         &mut core,
         MergeableCommit::new("memberships", owner_membership, 3).cells(BTreeMap::from([
             ("organization".to_owned(), Value::Uuid(organization.0)),
-            ("user".to_owned(), Value::Uuid(owner.0)),
+            ("user".to_owned(), Value::Uuid(owner.test_uuid())),
             ("role".to_owned(), Value::String("admin".to_owned())),
         ])),
     );
@@ -1034,7 +1034,7 @@ fn correlated_inherited_insert_policy_accepts_owner_and_denies_cross_tenant_memb
         &mut core,
         MergeableCommit::new("memberships", foreign_membership, 4).cells(BTreeMap::from([
             ("organization".to_owned(), Value::Uuid(foreign_organization.0)),
-            ("user".to_owned(), Value::Uuid(outsider.0)),
+            ("user".to_owned(), Value::Uuid(outsider.test_uuid())),
             ("role".to_owned(), Value::String("admin".to_owned())),
         ])),
     );
@@ -1053,7 +1053,10 @@ fn correlated_inherited_insert_policy_accepts_owner_and_denies_cross_tenant_memb
             ("title".to_owned(), Value::String("release".to_owned())),
         ])),
     );
-    core.set_session_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.0))]));
+    core.set_session_claims(
+        owner,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.test_uuid()))]),
+    );
 
     let accepted = core
         .commit_mergeable_settled(

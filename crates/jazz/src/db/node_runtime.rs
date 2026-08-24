@@ -720,7 +720,7 @@ where
         let upstream_upload_destination =
             session_context.map(|context| UpstreamUploadDestination {
                 remote_node: *context.remote.node.as_bytes(),
-                link_identity: *context.link_identity.as_bytes(),
+                link_identity: context.link_identity,
             });
         let transferred_large_value_uploads = upstream_upload_destination
             .and_then(|destination| {

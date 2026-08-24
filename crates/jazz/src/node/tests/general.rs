@@ -523,7 +523,7 @@ fn delayed_chunk_upload_succeeds_while_pending_journal_remains_present() {
     )
     .unwrap();
     let context = Some(CommitUnitIngestContext {
-        identity: AuthorId::SYSTEM,
+        identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
         edge_authority: false,
     });

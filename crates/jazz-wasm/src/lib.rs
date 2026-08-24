@@ -175,6 +175,7 @@ struct WasmOpenDbConfig {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 struct WasmDbIdentity {
     node: NodeUuid,
+    #[serde(deserialize_with = "AuthorSubject::deserialize_untrusted")]
     author: AuthorSubject,
 }
 
@@ -3765,7 +3766,8 @@ fn checked_js_u64_range(start: f64, end: f64) -> Result<std::ops::Range<u64>, Js
 fn author_id_from_bytes(bytes: &[u8]) -> Result<AuthorSubject, JsValue> {
     let canonical = std::str::from_utf8(bytes)
         .map_err(|_| JsValue::from_str("author subject must be canonical UTF-8 JSON"))?;
-    AuthorSubject::from_canonical(canonical).map_err(|error| JsValue::from_str(&error.to_string()))
+    AuthorSubject::from_untrusted_canonical(canonical)
+        .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
 fn set_identity_claims<S>(db: &Db<S>, author: AuthorSubject)
@@ -4199,6 +4201,52 @@ mod dynamic_schema_view_tests {
     use jazz::tools::public_schema::{
         ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema,
     };
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn public_raw_author_ingress_rejects_reserved_subjects_and_accepts_external_subjects() {
+        let external = br#"["https://issuer.example","alice"]"#;
+        assert_eq!(
+            author_id_from_bytes(external).unwrap().canonical(),
+            std::str::from_utf8(external).unwrap()
+        );
+        for issuer in [
+            AuthorSubject::SYSTEM_ISSUER,
+            AuthorSubject::LOCAL_FIRST_ISSUER,
+            AuthorSubject::STATIC_BEARER_ISSUER,
+            AuthorSubject::ANONYMOUS_ISSUER,
+        ] {
+            let canonical = serde_json::to_vec(&(issuer, "caller")).unwrap();
+            assert!(author_id_from_bytes(&canonical).is_err(), "issuer {issuer}");
+        }
+    }
+
+    #[test]
+    fn public_open_config_rejects_reserved_subjects() {
+        let bytes = postcard::to_allocvec(&WasmOpenDbConfig {
+            identity: WasmDbIdentity {
+                node: NodeUuid::from_bytes([7; 16]),
+                author: AuthorSubject::SYSTEM,
+            },
+            row_id_seed: None,
+            history_complete: false,
+            initial_sync_flush_every: None,
+        })
+        .unwrap();
+        assert!(postcard::from_bytes::<WasmOpenDbConfig>(&bytes).is_err());
+
+        let bytes = postcard::to_allocvec(&WasmOpenDbConfig {
+            identity: WasmDbIdentity {
+                node: NodeUuid::from_bytes([7; 16]),
+                author: AuthorSubject::authenticated("https://issuer.example", "alice").unwrap(),
+            },
+            row_id_seed: None,
+            history_complete: false,
+            initial_sync_flush_every: None,
+        })
+        .unwrap();
+        assert!(postcard::from_bytes::<WasmOpenDbConfig>(&bytes).is_ok());
+    }
 
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test::wasm_bindgen_test]

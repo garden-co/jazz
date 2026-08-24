@@ -102,6 +102,7 @@ struct CoreOpenDbConfig {
 #[derive(Clone, Copy, Debug, Deserialize)]
 struct CoreOpenDbIdentity {
     node: CoreNodeUuid,
+    #[serde(deserialize_with = "CoreAuthorSubject::deserialize_untrusted")]
     author: CoreAuthorSubject,
 }
 
@@ -3148,7 +3149,7 @@ fn checked_u64_range(start: f64, end: f64) -> napi::Result<std::ops::Range<u64>>
 fn core_author_id_from_bytes(bytes: &[u8]) -> napi::Result<CoreAuthorSubject> {
     let canonical = std::str::from_utf8(bytes)
         .map_err(|_| napi::Error::from_reason("author subject must be canonical UTF-8 JSON"))?;
-    CoreAuthorSubject::from_canonical(canonical)
+    CoreAuthorSubject::from_untrusted_canonical(canonical)
         .map_err(|error| napi::Error::from_reason(error.to_string()))
 }
 
@@ -4122,9 +4123,10 @@ mod tests {
     use std::rc::Rc;
 
     use crate::{
-        NapiDb, NapiDbInnerStorage, NapiTxKind, PreparedQuery, Tx, authority_epoch_from_bigint,
-        core_block_on, core_claim_value_from_json, core_read_opts_from_json,
-        core_subscription_event_to_napi, encode_core_subscription_delta, terminal_bytes_to_numbers,
+        CoreOpenDbConfig, NapiDb, NapiDbInnerStorage, NapiTxKind, PreparedQuery, Tx,
+        authority_epoch_from_bigint, core_author_id_from_bytes, core_block_on,
+        core_claim_value_from_json, core_read_opts_from_json, core_subscription_event_to_napi,
+        encode_core_subscription_delta, terminal_bytes_to_numbers,
         unknown_transaction_kind_message,
     };
 
@@ -4157,6 +4159,58 @@ mod tests {
     use napi::bindgen_prelude::{BigInt, Either, Either3, Either4};
     use serde_json::json;
     use std::cell::RefCell;
+
+    #[test]
+    fn public_author_ingress_rejects_reserved_subjects_and_accepts_external_subjects() {
+        let external = br#"["https://issuer.example","alice"]"#;
+        assert_eq!(
+            core_author_id_from_bytes(external).unwrap().canonical(),
+            std::str::from_utf8(external).unwrap()
+        );
+        for issuer in [
+            CoreAuthorSubject::SYSTEM_ISSUER,
+            CoreAuthorSubject::LOCAL_FIRST_ISSUER,
+            CoreAuthorSubject::STATIC_BEARER_ISSUER,
+            CoreAuthorSubject::ANONYMOUS_ISSUER,
+        ] {
+            let canonical = serde_json::to_vec(&(issuer, "caller")).unwrap();
+            assert!(
+                core_author_id_from_bytes(&canonical).is_err(),
+                "issuer {issuer}"
+            );
+        }
+
+        #[derive(serde::Serialize)]
+        struct EncodedIdentity {
+            node: CoreNodeUuid,
+            author: CoreAuthorSubject,
+        }
+        #[derive(serde::Serialize)]
+        struct EncodedConfig {
+            identity: EncodedIdentity,
+            row_id_seed: Option<u64>,
+            history_complete: bool,
+            initial_sync_flush_every: Option<u32>,
+        }
+        let encode_config = |author| {
+            postcard::to_allocvec(&EncodedConfig {
+                identity: EncodedIdentity {
+                    node: CoreNodeUuid::from_bytes([7; 16]),
+                    author,
+                },
+                row_id_seed: None,
+                history_complete: false,
+                initial_sync_flush_every: None,
+            })
+            .unwrap()
+        };
+        let bytes = encode_config(CoreAuthorSubject::SYSTEM);
+        assert!(postcard::from_bytes::<CoreOpenDbConfig>(&bytes).is_err());
+        let bytes = encode_config(
+            CoreAuthorSubject::authenticated("https://issuer.example", "alice").unwrap(),
+        );
+        assert!(postcard::from_bytes::<CoreOpenDbConfig>(&bytes).is_ok());
+    }
 
     #[test]
     fn javascript_numeric_claims_preserve_safe_integers_and_fail_closed_when_lossy() {

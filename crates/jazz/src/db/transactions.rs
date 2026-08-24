@@ -711,20 +711,6 @@ where
         &self,
         open_tx_id: OpenTransactionId,
     ) -> Result<TxId, Error> {
-        self.commit_exclusive_handle_for_identity(open_tx_id, self.identity.author)
-            .await
-    }
-
-    /// Commit an owned exclusive transaction as an explicit policy identity.
-    ///
-    /// Bindings that expose session-scoped transactions use this rather than
-    /// the connection's default identity so a trusted backend cannot silently
-    /// turn a `for_session` transaction into a system-authored commit.
-    pub(crate) async fn commit_exclusive_handle_for_identity(
-        &self,
-        open_tx_id: OpenTransactionId,
-        _author: AuthorSubject,
-    ) -> Result<TxId, Error> {
         let (published, unit) = self
             .node
             .node
@@ -732,6 +718,35 @@ where
             .await
             .commit_exclusive_bound(open_tx_id, self.next_now_ms())
             .await?;
+        self.finish_exclusive_publication(published, unit).await
+    }
+
+    /// Commit an owned exclusive transaction as an explicit policy identity.
+    ///
+    /// Bindings that expose session-scoped transactions use this rather than
+    /// the connection's default identity so a trusted backend cannot silently
+    /// turn a `for_session` transaction into a system-authored commit.
+    #[cfg_attr(not(feature = "testing"), allow(dead_code))]
+    pub(crate) async fn commit_exclusive_handle_for_identity(
+        &self,
+        open_tx_id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<TxId, Error> {
+        let (published, unit) = self
+            .node
+            .node
+            .lock()
+            .await
+            .commit_exclusive(open_tx_id, author, self.next_now_ms())
+            .await?;
+        self.finish_exclusive_publication(published, unit).await
+    }
+
+    async fn finish_exclusive_publication(
+        &self,
+        published: PublishedTransaction,
+        unit: SyncMessage,
+    ) -> Result<TxId, Error> {
         let tx_id = published.tx_id;
         if self.node.defer_local_persistence.get() {
             self.refresh_subscriptions().await?;
