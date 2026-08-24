@@ -147,6 +147,17 @@ where
         })
     }
 
+    /// Native bindings call this only after accepting their backend credential
+    /// when opening an authoritative, history-complete database.
+    #[doc(hidden)]
+    pub async fn open_history_complete_with_backend_attribution(
+        config: DbConfig<S>,
+    ) -> Result<Self, Error> {
+        let mut db = Self::open_history_complete(config).await?;
+        db.backend_attribution = true;
+        Ok(db)
+    }
+
     /// Open an edge whose durable store has no authority catalogue yet.
     ///
     /// This is deliberately narrower than [`Db::open`]: callers may only use

@@ -1451,6 +1451,40 @@ fn client_attributed_insert_to_different_user_is_rejected() {
 }
 
 #[test]
+/// Internal capability receipt: a Db whose logical author happens to be SYSTEM
+/// is still an ordinary Db, and cannot stamp another author's provenance.
+///
+/// This stays below the client/server surface because minting the native-only
+/// capability is intentionally not exposed through the public client API.
+fn ordinary_system_db_cannot_forge_external_attribution() {
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean),
+        ),
+    );
+    let external = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let db = open_db(0xc2, AuthorSubject::SYSTEM, &schema);
+    let result = db
+        .insert_attributed(
+            external,
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("forged".to_owned())),
+                ("done".to_owned(), Value::Bool(false)),
+            ]),
+        )
+        .resolve();
+    let err = match result {
+        Ok(_) => panic!("SYSTEM identity alone must not mint backend attribution"),
+        Err(err) => err,
+    };
+    assert_eq!(err.code, ErrorCode::WriteRejected);
+    assert!(prepared_read(&db, &db.table("todos")).is_empty());
+}
+
+#[test]
 fn default_insert_keeps_subject_and_made_by_equal() {
     let schema = owner_write_schema();
     let owner = AuthorSubject::for_test_bytes([0xa1; 16]);

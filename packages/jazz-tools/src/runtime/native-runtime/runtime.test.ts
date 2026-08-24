@@ -5101,6 +5101,88 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     ).toBe(expected);
   });
 
+  it("keeps every mergeable transaction operation on its initial provenance", () => {
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: () => fakeDb({}) } as never,
+      testSchema,
+      new Uint8Array(16),
+      new TextEncoder().encode(JSON.stringify(["urn:jazz:test", "backend-owner"])),
+      1,
+      true,
+      { backendCredential: "backend-only-test-capability" },
+    );
+    const context = (attribution?: string) =>
+      JSON.stringify({
+        batch_id: "attribution-mixing",
+        session: {
+          ...SYSTEM_READ_SESSION,
+          [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: trustedReservedSessionToken(SYSTEM_READ_SESSION),
+        },
+        ...(attribution ? { attribution } : {}),
+      });
+    const alice = JSON.stringify(["https://issuer.example", "alice"]);
+    const bob = JSON.stringify(["https://issuer.example", "bob"]);
+    const row = "00000000-0000-0000-0000-000000000123";
+
+    runtime.beginTransaction("mergeable", "attribution-mixing", context(alice));
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "alice write" }, done: false },
+      context(alice),
+      row,
+    );
+    expect(() => runtime.update("todos", row, { done: true }, context(bob))).toThrow(
+      "cannot mix provenance attributions",
+    );
+    expect(() => runtime.delete("todos", row, context())).toThrow(
+      "cannot mix provenance attributions",
+    );
+  });
+
+  it("fails closed rather than silently dropping backend provenance on branch writes", () => {
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: () => fakeDb({}) } as never,
+      testSchema,
+      new Uint8Array(16),
+      new TextEncoder().encode(JSON.stringify(["urn:jazz:test", "backend-owner"])),
+      1,
+      true,
+      { backendCredential: "backend-only-test-capability" },
+    );
+    const context = JSON.stringify({
+      session: {
+        ...SYSTEM_READ_SESSION,
+        [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: trustedReservedSessionToken(SYSTEM_READ_SESSION),
+      },
+      attribution: JSON.stringify(["https://issuer.example", "alice"]),
+      branch_view: { head: { branch: "draft" } },
+    });
+    const row = "00000000-0000-0000-0000-000000000123";
+
+    expect(() =>
+      runtime.insert(
+        "todos",
+        { title: { type: "Text", value: "draft" }, done: false },
+        context,
+        row,
+      ),
+    ).toThrow("Backend-attributed branch mutations are not supported yet");
+    expect(() => runtime.update("todos", row, { done: true }, context)).toThrow(
+      "Backend-attributed branch mutations are not supported yet",
+    );
+    expect(() =>
+      runtime.restore(
+        "todos",
+        row,
+        { title: { type: "Text", value: "draft" }, done: false },
+        context,
+      ),
+    ).toThrow("Backend-attributed branch mutations are not supported yet");
+    expect(() => runtime.delete("todos", row, context)).toThrow(
+      "Backend-attributed branch mutations are not supported yet",
+    );
+  });
+
   it("aborts the native upload when the producer fails", async () => {
     const abort = vi.fn();
     const runtime = new NativeRuntimeAdapter(

@@ -3456,7 +3456,9 @@ where
     let initial_sync_flush_every = config.initial_sync_flush_every;
     if config.history_complete {
         let db = if trusted_backend {
-            core_block_on(CoreDb::open_with_backend_attribution(db_config))
+            core_block_on(CoreDb::open_history_complete_with_backend_attribution(
+                db_config,
+            ))
         } else {
             core_block_on(CoreDb::open_history_complete(db_config))
         }
