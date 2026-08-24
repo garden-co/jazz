@@ -8,6 +8,7 @@ const compiledWasmModule = new WebAssembly.Module(wasmBinary);
 vi.mock("jazz-wasm", () => ({
   default: wasmDefaultInit,
   initSync: wasmInitSync,
+  nativeArtifactProtocolVersion: () => 12,
 }));
 
 import { loadWasmModule } from "./client.js";

@@ -21,6 +21,7 @@ import {
 } from "./runtime-config.js";
 import { httpUrlToWs } from "./url.js";
 import { PostcardWriter } from "./native-runtime/native-codec.js";
+import { assertNativeArtifactProtocol } from "./native-artifact-compatibility.js";
 
 type RuntimeSerializedSession = Session & {
   [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]?: string;
@@ -1725,6 +1726,7 @@ async function initializeWasmModule(runtime?: RuntimeSourcesConfig): Promise<Was
 
   if (syncInitInput) {
     wasmModule.initSync(syncInitInput);
+    assertNativeArtifactProtocol(wasmModule, "WASM");
     return wasmModule;
   }
 
@@ -1756,5 +1758,6 @@ async function initializeWasmModule(runtime?: RuntimeSourcesConfig): Promise<Was
     }
   }
 
+  assertNativeArtifactProtocol(wasmModule, "WASM");
   return wasmModule;
 }

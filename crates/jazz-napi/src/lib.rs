@@ -91,6 +91,16 @@ use jazz_server::{
 };
 use jazz_storage_rocksdb::RocksDbStorage as CoreRocksDbStorage;
 
+/// Protocol marker for the generated native artifact.
+///
+/// The JavaScript loader checks this before exposing the binding so a stale
+/// `.node` file fails at import time rather than later as a missing runtime
+/// method (for example `db.tick`).
+#[napi]
+pub fn native_artifact_protocol_version() -> u32 {
+    jazz::wire::WIRE_PROTOCOL_VERSION.into()
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct CoreOpenDbConfig {
     identity: CoreOpenDbIdentity,
