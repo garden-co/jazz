@@ -19,6 +19,7 @@ pub struct Fixture {
     warehouse: RowUuid,
     district: RowUuid,
     customer: RowUuid,
+    item: RowUuid,
     stock: RowUuid,
     warehouse_districts: PreparedQuery,
     district_customers: PreparedQuery,
@@ -26,8 +27,9 @@ pub struct Fixture {
     district_next_order_number: PreparedQuery,
     all_orders: PreparedQuery,
     all_order_lines: PreparedQuery,
+    all_payments: PreparedQuery,
     pending_orders: PreparedQuery,
-    low_stock: PreparedQuery,
+    low_stock_candidates: PreparedQuery,
 }
 
 impl Fixture {
@@ -46,9 +48,12 @@ impl Fixture {
         .expect("open fixture");
         let warehouse = row(1, 0);
         let district = row(2, 0);
+        let other_district = row(2, 1);
         let customer = row(3, 0);
         let item = row(4, 0);
         let stock = row(5, 0);
+        let adequate_item = row(4, 1);
+        let adequate_stock = row(5, 1);
         insert(
             &db,
             "warehouses",
@@ -61,12 +66,43 @@ impl Fixture {
         );
         insert(
             &db,
+            "items",
+            adequate_item,
+            [
+                ("sku", Value::String("JAM-002".into())),
+                ("name", Value::String("Cable".into())),
+                ("unit_price_cents", Value::I32(1_000)),
+            ],
+        );
+        insert(
+            &db,
+            "stock",
+            adequate_stock,
+            [
+                ("warehouse_id", Value::Uuid(warehouse.0)),
+                ("item_id", Value::Uuid(adequate_item.0)),
+                ("on_hand", Value::I32(20)),
+                ("reorder_level", Value::I32(5)),
+            ],
+        );
+        insert(
+            &db,
             "districts",
             district,
             [
                 ("warehouse_id", Value::Uuid(warehouse.0)),
                 ("name", Value::String("A".into())),
                 ("next_order_number", Value::I32(order_count as i32)),
+            ],
+        );
+        insert(
+            &db,
+            "districts",
+            other_district,
+            [
+                ("warehouse_id", Value::Uuid(warehouse.0)),
+                ("name", Value::String("B".into())),
+                ("next_order_number", Value::I32(0)),
             ],
         );
         insert(
@@ -160,6 +196,8 @@ impl Fixture {
                 &Query::from("districts")
                     .select(["next_order_number"])
                     .filter(eq(col("warehouse_id"), lit(warehouse.0)))
+                    .filter(eq(col("name"), lit("A")))
+                    .order_by("name", OrderDirection::Asc)
                     .limit(1),
             )
             .expect("prepare district next order number");
@@ -169,19 +207,27 @@ impl Fixture {
         let all_order_lines = db
             .prepare_query(&Query::from("order_lines"))
             .expect("prepare all order lines");
-        let low_stock = db
+        let all_payments = db
+            .prepare_query(&Query::from("payments"))
+            .expect("prepare all payments");
+        // Jazz does not yet lower `on_hand < reorder_level` field-to-field
+        // predicates (the capability report says exactly that). Keep the
+        // bounded indexed candidate read honest and apply that predicate here
+        // until the query engine gains the missing lowering.
+        let low_stock_candidates = db
             .prepare_query(
                 &Query::from("stock")
                     .filter(eq(col("warehouse_id"), lit(warehouse.0)))
                     .order_by("on_hand", OrderDirection::Asc)
                     .limit(20),
             )
-            .expect("prepare low-stock");
+            .expect("prepare low-stock candidates");
         Self {
             db,
             warehouse,
             district,
             customer,
+            item,
             stock,
             warehouse_districts,
             district_customers,
@@ -189,8 +235,9 @@ impl Fixture {
             district_next_order_number,
             all_orders,
             all_order_lines,
+            all_payments,
             pending_orders,
-            low_stock,
+            low_stock_candidates,
         }
     }
     pub fn warehouse_district_count(&self) -> usize {
@@ -212,11 +259,43 @@ impl Fixture {
             .len()
     }
     pub fn low_stock_count(&self) -> usize {
-        self.db.read(&self.low_stock).expect("low stock").len()
+        self.db
+            .read(&self.low_stock_candidates)
+            .expect("low-stock candidates")
+            .into_iter()
+            .filter(|stock| {
+                matches!(
+                    (stock.cell_at(2), stock.cell_at(3)),
+                    (Some(Value::I32(on_hand)), Some(Value::I32(reorder_level))) if on_hand < reorder_level
+                )
+            })
+            .count()
     }
-    pub fn purchase(&self, quantity: i32) -> Result<(), &'static str> {
+    pub fn purchase(
+        &self,
+        request_key: &str,
+        quantity: i32,
+    ) -> Result<PurchaseReceipt, &'static str> {
         block_on(async {
             let tx = self.db.exclusive_tx().await.map_err(|_| "open purchase")?;
+            let prior_orders = tx
+                .all_prepared(&self.all_orders)
+                .await
+                .map_err(|_| "read orders")?;
+            if let Some(order) = prior_orders.into_iter().find(|order| {
+                matches!(order.cell_at(6), Some(Value::String(ref key)) if key == request_key)
+            }) {
+                return Ok(PurchaseReceipt {
+                    order_number: match order.cell_at(3) {
+                        Some(Value::I32(order_number)) => order_number,
+                        _ => return Err("invalid existing order"),
+                    },
+                    total_cents: match order.cell_at(5) {
+                        Some(Value::I32(total_cents)) => total_cents,
+                        _ => return Err("invalid existing order"),
+                    },
+                });
+            }
             let stock = tx
                 .read("stock", self.stock)
                 .await
@@ -238,9 +317,27 @@ impl Fixture {
                 Some(Value::I32(order_number)) => *order_number,
                 _ => return Err("invalid district"),
             };
-            let order = row(7, order_number as usize);
-            let order_line = row(8, order_number as usize);
-            let amount_cents = quantity * 2_500;
+            let order_number_usize =
+                usize::try_from(order_number).map_err(|_| "invalid order number")?;
+            let order = row(7, order_number_usize);
+            let order_line = row(8, order_number_usize);
+            let payment = row(9, order_number_usize);
+            let amount_cents = quantity.checked_mul(2_500).ok_or("total overflow")?;
+            let next_order_number = order_number
+                .checked_add(1)
+                .ok_or("order counter overflow")?;
+            let customer = tx
+                .read("customers", self.customer)
+                .await
+                .map_err(|_| "read customer")?
+                .ok_or("missing customer")?;
+            let balance = match customer.get("balance_cents") {
+                Some(Value::I32(balance)) => *balance,
+                _ => return Err("invalid customer"),
+            };
+            let next_balance = balance
+                .checked_sub(amount_cents)
+                .ok_or("balance overflow")?;
             tx.update(
                 "stock",
                 self.stock,
@@ -251,14 +348,17 @@ impl Fixture {
             tx.update(
                 "districts",
                 self.district,
-                BTreeMap::from([("next_order_number".to_owned(), Value::I32(order_number + 1))]),
+                BTreeMap::from([(
+                    "next_order_number".to_owned(),
+                    Value::I32(next_order_number),
+                )]),
             )
             .await
             .map_err(|_| "stage district")?;
             tx.update(
                 "customers",
                 self.customer,
-                BTreeMap::from([("balance_cents".to_owned(), Value::I32(-amount_cents))]),
+                BTreeMap::from([("balance_cents".to_owned(), Value::I32(next_balance))]),
             )
             .await
             .map_err(|_| "stage customer")?;
@@ -274,7 +374,7 @@ impl Fixture {
                     ("total_cents".to_owned(), Value::I32(amount_cents)),
                     (
                         "idempotency_key".to_owned(),
-                        Value::String(format!("purchase-{order_number}")),
+                        Value::String(request_key.into()),
                     ),
                 ]),
             )
@@ -285,15 +385,36 @@ impl Fixture {
                 order_line,
                 BTreeMap::from([
                     ("order_id".to_owned(), Value::Uuid(order.0)),
-                    ("item_id".to_owned(), Value::Uuid(row(4, 0).0)),
+                    ("item_id".to_owned(), Value::Uuid(self.item.0)),
                     ("quantity".to_owned(), Value::I32(quantity)),
                     ("amount_cents".to_owned(), Value::I32(amount_cents)),
                 ]),
             )
             .await
             .map_err(|_| "stage order line")?;
+            tx.insert_with_id(
+                "payments",
+                payment,
+                BTreeMap::from([
+                    ("customer_id".to_owned(), Value::Uuid(self.customer.0)),
+                    (
+                        "order_id".to_owned(),
+                        Value::Nullable(Some(Box::new(Value::Uuid(order.0)))),
+                    ),
+                    ("amount_cents".to_owned(), Value::I32(amount_cents)),
+                    (
+                        "idempotency_key".to_owned(),
+                        Value::String(request_key.into()),
+                    ),
+                ]),
+            )
+            .await
+            .map_err(|_| "stage payment")?;
             tx.commit().await.map_err(|_| "commit purchase")?;
-            Ok(())
+            Ok(PurchaseReceipt {
+                order_number,
+                total_cents: amount_cents,
+            })
         })
     }
     pub fn stock_on_hand(&self) -> i32 {
@@ -317,6 +438,32 @@ impl Fixture {
             .expect("order lines")
             .len()
     }
+    pub fn payment_count(&self) -> usize {
+        self.db.read(&self.all_payments).expect("payments").len()
+    }
+    pub fn customer_balance(&self) -> i32 {
+        let customer = block_on(self.db.exclusive_tx()).expect("open customer read");
+        let cells = block_on(customer.read("customers", self.customer))
+            .expect("read customer")
+            .expect("customer exists");
+        match cells.get("balance_cents") {
+            Some(Value::I32(balance)) => *balance,
+            other => panic!("invalid customer value: {other:?}"),
+        }
+    }
+    pub fn set_stock_on_hand_for_test(&self, on_hand: i32) {
+        block_on(async {
+            let tx = self.db.exclusive_tx().await.expect("open stock update");
+            tx.update(
+                "stock",
+                self.stock,
+                BTreeMap::from([("on_hand".to_owned(), Value::I32(on_hand))]),
+            )
+            .await
+            .expect("stage stock update");
+            tx.commit().await.expect("commit stock update");
+        });
+    }
     pub fn district_next_order_number(&self) -> i32 {
         let district = self
             .db
@@ -329,6 +476,12 @@ impl Fixture {
             other => panic!("invalid district value: {other:?}"),
         }
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct PurchaseReceipt {
+    pub order_number: i32,
+    pub total_cents: i32,
 }
 
 fn schema() -> JazzSchema {
@@ -390,7 +543,7 @@ fn schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("payments")
                     .fk_column("customer_id", "customers")
-                    .fk_column("order_id", "orders")
+                    .nullable_column("order_id", ColumnType::Uuid)
                     .column("amount_cents", ColumnType::Integer)
                     .column("idempotency_key", ColumnType::Text),
             )
