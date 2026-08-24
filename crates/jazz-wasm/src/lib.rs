@@ -165,18 +165,24 @@ pub fn mint_anonymous_token(
     .map_err(|e| JsValue::from_str(&e))
 }
 
+/// Stable postcard envelope accepted by [`WasmDb::open_memory`] and
+/// `WasmDb.openMemory`.
+///
+/// The schema travels as public-schema JSON; this separately encodes only the
+/// runtime identity and deterministic test/open options.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct WasmOpenDbConfig {
-    identity: WasmDbIdentity,
-    row_id_seed: Option<u64>,
-    history_complete: bool,
-    initial_sync_flush_every: Option<u32>,
+pub struct WasmOpenDbConfig {
+    pub identity: WasmDbIdentity,
+    pub row_id_seed: Option<u64>,
+    pub history_complete: bool,
+    pub initial_sync_flush_every: Option<u32>,
 }
 
+/// Runtime identity carried in [`WasmOpenDbConfig`].
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-struct WasmDbIdentity {
-    node: NodeUuid,
-    author: AuthorId,
+pub struct WasmDbIdentity {
+    pub node: NodeUuid,
+    pub author: AuthorId,
 }
 
 impl From<WasmDbIdentity> for DbIdentity {
