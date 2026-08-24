@@ -60,17 +60,16 @@ const relationalRecipientApp = s.defineApp({
     audio_bytes: s.bytes().optional(),
   }),
   playlists: s.table({ name: s.string(), owner_subject: s.string() }),
-  invitations: s.table({
-    playlist_id: s.ref("playlists"),
-    subject: s.string(),
-    label: s.string(),
-    role: s.enum("listener", "editor"),
-    status: s.enum("pending", "accepted"),
-  }),
   playlist_entries: s.table({
     playlist_id: s.ref("playlists"),
     track_id: s.ref("tracks"),
-    label: s.string(),
+    position: s.float(),
+  }),
+  invitations: s.table({
+    playlist_id: s.ref("playlists"),
+    subject: s.string(),
+    role: s.enum("listener", "editor"),
+    status: s.enum("pending", "accepted", "revoked"),
   }),
   playback_positions: s.table({
     playlist_id: s.ref("playlists"),
@@ -111,8 +110,6 @@ const relationalRecipientPermissions = s.definePermissions(
     policy.playlist_entries.allowInsert.where((entry) => canEditPlaylist(entry.playlist_id));
     policy.playlist_entries.allowUpdate.where((entry) => canEditPlaylist(entry.playlist_id));
     policy.playlist_entries.allowDelete.where((entry) => canEditPlaylist(entry.playlist_id));
-    policy.playback_positions.allowRead.where({ $createdBy: session.author });
-    policy.playback_positions.allowInsert.always();
     policy.invitations.allowRead.where((invite) =>
       anyOf([
         { subject: session.user_id },
@@ -140,6 +137,8 @@ const relationalRecipientPermissions = s.definePermissions(
     policy.invitations.allowDelete.where((invite) =>
       policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.author }),
     );
+    policy.playback_positions.allowRead.where({ $createdBy: session.author });
+    policy.playback_positions.allowInsert.always();
   },
 );
 
@@ -343,7 +342,6 @@ describe("RecordPlayer authenticated playlist topology", () => {
       .insert(relationalRecipientApp.invitations, {
         playlist_id: playlist.id,
         subject: "record-player-relation-recipient",
-        label: "recipient relation receipt",
         role: "listener",
         status: "pending",
       })
@@ -352,7 +350,6 @@ describe("RecordPlayer authenticated playlist topology", () => {
       .insert(relationalRecipientApp.invitations, {
         playlist_id: playlist.id,
         subject: "record-player-relation-listener",
-        label: "second recipient relation receipt",
         role: "listener",
         status: "pending",
       })
@@ -469,7 +466,6 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 .insert(relationalRecipientApp.invitations, {
                   playlist_id: playlist.id,
                   subject: "record-player-phase-recipient",
-                  label: "phase relation receipt",
                   role: "listener",
                   status: "pending",
                 })
