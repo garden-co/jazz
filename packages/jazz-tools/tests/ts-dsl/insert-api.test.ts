@@ -10,6 +10,12 @@ describe("TS Insert API", () => {
     db = await createDb({
       appId: "test-app",
       driver: { type: "persistent", dbName: uniqueDbName("insert-row-shape") },
+      cookieSession: {
+        issuer: "https://issuer.example",
+        user_id: "todo-client-localfirst-insert",
+        claims: {},
+        authMode: "external",
+      },
     });
   });
 

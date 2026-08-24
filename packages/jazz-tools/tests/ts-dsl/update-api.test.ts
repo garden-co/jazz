@@ -10,6 +10,12 @@ describe("TS Update API", () => {
     db = await createDb({
       appId: "test-app",
       driver: { type: "persistent" },
+      cookieSession: {
+        issuer: "https://issuer.example",
+        user_id: "todo-client-localfirst-update",
+        claims: {},
+        authMode: "external",
+      },
     });
   });
 
