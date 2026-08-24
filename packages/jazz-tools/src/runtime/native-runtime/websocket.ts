@@ -347,7 +347,7 @@ function canonicalAuthorForWebSocketAuth(auth: Record<string, unknown>): string 
 
   if (typeof auth.jwt_token === "string") {
     const payload = parseJwtPayload(auth.jwt_token);
-    const issuer = typeof payload?.iss === "string" ? payload.iss.trim() : undefined;
+    const issuer = typeof payload?.iss === "string" ? payload.iss : undefined;
     const subject = payload?.sub;
     if (
       typeof issuer === "string" &&

@@ -1040,10 +1040,35 @@ impl WasmDb {
     pub fn open_memory(schema: Vec<u8>, config: Vec<u8>) -> Result<WasmDb, JsValue> {
         console_error_panic_hook::set_once();
         let (schema, config) = decode_open_args(&schema, &config)?;
+        validate_untrusted_open_author(&config)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let db =
-            block_on(open_db(schema, MemoryStorage::new(&refs), config)).map_err(to_js_error)?;
+            block_on(open_db(schema, MemoryStorage::new(&refs), config, false)).map_err(to_js_error)?;
+        db.set_deferred_local_persistence(true);
+        Ok(Self {
+            inner: WasmDbInner::Memory(Rc::new(db)),
+            owns_runtime: true,
+        })
+    }
+
+    /// Open with a verified Jazz self-signed client identity. This deliberately
+    /// stays separate from `openMemory`: untrusted open config bytes can never
+    /// select a Jazz-reserved identity.
+    #[wasm_bindgen(js_name = openMemoryWithSelfSignedProof)]
+    pub fn open_memory_with_self_signed_proof(
+        schema: Vec<u8>,
+        config: Vec<u8>,
+        token: String,
+        app_id: String,
+        claimed_author: String,
+    ) -> Result<WasmDb, JsValue> {
+        console_error_panic_hook::set_once();
+        let (schema, mut config) = decode_open_args(&schema, &config)?;
+        config.identity.author = verify_self_signed_runtime_author(&token, &app_id, &claimed_author)?;
+        let refs = schema.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let db = block_on(open_db(schema, MemoryStorage::new(&refs), config, true)).map_err(to_js_error)?;
         db.set_deferred_local_persistence(true);
         Ok(Self {
             inner: WasmDbInner::Memory(Rc::new(db)),
@@ -1060,14 +1085,41 @@ impl WasmDb {
     ) -> Result<WasmDb, JsValue> {
         console_error_panic_hook::set_once();
         let (schema, config) = decode_open_args(&schema, &config)?;
+        validate_untrusted_open_author(&config)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = BrowserStorage::open(IndexedDbPageStore::from_js(page_store), &refs)
             .await
             .map_err(to_js_error)?;
-        let db = open_db(schema, storage, config)
+        let db = open_db(schema, storage, config, false)
             .await
             .map_err(to_js_error)?;
+        db.set_deferred_local_persistence(true);
+        Ok(Self {
+            inner: WasmDbInner::Browser(Rc::new(db)),
+            owns_runtime: true,
+        })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = openBrowserWithSelfSignedProof)]
+    pub async fn open_browser_with_self_signed_proof(
+        page_store: JsValue,
+        schema: Vec<u8>,
+        config: Vec<u8>,
+        token: String,
+        app_id: String,
+        claimed_author: String,
+    ) -> Result<WasmDb, JsValue> {
+        console_error_panic_hook::set_once();
+        let (schema, mut config) = decode_open_args(&schema, &config)?;
+        config.identity.author = verify_self_signed_runtime_author(&token, &app_id, &claimed_author)?;
+        let refs = schema.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = BrowserStorage::open(IndexedDbPageStore::from_js(page_store), &refs)
+            .await
+            .map_err(to_js_error)?;
+        let db = open_db(schema, storage, config, true).await.map_err(to_js_error)?;
         db.set_deferred_local_persistence(true);
         Ok(Self {
             inner: WasmDbInner::Browser(Rc::new(db)),
@@ -2593,6 +2645,7 @@ async fn open_db<S>(
     schema: JazzSchema,
     storage: S,
     config: WasmOpenDbConfig,
+    _verified_self_signed_author: bool,
 ) -> Result<Db<S>, jazz::db::Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
@@ -2611,6 +2664,21 @@ where
         configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
         Ok(db)
     }
+}
+
+fn validate_untrusted_open_author(config: &WasmOpenDbConfig) -> Result<(), JsValue> {
+    AuthorSubject::from_untrusted_canonical(config.identity.author.canonical())
+        .map(|_| ())
+        .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+fn verify_self_signed_runtime_author(
+    token: &str,
+    app_id: &str,
+    claimed_author: &str,
+) -> Result<AuthorSubject, JsValue> {
+    jazz::tools::identity::verify_client_runtime_author(token, app_id, claimed_author)
+        .map_err(|error| JsValue::from_str(&error))
 }
 
 fn configure_initial_sync_flush_cadence<S>(
@@ -3313,7 +3381,7 @@ mod dynamic_schema_view_tests {
                 .begin_transaction(
                     bound.to_string(),
                     "exclusive".to_owned(),
-                    Some(alice.0.as_bytes().to_vec()),
+                    Some(alice.canonical().as_bytes().to_vec()),
                 )
                 .unwrap();
             let tx = binding.attach_exclusive_tx(bound.to_string()).unwrap();
@@ -3325,7 +3393,7 @@ mod dynamic_schema_view_tests {
                     .all_in_transaction_for_identity(
                         &query,
                         &tx,
-                        alice.0.as_bytes().to_vec(),
+                        alice.canonical().as_bytes().to_vec(),
                         JsValue::NULL
                     )
                     .is_ok(),
@@ -3345,7 +3413,7 @@ mod dynamic_schema_view_tests {
                 .all_in_transaction_for_identity(
                     &view_query,
                     &tx,
-                    alice.0.as_bytes().to_vec(),
+                    alice.canonical().as_bytes().to_vec(),
                     JsValue::NULL,
                 )
                 .is_ok());
@@ -3357,7 +3425,7 @@ mod dynamic_schema_view_tests {
                     .one_in_transaction_for_identity(
                         &view_query,
                         &tx,
-                        alice.0.as_bytes().to_vec(),
+                        alice.canonical().as_bytes().to_vec(),
                         JsValue::NULL,
                     )
                     .is_ok(),
@@ -3383,7 +3451,7 @@ mod dynamic_schema_view_tests {
                 .begin_transaction(
                     bound.to_string(),
                     "exclusive".to_owned(),
-                    Some(alice.0.as_bytes().to_vec()),
+                    Some(alice.canonical().as_bytes().to_vec()),
                 )
                 .unwrap();
             block_on(other_owner.exclusive_tx_ref(bound).insert(
@@ -3413,21 +3481,21 @@ mod dynamic_schema_view_tests {
             assert_foreign(other_binding.all_in_transaction_for_identity(
                 &other_query,
                 &tx,
-                alice.0.as_bytes().to_vec(),
+                alice.canonical().as_bytes().to_vec(),
                 JsValue::NULL,
             ));
             assert_foreign(other_binding.one_in_transaction(&other_query, &tx, JsValue::NULL));
             assert_foreign(other_binding.one_in_transaction_for_identity(
                 &other_query,
                 &tx,
-                alice.0.as_bytes().to_vec(),
+                alice.canonical().as_bytes().to_vec(),
                 JsValue::NULL,
             ));
             let error = binding
                 .all_in_transaction_for_identity(
                     &query,
                     &tx,
-                    bob.0.as_bytes().to_vec(),
+                    bob.canonical().as_bytes().to_vec(),
                     JsValue::NULL,
                 )
                 .unwrap_err();
