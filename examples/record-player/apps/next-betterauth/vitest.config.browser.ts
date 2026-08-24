@@ -30,7 +30,10 @@ export default defineConfig({
   plugins: [wasm(), topLevelAwait(), react()],
   worker: { plugins: () => [wasm(), topLevelAwait()] },
   test: {
-    include: ["tests/browser/**/*.test.{ts,tsx}"],
+    // This project owns the Jazz server lifecycle. Keep the mocked provider
+    // receipt in vitest.config.provider.ts so `test:browser` remains a true
+    // topology-only gate.
+    include: ["tests/browser/topology.e2e.test.ts"],
     globalSetup: ["../../../../packages/jazz-tools/tests/browser/global-setup.ts"],
     browser: {
       enabled: true,

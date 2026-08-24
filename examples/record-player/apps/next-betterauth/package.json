@@ -9,7 +9,8 @@
     "start": "next start",
     "test": "vitest run tests/*.test.ts",
     "test:browser": "vitest run --config vitest.config.browser.ts",
-    "test:provider": "vitest run --config vitest.config.provider.ts"
+    "test:provider": "vitest run --config vitest.config.provider.ts",
+    "test:selection": "node --test tests/test-selection.test.mjs"
   },
   "dependencies": {
     "better-auth": "1.6.24",
