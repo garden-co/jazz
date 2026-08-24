@@ -990,6 +990,7 @@ pub struct StreamingMutation {
     column: String,
     mutation: CoreStreamingMutationKind,
     identity: Option<CoreAuthorSubject>,
+    attribution: Option<CoreAuthorSubject>,
     updated_at_ms: Option<u64>,
     head: Option<CoreBranchSelector>,
     base: Option<CoreBranchViewBase>,
@@ -1047,6 +1048,7 @@ impl StreamingMutation {
                     self.updated_at_ms,
                     self.head.clone(),
                     self.base.clone(),
+                    self.attribution,
                 ))
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
@@ -1063,6 +1065,7 @@ impl StreamingMutation {
                     self.updated_at_ms,
                     self.head.clone(),
                     self.base.clone(),
+                    self.attribution,
                 ))
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
@@ -1178,6 +1181,96 @@ impl NapiDb {
             column,
             mutation,
             identity,
+            attribution: None,
+            updated_at_ms: updated_at_ms
+                .map(|value| checked_u64(value, "updatedAtMs"))
+                .transpose()?,
+            head,
+            base,
+            upload: Some(upload),
+        })
+    }
+
+    /// Backend-only counterpart which leaves policy admission on the runtime's
+    /// SYSTEM Db while carrying a distinct provenance author into finalization.
+    #[napi(js_name = "beginStreamingMutationAttributedEncoded")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_streaming_mutation_attributed_encoded(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+        column: String,
+        kind: String,
+        mutation: Option<String>,
+        author: Option<Uint8Array>,
+        attribution: Uint8Array,
+        updated_at_ms: Option<f64>,
+        head: Option<JsonValue>,
+        base: Option<JsonValue>,
+    ) -> napi::Result<StreamingMutation> {
+        self.require_trusted_backend()?;
+        if self.inner.borrow().is_none() {
+            return Err(napi::Error::from_reason("database is closed"));
+        }
+        let kind = match kind.as_str() {
+            "Text" => CoreLargeValueKind::String,
+            "Json" => CoreLargeValueKind::Json,
+            "Bytea" => CoreLargeValueKind::Bytes,
+            _ => {
+                return Err(napi::Error::from_reason(
+                    "streaming insert requires a Text, Json, or Bytea column",
+                ));
+            }
+        };
+        let mutation = match mutation.as_deref().unwrap_or("insert") {
+            "insert" => CoreStreamingMutationKind::Insert,
+            "update" => CoreStreamingMutationKind::Update,
+            "upsert" => CoreStreamingMutationKind::Upsert,
+            _ => {
+                return Err(napi::Error::from_reason(
+                    "streaming mutation must be insert, update, or upsert",
+                ));
+            }
+        };
+        let identity = author
+            .as_ref()
+            .map(|author| core_author_id_from_bytes(author))
+            .transpose()?;
+        let attribution = core_author_id_from_bytes(&attribution)?;
+        let head = head.map(core_branch_selector_from_json).transpose()?;
+        let base = core_branch_base_from_json(base)?;
+        if base.is_some() && head.is_none() {
+            return Err(napi::Error::from_reason(
+                "a streaming mutation branch base requires a branch head",
+            ));
+        }
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        let upload = {
+            let db = self.inner.borrow();
+            let db = db
+                .as_ref()
+                .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+            match db {
+                NapiDbInnerStorage::Memory(db) => {
+                    db.begin_streaming_value_upload(&table, &cells, &column, kind)
+                }
+                NapiDbInnerStorage::Persistent(db) => {
+                    db.begin_streaming_value_upload(&table, &cells, &column, kind)
+                }
+            }
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?
+        };
+        Ok(StreamingMutation {
+            db: Rc::clone(&self.inner),
+            table,
+            row_id,
+            cells: Some(cells),
+            column,
+            mutation,
+            identity,
+            attribution: Some(attribution),
             updated_at_ms: updated_at_ms
                 .map(|value| checked_u64(value, "updatedAtMs"))
                 .transpose()?,
@@ -1365,6 +1458,7 @@ impl NapiDb {
         open_batch_id: String,
         kind: String,
         author: Option<Uint8Array>,
+        attribution: Option<Uint8Array>,
     ) -> napi::Result<()> {
         let open_batch_id = open_batch_id
             .parse::<CoreOpenBatchId>()
@@ -1373,6 +1467,18 @@ impl NapiDb {
             .as_deref()
             .map(core_author_id_from_bytes)
             .transpose()?;
+        let attribution = attribution
+            .as_ref()
+            .map(|author| core_author_id_from_bytes(author))
+            .transpose()?;
+        if attribution.is_some() {
+            self.require_trusted_backend()?;
+            if kind != "mergeable" {
+                return Err(napi::Error::from_reason(
+                    "backend-attributed transactions currently require mergeable kind",
+                ));
+            }
+        }
         if kind != "mergeable" && kind != "exclusive" {
             return Err(napi::Error::from_reason(unknown_transaction_kind_message(
                 &kind,
@@ -1386,12 +1492,18 @@ impl NapiDb {
             ($db:expr) => {
                 core_block_on(async {
                     if kind == "mergeable" {
-                        match author {
-                            Some(author) => {
-                                $db.begin_mergeable_for_identity(open_batch_id, author)
+                        match attribution {
+                            Some(attribution) => {
+                                $db.begin_mergeable_attributed(open_batch_id, attribution)
                                     .await
                             }
-                            None => $db.begin_mergeable(open_batch_id).await,
+                            None => match author {
+                                Some(author) => {
+                                    $db.begin_mergeable_for_identity(open_batch_id, author)
+                                        .await
+                                }
+                                None => $db.begin_mergeable(open_batch_id).await,
+                            },
                         }
                     } else {
                         match author {

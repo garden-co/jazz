@@ -4920,12 +4920,17 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     );
   });
 
-  it("keeps backend policy admission separate from attributed provenance", () => {
+  it("keeps backend policy admission separate from attributed provenance", async () => {
     const insertWithIdEncodedAttributed = vi.fn(() => fakeWrite());
     const updateEncodedAttributed = vi.fn(() => fakeWrite());
     const upsertEncodedAttributed = vi.fn(() => fakeWrite());
     const restoreEncodedAttributed = vi.fn(() => fakeWrite());
     const deleteAttributed = vi.fn(() => fakeWrite());
+    const beginStreamingMutationAttributedEncoded = vi.fn(() => ({
+      push: () => undefined,
+      finish: () => fakeWrite(),
+      abort: () => true,
+    }));
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
@@ -4935,6 +4940,10 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
             upsertEncodedAttributed,
             restoreEncodedAttributed,
             deleteAttributed,
+            beginStreamingMutationEncoded: () => {
+              throw new Error("backend attribution must select the dedicated method");
+            },
+            beginStreamingMutationAttributedEncoded,
             prepareQuery: () => ({}),
             all: () => encodeRows([]),
             tick: () => undefined,
@@ -4975,6 +4984,17 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       { title: { type: "Text", value: "restored" }, done: false },
       context,
     );
+    await runtime.streamingMutation(
+      "update",
+      "todos",
+      {},
+      "title",
+      (async function* () {
+        yield "streamed";
+      })(),
+      context,
+      id,
+    );
     runtime.delete("todos", id, context);
 
     const expected = JSON.stringify(["https://issuer.example", "attributed-user"]);
@@ -4990,6 +5010,10 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         expected,
       );
     }
+    const streamingAuthor = beginStreamingMutationAttributedEncoded.mock.calls[0]?.[7];
+    expect(
+      streamingAuthor instanceof Uint8Array ? new TextDecoder().decode(streamingAuthor) : undefined,
+    ).toBe(expected);
   });
 
   it("aborts the native upload when the producer fails", async () => {

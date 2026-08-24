@@ -255,6 +255,7 @@ fn expired_local_stream_handles_cannot_recreate_pending_uploads() {
         None,
         None,
         None,
+        None,
     ));
     let finish_error = match finish_result {
         Ok(_) => panic!("an evicted stream cannot finish"),
