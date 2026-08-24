@@ -1905,20 +1905,24 @@ fn auth_mode_claim_value(auth_mode: crate::tools::public_api::session::AuthMode)
 fn core_row_provenance_to_public(
     provenance: crate::node::RowProvenance,
 ) -> crate::tools::metadata::RowProvenance {
+    // Rust's public metadata API uses microseconds for provenance magic
+    // timestamps. This is distinct from core current-row storage (physical
+    // milliseconds) and mirrors `PublicQueryDecoder` below.
     crate::tools::metadata::RowProvenance {
         created_by: provenance.created_by.0.to_string(),
-        created_at: provenance.created_at,
+        created_at: provenance.created_at * 1_000,
         updated_by: provenance.updated_by.0.to_string(),
-        updated_at: provenance.updated_at,
+        updated_at: provenance.updated_at * 1_000,
     }
 }
 
 /// Re-encode a subscription row for the public/native boundary.
 ///
-/// Current-row records encode provenance as public physical milliseconds.
-/// The tools wire timestamp representation uses microseconds, so normalize
-/// only the two provenance fields at that boundary. Application `Timestamp`
-/// columns and the internal `tx_time` alias deliberately remain unchanged.
+/// This is the public Jazz-client subscription boundary, distinct from the
+/// lower-level NAPI row codec. It exposes provenance magic columns in Jazz's
+/// public microsecond timestamp representation. Current-row storage itself,
+/// ordinary `Timestamp` columns, and the internal `tx_time` alias remain in
+/// their respective core representations.
 fn public_subscription_record(row: &crate::node::CurrentRow) -> Result<Vec<u8>> {
     let (descriptor, raw) = row.encoded_record();
     let mut values = BorrowedRecord::new(raw, descriptor)
@@ -1995,9 +1999,7 @@ fn normalize_public_subscription_value(
             if matches!(field_name, Some("$createdAt" | "$updatedAt")) =>
         {
             *timestamp = timestamp.checked_mul(1_000).ok_or_else(|| {
-                JazzError::Query(
-                    "subscription provenance timestamp exceeds u64 microseconds".to_owned(),
-                )
+                JazzError::Query("subscription provenance timestamp exceeds public range".into())
             })?;
             Ok(())
         }
@@ -2296,6 +2298,15 @@ impl JazzClient {
             )));
         }
         Ok(Some(updated_at))
+    }
+
+    fn reject_updated_at_override(&self, operation: &str) -> Result<()> {
+        if self.write_updated_at()?.is_some() {
+            return Err(JazzError::Write(format!(
+                "updated_at is not supported for {operation}"
+            )));
+        }
+        Ok(())
     }
 
     fn check_core_write_not_rejected(db: &Backend, tx_id: CoreTxId) -> Result<()> {
@@ -3140,6 +3151,7 @@ impl JazzClient {
         values: HashMap<String, Value>,
     ) -> Result<(ObjectId, Vec<Value>, Option<TransactionId>)> {
         {
+            self.reject_updated_at_override("inserts")?;
             let row_values = self.core_ordered_values(table, &values)?;
             let cells = self.core_cells(table, values)?;
             if let Some(transaction_id) = self
@@ -3238,6 +3250,7 @@ impl JazzClient {
     /// Delete a row.
     pub fn delete(&self, object_id: ObjectId) -> Result<Option<TransactionId>> {
         {
+            self.reject_updated_at_override("deletes")?;
             if let Some(transaction_id) = self
                 .write_context
                 .as_ref()
@@ -3537,12 +3550,12 @@ mod tests {
     }
 
     #[test]
-    fn public_provenance_uses_physical_milliseconds_and_wire_microseconds() {
+    fn public_provenance_uses_microseconds_without_touching_other_timestamps() {
         use crate::groove::records::ValueType;
         use crate::time::TxTime;
 
-        // HLC bits are retained only on `tx_time`; public provenance is
-        // physical milliseconds before crossing the tools wire boundary.
+        // HLC bits are retained only on `tx_time`; this public Jazz-client
+        // boundary exposes provenance in its documented microsecond unit.
         let physical_ms = 1_777_777_777_777;
         let created = TxTime::new(physical_ms, 17);
         assert!(created.0 > (1_u64 << 53));
@@ -3553,8 +3566,8 @@ mod tests {
             updated_by: CoreAuthorId::SYSTEM,
             updated_at: physical_ms + 1,
         });
-        assert_eq!(provenance.created_at, physical_ms);
-        assert_eq!(provenance.updated_at, physical_ms + 1);
+        assert_eq!(provenance.created_at, physical_ms * 1_000);
+        assert_eq!(provenance.updated_at, (physical_ms + 1) * 1_000);
 
         // Both ordinary current rows and terminal root/child rows traverse
         // this encoder before they become a native subscription delta.
@@ -3734,6 +3747,37 @@ mod tests {
         );
 
         transaction.rollback().expect("rollback empty transaction");
+    }
+
+    #[tokio::test]
+    async fn unsupported_timestamp_overrides_fail_closed_for_insert_and_delete() {
+        let client = JazzClient::test_client(declared_todo_schema()).await;
+        let client =
+            client.with_write_context(WriteContext::default().with_updated_at(1_700_000_000_001));
+
+        let insert_error = client
+            .insert(
+                "todos",
+                HashMap::from([
+                    ("title".to_owned(), Value::Text("no override".to_owned())),
+                    ("completed".to_owned(), Value::Boolean(false)),
+                ]),
+            )
+            .expect_err("insert must not silently discard updated_at");
+        assert!(
+            insert_error
+                .to_string()
+                .contains("not supported for inserts")
+        );
+
+        let delete_error = client
+            .delete(ObjectId::from_uuid(Uuid::from_u128(8)))
+            .expect_err("delete must not silently discard updated_at");
+        assert!(
+            delete_error
+                .to_string()
+                .contains("not supported for deletes")
+        );
     }
 
     #[test]

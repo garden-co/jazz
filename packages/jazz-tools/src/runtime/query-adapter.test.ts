@@ -52,6 +52,39 @@ describe("translateQuery", () => {
     expect(translated.array_subqueries).toHaveLength(1);
   });
 
+  it("lowers provenance timestamp predicates in public microseconds", () => {
+    const timestampMs = 1_777_777_777_777;
+    const translated = JSON.parse(
+      translateQuery(
+        app.todos
+          .where({ $updatedAt: { gte: new Date(timestampMs) } })
+          .hopTo("owner")
+          ._build(),
+        app.wasmSchema,
+      ),
+    );
+
+    expect(translated.relation_ir).toMatchObject({
+      Project: {
+        input: {
+          Join: {
+            left: {
+              Filter: {
+                predicate: {
+                  Cmp: {
+                    left: { column: "$updatedAt" },
+                    op: "Ge",
+                    right: { Literal: { type: "Timestamp", value: timestampMs * 1_000 } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+  });
+
   it("keeps native relation IR for relation traversal queries", () => {
     const translated = JSON.parse(
       translateQuery(app.todos.where({ done: false }).hopTo("owner")._build(), app.wasmSchema),

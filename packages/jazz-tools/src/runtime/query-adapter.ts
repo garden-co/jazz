@@ -106,6 +106,10 @@ function toTimestampMs(value: unknown): number {
 }
 
 function toRuntimeTimestampValue(value: unknown, columnName?: string): number {
+  // This public query boundary uses microseconds for provenance magic columns,
+  // while ordinary timestamps remain physical milliseconds. It is separate
+  // from the NAPI row codec, which receives physical-millisecond core records
+  // and performs this conversion for decoded result values.
   const timestampMs = toTimestampMs(value);
   return columnName && isProvenanceMagicTimestampColumn(columnName)
     ? timestampMs * 1_000
