@@ -554,7 +554,7 @@ mod tests {
         let mut requests = EvaluationRequests::new();
         let key = EvaluationRequestKey::Chunk(ChunkRequest {
             object_hash: crate::large_values::object_hash(&chunk).0,
-            locator: b"opaque-locator".to_vec(),
+            locator: crate::large_values::Locator::from_seed(b"opaque-locator"),
         });
         let schema = DatabaseSchema::new([]);
 

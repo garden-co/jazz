@@ -30,7 +30,7 @@ fn auxiliary_pump_completes_a_suspended_groove_chunk_read_without_a_semantic_tic
         let prepared = groove::large_values::prepare(
             groove::large_values::LargeValueKind::Bytes,
             &vec![7; 32 * 1024],
-            |_| groove::large_values::Locator(uuid::Uuid::new_v4().as_bytes().to_vec()),
+            |_| groove::large_values::Locator::random(),
         )
         .unwrap();
         source.stage(prepared.staged_chunks.clone()).await.unwrap();
@@ -54,7 +54,7 @@ fn auxiliary_pump_completes_a_suspended_groove_chunk_read_without_a_semantic_tic
         );
         let request = groove::chunks::ChunkRequest {
             object_hash: prepared.value_ref.root.object_hash.0,
-            locator: prepared.value_ref.root.locator.0.clone(),
+            locator: prepared.value_ref.root.locator,
         };
         let mut read = provider.get(request.clone());
         let waker = futures::task::noop_waker();
@@ -131,7 +131,7 @@ fn dropping_the_last_suspended_consumer_cancels_unsent_chunk_demand() {
     );
     let request = groove::chunks::ChunkRequest {
         object_hash: [4; 32],
-        locator: vec![5; 16],
+        locator: groove::large_values::Locator([5; 32]),
     };
     let mut pending = resolver.resolve(request);
     let waker = futures::task::noop_waker();
@@ -170,7 +170,7 @@ fn five_concurrent_chunk_demands_are_delivered_in_two_decodable_batches() {
         let requests = (0_u8..5)
             .map(|index| groove::chunks::ChunkRequest {
                 object_hash: groove::large_values::object_hash(&[index]).0,
-                locator: vec![index; 16],
+                locator: groove::large_values::Locator([index; 32]),
             })
             .collect::<Vec<_>>();
         for (index, request) in requests.iter().enumerate() {
@@ -260,7 +260,7 @@ fn a_late_response_from_a_disconnected_upstream_cannot_complete_reassigned_deman
         );
         let request = groove::chunks::ChunkRequest {
             object_hash: [6; 32],
-            locator: vec![7; 16],
+            locator: groove::large_values::Locator([7; 32]),
         };
         let mut pending = resolver.resolve(request);
         let waker = futures::task::noop_waker();

@@ -42,7 +42,7 @@ fn failed_large_scalar_staging_publishes_no_row() {
     impl groove::chunks::ChunkStorage for FailingStage {
         fn get(
             &self,
-            _locator: Vec<u8>,
+            _locator: groove::large_values::Locator,
             _expected_hash: groove::large_values::ContentHash,
         ) -> groove::chunks::ChunkFuture<'_, Result<bytes::Bytes, groove::chunks::ChunkStorageError>> {
             Box::pin(async { Err(groove::chunks::ChunkStorageError::Unavailable) })
@@ -130,7 +130,7 @@ fn expired_staged_tree_requires_reupload_before_row_publication() {
     let prepared = groove::large_values::prepare(
         groove::large_values::LargeValueKind::String,
         logical.as_bytes(),
-        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
+        |hash| groove::large_values::Locator(hash.0),
     )
     .unwrap();
     let commit = crate::db::block_on(node.attach_prepared_large_cell(
@@ -168,7 +168,7 @@ fn pushed_chunks_must_be_staged_before_the_referencing_authority_commit() {
     let prepared = groove::large_values::prepare(
         groove::large_values::LargeValueKind::String,
         "pushed body/".repeat(8_000).as_bytes(),
-        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
+        |hash| groove::large_values::Locator(hash.0),
     )
     .unwrap();
     let commit = crate::db::block_on(writer.attach_prepared_large_cell(
@@ -255,7 +255,7 @@ fn corrupt_root_first_upload_is_rejected_without_poisoning_the_receiver() {
     let prepared = groove::large_values::prepare(
         groove::large_values::LargeValueKind::String,
         "corrupt upload/".repeat(8_000).as_bytes(),
-        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
+        |hash| groove::large_values::Locator(hash.0),
     )
     .unwrap();
     let context = Some(CommitUnitIngestContext {
@@ -316,7 +316,7 @@ fn rate_limited_upload_preserves_pending_claim_for_retry() {
     let prepared = groove::large_values::prepare(
         groove::large_values::LargeValueKind::String,
         "terminal cleanup/".repeat(20_000).as_bytes(),
-        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
+        |hash| groove::large_values::Locator(hash.0),
     )
     .unwrap();
     let context = Some(CommitUnitIngestContext {
@@ -440,7 +440,7 @@ fn pending_upload_expires_under_the_mandatory_finite_staging_age() {
     let prepared = groove::large_values::prepare(
         groove::large_values::LargeValueKind::String,
         "pending expiry/".repeat(20_000).as_bytes(),
-        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
+        |hash| groove::large_values::Locator(hash.0),
     )
     .unwrap();
     let context = Some(CommitUnitIngestContext {
@@ -507,7 +507,7 @@ fn handcrafted_large_descriptor_is_rejected_but_node_staged_preparation_can_publ
     let prepared = groove::large_values::prepare(
         groove::large_values::LargeValueKind::String,
         logical.as_bytes(),
-        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
+        |hash| groove::large_values::Locator(hash.0),
     )
     .unwrap();
     let forged = MergeableCommit::new("todos", row(0x75), 10).cells(BTreeMap::from([

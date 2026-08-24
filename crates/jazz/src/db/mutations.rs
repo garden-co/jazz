@@ -604,8 +604,7 @@ where
         let emitted_for_stage = Rc::clone(&emitted);
         let preparation = groove::large_values::PushStreamingPreparation::new(
             kind,
-            Box::new(|_| groove::large_values::Locator(uuid::Uuid::new_v4().as_bytes().to_vec()))
-                as Box<dyn FnMut(_) -> _>,
+            Box::new(|_| groove::large_values::Locator::random()) as Box<dyn FnMut(_) -> _>,
             Box::new(move |chunk| {
                 emitted_for_stage.borrow_mut().push(chunk);
                 Ok(())

@@ -1177,7 +1177,7 @@ where
                                             .lock()
                                             .await
                                             .local_chunk(
-                                                node_ref.locator.0.clone(),
+                                                node_ref.locator,
                                                 node_ref.object_hash,
                                             )
                                             .await

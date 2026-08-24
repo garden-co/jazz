@@ -20,7 +20,7 @@ use groove::storage::MemoryStorage;
 #[futures_test::test]
 async fn count_star_does_not_fetch_an_unused_indirect_column() {
     let prepared = prepare(LargeValueKind::String, &vec![b'x'; 800_000], |hash| {
-        Locator(hash.0[..24].to_vec())
+        Locator(hash.0)
     })
     .unwrap();
     let chunks = prepared
@@ -30,7 +30,7 @@ async fn count_star_does_not_fetch_an_unused_indirect_column() {
             (
                 ChunkRequest {
                     object_hash: chunk.node_ref.object_hash.0,
-                    locator: chunk.node_ref.locator.0.clone(),
+                    locator: chunk.node_ref.locator,
                 },
                 Bytes::copy_from_slice(&chunk.encoded),
             )
@@ -75,7 +75,7 @@ async fn count_star_does_not_fetch_an_unused_indirect_column() {
 #[futures_test::test]
 async fn projection_does_not_fetch_an_unselected_indirect_column() {
     let prepared = prepare(LargeValueKind::Bytes, &vec![9; 800_000], |hash| {
-        Locator(hash.0[..24].to_vec())
+        Locator(hash.0)
     })
     .unwrap();
     let chunks = prepared
@@ -85,7 +85,7 @@ async fn projection_does_not_fetch_an_unselected_indirect_column() {
             (
                 ChunkRequest {
                     object_hash: chunk.node_ref.object_hash.0,
-                    locator: chunk.node_ref.locator.0.clone(),
+                    locator: chunk.node_ref.locator,
                 },
                 Bytes::copy_from_slice(&chunk.encoded),
             )
@@ -118,7 +118,7 @@ async fn projection_does_not_fetch_an_unselected_indirect_column() {
 #[futures_test::test]
 async fn filter_does_not_fetch_an_indirect_column_the_predicate_does_not_reference() {
     let prepared = prepare(LargeValueKind::Bytes, &vec![5; 800_000], |hash| {
-        Locator(hash.0[..24].to_vec())
+        Locator(hash.0)
     })
     .unwrap();
     let chunks = prepared
@@ -128,7 +128,7 @@ async fn filter_does_not_fetch_an_indirect_column_the_predicate_does_not_referen
             (
                 ChunkRequest {
                     object_hash: chunk.node_ref.object_hash.0,
-                    locator: chunk.node_ref.locator.0.clone(),
+                    locator: chunk.node_ref.locator,
                 },
                 Bytes::copy_from_slice(&chunk.encoded),
             )
@@ -162,7 +162,7 @@ async fn filter_does_not_fetch_an_indirect_column_the_predicate_does_not_referen
 #[futures_test::test]
 async fn join_fetches_only_key_and_selected_large_fields() {
     let prepared = prepare(LargeValueKind::String, &vec![b'z'; 800_000], |hash| {
-        Locator(hash.0[..24].to_vec())
+        Locator(hash.0)
     })
     .unwrap();
     let chunks = prepared
@@ -172,7 +172,7 @@ async fn join_fetches_only_key_and_selected_large_fields() {
             (
                 ChunkRequest {
                     object_hash: chunk.node_ref.object_hash.0,
-                    locator: chunk.node_ref.locator.0.clone(),
+                    locator: chunk.node_ref.locator,
                 },
                 Bytes::copy_from_slice(&chunk.encoded),
             )
@@ -214,13 +214,13 @@ async fn subscription_materializes_large_insert_and_update_deltas_atomically() {
     let first = prepare(LargeValueKind::String, first_text.as_bytes(), |hash| {
         let mut locator = b"first/".to_vec();
         locator.extend_from_slice(&hash.0[..20]);
-        Locator(locator)
+        Locator::from_seed(&locator)
     })
     .unwrap();
     let second = prepare(LargeValueKind::String, second_text.as_bytes(), |hash| {
         let mut locator = b"second/".to_vec();
         locator.extend_from_slice(&hash.0[..20]);
-        Locator(locator)
+        Locator::from_seed(&locator)
     })
     .unwrap();
     let chunks = first
@@ -231,7 +231,7 @@ async fn subscription_materializes_large_insert_and_update_deltas_atomically() {
             (
                 ChunkRequest {
                     object_hash: chunk.node_ref.object_hash.0,
-                    locator: chunk.node_ref.locator.0.clone(),
+                    locator: chunk.node_ref.locator,
                 },
                 Bytes::copy_from_slice(&chunk.encoded),
             )
@@ -295,14 +295,8 @@ async fn subscription_materializes_large_insert_and_update_deltas_atomically() {
 async fn streaming_checksum_subscription_retracts_old_source_and_installs_new_source() {
     let first_bytes = vec![17; 350_000];
     let second_bytes = vec![29; 420_000];
-    let first = prepare(LargeValueKind::Bytes, &first_bytes, |hash| {
-        Locator(hash.0[..24].to_vec())
-    })
-    .unwrap();
-    let second = prepare(LargeValueKind::Bytes, &second_bytes, |hash| {
-        Locator(hash.0[..24].to_vec())
-    })
-    .unwrap();
+    let first = prepare(LargeValueKind::Bytes, &first_bytes, |hash| Locator(hash.0)).unwrap();
+    let second = prepare(LargeValueKind::Bytes, &second_bytes, |hash| Locator(hash.0)).unwrap();
     let chunks = first
         .staged_chunks
         .iter()
@@ -311,7 +305,7 @@ async fn streaming_checksum_subscription_retracts_old_source_and_installs_new_so
             (
                 ChunkRequest {
                     object_hash: chunk.node_ref.object_hash.0,
-                    locator: chunk.node_ref.locator.0.clone(),
+                    locator: chunk.node_ref.locator,
                 },
                 Bytes::copy_from_slice(&chunk.encoded),
             )
@@ -395,7 +389,7 @@ async fn streaming_checksum_subscription_retracts_old_source_and_installs_new_so
 async fn indirect_string_materializes_as_the_ordinary_logical_query_value() {
     let logical = "large logical text ".repeat(100_000);
     let prepared = prepare(LargeValueKind::String, logical.as_bytes(), |hash| {
-        Locator(hash.0[..24].to_vec())
+        Locator(hash.0)
     })
     .unwrap();
     let chunks = prepared
@@ -405,7 +399,7 @@ async fn indirect_string_materializes_as_the_ordinary_logical_query_value() {
             (
                 ChunkRequest {
                     object_hash: chunk.node_ref.object_hash.0,
-                    locator: chunk.node_ref.locator.0.clone(),
+                    locator: chunk.node_ref.locator,
                 },
                 Bytes::copy_from_slice(&chunk.encoded),
             )
@@ -438,7 +432,7 @@ fn query_future_stays_pending_while_required_chunks_are_paused() {
     futures::executor::block_on(async {
         let logical = "paused logical text ".repeat(30_000);
         let prepared = prepare(LargeValueKind::String, logical.as_bytes(), |hash| {
-            Locator(hash.0[..24].to_vec())
+            Locator(hash.0)
         })
         .unwrap();
         let chunks = prepared
@@ -448,7 +442,7 @@ fn query_future_stays_pending_while_required_chunks_are_paused() {
                 (
                     ChunkRequest {
                         object_hash: chunk.node_ref.object_hash.0,
-                        locator: chunk.node_ref.locator.0.clone(),
+                        locator: chunk.node_ref.locator,
                     },
                     Bytes::copy_from_slice(&chunk.encoded),
                 )
@@ -483,7 +477,7 @@ fn query_future_stays_pending_while_required_chunks_are_paused() {
 async fn chunk_failure_is_reported_without_publishing_a_partial_result() {
     let logical = "unavailable logical text ".repeat(30_000);
     let prepared = prepare(LargeValueKind::String, logical.as_bytes(), |hash| {
-        Locator(hash.0[..24].to_vec())
+        Locator(hash.0)
     })
     .unwrap();
     let chunks = prepared
@@ -493,7 +487,7 @@ async fn chunk_failure_is_reported_without_publishing_a_partial_result() {
             (
                 ChunkRequest {
                     object_hash: chunk.node_ref.object_hash.0,
-                    locator: chunk.node_ref.locator.0.clone(),
+                    locator: chunk.node_ref.locator,
                 },
                 Bytes::copy_from_slice(&chunk.encoded),
             )
@@ -516,10 +510,7 @@ async fn chunk_failure_is_reported_without_publishing_a_partial_result() {
 #[futures_test::test]
 async fn indirect_scalars_materialize_inside_composite_values() {
     let logical = b"nested bytes".repeat(50_000);
-    let prepared = prepare(LargeValueKind::Bytes, &logical, |hash| {
-        Locator(hash.0[..24].to_vec())
-    })
-    .unwrap();
+    let prepared = prepare(LargeValueKind::Bytes, &logical, |hash| Locator(hash.0)).unwrap();
     let chunks = prepared
         .staged_chunks
         .iter()
@@ -527,7 +518,7 @@ async fn indirect_scalars_materialize_inside_composite_values() {
             (
                 ChunkRequest {
                     object_hash: chunk.node_ref.object_hash.0,
-                    locator: chunk.node_ref.locator.0.clone(),
+                    locator: chunk.node_ref.locator,
                 },
                 Bytes::copy_from_slice(&chunk.encoded),
             )
@@ -572,7 +563,7 @@ async fn indirect_scalars_materialize_inside_composite_values() {
 async fn predicates_compare_indirect_strings_by_logical_value() {
     let logical = "predicate text ".repeat(40_000);
     let prepared = prepare(LargeValueKind::String, logical.as_bytes(), |hash| {
-        Locator(hash.0[..24].to_vec())
+        Locator(hash.0)
     })
     .unwrap();
     let chunks = prepared
@@ -582,7 +573,7 @@ async fn predicates_compare_indirect_strings_by_logical_value() {
             (
                 ChunkRequest {
                     object_hash: chunk.node_ref.object_hash.0,
-                    locator: chunk.node_ref.locator.0.clone(),
+                    locator: chunk.node_ref.locator,
                 },
                 Bytes::copy_from_slice(&chunk.encoded),
             )
@@ -612,14 +603,14 @@ async fn predicates_compare_indirect_strings_by_logical_value() {
 async fn predicates_compare_present_nullable_indirect_strings_logically() {
     let logical = "nullable predicate text ".repeat(20_000);
     let prepared = prepare(LargeValueKind::String, logical.as_bytes(), |hash| {
-        Locator(hash.0[..24].to_vec())
+        Locator(hash.0)
     })
     .unwrap();
     let chunks = prepared.staged_chunks.iter().map(|chunk| {
         (
             ChunkRequest {
                 object_hash: chunk.node_ref.object_hash.0,
-                locator: chunk.node_ref.locator.0.clone(),
+                locator: chunk.node_ref.locator,
             },
             Bytes::copy_from_slice(&chunk.encoded),
         )
@@ -659,7 +650,7 @@ async fn lexical_predicate_stops_chunk_requests_after_decisive_prefix_mismatch()
     let logical = format!("a{}", "tail".repeat(250_000));
     let literal = format!("z{}", "tail".repeat(250_000));
     let prepared = prepare(LargeValueKind::String, logical.as_bytes(), |hash| {
-        Locator(hash.0[..24].to_vec())
+        Locator(hash.0)
     })
     .unwrap();
     let total_chunks = prepared.staged_chunks.len();
@@ -670,7 +661,7 @@ async fn lexical_predicate_stops_chunk_requests_after_decisive_prefix_mismatch()
             (
                 ChunkRequest {
                     object_hash: chunk.node_ref.object_hash.0,
-                    locator: chunk.node_ref.locator.0.clone(),
+                    locator: chunk.node_ref.locator,
                 },
                 Bytes::copy_from_slice(&chunk.encoded),
             )
@@ -706,7 +697,7 @@ async fn lexical_predicate_stops_chunk_requests_after_decisive_prefix_mismatch()
 async fn public_consolidation_future_keeps_chunk_suspension_inside_groove() {
     let base = "consolidation base ".repeat(80_000);
     let prepared = prepare(LargeValueKind::String, base.as_bytes(), |hash| {
-        Locator(hash.0[..24].to_vec())
+        Locator(hash.0)
     })
     .unwrap();
     let suffix = " appended 😀";
@@ -722,7 +713,7 @@ async fn public_consolidation_future_keeps_chunk_suspension_inside_groove() {
             (
                 ChunkRequest {
                     object_hash: chunk.node_ref.object_hash.0,
-                    locator: chunk.node_ref.locator.0.clone(),
+                    locator: chunk.node_ref.locator,
                 },
                 Bytes::copy_from_slice(&chunk.encoded),
             )
@@ -737,7 +728,7 @@ async fn public_consolidation_future_keeps_chunk_suspension_inside_groove() {
     let mut consolidation = Box::pin(database.consolidate_large_value(with_tail, |hash| {
         let mut locator = b"new/".to_vec();
         locator.extend_from_slice(&hash.0[..20]);
-        Locator(locator)
+        Locator::from_seed(&locator)
     }));
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
@@ -752,7 +743,7 @@ async fn public_consolidation_future_keeps_chunk_suspension_inside_groove() {
     let mut expected = base;
     expected.push_str(suffix);
     let fresh = prepare(LargeValueKind::String, expected.as_bytes(), |hash| {
-        Locator(hash.0[..24].to_vec())
+        Locator(hash.0)
     })
     .unwrap();
 
@@ -769,7 +760,7 @@ async fn public_append_preparation_localizes_automatic_tail_consolidation() {
     let original = prepare(LargeValueKind::String, base.as_bytes(), |hash| {
         let mut locator = b"old/".to_vec();
         locator.extend_from_slice(&hash.0[..20]);
-        Locator(locator)
+        Locator::from_seed(&locator)
     })
     .unwrap();
     let mut with_tail = original.value_ref.clone();
@@ -791,7 +782,7 @@ async fn public_append_preparation_localizes_automatic_tail_consolidation() {
             (
                 ChunkRequest {
                     object_hash: chunk.node_ref.object_hash.0,
-                    locator: chunk.node_ref.locator.0.clone(),
+                    locator: chunk.node_ref.locator,
                 },
                 Bytes::copy_from_slice(&chunk.encoded),
             )
@@ -807,13 +798,13 @@ async fn public_append_preparation_localizes_automatic_tail_consolidation() {
         .append_large_value(with_tail, b"final".to_vec(), |hash| {
             let mut locator = b"new/".to_vec();
             locator.extend_from_slice(&hash.0[..20]);
-            Locator(locator)
+            Locator::from_seed(&locator)
         })
         .await
         .unwrap();
     expected.push_str("final");
     let fresh = prepare(LargeValueKind::String, expected.as_bytes(), |hash| {
-        Locator(hash.0[..24].to_vec())
+        Locator(hash.0)
     })
     .unwrap();
 
@@ -828,10 +819,7 @@ async fn public_append_preparation_localizes_automatic_tail_consolidation() {
 #[futures_test::test]
 async fn json_pointer_observes_literal_indirect_json_semantics() {
     let source = br#"{"outer":{"items":[1,{"name":"target"}]},"keep":true}"#;
-    let prepared = prepare(LargeValueKind::Json, source, |hash| {
-        Locator(hash.0[..24].to_vec())
-    })
-    .unwrap();
+    let prepared = prepare(LargeValueKind::Json, source, |hash| Locator(hash.0)).unwrap();
     let chunks = prepared
         .staged_chunks
         .iter()
@@ -839,7 +827,7 @@ async fn json_pointer_observes_literal_indirect_json_semantics() {
             (
                 ChunkRequest {
                     object_hash: chunk.node_ref.object_hash.0,
-                    locator: chunk.node_ref.locator.0.clone(),
+                    locator: chunk.node_ref.locator,
                 },
                 Bytes::copy_from_slice(&chunk.encoded),
             )
@@ -874,10 +862,7 @@ async fn root_array_json_pointer_stops_after_the_selected_complete_element() {
         source.extend_from_slice(br#",{"padding":"xxxxxxxx"}"#);
     }
     source.push(b']');
-    let prepared = prepare(LargeValueKind::Json, &source, |hash| {
-        Locator(hash.0[..24].to_vec())
-    })
-    .unwrap();
+    let prepared = prepare(LargeValueKind::Json, &source, |hash| Locator(hash.0)).unwrap();
     let chunks = prepared
         .staged_chunks
         .iter()
@@ -885,7 +870,7 @@ async fn root_array_json_pointer_stops_after_the_selected_complete_element() {
             (
                 ChunkRequest {
                     object_hash: chunk.node_ref.object_hash.0,
-                    locator: chunk.node_ref.locator.0.clone(),
+                    locator: chunk.node_ref.locator,
                 },
                 Bytes::copy_from_slice(&chunk.encoded),
             )
@@ -915,10 +900,7 @@ async fn root_array_json_pointer_stops_after_the_selected_complete_element() {
 #[futures_test::test]
 async fn object_json_pointer_preserves_last_duplicate_key_semantics() {
     let source = br#"{"selected":{"value":1},"selected":{"value":2}}"#;
-    let prepared = prepare(LargeValueKind::Json, source, |hash| {
-        Locator(hash.0[..24].to_vec())
-    })
-    .unwrap();
+    let prepared = prepare(LargeValueKind::Json, source, |hash| Locator(hash.0)).unwrap();
     let chunks = prepared
         .staged_chunks
         .iter()
@@ -926,7 +908,7 @@ async fn object_json_pointer_preserves_last_duplicate_key_semantics() {
             (
                 ChunkRequest {
                     object_hash: chunk.node_ref.object_hash.0,
-                    locator: chunk.node_ref.locator.0.clone(),
+                    locator: chunk.node_ref.locator,
                 },
                 Bytes::copy_from_slice(&chunk.encoded),
             )
@@ -950,7 +932,7 @@ async fn object_json_pointer_preserves_last_duplicate_key_semantics() {
 async fn utf16_ranges_use_tree_metrics_and_tail_coordinates_without_prefix_hydration() {
     let source = "ab😀cd".repeat(160_000);
     let prepared = prepare(LargeValueKind::String, source.as_bytes(), |hash| {
-        Locator(hash.0[..24].to_vec())
+        Locator(hash.0)
     })
     .unwrap();
     let chunks = prepared
@@ -960,7 +942,7 @@ async fn utf16_ranges_use_tree_metrics_and_tail_coordinates_without_prefix_hydra
             (
                 ChunkRequest {
                     object_hash: chunk.node_ref.object_hash.0,
-                    locator: chunk.node_ref.locator.0.clone(),
+                    locator: chunk.node_ref.locator,
                 },
                 Bytes::copy_from_slice(&chunk.encoded),
             )
@@ -1013,7 +995,7 @@ async fn utf16_ranges_use_tree_metrics_and_tail_coordinates_without_prefix_hydra
             (source.len() - 6) as u64,
             "😀".len() as u64,
             "🪩".as_bytes().to_vec(),
-            |hash| Locator(hash.0[..24].to_vec()),
+            |hash| Locator(hash.0),
         )
         .await
         .unwrap();
@@ -1032,10 +1014,7 @@ async fn sequential_cursor_reads_post_edit_logical_value_in_atomic_bounded_windo
     let base = (0..1_500_000)
         .map(|index| (index * 17) as u8)
         .collect::<Vec<_>>();
-    let prepared = prepare(LargeValueKind::Bytes, &base, |hash| {
-        Locator(hash.0[..24].to_vec())
-    })
-    .unwrap();
+    let prepared = prepare(LargeValueKind::Bytes, &base, |hash| Locator(hash.0)).unwrap();
     let TailAppendOutcome::Updated(with_tail) =
         append_tail(&prepared.value_ref, b"tail-data".to_vec()).unwrap()
     else {
@@ -1048,7 +1027,7 @@ async fn sequential_cursor_reads_post_edit_logical_value_in_atomic_bounded_windo
             (
                 ChunkRequest {
                     object_hash: chunk.node_ref.object_hash.0,
-                    locator: chunk.node_ref.locator.0.clone(),
+                    locator: chunk.node_ref.locator,
                 },
                 Bytes::copy_from_slice(&chunk.encoded),
             )
@@ -1100,10 +1079,7 @@ async fn cached_streaming_checksum_obeys_cooperative_work_budget() {
     let source = (0..600_000)
         .map(|index| (index * 29) as u8)
         .collect::<Vec<_>>();
-    let prepared = prepare(LargeValueKind::Bytes, &source, |hash| {
-        Locator(hash.0[..24].to_vec())
-    })
-    .unwrap();
+    let prepared = prepare(LargeValueKind::Bytes, &source, |hash| Locator(hash.0)).unwrap();
     let chunks = prepared
         .staged_chunks
         .iter()
@@ -1111,7 +1087,7 @@ async fn cached_streaming_checksum_obeys_cooperative_work_budget() {
             (
                 ChunkRequest {
                     object_hash: chunk.node_ref.object_hash.0,
-                    locator: chunk.node_ref.locator.0.clone(),
+                    locator: chunk.node_ref.locator,
                 },
                 Bytes::copy_from_slice(&chunk.encoded),
             )
@@ -1167,10 +1143,7 @@ async fn graph_streaming_checksum_yields_and_publishes_one_complete_row() {
     let source = (0..600_000)
         .map(|index| (index * 31) as u8)
         .collect::<Vec<_>>();
-    let prepared = prepare(LargeValueKind::Bytes, &source, |hash| {
-        Locator(hash.0[..24].to_vec())
-    })
-    .unwrap();
+    let prepared = prepare(LargeValueKind::Bytes, &source, |hash| Locator(hash.0)).unwrap();
     let chunks = prepared
         .staged_chunks
         .iter()
@@ -1178,7 +1151,7 @@ async fn graph_streaming_checksum_yields_and_publishes_one_complete_row() {
             (
                 ChunkRequest {
                     object_hash: chunk.node_ref.object_hash.0,
-                    locator: chunk.node_ref.locator.0.clone(),
+                    locator: chunk.node_ref.locator,
                 },
                 Bytes::copy_from_slice(&chunk.encoded),
             )
@@ -1227,10 +1200,7 @@ async fn graph_streaming_checksum_yields_and_publishes_one_complete_row() {
 #[futures_test::test]
 async fn graph_streaming_checksum_failure_publishes_nothing_and_can_retry() {
     let source = vec![41; 280_000];
-    let prepared = prepare(LargeValueKind::Bytes, &source, |hash| {
-        Locator(hash.0[..24].to_vec())
-    })
-    .unwrap();
+    let prepared = prepare(LargeValueKind::Bytes, &source, |hash| Locator(hash.0)).unwrap();
     let chunks = prepared
         .staged_chunks
         .iter()
@@ -1238,7 +1208,7 @@ async fn graph_streaming_checksum_failure_publishes_nothing_and_can_retry() {
             (
                 ChunkRequest {
                     object_hash: chunk.node_ref.object_hash.0,
-                    locator: chunk.node_ref.locator.0.clone(),
+                    locator: chunk.node_ref.locator,
                 },
                 Bytes::copy_from_slice(&chunk.encoded),
             )

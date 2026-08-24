@@ -30,7 +30,7 @@ impl CrashAfterChunkPut {
 impl crate::chunks::ChunkKvStorage for CrashAfterChunkPut {
     fn get_exact(
         &self,
-        locator: Vec<u8>,
+        locator: crate::large_values::Locator,
     ) -> crate::chunks::ChunkFuture<
         '_,
         Result<Option<(crate::large_values::ContentHash, Bytes)>, crate::chunks::ChunkStorageError>,
@@ -40,7 +40,7 @@ impl crate::chunks::ChunkKvStorage for CrashAfterChunkPut {
 
     fn put_if_absent(
         &self,
-        locator: Vec<u8>,
+        locator: crate::large_values::Locator,
         hash: crate::large_values::ContentHash,
         bytes: Bytes,
     ) -> crate::chunks::ChunkFuture<
@@ -65,7 +65,7 @@ impl crate::chunks::ChunkKvStorage for CrashAfterChunkPut {
 
     fn delete_exact(
         &self,
-        locator: Vec<u8>,
+        locator: crate::large_values::Locator,
         expected_hash: crate::large_values::ContentHash,
     ) -> crate::chunks::ChunkFuture<'_, Result<(), crate::chunks::ChunkStorageError>> {
         crate::chunks::ChunkKvStorage::delete_exact(&*self.storage, locator, expected_hash)
@@ -103,7 +103,7 @@ impl BlockedChunkPut {
 impl crate::chunks::ChunkKvStorage for BlockedChunkPut {
     fn get_exact(
         &self,
-        locator: Vec<u8>,
+        locator: crate::large_values::Locator,
     ) -> crate::chunks::ChunkFuture<
         '_,
         Result<Option<(crate::large_values::ContentHash, Bytes)>, crate::chunks::ChunkStorageError>,
@@ -113,7 +113,7 @@ impl crate::chunks::ChunkKvStorage for BlockedChunkPut {
 
     fn put_if_absent(
         &self,
-        locator: Vec<u8>,
+        locator: crate::large_values::Locator,
         hash: crate::large_values::ContentHash,
         bytes: Bytes,
     ) -> crate::chunks::ChunkFuture<
@@ -139,7 +139,7 @@ impl crate::chunks::ChunkKvStorage for BlockedChunkPut {
 
     fn delete_exact(
         &self,
-        locator: Vec<u8>,
+        locator: crate::large_values::Locator,
         expected_hash: crate::large_values::ContentHash,
     ) -> crate::chunks::ChunkFuture<'_, Result<(), crate::chunks::ChunkStorageError>> {
         crate::chunks::ChunkKvStorage::delete_exact(&*self.storage, locator, expected_hash)
@@ -232,7 +232,7 @@ async fn idempotent_restaging_reports_incoming_bytes_for_each_upload() {
     let prepared = crate::large_values::prepare(
         crate::large_values::LargeValueKind::Bytes,
         &vec![4; crate::large_values::INLINE_VALUE_MAX_BYTES + 1],
-        |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
+        |hash| crate::large_values::Locator(hash.0),
     )
     .unwrap();
 
@@ -269,7 +269,7 @@ async fn incomplete_push_upload_is_restart_persistent_and_reclaimable() {
     let prepared = crate::large_values::prepare(
         crate::large_values::LargeValueKind::Bytes,
         &vec![5; crate::large_values::INLINE_VALUE_MAX_BYTES + 1],
-        |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
+        |hash| crate::large_values::Locator(hash.0),
     )
     .unwrap();
     let upload_id = crate::large_values::StagedLargeValueId([0x55; 16]);
@@ -327,7 +327,7 @@ async fn upload_intent_reclaims_crash_window_chunks_and_promotes_completed_uploa
         &(0..crate::large_values::INLINE_VALUE_MAX_BYTES * 8)
             .map(|index| (index % 251) as u8)
             .collect::<Vec<_>>(),
-        |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
+        |hash| crate::large_values::Locator(hash.0),
     )
     .unwrap();
 
@@ -436,7 +436,7 @@ fn eviction_and_reclamation_wait_for_an_inflight_blob_stage() {
     let prepared = crate::large_values::prepare(
         crate::large_values::LargeValueKind::Bytes,
         &vec![3; crate::large_values::INLINE_VALUE_MAX_BYTES + 1],
-        |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
+        |hash| crate::large_values::Locator(hash.0),
     )
     .unwrap();
     let mut pool = LocalPool::new();
@@ -531,7 +531,7 @@ async fn orphan_reclamation_defers_for_active_chunk_requests_and_leases() {
     let prepared = crate::large_values::prepare(
         crate::large_values::LargeValueKind::Bytes,
         &vec![8; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
-        |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
+        |hash| crate::large_values::Locator(hash.0),
     )
     .unwrap();
     let staged = database
@@ -542,13 +542,13 @@ async fn orphan_reclamation_defers_for_active_chunk_requests_and_leases() {
 
     let root_request = crate::chunks::ChunkRequest {
         object_hash: prepared.value_ref.root.object_hash.0,
-        locator: prepared.value_ref.root.locator.0.clone(),
+        locator: prepared.value_ref.root.locator,
     };
     let provider_chunks = prepared.staged_chunks.iter().map(|chunk| {
         (
             crate::chunks::ChunkRequest {
                 object_hash: chunk.node_ref.object_hash.0,
-                locator: chunk.node_ref.locator.0.clone(),
+                locator: chunk.node_ref.locator,
             },
             bytes::Bytes::copy_from_slice(&chunk.encoded),
         )
@@ -678,7 +678,7 @@ async fn root_first_upload_requests_only_authenticated_missing_frontier() {
     let prepared = crate::large_values::prepare(
         crate::large_values::LargeValueKind::Bytes,
         &vec![5; crate::large_values::INLINE_VALUE_MAX_BYTES * 8],
-        |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
+        |hash| crate::large_values::Locator(hash.0),
     )
     .unwrap();
 
@@ -791,7 +791,7 @@ async fn malformed_json_tail_upload_is_rejected_and_reclaimed_before_staging() {
     database.set_chunk_storage(chunks.clone());
     let prepared =
         crate::large_values::prepare(crate::large_values::LargeValueKind::Json, b"[]", |hash| {
-            crate::large_values::Locator(hash.0[..16].to_vec())
+            crate::large_values::Locator(hash.0)
         })
         .unwrap();
     let mut malformed = prepared.value_ref.clone();
@@ -866,7 +866,7 @@ async fn malformed_later_upload_child_has_no_durable_partial_write_after_reopen(
     let mut prepared = crate::large_values::prepare(
         crate::large_values::LargeValueKind::Bytes,
         &vec![7; crate::large_values::INLINE_VALUE_MAX_BYTES * 8],
-        |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
+        |hash| crate::large_values::Locator(hash.0),
     )
     .unwrap();
     let root_index = prepared
@@ -887,7 +887,7 @@ async fn malformed_later_upload_child_has_no_durable_partial_write_after_reopen(
         let mut mutated_children = children;
         mutated_children[1].node_ref = crate::large_values::NodeRef {
             object_hash: crate::large_values::object_hash(&malformed),
-            locator: crate::large_values::Locator(vec![0xee; 16]),
+            locator: crate::large_values::Locator([0xee; 32]),
         };
         root.encoded = postcard::to_allocvec(&crate::large_values::ChunkNode::Branch {
             format: crate::large_values::FORMAT_VERSION,
@@ -984,7 +984,7 @@ async fn utf8_boundary_tail_upload_is_rejected_and_reclaimed_before_staging() {
     let prepared = crate::large_values::prepare(
         crate::large_values::LargeValueKind::String,
         "é".as_bytes(),
-        |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
+        |hash| crate::large_values::Locator(hash.0),
     )
     .unwrap();
     let mut malformed = prepared.value_ref.clone();
@@ -1053,7 +1053,7 @@ async fn root_first_upload_resumes_from_the_persisted_authenticated_frontier() {
     let prepared = crate::large_values::prepare(
         crate::large_values::LargeValueKind::Bytes,
         &vec![6; crate::large_values::INLINE_VALUE_MAX_BYTES * 8],
-        |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
+        |hash| crate::large_values::Locator(hash.0),
     )
     .unwrap();
     let root = prepared

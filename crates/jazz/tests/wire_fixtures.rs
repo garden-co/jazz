@@ -173,7 +173,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
     let large_value = groove::large_values::prepare(
         groove::large_values::LargeValueKind::Bytes,
         &vec![0x5a; groove::large_values::INLINE_VALUE_MAX_BYTES + 1],
-        |hash| groove::large_values::Locator(hash.0[..16].to_vec()),
+        |hash| groove::large_values::Locator(hash.0),
     )
     .expect("large-value wire fixture prepares");
     let root_chunk = large_value

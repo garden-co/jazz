@@ -209,7 +209,7 @@ impl Database {
     }
 
     fn fresh_chunk_locator(_: crate::large_values::ContentHash) -> crate::large_values::Locator {
-        crate::large_values::Locator(uuid::Uuid::new_v4().as_bytes().to_vec())
+        crate::large_values::Locator::random()
     }
 
     /// Prepare and stage a complete logical value entirely inside Groove.
@@ -455,7 +455,7 @@ impl Database {
             // is idempotent only when it is byte-for-byte the stored node.
             let already_stored = self
                 .local_chunk_reader()
-                .get(chunk.node_ref.locator.0.clone(), chunk.node_ref.object_hash)
+                .get(chunk.node_ref.locator, chunk.node_ref.object_hash)
                 .await
                 .is_ok_and(|encoded| encoded.as_ref() == chunk.encoded.as_slice());
             if !already_stored {
@@ -801,7 +801,7 @@ impl Database {
             } else {
                 let encoded = self
                     .chunk_storage
-                    .get(node_ref.locator.0.clone(), node_ref.object_hash)
+                    .get(node_ref.locator, node_ref.object_hash)
                     .await
                     .map_err(crate::chunks::ChunkError::from)
                     .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
@@ -1038,7 +1038,7 @@ impl Database {
                     continue;
                 }
                 self.chunk_storage
-                    .delete(node_ref.locator.0.clone(), node_ref.object_hash)
+                    .delete(node_ref.locator, node_ref.object_hash)
                     .await
                     .map_err(crate::chunks::ChunkError::from)
                     .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;

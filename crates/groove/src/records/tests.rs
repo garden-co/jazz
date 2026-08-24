@@ -1749,7 +1749,7 @@ fn indirect_string_uses_the_same_logical_value_type_with_an_explicit_physical_ar
     let prepared = crate::large_values::prepare(
         crate::large_values::LargeValueKind::String,
         b"large logical text",
-        |hash| crate::large_values::Locator(hash.0[..24].to_vec()),
+        |hash| crate::large_values::Locator(hash.0),
     )
     .unwrap();
     let record = descriptor

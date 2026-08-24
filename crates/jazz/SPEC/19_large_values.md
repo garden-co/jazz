@@ -65,7 +65,7 @@ Every retrievable node has two independent identities:
 ```text
 NodeRef {
   object_hash,     // commits to exact encoded bytes and child locators
-  locator,         // random opaque Groove storage key
+  locator,         // exact random 256-bit retrieval capability
 }
 ```
 

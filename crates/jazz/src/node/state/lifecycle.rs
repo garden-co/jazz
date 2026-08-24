@@ -786,7 +786,7 @@ where
     /// fallback. Peer forwarding uses this to avoid recursive request loops.
     pub async fn local_chunk(
         &self,
-        locator: Vec<u8>,
+        locator: groove::large_values::Locator,
         expected_hash: groove::large_values::ContentHash,
     ) -> Result<bytes::Bytes, groove::chunks::ChunkStorageError> {
         self.local_chunk_reader.get(locator, expected_hash).await

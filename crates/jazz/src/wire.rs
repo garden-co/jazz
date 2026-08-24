@@ -860,7 +860,7 @@ mod tests {
     fn oversized_chunk_request_batches_are_rejected_during_decode() {
         let request = |request_id| ChunkRequestEntry {
             request_id,
-            locator: vec![0x11],
+            locator: groove::large_values::Locator([0x11; 32]),
             expected_hash: [0x22; 32],
             remaining_hops: 1,
         };
@@ -885,6 +885,43 @@ mod tests {
             decode_sync_message(&encoded).is_err(),
             "remote request cardinality must be bounded before storage work"
         );
+    }
+
+    #[test]
+    fn chunk_request_locator_decode_requires_exactly_256_bits() {
+        #[derive(serde::Serialize)]
+        struct RawChunkRequestBatch {
+            requests: Vec<RawChunkRequestEntry>,
+        }
+        #[derive(serde::Serialize)]
+        struct RawChunkRequestEntry {
+            request_id: u64,
+            locator: Vec<u8>,
+            expected_hash: [u8; 32],
+            remaining_hops: u8,
+        }
+
+        for length in [31, 32, 33] {
+            let encoded = postcard::to_allocvec(&RawChunkRequestBatch {
+                requests: vec![RawChunkRequestEntry {
+                    request_id: 1,
+                    locator: vec![0x11; length],
+                    expected_hash: [0x22; 32],
+                    remaining_hops: 1,
+                }],
+            })
+            .unwrap();
+            assert_eq!(
+                postcard::from_bytes::<ChunkRequestBatch>(&encoded).is_ok(),
+                length == groove::large_values::LOCATOR_BYTES,
+                "locator length {length} must {}decode",
+                if length == groove::large_values::LOCATOR_BYTES {
+                    ""
+                } else {
+                    "not "
+                }
+            );
+        }
     }
 
     #[test]

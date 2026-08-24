@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
+use groove::large_values::Locator;
 use groove::records::{OwnedRecord, Value};
 
 use crate::ids::{
@@ -323,8 +324,9 @@ where
 pub struct ChunkRequestEntry {
     /// Identifier meaningful only on this peer hop.
     pub request_id: u64,
-    /// Opaque Groove storage locator.
-    pub locator: Vec<u8>,
+    /// Exact random 256-bit retrieval capability. Storage adapters derive
+    /// their private key layout from this value internally.
+    pub locator: Locator,
     /// Hash Groove must verify before accepting returned bytes.
     pub expected_hash: [u8; 32],
     /// Maximum remaining forwarding edges.
