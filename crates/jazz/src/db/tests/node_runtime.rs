@@ -203,7 +203,16 @@ fn rate_limited_push_waits_then_retries_the_exact_batch_without_rejecting_the_wr
         .set_upload_retry_clock_for_test(Rc::new(PausedUploadRetryClock(Rc::clone(&clock))));
     let scheduler = Rc::new(RecordingScheduler::default());
     writer.set_tick_scheduler(Some(scheduler.clone()));
-    let (writer_transport, core_transport, writer_outbound) = duplex_with_client_outbound_tap();
+    let writer_node = NodeUuid::from_bytes([0xc2; 16]);
+    let core_node = NodeUuid::from_bytes([0xc3; 16]);
+    let (writer_transport, core_transport, writer_outbound) =
+        duplex_with_admitted_session_context_and_client_outbound_tap(
+            author,
+            writer_node,
+            1,
+            core_node,
+            1,
+        );
     let upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
     let _subscriber = core.accept_subscriber(core_transport, author);
     let write = writer
@@ -254,7 +263,13 @@ fn rate_limited_push_waits_then_retries_the_exact_batch_without_rejecting_the_wr
     // node-scoped deadline also gates a fresh Start on any replacement link.
     assert!(writer.detach_connection(&upstream));
     let (reconnected_transport, reconnected_core_transport, reconnected_outbound) =
-        duplex_with_client_outbound_tap();
+        duplex_with_admitted_session_context_and_client_outbound_tap(
+            author,
+            writer_node,
+            2,
+            core_node,
+            2,
+        );
     let _reconnected_upstream = crate::db::block_on(writer.connect_upstream(reconnected_transport));
     let _reconnected_subscriber = core.accept_subscriber(reconnected_core_transport, author);
 
@@ -311,10 +326,10 @@ fn rate_limited_push_waits_then_retries_the_exact_batch_without_rejecting_the_wr
     assert_eq!(core.read(&core.table("todos")).unwrap().len(), 1);
 }
 
-/// A disconnected sender's resumable state does not keep the receiver's
-/// mandatory staging claim alive: ordinary host expiry reclaims it by TTL.
+/// Unauthenticated links retain the bounded admission deadline but never a
+/// receiver-specific frontier; expiry still independently reclaims staging.
 #[test]
-fn detached_rate_limited_upload_does_not_prevent_receiver_ttl_cleanup() {
+fn unauthenticated_reconnect_restarts_after_deadline_and_does_not_prevent_ttl_cleanup() {
     let schema = schema();
     let author = AuthorId::from_bytes([0xc8; 16]);
     let core = open_core(0xc9, AuthorId::SYSTEM, &schema);
@@ -385,13 +400,8 @@ fn detached_rate_limited_upload_does_not_prevent_receiver_ttl_cleanup() {
     );
 
     assert!(
-        writer
-            .node
-            .detached_large_value_uploads
-            .borrow()
-            .values()
-            .any(|uploads| uploads.contains_key(&write.tx_id)),
-        "sender state remains resumable while the receiver independently reclaims abandoned staging"
+        writer.node.detached_large_value_uploads.borrow().is_empty(),
+        "a context-free link never retains another receiver's missing-node frontier"
     );
     assert!(
         writer
@@ -399,7 +409,138 @@ fn detached_rate_limited_upload_does_not_prevent_receiver_ttl_cleanup() {
             .large_value_upload_retry_deadlines
             .borrow()
             .contains_key(&write.tx_id),
-        "the sender retains only the bounded admission deadline, not receiver staging"
+        "the sender retains only the bounded admission deadline"
+    );
+
+    let (reconnected_transport, reconnected_core_transport, reconnected_outbound) =
+        duplex_with_client_outbound_tap();
+    let _reconnected_upstream = crate::db::block_on(writer.connect_upstream(reconnected_transport));
+    let _reconnected_subscriber = core.accept_subscriber(reconnected_core_transport, author);
+    writer.tick().unwrap();
+    assert!(
+        reconnected_outbound.borrow().is_empty(),
+        "an unauthenticated reconnect remains gated before the deadline"
+    );
+    clock.set(21_000);
+    writer.tick().unwrap();
+    assert!(
+        reconnected_outbound
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ChunkUploadStart(_))),
+        "after the deadline an unauthenticated reconnect starts a fresh handshake"
+    );
+    assert!(
+        !reconnected_outbound
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ChunkUploadNodes(_))),
+        "an unauthenticated reconnect never replays the previous receiver frontier"
+    );
+}
+
+fn assert_different_authenticated_destination_restarts_upload(
+    reconnect_remote_node: NodeUuid,
+    reconnect_link_identity: AuthorId,
+) {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xd2; 16]);
+    let writer_node = NodeUuid::from_bytes([0xd2; 16]);
+    let core_node = NodeUuid::from_bytes([0xd3; 16]);
+    let core = open_core(0xd3, AuthorId::SYSTEM, &schema);
+    core.node()
+        .borrow_mut()
+        .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
+            incoming_bytes_per_window: 1,
+            window_ms: 60_000,
+            max_age_ms: 10 * 60 * 1_000,
+        });
+    let writer = open_db(0xd2, author, &schema);
+    let clock = Rc::new(Cell::new(30_000));
+    writer
+        .node
+        .set_upload_retry_clock_for_test(Rc::new(PausedUploadRetryClock(Rc::clone(&clock))));
+    let (writer_transport, core_transport, _writer_outbound) =
+        duplex_with_admitted_session_context_and_client_outbound_tap(
+            author,
+            writer_node,
+            1,
+            core_node,
+            1,
+        );
+    let upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
+    let _subscriber = core.accept_subscriber(core_transport, author);
+    let write = writer
+        .insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("isolated/".repeat(8_000))),
+                ("done".to_owned(), Value::Bool(false)),
+                ("owner".to_owned(), Value::Uuid(author.0)),
+            ]),
+        )
+        .unwrap();
+    writer.tick().unwrap();
+    core.tick().unwrap();
+    writer.tick().unwrap();
+    core.tick().unwrap();
+    writer.tick().unwrap();
+    assert!(
+        writer
+            .node
+            .large_value_upload_retry_deadlines
+            .borrow()
+            .contains_key(&write.tx_id)
+    );
+    assert!(writer.detach_connection(&upstream));
+    assert_eq!(writer.node.detached_large_value_uploads.borrow().len(), 1);
+
+    clock.set(31_000);
+    let (reconnect_transport, reconnect_core_transport, reconnect_outbound) =
+        duplex_with_admitted_session_context_and_client_outbound_tap(
+            reconnect_link_identity,
+            writer_node,
+            2,
+            reconnect_remote_node,
+            2,
+        );
+    let _reconnect = crate::db::block_on(writer.connect_upstream(reconnect_transport));
+    let _reconnect_subscriber = core.accept_subscriber(reconnect_core_transport, author);
+    writer.tick().unwrap();
+    assert!(
+        reconnect_outbound
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ChunkUploadStart(_))),
+        "a mismatched authenticated destination starts a fresh handshake"
+    );
+    assert!(
+        !reconnect_outbound
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ChunkUploadNodes(_))),
+        "a mismatched authenticated destination never receives the retained frontier"
+    );
+    assert_eq!(
+        writer.node.detached_large_value_uploads.borrow().len(),
+        1,
+        "a mismatched reconnect cannot consume the original destination's frontier"
+    );
+}
+
+#[test]
+fn reconnect_to_different_authenticated_node_never_replays_upload_frontier() {
+    assert_different_authenticated_destination_restarts_upload(
+        NodeUuid::from_bytes([0xd4; 16]),
+        AuthorId::from_bytes([0xd2; 16]),
+    );
+}
+
+#[test]
+fn reconnect_with_different_authenticated_link_never_replays_upload_frontier() {
+    assert_different_authenticated_destination_restarts_upload(
+        NodeUuid::from_bytes([0xd3; 16]),
+        AuthorId::from_bytes([0xd5; 16]),
     );
 }
 

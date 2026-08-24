@@ -33,11 +33,8 @@ where
     pub(super) connections: RefCell<Vec<Rc<LocalMutex<PeerConnection<S>>>>>,
     pub(super) scheduler: SharedTickScheduler,
     pub(super) upload_retry_clock: SharedUploadRetryClock,
-    pub(super) detached_large_value_uploads: Rc<
-        RefCell<
-            BTreeMap<Option<UpstreamUploadDestination>, peer_connection::LargeValueUploadQueues>,
-        >,
-    >,
+    pub(super) detached_large_value_uploads:
+        Rc<RefCell<BTreeMap<UpstreamUploadDestination, peer_connection::LargeValueUploadQueues>>>,
     pub(super) large_value_upload_retry_deadlines: Rc<RefCell<BTreeMap<TxId, u64>>>,
     pub(super) write_state_waiters: WriteStateWaiters,
     pub(super) permission_advice_waiters: PermissionAdviceWaiters,
@@ -725,10 +722,12 @@ where
                 remote_node: *context.remote.node.as_bytes(),
                 link_identity: *context.link_identity.as_bytes(),
             });
-        let transferred_large_value_uploads = self
-            .detached_large_value_uploads
-            .borrow_mut()
-            .remove(&upstream_upload_destination)
+        let transferred_large_value_uploads = upstream_upload_destination
+            .and_then(|destination| {
+                self.detached_large_value_uploads
+                    .borrow_mut()
+                    .remove(&destination)
+            })
             .unwrap_or_default();
         let connection_epoch = session_context
             .map(|context| context.local.epoch)
@@ -1182,13 +1181,12 @@ where
         connections.retain(|candidate| !Rc::ptr_eq(candidate, connection));
         drop(connections);
         let detached = true;
-        if let Some(uploads) = transferable_uploads
+        if let (Some(destination), Some(uploads)) =
+            (upstream_upload_destination, transferable_uploads)
             && !uploads.is_empty()
         {
             let mut detached_uploads = self.detached_large_value_uploads.borrow_mut();
-            let destination_uploads = detached_uploads
-                .entry(upstream_upload_destination)
-                .or_default();
+            let destination_uploads = detached_uploads.entry(destination).or_default();
             peer_connection::merge_reconnectable_large_value_uploads(destination_uploads, uploads);
         }
         if detached
