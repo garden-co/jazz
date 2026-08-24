@@ -157,6 +157,15 @@ export declare class Write {
 
 export declare function mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
 
+/**
+ * Protocol marker for the generated native artifact.
+ *
+ * The JavaScript loader checks this before exposing the binding so a stale
+ * `.node` file fails at import time rather than later as a missing runtime
+ * method (for example `db.tick`).
+ */
+export declare function nativeArtifactProtocolVersion(): number
+
 export interface SubscriptionClosedEvent {
   type: 'closed'
 }
