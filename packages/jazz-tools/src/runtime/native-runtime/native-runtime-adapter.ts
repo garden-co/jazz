@@ -1596,6 +1596,12 @@ export class NativeRuntimeAdapter implements Runtime {
     const materializedTier = this.nonDurableClient ? "local" : tier;
     const opts = readOptions(materializedTier, queryIncludesDeleted(coreQueryJson), optionsJson);
     if (queryUsesNativeRelationApi(coreQueryJson)) {
+      if (this.isBackendSystemSession(session)) {
+        if (!this.db.allRelationQuery)
+          throw new Error("Native runtime does not support relation queries");
+        const payload = await this.db.allRelationQuery(coreQueryJson, opts);
+        return rowsFromBatches(readRowBatches(payload), this.schema);
+      }
       if (this.readAuthorizationHost === "trusted-serving") {
         if (!this.db.allRelationQueryForIdentity) {
           throw new Error("Native runtime does not support trusted-serving relation queries");
@@ -1619,6 +1625,16 @@ export class NativeRuntimeAdapter implements Runtime {
     this.attachLocalReadCoverageInBackground(tier, optionsJson, query, session);
     try {
       if (queryHasArraySubqueries(coreQueryJson)) {
+        if (this.isBackendSystemSession(session)) {
+          if (!this.db.allRelationSnapshot)
+            throw new Error("Native runtime does not support relation snapshots");
+          const payload = await this.db.allRelationSnapshot(query, opts);
+          return rowsFromRelationSnapshot(
+            readRelationSnapshot(payload),
+            this.schema,
+            subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns,
+          );
+        }
         if (this.readAuthorizationHost === "trusted-serving") {
           if (!this.db.allRelationSnapshotForIdentity) {
             throw new Error("Native runtime does not support trusted-serving relation snapshots");
@@ -1680,6 +1696,7 @@ export class NativeRuntimeAdapter implements Runtime {
       }
       if (
         this.readAuthorizationHost === "trusted-serving" &&
+        !this.isBackendSystemSession(session) &&
         !this.db.subscribeRelationQueryForIdentity
       ) {
         throw new Error("Native runtime does not support trusted-serving relation subscriptions");
@@ -1689,6 +1706,7 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     if (
       this.readAuthorizationHost === "trusted-serving" &&
+      !this.isBackendSystemSession(session) &&
       !usesNativeRelationApi &&
       !this.db.subscribeForIdentity
     ) {
@@ -1702,7 +1720,7 @@ export class NativeRuntimeAdapter implements Runtime {
     try {
       if (usesNativeRelationApi) {
         nativeSubscription =
-          this.readAuthorizationHost === "trusted-serving"
+          this.readAuthorizationHost === "trusted-serving" && !this.isBackendSystemSession(session)
             ? this.db.subscribeRelationQueryForIdentity!(
                 queryJson,
                 identity ?? this.peerIdentity,
@@ -1713,7 +1731,7 @@ export class NativeRuntimeAdapter implements Runtime {
         const query = this.prepareQuery(queryJson);
         preparedQuery = query;
         nativeSubscription =
-          this.readAuthorizationHost === "trusted-serving"
+          this.readAuthorizationHost === "trusted-serving" && !this.isBackendSystemSession(session)
             ? this.db.subscribeForIdentity!(query, identity ?? this.peerIdentity, opts)
             : this.db.subscribe!(query, opts);
       }
@@ -2073,6 +2091,10 @@ export class NativeRuntimeAdapter implements Runtime {
       : undefined;
   }
 
+  private isBackendSystemSession(session: RuntimeSession | null | undefined): boolean {
+    return this.trustedBackend && !!session && isSystemIdentity(session.identity);
+  }
+
   private stagedRowForWriteMerge(
     tx: PendingTx,
     table: string,
@@ -2155,7 +2177,9 @@ export class NativeRuntimeAdapter implements Runtime {
     if (this.closed) return;
     const opts = readOptions(tier, false, optionsJson);
     let attachment: unknown;
-    if (this.readAuthorizationHost === "trusted-serving") {
+    if (this.isBackendSystemSession(session)) {
+      attachment = this.db.attachQuery(query, opts);
+    } else if (this.readAuthorizationHost === "trusted-serving") {
       if (!this.db.attachQueryForIdentity) {
         throw new Error("Native runtime does not support trusted-serving query coverage");
       }
