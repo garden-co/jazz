@@ -122,6 +122,24 @@ describe("typed app prototype", () => {
     });
   });
 
+  it("serializes partial large-value select descriptors", () => {
+    const query = app.todos.select({
+      attachment: { from: 1_000_000, to: 2_000_000 },
+      title: { fromUtf8: 4, toUtf8: 67 },
+    });
+
+    expect(JSON.parse(query._build())).toMatchObject({
+      table: "todos",
+      select: {
+        attachment: { from: 1_000_000, to: 2_000_000 },
+        title: { fromUtf8: 4, toUtf8: 67 },
+      },
+    });
+    expectTypeOf(query).toMatchTypeOf<
+      QueryBuilder<{ id: string; attachment: Uint8Array; title: string }>
+    >();
+  });
+
   it("serializes nested include builders as query objects", () => {
     expect(
       JSON.parse(app.projects.include({ todosViaProject: app.todos.select("title") })._build()),

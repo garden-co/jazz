@@ -17,6 +17,7 @@ import {
   type BuiltCondition,
   type BuiltGather,
   type BuiltRelation,
+  type LargeValueSelectDescriptor,
   type NormalizedIncludeEntry,
   type NormalizedIncludeSpec,
 } from "./query-builder-shape.js";
@@ -196,7 +197,65 @@ function includeRequirementForRelation(
   return relation.isArray ? "MatchCorrelationCardinality" : "AtLeastOne";
 }
 
-function visibleSelectColumns(resolvedSelect: readonly string[]): string[] | null {
+type WireSelectProjection =
+  | { kind: "full"; column: string }
+  | { kind: "bytes"; column: string; from: number; to: number }
+  | { kind: "text_utf16"; column: string; from: number; to: number }
+  | { kind: "text_utf8"; column: string; from: number; to: number }
+  | { kind: "json_pointer"; column: string; at: string };
+
+function partialProjection(
+  column: string,
+  descriptor: LargeValueSelectDescriptor,
+  schema: WasmSchema,
+  table: string,
+): WireSelectProjection {
+  const columnType = getColumnType(schema, table, column);
+  if (!columnType) throw new Error(`Unknown column "${column}" in partial select.`);
+  if ("at" in descriptor) {
+    if (columnType.type !== "Json") {
+      throw new Error(`JSON pointer selection requires a JSON column, got "${column}".`);
+    }
+    return { kind: "json_pointer", column, at: descriptor.at };
+  }
+  if ("fromUtf8" in descriptor) {
+    if (descriptor.toUtf8 < descriptor.fromUtf8) {
+      throw new Error(`Invalid UTF-8 range for column "${column}": toUtf8 must be >= fromUtf8.`);
+    }
+    if (columnType.type !== "Text") {
+      throw new Error(`UTF-8 text selection requires a Text column, got "${column}".`);
+    }
+    return { kind: "text_utf8", column, from: descriptor.fromUtf8, to: descriptor.toUtf8 };
+  }
+  if (descriptor.to < descriptor.from) {
+    throw new Error(`Invalid range for column "${column}": to must be >= from.`);
+  }
+  if (columnType.type === "Bytea") {
+    return { kind: "bytes", column, from: descriptor.from, to: descriptor.to };
+  }
+  if (columnType.type === "Text") {
+    return { kind: "text_utf16", column, from: descriptor.from, to: descriptor.to };
+  }
+  throw new Error(`Range selection requires a bytes or Text column, got "${column}".`);
+}
+
+function visibleSelectColumns(
+  resolvedSelect: readonly string[],
+  partialSelect: Record<string, LargeValueSelectDescriptor> = {},
+  schema?: WasmSchema,
+  table?: string,
+): WireSelectProjection[] | null {
+  const full = resolvedSelect.map((column) => ({ kind: "full" as const, column }));
+  const partial =
+    schema && table
+      ? Object.entries(partialSelect).map(([column, descriptor]) =>
+          partialProjection(column, descriptor, schema, table),
+        )
+      : [];
+  return full.length + partial.length > 0 ? [...full, ...partial] : null;
+}
+
+function visibleFullSelectColumns(resolvedSelect: readonly string[]): string[] | null {
   return resolvedSelect.length > 0 ? [...resolvedSelect] : null;
 }
 
@@ -255,7 +314,7 @@ function toArraySubqueries(
     const nestedArrays = toArraySubqueries(spec.includes, rel.toTable, relations, schema, {
       requireIncludes: spec.requireIncludes,
     });
-    const selectColumns = visibleSelectColumns(resolvedSelectColumns);
+    const selectColumns = visibleFullSelectColumns(resolvedSelectColumns);
 
     // Build the subquery based on relation type
     if (rel.type === "forward") {
@@ -848,11 +907,14 @@ function toFlatConditions(
 export function translateQuery(builderJson: string, schema: WasmSchema): string {
   const builder = normalizeBuiltQuery(JSON.parse(builderJson));
   const relations = analyzeRelations(schema);
-  const hasExplicitSelect = builder.select.length > 0;
-  const selectColumns = hasExplicitSelect
-    ? resolveSelectedColumns(builder.table, schema, builder.select)
-    : [];
-  const projectedColumns = visibleSelectColumns(selectColumns);
+  const selectColumns =
+    builder.select.length > 0 ? resolveSelectedColumns(builder.table, schema, builder.select) : [];
+  const projectedColumns = visibleSelectColumns(
+    selectColumns,
+    builder.partialSelect,
+    schema,
+    builder.table,
+  );
   const arraySubqueries = toArraySubqueries(builder.includes, builder.table, relations, schema, {
     requireIncludes: builder.requireIncludes,
   });
