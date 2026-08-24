@@ -70,7 +70,8 @@ fn open_batch_identity_is_unique_and_terminal() {
     ));
 
     let committed = OpenTransactionId::new();
-    node.open_exclusive(committed).unwrap();
+    let author = user(1);
+    node.open_exclusive_for_identity(committed, author).unwrap();
     node.tx_write(
         committed,
         "todos",
@@ -79,26 +80,31 @@ fn open_batch_identity_is_unique_and_terminal() {
         None,
     )
     .unwrap();
-    node.commit_exclusive_settled(committed, user(1), 10).unwrap();
+    node.commit_exclusive_settled(committed, author, 10).unwrap();
     assert!(matches!(
         node.open_exclusive(committed).resolve(),
         Err(Error::DuplicateOpenBatch(id)) if id == committed
     ));
 }
 
-/// Low-level exclusive transactions retain commit-time author selection, while
-/// explicitly identity-bound transactions reject a different commit author.
+/// Bare node transactions are system-owned; application transactions bind the
+/// authenticated author when opened and reject a different commit author.
 #[test]
-fn exclusive_identity_binding_applies_only_to_explicitly_bound_node_transactions() {
+fn exclusive_identity_binding_requires_an_explicit_author_at_open() {
     let (_temp_dir, mut node) = open_node();
     let alice = user(0xa1);
     let bob = user(0xb2);
 
-    let unbound = OpenTransactionId::new();
-    node.open_exclusive(unbound).unwrap();
-    node.tx_write(unbound, "todos", row(1), title_cells("unbound"), None)
+    let system_owned = OpenTransactionId::new();
+    node.open_exclusive(system_owned).unwrap();
+    node.tx_write(system_owned, "todos", row(1), title_cells("system"), None)
         .unwrap();
-    node.commit_exclusive_settled(unbound, alice, 10).unwrap();
+    assert!(matches!(
+        node.commit_exclusive_settled(system_owned, alice, 10),
+        Err(Error::OpenTransactionIdentityMismatch)
+    ));
+    node.commit_exclusive_settled(system_owned, AuthorSubject::SYSTEM, 10)
+        .unwrap();
 
     let bound = OpenTransactionId::new();
     node.open_exclusive_for_identity(bound, alice).unwrap();
@@ -794,6 +800,8 @@ fn exclusive_shape_predicate_is_binding_sensitive() {
         let (_client_dir, mut client) = open_node_with_schema(node(node_base), schema.clone());
         let (_other_dir, mut other) = open_node_with_schema(node(node_base + 1), schema.clone());
         let (_core_dir, mut core) = open_node_with_schema(node(node_base + 2), schema.clone());
+        install_test_uuid_sub_claim(&mut client, author_a);
+        install_test_uuid_sub_claim(&mut core, author_a);
         let shape = crate::query::Query::from("todos")
             .filter(crate::query::eq(
                 crate::query::col("owner"),
@@ -810,7 +818,7 @@ fn exclusive_shape_predicate_is_binding_sensitive() {
         register_shape_binding(&mut core, &shape, &binding_a);
 
         let tx_id = OpenTransactionId::new();
-        client.open_exclusive(tx_id).unwrap();
+        client.open_exclusive_for_identity(tx_id, author_a).unwrap();
         assert!(client
             .tx_query(tx_id, &shape, &binding_a)
             .unwrap()
@@ -846,6 +854,8 @@ fn exclusive_shape_predicate_validation_uses_inline_shape_without_registration()
     let (_client_dir, mut client) = open_node_with_schema(node(1), schema.clone());
     let (_other_dir, mut other) = open_node_with_schema(node(2), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
+    install_test_uuid_sub_claim(&mut client, author_a);
+    install_test_uuid_sub_claim(&mut core, author_a);
     let shape = crate::query::Query::from("todos")
         .filter(crate::query::eq(
             crate::query::col("owner"),
@@ -861,7 +871,7 @@ fn exclusive_shape_predicate_validation_uses_inline_shape_without_registration()
         .unwrap();
 
     let tx_id = OpenTransactionId::new();
-    client.open_exclusive(tx_id).unwrap();
+    client.open_exclusive_for_identity(tx_id, author_a).unwrap();
     assert!(client
         .tx_query(tx_id, &shape, &binding_a)
         .unwrap()
