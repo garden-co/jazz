@@ -3,6 +3,12 @@ import { createPolicyTestApp, type PolicyTestApp } from "jazz-tools/testing";
 import permissions from "../permissions.js";
 import { app } from "../schema.js";
 
+// These are integration receipts: each deliberately awaits serving-authority
+// admission or rejection at the edge. The cross-workspace receipt performs
+// many independent negative cases, so Vitest's generic unit-test default is
+// shorter than the asserted workload even when every receipt settles.
+const POLICY_RECEIPT_TIMEOUT_MS = 15_000;
+
 let testApp: PolicyTestApp;
 beforeEach(async () => {
   testApp = await createPolicyTestApp(app, permissions, expect);
@@ -98,7 +104,7 @@ describe("BandBinder workspace roles", () => {
     await manager.expectDenied((db) =>
       db.insert(app.pages, { workspaceId: workspace.id, title: "after revocation" }),
     );
-  });
+  }, POLICY_RECEIPT_TIMEOUT_MS);
 
   it("rejects cross-workspace UUIDs for every recursive and block-dependent relation", async () => {
     const owner = testApp.as(session("owner"));
@@ -257,5 +263,5 @@ describe("BandBinder workspace roles", () => {
     await owner.expectDenied((db) =>
       db.update(app.attachments, attachment.id, { blockId: blockB.id }),
     );
-  });
+  }, POLICY_RECEIPT_TIMEOUT_MS);
 });
