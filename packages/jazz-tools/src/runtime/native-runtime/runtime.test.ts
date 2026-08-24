@@ -31,6 +31,16 @@ import {
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 import { encodeNativeNullValue, storageColumnValueType } from "./native-row-codec.js";
 import { type BatchId, type WriteReceipt } from "../client.js";
+import {
+  ANONYMOUS_JWT_ISSUER,
+  LOCAL_FIRST_JWT_ISSUER,
+  STATIC_BEARER_SESSION_ISSUER,
+  SYSTEM_SESSION_ISSUER,
+  TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
+  sessionFromVerifiedReservedJwtPayload,
+  trustedReservedSessionToken,
+} from "../client-session.js";
+import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
 
 type NativeDbForTest = ReturnType<
   NonNullable<ConstructorParameters<typeof NativeRuntimeAdapter>[0]>["openMemory"]
@@ -42,6 +52,12 @@ async function committedBatchId(receipt: WriteReceipt): Promise<BatchId> {
 }
 
 const previousWebSocket = globalThis.WebSocket;
+const RESERVED_TEST_ISSUERS = [
+  SYSTEM_SESSION_ISSUER,
+  LOCAL_FIRST_JWT_ISSUER,
+  STATIC_BEARER_SESSION_ISSUER,
+  ANONYMOUS_JWT_ISSUER,
+];
 
 function decodeSchemaSource(bytes: Uint8Array) {
   return JSON.parse(new TextDecoder().decode(bytes)) as {
@@ -850,8 +866,8 @@ describe("NativeRuntimeAdapter server transport", () => {
         JSON.stringify({
           user_id: "00000000-0000-0000-0000-0000000000a1",
           claims: {},
-          issuer: "urn:jazz:anonymous",
-          authMode: "anonymous",
+          issuer: "https://issuer.example",
+          authMode: "external",
         }),
         "local",
       ),
@@ -1049,8 +1065,8 @@ describe("NativeRuntimeAdapter server transport", () => {
         JSON.stringify({
           user_id: "00000000-0000-0000-0000-0000000000a1",
           claims: {},
-          issuer: "urn:jazz:anonymous",
-          authMode: "anonymous",
+          issuer: "https://issuer.example",
+          authMode: "external",
         }),
         "local",
       ),
@@ -1061,7 +1077,125 @@ describe("NativeRuntimeAdapter server transport", () => {
         values: [{ type: "Text", value: "trusted serving" }],
       },
     ]);
-    expect(authors).toEqual(['["urn:jazz:anonymous","00000000-0000-0000-0000-0000000000a1"]']);
+    expect(authors).toEqual(['["https://issuer.example","00000000-0000-0000-0000-0000000000a1"]']);
+  });
+
+  it("rejects reserved issuers in public read sessions but preserves private trusted identity", async () => {
+    const authors: string[] = [];
+    const privateSystemAuthor = JSON.stringify([SYSTEM_SESSION_ISSUER, SYSTEM_AUTHOR_ID]);
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            allForIdentity: (_query: unknown, author: Uint8Array) => {
+              authors.push(new TextDecoder().decode(author));
+              return encodeRows([
+                {
+                  table: "todos",
+                  rowId: new Uint8Array(16),
+                  title: "private trusted identity",
+                },
+              ]);
+            },
+            prepareQuery: () => ({}),
+            subscribeForIdentity: () => {
+              throw new Error("reserved public session must be rejected before subscribing");
+            },
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new TextEncoder().encode(privateSystemAuthor),
+      1,
+      true,
+      { readAuthorizationHost: "trusted-serving" },
+    );
+
+    await expect(runtime.query(JSON.stringify({ table: "todos" }), null, "local")).resolves.toEqual(
+      [
+        {
+          table: "todos",
+          id: "00000000-0000-0000-0000-000000000000",
+          values: [{ type: "Text", value: "private trusted identity" }],
+        },
+      ],
+    );
+    expect(authors).toEqual([privateSystemAuthor]);
+
+    for (const issuer of RESERVED_TEST_ISSUERS) {
+      const sessionJson = JSON.stringify({
+        issuer,
+        user_id: "public-caller",
+        claims: {},
+        authMode:
+          issuer === LOCAL_FIRST_JWT_ISSUER
+            ? "local-first"
+            : issuer === ANONYMOUS_JWT_ISSUER
+              ? "anonymous"
+              : "external",
+      });
+      await expect(
+        runtime.query(JSON.stringify({ table: "todos" }), sessionJson, "local"),
+      ).rejects.toThrow("reserved issuer");
+      expect(() =>
+        runtime.createSubscription(JSON.stringify({ table: "todos" }), sessionJson, "local"),
+      ).toThrow("reserved issuer");
+    }
+  });
+
+  it("admits verified reserved sessions carrying the in-process runtime capability", async () => {
+    const authors: string[] = [];
+    const trustedSession = sessionFromVerifiedReservedJwtPayload(
+      { iss: LOCAL_FIRST_JWT_ISSUER, sub: "verified-user" },
+      "local-first",
+    )!;
+    const runtimeSessionJson = JSON.stringify({
+      ...trustedSession,
+      [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: trustedReservedSessionToken(trustedSession),
+    });
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            allForIdentity: (_query: unknown, author: Uint8Array) => {
+              authors.push(new TextDecoder().decode(author));
+              return encodeRows([
+                {
+                  table: "todos",
+                  rowId: new Uint8Array(16),
+                  title: "verified reserved identity",
+                },
+              ]);
+            },
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+      { readAuthorizationHost: "trusted-serving" },
+    );
+
+    await expect(
+      runtime.query(JSON.stringify({ table: "todos" }), runtimeSessionJson, "local"),
+    ).resolves.toEqual([
+      {
+        table: "todos",
+        id: "00000000-0000-0000-0000-000000000000",
+        values: [{ type: "Text", value: "verified reserved identity" }],
+      },
+    ]);
+    expect(authors).toEqual(['["urn:jazz:local-first","verified-user"]']);
   });
 
   it("decodes fixed-width array columns from native row batches", async () => {
@@ -4540,6 +4674,126 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     const author = beginStreamingMutationEncoded.mock.calls[0]?.[6];
     expect(author instanceof Uint8Array ? new TextDecoder().decode(author) : undefined).toBe(
       testCase.expectedAuthor ?? ownerAuthor,
+    );
+  });
+
+  it("rejects reserved public write-context sessions and attributions", async () => {
+    const beginStreamingMutationEncoded = vi.fn(() => ({
+      push: () => undefined,
+      finish: () => fakeWrite(),
+      abort: vi.fn(),
+    }));
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ beginStreamingMutationEncoded }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new TextEncoder().encode(JSON.stringify(["urn:jazz:test", "owner"])),
+      1,
+      true,
+      { readAuthorizationHost: "trusted-serving" },
+    );
+
+    async function* source() {
+      yield "updated";
+    }
+
+    for (const issuer of RESERVED_TEST_ISSUERS) {
+      await expect(
+        runtime.streamingMutation(
+          "update",
+          "todos",
+          {},
+          "title",
+          source(),
+          JSON.stringify({
+            session: {
+              issuer,
+              user_id: "public-caller",
+              claims: {},
+            },
+          }),
+          "00000000-0000-0000-0000-000000000123",
+        ),
+      ).rejects.toThrow("reserved issuer");
+
+      await expect(
+        runtime.streamingMutation(
+          "update",
+          "todos",
+          {},
+          "title",
+          source(),
+          JSON.stringify({ attribution: JSON.stringify([issuer, "public-caller"]) }),
+          "00000000-0000-0000-0000-000000000123",
+        ),
+      ).rejects.toThrow("reserved issuer");
+    }
+
+    await expect(
+      runtime.streamingMutation(
+        "update",
+        "todos",
+        {},
+        "title",
+        source(),
+        JSON.stringify({ attribution: SYSTEM_AUTHOR_ID }),
+        "00000000-0000-0000-0000-000000000123",
+      ),
+    ).rejects.toThrow("reserved issuer");
+
+    expect(beginStreamingMutationEncoded).not.toHaveBeenCalled();
+  });
+
+  it("admits verified reserved write-context sessions carrying the runtime capability", async () => {
+    const beginStreamingMutationEncoded = vi.fn(() => ({
+      push: () => undefined,
+      finish: () => fakeWrite(),
+      abort: vi.fn(),
+    }));
+    const trustedSession = sessionFromVerifiedReservedJwtPayload(
+      { iss: LOCAL_FIRST_JWT_ISSUER, sub: "verified-writer" },
+      "local-first",
+    )!;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => fakeDb({ beginStreamingMutationEncoded }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new TextEncoder().encode(JSON.stringify(["urn:jazz:test", "owner"])),
+      1,
+      true,
+      { readAuthorizationHost: "trusted-serving" },
+    );
+
+    await runtime.streamingMutation(
+      "update",
+      "todos",
+      {},
+      "title",
+      (async function* () {
+        yield "updated";
+      })(),
+      JSON.stringify({
+        session: {
+          ...trustedSession,
+          [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: trustedReservedSessionToken(trustedSession),
+        },
+      }),
+      "00000000-0000-0000-0000-000000000123",
+    );
+
+    const author = beginStreamingMutationEncoded.mock.calls[0]?.[6];
+    expect(author instanceof Uint8Array ? new TextDecoder().decode(author) : undefined).toBe(
+      '["urn:jazz:local-first","verified-writer"]',
     );
   });
 

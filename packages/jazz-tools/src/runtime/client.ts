@@ -9,7 +9,11 @@ import type { AppContext, RuntimeSourcesConfig, Session } from "./context.js";
 import type { InsertValues, Value, SubscriptionWireDelta, WasmSchema } from "../drivers/types.js";
 import { normalizeRuntimeSchema } from "../drivers/schema-wire.js";
 import type { AuthFailureReason } from "./auth-state.js";
-import { resolveClientSessionStateSync } from "./client-session.js";
+import {
+  TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
+  resolveClientSessionStateSync,
+  trustedReservedSessionToken,
+} from "./client-session.js";
 import { mapAuthReason } from "./auth-state.js";
 import {
   resolveRuntimeConfigSyncInitInput,
@@ -18,6 +22,15 @@ import {
 import { httpUrlToWs } from "./url.js";
 import { PostcardWriter } from "./native-runtime/native-codec.js";
 import { assertNativeArtifactCompatibility } from "./native-artifact-compatibility.js";
+
+type RuntimeSerializedSession = Session & {
+  [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]?: string;
+};
+
+function serializeRuntimeSession(session: Session): RuntimeSerializedSession {
+  const token = trustedReservedSessionToken(session);
+  return token ? { ...session, [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: token } : session;
+}
 
 function encodeBranchColumnValue(value: Value): Uint8Array {
   const writer = new PostcardWriter();
@@ -780,6 +793,7 @@ export class JazzClient {
       appId: this.context.appId,
       jwtToken: this.context.jwtToken,
       cookieSession: this.context.cookieSession,
+      trustedReservedSession: this.context.trustedReservedSession,
     }).session;
   }
 
@@ -1007,12 +1021,12 @@ export class JazzClient {
       updatedAt === undefined &&
       !branch
     ) {
-      return JSON.stringify(session);
+      return JSON.stringify(serializeRuntimeSession(session));
     }
 
     const payload: WriteContextPayload = {};
     if (session) {
-      payload.session = session;
+      payload.session = serializeRuntimeSession(session);
     }
     if (attribution !== undefined) {
       payload.attribution = attribution;
@@ -1288,7 +1302,9 @@ export class JazzClient {
   ): Promise<Row[]> {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const effectiveSession = session ?? this.resolvedSession;
-    const sessionJson = effectiveSession ? JSON.stringify(effectiveSession) : undefined;
+    const sessionJson = effectiveSession
+      ? JSON.stringify(serializeRuntimeSession(effectiveSession))
+      : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
     const results = await this.runtime.query(
       query,
@@ -1518,7 +1534,9 @@ export class JazzClient {
   ): number {
     const normalizedOptions = this.normalizeQueryExecutionOptions(options);
     const effectiveSession = session ?? this.resolvedSession;
-    const sessionJson = effectiveSession ? JSON.stringify(effectiveSession) : undefined;
+    const sessionJson = effectiveSession
+      ? JSON.stringify(serializeRuntimeSession(effectiveSession))
+      : undefined;
     const optionsJson = encodeQueryExecutionOptions(normalizedOptions);
 
     const handle = this.runtime.createSubscription(
