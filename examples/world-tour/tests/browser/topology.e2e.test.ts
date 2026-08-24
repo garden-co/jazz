@@ -37,6 +37,8 @@ describe("WorldTour cross-topology itinerary recovery", () => {
     let tour: { id: string } | undefined;
     let firstStop: { id: string } | undefined;
     let protectedStop: { id: string } | undefined;
+    let offlineStop: { id: string } | undefined;
+    let fallbackVenueId: string | undefined;
     let observedWindow: string[] = [];
     const aliceDbName = uniqueDbName("world-tour-alice");
 
@@ -157,6 +159,7 @@ describe("WorldTour cross-topology itinerary recovery", () => {
               ]);
               firstStop = first;
               protectedStop = third;
+              fallbackVenueId = london.id;
 
               const itinerary = app.stops
                 .where({
@@ -219,15 +222,41 @@ describe("WorldTour cross-topology itinerary recovery", () => {
             faultsAfter: [{ kind: "disconnect", target: "alice" }],
           },
           {
-            name: "offline local itinerary edit",
+            name: "offline local itinerary insert stays local until reconnect",
             run: async () => {
-              await alice!
-                .update(app.stops, firstStop!.id, { publicDescription: "offline routing note" })
+              const insertedOffline = await alice!
+                .insert(app.stops, {
+                  bandId: tour!.id,
+                  venueId: fallbackVenueId!,
+                  // This lies between the first and third stops. It must
+                  // displace the third stop from the bounded itinerary after
+                  // the disconnected writer reconnects.
+                  date: new Date("2026-08-01T12:00:00.000Z"),
+                  status: "confirmed",
+                  publicDescription: "offline routing note",
+                })
                 .wait({ tier: "local" });
-              const local = await alice!.one(app.stops.where({ id: firstStop!.id }), {
+              offlineStop = insertedOffline;
+              const local = await alice!.one(app.stops.where({ id: offlineStop.id }), {
                 tier: "local",
               });
               expect(local?.publicDescription).toBe("offline routing note");
+
+              const itinerary = app.stops
+                .where({
+                  bandId: tour!.id,
+                  date: { gte: new Date("2026-08-01"), lte: new Date("2026-08-07") },
+                })
+                .include({ venue: true })
+                .orderBy("date", "asc")
+                .limit(2);
+              // The real disconnect is a topology disruption: Bob's edge
+              // window must not learn Alice's local insertion before reconnect.
+              const beforeReconnect = await bob!.all(itinerary, { tier: "edge" });
+              expect(beforeReconnect.map((stop) => stop.id)).toEqual([
+                firstStop!.id,
+                protectedStop!.id,
+              ]);
             },
             faultsAfter: [{ kind: "reconnect", target: "alice" }],
           },
@@ -246,8 +275,10 @@ describe("WorldTour cross-topology itinerary recovery", () => {
                 bob!,
                 itinerary,
                 (value) =>
-                  value.length === 2 && value[0]?.publicDescription === "offline routing note",
-                "peer receives offline itinerary edit after reconnect",
+                  value.length === 2 &&
+                  value.map((stop) => stop.id).join(",") ===
+                    [firstStop!.id, offlineStop!.id].join(","),
+                "peer receives the offline insertion and recomputes its bounded itinerary after reconnect",
                 20_000,
                 "edge",
               );
@@ -259,7 +290,9 @@ describe("WorldTour cross-topology itinerary recovery", () => {
               expect(observedWindow).toEqual(
                 rows.map((stop) => `${stop.date.toISOString()}:${stop.venue?.name}`),
               );
-              expect(rows.map((stop) => stop.venue?.name)).toEqual(["London Hall", "Paris Club"]);
+              expect(rows.map((stop) => stop.id)).toEqual([firstStop!.id, offlineStop!.id]);
+              expect(rows.map((stop) => stop.id)).not.toContain(protectedStop!.id);
+              expect(rows.map((stop) => stop.venue?.name)).toEqual(["London Hall", "London Hall"]);
             },
             faultsAfter: [{ kind: "restart", target: "alice" }],
           },
@@ -278,13 +311,15 @@ describe("WorldTour cross-topology itinerary recovery", () => {
                 alice!,
                 itinerary,
                 (value) =>
-                  value.length === 2 && value[0]?.publicDescription === "offline routing note",
+                  value.length === 2 &&
+                  value.map((stop) => stop.id).join(",") ===
+                    [firstStop!.id, offlineStop!.id].join(","),
                 "reopened client rehydrates its bounded itinerary from IndexedDB",
                 15_000,
                 "local",
               );
-              expect(rows.map((stop) => stop.id)).toEqual([firstStop!.id, protectedStop!.id]);
-              expect(rows.map((stop) => stop.venue?.name)).toEqual(["London Hall", "Paris Club"]);
+              expect(rows.map((stop) => stop.id)).toEqual([firstStop!.id, offlineStop!.id]);
+              expect(rows.map((stop) => stop.venue?.name)).toEqual(["London Hall", "London Hall"]);
             },
           },
         ],
