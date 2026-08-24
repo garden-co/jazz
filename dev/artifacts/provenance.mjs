@@ -84,7 +84,7 @@ const isNapiTurboOutputDirectory = (repoPath) => repoPath === "crates/jazz-napi/
 const isNapiGeneratedOutput = (repoPath) =>
   repoPath === "crates/jazz-napi/index.js" ||
   repoPath === "crates/jazz-napi/index.d.ts" ||
-  repoPath === "crates/jazz-napi/native-binding.cjs" ||
+  repoPath === "crates/jazz-napi/native-binding.pointer.cjs" ||
   repoPath === "crates/jazz-napi/native-binding.d.ts" ||
   repoPath === "crates/jazz-napi/native-loader.cjs" ||
   repoPath === "crates/jazz-napi/native-artifact-fingerprint.cjs" ||
@@ -186,7 +186,7 @@ function artifactHashes(root, kind, options = {}) {
 
 function activeNapiBindings(root) {
   const packageDir = join(root, "crates", "jazz-napi");
-  const pointer = join(packageDir, "native-binding.cjs");
+  const pointer = join(packageDir, "native-binding.pointer.cjs");
   if (!existsSync(pointer)) return undefined;
   const match = /\.native-artifacts\/(generation-[A-Za-z0-9.-]+)\/index\.js/.exec(
     readFileSync(pointer, "utf8"),
@@ -238,7 +238,7 @@ export function expectedManifest(root, kind, profile, targetOverride, options = 
       dirtyDiff: injectedGit
         ? process.env.JAZZ_ARTIFACT_GIT_DIRTY_DIFF
         : sha256(
-            `${run(root, "git", ["diff", "--binary", "HEAD", "--", ".", ":(exclude)crates/jazz-wasm/pkg/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-wasm/.pkg-stage-*", ":(exclude)crates/jazz-wasm/.pkg-backup-*", ":(exclude)crates/jazz-wasm/.pkg-transaction.json*", ":(exclude)crates/jazz-napi/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-napi/native-binding.cjs", ":(exclude)crates/jazz-napi/native-binding.d.ts", ":(exclude)crates/jazz-napi/native-artifact-fingerprint.cjs", ":(exclude)crates/jazz-napi/native-loader.cjs", ":(exclude)crates/jazz-napi/.native-artifacts/**"])}\n${run(root, "git", ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude)crates/jazz-wasm/pkg/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-wasm/.pkg-stage-*", ":(exclude)crates/jazz-wasm/.pkg-backup-*", ":(exclude)crates/jazz-wasm/.pkg-transaction.json*", ":(exclude)crates/jazz-napi/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-napi/native-binding.cjs", ":(exclude)crates/jazz-napi/native-binding.d.ts", ":(exclude)crates/jazz-napi/native-artifact-fingerprint.cjs", ":(exclude)crates/jazz-napi/native-loader.cjs", ":(exclude)crates/jazz-napi/.native-artifacts/**"])}`,
+            `${run(root, "git", ["diff", "--binary", "HEAD", "--", ".", ":(exclude)crates/jazz-wasm/pkg/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-wasm/.pkg-stage-*", ":(exclude)crates/jazz-wasm/.pkg-backup-*", ":(exclude)crates/jazz-wasm/.pkg-transaction.json*", ":(exclude)crates/jazz-napi/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-napi/native-binding.pointer.cjs", ":(exclude)crates/jazz-napi/native-binding.d.ts", ":(exclude)crates/jazz-napi/native-artifact-fingerprint.cjs", ":(exclude)crates/jazz-napi/native-loader.cjs", ":(exclude)crates/jazz-napi/.native-artifacts/**"])}\n${run(root, "git", ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude)crates/jazz-wasm/pkg/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-wasm/.pkg-stage-*", ":(exclude)crates/jazz-wasm/.pkg-backup-*", ":(exclude)crates/jazz-wasm/.pkg-transaction.json*", ":(exclude)crates/jazz-napi/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-napi/native-binding.pointer.cjs", ":(exclude)crates/jazz-napi/native-binding.d.ts", ":(exclude)crates/jazz-napi/native-artifact-fingerprint.cjs", ":(exclude)crates/jazz-napi/native-loader.cjs", ":(exclude)crates/jazz-napi/.native-artifacts/**"])}`,
           ),
     },
     cargoLock: existsSync(cargoLock) ? sha256(readFileSync(cargoLock)) : "missing",
@@ -282,7 +282,7 @@ export function nativeArtifactFingerprint(root, kind, profile, targetOverride) {
 export const manifestPath = (root, kind) => {
   if (kind === "wasm") return join(root, "crates/jazz-wasm/pkg/.jazz-artifact-manifest.json");
   const packageDir = join(root, "crates/jazz-napi");
-  const pointer = join(packageDir, "native-binding.cjs");
+  const pointer = join(packageDir, "native-binding.pointer.cjs");
   if (existsSync(pointer)) {
     const generation = /\.native-artifacts\/(generation-[A-Za-z0-9.-]+)\/index\.js/.exec(
       readFileSync(pointer, "utf8"),

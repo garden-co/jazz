@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   expectedManifest,
   manifestPath,
+  nativeArtifactFingerprint,
   verifyManifest,
   verifyPublishedNapiManifest,
   writeManifest,
@@ -125,6 +126,19 @@ test("NAPI provenance excludes only the wrapper's ephemeral staged binding", () 
 
   // Planted positive: an actual NAPI source remains a provenance input.
   writeFileSync(join(root, "crates/jazz-napi/src/lib.rs"), "// changed native source\n");
+  assert.match(verifyManifest(root, "napi", "release"), /packageInputs differs/);
+});
+
+test("tracked NAPI bootstrap changes invalidate sealed provenance and its ABI fingerprint", () => {
+  const root = fixture();
+  const bootstrap = join(root, "crates/jazz-napi/native-binding.cjs");
+  writeFileSync(bootstrap, "module.exports = {};\n");
+  writeManifest(root, "napi", "release");
+  const inputs = expectedManifest(root, "napi", "release").packageInputs;
+  const fingerprint = nativeArtifactFingerprint(root, "napi", "release");
+  writeFileSync(bootstrap, "module.exports = { changed: true };\n");
+  assert.notEqual(expectedManifest(root, "napi", "release").packageInputs, inputs);
+  assert.notEqual(nativeArtifactFingerprint(root, "napi", "release"), fingerprint);
   assert.match(verifyManifest(root, "napi", "release"), /packageInputs differs/);
 });
 
@@ -255,16 +269,35 @@ test("assembled NAPI packages carry only matching manifests and reject stale or 
   crossTargetMismatch.packageInputs = "b".repeat(64);
   writeFileSync(darwinManifest, JSON.stringify(crossTargetMismatch));
 
-  for (const [field, value] of [
-    ["nativeArtifactFingerprint", "not-a-fingerprint"],
-    ["packageInputs", undefined],
-  ]) {
-    const malformed = JSON.parse(readFileSync(darwinManifest, "utf8"));
+  for (const [field, value] of [["nativeArtifactFingerprint", "not-a-fingerprint"]]) {
+    // Start every case from the same otherwise-valid sealed manifest. In
+    // particular, a missing packageInputs receipt must not be masked by a
+    // prior invalid fingerprint failure.
+    const malformed = structuredClone(crossTargetMismatch);
     malformed[field] = value;
     writeFileSync(darwinManifest, JSON.stringify(malformed));
     assert.throws(() => stageNapiManifests(root), /missing native fingerprint or package inputs/);
   }
   writeFileSync(darwinManifest, JSON.stringify(crossTargetMismatch));
+
+  // Equality alone cannot reject this: every target carries the same missing
+  // value. The field validator must reject it before cross-target comparison.
+  for (const platform of Object.keys(platforms)) {
+    const path = join(root, "crates/jazz-napi/artifacts", `jazz-napi.${platform}.manifest.json`);
+    const missingInputs = JSON.parse(readFileSync(path, "utf8"));
+    delete missingInputs.packageInputs;
+    writeFileSync(path, JSON.stringify(missingInputs));
+  }
+  assert.throws(() => stageNapiManifests(root), /missing native fingerprint or package inputs/);
+  for (const [platform, target] of Object.entries(platforms)) {
+    const restored = expectedManifest(root, "napi", "release", target);
+    restored.nativeArtifactFingerprint = "a".repeat(64);
+    restored.packageInputs = "b".repeat(64);
+    writeFileSync(
+      join(root, "crates/jazz-napi/artifacts", `jazz-napi.${platform}.manifest.json`),
+      JSON.stringify(restored),
+    );
+  }
 
   writeFileSync(node, "stale");
   assert.match(

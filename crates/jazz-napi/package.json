@@ -13,6 +13,7 @@
     "index.js",
     "index.d.ts",
     "native-binding.cjs",
+    "native-binding.pointer.cjs",
     "native-loader.cjs",
     "native-artifact-fingerprint.cjs",
     ".native-artifacts/**"

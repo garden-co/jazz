@@ -52,7 +52,7 @@ test("release NAPI staging rejects a valid sealed manifest whose fingerprint dis
   const packageDir = join(root, "crates/jazz-napi");
   const generation = join(packageDir, ".native-artifacts/generation-test");
   writeFileSync(
-    join(packageDir, "native-binding.cjs"),
+    join(packageDir, "native-binding.pointer.cjs"),
     `const nativeBinding = require("./.native-artifacts/generation-test/index.js");\nmodule.exports = { nativeBinding, expectedNativeArtifactFingerprint: "${fingerprint}" };\n`,
   );
   writeFileSync(join(generation, "jazz-napi.linux-x64-gnu.node"), "native bytes");
@@ -67,7 +67,7 @@ test("release NAPI staging rejects a valid sealed manifest whose fingerprint dis
     /pointer fingerprint does not match its sealed manifest/,
   );
   assert.equal(
-    readFileSync(join(packageDir, "native-binding.cjs"), "utf8").includes(fingerprint),
+    readFileSync(join(packageDir, "native-binding.pointer.cjs"), "utf8").includes(fingerprint),
     true,
   );
 });
