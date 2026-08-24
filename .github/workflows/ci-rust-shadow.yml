@@ -1,0 +1,74 @@
+name: Rust throughput shadow
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
+
+# This is intentionally a separate, non-required workflow. Its aggregate is
+# fail-closed for measurement integrity, but does not feed the protected CI
+# check while the speed study is evaluated.
+concurrency:
+  group: rust-throughput-shadow-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  shard:
+    name: Rust shadow shard ${{ matrix.index }} of 2
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        index: [1, 2]
+    # The two deterministic workspace shards run concurrently. The existing
+    # CI suite retains its independent workspace/all-target build gate.
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 20
+    container:
+      image: ghcr.io/garden-co/jazz-ci-toolchain@sha256:dcb4ec5e4f5507b258805617d58ee6976f7dcee2e9afe1b05ae3d41cc185ef35
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - uses: ./.github/actions/setup-blacksmith
+      - name: Run exact-inventory Rust shadow shard
+        run: node dev/gates/rust-shadow-matrix.mjs shard ${{ matrix.index }} 2 "target/rust-shadow/shard-${{ matrix.index }}.json"
+      - name: Upload shadow shard receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rust-shadow-shard-${{ matrix.index }}
+          path: target/rust-shadow/
+          if-no-files-found: error
+      - name: Report sccache statistics
+        if: always()
+        run: sccache --show-stats
+
+  aggregate:
+    name: Rust throughput shadow
+    if: always()
+    needs: [shard]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 3
+    steps:
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: rust-shadow-shard-*
+          path: rust-shadow-receipts
+          merge-multiple: true
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+      - name: Require exact partition receipts and folded M3 coverage
+        run: node dev/gates/rust-shadow-matrix.mjs aggregate rust-shadow-receipts 2 rust-shadow-receipts/aggregate.json
+      - name: Upload shadow aggregate receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rust-shadow-aggregate
+          path: rust-shadow-receipts/
+          if-no-files-found: error

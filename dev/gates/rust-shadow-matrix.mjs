@@ -1,0 +1,263 @@
+#!/usr/bin/env node
+/**
+ * Non-required Rust throughput-shadow receipts.
+ *
+ * The production CI suite remains authoritative.  This launcher deliberately
+ * records the exact Nextest inventory assigned to each hash shard so the
+ * shadow aggregate can prove that a faster shape did not sample or drop tests.
+ */
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { sourceIdentity } from "./source-identity.mjs";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const testArgs = [
+  "--workspace",
+  "--lib",
+  "--bins",
+  "--tests",
+  "--features",
+  "jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test",
+];
+const now = () => new Date().toISOString();
+const run = (command, args, options = {}) =>
+  spawnSync(command, args, {
+    cwd: root,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    ...options,
+  });
+const fail = (message) => {
+  throw new Error(`rust-shadow-matrix: ${message}`);
+};
+const plainObject = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+
+function parsedInventory(output) {
+  const document = JSON.parse(output);
+  if (!plainObject(document) || !plainObject(document["rust-suites"]))
+    fail("invalid Nextest list JSON");
+  const tests = [];
+  for (const suite of Object.values(document["rust-suites"])) {
+    if (
+      !plainObject(suite) ||
+      typeof suite["binary-id"] !== "string" ||
+      !plainObject(suite.testcases)
+    )
+      fail("invalid Nextest suite JSON");
+    for (const [name, testcase] of Object.entries(suite.testcases)) {
+      const status = testcase?.["filter-match"]?.status;
+      if (status !== "matches" && status !== "mismatch")
+        fail(`unsupported filter status: ${String(status)}`);
+      if (status === "matches" && !testcase.ignored) tests.push(`${suite["binary-id"]}\0${name}`);
+    }
+  }
+  tests.sort();
+  if (new Set(tests).size !== tests.length) fail("duplicate executable test in Nextest inventory");
+  return tests;
+}
+
+function inventory(partition) {
+  const args = ["nextest", "list", ...testArgs, "--message-format", "json"];
+  if (partition) args.push("--partition", partition);
+  const result = run("cargo", args);
+  if (result.status !== 0) fail(`Nextest inventory failed: ${result.stderr}`);
+  return parsedInventory(result.stdout);
+}
+
+function phase(phases, name, action) {
+  const started = Date.now();
+  try {
+    const value = action();
+    phases.push({ name, durationMs: Date.now() - started, status: "passed" });
+    return value;
+  } catch (error) {
+    phases.push({ name, durationMs: Date.now() - started, status: "failed", error: String(error) });
+    throw error;
+  }
+}
+
+function writeJson(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+}
+
+function shard(argv) {
+  const index = Number(argv[0]);
+  const count = Number(argv[1]);
+  const receipt = argv[2];
+  if (
+    !Number.isInteger(index) ||
+    !Number.isInteger(count) ||
+    index < 1 ||
+    index > count ||
+    !receipt
+  )
+    fail("usage: shard INDEX COUNT RECEIPT");
+  const startedAt = now();
+  const phases = [];
+  const partition = `hash:${index}/${count}`;
+  const value = {
+    schemaVersion: 1,
+    kind: "rust-shadow-shard-receipt",
+    startedAt,
+    shard: { index, count, partition },
+    testArgs,
+    phases,
+    status: "failed",
+    source: { commit: run("git", ["rev-parse", "HEAD"]).stdout.trim(), ...sourceIdentity(root) },
+    environment: {
+      platform: process.platform,
+      arch: process.arch,
+      hostname: os.hostname(),
+      rustMinStack: process.env.RUST_MIN_STACK ?? String(4 * 1024 * 1024),
+      rustcWrapper: process.env.RUSTC_WRAPPER ?? null,
+      sccacheDir: process.env.SCCACHE_DIR ?? null,
+    },
+  };
+  try {
+    value.inventory = {
+      all: phase(phases, "inventory-all", () => inventory()),
+      selected: phase(phases, "inventory-partition", () => inventory(partition)),
+    };
+    const testReceipt = `${receipt}.test.json`;
+    phase(phases, "partition-tests", () => {
+      const result = run(
+        "node",
+        [
+          "dev/gates/run-rust-tests.mjs",
+          "--require-nextest",
+          "--shard-index",
+          String(index),
+          "--shard-count",
+          String(count),
+          "--timeout-seconds",
+          "780",
+          "--nextest-profile",
+          "jazz-ci",
+          "--receipt",
+          testReceipt,
+          "--",
+          ...testArgs,
+        ],
+        { stdio: "inherit" },
+      );
+      if (result.status !== 0) fail(`partition tests exited ${result.status}`);
+    });
+    value.testReceipt = JSON.parse(fs.readFileSync(testReceipt, "utf8"));
+    if (index === 1) {
+      // This is the same maintained seed required by CI, folded into shard 1
+      // after the complete ordinary workspace partition has run.
+      phase(phases, "m3-maintained-seed-11", () => {
+        const result = run(
+          "timeout",
+          [
+            "--kill-after=30s",
+            "60s",
+            "env",
+            "JAZZ_SEED=11",
+            "JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000",
+            "JAZZ_DIFFERENTIAL_STEP_COUNT=3",
+            "cargo",
+            "test",
+            "-p",
+            "jazz",
+            "--lib",
+            "--features",
+            "testing,transport-compression-zstd",
+            "node::tests::harness::m3_maintained_one_shot_differential_oracle",
+            "--exact",
+            "--ignored",
+          ],
+          {
+            stdio: "inherit",
+          },
+        );
+        if (result.status !== 0) fail(`M3 seed 11 exited ${result.status}`);
+      });
+      value.m3 = { seed: 11, status: "passed" };
+    } else value.m3 = { status: "not-assigned" };
+    value.status = "passed";
+  } catch (error) {
+    value.error = String(error);
+  }
+  const cache = run("sccache", ["--show-stats"]);
+  value.cache = {
+    status: cache.status === 0 ? "available" : "unavailable",
+    statistics: cache.stdout.trim(),
+  };
+  value.finishedAt = now();
+  value.durationMs = Date.parse(value.finishedAt) - Date.parse(startedAt);
+  writeJson(receipt, value);
+  if (value.status !== "passed") fail(value.error ?? "shard failed");
+}
+
+function aggregate(argv) {
+  const directory = argv[0];
+  const count = Number(argv[1]);
+  const receipt = argv[2];
+  if (!directory || !Number.isInteger(count) || count < 1 || !receipt)
+    fail("usage: aggregate DIRECTORY COUNT RECEIPT");
+  const files = fs
+    .readdirSync(directory, { recursive: true })
+    .filter((file) => file.endsWith(".json") && !file.endsWith(".test.json"));
+  const shards = files.map((file) =>
+    JSON.parse(fs.readFileSync(path.join(directory, file), "utf8")),
+  );
+  if (shards.length !== count) fail(`expected ${count} shard receipts, found ${shards.length}`);
+  const seenIndexes = new Set();
+  const selected = new Set();
+  let all;
+  for (const shardReceipt of shards) {
+    if (shardReceipt?.kind !== "rust-shadow-shard-receipt" || shardReceipt.status !== "passed")
+      fail("shard receipt is missing or failed");
+    const { index, count: receiptCount, partition } = shardReceipt.shard ?? {};
+    if (
+      receiptCount !== count ||
+      partition !== `hash:${index}/${count}` ||
+      !Number.isInteger(index) ||
+      index < 1 ||
+      index > count ||
+      seenIndexes.has(index)
+    )
+      fail("invalid or duplicate shard receipt");
+    seenIndexes.add(index);
+    if (
+      !Array.isArray(shardReceipt.inventory?.all) ||
+      !Array.isArray(shardReceipt.inventory?.selected)
+    )
+      fail("shard receipt has no exact inventory");
+    const candidateAll = JSON.stringify(shardReceipt.inventory.all);
+    if (all === undefined) all = candidateAll;
+    else if (all !== candidateAll) fail("shards disagree on the exact inventory");
+    for (const test of shardReceipt.inventory.selected) {
+      if (selected.has(test)) fail(`test belongs to more than one shard: ${test}`);
+      selected.add(test);
+    }
+    const ran = shardReceipt.testReceipt;
+    if (ran?.status !== "passed" || ran?.shard?.index !== index || ran?.shard?.count !== count)
+      fail("partition test receipt does not prove the selected shard ran");
+  }
+  const expected = JSON.parse(all);
+  if (selected.size !== expected.length || expected.some((test) => !selected.has(test)))
+    fail("hash shards do not cover the exact executable inventory");
+  const m3 = shards.filter((item) => item.m3?.seed === 11 && item.m3?.status === "passed");
+  if (m3.length !== 1 || m3[0].shard.index !== 1)
+    fail("maintained M3 seed 11 was not folded into shard 1 exactly once");
+  writeJson(receipt, {
+    schemaVersion: 1,
+    kind: "rust-shadow-aggregate-receipt",
+    status: "passed",
+    shardCount: count,
+    executableTestCount: expected.length,
+    m3Shard: 1,
+    shards: [...seenIndexes].sort(),
+  });
+}
+
+const [command, ...argv] = process.argv.slice(2);
+if (command === "shard") shard(argv);
+else if (command === "aggregate") aggregate(argv);
+else fail("expected shard or aggregate command");
