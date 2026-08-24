@@ -102,6 +102,29 @@ where
             .map_err(Into::into)
     }
 
+    /// Open a mergeable transaction admitted as this Db while retaining an
+    /// external provenance author for every staged write.
+    #[doc(hidden)]
+    pub async fn begin_mergeable_attributed(
+        &self,
+        id: OpenTransactionId,
+        made_by: AuthorSubject,
+    ) -> Result<(), Error> {
+        if made_by != self.identity.author && !self.backend_attribution {
+            return Err(Error::new(
+                ErrorCode::WriteRejected,
+                "attribution requires a trusted serving node",
+            ));
+        }
+        self.node
+            .node
+            .lock()
+            .await
+            .open_mergeable(id, made_by, Some(self.identity.author))
+            .await
+            .map_err(Into::into)
+    }
+
     /// Return a non-owning operations handle for an already-open mergeable transaction.
     ///
     /// This handle never closes the transaction when dropped, so it is suitable

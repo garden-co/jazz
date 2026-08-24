@@ -475,7 +475,10 @@ where
 
         if supplied_row_id {
             match target {
-                ExactWriteTarget::Root => self.ensure_row_absent(table, row, made_by).await?,
+                ExactWriteTarget::Root => {
+                    self.ensure_row_absent(table, row, permission_subject.unwrap_or(made_by))
+                        .await?
+                }
                 ExactWriteTarget::Branch(_) => {
                     self.ensure_exact_branch_row_absent(table, &branch, row)
                         .await?
@@ -494,6 +497,28 @@ where
             None,
             updated_at_ms.unwrap_or_else(|| self.next_now_ms()),
             branch,
+        )
+        .await
+    }
+
+    /// Trusted-backend-only root insert retaining backend admission while
+    /// recording `made_by` as external provenance.
+    #[doc(hidden)]
+    pub async fn insert_with_id_attributed(
+        &self,
+        made_by: AuthorSubject,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.insert(
+            table,
+            cells,
+            InsertOptions {
+                row_id: Some(row),
+                identity: WriteIdentity::Attribution(made_by),
+                ..Default::default()
+            },
         )
         .await
     }
@@ -1164,6 +1189,26 @@ where
         }
     }
 
+    #[doc(hidden)]
+    pub async fn update_attributed(
+        &self,
+        made_by: AuthorSubject,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.update(
+            table,
+            row,
+            patch,
+            UpdateOptions {
+                identity: WriteIdentity::Attribution(made_by),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
     /// Insert or update one row through a single implementation.
     pub async fn upsert(
         &self,
@@ -1186,7 +1231,11 @@ where
                 self.ensure_row_not_deleted(table, row).await?;
                 let exists = match identity {
                     WriteIdentity::Database | WriteIdentity::Attribution(_) => self
-                        .upsert_target_for_client_identity(table, row, made_by)
+                        .upsert_target_for_client_identity(
+                            table,
+                            row,
+                            permission_subject.unwrap_or(made_by),
+                        )
                         .await?
                         .is_some(),
                     WriteIdentity::Session(author) => self
@@ -1256,6 +1305,26 @@ where
         .await
     }
 
+    #[doc(hidden)]
+    pub async fn upsert_attributed(
+        &self,
+        made_by: AuthorSubject,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.upsert(
+            table,
+            row,
+            cells,
+            UpsertOptions {
+                identity: WriteIdentity::Attribution(made_by),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
     /// Soft-delete one row, optionally through a branch view.
     pub async fn delete(
         &self,
@@ -1321,6 +1390,24 @@ where
             None,
             now_ms,
             branch,
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn delete_attributed(
+        &self,
+        made_by: AuthorSubject,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.delete(
+            table,
+            row,
+            DeleteOptions {
+                identity: WriteIdentity::Attribution(made_by),
+                ..Default::default()
+            },
         )
         .await
     }
@@ -1428,7 +1515,8 @@ where
             .transpose()?;
         let (content_parents, deletion_parents) = match target {
             ExactWriteTarget::Root => {
-                self.ensure_row_deleted(table, row, made_by).await?;
+                self.ensure_row_deleted(table, row, permission_subject.unwrap_or(made_by))
+                    .await?;
                 self.row_layer_parents(table, row).await?
             }
             ExactWriteTarget::Branch(_) => {
@@ -1481,6 +1569,26 @@ where
             .commit_mergeable_many_in_schema(self.schema_version_id, commits)
             .await?;
         self.finish_published_write(row, published).await
+    }
+
+    #[doc(hidden)]
+    pub async fn restore_attributed(
+        &self,
+        made_by: AuthorSubject,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.restore(
+            table,
+            row,
+            Some(cells),
+            RestoreOptions {
+                identity: WriteIdentity::Attribution(made_by),
+                ..Default::default()
+            },
+        )
+        .await
     }
 
     async fn write_mergeable_at_ms_with_authorship(
@@ -1642,7 +1750,9 @@ where
         match identity {
             WriteIdentity::Database => Ok((self.identity.author, None)),
             WriteIdentity::Session(author) => Ok((author, Some(author))),
-            WriteIdentity::Attribution(author) if author == self.identity.author => {
+            WriteIdentity::Attribution(author)
+                if author == self.identity.author || self.backend_attribution =>
+            {
                 Ok((author, Some(self.identity.author)))
             }
             WriteIdentity::Attribution(_) => Err(Error::new(
