@@ -9,10 +9,15 @@ afterEach(async () => {
   await Promise.all(dbs.splice(0).map((db) => db.shutdown()));
 });
 
-async function openDb(label: string, serverUrl?: string, secret?: string): Promise<Db> {
+async function openDb(
+  label: string,
+  serverUrl?: string,
+  secret?: string,
+  dbName = `epic-drop-${label}-${crypto.randomUUID()}`,
+): Promise<Db> {
   const db = await createDb({
     appId: APP_ID,
-    driver: { type: "persistent", dbName: `epic-drop-${label}-${crypto.randomUUID()}` },
+    driver: { type: "persistent", dbName },
     serverUrl,
     secret,
   });
@@ -180,6 +185,53 @@ describe("EpicDrop upload", () => {
     } finally {
       unsubscribe();
     }
+  });
+
+  it("replays an offline inline upload after reconnect and browser-runtime restart", async () => {
+    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const secret = generateAuthSecret();
+    const dbName = `epic-drop-restart-${crypto.randomUUID()}`;
+    const writer = await openDb("restart-writer", serverUrl, secret, dbName);
+    await waitFor(
+      async () => (writer.getAuthState().authMode === "local-first" ? true : undefined),
+      "the writer to establish its local-first session",
+    );
+    const ownerId = writer.getAuthState().session?.user_id;
+    expect(ownerId).toBeDefined();
+    const folder = writer.insert(app.folders, { name: "Offline recordings", owner_id: ownerId! });
+    await folder.wait({ tier: "global" });
+
+    await writer.disconnect();
+    const offlineUpload = await writer.insertStreaming(app.files, {
+      folder_id: folder.value.id,
+      name: "replay-after-restart.txt",
+      content_type: "text/plain",
+      size_bytes: 3,
+      owner_id: ownerId!,
+      contents: (async function* () {
+        yield new Uint8Array([8, 6, 7]);
+      })(),
+    });
+    await offlineUpload.wait({ tier: "local" });
+    await writer.shutdown();
+    dbs.splice(dbs.indexOf(writer), 1);
+
+    const reopened = await openDb("restart-reopened", serverUrl, secret, dbName);
+    await waitFor(
+      async () => (reopened.getAuthState().authMode === "local-first" ? true : undefined),
+      "the reopened writer to establish its local-first session",
+    );
+    const replayed = await waitFor(async () => {
+      const files = await reopened.all(app.files, { tier: "edge" });
+      return files.find((file) => file.id === offlineUpload.value.id);
+    }, "the persistent offline upload to replay after restart");
+    expect(replayed).toEqual(
+      expect.objectContaining({
+        id: offlineUpload.value.id,
+        name: "replay-after-restart.txt",
+        contents: new Uint8Array([8, 6, 7]),
+      }),
+    );
   });
 
   it("streams a large upload through edge A and converges at a peer edge subscription", async () => {
