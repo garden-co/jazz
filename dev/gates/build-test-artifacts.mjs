@@ -167,11 +167,21 @@ export function acquireArtifactBuildLock(lockPath = artifactLockPath()) {
   };
 }
 
-/** Environment inherited by a direct artifact producer owned by this lock. */
+/**
+ * Environment inherited by an artifact producer owned by this lock.
+ *
+ * `JAZZ_TEST_ARTIFACT_LOCK_PATH` is deliberately the selected-lock input, not
+ * merely a test convenience: the aggregate CI parent selects its runner-temp
+ * lock before it spawns Turbo.  Turbo children must receive that same input so
+ * `verifyArtifactBuildLease` can prove that a claimed lease belongs to the
+ * parent-selected lock, rather than treating a child-provided lock path as
+ * authority.
+ */
 export function artifactBuildLease(lock) {
   return {
     JAZZ_ARTIFACT_BUILD_LEASE: lock.token,
     JAZZ_ARTIFACT_BUILD_LOCK_PATH: lock.lockPath,
+    JAZZ_TEST_ARTIFACT_LOCK_PATH: lock.lockPath,
   };
 }
 

@@ -221,6 +221,80 @@ test("inherited artifact leases require the exact live clone owner", () => {
   }
 });
 
+test("WASM publication accepts only the exact live inherited lease", () => {
+  const { root, pkg, lock } = fixture();
+  try {
+    withLock(lock, () => {
+      writePackage(pkg, "old");
+      const held = acquireArtifactBuildLock(lock);
+      const inherited = artifactBuildLease(held);
+      const lease = {
+        token: inherited.JAZZ_ARTIFACT_BUILD_LEASE,
+        lockPath: inherited.JAZZ_ARTIFACT_BUILD_LOCK_PATH,
+      };
+      const stage = (marker) => {
+        const created = createWasmPackageStage(root, "fast");
+        writePackage(created.path, marker);
+        return created;
+      };
+      const prior = wasmPackageFiles.map((file) => `old:${file}`);
+
+      for (const [name, supplied] of [
+        ["missing", {}],
+        ["forged", { ...lease, token: "forged" }],
+        ["different selected path", { ...lease, lockPath: `${lock}-other` }],
+      ]) {
+        const candidate = stage(name);
+        assert.throws(
+          () => publishWasmPackage(candidate.path, pkg, { lease: supplied }),
+          /inherited artifact lease/,
+          name,
+        );
+        assert.equal(existsSync(candidate.path), true, `${name} lease must not consume staging`);
+        assert.deepEqual(markers(pkg), prior, `${name} lease must not alter the package`);
+        rmSync(candidate.path, { recursive: true, force: true });
+      }
+
+      const accepted = stage("inherited");
+      publishWasmPackage(accepted.path, pkg, { profile: "fast", lease });
+      assert.deepEqual(
+        markers(pkg),
+        wasmPackageFiles.map((file) => `inherited:${file}`),
+      );
+      assert.equal(existsSync(lock), true, "an inherited lease must not release its parent lock");
+      held.release();
+
+      const dead = stage("dead");
+      assert.throws(
+        () => publishWasmPackage(dead.path, pkg, { lease }),
+        /missing or no longer owned/,
+      );
+      assert.equal(existsSync(dead.path), true, "a dead lease must not consume staging");
+      rmSync(dead.path, { recursive: true, force: true });
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("direct WASM publication acquires and releases the selected lock itself", () => {
+  const { root, pkg, lock } = fixture();
+  try {
+    withLock(lock, () => {
+      const stage = createWasmPackageStage(root, "fast");
+      writePackage(stage.path, "direct");
+      publishWasmPackage(stage.path, pkg, { profile: "fast" });
+      assert.deepEqual(
+        markers(pkg),
+        wasmPackageFiles.map((file) => `direct:${file}`),
+      );
+      assert.equal(existsSync(lock), false, "direct publication must release its acquired lock");
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("two independent fast/release producers serialize and publish one internally consistent generation", async () => {
   const { root, pkg, lock } = fixture();
   const previous = process.env.JAZZ_TEST_ARTIFACT_LOCK_PATH;
