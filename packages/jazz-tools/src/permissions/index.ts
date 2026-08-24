@@ -1687,6 +1687,7 @@ function applyRelationTail(options: {
   joinAlias: (join: RelationJoinSpec, index: number) => string;
 }): RelExpr {
   let relation = options.base;
+  let defaultScope = options.initialScope;
   let hasHopJoin = false;
 
   for (let i = 0; i < options.joins.length; i += 1) {
@@ -1708,6 +1709,7 @@ function applyRelationTail(options: {
         join_kind: "Inner",
       },
     };
+    defaultScope = rightScope;
     hasHopJoin ||= Boolean(join.viaHop);
   }
 
