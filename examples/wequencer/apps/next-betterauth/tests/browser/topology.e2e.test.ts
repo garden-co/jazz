@@ -14,8 +14,10 @@ import {
   TopologyEnvelopeScheduler,
 } from "../../../../../../packages/jazz-tools/tests/browser/topology-harness.js";
 import {
+  blockJazzServerNetwork,
   getJazzServerInfo,
   getJazzServerJwtForUser,
+  unblockJazzServerNetwork,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import permissions from "../../permissions.js";
 import { app, type Step } from "../../schema.js";
@@ -55,6 +57,7 @@ describe("Wequencer cross-topology recovery", () => {
     let subscribedOwnerStepId: string;
     let transport: { id: string } | undefined;
     let subscribedTrackSteps: Step[] = [];
+    let editorRouteBlocked = false;
 
     const receipt = await runTopologyScenario(
       {
@@ -77,6 +80,11 @@ describe("Wequencer cross-topology recovery", () => {
           },
           editor: {
             restart: async () => {
+              // Prevent the replacement client from cold-refetching before
+              // the next phase can prove what survived in IndexedDB.
+              await blockJazzServerNetwork(server.serverUrl);
+              editorRouteBlocked = true;
+              await editor.disconnect();
               await editor.shutdown();
               ctx.untrack(editor);
               editor = await openClient(server, "editor", editorToken, editorDbName);
@@ -403,15 +411,15 @@ describe("Wequencer cross-topology recovery", () => {
             faultsAfter: [{ kind: "restart", target: "editor" }],
           },
           {
-            name: "editor durable reopen keeps bounded projected session reads",
+            name: "offline editor reopen rehydrates bounded projected session reads",
             run: async () => {
               const restoredTracks = await waitForQuery(
                 editor,
                 sessionQueries(session.id).tracks,
                 (rows) => rows.length === trackNames.length,
-                "persistent editor reopens session tracks",
+                "offline persistent editor reopens session tracks from local storage",
                 20_000,
-                "edge",
+                "local",
               );
               expect(restoredTracks.map((track) => track.position)).toEqual([0, 1, 2, 3]);
 
@@ -421,18 +429,34 @@ describe("Wequencer cross-topology recovery", () => {
               // does not accidentally materialize unrelated track fields.
               const projectedWindow = await editor.all(
                 sessionQueries(session.id).tracks.limit(2).select("id", "position", "name"),
-                { tier: "edge" },
+                { tier: "local" },
               );
               expect(projectedWindow.map((track) => track.position)).toEqual([0, 1]);
               expect(projectedWindow).toHaveLength(2);
               expect("color" in projectedWindow[0]!).toBe(false);
 
               const restoredOfflineStep = await editor.all(trackSteps(tracks[2].id), {
-                tier: "edge",
+                tier: "local",
               });
               expect(restoredOfflineStep.find((step) => step.id === offlineStep.id)).toMatchObject({
                 enabled: true,
               });
+
+              await unblockJazzServerNetwork(server.serverUrl);
+              editorRouteBlocked = false;
+              await editor.reconnect();
+              const settledProjectedWindow = await waitForQuery(
+                editor,
+                sessionQueries(session.id).tracks.limit(2).select("id", "position", "name"),
+                (rows) => rows.length === 2 && rows[0]?.position === 0 && rows[1]?.position === 1,
+                "reconnected editor settles the exact projected track window at edge",
+                20_000,
+                "edge",
+              );
+              expect(settledProjectedWindow.map((track) => track.id)).toEqual(
+                projectedWindow.map((track) => track.id),
+              );
+              expect(settledProjectedWindow.every((track) => !("color" in track))).toBe(true);
             },
           },
           {
@@ -448,7 +472,13 @@ describe("Wequencer cross-topology recovery", () => {
             },
           },
         ],
-        cleanup: async () => ctx.cleanup(),
+        cleanup: async () => {
+          if (editorRouteBlocked && server) {
+            await unblockJazzServerNetwork(server.serverUrl).catch(() => undefined);
+            editorRouteBlocked = false;
+          }
+          await ctx.cleanup();
+        },
         cleanupTimeoutMs: 10_000,
       },
       browserTopologyReporter,
