@@ -66,6 +66,7 @@ describe("BandBinder cross-topology recovery", () => {
     let offlineTaskId = "";
     let nestedPageId = "";
     let nestedBlockId = "";
+    let nestedAttachmentId = "";
     const ownerMutationErrors: unknown[] = [];
     const taskSubscriptionSnapshots: string[][] = [];
     const expectedBlockIds = new Set<string>();
@@ -170,6 +171,24 @@ describe("BandBinder cross-topology recovery", () => {
                 15_000,
                 "edge",
               );
+              // The manager discovers their own grant first, then uses the
+              // workspace witness to read the roster.  This is deliberately
+              // broader than the self-grant check above: it catches a
+              // maintained-query path that accidentally keeps the bootstrap
+              // exception but drops ordinary role-scoped membership reads.
+              expect(
+                await waitForQuery(
+                  manager,
+                  app.members.where({ workspaceId }).orderBy("subject", "asc"),
+                  (rows) =>
+                    rows.length === 2 &&
+                    rows.map((row) => row.subject).join(",") ===
+                      "band-binder-manager,band-binder-owner",
+                  "manager reads the workspace roster through its grant",
+                  15_000,
+                  "edge",
+                ),
+              ).toHaveLength(2);
             },
             faultsAfter: [{ kind: "failure", target: "authorization" }],
           },
@@ -354,7 +373,10 @@ describe("BandBinder cross-topology recovery", () => {
                       mediaType: "text/plain",
                       bytes: new TextEncoder().encode("channels 1-16"),
                     })
-                    .wait({ tier: "edge" }),
+                    .wait({ tier: "edge" })
+                    .then((attachment) => {
+                      nestedAttachmentId = attachment.id;
+                    }),
                   ...Array.from({ length: PAGE_SIZE }, (_, index) =>
                     manager!
                       .insert(app.attachments, {
@@ -419,6 +441,19 @@ describe("BandBinder cross-topology recovery", () => {
                   "edge",
                 ),
               ).toHaveLength(PAGE_SIZE);
+              const [stagePlot] = await waitForQuery(
+                owner!,
+                app.attachments.where({
+                  id: nestedAttachmentId,
+                  workspaceId,
+                  blockId: nestedBlockId,
+                }),
+                (rows) => rows.length === 1,
+                "nested attachment bytes resolve through the block and workspace witnesses",
+                15_000,
+                "edge",
+              );
+              expect(stagePlot?.bytes).toEqual(new TextEncoder().encode("channels 1-16"));
               const nestedBlocks = await waitForQuery(
                 owner!,
                 app.blocks.where({ workspaceId, pageId: nestedPageId }).orderBy("position", "asc"),
@@ -538,6 +573,29 @@ describe("BandBinder cross-topology recovery", () => {
                 "local",
               );
               expect(persistedTasks.map((task) => task.id)).toEqual([offlineTaskId]);
+              const [persistedStagePlot] = await waitForQuery(
+                manager!,
+                app.attachments.where({
+                  id: nestedAttachmentId,
+                  workspaceId,
+                  blockId: nestedBlockId,
+                }),
+                (rows) => rows.length === 1,
+                "manager rehydrates the nested attachment after browser restart",
+                15_000,
+                "local",
+              );
+              expect(persistedStagePlot?.bytes).toEqual(new TextEncoder().encode("channels 1-16"));
+              expect(
+                await manager!.all(
+                  app.pages
+                    .where({ workspaceId, parentPageId: pageId })
+                    .orderBy("title", "asc")
+                    .offset(1)
+                    .limit(PAGE_SIZE),
+                  { tier: "local" },
+                ),
+              ).toHaveLength(PAGE_SIZE);
               await owner!.delete(app.members, managerMembershipId).wait({ tier: "edge" });
               const rejected = manager!.insert(app.pages, {
                 workspaceId,
