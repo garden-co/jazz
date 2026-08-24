@@ -89,9 +89,11 @@ describe("BandChat browser smoke", () => {
     try {
       const userId = local.getAuthState().session?.user_id;
       expect(userId).toBeTruthy();
-      const profile = await local
-        .insert(app.profiles, { userId: userId!, displayName: "Local musician" })
-        .wait({ tier: "edge" });
+      const profile = local.insert(app.profiles, {
+        userId: userId!,
+        displayName: "Local musician",
+      });
+      await profile.wait({ tier: "edge" });
       await expect(
         local
           .insert(app.profiles, { userId: "someone-else", displayName: "Forged" })

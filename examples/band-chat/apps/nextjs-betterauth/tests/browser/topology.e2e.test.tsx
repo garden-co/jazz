@@ -140,11 +140,11 @@ describe("BandChat cross-topology recovery", () => {
                 throw new Error("trusted profile bootstrap did not persist");
               expect(ownerProfile).toMatchObject({ userId: bandChatFixtureUsers.owner });
               expect(peerProfile).toMatchObject({ userId: bandChatFixtureUsers.peer });
-              room = (
-                await owner
-                  .insert(app.rooms, { name: scenario.assertion.visibleText })
-                  .wait({ tier: "edge" })
-              ).value;
+              const roomInsert = owner.insert(app.rooms, {
+                name: scenario.assertion.visibleText,
+              });
+              await roomInsert.wait({ tier: "edge" });
+              room = roomInsert.value;
               await owner
                 .insert(app.roomMembers, { roomId: room.id, userId: bandChatFixtureUsers.owner })
                 .wait({ tier: "edge" });
@@ -231,7 +231,8 @@ describe("BandChat cross-topology recovery", () => {
                 senderId: ownerProfile!.id,
                 text: "offline replay",
               });
-              offlineMessage = (await offline.wait({ tier: "local" })).value;
+              await offline.wait({ tier: "local" });
+              offlineMessage = offline.value;
               expect(
                 (await owner!.all(app.messages.where({ roomId: room!.id }))).some(
                   (message) => message.text === "offline replay",
@@ -327,9 +328,9 @@ describe("BandChat cross-topology recovery", () => {
       { tier: "edge" },
     );
     if (!profile) throw new Error("trusted profile bootstrap did not persist");
-    const room = (
-      await owner.insert(app.rooms, { name: "large-value receipt" }).wait({ tier: "edge" })
-    ).value;
+    const roomInsert = owner.insert(app.rooms, { name: "large-value receipt" });
+    await roomInsert.wait({ tier: "edge" });
+    const room = roomInsert.value;
     await owner
       .insert(app.roomMembers, { roomId: room.id, userId: bandChatFixtureUsers.largeOwner })
       .wait({ tier: "edge" });
