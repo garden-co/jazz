@@ -90,18 +90,25 @@ function matches(path, hashes) {
     return false;
   }
 }
-function acquireWasmLease() {
+function inheritedWasmLease() {
   const token = process.env.JAZZ_ARTIFACT_BUILD_LEASE;
-  if (token) {
-    verifyArtifactBuildLease({ token, lockPath: process.env.JAZZ_ARTIFACT_BUILD_LOCK_PATH });
-    return undefined;
-  }
+  const lockPath = process.env.JAZZ_ARTIFACT_BUILD_LOCK_PATH;
+  if (!token && !lockPath) return undefined;
+  return verifyArtifactBuildLease({ token, lockPath });
+}
+function acquireWasmLease() {
+  const inherited = inheritedWasmLease();
+  if (inherited) return { lease: inherited };
   // Direct producers are command-line entrypoints; a short synchronous wait is
   // preferable to failing a valid concurrent `pnpm build:core` invocation.
   const deadline = Date.now() + 60_000;
   for (;;) {
     try {
-      return acquireArtifactBuildLock(artifactLockPath(root));
+      const lock = acquireArtifactBuildLock(artifactLockPath(root));
+      return {
+        lease: { token: lock.token, lockPath: lock.lockPath },
+        release: () => lock.release(),
+      };
     } catch (error) {
       if (!String(error.message).includes("active artifact lock") || Date.now() >= deadline)
         throw error;
@@ -189,10 +196,13 @@ export function recoverWasmPackageTransaction(packageDir) {
 export function publishWasmPackage(
   stagePath,
   packagePath,
-  { profile = "release", alreadyLocked = false } = {},
+  { profile = "release", lease = undefined } = {},
 ) {
   const packageDir = resolve(packagePath, "..");
-  const lock = alreadyLocked ? undefined : acquireWasmLease();
+  // A caller may only skip acquisition with the opaque lease returned by the
+  // clone-wide lock layer. Re-verify it immediately before the first mutable
+  // operation; neither a boolean nor a child-controlled path is authority.
+  const held = lease ? { lease: verifyArtifactBuildLease(lease) } : acquireWasmLease();
   try {
     recoverWasmPackageTransaction(packageDir);
     realDirectory(stagePath, "stage", { required: true });
@@ -229,7 +239,7 @@ export function publishWasmPackage(
     throw new Error(`WASM package publish transaction failed: ${error.message}`);
   } finally {
     if (existsSync(stagePath)) rmSync(stagePath, { recursive: true, force: true });
-    lock?.release();
+    held.release?.();
   }
 }
 export function writeWasmStageManifest(stagePath, profile) {
@@ -270,7 +280,7 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
       writeWasmStageManifest(wasmStage.path, profile);
       publishWasmPackage(wasmStage.path, join(root, "crates", "jazz-wasm", "pkg"), {
         profile,
-        alreadyLocked: true,
+        lease: wasmLock.lease,
       });
       const problem = verifyManifest(root, kind, profile);
       if (problem) throw new Error(`published WASM manifest verification failed: ${problem}`);
@@ -278,7 +288,7 @@ export function buildArtifact(kind, profile = "release", extraArgs = []) {
   } finally {
     if (wasmStage && existsSync(wasmStage.path))
       rmSync(wasmStage.path, { recursive: true, force: true });
-    wasmLock?.release();
+    wasmLock?.release?.();
   }
 }
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
