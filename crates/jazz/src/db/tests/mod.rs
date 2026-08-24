@@ -102,11 +102,153 @@ fn retryable_chunk_response_keeps_the_original_waiter_until_the_scheduled_reissu
     let retry = resolver.take_outbound(1);
     assert_eq!(retry.len(), 1);
     assert_eq!(retry[0].request_id, response_id, "same pending request id");
+    assert!(
+        resolver.take_outbound(1).is_empty(),
+        "promoting a retry clears its deadline; a later tick must not enqueue a duplicate"
+    );
     resolver.complete(ChunkResponseEntry {
         request_id: response_id,
         result: ChunkResponse::Found(vec![0x42]),
     });
     assert_eq!(crate::db::block_on(waiter).unwrap().as_ref(), &[0x42]);
+}
+
+#[test]
+fn auxiliary_waiter_recomputes_a_long_retry_when_immediate_demand_arrives() {
+    use groove::chunks::MissingChunkResolver;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    let resolver = PeerChunkResolver::default();
+    resolver.register_connection(41, true);
+    let pump = PeerIoPump::new(
+        resolver.clone(),
+        test_empty_local_chunk_reader(),
+        41,
+        PeerIoPumpRole::Upstream,
+    );
+    let long = resolver.resolve(test_chunk_request(0x41));
+    let long_id = resolver.take_outbound(1)[0].request_id;
+    resolver.complete(ChunkResponseEntry {
+        request_id: long_id,
+        result: ChunkResponse::Retryable {
+            retry_after_ms: 60_000,
+        },
+    });
+    let mut wake = pump.outbound_ready();
+    let waker = futures::task::noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(
+        Pin::new(&mut wake).poll(&mut context),
+        Poll::Pending
+    ));
+
+    let immediate = resolver.resolve(test_chunk_request(0x42));
+    assert!(matches!(
+        Pin::new(&mut wake).poll(&mut context),
+        Poll::Ready(())
+    ));
+    drop(long);
+    drop(immediate);
+}
+
+#[test]
+fn auxiliary_waiter_recomputes_when_an_earlier_retry_replaces_its_deadline() {
+    use groove::chunks::MissingChunkResolver;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    let resolver = PeerChunkResolver::default();
+    resolver.register_connection(42, true);
+    let pump = PeerIoPump::new(
+        resolver.clone(),
+        test_empty_local_chunk_reader(),
+        42,
+        PeerIoPumpRole::Upstream,
+    );
+    let long = resolver.resolve(test_chunk_request(0x43));
+    let long_id = resolver.take_outbound(1)[0].request_id;
+    resolver.complete(ChunkResponseEntry {
+        request_id: long_id,
+        result: ChunkResponse::Retryable {
+            retry_after_ms: 60_000,
+        },
+    });
+    let mut wake = pump.outbound_ready();
+    let waker = futures::task::noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(
+        Pin::new(&mut wake).poll(&mut context),
+        Poll::Pending
+    ));
+
+    let earlier = resolver.resolve(test_chunk_request(0x44));
+    let earlier_id = resolver.take_outbound(1)[0].request_id;
+    resolver.complete(ChunkResponseEntry {
+        request_id: earlier_id,
+        result: ChunkResponse::Retryable { retry_after_ms: 1 },
+    });
+    assert!(matches!(
+        Pin::new(&mut wake).poll(&mut context),
+        Poll::Ready(())
+    ));
+    drop(long);
+    drop(earlier);
+}
+
+#[test]
+fn auxiliary_waiter_recomputes_when_last_retry_waiter_is_cancelled() {
+    use groove::chunks::MissingChunkResolver;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    let resolver = PeerChunkResolver::default();
+    resolver.register_connection(43, true);
+    let pump = PeerIoPump::new(
+        resolver.clone(),
+        test_empty_local_chunk_reader(),
+        43,
+        PeerIoPumpRole::Upstream,
+    );
+    let demand = resolver.resolve(test_chunk_request(0x45));
+    let request_id = resolver.take_outbound(1)[0].request_id;
+    resolver.complete(ChunkResponseEntry {
+        request_id,
+        result: ChunkResponse::Retryable {
+            retry_after_ms: 60_000,
+        },
+    });
+    let mut wake = pump.outbound_ready();
+    let waker = futures::task::noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(
+        Pin::new(&mut wake).poll(&mut context),
+        Poll::Pending
+    ));
+
+    drop(demand);
+    assert!(matches!(
+        Pin::new(&mut wake).poll(&mut context),
+        Poll::Ready(())
+    ));
+    assert!(resolver.next_retry_delay().is_none());
+}
+
+fn test_chunk_request(byte: u8) -> groove::chunks::ChunkRequest {
+    groove::chunks::ChunkRequest {
+        object_hash: [byte; 32],
+        locator: vec![byte; 16],
+    }
+}
+
+fn test_empty_local_chunk_reader() -> groove::chunks::LocalChunkReader {
+    let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
+    let database = crate::db::block_on(groove::db::Database::new(
+        schema,
+        groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF]),
+    ))
+    .unwrap();
+    database.local_chunk_reader()
 }
 
 #[test]

@@ -3283,13 +3283,37 @@ impl WasmTransport {
     pub fn auxiliary_outbound_ready(&self) -> js_sys::Promise {
         let pump = self.auxiliary_pump.clone();
         future_to_promise(async move {
-            if let Some(delay) = pump.next_retry_delay() {
-                JsFuture::from(js_timeout(delay.as_millis() as f64)?).await?;
-                pump.tick();
-            } else {
-                pump.outbound_ready().await;
+            // The retry deadline is only a snapshot.  A new request, a
+            // shorter Retryable response, cancellation, completion, or link
+            // replacement wakes `outbound_ready` through the resolver's
+            // schedule generation, so an old JS timeout is never allowed to
+            // starve the current carrier.
+            loop {
+                if pump.outbound_is_ready() || pump.is_disconnected() {
+                    return Ok(JsValue::UNDEFINED);
+                }
+                let schedule_change = pump.outbound_ready();
+                if let Some(delay) = pump.next_retry_delay() {
+                    // Browsers clamp overflowing setTimeout delays to an
+                    // immediate callback.  Clamp deliberately and recompute
+                    // after each bounded wait so a u64 retry remains a real
+                    // delay instead of a hot loop.
+                    const MAX_JS_TIMEOUT_MS: u64 = i32::MAX as u64;
+                    let timeout = JsFuture::from(js_timeout(
+                        delay.as_millis().min(u128::from(MAX_JS_TIMEOUT_MS)) as f64,
+                    )?);
+                    futures_util::pin_mut!(schedule_change, timeout);
+                    match futures_util::future::select(schedule_change, timeout).await {
+                        futures_util::future::Either::Left(((), _)) => continue,
+                        futures_util::future::Either::Right((result, _)) => {
+                            result?;
+                            pump.tick();
+                        }
+                    }
+                } else {
+                    schedule_change.await;
+                }
             }
-            Ok(JsValue::UNDEFINED)
         })
     }
 
@@ -4052,7 +4076,17 @@ fn subscription_stream_to_js(
             match db.hydrate_subscription_event_for_binding(&mut event).await {
                 Ok(()) => {}
                 Err(jazz::db::BindingHydrationError::ChunkUnavailable) => {
-                    return Some((Ok(None), (db, source, Some(event), layouts)));
+                    // Peer-resolved chunk absence remains pending inside the
+                    // resolver until a Retryable deadline or terminal answer;
+                    // reaching this boundary therefore has no awaitable wake.
+                    // Returning an empty successful pull would make JS spin
+                    // forever on the same retained event.
+                    return Some((
+                        Err(JsValue::from_str(
+                            "large-value chunk is unavailable and cannot be retried",
+                        )),
+                        (db, source, None, layouts),
+                    ));
                 }
                 Err(jazz::db::BindingHydrationError::Error(error)) => {
                     return Some((Err(to_js_error(error)), (db, source, None, layouts)));

@@ -2786,13 +2786,62 @@ export class NativeRuntimeAdapter implements Runtime {
       if (!readiness || typeof readiness === "boolean") {
         const delay = transport.nextAuxiliaryRetryDelayMs?.();
         if (delay == null) return;
-        await new Promise<void>((resolve) => setTimeout(resolve, delay));
+        // NAPI exposes a synchronous readiness probe, so race its current
+        // retry deadline with normal transport activity.  A Retryable response
+        // can install an earlier deadline (or an immediate request can appear)
+        // while this timer is pending; in either case discard the old timer and
+        // ask the transport for the current schedule again.
+        const observedWork = this.serverTransportWorkEpoch;
+        const work = this.waitForServerTransportWork("edge", observedWork);
+        let wake: "timer" | "work";
+        try {
+          const timer = new Promise<"timer">((resolve, reject) => {
+            try {
+              setTimeout(() => resolve("timer"), delay);
+            } catch (error) {
+              reject(error);
+            }
+          });
+          wake = await Promise.race([
+            timer,
+            work?.promise.then(() => "work" as const) ?? new Promise<never>(() => {}),
+          ]);
+        } catch (error) {
+          this.handleServerTransportError(error, generation);
+          return;
+        } finally {
+          work?.cancel();
+        }
+        if (
+          this.closed ||
+          generation !== this.serverConnectionGeneration ||
+          transport !== this.serverTransport ||
+          carrier !== this.serverCarrier
+        ) {
+          return;
+        }
+        if (wake === "work") continue;
         await transport.tick();
+        if (
+          this.closed ||
+          generation !== this.serverConnectionGeneration ||
+          transport !== this.serverTransport ||
+          carrier !== this.serverCarrier
+        ) {
+          return;
+        }
         this.flushAuxiliaryOutbound(transport, carrier, generation);
         continue;
       }
       await readiness;
-      if (transport !== this.serverTransport || carrier !== this.serverCarrier) return;
+      if (
+        this.closed ||
+        generation !== this.serverConnectionGeneration ||
+        transport !== this.serverTransport ||
+        carrier !== this.serverCarrier
+      ) {
+        return;
+      }
       this.flushAuxiliaryOutbound(transport, carrier, generation);
     }
   }

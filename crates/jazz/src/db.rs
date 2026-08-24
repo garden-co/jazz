@@ -25,8 +25,6 @@ use groove::records::{OwnedRecord, RecordDescriptor, Value};
 use groove::schema::ColumnType as GrooveColumnType;
 use groove::storage::{OrderedKvStorage, ReopenableStorage};
 use thiserror::Error;
-#[cfg(feature = "cold-settle-attribution")]
-use web_time::Instant;
 use web_time::{Duration, Instant};
 
 use crate::authorization_scope::{
@@ -124,6 +122,13 @@ struct ChunkDemandState {
     disconnected_connections: BTreeSet<u64>,
     upstream_connection: Option<u64>,
     upstream_connections: BTreeSet<u64>,
+    /// Bumped for every change that can alter either the next retry deadline
+    /// or the carrier that is responsible for draining auxiliary traffic.
+    ///
+    /// A binding may be sleeping until an old deadline when a new request,
+    /// an earlier retry, or a successor link appears.  It must wake and
+    /// recompute rather than wait for that stale timer.
+    schedule_generation: u64,
     completion_generation: u64,
 }
 
@@ -157,10 +162,23 @@ impl PeerChunkResolver {
             state.upstream_connections.insert(connection);
             state.upstream_connection.get_or_insert(connection);
         }
+        Self::schedule_changed(&mut state);
     }
 
     fn wake_connection(state: &mut ChunkDemandState, connection: u64) {
         if let Some(waker) = state.outbound_wakers.remove(&connection) {
+            waker.wake();
+        }
+    }
+
+    /// Wake every carrier-local waiter after changing retry scheduling.  The
+    /// map is deliberately per connection, while the generation is shared:
+    /// replacement upstreams need to observe a demand that was created before
+    /// they became active, and an old carrier must stop waiting before it can
+    /// accidentally flush onto its replacement.
+    fn schedule_changed(state: &mut ChunkDemandState) {
+        state.schedule_generation = state.schedule_generation.wrapping_add(1);
+        for (_, waker) in std::mem::take(&mut state.outbound_wakers) {
             waker.wake();
         }
     }
@@ -174,6 +192,7 @@ impl PeerChunkResolver {
         let mut state = self.state.borrow_mut();
         if let Some(pending) = state.pending_by_chunk.get_mut(&request) {
             pending.waiters.push(waiter);
+            Self::schedule_changed(&mut state);
             return Ok(());
         }
         if state.pending_by_chunk.len() >= MAX_PENDING_CHUNK_DEMANDS {
@@ -199,6 +218,7 @@ impl PeerChunkResolver {
                 retry_at: None,
             },
         );
+        Self::schedule_changed(&mut state);
         if let Some(connection) = state.upstream_connection {
             Self::wake_connection(&mut state, connection);
         }
@@ -263,10 +283,11 @@ impl PeerChunkResolver {
         }
         let count = promoted.len();
         state.outbound.extend(promoted);
-        if count > 0
-            && let Some(connection) = state.upstream_connection
-        {
-            Self::wake_connection(&mut state, connection);
+        if count > 0 {
+            Self::schedule_changed(&mut state);
+            if let Some(connection) = state.upstream_connection {
+                Self::wake_connection(&mut state, connection);
+            }
         }
         count
     }
@@ -314,6 +335,7 @@ impl PeerChunkResolver {
             if let Some(pending) = state.pending_by_chunk.get_mut(&request) {
                 pending.retry_at =
                     Some(Instant::now() + Duration::from_millis(u64::from(retry_after_ms)));
+                Self::schedule_changed(&mut state);
             }
             return;
         }
@@ -322,6 +344,7 @@ impl PeerChunkResolver {
             return;
         };
         state.completion_generation = state.completion_generation.wrapping_add(1);
+        Self::schedule_changed(&mut state);
         debug_assert_eq!(pending.upstream_id, response.request_id);
         for waiter in pending.waiters {
             match waiter {
@@ -371,6 +394,7 @@ impl PeerChunkResolver {
             state
                 .outbound
                 .retain(|outbound| outbound.request_id != upstream_id);
+            Self::schedule_changed(&mut state);
         }
     }
 
@@ -404,6 +428,7 @@ impl PeerChunkResolver {
                     Self::wake_connection(&mut state, successor);
                 }
             }
+            Self::schedule_changed(&mut state);
             drop(state);
             if let Some(waker) = disconnected_waker {
                 waker.wake();
@@ -427,6 +452,7 @@ impl PeerChunkResolver {
                     .retain(|entry| entry.request_id != upstream_id);
             }
         }
+        Self::schedule_changed(&mut state);
         drop(state);
         if let Some(waker) = disconnected_waker {
             waker.wake();
@@ -664,6 +690,7 @@ impl PeerIoPump {
             }
             _ => {}
         }
+        PeerChunkResolver::schedule_changed(&mut state);
     }
 
     /// Encode one bounded auxiliary payload for a binding-owned socket channel.
@@ -680,7 +707,11 @@ impl PeerIoPump {
     /// semantic tick. Browser microtasks, NAPI async notifications, and native
     /// socket tasks can all await this same executor-independent future.
     pub fn outbound_ready(&self) -> PeerIoOutboundReady {
-        PeerIoOutboundReady { pump: self.clone() }
+        let generation = self.resolver.state.borrow().schedule_generation;
+        PeerIoOutboundReady {
+            pump: self.clone(),
+            observed_generation: generation,
+        }
     }
 
     /// Non-blocking readiness probe for hosts that drive local futures by
@@ -709,7 +740,9 @@ impl PeerIoPump {
         }
     }
 
-    fn is_disconnected(&self) -> bool {
+    /// Whether this binding-owned carrier has been detached.  Hosts use this
+    /// after an auxiliary wake to avoid flushing a timer from an old link.
+    pub fn is_disconnected(&self) -> bool {
         self.resolver
             .state
             .borrow()
@@ -721,21 +754,34 @@ impl PeerIoPump {
 /// Future completed when a [`PeerIoPump`] has outbound auxiliary traffic.
 pub struct PeerIoOutboundReady {
     pump: PeerIoPump,
+    observed_generation: u64,
 }
 
 impl Future for PeerIoOutboundReady {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.pump.has_outbound() || self.pump.is_disconnected() {
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let pump = self.pump.clone();
+        let mut state = pump.resolver.state.borrow_mut();
+        let has_outbound = match pump.role {
+            PeerIoPumpRole::Upstream => !state.outbound.is_empty(),
+            PeerIoPumpRole::Subscriber => state
+                .relay_responses
+                .get(&pump.connection)
+                .is_some_and(|responses| !responses.is_empty()),
+        };
+        if has_outbound || state.disconnected_connections.contains(&pump.connection) {
+            Poll::Ready(())
+        } else if state.schedule_generation != self.observed_generation {
+            // A deadline/carrier changed while this waiter was registered.  A
+            // host that is racing a native timer must now discard that timer
+            // and obtain the current deadline before sleeping again.
+            self.observed_generation = state.schedule_generation;
             Poll::Ready(())
         } else {
-            self.pump
-                .resolver
-                .state
-                .borrow_mut()
+            state
                 .outbound_wakers
-                .insert(self.pump.connection, context.waker().clone());
+                .insert(pump.connection, context.waker().clone());
             Poll::Pending
         }
     }
