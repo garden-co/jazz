@@ -226,7 +226,7 @@ class PermissionRelationBuilder implements PermissionRelation {
     }
     const relation = isPermissionRelation(target) ? target : undefined;
     const table = relation
-      ? getRelationState(relation).outputTable
+      ? validateFilteredJoinRelation(relation, this.state).outputTable
       : relationJoinTargetToTable(target);
     const leftScope = currentRelationScope(this.state);
     const joins = [
@@ -1266,6 +1266,45 @@ function relationJoinTargetToTable(target: RelationJoinTarget): string {
   throw new Error(
     "join(...) expects a table relation, table builder (policy.<table>), or table name string.",
   );
+}
+
+/**
+ * A relation target is deliberately narrower than a normal relation. The
+ * lowering embeds it directly as the right side of the join, so it has no
+ * opportunity to allocate aliases for another relation tree. Keep that
+ * contract explicit until the lowering grows fresh alias rebinding.
+ */
+function validateFilteredJoinRelation(
+  relation: PermissionRelation,
+  leftState: RelationExprState,
+): RelationExprState {
+  const state = getRelationState(relation);
+  if (state.kind !== "table") {
+    throw new Error(
+      "join(...) relation RHS must be a filtered single-table relation; union(...) and gather(...) RHS are unsupported.",
+    );
+  }
+  if (state.joins.length > 0) {
+    throw new Error(
+      "join(...) relation RHS must be a filtered single-table relation; nested join(...) and hopTo(...) RHS are unsupported.",
+    );
+  }
+  if (state.selectMap && Object.keys(state.selectMap).length > 0) {
+    throw new Error(
+      "join(...) relation RHS must be a filtered single-table relation; select(...) RHS are unsupported.",
+    );
+  }
+  if (state.filters.length === 0) {
+    throw new Error(
+      "join(...) relation RHS must include where(...); pass policy.<table> directly for an unfiltered join.",
+    );
+  }
+  if (state.initialScope === leftState.initialScope) {
+    throw new Error(
+      `join(...) cannot use filtered relation "${state.outputTable}" as a same-table RHS without an alias. Use a distinct table or wait for aliased relation joins.`,
+    );
+  }
+  return state;
 }
 
 function resolveNamedRelation(
