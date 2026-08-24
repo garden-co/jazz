@@ -1770,17 +1770,26 @@ fn authorization_subplan_with_correlated_allowed_to_joins_lowers_without_occurre
         },
         output: RowSetOutputRequest {
             app_rows: None,
-            facts: BTreeSet::from([ProgramFactKey::AuthorizedRows]),
+            facts: BTreeSet::from([ProgramFactKey::ResultMembership]),
         },
     };
 
     let program = lower_query_program(request, &mut FakeSourceResolver::default())
         .expect("correlated write authorization should lower");
-    let graph = format!("{:?}", program.lowered.terminals);
-    assert!(
-        !graph.contains("__flat_join_source_"),
-        "authorization decision graph must not request public occurrence carriers: {graph}"
-    );
+    let OutputTerminalSchema::Fact(ProgramFactOutput {
+        schema: ProgramFactSchema::ResultMembership(schema),
+        ..
+    }) = program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| terminal.sink == "maintained.result_current")
+        .map(|terminal| &terminal.output)
+        .expect("result-membership terminal")
+    else {
+        panic!("result-membership terminal must retain its schema");
+    };
+    assert_eq!(schema.occurrence_id_fields, vec!["row_uuid"]);
 }
 
 #[test]
