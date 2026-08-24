@@ -5,7 +5,7 @@
 
 int main(void) {
   const uint16_t abi = jazz_native_relay_abi_version();
-  if (abi != 2) {
+  if (abi != 3) {
     fprintf(stderr, "unexpected Jazz native relay ABI: %u\n", abi);
     return 1;
   }

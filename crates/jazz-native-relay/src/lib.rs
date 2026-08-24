@@ -30,7 +30,7 @@ use thiserror::Error;
 /// JS wrappers must compare this with their expected range during startup and
 /// explain that an OTA update needs a new native development build when it is
 /// incompatible.
-pub const NATIVE_RELAY_ABI_VERSION: u16 = 2;
+pub const NATIVE_RELAY_ABI_VERSION: u16 = 3;
 
 const NATIVE_RELAY_QUEUE_MAX_MESSAGES: usize = 1024;
 const NATIVE_RELAY_QUEUE_MAX_BYTES: usize = MAX_LOGICAL_MESSAGE_BYTES;
@@ -2132,7 +2132,7 @@ mod tests {
         };
         for (request, expected) in [
             (request(3, 2), JazzNativeRelayStatus::InvalidAbiRange),
-            (request(3, 3), JazzNativeRelayStatus::IncompatibleAbi),
+            (request(2, 2), JazzNativeRelayStatus::IncompatibleAbi),
         ] {
             let encoded = postcard::to_allocvec(&request).unwrap();
             let mut output = JazzNativeRelayBytes {

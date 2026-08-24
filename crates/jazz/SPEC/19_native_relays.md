@@ -65,6 +65,10 @@ storage with a clear **“new native development/release build required”** err
 This makes OTA JavaScript updates safe without pretending they can update an
 embedded Rust library.
 
+ABI version 3 introduces host-generated opaque admission capabilities and
+trusted revocation. Its postcard command contract is intentionally incompatible
+with version 2, whose `open` command carried a predictable integer scope handle.
+
 The ABI stays coarse and binary:
 
 - open/close relay scope and attach/detach UI client;

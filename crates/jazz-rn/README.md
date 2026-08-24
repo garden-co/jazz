@@ -51,6 +51,9 @@ route through the obsolete UniFFI library. The remaining Android runner gate is
 a real Gradle/NDK AAR build and emulator installation against that linked
 artifact.
 
+The wrapper accepts ABI 3, which uses opaque host-generated admission
+capabilities and trusted revocation.
+
 ## What remains before React Native is supported
 
 1. Link the staged host lifecycle codec through thin JNI/Swift translation and
