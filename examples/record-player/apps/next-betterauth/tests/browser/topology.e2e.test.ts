@@ -155,7 +155,12 @@ describe("RecordPlayer authenticated playlist topology", () => {
       getJazzServerJwtForUser("record-player-recipient-listener", undefined, server.appId),
     ]);
     const owner = await openClient(server, "recipient-owner", ownerToken);
-    const recipient = await openClient(server, "recipient-editor", recipientToken);
+    const recipient = await openClient(
+      server,
+      "recipient-editor",
+      recipientToken,
+      uniqueDbName("record-player-recipient-editor-persistent"),
+    );
     const secondRecipient = await openClient(server, "recipient-listener", secondRecipientToken);
     const playlist = await owner
       .insert(app.playlists, {
