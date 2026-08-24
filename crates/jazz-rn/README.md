@@ -34,8 +34,9 @@ inspects Expo's autolinking contracts for this package. It is intentionally not
 a native build receipt: this Linux development environment has neither Java
 nor CocoaPods, so Gradle configuration/build and `pod install` must run on the
 respective Blacksmith runners before claiming platform or device support.
-The shared host codec now stages `Open`, `Attach`, `CloseClient`, `CloseRelay`,
-and bounded `Pump`; no platform artifact calls it yet. This is a thin platform
+The shared host codec now stages scope/client open-close, bounded `Pump`,
+directional opaque peer-frame send/drain, and handle/queue diagnostics; no
+platform artifact calls it yet. This is a thin platform
 checkpoint, not device support: there is still no linked JNI artifact,
 XCFramework, AAR, or Expo development-build receipt.
 

@@ -59,6 +59,8 @@ embedded Rust library.
 The ABI stays coarse and binary:
 
 - open/close relay scope and attach/detach UI client;
+- send and drain complete canonical peer frames for each UI client and the
+  relay's upstream transport; host diagnostics expose only handle/queue state;
 - encode/decode the same schema, row, query, error, and peer-frame contracts
   used by WASM/NAPI where they apply;
 - drain/push peer protocol frames and lifecycle notifications;
@@ -139,12 +141,12 @@ independently from JS-only scenario changes.
 
 ## Implementation ledger
 
-| Layer                     | Status                 | Verification                                                                                        | Remaining work                                                           |
-| ------------------------- | ---------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| SQLite ordered-KV         | implemented            | crate conformance: order/prefix/range, atomic unknown-CF rejection, reopen, format rejection, close | add injected crash/durability and full differential receipt              |
-| Native owner-thread relay | implemented foundation | compile contract; normal `Db` peer links for persistent relay ↔ in-memory clients                   | expose codec command surface and add black-box two-client/upstream tests |
-| RN TurboModule/package    | checkpoint implemented | generated Android+iOS `JazzRelay` contract, unavailable ABI/error receipts                          | embed and package prebuilt artifacts                                     |
-| Expo/bare RN app          | prebuild scaffold      | New-Architecture config plugin plus Android/iOS prebuild commands                                   | first-party device app, Android/iOS runners, cache actions               |
+| Layer                     | Status                 | Verification                                                                                        | Remaining work                                                             |
+| ------------------------- | ---------------------- | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| SQLite ordered-KV         | implemented            | crate conformance: order/prefix/range, atomic unknown-CF rejection, reopen, format rejection, close | add injected crash/durability and full differential receipt                |
+| Native owner-thread relay | implemented foundation | lifecycle/frame host codec; normal `Db` peer links for persistent relay ↔ in-memory clients         | platform artifact wrappers and black-box two-client/upstream restart tests |
+| RN TurboModule/package    | checkpoint implemented | generated Android+iOS `JazzRelay` contract, unavailable ABI/error receipts                          | embed and package prebuilt artifacts                                       |
+| Expo/bare RN app          | prebuild scaffold      | New-Architecture config plugin plus Android/iOS prebuild commands                                   | first-party device app, Android/iOS runners, cache actions                 |
 
 ## Open questions
 
