@@ -340,21 +340,29 @@ fn run_scenario(mode: CoverageMode) -> ScenarioReceipt {
             "title".to_owned(),
             Value::String("alpha-updated".to_owned()),
         )]),
+        Default::default(),
     ))
     .expect("update visible row");
-    block_on(server.insert_with_id(
+    block_on(server.insert(
         "beta_items",
-        row(310),
         cells("beta-inserted-visible", visible_owner),
+        jazz::db::InsertOptions {
+            row_id: Some(row(310)),
+            ..Default::default()
+        },
     ))
     .expect("insert visible row");
-    block_on(server.insert_with_id(
+    block_on(server.insert(
         "gamma_items",
-        row(320),
         cells("gamma-inserted-hidden", hidden_owner),
+        jazz::db::InsertOptions {
+            row_id: Some(row(320)),
+            ..Default::default()
+        },
     ))
     .expect("insert hidden row");
-    block_on(server.delete("delta_items", row(103))).expect("delete visible row");
+    block_on(server.delete("delta_items", row(103), Default::default()))
+        .expect("delete visible row");
 
     drive(&server, &client, &mut streams, &table_schemas, &mut traces);
 

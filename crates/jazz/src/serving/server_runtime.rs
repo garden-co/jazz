@@ -1002,7 +1002,7 @@ fn sync_message_name(message: &SyncMessage) -> &'static str {
         SyncMessage::PublishLens { .. } => "PublishLens",
         SyncMessage::SetCurrentWriteSchema { .. } => "SetCurrentWriteSchema",
         SyncMessage::CatalogueAck(_) => "CatalogueAck",
-        SyncMessage::ViewUpdate { .. } => "ViewUpdate",
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) => "ViewUpdate",
         SyncMessage::FetchRowVersions { .. } => "FetchRowVersions",
         SyncMessage::RowVersionPayloads { .. } => "RowVersionPayloads",
         SyncMessage::CatalogueSnapshot(_) => "CatalogueSnapshot",

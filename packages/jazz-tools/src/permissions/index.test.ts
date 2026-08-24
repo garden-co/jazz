@@ -1153,6 +1153,76 @@ describe("permissions DSL", () => {
     });
   });
 
+  it("keeps chained relation joins anchored to the preceding joined table", () => {
+    let relation: PermissionRelation | undefined;
+    definePermissions(app, ({ policy }) => {
+      relation = policy.teams
+        .where({})
+        .join(policy.user_team_edges, { left: "id", right: "team" })
+        .join(policy.resource_access_edges, { left: "team", right: "team" });
+      return [];
+    });
+    if (!relation) {
+      throw new Error("Expected joined relation to be initialized.");
+    }
+
+    const ir = toAssertionRelExprForTest(relationToIr(relation));
+    expect(ir.type).toBe("Join");
+    if (ir.type !== "Join") {
+      throw new Error("Expected outer relation join.");
+    }
+    expect(ir.on[0]).toEqual({
+      left: { scope: "__join_0", column: "team" },
+      right: { scope: "__join_1", column: "team" },
+    });
+    expect(ir.left.type).toBe("Join");
+    if (ir.left.type !== "Join") {
+      throw new Error("Expected inner relation join.");
+    }
+    expect(ir.left.on[0]).toEqual({
+      left: { scope: "teams", column: "id" },
+      right: { scope: "__join_0", column: "team" },
+    });
+  });
+
+  it("anchors sibling qualified policy joins to the protected row", () => {
+    const compiled = definePermissions(app, ({ policy, session }) => [
+      policy.teams.allowRead.where({
+        "user_team_edges.user_id": session.userId,
+        "resource_access_edges.grant_role": "viewer",
+      } as Record<string, unknown>),
+    ]);
+
+    const using = compiled.teams!.select?.using;
+    expect(using?.type).toBe("ExistsRel");
+    if (!using || using.type !== "ExistsRel") {
+      throw new Error("Expected qualified rule predicate to compile to ExistsRel.");
+    }
+
+    const rel = toAssertionRelExprForTest(using.rel);
+    expect(rel.type).toBe("Filter");
+    if (rel.type !== "Filter" || rel.input.type !== "Filter") {
+      throw new Error("Expected correlated qualified policy filter.");
+    }
+    const siblingJoin = rel.input.input;
+    expect(siblingJoin.type).toBe("Join");
+    if (siblingJoin.type !== "Join") {
+      throw new Error("Expected outer sibling join.");
+    }
+    expect(siblingJoin.on[0]).toEqual({
+      left: { scope: "teams", column: "id" },
+      right: { scope: "__join_1", column: "team" },
+    });
+    expect(siblingJoin.left.type).toBe("Join");
+    if (siblingJoin.left.type !== "Join") {
+      throw new Error("Expected inner sibling join.");
+    }
+    expect(siblingJoin.left.on[0]).toEqual({
+      left: { scope: "teams", column: "id" },
+      right: { scope: "__join_0", column: "team" },
+    });
+  });
+
   it("compiles qualified allowRead.where(...) columns into implicit correlated exists relations", () => {
     const compiled = definePermissions(app, ({ policy, session }) => [
       policy.teams.allowRead.where({

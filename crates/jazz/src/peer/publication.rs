@@ -411,7 +411,7 @@ impl PeerState {
         self.clear_stale_groove_runtime_handles(node, subscription);
         self.ensure_query_subscription_registered(node, subscription, shape, binding)?;
         let Some(state) = self.publication_states.get(&subscription) else {
-            return Ok(Some(SyncMessage::ViewUpdate {
+            return Ok(Some(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through: binding_settlement_time(node, subscription, shape, binding),
                 reset_result_set: false,
@@ -423,7 +423,7 @@ impl PeerState {
                 terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
-            }));
+            })));
         };
         if state.maintained_subscription_view.is_some() {
             return self.query_update_maintained_subscription_view(
@@ -572,7 +572,7 @@ impl PeerState {
             &program_fact_adds,
             &program_fact_removes,
         ) {
-            return Ok(Some(SyncMessage::ViewUpdate {
+            return Ok(Some(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through: binding_settlement_time(node, subscription, shape, binding),
                 reset_result_set: false,
@@ -584,7 +584,7 @@ impl PeerState {
                 terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
-            }));
+            })));
         }
         let previous_result_tx_ids = previous_member_result_set
             .iter()
@@ -641,10 +641,10 @@ impl PeerState {
             )
         };
         let mut update = update.await?;
-        if let SyncMessage::ViewUpdate {
+        if let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             terminal_operations: outgoing,
             ..
-        } = &mut update
+        }) = &mut update
         {
             *outgoing = terminal_operations;
         }
@@ -652,11 +652,11 @@ impl PeerState {
         let bundle_reads = trace_rehydrate.then(|| node.take_storage_read_metrics());
         if trace_rehydrate {
             let bundle_count = match &update {
-                SyncMessage::ViewUpdate {
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     version_carriers,
                     version_bundles,
                     ..
-                } => view_update_singleton_bundles(version_carriers, version_bundles).len(),
+                }) => view_update_singleton_bundles(version_carriers, version_bundles).len(),
                 _ => 0,
             };
             let drain_reads = drain_reads.expect("trace reads captured");
@@ -896,7 +896,7 @@ impl PeerState {
             Err(Error::AuthorizationSupportMissingClaim(_))
                 if purpose == RehydratePurpose::AuthorizationSupport =>
             {
-                let update = SyncMessage::ViewUpdate {
+                let update = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through: binding_settlement_time(node, subscription, shape, binding),
                     reset_result_set,
@@ -908,7 +908,7 @@ impl PeerState {
                     terminal_operations: Vec::new(),
                     program_fact_adds: Vec::new(),
                     program_fact_removes: Vec::new(),
-                };
+                });
                 self.record_outgoing_view_update(&update);
                 self.publication_states
                     .entry(subscription)
@@ -1091,11 +1091,11 @@ impl PeerState {
         }
         if trace_rehydrate {
             let bundle_count = match &update {
-                SyncMessage::ViewUpdate {
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     version_carriers,
                     version_bundles,
                     ..
-                } => view_update_singleton_bundles(version_carriers, version_bundles).len(),
+                }) => view_update_singleton_bundles(version_carriers, version_bundles).len(),
                 _ => 0,
             };
             let open_reads = open_reads.expect("trace reads captured");
@@ -1414,7 +1414,7 @@ impl PeerState {
             || !source_program_fact_adds.is_empty()
             || !source_program_fact_removes.is_empty()
         {
-            self.apply_outgoing_view_update_result_set(&SyncMessage::ViewUpdate {
+            self.apply_outgoing_view_update_result_set(&SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription: maintained_subscription,
                 settled_through: canonical_subscription_settlement_time(
                     node,
@@ -1429,7 +1429,7 @@ impl PeerState {
                 terminal_operations: source_terminal_operations,
                 program_fact_adds: source_program_fact_adds,
                 program_fact_removes: source_program_fact_removes,
-            });
+            }));
         }
         let canonical_state = self
             .publication_states

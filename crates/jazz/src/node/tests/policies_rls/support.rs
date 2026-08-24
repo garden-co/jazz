@@ -26,11 +26,11 @@ fn assert_view_update_rows<const A: usize, const R: usize>(
     expected_adds: [(&str, RowUuid, TxId); A],
     expected_removes: [(&str, RowUuid, TxId); R],
 ) {
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };

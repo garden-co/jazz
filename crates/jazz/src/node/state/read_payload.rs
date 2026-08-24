@@ -452,14 +452,14 @@ where
             version_bundles,
             program_fact_adds,
         ) = match message {
-            SyncMessage::ViewUpdate {
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription,
                 result_member_adds,
                 version_carriers,
                 version_bundles,
                 program_fact_adds,
                 ..
-            } => (
+            }) => (
                 *subscription,
                 result_member_adds,
                 version_carriers,

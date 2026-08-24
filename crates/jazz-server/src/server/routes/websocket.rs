@@ -35,7 +35,7 @@ use jazz::tools::public_schema::AuthMode;
 const WS_REQUIRED_FEATURES: u64 = FEATURE_SYNC_MESSAGE_PAYLOAD;
 const WS_HANDSHAKE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const WS_PER_IDENTITY_CONNECTION_CAP: usize = crate::server::PER_CLIENT_CONNECTION_CAP;
-const WS_MAX_FRAME_BYTES: usize = 1 << 20;
+const WS_MAX_FRAME_BYTES: usize = MAX_WIRE_FRAME_BYTES;
 const WS_MAX_MESSAGE_BYTES: usize = WS_MAX_FRAME_BYTES;
 
 static WS_NEXT_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
@@ -1044,8 +1044,10 @@ mod tests {
     use jazz::protocol::SyncMessage;
     use jazz::schema::{JazzSchema, TableSchema};
     use jazz::tx::{DurabilityTier, TxId};
-    use jazz::wire::FEATURE_STRUCTURED_ERRORS;
-    use jazz::wire::{TransportError, WireTransport};
+    use jazz::wire::{
+        FEATURE_MESSAGE_FRAGMENTATION, FEATURE_STRUCTURED_ERRORS, TransportError,
+        WireMessageFragment, WireTransport,
+    };
     use jazz::wire::{WireStreamDecoder, decode_frame, decode_sync_message};
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 
@@ -1222,9 +1224,9 @@ mod tests {
     }
 
     #[test]
-    fn ws_limits_are_capped_for_websocket() {
-        assert_eq!(WS_MAX_FRAME_BYTES, 1 << 20);
-        assert_eq!(WS_MAX_MESSAGE_BYTES, WS_MAX_FRAME_BYTES);
+    fn websocket_limits_match_the_wire_protocol_limit() {
+        assert_eq!(WS_MAX_FRAME_BYTES, MAX_WIRE_FRAME_BYTES);
+        assert_eq!(WS_MAX_MESSAGE_BYTES, MAX_WIRE_FRAME_BYTES);
     }
 
     async fn make_ws_test_state() -> Arc<ServerState> {
@@ -1650,12 +1652,81 @@ mod tests {
     }
 
     fn ws_client_hello_batch() -> Vec<u8> {
-        let hello = WireFrame::Hello(WireHello::current(
-            WirePeerRole::Client,
+        ws_client_hello_batch_with_features(
             FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
-        ));
+        )
+    }
+
+    fn ws_client_hello_batch_with_features(features: u64) -> Vec<u8> {
+        let hello = WireFrame::Hello(WireHello::current(WirePeerRole::Client, features));
         let encoded = vec![encode_frame(&hello).expect("encode client hello")];
         postcard::to_allocvec(&encoded).expect("encode websocket hello batch")
+    }
+
+    #[tokio::test]
+    async fn websocket_accepts_batches_between_legacy_and_wire_caps() {
+        let state = make_ws_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let identity = AuthorSubject::for_test_bytes([0x7a; 16]);
+        let features = FEATURE_SYNC_MESSAGE_PAYLOAD
+            | FEATURE_STRUCTURED_ERRORS
+            | FEATURE_MESSAGE_FRAGMENTATION;
+        let mut ws = open_negotiated_ws_with_prelude_and_features(
+            addr,
+            &state,
+            ws_prelude(identity),
+            features,
+        )
+        .await;
+        let fragment_payload_len = 512 * 1024;
+        let logical_payload = vec![0x42; fragment_payload_len * 4];
+        let message_digest = [0; 32];
+        let encoded = (0..3)
+            .map(|index| {
+                let offset = index * fragment_payload_len;
+                let fragment = WireMessageFragment {
+                    protocol_version: WIRE_PROTOCOL_VERSION,
+                    features,
+                    session: None,
+                    message_id: 1,
+                    message_digest,
+                    total_len: logical_payload.len() as u64,
+                    offset: offset as u64,
+                    payload: logical_payload[offset..offset + fragment_payload_len].to_vec(),
+                };
+                encode_frame(&WireFrame::MessageFragment(fragment))
+                    .expect("encode large websocket fragment")
+            })
+            .collect::<Vec<_>>();
+        let batch = postcard::to_allocvec(&encoded).expect("encode large websocket batch");
+        assert!(batch.len() > 1 << 20);
+        assert!(batch.len() <= MAX_WIRE_FRAME_BYTES);
+
+        ws.send(WsMessage::Binary(batch.into()))
+            .await
+            .expect("send protocol-sized websocket batch");
+        let ping = vec![0x51, 0x52, 0x53];
+        ws.send(WsMessage::Ping(ping.clone().into()))
+            .await
+            .expect("ping after protocol-sized batch");
+        let pong = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match ws.next().await {
+                    Some(Ok(WsMessage::Pong(payload))) => break payload,
+                    Some(Ok(WsMessage::Close(frame))) => {
+                        panic!("websocket closed after protocol-sized batch: {frame:?}")
+                    }
+                    Some(Err(error)) => {
+                        panic!("websocket failed after protocol-sized batch: {error}")
+                    }
+                    Some(Ok(_)) => {}
+                    None => panic!("websocket ended after protocol-sized batch"),
+                }
+            }
+        })
+        .await
+        .expect("wait for pong after protocol-sized batch");
+        assert_eq!(pong.as_ref(), ping.as_slice());
     }
 
     #[test]
@@ -1735,15 +1806,33 @@ mod tests {
         prelude: Vec<u8>,
     ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
     {
+        open_negotiated_ws_with_prelude_and_features(
+            addr,
+            state,
+            prelude,
+            FEATURE_SYNC_MESSAGE_PAYLOAD | FEATURE_STRUCTURED_ERRORS,
+        )
+        .await
+    }
+
+    async fn open_negotiated_ws_with_prelude_and_features(
+        addr: std::net::SocketAddr,
+        state: &Arc<ServerState>,
+        prelude: Vec<u8>,
+        features: u64,
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
         let (mut ws, _) = connect_async(ws_url(addr, state.app_id))
             .await
             .expect("connect websocket");
         ws.send(WsMessage::Binary(prelude.into()))
             .await
             .expect("send websocket prelude");
-        ws.send(WsMessage::Binary(ws_client_hello_batch().into()))
-            .await
-            .expect("send websocket hello");
+        ws.send(WsMessage::Binary(
+            ws_client_hello_batch_with_features(features).into(),
+        ))
+        .await
+        .expect("send websocket hello");
 
         let response = tokio::time::timeout(Duration::from_secs(5), ws.next())
             .await
@@ -1881,6 +1970,7 @@ mod tests {
                     ("title".to_owned(), CoreValue::String(title.to_owned())),
                     ("done".to_owned(), CoreValue::Bool(false)),
                 ]),
+                Default::default(),
             ))
             .expect("insert client row")
             .row_uuid()
@@ -1893,6 +1983,7 @@ mod tests {
                     ("title".to_owned(), CoreValue::String(title.to_owned())),
                     ("done".to_owned(), CoreValue::Bool(false)),
                 ]),
+                Default::default(),
             ))
             .expect("insert client row")
             .mergeable_tx_id()
@@ -1906,6 +1997,7 @@ mod tests {
                     ("title".to_owned(), CoreValue::String(title.to_owned())),
                     ("owner".to_owned(), CoreValue::String(owner)),
                 ]),
+                Default::default(),
             ))
             .expect("insert client doc")
             .row_uuid()

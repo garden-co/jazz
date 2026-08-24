@@ -134,18 +134,20 @@ fn nonselected_view_update_demotes_receipts_for_other_recomputed_views() {
     let client = open_db(0xc1, client_author, &schema);
     let all_query = Query::from("todos");
     let filtered_query = Query::from("todos").filter(eq(col("title"), lit("matching")));
-    let view_update = |subscription, settled_through| SyncMessage::ViewUpdate {
-        subscription,
-        settled_through,
-        reset_result_set: true,
-        version_carriers: Vec::new(),
-        version_bundles: Vec::new(),
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
+    let view_update = |subscription, settled_through| {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            subscription,
+            settled_through,
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
     };
 
     let (old_client_transport, mut old_authority) = duplex();
@@ -313,18 +315,20 @@ fn fallback_staged_cut_blocks_older_selected_confirmation() {
     let client_author = AuthorSubject::for_test_bytes([0xc1; 16]);
     let client = open_db(0xc1, client_author, &schema);
     let query = Query::from("todos");
-    let update = |subscription, settled_through| SyncMessage::ViewUpdate {
-        subscription,
-        settled_through,
-        reset_result_set: true,
-        version_carriers: Vec::new(),
-        version_bundles: Vec::new(),
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
+    let update = |subscription, settled_through| {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            subscription,
+            settled_through,
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
     };
 
     let (old_client_transport, mut old_authority) = duplex();
@@ -387,18 +391,20 @@ fn fallback_replay_of_preselection_row_repair_cannot_settle() {
             _ => continue,
         }
     };
-    let view_update = |subscription, settled_through| SyncMessage::ViewUpdate {
-        subscription,
-        settled_through,
-        reset_result_set: true,
-        version_carriers: Vec::new(),
-        version_bundles: Vec::new(),
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
+    let view_update = |subscription, settled_through| {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            subscription,
+            settled_through,
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory::default(),
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
     };
     old_authority_transport
         .send(view_update(old_subscription, GlobalTime(1)))

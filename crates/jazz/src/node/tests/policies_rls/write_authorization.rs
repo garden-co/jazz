@@ -615,14 +615,14 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
         .rehydrate_query(&mut core, &shape, &binding)
         .unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
                 complete_tx_payloads, ..
             },
         result_member_adds,
         ..
-    } = &update
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -684,7 +684,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
 
     let tx_b = commit_core_owner_fixture(&mut core, row_uuid, author_b, "owned by B", 11);
     let update = link_a.current_rows_update(&mut core, "todos").unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         version_bundles,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
@@ -693,7 +693,7 @@ fn owner_transfer_removes_settled_result_set_without_redacting_local_copy() {
         result_member_adds,
         result_member_removes,
         ..
-    } = &update
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -899,9 +899,9 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     let revoked_update = invited_link
         .current_rows_update(&mut core, "canvases")
         .unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_removes, ..
-    } = &revoked_update
+    }) = &revoked_update
     else {
         panic!("expected view update");
     };

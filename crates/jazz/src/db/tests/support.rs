@@ -698,7 +698,7 @@ pub(super) fn assert_view_update_for_subscription(
     expected_subscription: SubscriptionKey,
 ) {
     match message {
-        SyncMessage::ViewUpdate { subscription, .. } => {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { subscription, .. }) => {
             assert_eq!(subscription, expected_subscription);
         }
         other => panic!("expected ViewUpdate, got {other:?}"),

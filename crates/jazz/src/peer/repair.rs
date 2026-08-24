@@ -119,14 +119,14 @@ impl PeerState {
     }
 
     fn record_outgoing_view_update_metadata(&mut self, update: &SyncMessage) {
-        let SyncMessage::ViewUpdate {
+        let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             version_carriers,
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             ..
-        } = update
+        }) = update
         else {
             return;
         };
@@ -197,17 +197,17 @@ impl PeerState {
                 } else {
                     let update = self
                         .rehydrate_authorization_support_query_for_identity(
-                        node,
-                        writer,
-                        subscription,
-                        &shape,
-                        &binding,
-                        scope.options.clone(),
-                    )
-                    .await;
-                    let SyncMessage::ViewUpdate {
+                            node,
+                            writer,
+                            subscription,
+                            &shape,
+                            &binding,
+                            scope.options.clone(),
+                        )
+                        .await;
+                    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                         settled_through, ..
-                    } = update?
+                    }) = update?
                     else {
                         return Err(Error::UnsupportedSyncMessage(
                             "terminal authority support hydration did not return a view",
@@ -303,18 +303,18 @@ impl PeerState {
                 }
                 let rehydrate = self
                     .rehydrate_authorization_support_query_for_identity(
-                    node,
-                    writer,
-                    subscription,
-                    &shape,
-                    &binding,
-                    scope.options.clone(),
-                )
-                .await;
+                        node,
+                        writer,
+                        subscription,
+                        &shape,
+                        &binding,
+                        scope.options.clone(),
+                    )
+                    .await;
                 let update = rehydrate?;
-                let SyncMessage::ViewUpdate {
+                let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     settled_through, ..
-                } = update
+                }) = update
                 else {
                     return Err(Error::UnsupportedSyncMessage(
                         "authority support hydration did not return a view",
@@ -429,7 +429,7 @@ impl PeerState {
     }
 
     fn apply_outgoing_view_update_result_set(&mut self, update: &SyncMessage) {
-        let SyncMessage::ViewUpdate {
+        let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             reset_result_set,
             result_member_adds,
@@ -437,7 +437,7 @@ impl PeerState {
             program_fact_adds,
             program_fact_removes,
             ..
-        } = update
+        }) = update
         else {
             return;
         };

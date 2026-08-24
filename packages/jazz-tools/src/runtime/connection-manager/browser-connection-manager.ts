@@ -3,6 +3,7 @@ import { resolveClientSessionSync } from "../client-session.js";
 import type { Session } from "../context.js";
 import type { BrowserWorkerConnection } from "../runtime-source.js";
 import { reloadAfterStorageInvalidation } from "../browser-storage-invalidation.js";
+import { runCleanupSteps } from "../run-cleanup-steps.js";
 import {
   ConnectionManager,
   type ConnectionManagerClientInput,
@@ -148,16 +149,22 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.connection = null;
     this.connectionReady = null;
     this.resolveReconnectWaiters();
-    this.unregisterInspectorControl?.();
+    const unregisterInspectorControl = this.unregisterInspectorControl;
     this.unregisterInspectorControl = null;
-    await connection?.flushLocal();
-    // The tab runtime is explicitly non-durable; once its worker peer has
-    // flushed, graceful evaluator teardown cannot add durability and may wait
-    // on suspended recursive/include work. Abandon that view and let the
-    // durable worker own orderly persistence shutdown.
-    this.detachClient()?.discard();
-    await super.shutdown();
-    await connection?.shutdown();
+
+    await runCleanupSteps([
+      () => unregisterInspectorControl?.(),
+      () => connection?.flushLocal(),
+      () => {
+        // The tab runtime is explicitly non-durable; once its worker peer has
+        // flushed, graceful evaluator teardown cannot add durability and may wait
+        // on suspended recursive/include work. Abandon that view and let the
+        // durable worker own orderly persistence shutdown.
+        this.detachClient()?.discard();
+      },
+      () => super.shutdown(),
+      () => connection?.shutdown(),
+    ]);
   }
 
   private resolveReconnectWaiters(): void {

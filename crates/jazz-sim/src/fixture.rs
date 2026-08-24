@@ -523,7 +523,10 @@ where
 {
     let update = jazz::db::block_on(peer.current_rows_update(from, options.table))
         .map_err(|err| format!("view update failed: {err}"))?;
-    if !matches!(update, SyncMessage::ViewUpdate { .. }) {
+    if !matches!(
+        update,
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload { .. })
+    ) {
         return Err("expected view update".to_owned());
     }
     ctx.send(options.from_name, options.to_name, update);

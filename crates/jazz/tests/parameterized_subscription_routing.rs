@@ -59,13 +59,16 @@ fn row(seed: u64) -> RowUuid {
 }
 
 fn insert_document(db: &Db<TestStorage>, document: RowUuid, team: RowUuid, updated_at: u64) {
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         "documents",
-        document,
         BTreeMap::from([
             ("team".to_owned(), Value::Uuid(team.0)),
             ("updated_at".to_owned(), Value::U64(updated_at)),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(document),
+            ..Default::default()
+        },
     ))
     .expect("insert document");
 }

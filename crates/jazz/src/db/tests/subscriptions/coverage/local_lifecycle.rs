@@ -77,6 +77,7 @@ fn db_facade_subscription_refresh_preserves_read_tier() {
     db.insert(
         "todos",
         doctest_support::todo_cells("pending local-only write", true),
+        Default::default(),
     )
     .unwrap();
 
@@ -100,6 +101,7 @@ fn db_facade_subscription_accepts_local_tier_for_alpha_style_live_reads() {
     db.insert(
         "todos",
         doctest_support::todo_cells("local callback", false),
+        Default::default(),
     )
     .unwrap();
     let changed = doctest_support::block_on(subscription.next_raw()).unwrap();
@@ -122,6 +124,7 @@ fn local_write_is_readable_synchronously_without_running_tick() {
     db.insert(
         "todos",
         doctest_support::todo_cells("read before tick", false),
+        Default::default(),
     )
     .unwrap();
 
@@ -145,6 +148,7 @@ fn local_write_notifies_subscription_synchronously_without_running_tick() {
     db.insert(
         "todos",
         doctest_support::todo_cells("notify before tick", false),
+        Default::default(),
     )
     .unwrap();
 

@@ -109,9 +109,12 @@ mod relay_topology {
         let (seeder_transport, authority_seed_transport) = duplex();
         let _seeder_connection = block_on(seeder.connect_upstream(seeder_transport));
         let _authority_seed_subscriber = authority.accept_subscriber(authority_seed_transport, bob);
-        let seeded =
-            block_on(seeder.insert("documents", document_cells("settled at the authority")))
-                .expect("seed authority document");
+        let seeded = block_on(seeder.insert(
+            "documents",
+            document_cells("settled at the authority"),
+            Default::default(),
+        ))
+        .expect("seed authority document");
         tick(&seeder, "upload seeded document");
         tick(&authority, "accept seeded document");
         tick(&seeder, "apply seeded document fate");
@@ -270,8 +273,12 @@ mod relay_topology {
     fn relay_without_any_upstream_settles_downstream_local_reads() {
         let alice = AuthorSubject::for_test_bytes([0xa3; 16]);
         let relay = open_db(0x23, AuthorSubject::SYSTEM);
-        block_on(relay.insert("documents", document_cells("stored before alice opens")))
-            .expect("seed relay document");
+        block_on(relay.insert(
+            "documents",
+            document_cells("stored before alice opens"),
+            Default::default(),
+        ))
+        .expect("seed relay document");
 
         let client = open_db(0x13, alice);
         client.set_non_durable_client();
@@ -327,8 +334,12 @@ mod relay_topology {
         let (upstream_transport, _held_far_end) = duplex();
         let _upstream = block_on(node.connect_upstream(upstream_transport));
 
-        let written = block_on(node.insert("documents", document_cells("locally visible")))
-            .expect("insert local document");
+        let written = block_on(node.insert(
+            "documents",
+            document_cells("locally visible"),
+            Default::default(),
+        ))
+        .expect("insert local document");
 
         let documents = node
             .prepare_query(&node.table("documents"))
@@ -419,8 +430,12 @@ mod relay_topology {
     fn node_subscription_without_any_upstream_settles_locally() {
         let alice = AuthorSubject::for_test_bytes([0xa6; 16]);
         let node = open_db(0x16, alice);
-        let written = block_on(node.insert("documents", document_cells("settles locally")))
-            .expect("insert local document");
+        let written = block_on(node.insert(
+            "documents",
+            document_cells("settles locally"),
+            Default::default(),
+        ))
+        .expect("insert local document");
 
         let documents = node
             .prepare_query(&node.table("documents"))
@@ -527,9 +542,12 @@ mod relay_topology {
         let (upstream_transport, _held_far_end) = duplex();
         let upstream = block_on(node.connect_upstream(upstream_transport));
 
-        let written =
-            block_on(node.insert("documents", document_cells("local answer after detach")))
-                .expect("insert local document");
+        let written = block_on(node.insert(
+            "documents",
+            document_cells("local answer after detach"),
+            Default::default(),
+        ))
+        .expect("insert local document");
 
         let documents = node
             .prepare_query(&node.table("documents"))

@@ -71,14 +71,6 @@ pub fn current_timestamp() -> u64 {
         .unwrap_or(0)
 }
 
-fn current_unix_timestamp_secs() -> Result<u64, String> {
-    use web_time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| error.to_string())
-        .map(|duration| duration.as_secs())
-}
-
 #[cfg(feature = "bench-probes")]
 #[wasm_bindgen(js_name = benchProbeArithmeticHash)]
 pub fn bench_probe_arithmetic_hash(iterations: u32) -> u64 {
@@ -180,19 +172,9 @@ struct WasmOpenDbConfig {
     initial_sync_flush_every: Option<u32>,
 }
 
-/// Binding-internal proof that may derive a client-owned reserved author only
-/// after signature and audience verification.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct WasmSelfSignedClientProof {
-    token: String,
-    app_id: String,
-    claimed_author: String,
-}
-
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 struct WasmDbIdentity {
     node: NodeUuid,
-    #[serde(deserialize_with = "AuthorSubject::deserialize_untrusted")]
     author: AuthorSubject,
 }
 
@@ -224,6 +206,7 @@ pub struct WasmQueryAttachment {
 #[wasm_bindgen]
 pub struct WasmWrite {
     payload: Vec<u8>,
+    row_id: RowUuid,
     batch_id: TransactionId,
     inner: Option<WasmWriteInner>,
 }
@@ -363,6 +346,11 @@ impl WasmWrite {
     #[wasm_bindgen(getter, js_name = payload)]
     pub fn payload(&self) -> Vec<u8> {
         self.payload.clone()
+    }
+
+    #[wasm_bindgen(getter, js_name = rowId)]
+    pub fn row_id(&self) -> Vec<u8> {
+        self.row_id.to_bytes()
     }
 
     #[wasm_bindgen(js_name = writeState)]
@@ -762,181 +750,6 @@ impl WasmDbInner {
         with_wasm_db!(self, |db| db.abandon_transaction_handle(tx_id))
     }
 
-    fn mergeable_insert(
-        &self,
-        tx_id: OpenTransactionId,
-        table: &str,
-        row_id: RowUuid,
-        cells: RowCells,
-        now_ms: Option<u64>,
-    ) -> Result<(), jazz::db::Error> {
-        with_wasm_db!(self, |db| match now_ms {
-            Some(now_ms) => block_on(
-                db.mergeable_tx_ref(tx_id)
-                    .insert_with_id_at_ms(table, row_id, cells, now_ms)
-            ),
-            None => block_on(
-                db.mergeable_tx_ref(tx_id)
-                    .insert_with_id(table, row_id, cells)
-            ),
-        })
-    }
-
-    fn mergeable_insert_in_branch(
-        &self,
-        tx_id: OpenTransactionId,
-        table: &str,
-        row_id: RowUuid,
-        cells: RowCells,
-        branch: BranchSelector,
-    ) -> Result<(), jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(
-            db.mergeable_tx_ref(tx_id)
-                .insert_with_id_in_branch(table, branch, row_id, cells)
-        ))
-    }
-
-    fn mergeable_update(
-        &self,
-        tx_id: OpenTransactionId,
-        table: &str,
-        row_id: RowUuid,
-        patch: RowCells,
-        now_ms: Option<u64>,
-    ) -> Result<(), jazz::db::Error> {
-        with_wasm_db!(self, |db| match now_ms {
-            Some(now_ms) => block_on(
-                db.mergeable_tx_ref(tx_id)
-                    .update_at_ms(table, row_id, patch, now_ms)
-            ),
-            None => block_on(db.mergeable_tx_ref(tx_id).update(table, row_id, patch)),
-        })
-    }
-
-    fn mergeable_update_in_branch_view(
-        &self,
-        tx_id: OpenTransactionId,
-        table: &str,
-        row_id: RowUuid,
-        patch: RowCells,
-        head: BranchSelector,
-        base: Option<BranchViewBase>,
-    ) -> Result<(), jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(
-            db.mergeable_tx_ref(tx_id)
-                .update_in_branch_view(table, head, base, row_id, patch)
-        ))
-    }
-
-    fn mergeable_delete(
-        &self,
-        tx_id: OpenTransactionId,
-        table: &str,
-        row_id: RowUuid,
-        now_ms: Option<u64>,
-    ) -> Result<(), jazz::db::Error> {
-        with_wasm_db!(self, |db| match now_ms {
-            Some(now_ms) => block_on(
-                db.mergeable_tx_ref(tx_id)
-                    .delete_at_ms(table, row_id, now_ms)
-            ),
-            None => block_on(db.mergeable_tx_ref(tx_id).delete(table, row_id)),
-        })
-    }
-
-    fn mergeable_delete_in_branch_view(
-        &self,
-        tx_id: OpenTransactionId,
-        table: &str,
-        row_id: RowUuid,
-        head: BranchSelector,
-        base: Option<BranchViewBase>,
-    ) -> Result<(), jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(
-            db.mergeable_tx_ref(tx_id)
-                .delete_in_branch_view(table, head, base, row_id)
-        ))
-    }
-
-    fn mergeable_restore(
-        &self,
-        tx_id: OpenTransactionId,
-        table: &str,
-        row_id: RowUuid,
-        cells: RowCells,
-        now_ms: Option<u64>,
-    ) -> Result<(), jazz::db::Error> {
-        with_wasm_db!(self, |db| match now_ms {
-            Some(now_ms) => block_on(
-                db.mergeable_tx_ref(tx_id)
-                    .restore_at_ms(table, row_id, cells, now_ms)
-            ),
-            None => block_on(db.mergeable_tx_ref(tx_id).restore(table, row_id, cells)),
-        })
-    }
-
-    fn mergeable_restore_in_branch(
-        &self,
-        tx_id: OpenTransactionId,
-        table: &str,
-        row_id: RowUuid,
-        cells: RowCells,
-        branch: BranchSelector,
-    ) -> Result<(), jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(
-            db.mergeable_tx_ref(tx_id)
-                .restore_in_branch(table, branch, row_id, cells)
-        ))
-    }
-
-    fn exclusive_write(
-        &self,
-        tx_id: OpenTransactionId,
-        table: &str,
-        row_id: RowUuid,
-        cells: RowCells,
-    ) -> Result<(), jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(
-            db.exclusive_tx_ref(tx_id)
-                .insert_with_id(table, row_id, cells)
-        ))
-    }
-
-    fn exclusive_update(
-        &self,
-        tx_id: OpenTransactionId,
-        table: &str,
-        row_id: RowUuid,
-        patch: RowCells,
-    ) -> Result<(), jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(
-            db.exclusive_tx_ref(tx_id).update(table, row_id, patch)
-        ))
-    }
-
-    fn exclusive_delete(
-        &self,
-        tx_id: OpenTransactionId,
-        table: &str,
-        row_id: RowUuid,
-    ) -> Result<(), jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(
-            db.exclusive_tx_ref(tx_id).delete(table, row_id)
-        ))
-    }
-
-    fn exclusive_restore(
-        &self,
-        tx_id: OpenTransactionId,
-        table: &str,
-        row_id: RowUuid,
-        cells: RowCells,
-    ) -> Result<(), jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(
-            db.exclusive_tx_ref(tx_id).restore(table, row_id, cells)
-        ))
-    }
-
     fn commit_exclusive(&self, tx_id: OpenTransactionId) -> Result<TxId, jazz::db::Error> {
         with_wasm_db!(self, |db| block_on(db.commit_exclusive_handle(tx_id)))
     }
@@ -1069,629 +882,6 @@ impl WasmDbInner {
         with_wasm_db!(self, |db| db.set_tick_scheduler(Some(scheduler)))
     }
 
-    fn insert(&self, table: &str, cells: RowCells) -> Result<WasmWrite, JsValue> {
-        match self {
-            Self::Memory(db) => wasm_write_memory(
-                Rc::clone(db),
-                block_on(db.insert(table, cells)).map_err(to_js_error)?,
-            ),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                block_on(db.insert(table, cells)).map_err(to_js_error)?,
-            ),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
-    }
-
-    fn insert_with_id(
-        &self,
-        table: &str,
-        row_id: RowUuid,
-        cells: RowCells,
-        updated_at_ms: Option<u64>,
-    ) -> Result<WasmWrite, JsValue> {
-        match self {
-            Self::Memory(db) => wasm_write_memory(
-                Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => block_on(db.insert_with_id_at_ms(table, row_id, cells, now_ms)),
-                    None => block_on(db.insert_with_id(table, row_id, cells)),
-                }
-                .map_err(to_js_error)?,
-            ),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => block_on(db.insert_with_id_at_ms(table, row_id, cells, now_ms)),
-                    None => block_on(db.insert_with_id(table, row_id, cells)),
-                }
-                .map_err(to_js_error)?,
-            ),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
-    }
-
-    fn insert_with_id_in_branch(
-        &self,
-        table: &str,
-        row_id: RowUuid,
-        cells: RowCells,
-        branch: BranchSelector,
-    ) -> Result<WasmWrite, JsValue> {
-        match self {
-            Self::Memory(db) => wasm_write_memory(
-                Rc::clone(db),
-                block_on(db.insert_with_id_in_branch(table, branch, row_id, cells))
-                    .map_err(to_js_error)?,
-            ),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                block_on(db.insert_with_id_in_branch(table, branch, row_id, cells))
-                    .map_err(to_js_error)?,
-            ),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
-    }
-
-    fn insert_with_id_in_branch_for_identity(
-        &self,
-        identity: AuthorSubject,
-        table: &str,
-        row_id: RowUuid,
-        cells: RowCells,
-        branch: BranchSelector,
-    ) -> Result<WasmWrite, JsValue> {
-        match self {
-            Self::Memory(db) => {
-                set_identity_claims(db, identity);
-                wasm_write_memory(
-                    Rc::clone(db),
-                    block_on(db.insert_with_id_in_branch_for_identity(
-                        identity, table, branch, row_id, cells,
-                    ))
-                    .map_err(to_js_error)?,
-                )
-            }
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => {
-                set_identity_claims(db, identity);
-                wasm_write_browser(
-                    Rc::clone(db),
-                    block_on(db.insert_with_id_in_branch_for_identity(
-                        identity, table, branch, row_id, cells,
-                    ))
-                    .map_err(to_js_error)?,
-                )
-            }
-            Self::Closed => panic!("WasmDb is closed"),
-        }
-    }
-
-    fn insert_with_id_for_identity(
-        &self,
-        identity: AuthorSubject,
-        table: &str,
-        row_id: RowUuid,
-        cells: RowCells,
-        updated_at_ms: Option<u64>,
-    ) -> Result<WasmWrite, JsValue> {
-        match self {
-            Self::Memory(db) => {
-                set_identity_claims(db, identity);
-                wasm_write_memory(
-                    Rc::clone(db),
-                    match updated_at_ms {
-                        Some(now_ms) => block_on(db.insert_with_id_for_identity_at_ms(
-                            identity, table, row_id, cells, now_ms,
-                        )),
-                        None => {
-                            block_on(db.insert_with_id_for_identity(identity, table, row_id, cells))
-                        }
-                    }
-                    .map_err(to_js_error)?,
-                )
-            }
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => {
-                set_identity_claims(db, identity);
-                wasm_write_browser(
-                    Rc::clone(db),
-                    match updated_at_ms {
-                        Some(now_ms) => block_on(db.insert_with_id_for_identity_at_ms(
-                            identity, table, row_id, cells, now_ms,
-                        )),
-                        None => {
-                            block_on(db.insert_with_id_for_identity(identity, table, row_id, cells))
-                        }
-                    }
-                    .map_err(to_js_error)?,
-                )
-            }
-            Self::Closed => panic!("WasmDb is closed"),
-        }
-    }
-
-    fn update(
-        &self,
-        table: &str,
-        row_id: RowUuid,
-        patch: RowCells,
-        updated_at_ms: Option<u64>,
-    ) -> Result<WasmWrite, JsValue> {
-        match self {
-            Self::Memory(db) => wasm_write_memory(
-                Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => block_on(db.update_at_ms(table, row_id, patch, now_ms)),
-                    None => block_on(db.update(table, row_id, patch)),
-                }
-                .map_err(to_js_error)?,
-            ),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => block_on(db.update_at_ms(table, row_id, patch, now_ms)),
-                    None => block_on(db.update(table, row_id, patch)),
-                }
-                .map_err(to_js_error)?,
-            ),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
-    }
-
-    fn update_in_branch(
-        &self,
-        table: &str,
-        row_id: RowUuid,
-        patch: RowCells,
-        head: BranchSelector,
-        base: Option<BranchViewBase>,
-    ) -> Result<WasmWrite, JsValue> {
-        match self {
-            Self::Memory(db) => wasm_write_memory(
-                Rc::clone(db),
-                match base {
-                    Some(base) => {
-                        block_on(db.update_in_branch_view(table, head, Some(base), row_id, patch))
-                    }
-                    None => block_on(db.update_in_branch(table, head, row_id, patch)),
-                }
-                .map_err(to_js_error)?,
-            ),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                match base {
-                    Some(base) => {
-                        block_on(db.update_in_branch_view(table, head, Some(base), row_id, patch))
-                    }
-                    None => block_on(db.update_in_branch(table, head, row_id, patch)),
-                }
-                .map_err(to_js_error)?,
-            ),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
-    }
-
-    fn update_in_branch_for_identity(
-        &self,
-        identity: AuthorSubject,
-        table: &str,
-        row_id: RowUuid,
-        patch: RowCells,
-        head: BranchSelector,
-        base: Option<BranchViewBase>,
-    ) -> Result<WasmWrite, JsValue> {
-        match self {
-            Self::Memory(db) => {
-                set_identity_claims(db, identity);
-                wasm_write_memory(
-                    Rc::clone(db),
-                    block_on(db.update_in_branch_view_for_identity(
-                        identity, table, head, base, row_id, patch,
-                    ))
-                    .map_err(to_js_error)?,
-                )
-            }
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => {
-                set_identity_claims(db, identity);
-                wasm_write_browser(
-                    Rc::clone(db),
-                    block_on(db.update_in_branch_view_for_identity(
-                        identity, table, head, base, row_id, patch,
-                    ))
-                    .map_err(to_js_error)?,
-                )
-            }
-            Self::Closed => panic!("WasmDb is closed"),
-        }
-    }
-
-    fn update_for_identity(
-        &self,
-        identity: AuthorSubject,
-        table: &str,
-        row_id: RowUuid,
-        patch: RowCells,
-        updated_at_ms: Option<u64>,
-    ) -> Result<WasmWrite, JsValue> {
-        match self {
-            Self::Memory(db) => {
-                set_identity_claims(db, identity);
-                wasm_write_memory(
-                    Rc::clone(db),
-                    match updated_at_ms {
-                        Some(now_ms) => block_on(
-                            db.update_for_identity_at_ms(identity, table, row_id, patch, now_ms),
-                        ),
-                        None => block_on(db.update_for_identity(identity, table, row_id, patch)),
-                    }
-                    .map_err(to_js_error)?,
-                )
-            }
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => {
-                set_identity_claims(db, identity);
-                wasm_write_browser(
-                    Rc::clone(db),
-                    match updated_at_ms {
-                        Some(now_ms) => block_on(
-                            db.update_for_identity_at_ms(identity, table, row_id, patch, now_ms),
-                        ),
-                        None => block_on(db.update_for_identity(identity, table, row_id, patch)),
-                    }
-                    .map_err(to_js_error)?,
-                )
-            }
-            Self::Closed => panic!("WasmDb is closed"),
-        }
-    }
-
-    fn upsert(
-        &self,
-        table: &str,
-        row_id: RowUuid,
-        cells: RowCells,
-        updated_at_ms: Option<u64>,
-    ) -> Result<WasmWrite, JsValue> {
-        match self {
-            Self::Memory(db) => wasm_write_memory(
-                Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => block_on(db.upsert_at_ms(table, row_id, cells, now_ms)),
-                    None => block_on(db.upsert(table, row_id, cells)),
-                }
-                .map_err(to_js_error)?,
-            ),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => block_on(db.upsert_at_ms(table, row_id, cells, now_ms)),
-                    None => block_on(db.upsert(table, row_id, cells)),
-                }
-                .map_err(to_js_error)?,
-            ),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
-    }
-
-    fn upsert_for_identity(
-        &self,
-        identity: AuthorSubject,
-        table: &str,
-        row_id: RowUuid,
-        cells: RowCells,
-        updated_at_ms: Option<u64>,
-    ) -> Result<WasmWrite, JsValue> {
-        match self {
-            Self::Memory(db) => {
-                set_identity_claims(db, identity);
-                wasm_write_memory(
-                    Rc::clone(db),
-                    match updated_at_ms {
-                        Some(now_ms) => block_on(
-                            db.upsert_for_identity_at_ms(identity, table, row_id, cells, now_ms),
-                        ),
-                        None => block_on(db.upsert_for_identity(identity, table, row_id, cells)),
-                    }
-                    .map_err(to_js_error)?,
-                )
-            }
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => {
-                set_identity_claims(db, identity);
-                wasm_write_browser(
-                    Rc::clone(db),
-                    match updated_at_ms {
-                        Some(now_ms) => block_on(
-                            db.upsert_for_identity_at_ms(identity, table, row_id, cells, now_ms),
-                        ),
-                        None => block_on(db.upsert_for_identity(identity, table, row_id, cells)),
-                    }
-                    .map_err(to_js_error)?,
-                )
-            }
-            Self::Closed => panic!("WasmDb is closed"),
-        }
-    }
-
-    fn delete(
-        &self,
-        table: &str,
-        row_id: RowUuid,
-        now_ms: Option<u64>,
-    ) -> Result<WasmWrite, JsValue> {
-        match self {
-            Self::Memory(db) => wasm_write_memory(
-                Rc::clone(db),
-                match now_ms {
-                    Some(now_ms) => block_on(db.delete_at_ms(table, row_id, now_ms)),
-                    None => block_on(db.delete(table, row_id)),
-                }
-                .map_err(to_js_error)?,
-            ),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                match now_ms {
-                    Some(now_ms) => block_on(db.delete_at_ms(table, row_id, now_ms)),
-                    None => block_on(db.delete(table, row_id)),
-                }
-                .map_err(to_js_error)?,
-            ),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
-    }
-
-    fn delete_in_branch(
-        &self,
-        table: &str,
-        row_id: RowUuid,
-        head: BranchSelector,
-        base: Option<BranchViewBase>,
-    ) -> Result<WasmWrite, JsValue> {
-        match self {
-            Self::Memory(db) => wasm_write_memory(
-                Rc::clone(db),
-                match base {
-                    Some(base) => {
-                        block_on(db.delete_in_branch_view(table, head, Some(base), row_id))
-                    }
-                    None => block_on(db.delete_in_branch(table, head, row_id)),
-                }
-                .map_err(to_js_error)?,
-            ),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                match base {
-                    Some(base) => {
-                        block_on(db.delete_in_branch_view(table, head, Some(base), row_id))
-                    }
-                    None => block_on(db.delete_in_branch(table, head, row_id)),
-                }
-                .map_err(to_js_error)?,
-            ),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
-    }
-
-    fn delete_in_branch_for_identity(
-        &self,
-        identity: AuthorSubject,
-        table: &str,
-        row_id: RowUuid,
-        head: BranchSelector,
-        base: Option<BranchViewBase>,
-    ) -> Result<WasmWrite, JsValue> {
-        match self {
-            Self::Memory(db) => {
-                set_identity_claims(db, identity);
-                wasm_write_memory(
-                    Rc::clone(db),
-                    block_on(
-                        db.delete_in_branch_view_for_identity(identity, table, head, base, row_id),
-                    )
-                    .map_err(to_js_error)?,
-                )
-            }
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => {
-                set_identity_claims(db, identity);
-                wasm_write_browser(
-                    Rc::clone(db),
-                    block_on(
-                        db.delete_in_branch_view_for_identity(identity, table, head, base, row_id),
-                    )
-                    .map_err(to_js_error)?,
-                )
-            }
-            Self::Closed => panic!("WasmDb is closed"),
-        }
-    }
-
-    fn delete_for_identity(
-        &self,
-        identity: AuthorSubject,
-        table: &str,
-        row_id: RowUuid,
-        now_ms: Option<u64>,
-    ) -> Result<WasmWrite, JsValue> {
-        match self {
-            Self::Memory(db) => {
-                set_identity_claims(db, identity);
-                wasm_write_memory(
-                    Rc::clone(db),
-                    match now_ms {
-                        Some(now_ms) => {
-                            block_on(db.delete_for_identity_at_ms(identity, table, row_id, now_ms))
-                        }
-                        None => block_on(db.delete_for_identity(identity, table, row_id)),
-                    }
-                    .map_err(to_js_error)?,
-                )
-            }
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => {
-                set_identity_claims(db, identity);
-                wasm_write_browser(
-                    Rc::clone(db),
-                    match now_ms {
-                        Some(now_ms) => {
-                            block_on(db.delete_for_identity_at_ms(identity, table, row_id, now_ms))
-                        }
-                        None => block_on(db.delete_for_identity(identity, table, row_id)),
-                    }
-                    .map_err(to_js_error)?,
-                )
-            }
-            Self::Closed => panic!("WasmDb is closed"),
-        }
-    }
-
-    fn restore(
-        &self,
-        table: &str,
-        row_id: RowUuid,
-        cells: RowCells,
-        updated_at_ms: Option<u64>,
-    ) -> Result<WasmWrite, JsValue> {
-        match self {
-            Self::Memory(db) => wasm_write_memory(
-                Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => block_on(db.restore_at_ms(table, row_id, cells, now_ms)),
-                    None => block_on(db.restore(table, row_id, cells)),
-                }
-                .map_err(to_js_error)?,
-            ),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                match updated_at_ms {
-                    Some(now_ms) => block_on(db.restore_at_ms(table, row_id, cells, now_ms)),
-                    None => block_on(db.restore(table, row_id, cells)),
-                }
-                .map_err(to_js_error)?,
-            ),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
-    }
-
-    fn restore_in_branch(
-        &self,
-        table: &str,
-        row_id: RowUuid,
-        branch: BranchSelector,
-    ) -> Result<WasmWrite, JsValue> {
-        match self {
-            Self::Memory(db) => wasm_write_memory(
-                Rc::clone(db),
-                block_on(db.restore_in_branch(table, branch, row_id)).map_err(to_js_error)?,
-            ),
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => wasm_write_browser(
-                Rc::clone(db),
-                block_on(db.restore_in_branch(table, branch, row_id)).map_err(to_js_error)?,
-            ),
-            Self::Closed => panic!("WasmDb is closed"),
-        }
-    }
-
-    fn restore_with_cells_in_branch(
-        &self,
-        identity: Option<AuthorSubject>,
-        table: &str,
-        row_id: RowUuid,
-        cells: RowCells,
-        branch: BranchSelector,
-    ) -> Result<WasmWrite, JsValue> {
-        match self {
-            Self::Memory(db) => {
-                if let Some(identity) = identity {
-                    set_identity_claims(db, identity);
-                }
-                wasm_write_memory(
-                    Rc::clone(db),
-                    match identity {
-                        Some(identity) => block_on(db.restore_with_cells_in_branch_as_identity(
-                            identity, table, branch, row_id, cells,
-                        )),
-                        None => {
-                            block_on(db.restore_with_cells_in_branch(table, branch, row_id, cells))
-                        }
-                    }
-                    .map_err(to_js_error)?,
-                )
-            }
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => {
-                if let Some(identity) = identity {
-                    set_identity_claims(db, identity);
-                }
-                wasm_write_browser(
-                    Rc::clone(db),
-                    match identity {
-                        Some(identity) => block_on(db.restore_with_cells_in_branch_as_identity(
-                            identity, table, branch, row_id, cells,
-                        )),
-                        None => {
-                            block_on(db.restore_with_cells_in_branch(table, branch, row_id, cells))
-                        }
-                    }
-                    .map_err(to_js_error)?,
-                )
-            }
-            Self::Closed => panic!("WasmDb is closed"),
-        }
-    }
-
-    fn restore_for_identity(
-        &self,
-        identity: AuthorSubject,
-        table: &str,
-        row_id: RowUuid,
-        cells: RowCells,
-        updated_at_ms: Option<u64>,
-    ) -> Result<WasmWrite, JsValue> {
-        match self {
-            Self::Memory(db) => {
-                set_identity_claims(db, identity);
-                wasm_write_memory(
-                    Rc::clone(db),
-                    match updated_at_ms {
-                        Some(now_ms) => block_on(
-                            db.restore_for_identity_at_ms(identity, table, row_id, cells, now_ms),
-                        ),
-                        None => block_on(db.restore_for_identity(identity, table, row_id, cells)),
-                    }
-                    .map_err(to_js_error)?,
-                )
-            }
-            #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => {
-                set_identity_claims(db, identity);
-                wasm_write_browser(
-                    Rc::clone(db),
-                    match updated_at_ms {
-                        Some(now_ms) => block_on(
-                            db.restore_for_identity_at_ms(identity, table, row_id, cells, now_ms),
-                        ),
-                        None => block_on(db.restore_for_identity(identity, table, row_id, cells)),
-                    }
-                    .map_err(to_js_error)?,
-                )
-            }
-            Self::Closed => panic!("WasmDb is closed"),
-        }
-    }
-
     async fn tick(&self) -> Result<(), jazz::db::Error> {
         with_wasm_db!(self, |db| db.tick().await)
     }
@@ -1725,42 +915,135 @@ enum WasmTxKind {
 
 #[wasm_bindgen]
 impl WasmDb {
+    #[wasm_bindgen(js_name = insertEncoded)]
+    pub fn insert_encoded_with_options(
+        &self,
+        table: String,
+        cells: Vec<u8>,
+        options: JsValue,
+    ) -> Result<WasmWrite, JsValue> {
+        let cells = decode_cells(&cells)?;
+        let options = insert_options_from_js(options)?;
+        match &self.inner {
+            WasmDbInner::Memory(db) => wasm_write_memory(
+                Rc::clone(db),
+                block_on(db.insert(&table, cells, options)).map_err(to_js_error)?,
+            ),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                block_on(db.insert(&table, cells, options)).map_err(to_js_error)?,
+            ),
+            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
+        }
+    }
+
+    #[wasm_bindgen(js_name = updateEncoded)]
+    pub fn update_encoded_with_options(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        patch: Vec<u8>,
+        options: JsValue,
+    ) -> Result<WasmWrite, JsValue> {
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let patch = decode_cells(&patch)?;
+        let options = update_options_from_js(options)?;
+        match &self.inner {
+            WasmDbInner::Memory(db) => wasm_write_memory(
+                Rc::clone(db),
+                block_on(db.update(&table, row_id, patch, options)).map_err(to_js_error)?,
+            ),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                block_on(db.update(&table, row_id, patch, options)).map_err(to_js_error)?,
+            ),
+            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
+        }
+    }
+
+    #[wasm_bindgen(js_name = upsertEncoded)]
+    pub fn upsert_encoded_with_options(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        cells: Vec<u8>,
+        options: JsValue,
+    ) -> Result<WasmWrite, JsValue> {
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let cells = decode_cells(&cells)?;
+        let options = upsert_options_from_js(options)?;
+        match &self.inner {
+            WasmDbInner::Memory(db) => wasm_write_memory(
+                Rc::clone(db),
+                block_on(db.upsert(&table, row_id, cells, options)).map_err(to_js_error)?,
+            ),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                block_on(db.upsert(&table, row_id, cells, options)).map_err(to_js_error)?,
+            ),
+            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
+        }
+    }
+
+    #[wasm_bindgen(js_name = deleteEncoded)]
+    pub fn delete_encoded_with_options(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        options: JsValue,
+    ) -> Result<WasmWrite, JsValue> {
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let options = delete_options_from_js(options)?;
+        match &self.inner {
+            WasmDbInner::Memory(db) => wasm_write_memory(
+                Rc::clone(db),
+                block_on(db.delete(&table, row_id, options)).map_err(to_js_error)?,
+            ),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                block_on(db.delete(&table, row_id, options)).map_err(to_js_error)?,
+            ),
+            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
+        }
+    }
+
+    #[wasm_bindgen(js_name = restoreEncoded)]
+    pub fn restore_encoded_with_options(
+        &self,
+        table: String,
+        row_id: Vec<u8>,
+        cells: Vec<u8>,
+        options: JsValue,
+    ) -> Result<WasmWrite, JsValue> {
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let cells = decode_cells(&cells)?;
+        let options = restore_options_from_js(options)?;
+        match &self.inner {
+            WasmDbInner::Memory(db) => wasm_write_memory(
+                Rc::clone(db),
+                block_on(db.restore(&table, row_id, Some(cells), options)).map_err(to_js_error)?,
+            ),
+            #[cfg(target_arch = "wasm32")]
+            WasmDbInner::Browser(db) => wasm_write_browser(
+                Rc::clone(db),
+                block_on(db.restore(&table, row_id, Some(cells), options)).map_err(to_js_error)?,
+            ),
+            WasmDbInner::Closed => Err(JsValue::from_str("WasmDb is closed")),
+        }
+    }
+
     #[wasm_bindgen(js_name = openMemory)]
     pub fn open_memory(schema: Vec<u8>, config: Vec<u8>) -> Result<WasmDb, JsValue> {
         console_error_panic_hook::set_once();
         let (schema, config) = decode_open_args(&schema, &config)?;
-        let identity = wasm_open_identity(&config, None)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let db = block_on(open_db(schema, MemoryStorage::new(&refs), config, identity))?;
-        db.set_deferred_local_persistence(true);
-        Ok(Self {
-            inner: WasmDbInner::Memory(Rc::new(db)),
-            owns_runtime: true,
-        })
-    }
-
-    /// Separate proof-bearing ABI so independently deployed JS and WASM
-    /// artifacts fail closed rather than reinterpret an open-config payload.
-    #[wasm_bindgen(js_name = openMemoryWithSelfSignedProof)]
-    pub fn open_memory_with_self_signed_proof(
-        schema: Vec<u8>,
-        config: Vec<u8>,
-        token: String,
-        app_id: String,
-        claimed_author: String,
-    ) -> Result<WasmDb, JsValue> {
-        console_error_panic_hook::set_once();
-        let (schema, config) = decode_open_args(&schema, &config)?;
-        let proof = WasmSelfSignedClientProof {
-            token,
-            app_id,
-            claimed_author,
-        };
-        let identity = wasm_open_identity(&config, Some(&proof))?;
-        let refs = schema.column_families();
-        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let db = block_on(open_db(schema, MemoryStorage::new(&refs), config, identity))?;
+        let db =
+            block_on(open_db(schema, MemoryStorage::new(&refs), config)).map_err(to_js_error)?;
         db.set_deferred_local_persistence(true);
         Ok(Self {
             inner: WasmDbInner::Memory(Rc::new(db)),
@@ -1777,44 +1060,14 @@ impl WasmDb {
     ) -> Result<WasmDb, JsValue> {
         console_error_panic_hook::set_once();
         let (schema, config) = decode_open_args(&schema, &config)?;
-        let identity = wasm_open_identity(&config, None)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = BrowserStorage::open(IndexedDbPageStore::from_js(page_store), &refs)
             .await
             .map_err(to_js_error)?;
-        let db = open_db(schema, storage, config, identity).await?;
-        db.set_deferred_local_persistence(true);
-        Ok(Self {
-            inner: WasmDbInner::Browser(Rc::new(db)),
-            owns_runtime: true,
-        })
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    #[wasm_bindgen(js_name = openBrowserWithSelfSignedProof)]
-    pub async fn open_browser_with_self_signed_proof(
-        page_store: JsValue,
-        schema: Vec<u8>,
-        config: Vec<u8>,
-        token: String,
-        app_id: String,
-        claimed_author: String,
-    ) -> Result<WasmDb, JsValue> {
-        console_error_panic_hook::set_once();
-        let (schema, config) = decode_open_args(&schema, &config)?;
-        let proof = WasmSelfSignedClientProof {
-            token,
-            app_id,
-            claimed_author,
-        };
-        let identity = wasm_open_identity(&config, Some(&proof))?;
-        let refs = schema.column_families();
-        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let storage = BrowserStorage::open(IndexedDbPageStore::from_js(page_store), &refs)
+        let db = open_db(schema, storage, config)
             .await
             .map_err(to_js_error)?;
-        let db = open_db(schema, storage, config, identity).await?;
         db.set_deferred_local_persistence(true);
         Ok(Self {
             inner: WasmDbInner::Browser(Rc::new(db)),
@@ -2251,12 +1504,6 @@ impl WasmDb {
         }
     }
 
-    #[wasm_bindgen(js_name = insertEncoded)]
-    pub fn insert_encoded(&self, table: String, cells: Vec<u8>) -> Result<WasmWrite, JsValue> {
-        let cells = decode_cells(&cells)?;
-        self.inner.insert(&table, cells)
-    }
-
     #[wasm_bindgen(js_name = canInsertEncoded)]
     pub fn can_insert_encoded(&self, table: String, cells: Vec<u8>) -> Result<String, JsValue> {
         let cells = decode_cells(&cells)?;
@@ -2300,166 +1547,6 @@ impl WasmDb {
             })
     }
 
-    #[wasm_bindgen(js_name = insertWithIdEncoded)]
-    pub fn insert_with_id_encoded(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        updated_at_ms: Option<f64>,
-    ) -> Result<WasmWrite, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let cells = decode_cells(&cells)?;
-        self.inner.insert_with_id(
-            &table,
-            row_id,
-            cells,
-            updated_at_ms.map(|value| value as u64),
-        )
-    }
-
-    #[wasm_bindgen(js_name = insertWithIdEncodedInBranch)]
-    pub fn insert_with_id_encoded_in_branch(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        branch: JsValue,
-    ) -> Result<WasmWrite, JsValue> {
-        self.inner.insert_with_id_in_branch(
-            &table,
-            row_uuid_from_bytes(&row_id)?,
-            decode_cells(&cells)?,
-            serde_wasm_bindgen::from_value(branch)
-                .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?,
-        )
-    }
-
-    #[wasm_bindgen(js_name = insertWithIdEncodedInBranchForIdentity)]
-    pub fn insert_with_id_encoded_in_branch_for_identity(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        branch: JsValue,
-        author: Vec<u8>,
-    ) -> Result<WasmWrite, JsValue> {
-        self.inner.insert_with_id_in_branch_for_identity(
-            author_id_from_bytes(&author)?,
-            &table,
-            row_uuid_from_bytes(&row_id)?,
-            decode_cells(&cells)?,
-            serde_wasm_bindgen::from_value(branch)
-                .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?,
-        )
-    }
-
-    #[wasm_bindgen(js_name = insertWithIdEncodedForIdentity)]
-    pub fn insert_with_id_encoded_for_identity(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        author: Vec<u8>,
-        updated_at_ms: Option<f64>,
-    ) -> Result<WasmWrite, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let cells = decode_cells(&cells)?;
-        let author = author_id_from_bytes(&author)?;
-        self.inner.insert_with_id_for_identity(
-            author,
-            &table,
-            row_id,
-            cells,
-            updated_at_ms.map(|value| value as u64),
-        )
-    }
-
-    #[wasm_bindgen(js_name = updateEncoded)]
-    pub fn update_encoded(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        patch: Vec<u8>,
-        updated_at_ms: Option<f64>,
-    ) -> Result<WasmWrite, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let patch = decode_cells(&patch)?;
-        self.inner.update(
-            &table,
-            row_id,
-            patch,
-            updated_at_ms.map(|value| value as u64),
-        )
-    }
-
-    #[wasm_bindgen(js_name = updateEncodedInBranch)]
-    pub fn update_encoded_in_branch(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        patch: Vec<u8>,
-        head: JsValue,
-    ) -> Result<WasmWrite, JsValue> {
-        self.inner.update_in_branch(
-            &table,
-            row_uuid_from_bytes(&row_id)?,
-            decode_cells(&patch)?,
-            serde_wasm_bindgen::from_value(head)
-                .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?,
-            None,
-        )
-    }
-
-    #[wasm_bindgen(js_name = updateEncodedInBranchView)]
-    pub fn update_encoded_in_branch_view(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        patch: Vec<u8>,
-        head: JsValue,
-        base: JsValue,
-    ) -> Result<WasmWrite, JsValue> {
-        self.inner.update_in_branch(
-            &table,
-            row_uuid_from_bytes(&row_id)?,
-            decode_cells(&patch)?,
-            serde_wasm_bindgen::from_value(head)
-                .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?,
-            Some(serde_wasm_bindgen::from_value(base).map_err(|error| {
-                JsValue::from_str(&format!("invalid branch view base: {error}"))
-            })?),
-        )
-    }
-
-    #[wasm_bindgen(js_name = updateEncodedInBranchViewForIdentity)]
-    pub fn update_encoded_in_branch_view_for_identity(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        patch: Vec<u8>,
-        head: JsValue,
-        base: JsValue,
-        author: Vec<u8>,
-    ) -> Result<WasmWrite, JsValue> {
-        let base = if base.is_null() || base.is_undefined() {
-            None
-        } else {
-            Some(serde_wasm_bindgen::from_value(base).map_err(|error| {
-                JsValue::from_str(&format!("invalid branch view base: {error}"))
-            })?)
-        };
-        self.inner.update_in_branch_for_identity(
-            author_id_from_bytes(&author)?,
-            &table,
-            row_uuid_from_bytes(&row_id)?,
-            decode_cells(&patch)?,
-            serde_wasm_bindgen::from_value(head)
-                .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?,
-            base,
-        )
-    }
-
     #[wasm_bindgen(js_name = requestUpdatePermissionAdviceEncoded)]
     pub fn request_update_permission_advice_encoded(
         &self,
@@ -2475,139 +1562,6 @@ impl WasmDb {
             })
     }
 
-    #[wasm_bindgen(js_name = updateEncodedForIdentity)]
-    pub fn update_encoded_for_identity(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        patch: Vec<u8>,
-        author: Vec<u8>,
-        updated_at_ms: Option<f64>,
-    ) -> Result<WasmWrite, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let patch = decode_cells(&patch)?;
-        let author = author_id_from_bytes(&author)?;
-        self.inner.update_for_identity(
-            author,
-            &table,
-            row_id,
-            patch,
-            updated_at_ms.map(|value| value as u64),
-        )
-    }
-
-    #[wasm_bindgen(js_name = upsertEncoded)]
-    pub fn upsert_encoded(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        updated_at_ms: Option<f64>,
-    ) -> Result<WasmWrite, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let cells = decode_cells(&cells)?;
-        self.inner.upsert(
-            &table,
-            row_id,
-            cells,
-            updated_at_ms.map(|value| value as u64),
-        )
-    }
-
-    #[wasm_bindgen(js_name = upsertEncodedForIdentity)]
-    pub fn upsert_encoded_for_identity(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        author: Vec<u8>,
-        updated_at_ms: Option<f64>,
-    ) -> Result<WasmWrite, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let cells = decode_cells(&cells)?;
-        let author = author_id_from_bytes(&author)?;
-        self.inner.upsert_for_identity(
-            author,
-            &table,
-            row_id,
-            cells,
-            updated_at_ms.map(|value| value as u64),
-        )
-    }
-
-    #[wasm_bindgen(js_name = delete)]
-    pub fn delete(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        updated_at_ms: Option<f64>,
-    ) -> Result<WasmWrite, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        self.inner
-            .delete(&table, row_id, updated_at_ms.map(|value| value as u64))
-    }
-
-    #[wasm_bindgen(js_name = deleteInBranch)]
-    pub fn delete_in_branch(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        head: JsValue,
-    ) -> Result<WasmWrite, JsValue> {
-        self.inner.delete_in_branch(
-            &table,
-            row_uuid_from_bytes(&row_id)?,
-            serde_wasm_bindgen::from_value(head)
-                .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?,
-            None,
-        )
-    }
-
-    #[wasm_bindgen(js_name = deleteInBranchView)]
-    pub fn delete_in_branch_view(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        head: JsValue,
-        base: JsValue,
-    ) -> Result<WasmWrite, JsValue> {
-        self.inner.delete_in_branch(
-            &table,
-            row_uuid_from_bytes(&row_id)?,
-            serde_wasm_bindgen::from_value(head)
-                .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?,
-            Some(serde_wasm_bindgen::from_value(base).map_err(|error| {
-                JsValue::from_str(&format!("invalid branch view base: {error}"))
-            })?),
-        )
-    }
-
-    #[wasm_bindgen(js_name = deleteInBranchViewForIdentity)]
-    pub fn delete_in_branch_view_for_identity(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        head: JsValue,
-        base: JsValue,
-        author: Vec<u8>,
-    ) -> Result<WasmWrite, JsValue> {
-        let base = if base.is_null() || base.is_undefined() {
-            None
-        } else {
-            Some(serde_wasm_bindgen::from_value(base).map_err(|error| {
-                JsValue::from_str(&format!("invalid branch view base: {error}"))
-            })?)
-        };
-        self.inner.delete_in_branch_for_identity(
-            author_id_from_bytes(&author)?,
-            &table,
-            row_uuid_from_bytes(&row_id)?,
-            serde_wasm_bindgen::from_value(head)
-                .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?,
-            base,
-        )
-    }
-
     #[wasm_bindgen(js_name = requestDeletePermissionAdvice)]
     pub fn request_delete_permission_advice(
         &self,
@@ -2621,114 +1575,6 @@ impl WasmDb {
             })
     }
 
-    #[wasm_bindgen(js_name = deleteForIdentity)]
-    pub fn delete_for_identity(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        author: Vec<u8>,
-        updated_at_ms: Option<f64>,
-    ) -> Result<WasmWrite, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let author = author_id_from_bytes(&author)?;
-        self.inner.delete_for_identity(
-            author,
-            &table,
-            row_id,
-            updated_at_ms.map(|value| value as u64),
-        )
-    }
-
-    #[wasm_bindgen(js_name = restoreEncoded)]
-    pub fn restore_encoded(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        updated_at_ms: Option<f64>,
-    ) -> Result<WasmWrite, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let cells = decode_cells(&cells)?;
-        self.inner.restore(
-            &table,
-            row_id,
-            cells,
-            updated_at_ms.map(|value| value as u64),
-        )
-    }
-
-    #[wasm_bindgen(js_name = restoreInBranch)]
-    pub fn restore_in_branch(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        branch: JsValue,
-    ) -> Result<WasmWrite, JsValue> {
-        self.inner.restore_in_branch(
-            &table,
-            row_uuid_from_bytes(&row_id)?,
-            serde_wasm_bindgen::from_value(branch)
-                .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?,
-        )
-    }
-
-    #[wasm_bindgen(js_name = restoreEncodedInBranch)]
-    pub fn restore_encoded_in_branch(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        branch: JsValue,
-    ) -> Result<WasmWrite, JsValue> {
-        self.inner.restore_with_cells_in_branch(
-            None,
-            &table,
-            row_uuid_from_bytes(&row_id)?,
-            decode_cells(&cells)?,
-            serde_wasm_bindgen::from_value(branch)
-                .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?,
-        )
-    }
-
-    #[wasm_bindgen(js_name = restoreEncodedInBranchForIdentity)]
-    pub fn restore_encoded_in_branch_for_identity(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        branch: JsValue,
-        author: Vec<u8>,
-    ) -> Result<WasmWrite, JsValue> {
-        self.inner.restore_with_cells_in_branch(
-            Some(author_id_from_bytes(&author)?),
-            &table,
-            row_uuid_from_bytes(&row_id)?,
-            decode_cells(&cells)?,
-            serde_wasm_bindgen::from_value(branch)
-                .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?,
-        )
-    }
-
-    #[wasm_bindgen(js_name = restoreEncodedForIdentity)]
-    pub fn restore_encoded_for_identity(
-        &self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        author: Vec<u8>,
-        updated_at_ms: Option<f64>,
-    ) -> Result<WasmWrite, JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let cells = decode_cells(&cells)?;
-        let author = author_id_from_bytes(&author)?;
-        self.inner.restore_for_identity(
-            author,
-            &table,
-            row_id,
-            cells,
-            updated_at_ms.map(|value| value as u64),
-        )
-    }
     #[wasm_bindgen(js_name = tick)]
     pub fn tick(&self) -> js_sys::Promise {
         let inner = self.inner.clone();
@@ -3376,223 +2222,122 @@ impl WasmTransport {
 
 #[wasm_bindgen]
 impl WasmTx {
-    #[wasm_bindgen(js_name = insertWithIdEncoded)]
-    pub fn insert_with_id_encoded(
+    #[wasm_bindgen(js_name = insertEncoded)]
+    pub fn insert_encoded_with_options(
         &mut self,
         table: String,
-        row_id: Vec<u8>,
         cells: Vec<u8>,
-        updated_at_ms: Option<f64>,
-    ) -> Result<(), JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
+        options: JsValue,
+    ) -> Result<Vec<u8>, JsValue> {
         let cells = decode_cells(&cells)?;
-        let now_ms = updated_at_ms.map(|value| value as u64);
+        let options = insert_options_from_js(options)?;
         let open_tx = self.open_tx_for_read()?;
-        match self.kind {
-            WasmTxKind::Mergeable => self
-                .db
-                .mergeable_insert(open_tx, &table, row_id, cells, now_ms),
-            WasmTxKind::Exclusive => self.db.exclusive_write(open_tx, &table, row_id, cells),
-        }
+        let row = with_wasm_db!(&self.db, |db| match self.kind {
+            WasmTxKind::Mergeable =>
+                block_on(db.mergeable_tx_ref(open_tx).insert(&table, cells, options,)),
+            WasmTxKind::Exclusive =>
+                block_on(db.exclusive_tx_ref(open_tx).insert(&table, cells, options,)),
+        })
         .map_err(to_js_error)?;
-        Ok(())
-    }
-
-    #[wasm_bindgen(js_name = insertWithIdEncodedInBranch)]
-    pub fn insert_with_id_encoded_in_branch(
-        &mut self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        branch: JsValue,
-    ) -> Result<(), JsValue> {
-        if !matches!(self.kind, WasmTxKind::Mergeable) {
-            return Err(JsValue::from_str(
-                "branch writes require a mergeable transaction",
-            ));
-        }
-        let branch = serde_wasm_bindgen::from_value(branch)
-            .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?;
-        self.db
-            .mergeable_insert_in_branch(
-                self.open_tx_for_read()?,
-                &table,
-                row_uuid_from_bytes(&row_id)?,
-                decode_cells(&cells)?,
-                branch,
-            )
-            .map_err(to_js_error)
+        Ok(row.to_bytes())
     }
 
     #[wasm_bindgen(js_name = updateEncoded)]
-    pub fn update_encoded(
+    pub fn update_encoded_with_options(
         &mut self,
         table: String,
         row_id: Vec<u8>,
         patch: Vec<u8>,
-        updated_at_ms: Option<f64>,
+        options: JsValue,
     ) -> Result<(), JsValue> {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let patch = decode_cells(&patch)?;
-        let now_ms = updated_at_ms.map(|value| value as u64);
+        let options = update_options_from_js(options)?;
         let open_tx = self.open_tx_for_read()?;
-        match self.kind {
-            WasmTxKind::Mergeable => self
-                .db
-                .mergeable_update(open_tx, &table, row_id, patch, now_ms),
-            WasmTxKind::Exclusive => self.db.exclusive_update(open_tx, &table, row_id, patch),
-        }
-        .map_err(to_js_error)?;
-        Ok(())
-    }
-
-    #[wasm_bindgen(js_name = updateEncodedInBranchView)]
-    pub fn update_encoded_in_branch_view(
-        &mut self,
-        table: String,
-        row_id: Vec<u8>,
-        patch: Vec<u8>,
-        head: JsValue,
-        base: JsValue,
-    ) -> Result<(), JsValue> {
-        if !matches!(self.kind, WasmTxKind::Mergeable) {
-            return Err(JsValue::from_str(
-                "branch writes require a mergeable transaction",
-            ));
-        }
-        let head = serde_wasm_bindgen::from_value(head)
-            .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?;
-        let base = if base.is_null() || base.is_undefined() {
-            None
-        } else {
-            Some(serde_wasm_bindgen::from_value(base).map_err(|error| {
-                JsValue::from_str(&format!("invalid branch view base: {error}"))
-            })?)
-        };
-        self.db
-            .mergeable_update_in_branch_view(
-                self.open_tx_for_read()?,
-                &table,
-                row_uuid_from_bytes(&row_id)?,
-                decode_cells(&patch)?,
-                head,
-                base,
-            )
-            .map_err(to_js_error)
+        with_wasm_db!(&self.db, |db| match self.kind {
+            WasmTxKind::Mergeable => block_on(
+                db.mergeable_tx_ref(open_tx)
+                    .update(&table, row_id, patch, options,)
+            ),
+            WasmTxKind::Exclusive => block_on(
+                db.exclusive_tx_ref(open_tx)
+                    .update(&table, row_id, patch, options,)
+            ),
+        })
+        .map_err(to_js_error)
     }
 
     #[wasm_bindgen(js_name = upsertEncoded)]
-    pub fn upsert_encoded(
+    pub fn upsert_encoded_with_options(
         &mut self,
         table: String,
         row_id: Vec<u8>,
         cells: Vec<u8>,
-        updated_at_ms: Option<f64>,
-    ) -> Result<(), JsValue> {
-        self.insert_with_id_encoded(table, row_id, cells, updated_at_ms)
-    }
-
-    #[wasm_bindgen(js_name = delete)]
-    pub fn delete(
-        &mut self,
-        table: String,
-        row_id: Vec<u8>,
-        updated_at_ms: Option<f64>,
-    ) -> Result<(), JsValue> {
-        let row_id = row_uuid_from_bytes(&row_id)?;
-        let open_tx = self.open_tx_for_read()?;
-        match self.kind {
-            WasmTxKind::Mergeable => self.db.mergeable_delete(
-                open_tx,
-                &table,
-                row_id,
-                updated_at_ms.map(|value| value as u64),
-            ),
-            WasmTxKind::Exclusive => self.db.exclusive_delete(open_tx, &table, row_id),
-        }
-        .map_err(to_js_error)?;
-        Ok(())
-    }
-
-    #[wasm_bindgen(js_name = deleteInBranchView)]
-    pub fn delete_in_branch_view(
-        &mut self,
-        table: String,
-        row_id: Vec<u8>,
-        head: JsValue,
-        base: JsValue,
-    ) -> Result<(), JsValue> {
-        if !matches!(self.kind, WasmTxKind::Mergeable) {
-            return Err(JsValue::from_str(
-                "branch writes require a mergeable transaction",
-            ));
-        }
-        let head = serde_wasm_bindgen::from_value(head)
-            .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?;
-        let base = if base.is_null() || base.is_undefined() {
-            None
-        } else {
-            Some(serde_wasm_bindgen::from_value(base).map_err(|error| {
-                JsValue::from_str(&format!("invalid branch view base: {error}"))
-            })?)
-        };
-        self.db
-            .mergeable_delete_in_branch_view(
-                self.open_tx_for_read()?,
-                &table,
-                row_uuid_from_bytes(&row_id)?,
-                head,
-                base,
-            )
-            .map_err(to_js_error)
-    }
-
-    #[wasm_bindgen(js_name = restoreEncoded)]
-    pub fn restore_encoded(
-        &mut self,
-        table: String,
-        row_id: Vec<u8>,
-        cells: Vec<u8>,
-        updated_at_ms: Option<f64>,
+        options: JsValue,
     ) -> Result<(), JsValue> {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let cells = decode_cells(&cells)?;
-        let now_ms = updated_at_ms.map(|value| value as u64);
+        let options = upsert_options_from_js(options)?;
         let open_tx = self.open_tx_for_read()?;
-        match self.kind {
-            WasmTxKind::Mergeable => self
-                .db
-                .mergeable_restore(open_tx, &table, row_id, cells, now_ms),
-            WasmTxKind::Exclusive => self.db.exclusive_restore(open_tx, &table, row_id, cells),
-        }
-        .map_err(to_js_error)?;
-        Ok(())
+        with_wasm_db!(&self.db, |db| match self.kind {
+            WasmTxKind::Mergeable => block_on(
+                db.mergeable_tx_ref(open_tx)
+                    .upsert(&table, row_id, cells, options,)
+            ),
+            WasmTxKind::Exclusive => block_on(
+                db.exclusive_tx_ref(open_tx)
+                    .upsert(&table, row_id, cells, options,)
+            ),
+        })
+        .map_err(to_js_error)
     }
 
-    #[wasm_bindgen(js_name = restoreEncodedInBranch)]
-    pub fn restore_encoded_in_branch(
+    #[wasm_bindgen(js_name = deleteEncoded)]
+    pub fn delete_encoded_with_options(
+        &mut self,
+        table: String,
+        row_id: Vec<u8>,
+        options: JsValue,
+    ) -> Result<(), JsValue> {
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let options = delete_options_from_js(options)?;
+        let open_tx = self.open_tx_for_read()?;
+        with_wasm_db!(&self.db, |db| match self.kind {
+            WasmTxKind::Mergeable => {
+                block_on(db.mergeable_tx_ref(open_tx).delete(&table, row_id, options))
+            }
+            WasmTxKind::Exclusive => {
+                block_on(db.exclusive_tx_ref(open_tx).delete(&table, row_id, options))
+            }
+        })
+        .map_err(to_js_error)
+    }
+
+    #[wasm_bindgen(js_name = restoreEncoded)]
+    pub fn restore_encoded_with_options(
         &mut self,
         table: String,
         row_id: Vec<u8>,
         cells: Vec<u8>,
-        branch: JsValue,
+        options: JsValue,
     ) -> Result<(), JsValue> {
-        if !matches!(self.kind, WasmTxKind::Mergeable) {
-            return Err(JsValue::from_str(
-                "branch writes require a mergeable transaction",
-            ));
-        }
-        let branch = serde_wasm_bindgen::from_value(branch)
-            .map_err(|error| JsValue::from_str(&format!("invalid branch selector: {error}")))?;
-        self.db
-            .mergeable_restore_in_branch(
-                self.open_tx_for_read()?,
-                &table,
-                row_uuid_from_bytes(&row_id)?,
-                decode_cells(&cells)?,
-                branch,
-            )
-            .map_err(to_js_error)
+        let row_id = row_uuid_from_bytes(&row_id)?;
+        let cells = decode_cells(&cells)?;
+        let options = restore_options_from_js(options)?;
+        let open_tx = self.open_tx_for_read()?;
+        with_wasm_db!(&self.db, |db| match self.kind {
+            WasmTxKind::Mergeable =>
+                block_on(
+                    db.mergeable_tx_ref(open_tx)
+                        .restore(&table, row_id, Some(cells), options,)
+                ),
+            WasmTxKind::Exclusive =>
+                block_on(
+                    db.exclusive_tx_ref(open_tx)
+                        .restore(&table, row_id, Some(cells), options,)
+                ),
+        })
+        .map_err(to_js_error)
     }
 
     #[wasm_bindgen(js_name = commit)]
@@ -3714,6 +2459,110 @@ fn decode_cells(bytes: &[u8]) -> Result<RowCells, JsValue> {
     Ok(cells)
 }
 
+fn write_option(options: &JsValue, name: &str) -> Result<Option<JsValue>, JsValue> {
+    if options.is_null() || options.is_undefined() {
+        return Ok(None);
+    }
+    let value = js_sys::Reflect::get(options, &JsValue::from_str(name))?;
+    Ok((!value.is_null() && !value.is_undefined()).then_some(value))
+}
+
+fn write_identity_option(options: &JsValue) -> Result<jazz::db::WriteIdentity, JsValue> {
+    write_option(options, "author")?
+        .map(|author| {
+            author_id_from_bytes(&js_sys::Uint8Array::new(&author).to_vec())
+                .map(jazz::db::WriteIdentity::Session)
+        })
+        .transpose()
+        .map(|identity| identity.unwrap_or_default())
+}
+
+fn write_timestamp_option(options: &JsValue) -> Result<Option<u64>, JsValue> {
+    write_option(options, "updatedAtMs")?
+        .map(|value| {
+            value
+                .as_f64()
+                .map(|value| value as u64)
+                .ok_or_else(|| JsValue::from_str("updatedAtMs must be a number"))
+        })
+        .transpose()
+}
+
+fn insert_options_from_js(options: JsValue) -> Result<jazz::db::InsertOptions, JsValue> {
+    Ok(jazz::db::InsertOptions {
+        row_id: write_option(&options, "rowId")?
+            .map(|row_id| row_uuid_from_bytes(&js_sys::Uint8Array::new(&row_id).to_vec()))
+            .transpose()?,
+        identity: write_identity_option(&options)?,
+        target: write_option(&options, "branch")?
+            .map(|branch| {
+                serde_wasm_bindgen::from_value(branch)
+                    .map(jazz::db::ExactWriteTarget::Branch)
+                    .map_err(to_js_error)
+            })
+            .transpose()?
+            .unwrap_or_default(),
+        updated_at_ms: write_timestamp_option(&options)?,
+    })
+}
+
+fn update_options_from_js(options: JsValue) -> Result<jazz::db::UpdateOptions, JsValue> {
+    let head = write_option(&options, "head")?;
+    let base = write_option(&options, "base")?;
+    let target = match head {
+        Some(head) => jazz::db::WriteTarget::BranchView {
+            head: serde_wasm_bindgen::from_value(head).map_err(to_js_error)?,
+            base: base
+                .map(|base| serde_wasm_bindgen::from_value(base).map_err(to_js_error))
+                .transpose()?,
+        },
+        None if base.is_none() => Default::default(),
+        None => {
+            return Err(JsValue::from_str(
+                "branch view base requires a head selector",
+            ))
+        }
+    };
+    Ok(jazz::db::UpdateOptions {
+        identity: write_identity_option(&options)?,
+        target,
+        updated_at_ms: write_timestamp_option(&options)?,
+    })
+}
+
+fn upsert_options_from_js(options: JsValue) -> Result<jazz::db::UpsertOptions, JsValue> {
+    Ok(jazz::db::UpsertOptions {
+        identity: write_identity_option(&options)?,
+        target: write_option(&options, "branch")?
+            .map(|branch| {
+                serde_wasm_bindgen::from_value(branch)
+                    .map(jazz::db::ExactWriteTarget::Branch)
+                    .map_err(to_js_error)
+            })
+            .transpose()?
+            .unwrap_or_default(),
+        updated_at_ms: write_timestamp_option(&options)?,
+    })
+}
+
+fn delete_options_from_js(options: JsValue) -> Result<jazz::db::DeleteOptions, JsValue> {
+    let options = update_options_from_js(options)?;
+    Ok(jazz::db::DeleteOptions {
+        identity: options.identity,
+        target: options.target,
+        updated_at_ms: options.updated_at_ms,
+    })
+}
+
+fn restore_options_from_js(options: JsValue) -> Result<jazz::db::RestoreOptions, JsValue> {
+    let options = upsert_options_from_js(options)?;
+    Ok(jazz::db::RestoreOptions {
+        identity: options.identity,
+        target: options.target,
+        updated_at_ms: options.updated_at_ms,
+    })
+}
+
 fn decode_open_args(
     schema: &[u8],
     config: &[u8],
@@ -3744,47 +2593,24 @@ async fn open_db<S>(
     schema: JazzSchema,
     storage: S,
     config: WasmOpenDbConfig,
-    identity: DbIdentity,
-) -> Result<Db<S>, JsValue>
+) -> Result<Db<S>, jazz::db::Error>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    let mut db_config = DbConfig::new(schema, storage, identity);
+    let mut db_config = DbConfig::new(schema, storage, config.identity.into());
     if let Some(seed) = config.row_id_seed {
         db_config = db_config.with_id_source(SeededRowIdSource::new(seed));
     }
     let initial_sync_flush_every = config.initial_sync_flush_every;
     if config.history_complete {
-        let db = Db::open_history_complete(db_config)
-            .await
-            .map_err(to_js_error)?;
-        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every).map_err(to_js_error)?;
+        let db = Db::open_history_complete(db_config).await?;
+        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
         Ok(db)
     } else {
-        let db = Db::open(db_config).await.map_err(to_js_error)?;
-        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every).map_err(to_js_error)?;
+        let db = Db::open(db_config).await?;
+        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
         Ok(db)
     }
-}
-
-fn wasm_open_identity(
-    config: &WasmOpenDbConfig,
-    self_signed_client_proof: Option<&WasmSelfSignedClientProof>,
-) -> Result<DbIdentity, JsValue> {
-    let author = match self_signed_client_proof {
-        Some(proof) => jazz::tools::identity::verify_client_runtime_author_at(
-            &proof.token,
-            &proof.app_id,
-            &proof.claimed_author,
-            current_unix_timestamp_secs().map_err(to_js_error)?,
-        )
-        .map_err(to_js_error)?,
-        None => config.identity.author,
-    };
-    Ok(DbIdentity {
-        node: config.identity.node,
-        author,
-    })
 }
 
 fn configure_initial_sync_flush_cadence<S>(
@@ -3868,13 +2694,6 @@ fn author_id_from_bytes(bytes: &[u8]) -> Result<AuthorSubject, JsValue> {
         .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
-fn set_identity_claims<S>(db: &Db<S>, author: AuthorSubject)
-where
-    S: OrderedKvStorage + ReopenableStorage + 'static,
-{
-    db.set_identity_claims(author, BTreeMap::new());
-}
-
 fn claims_from_js(
     _author: AuthorSubject,
     claims: JsValue,
@@ -3926,6 +2745,7 @@ fn wasm_write_memory(
     };
     Ok(WasmWrite {
         payload: postcard::to_allocvec(&result).map_err(to_js_error)?,
+        row_id: result.row_id,
         batch_id: TransactionId::from_committed_tx(tx_id),
         inner: Some(WasmWriteInner::MemoryTx { db, tx_id }),
     })
@@ -3943,6 +2763,7 @@ fn wasm_write_browser(
     };
     Ok(WasmWrite {
         payload: postcard::to_allocvec(&result).map_err(to_js_error)?,
+        row_id: result.row_id,
         batch_id: TransactionId::from_committed_tx(tx_id),
         inner: Some(WasmWriteInner::BrowserTx { db, tx_id }),
     })
@@ -3955,6 +2776,7 @@ fn wasm_tx_write(tx_id: TxId, inner: Option<WasmWriteInner>) -> Result<WasmWrite
     };
     Ok(WasmWrite {
         payload: postcard::to_allocvec(&result).map_err(to_js_error)?,
+        row_id: result.row_id,
         batch_id: TransactionId::from_committed_tx(tx_id),
         inner,
     })
@@ -4302,113 +3124,6 @@ mod dynamic_schema_view_tests {
 
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test::wasm_bindgen_test]
-    fn public_raw_author_ingress_rejects_reserved_subjects_and_accepts_external_subjects() {
-        let external = br#"["https://issuer.example","alice"]"#;
-        assert_eq!(
-            author_id_from_bytes(external).unwrap().canonical(),
-            std::str::from_utf8(external).unwrap()
-        );
-        for issuer in [
-            AuthorSubject::SYSTEM_ISSUER,
-            AuthorSubject::LOCAL_FIRST_ISSUER,
-            AuthorSubject::STATIC_BEARER_ISSUER,
-            AuthorSubject::ANONYMOUS_ISSUER,
-        ] {
-            let canonical = serde_json::to_vec(&(issuer, "caller")).unwrap();
-            assert!(author_id_from_bytes(&canonical).is_err(), "issuer {issuer}");
-        }
-    }
-
-    #[test]
-    fn public_open_config_requires_verified_self_signed_client_proofs() {
-        for issuer in [
-            AuthorSubject::SYSTEM_ISSUER,
-            AuthorSubject::LOCAL_FIRST_ISSUER,
-            AuthorSubject::STATIC_BEARER_ISSUER,
-            AuthorSubject::ANONYMOUS_ISSUER,
-        ] {
-            let author = if issuer == AuthorSubject::SYSTEM_ISSUER {
-                AuthorSubject::SYSTEM
-            } else {
-                AuthorSubject::from_canonical(&serde_json::to_string(&(issuer, "caller")).unwrap())
-                    .unwrap()
-            };
-            let bytes = postcard::to_allocvec(&WasmOpenDbConfig {
-                identity: WasmDbIdentity {
-                    node: NodeUuid::from_bytes([7; 16]),
-                    author,
-                },
-                row_id_seed: None,
-                history_complete: false,
-                initial_sync_flush_every: None,
-            })
-            .unwrap();
-            assert!(
-                postcard::from_bytes::<WasmOpenDbConfig>(&bytes).is_err(),
-                "raw open author must reject {issuer} without a proof"
-            );
-        }
-
-        let bytes = postcard::to_allocvec(&WasmOpenDbConfig {
-            identity: WasmDbIdentity {
-                node: NodeUuid::from_bytes([7; 16]),
-                author: AuthorSubject::authenticated("https://issuer.example", "alice").unwrap(),
-            },
-            row_id_seed: None,
-            history_complete: false,
-            initial_sync_flush_every: None,
-        })
-        .unwrap();
-        let external = postcard::from_bytes::<WasmOpenDbConfig>(&bytes).unwrap();
-        assert_eq!(
-            wasm_open_identity(&external, None).unwrap().author,
-            external.identity.author,
-            "external open identity remains unmodified"
-        );
-
-        for issuer in [
-            jazz::tools::identity::LOCAL_FIRST_ISSUER,
-            jazz::tools::identity::ANONYMOUS_ISSUER,
-        ] {
-            let token = jazz::tools::identity::mint_jazz_self_signed_token(
-                &[issuer.len() as u8; 32],
-                issuer,
-                "wasm-proof-app",
-                60,
-            )
-            .unwrap();
-            let verified =
-                jazz::tools::identity::verify_jazz_self_signed_proof(&token, "wasm-proof-app")
-                    .unwrap();
-            let claimed_author = serde_json::to_string(&(issuer, verified.user_id)).unwrap();
-            let config = WasmOpenDbConfig {
-                identity: WasmDbIdentity {
-                    node: NodeUuid::from_bytes([7; 16]),
-                    author: AuthorSubject::authenticated("https://issuer.example", "alice")
-                        .unwrap(),
-                },
-                row_id_seed: None,
-                history_complete: false,
-                initial_sync_flush_every: None,
-            };
-            let proof = WasmSelfSignedClientProof {
-                token,
-                app_id: "wasm-proof-app".to_owned(),
-                claimed_author: claimed_author.clone(),
-            };
-            assert_eq!(
-                wasm_open_identity(&config, Some(&proof))
-                    .unwrap()
-                    .author
-                    .canonical(),
-                claimed_author,
-                "verified {issuer} proof derives the exact author"
-            );
-        }
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    #[wasm_bindgen_test::wasm_bindgen_test]
     fn removed_propagate_option_does_not_select_local_only() {
         let value = js_sys::Object::new();
         js_sys::Reflect::set(&value, &JsValue::from_str("propagate"), &JsValue::FALSE)
@@ -4544,10 +3259,13 @@ mod dynamic_schema_view_tests {
             open_tx: Some(batch),
             owns_lifetime: false,
         });
-        block_on(view.mergeable_tx_ref(batch).insert_with_id(
+        block_on(view.mergeable_tx_ref(batch).insert(
             "items",
-            RowUuid::from_bytes([1; 16]),
             BTreeMap::from([("label".to_owned(), Value::String("kept".to_owned()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(RowUuid::from_bytes([1; 16])),
+                ..Default::default()
+            },
         ))
         .unwrap();
         let prepared = view.prepare_query(&view.table("items")).unwrap();
@@ -4565,13 +3283,16 @@ mod dynamic_schema_view_tests {
             open_tx: Some(exclusive),
             owns_lifetime: false,
         });
-        block_on(view.exclusive_tx_ref(exclusive).insert_with_id(
+        block_on(view.exclusive_tx_ref(exclusive).insert(
             "items",
-            RowUuid::from_bytes([2; 16]),
             BTreeMap::from([(
                 "label".to_owned(),
                 Value::String("exclusive-kept".to_owned()),
             )]),
+            jazz::db::InsertOptions {
+                row_id: Some(RowUuid::from_bytes([2; 16])),
+                ..Default::default()
+            },
         ))
         .unwrap();
         block_on(owner.commit_exclusive_handle(exclusive)).unwrap();
@@ -4592,7 +3313,7 @@ mod dynamic_schema_view_tests {
                 .begin_transaction(
                     bound.to_string(),
                     "exclusive".to_owned(),
-                    Some(alice.canonical().as_bytes().to_vec()),
+                    Some(alice.0.as_bytes().to_vec()),
                 )
                 .unwrap();
             let tx = binding.attach_exclusive_tx(bound.to_string()).unwrap();
@@ -4604,7 +3325,7 @@ mod dynamic_schema_view_tests {
                     .all_in_transaction_for_identity(
                         &query,
                         &tx,
-                        alice.canonical().as_bytes().to_vec(),
+                        alice.0.as_bytes().to_vec(),
                         JsValue::NULL
                     )
                     .is_ok(),
@@ -4624,7 +3345,7 @@ mod dynamic_schema_view_tests {
                 .all_in_transaction_for_identity(
                     &view_query,
                     &tx,
-                    alice.canonical().as_bytes().to_vec(),
+                    alice.0.as_bytes().to_vec(),
                     JsValue::NULL,
                 )
                 .is_ok());
@@ -4636,7 +3357,7 @@ mod dynamic_schema_view_tests {
                     .one_in_transaction_for_identity(
                         &view_query,
                         &tx,
-                        alice.canonical().as_bytes().to_vec(),
+                        alice.0.as_bytes().to_vec(),
                         JsValue::NULL,
                     )
                     .is_ok(),
@@ -4662,16 +3383,19 @@ mod dynamic_schema_view_tests {
                 .begin_transaction(
                     bound.to_string(),
                     "exclusive".to_owned(),
-                    Some(alice.canonical().as_bytes().to_vec()),
+                    Some(alice.0.as_bytes().to_vec()),
                 )
                 .unwrap();
-            block_on(other_owner.exclusive_tx_ref(bound).insert_with_id(
+            block_on(other_owner.exclusive_tx_ref(bound).insert(
                 "items",
-                RowUuid::from_bytes([3; 16]),
                 BTreeMap::from([(
                     "label".to_owned(),
                     Value::String("receiver-secret".to_owned()),
                 )]),
+                jazz::db::InsertOptions {
+                    row_id: Some(RowUuid::from_bytes([3; 16])),
+                    ..Default::default()
+                },
             ))
             .unwrap();
             let other_query = WasmPreparedQuery {
@@ -4689,21 +3413,21 @@ mod dynamic_schema_view_tests {
             assert_foreign(other_binding.all_in_transaction_for_identity(
                 &other_query,
                 &tx,
-                alice.canonical().as_bytes().to_vec(),
+                alice.0.as_bytes().to_vec(),
                 JsValue::NULL,
             ));
             assert_foreign(other_binding.one_in_transaction(&other_query, &tx, JsValue::NULL));
             assert_foreign(other_binding.one_in_transaction_for_identity(
                 &other_query,
                 &tx,
-                alice.canonical().as_bytes().to_vec(),
+                alice.0.as_bytes().to_vec(),
                 JsValue::NULL,
             ));
             let error = binding
                 .all_in_transaction_for_identity(
                     &query,
                     &tx,
-                    bob.canonical().as_bytes().to_vec(),
+                    bob.0.as_bytes().to_vec(),
                     JsValue::NULL,
                 )
                 .unwrap_err();

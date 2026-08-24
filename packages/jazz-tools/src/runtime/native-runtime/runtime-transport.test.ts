@@ -220,6 +220,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const write = {
       batchId: "00000000000070008000000000000007",
       payload: new Uint8Array(),
+      rowId: new Uint8Array(16),
       wait: () => (settled ? Promise.resolve() : new Promise<void>(() => {})),
       writeState: () => ({}),
     };
@@ -227,7 +228,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            insertWithIdEncoded: () => write,
+            insertEncoded: () => write,
             connectUpstream: () => transport,
             tick: () => undefined,
           }),
@@ -283,6 +284,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const write = {
       batchId: "00000000000070008000000000000007",
       payload: new Uint8Array(),
+      rowId: new Uint8Array(16),
       wait: () => (settled ? Promise.resolve() : new Promise<void>(() => {})),
       writeState: () => ({}),
       nextWriteStateChange: () => new Promise<void>(() => {}),
@@ -291,7 +293,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            insertWithIdEncoded: () => write,
+            insertEncoded: () => write,
             connectUpstream: () => transport,
             tick: () => undefined,
           }),
@@ -879,11 +881,11 @@ function fakeTx(overrides: Partial<TxForTest> = {}): TxForTest {
   return {
     commit: () => fakeWrite(),
     rollback: () => undefined,
-    insertWithIdEncoded: () => undefined,
+    insertEncoded: (_table, _cells, options) => options?.rowId ?? new Uint8Array(16),
     restoreEncoded: () => undefined,
     updateEncoded: () => undefined,
     upsertEncoded: () => undefined,
-    delete: () => undefined,
+    deleteEncoded: () => undefined,
     ...overrides,
   };
 }
@@ -892,6 +894,7 @@ function fakeWrite() {
   return {
     batchId: "00000000000070008000000000000001",
     payload: new Uint8Array(0),
+    rowId: new Uint8Array(16),
     wait: async () => undefined,
     writeState: () => ({}),
   };
@@ -900,29 +903,9 @@ function fakeWrite() {
 type TxForTest = {
   commit(): ReturnType<typeof fakeWrite>;
   rollback(): void;
-  insertWithIdEncoded(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    updatedAtMs?: number | null,
-  ): void;
-  restoreEncoded(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    updatedAtMs?: number | null,
-  ): void;
-  updateEncoded(
-    table: string,
-    rowId: Uint8Array,
-    patch: Uint8Array,
-    updatedAtMs?: number | null,
-  ): void;
-  upsertEncoded(
-    table: string,
-    rowId: Uint8Array,
-    cells: Uint8Array,
-    updatedAtMs?: number | null,
-  ): void;
-  delete(table: string, rowId: Uint8Array, updatedAtMs?: number | null): void;
+  insertEncoded(table: string, cells: Uint8Array, options?: { rowId?: Uint8Array }): Uint8Array;
+  restoreEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, options?: unknown): void;
+  updateEncoded(table: string, rowId: Uint8Array, patch: Uint8Array, options?: unknown): void;
+  upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, options?: unknown): void;
+  deleteEncoded(table: string, rowId: Uint8Array, options?: unknown): void;
 };

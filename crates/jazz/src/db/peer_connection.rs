@@ -1419,11 +1419,11 @@ where
                                     .await?;
                                 }
                                 let (subscription, settled_through) = match &repair.update {
-                                    SyncMessage::ViewUpdate {
+                                    SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                                         subscription,
                                         settled_through,
                                         ..
-                                    } => (*subscription, *settled_through),
+                                    }) => (*subscription, *settled_through),
                                     _ => {
                                         unreachable!("row-version repair must retain a view update")
                                     }
@@ -1440,11 +1440,11 @@ where
                                 )?;
                                 scope_view_cuts.insert(subscription, settled_through);
                             }
-                            message @ SyncMessage::ViewUpdate {
+                            message @ SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                                 subscription,
                                 settled_through,
                                 ..
-                            } => {
+                            }) => {
                                 scope_receipts.remove(&subscription);
                                 #[cfg(not(feature = "sync-autopsy"))]
                                 let _ = subscription;
@@ -1519,19 +1519,10 @@ where
                                     drop_peer_request(&self.node);
                                     continue;
                                 };
-                                let SyncMessage::ViewUpdate {
-                                    subscription,
-                                    settled_through,
-                                    peer_payload_inventory,
-                                    ..
-                                } = view.as_ref()
-                                else {
-                                    drop_peer_request(&self.node);
-                                    continue;
-                                };
-                                let subscription = *subscription;
-                                let settled_through = *settled_through;
-                                let authorization_progress = peer_payload_inventory
+                                let subscription = view.subscription;
+                                let settled_through = view.settled_through;
+                                let authorization_progress = view
+                                    .peer_payload_inventory
                                     .authorization_progress
                                     .unwrap_or_default();
                                 if clause_count == 0
@@ -1601,7 +1592,7 @@ where
                                 // receipt can be accepted.
                                 push_view_update_message_for_receiver(
                                     &mut pending_view_updates,
-                                    *view,
+                                    view.into_view_update(),
                                     authority_receipt_eligible,
                                 )?;
                                 scope_view_cuts.insert(subscription, settled_through);
@@ -1658,11 +1649,14 @@ where
                                         .map(|(_, cut, _)| *cut)
                                         .min()
                                 };
+                                let observed = self.node.borrow();
+                                let observed_claims = observed
+                                    .session_claim_revision(expected.link);
+                                let observed_policy = observed.active_catalogue_seq();
+                                drop(observed);
                                 // Context components are monotonic per admitted
-                                // connection. Claims and policy revisions belong
-                                // to the authority: do not compare their opaque
-                                // wire domains to this client's local revisions.
-                                // A receipt may advance one, but can never
+                                // connection. A receipt may advance an otherwise
+                                // opaque authority revision, but it can never
                                 // decrease a component already admitted.
                                 let applied_progress = request
                                     .applied_clauses
@@ -1676,10 +1670,16 @@ where
                                     || receipt.authorization_progress
                                         < expected.authorization_progress
                                     || receipt.settled_through.0 < expected.settled_through;
-                                expected.claims_revision =
-                                    expected.claims_revision.max(receipt.claims_revision);
-                                expected.policy_epoch =
-                                    expected.policy_epoch.max(receipt.policy_epoch);
+                                if observed_claims > expected.claims_revision {
+                                    expected.claims_revision = observed_claims;
+                                } else if observed_claims == 0 {
+                                    expected.claims_revision = receipt.claims_revision;
+                                }
+                                if observed_policy > expected.policy_epoch {
+                                    expected.policy_epoch = observed_policy;
+                                } else if observed_policy == 0 {
+                                    expected.policy_epoch = receipt.policy_epoch;
+                                }
                                 expected.authorization_progress =
                                     expected.authorization_progress.max(applied_progress);
                                 expected.settled_through =
@@ -2133,25 +2133,17 @@ where
                             opts,
                             ast,
                         } => {
-                            let registration_key = (shape_id, opts.read_view_key());
-                            if let Err(message) = validate_shape_ast_size(&ast) {
-                                shape_registrations.insert(
-                                    registration_key,
-                                    SubscriberShapeRegistration::RejectedUnsupportedCapability(
-                                        message.clone(),
-                                    ),
-                                );
-                                send_unsupported_shape_capability_rejection(
-                                    &mut *self.transport,
-                                    register_shape_rejection_subscription(
-                                        shape_id,
-                                        opts.read_view_key(),
-                                    ),
-                                    message,
-                                )
-                                .map_err(transport_error)?;
-                                continue;
+                            if let Err(message) =
+                                validate_shape_registration_size(&ast, &opts)
+                            {
+                                // No stable subscription key exists before the
+                                // read-view key is derived. Fail the peer link
+                                // rather than inventing unnegotiated wire
+                                // semantics or hashing attacker-sized options.
+                                return Err(Error::new(ErrorCode::Protocol, message));
                             }
+                            let read_view_key = opts.read_view_key();
+                            let registration_key = (shape_id, read_view_key);
                             if let Err(error) = ensure_supported_register_shape_options(
                                 &opts,
                                 *local_receiver,
@@ -2167,7 +2159,7 @@ where
                                     &mut *self.transport,
                                     register_shape_rejection_subscription(
                                         shape_id,
-                                        opts.read_view_key(),
+                                        read_view_key,
                                     ),
                                     error.message,
                                 )
@@ -2187,7 +2179,7 @@ where
                                             &mut *self.transport,
                                             register_shape_rejection_subscription(
                                                 shape_id,
-                                                opts.read_view_key(),
+                                                read_view_key,
                                             ),
                                             &error,
                                         )
@@ -2238,7 +2230,7 @@ where
                                         let subscription = SubscriptionKey {
                                             shape_id,
                                             binding_id: binding.binding_id(),
-                                            read_view: opts.read_view_key(),
+                                            read_view: read_view_key,
                                         };
                                         send_unsupported_shape_capability_rejection(
                                             &mut *self.transport,
@@ -2253,7 +2245,7 @@ where
                                             SubscriptionKey {
                                                 shape_id,
                                                 binding_id: binding.binding_id(),
-                                                read_view: opts.read_view_key(),
+                                                read_view: read_view_key,
                                             },
                                             &error,
                                         )
@@ -2279,7 +2271,7 @@ where
                                             &mut *self.transport,
                                             register_shape_rejection_subscription(
                                                 shape_id,
-                                                opts.read_view_key(),
+                                                read_view_key,
                                             ),
                                             detail.clone(),
                                         )
@@ -2519,7 +2511,7 @@ where
                                     read_view: upstream_opts.read_view_key(),
                                 });
                             let opening_pending = if !permissions_ready {
-                                Some(SyncMessage::ViewUpdate {
+                                Some(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                                     subscription,
                                     settled_through: self.node.borrow().committed_global_time(),
                                     reset_result_set: true,
@@ -2534,7 +2526,7 @@ where
                                     terminal_operations: Vec::new(),
                                     program_fact_adds: Vec::new(),
                                     program_fact_removes: Vec::new(),
-                                })
+                                }))
                             } else {
                                 None
                             };
@@ -3156,7 +3148,7 @@ fn serialized_sync_message_len(message: &SyncMessage) -> usize {
 
 fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
     match message {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through,
             reset_result_set,
@@ -3168,7 +3160,7 @@ fn view_update_parts_from_message(message: SyncMessage) -> ViewUpdateParts {
             terminal_operations,
             program_fact_adds,
             program_fact_removes,
-        } => ViewUpdateParts {
+        }) => ViewUpdateParts {
             subscription,
             settled_through,
             defer_settlement: false,
@@ -3205,11 +3197,11 @@ fn stage_initial_coverage_clear_for_update(
     latest: &LatestCoverageSubscriptions,
     clears: &mut BTreeSet<CoverageKey>,
 ) {
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         peer_payload_inventory,
         ..
-    } = update
+    }) = update
     else {
         return;
     };
@@ -3466,7 +3458,8 @@ where
                     key: scope.key.clone(),
                     clause_index: index as u16,
                     clause_count,
-                    view: Box::new(clause.view.clone()),
+                    view: crate::protocol::ViewUpdatePayload::from_view_update(clause.view.clone())
+                        .expect("authority scope clauses are view updates"),
                 })
                 .map_err(transport_error)?;
         }
@@ -3543,9 +3536,8 @@ where
         peer.declare_known_state(subscription, None);
         let update = {
             let mut node = node.lock().await;
-            peer.rehydrate_authorization_support_query_for_identity(
+            peer.rehydrate_query_for_subscription_with_opts(
                 &mut node,
-                identity,
                 subscription,
                 shape,
                 binding,
@@ -3553,10 +3545,16 @@ where
             )
             .await?
         };
-        let SyncMessage::ViewUpdate {
+        let Some(update) = update else {
+            transport
+                .send(SyncMessage::AuthorizationScopeUnavailable { request_id })
+                .map_err(transport_error)?;
+            return Ok(());
+        };
+        let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             settled_through: cut,
             ..
-        } = &update
+        }) = &update
         else {
             return Err(Error::new(
                 ErrorCode::Protocol,
@@ -3578,7 +3576,8 @@ where
                 key: scope.key.clone(),
                 clause_index: index as u16,
                 clause_count,
-                view: Box::new(update.clone()),
+                view: crate::protocol::ViewUpdatePayload::from_view_update(update.clone())
+                    .expect("scope hydration produces view updates"),
             })
             .map_err(transport_error)?;
         support_subscriptions.push(subscription);
@@ -3643,11 +3642,11 @@ fn authorization_scope_receipt_for_view<S>(
 where
     S: OrderedKvStorage,
 {
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
         ..
-    } = update
+    }) = update
     else {
         return None;
     };
@@ -3964,7 +3963,7 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
             "SubscribeRejected {} reason={reason:?}",
             summarize_subscription_key(*subscription)
         ),
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through,
             reset_result_set,
@@ -3976,7 +3975,7 @@ fn summarize_sync_message(message: &SyncMessage) -> String {
             program_fact_adds,
             program_fact_removes,
             terminal_operations,
-        } => format!(
+        }) => format!(
             "ViewUpdate {} settled={} reset={} bundles={} inventory={} adds={} removes={} fact_adds={} fact_removes={} terminal_ops={}",
             summarize_subscription_key(*subscription),
             settled_through.0,
@@ -4029,11 +4028,11 @@ where
 {
     send_catalogue_snapshot_if_needed(node, peer, transport)?;
     let mut message = message;
-    if let SyncMessage::ViewUpdate {
+    if let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         peer_payload_inventory,
         ..
-    } = &mut message
+    }) = &mut message
     {
         peer_payload_inventory
             .authorization_progress
@@ -4098,7 +4097,9 @@ where
 
 fn view_update_subscription(message: &SyncMessage) -> Option<SubscriptionKey> {
     match message {
-        SyncMessage::ViewUpdate { subscription, .. } => Some(*subscription),
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { subscription, .. }) => {
+            Some(*subscription)
+        }
         _ => None,
     }
 }
@@ -4108,11 +4109,11 @@ fn stamp_view_update_authorization_progress_from(
     source_subscription: SubscriptionKey,
     message: &mut SyncMessage,
 ) {
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         peer_payload_inventory,
         ..
-    } = message
+    }) = message
     else {
         return;
     };
@@ -4126,7 +4127,9 @@ fn stamp_view_update_authorization_progress_from(
 }
 
 fn retarget_view_update(mut message: SyncMessage, target: SubscriptionKey) -> SyncMessage {
-    if let SyncMessage::ViewUpdate { subscription, .. } = &mut message {
+    if let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { subscription, .. }) =
+        &mut message
+    {
         *subscription = target;
     }
     message
@@ -4275,7 +4278,7 @@ fn binding_values_in_param_order(shape: &ValidatedQuery, binding: &Binding) -> V
 /// nothing to ship to the subscriber this tick.
 pub(super) fn view_update_is_empty(message: &SyncMessage) -> bool {
     match message {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             reset_result_set,
             version_carriers,
             version_bundles,
@@ -4285,7 +4288,7 @@ pub(super) fn view_update_is_empty(message: &SyncMessage) -> bool {
             program_fact_adds,
             program_fact_removes,
             ..
-        } => {
+        }) => {
             !reset_result_set
                 && version_carriers.is_empty()
                 && version_bundles.is_empty()

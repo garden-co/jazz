@@ -111,11 +111,11 @@ function fakeTx(overrides: Partial<TxForTest> = {}): TxForTest {
   return {
     commit: () => fakeWrite(),
     rollback: () => undefined,
-    insertWithIdEncoded: () => undefined,
+    insertEncoded: (_table, _cells, options) => options?.rowId ?? new Uint8Array(16),
     restoreEncoded: () => undefined,
     updateEncoded: () => undefined,
     upsertEncoded: () => undefined,
-    delete: () => undefined,
+    deleteEncoded: () => undefined,
     ...overrides,
   };
 }
@@ -132,31 +132,34 @@ function fakeWrite() {
 type TxForTest = {
   commit(): ReturnType<typeof fakeWrite>;
   rollback(): void;
-  insertWithIdEncoded(
+  insertEncoded(
     table: string,
-    rowId: Uint8Array,
     cells: Uint8Array,
-    updatedAtMs?: number | null,
-  ): void;
+    options?: { rowId?: Uint8Array; branch?: unknown; updatedAtMs?: number },
+  ): Uint8Array;
   restoreEncoded(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
-    updatedAtMs?: number | null,
+    options?: { branch?: unknown; updatedAtMs?: number },
   ): void;
   updateEncoded(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
-    updatedAtMs?: number | null,
+    options?: { head?: unknown; base?: unknown; updatedAtMs?: number },
   ): void;
   upsertEncoded(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
-    updatedAtMs?: number | null,
+    options?: { branch?: unknown; updatedAtMs?: number },
   ): void;
-  delete(table: string, rowId: Uint8Array, updatedAtMs?: number | null): void;
+  deleteEncoded(
+    table: string,
+    rowId: Uint8Array,
+    options?: { head?: unknown; base?: unknown; updatedAtMs?: number },
+  ): void;
 };
 
 function uuidBytes(value: string): Uint8Array {
@@ -176,12 +179,9 @@ it("stages authenticated client mutations through the optimistic local core path
         fakeDb({
           all: () => encodeRows([]),
           allForIdentity: () => encodeRows([]),
-          insertWithIdEncoded: (table: string) => {
+          insertEncoded: (table: string, _cells: Uint8Array, options?: { rowId?: Uint8Array }) => {
             staged.push(table);
-            return fakeWrite();
-          },
-          insertWithIdEncodedForIdentity: () => {
-            throw new Error("ordinary client mutation must not use trusted serving");
+            return { ...fakeWrite(), rowId: options?.rowId ?? new Uint8Array(16) };
           },
           prepareQuery: () => ({}),
           tick: () => undefined,
@@ -227,7 +227,14 @@ it("preserves logical user columns that share names with native storage metadata
       openMemory: () =>
         fakeDb({
           all: () => encodeRows([]),
-          insertWithIdEncoded: () => fakeWrite(),
+          insertEncoded: (
+            _table: string,
+            _cells: Uint8Array,
+            options?: { rowId?: Uint8Array },
+          ) => ({
+            ...fakeWrite(),
+            rowId: options?.rowId ?? new Uint8Array(16),
+          }),
           prepareQuery: () => ({}),
           tick: () => undefined,
         }),
@@ -268,7 +275,10 @@ it("uses identity-aware core txs only on an explicit trusted-serving host", () =
           mergeableTxForIdentity: (_openBatchId: string, author: Uint8Array) => {
             authors.push(new TextDecoder().decode(author));
             return fakeTx({
-              insertWithIdEncoded: (table: string) => staged.push(table),
+              insertEncoded: (table, _cells, options) => {
+                staged.push(table);
+                return options?.rowId ?? new Uint8Array(16);
+              },
             });
           },
           prepareQuery: () => ({}),
@@ -433,7 +443,12 @@ it("rejects a duplicate live OpenBatchId without replacing its staged transactio
           mergeableTx: () => {
             const staged: string[] = [];
             stagedTransactions.push(staged);
-            return fakeTx({ insertWithIdEncoded: (table: string) => staged.push(table) });
+            return fakeTx({
+              insertEncoded: (table, _cells, options) => {
+                staged.push(table);
+                return options?.rowId ?? new Uint8Array(16);
+              },
+            });
           },
         }),
       openBrowser: async () => {
@@ -528,7 +543,7 @@ it("emits an onMutationError event for an unawaited rejected write", async () =>
     {
       openMemory: () =>
         fakeDb({
-          insertWithIdEncoded: () => write,
+          insertEncoded: () => write,
           onMutationError: (callback: (event: MutationErrorEvent) => void) => {
             mutationErrorCallback = callback;
           },
@@ -604,7 +619,7 @@ it("does not emit onMutationError when an active wait handles the rejection", as
     {
       openMemory: () =>
         fakeDb({
-          insertWithIdEncoded: () => write,
+          insertEncoded: () => write,
           onMutationError: () => undefined,
         }),
     } as never,
@@ -648,15 +663,18 @@ it("passes caller-supplied updatedAt into staged mergeable transaction writes", 
           all: () => encodeRows([]),
           mergeableTx: () =>
             fakeTx({
-              insertWithIdEncoded: (_table, _rowId, _cells, updatedAtMs) =>
-                staged.push({ op: "insert", updatedAtMs }),
-              updateEncoded: (_table, _rowId, _patch, updatedAtMs) =>
-                staged.push({ op: "update", updatedAtMs }),
-              upsertEncoded: (_table, _rowId, _cells, updatedAtMs) =>
-                staged.push({ op: "upsert", updatedAtMs }),
-              restoreEncoded: (_table, _rowId, _cells, updatedAtMs) =>
-                staged.push({ op: "restore", updatedAtMs }),
-              delete: (_table, _rowId, updatedAtMs) => staged.push({ op: "delete", updatedAtMs }),
+              insertEncoded: (_table, _cells, options) => {
+                staged.push({ op: "insert", updatedAtMs: options?.updatedAtMs });
+                return options?.rowId ?? new Uint8Array(16);
+              },
+              updateEncoded: (_table, _rowId, _patch, options) =>
+                staged.push({ op: "update", updatedAtMs: options?.updatedAtMs }),
+              upsertEncoded: (_table, _rowId, _cells, options) =>
+                staged.push({ op: "upsert", updatedAtMs: options?.updatedAtMs }),
+              restoreEncoded: (_table, _rowId, _cells, options) =>
+                staged.push({ op: "restore", updatedAtMs: options?.updatedAtMs }),
+              deleteEncoded: (_table, _rowId, options) =>
+                staged.push({ op: "delete", updatedAtMs: options?.updatedAtMs }),
             }),
           prepareQuery: () => ({}),
           tick: () => undefined,

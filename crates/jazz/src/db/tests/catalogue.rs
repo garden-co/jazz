@@ -42,8 +42,12 @@ fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
     let evolved = evolved_owner_write_schema();
     let author = AuthorSubject::for_test_bytes([0xa1; 16]);
     let db = open_db(0x5d, author, &base);
-    db.insert("todos", cells("before evolution", false, author))
-        .unwrap();
+    db.insert(
+        "todos",
+        cells("before evolution", false, author),
+        Default::default(),
+    )
+    .unwrap();
 
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(
@@ -111,8 +115,12 @@ fn live_subscription_rebuilds_after_shared_current_descriptor_widens() {
         SubscriptionEvent::Delta { reset: true, .. }
     ));
 
-    db.insert("todos", cells("after evolution", true, author))
-        .unwrap();
+    db.insert(
+        "todos",
+        cells("after evolution", true, author),
+        Default::default(),
+    )
+    .unwrap();
     let (added, updated, removed) = delta_rows(
         subscription
             .try_next_event()
@@ -163,6 +171,7 @@ fn old_enum_subscription_rebuilds_across_registry_and_layout_growth() {
                 ("title".to_owned(), Value::String("before".to_owned())),
                 ("status".to_owned(), empty_payload_case(0)),
             ]),
+            Default::default(),
         )
         .unwrap();
     let query = Query::from("items");

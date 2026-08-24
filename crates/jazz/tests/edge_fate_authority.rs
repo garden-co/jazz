@@ -206,6 +206,7 @@ fn edge_shell_does_not_report_global_or_serve_global_before_core_ack() {
     let write = block_on(alice.insert(
         "todos",
         BTreeMap::from([("title".to_owned(), Value::String("edge only".to_owned()))]),
+        Default::default(),
     ))
     .unwrap();
     pump_client_edge(&alice, &alice_wire, &mut edge, alice_session);
@@ -271,6 +272,7 @@ fn core_shell_client_upload_still_reports_global_immediately() {
     let write = block_on(alice.insert(
         "todos",
         BTreeMap::from([("title".to_owned(), Value::String("core global".to_owned()))]),
+        Default::default(),
     ))
     .unwrap();
     pump_client_edge(&alice, &alice_wire, &mut core, alice_session);
@@ -326,6 +328,7 @@ fn core_authority_rejects_omitted_insert_after_read_policy_closes_table() {
             ("title".to_owned(), Value::String("forged write".to_owned())),
             ("completed".to_owned(), Value::Bool(false)),
         ]),
+        Default::default(),
     ))
     .unwrap();
     pump_client_edge(&alice, &wire, &mut core, session);
@@ -360,14 +363,17 @@ fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
     // Keep every transaction identity distinct and the LWW order explicit:
     // TxId includes each client's already-distinct node id plus this HLC time.
     let row = RowUuid::from_bytes([0xd2; 16]);
-    block_on(alice.insert_with_id_at_ms(
+    block_on(alice.insert(
         "todos",
-        row,
         BTreeMap::from([
             ("title".to_owned(), Value::String("base".to_owned())),
             ("completed".to_owned(), Value::Bool(false)),
         ]),
-        100,
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            updated_at_ms: Some(100),
+            ..Default::default()
+        },
     ))
     .unwrap();
     pump_client_edge(&alice, &alice_wire, &mut core, alice_session);
@@ -382,28 +388,42 @@ fn explicit_unchanged_partial_write_survives_sync_and_wins_lww() {
 
     // Neither client is pumped after these writes until both heads exist, so
     // they remain concurrent children of the shared t=100 base.
-    block_on(alice.update_at_ms(
+    block_on(alice.update(
         "todos",
         row,
         BTreeMap::from([
             ("title".to_owned(), Value::String("alice-change".to_owned())),
             ("completed".to_owned(), Value::Bool(true)),
         ]),
-        200,
+        jazz::db::UpdateOptions {
+            updated_at_ms: Some(200),
+            ..Default::default()
+        },
     ))
     .unwrap();
-    let explicit_write = block_on(bob.update_at_ms(
+    let explicit_write = block_on(bob.update(
         "todos",
         row,
         BTreeMap::from([("title".to_owned(), Value::String("base".to_owned()))]),
-        300,
+        jazz::db::UpdateOptions {
+            updated_at_ms: Some(300),
+            ..Default::default()
+        },
     ))
     .unwrap();
     // An empty partial update is not a content mutation. It reuses the current
     // write identity instead of emitting a newer legacy "all materialized cells
     // authored" version that could clobber Alice's cells during reconciliation.
-    let no_op = block_on(bob.update_at_ms("todos", row, BTreeMap::new(), 400))
-        .expect("empty patch remains a safe no-op");
+    let no_op = block_on(bob.update(
+        "todos",
+        row,
+        BTreeMap::new(),
+        jazz::db::UpdateOptions {
+            updated_at_ms: Some(400),
+            ..Default::default()
+        },
+    ))
+    .expect("empty patch remains a safe no-op");
     assert_eq!(no_op.mergeable_tx_id(), explicit_write.mergeable_tx_id());
 
     pump_client_edge(&alice, &alice_wire, &mut core, alice_session);

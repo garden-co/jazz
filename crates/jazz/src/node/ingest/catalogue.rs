@@ -246,7 +246,7 @@ where
                         .await?;
                     self.drain_parked_commit_units().await
                 }
-                SyncMessage::ViewUpdate {
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through,
                     reset_result_set,
@@ -258,7 +258,7 @@ where
                     terminal_operations,
                     program_fact_adds,
                     program_fact_removes,
-                } => {
+                }) => {
                     self.apply_view_update(ViewUpdateParts {
                         subscription,
                         settled_through,
@@ -281,10 +281,10 @@ where
                 SyncMessage::RegisterShape {
                     shape_id,
                     ast,
-                    opts: _,
+                    opts,
                 } => {
-                    validate_shape_ast_size(&ast).map_err(|_| {
-                        Error::UnsupportedSyncMessage("shape AST exceeds byte limit")
+                    validate_shape_registration_size(&ast, &opts).map_err(|_| {
+                        Error::UnsupportedSyncMessage("shape registration exceeds byte limit")
                     })?;
                     self.register_shape(shape_id, ast)?;
                     Ok(PublicationOutcome::settled(Vec::new()))

@@ -199,7 +199,15 @@ fn commit_client_mergeable(
     cells: BTreeMap<String, Value>,
 ) -> SyncMessage {
     let tx = jazz::db::block_on(client.db.mergeable_tx()).unwrap();
-    jazz::db::block_on(tx.insert_with_id(table, row, cells)).unwrap();
+    jazz::db::block_on(tx.insert(
+        table,
+        cells,
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
+    ))
+    .unwrap();
     jazz::db::block_on(tx.commit()).unwrap();
     jazz::db::block_on(client.db.tick()).unwrap();
     client

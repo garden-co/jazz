@@ -225,7 +225,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(owner_db.read(&todos)?.len(), 0);
 
     let row = RowUuid::from_bytes([0x33; 16]);
-    block_on(owner_db.insert_with_id("todos", row, todo_cells("private", false, owner)))?;
+    block_on(owner_db.insert(
+        "todos",
+        todo_cells("private", false, owner),
+        jazz::db::InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
+    ))?;
 
     assert_eq!(owner_db.can_read("todos", row)?, PermissionAdvice::Unknown);
     assert_eq!(
@@ -257,10 +264,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         todo_cells("written by core for user", false, attributed_user),
     )?;
 
-    let client_err = match block_on(owner_db.insert_attributed(
-        other,
+    let client_err = match block_on(owner_db.insert(
         "todos",
         todo_cells("forged", false, other),
+        jazz::db::InsertOptions {
+            identity: jazz::db::WriteIdentity::Attribution(other),
+            ..Default::default()
+        },
     )) {
         Ok(_) => panic!("clients cannot attribute writes to another user"),
         Err(err) => err,
@@ -273,10 +283,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let forbidden_row = RowUuid::from_bytes([0x44; 16]);
-    let forbidden = block_on(other_db.insert_with_id(
+    let forbidden = block_on(other_db.insert(
         "todos",
-        forbidden_row,
         todo_cells("forbidden at authority", false, owner),
+        jazz::db::InsertOptions {
+            row_id: Some(forbidden_row),
+            ..Default::default()
+        },
     ))?;
     assert_eq!(
         block_on(forbidden.write_state())?,

@@ -98,19 +98,19 @@ fn query_subscription_result_sets_track_bindings_and_rehydrate() {
         .unwrap();
     assert!(matches!(
         removed_delta,
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             result_member_adds,
             result_member_removes,
             ..
-        } if result_member_adds.is_empty() && result_member_removes.is_empty()
+        }) if result_member_adds.is_empty() && result_member_removes.is_empty()
     ));
 
     let reset = peer
         .rehydrate_query(&mut server, &shape, &alice_binding)
         .unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set, ..
-    } = &reset
+    }) = &reset
     else {
         panic!("expected view update");
     };
@@ -288,9 +288,9 @@ fn query_subscription_ships_provenance_closure_for_local_evaluation() {
     register_shape_binding_for_receiver(&mut reader, &shape, &binding);
     let mut peer = PeerState::new();
     let update = peer.rehydrate_query(&mut server, &shape, &binding).unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds, ..
-    } = &update
+    }) = &update
     else {
         panic!("expected view update");
     };

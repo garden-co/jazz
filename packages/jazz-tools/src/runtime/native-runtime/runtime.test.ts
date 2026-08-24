@@ -557,7 +557,7 @@ describe("NativeRuntimeAdapter server transport", () => {
               calls.push(["update", table, rowId, patch]);
               return write;
             },
-            delete: (table: string, rowId: Uint8Array) => {
+            deleteEncoded: (table: string, rowId: Uint8Array) => {
               calls.push(["delete", table, rowId]);
               return write;
             },
@@ -612,8 +612,12 @@ describe("NativeRuntimeAdapter server transport", () => {
                 },
               ]),
             prepareQuery: () => ({}),
-            insertWithIdEncoded: (_table: string, rowId: Uint8Array) => {
-              insertedRowIds.push(rowId);
+            insertEncoded: (
+              _table: string,
+              _cells: Uint8Array,
+              options?: { rowId?: Uint8Array },
+            ) => {
+              insertedRowIds.push(options?.rowId ?? new Uint8Array(16));
               return write;
             },
             tick: () => undefined,
@@ -661,11 +665,11 @@ describe("NativeRuntimeAdapter server transport", () => {
       {
         openMemory: () =>
           fakeDb({
-            insertWithIdEncodedInBranch: (...args: unknown[]) => {
+            insertEncoded: (...args: unknown[]) => {
               calls.push(["insert", ...args]);
               return fakeWrite();
             },
-            updateEncodedInBranchView: (...args: unknown[]) => {
+            updateEncoded: (...args: unknown[]) => {
               calls.push(["update", ...args]);
               return fakeWrite();
             },
@@ -697,9 +701,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     expect(calls[0]?.[0]).toBe("insert");
-    expect(calls[0]?.at(-1)).toEqual(head);
+    expect(calls[0]?.at(-1)).toMatchObject({ branch: head });
     expect(calls[1]?.[0]).toBe("update");
-    expect(calls[1]?.slice(-2)).toEqual([head, base]);
+    expect(calls[1]?.at(-1)).toMatchObject({ head, base });
   });
 
   it("runs scheduled core ticks before post-wait edge reads", async () => {
@@ -742,7 +746,7 @@ describe("NativeRuntimeAdapter server transport", () => {
               ];
             },
           }),
-          insertWithIdEncoded: () => {
+          insertEncoded: () => {
             schedulerCallback?.("deferred");
             return fakeWrite();
           },
@@ -6208,11 +6212,11 @@ function fakeTx(overrides: Partial<TxForTest> = {}): TxForTest {
   return {
     commit: () => fakeWrite(),
     rollback: () => undefined,
-    insertWithIdEncoded: () => undefined,
+    insertEncoded: (_table, _cells, options) => options?.rowId ?? new Uint8Array(16),
     restoreEncoded: () => undefined,
     updateEncoded: () => undefined,
     upsertEncoded: () => undefined,
-    delete: () => undefined,
+    deleteEncoded: () => undefined,
     ...overrides,
   };
 }
@@ -6229,31 +6233,34 @@ function fakeWrite() {
 type TxForTest = {
   commit(): ReturnType<typeof fakeWrite>;
   rollback(): void;
-  insertWithIdEncoded(
+  insertEncoded(
     table: string,
-    rowId: Uint8Array,
     cells: Uint8Array,
-    updatedAtMs?: number | null,
-  ): void;
+    options?: { rowId?: Uint8Array; branch?: unknown; updatedAtMs?: number },
+  ): Uint8Array;
   restoreEncoded(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
-    updatedAtMs?: number | null,
+    options?: { branch?: unknown; updatedAtMs?: number },
   ): void;
   updateEncoded(
     table: string,
     rowId: Uint8Array,
     patch: Uint8Array,
-    updatedAtMs?: number | null,
+    options?: { head?: unknown; base?: unknown; updatedAtMs?: number },
   ): void;
   upsertEncoded(
     table: string,
     rowId: Uint8Array,
     cells: Uint8Array,
-    updatedAtMs?: number | null,
+    options?: { branch?: unknown; updatedAtMs?: number },
   ): void;
-  delete(table: string, rowId: Uint8Array, updatedAtMs?: number | null): void;
+  deleteEncoded(
+    table: string,
+    rowId: Uint8Array,
+    options?: { head?: unknown; base?: unknown; updatedAtMs?: number },
+  ): void;
 };
 
 function uuidBytes(value: string): Uint8Array {

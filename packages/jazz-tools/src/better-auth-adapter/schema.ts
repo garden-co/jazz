@@ -130,6 +130,12 @@ function formatObjectKey(key: string): string {
   return JS_IDENTIFIER_PATTERN.test(key) ? key : JSON.stringify(key);
 }
 
+function formatPropertyAccess(objectName: string, key: string): string {
+  return JS_IDENTIFIER_PATTERN.test(key)
+    ? `${objectName}.${key}`
+    : `${objectName}[${formatStringLiteral(key)}]`;
+}
+
 function withOptionalSuffix(expression: string, field: DBFieldAttribute): string {
   return field.required === false ? `${expression}.optional()` : expression;
 }
@@ -333,6 +339,7 @@ export function buildJazzSchemaSourceText(args: {
 }): string {
   const { tables, getModelName, getFieldName } = args;
   const blocks: string[] = [];
+  const permissionsBlocks: string[] = [];
 
   for (const [modelName, model] of Object.entries(tables)) {
     const tableName = getModelName(modelName);
@@ -359,6 +366,16 @@ export function buildJazzSchemaSourceText(args: {
 
     lines.push("  }),");
     blocks.push(lines.join("\n"));
+
+    const policy = formatPropertyAccess("policy", tableName);
+    permissionsBlocks.push(
+      [
+        `  ${policy}.allowRead.never();`,
+        `  ${policy}.allowInsert.never();`,
+        `  ${policy}.allowUpdate.never();`,
+        `  ${policy}.allowDelete.never();`,
+      ].join("\n"),
+    );
   }
 
   return [
@@ -371,6 +388,10 @@ export function buildJazzSchemaSourceText(args: {
     "type AppSchema = s.Schema<typeof schema>;",
     "export const app: s.App<AppSchema> = s.defineApp(schema);",
     "export const wasmSchema = app.wasmSchema;",
+    "",
+    "export const permissions = s.definePermissions(app, ({ policy }) => {",
+    ...permissionsBlocks.flatMap((block, index) => (index === 0 ? [block] : ["", block])),
+    "});",
     "",
   ].join("\n");
 }

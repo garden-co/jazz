@@ -112,7 +112,7 @@ fn filtered_cells(index: usize) -> BTreeMap<String, Value> {
 fn seed_documents(db: &CoreDb, count: usize) {
     for index in 0..count {
         let write = db
-            .insert("documents", cells(index))
+            .insert("documents", cells(index), Default::default())
             .expect("seed core benchmark row");
         block_on(write.wait(DurabilityTier::Local)).expect("seed row should be local");
     }
@@ -121,7 +121,7 @@ fn seed_documents(db: &CoreDb, count: usize) {
 fn seed_filtered_documents(db: &CoreDb, count: usize) {
     for index in 0..count {
         let write = db
-            .insert("documents", filtered_cells(index))
+            .insert("documents", filtered_cells(index), Default::default())
             .expect("seed core benchmark row");
         block_on(write.wait(DurabilityTier::Local)).expect("seed row should be local");
     }
@@ -183,7 +183,7 @@ fn single_subscription_latency(c: &mut Criterion) {
 
             b.iter(|| {
                 next += 1;
-                db.insert("documents", cells(next))
+                db.insert("documents", cells(next), Default::default())
                     .expect("core subscribed insert should succeed");
                 assert_eq!(read_added_len(block_on(subscription.next_event())), 1);
             });
@@ -219,7 +219,7 @@ fn fanout_latency(c: &mut Criterion) {
 
                 b.iter(|| {
                     next += 1;
-                    db.insert("documents", cells(next))
+                    db.insert("documents", cells(next), Default::default())
                         .expect("core fanout insert should succeed");
 
                     let notified = subscriptions
@@ -285,7 +285,7 @@ fn filtered_subscription_latency(c: &mut Criterion) {
 
                 b.iter(|| {
                     next += 2;
-                    db.insert("documents", filtered_cells(next))
+                    db.insert("documents", filtered_cells(next), Default::default())
                         .expect("core filtered insert should succeed");
                     assert_eq!(read_added_len(block_on(subscription.next_event())), 1);
                 });
@@ -321,7 +321,7 @@ fn batch_insert_subscription_latency(c: &mut Criterion) {
                         .expect("core batch transaction should open");
                     for _ in 0..batch_size {
                         next += 2;
-                        tx.insert("documents", filtered_cells(next))
+                        tx.insert("documents", filtered_cells(next), Default::default())
                             .expect("core batch insert should stage");
                     }
                     tx.commit().expect("core batch insert should commit");

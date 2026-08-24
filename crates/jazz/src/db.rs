@@ -57,7 +57,7 @@ use crate::protocol::{
     SubscriptionKey, SyncMessage, TableLens,
 };
 use crate::protocol_limits::{
-    validate_fetch_row_versions, validate_known_state_declaration, validate_shape_ast_size,
+    validate_fetch_row_versions, validate_known_state_declaration, validate_shape_registration_size,
 };
 use crate::query::{
     Binding, BindingId, Operand, Predicate, Query, QueryError, RelationQuery, ShapeId,
@@ -2068,7 +2068,7 @@ fn subscriber_inbound_message_is_authority_only(
         SyncMessage::FateUpdate { .. }
             | SyncMessage::SubscribeRejected { .. }
             | SyncMessage::CatalogueAck(_)
-            | SyncMessage::ViewUpdate { .. }
+            | SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. })
             | SyncMessage::RowVersionPayloads { .. }
             | SyncMessage::CatalogueSnapshot(_)
             | SyncMessage::PermissionAdviceResponse { .. }
@@ -2090,6 +2090,140 @@ fn subscriber_permission_subject(ingest: CommitUnitIngestContext) -> AuthorSubje
 /// Row cells supplied to write methods.
 pub type RowCells = BTreeMap<String, Value>;
 
+/// Identity used to author and authorize a standalone write.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WriteIdentity {
+    /// Use the identity that opened the database.
+    #[default]
+    Database,
+    /// Author and authorize the write as this trusted session identity.
+    Session(AuthorSubject),
+    /// Attribute provenance while retaining the database identity as policy subject.
+    /// Client databases reject attribution to a different author.
+    Attribution(AuthorSubject),
+}
+
+/// Exact branch selected by an insert, upsert, or restore.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum ExactWriteTarget {
+    /// Write to the database's current root branch.
+    #[default]
+    Root,
+    /// Write to one exact branch key.
+    Branch(BranchSelector),
+}
+
+impl ExactWriteTarget {
+    fn branch(&self) -> BranchSelector {
+        match self {
+            Self::Root => BranchSelector::default(),
+            Self::Branch(branch) => branch.clone(),
+        }
+    }
+}
+
+/// Root or head-over-base view selected by an update or delete.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum WriteTarget {
+    /// Write to the database's current root branch.
+    #[default]
+    Root,
+    /// Write through a branch view, materializing inherited state in `head`.
+    BranchView {
+        /// Exact branch receiving the local write.
+        head: BranchSelector,
+        /// Optional inherited base view visible below `head`.
+        base: Option<BranchViewBase>,
+    },
+}
+
+/// Options for [`Db::insert`] and mergeable transaction inserts.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct InsertOptions {
+    /// Caller-supplied row id, or a generated UUIDv7 row id when omitted.
+    pub row_id: Option<RowUuid>,
+    /// Standalone-write identity. Transactions use the identity chosen when opened.
+    pub identity: WriteIdentity,
+    /// Exact branch receiving the row.
+    pub target: ExactWriteTarget,
+    /// Explicit provenance timestamp, or the database clock when omitted.
+    pub updated_at_ms: Option<u64>,
+}
+
+/// Options for [`Db::update`] and mergeable transaction updates.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UpdateOptions {
+    /// Standalone-write identity. Transactions use the identity chosen when opened.
+    pub identity: WriteIdentity,
+    /// Root or branch view through which the patch is applied.
+    pub target: WriteTarget,
+    /// Explicit provenance timestamp, or the database clock when omitted.
+    pub updated_at_ms: Option<u64>,
+}
+
+/// Options for [`Db::upsert`] and mergeable transaction upserts.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UpsertOptions {
+    /// Standalone-write identity. Transactions use the identity chosen when opened.
+    pub identity: WriteIdentity,
+    /// Exact branch receiving the insert or update.
+    pub target: ExactWriteTarget,
+    /// Explicit provenance timestamp, or the database clock when omitted.
+    pub updated_at_ms: Option<u64>,
+}
+
+/// Options for [`Db::delete`] and mergeable transaction deletes.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DeleteOptions {
+    /// Standalone-write identity. Transactions use the identity chosen when opened.
+    pub identity: WriteIdentity,
+    /// Root or branch view through which the row is deleted.
+    pub target: WriteTarget,
+    /// Explicit provenance timestamp, or the database clock when omitted.
+    pub updated_at_ms: Option<u64>,
+}
+
+/// Options for [`Db::restore`] and mergeable transaction restores.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RestoreOptions {
+    /// Standalone-write identity. Transactions use the identity chosen when opened.
+    pub identity: WriteIdentity,
+    /// Exact branch whose deletion register is restored.
+    pub target: ExactWriteTarget,
+    /// Explicit provenance timestamp, or the database clock when omitted.
+    pub updated_at_ms: Option<u64>,
+}
+
+fn ensure_transaction_identity(identity: WriteIdentity) -> Result<(), Error> {
+    if identity == WriteIdentity::Database {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorCode::Schema,
+        "transaction identity is selected when the transaction is opened",
+    ))
+}
+
+fn ensure_exclusive_target(target: &ExactWriteTarget) -> Result<(), Error> {
+    if *target != ExactWriteTarget::Root {
+        return Err(Error::new(
+            ErrorCode::Schema,
+            "exclusive transactions do not support branch writes",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_exclusive_view_target(target: &WriteTarget) -> Result<(), Error> {
+    if *target != WriteTarget::Root {
+        return Err(Error::new(
+            ErrorCode::Schema,
+            "exclusive transactions do not support branch writes",
+        ));
+    }
+    Ok(())
+}
+
 /// Build [`RowCells`] with bare identifier column names.
 ///
 /// Keys are converted to column names with `stringify!`, and values are
@@ -2106,6 +2240,7 @@ pub type RowCells = BTreeMap<String, Value>;
 ///         title: "Ship it",
 ///         done: false,
 ///     },
+///     Default::default(),
 /// ))?;
 /// block_on(write.wait(DurabilityTier::Local))?;
 ///
@@ -2142,127 +2277,168 @@ where
     /// The id of the already-open transaction.
     fn tx_id(&self) -> OpenTransactionId;
 
-    /// Stage an insert with a generated row id.
-    async fn insert(&self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
-        let row = self.db().row_id_source.borrow_mut().next_row_id();
-        self.insert_with_id(table, row, cells).await?;
+    /// Stage one insert. Transaction identity is fixed when the transaction opens.
+    async fn insert(
+        &self,
+        table: &str,
+        cells: RowCells,
+        options: InsertOptions,
+    ) -> Result<RowUuid, Error> {
+        ensure_transaction_identity(options.identity)?;
+        let row = options
+            .row_id
+            .unwrap_or_else(|| self.db().row_id_source.borrow_mut().next_row_id());
+        match options.target {
+            ExactWriteTarget::Root => {
+                self.db()
+                    .stage_mergeable_insert(self.tx_id(), table, row, cells, options.updated_at_ms)
+                    .await?;
+            }
+            ExactWriteTarget::Branch(branch) => {
+                self.db()
+                    .stage_mergeable_insert_in_branch(
+                        self.tx_id(),
+                        table,
+                        branch,
+                        row,
+                        cells,
+                        options.updated_at_ms,
+                    )
+                    .await?;
+            }
+        }
         Ok(row)
     }
 
-    /// Stage an insert with a caller-supplied row id.
-    async fn insert_with_id(
+    /// Stage one update; omitted fields keep the transaction-local value.
+    async fn update(
         &self,
         table: &str,
-        row: RowUuid,
-        cells: RowCells,
-    ) -> Result<(), Error> {
-        self.insert_with_id_at_ms_option(table, row, cells, None)
-            .await
-    }
-
-    /// Stage an insert in one exact branch-local row.
-    async fn insert_with_id_in_branch(
-        &self,
-        table: &str,
-        branch: BranchSelector,
-        row: RowUuid,
-        cells: RowCells,
-    ) -> Result<(), Error> {
-        self.db()
-            .stage_mergeable_insert_in_branch(self.tx_id(), table, branch, row, cells, None)
-            .await
-    }
-
-    /// Stage an insert with a caller-supplied row id and explicit millisecond provenance time.
-    async fn insert_with_id_at_ms(
-        &self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: u64,
-    ) -> Result<(), Error> {
-        self.insert_with_id_at_ms_option(table, row, cells, Some(now_ms))
-            .await
-    }
-
-    /// Stage an update; omitted fields keep the transaction-local value.
-    async fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
-        self.update_at_ms_option(table, row, patch, None).await
-    }
-
-    /// Stage an update through a head-over-base branch view.
-    async fn update_in_branch_view(
-        &self,
-        table: &str,
-        head: BranchSelector,
-        base: Option<BranchViewBase>,
         row: RowUuid,
         patch: RowCells,
+        options: UpdateOptions,
     ) -> Result<(), Error> {
-        self.db()
-            .stage_mergeable_update_in_branch_view(
-                self.tx_id(),
-                table,
-                head,
-                base,
-                row,
-                patch,
-                None,
+        ensure_transaction_identity(options.identity)?;
+        match options.target {
+            WriteTarget::Root => {
+                self.db()
+                    .stage_mergeable_update(self.tx_id(), table, row, patch, options.updated_at_ms)
+                    .await
+            }
+            WriteTarget::BranchView { head, base } => {
+                self.db()
+                    .stage_mergeable_update_in_branch_view(
+                        self.tx_id(),
+                        table,
+                        head,
+                        base,
+                        row,
+                        patch,
+                        options.updated_at_ms,
+                    )
+                    .await
+            }
+        }
+    }
+
+    /// Stage one upsert.
+    async fn upsert(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+        options: UpsertOptions,
+    ) -> Result<(), Error> {
+        ensure_transaction_identity(options.identity)?;
+        match options.target {
+            ExactWriteTarget::Root => {
+                if self.read(table, row).await?.is_some() {
+                    self.db()
+                        .stage_mergeable_update(
+                            self.tx_id(),
+                            table,
+                            row,
+                            cells,
+                            options.updated_at_ms,
+                        )
+                        .await
+                } else {
+                    self.db()
+                        .stage_mergeable_insert(
+                            self.tx_id(),
+                            table,
+                            row,
+                            cells,
+                            options.updated_at_ms,
+                        )
+                        .await
+                }
+            }
+            ExactWriteTarget::Branch(_) => Err(Error::new(
+                ErrorCode::Schema,
+                "branch upserts are not supported inside transactions",
+            )),
+        }
+    }
+
+    /// Stage one soft delete.
+    async fn delete(&self, table: &str, row: RowUuid, options: DeleteOptions) -> Result<(), Error> {
+        ensure_transaction_identity(options.identity)?;
+        match options.target {
+            WriteTarget::Root => {
+                self.db()
+                    .stage_mergeable_delete(self.tx_id(), table, row, options.updated_at_ms)
+                    .await
+            }
+            WriteTarget::BranchView { head, base } => {
+                self.db()
+                    .stage_mergeable_delete_in_branch_view(
+                        self.tx_id(),
+                        table,
+                        head,
+                        base,
+                        row,
+                        options.updated_at_ms,
+                    )
+                    .await
+            }
+        }
+    }
+
+    /// Stage one restore, optionally replacing row content.
+    async fn restore(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: Option<RowCells>,
+        options: RestoreOptions,
+    ) -> Result<(), Error> {
+        ensure_transaction_identity(options.identity)?;
+        let cells = cells.ok_or_else(|| {
+            Error::new(
+                ErrorCode::Schema,
+                "transaction restores currently require replacement cells",
             )
-            .await
-    }
-
-    /// Stage an update with an explicit millisecond provenance time.
-    async fn update_at_ms(
-        &self,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-        now_ms: u64,
-    ) -> Result<(), Error> {
-        self.update_at_ms_option(table, row, patch, Some(now_ms))
-            .await
-    }
-
-    /// Stage a soft delete.
-    async fn delete(&self, table: &str, row: RowUuid) -> Result<(), Error> {
-        self.delete_at_ms_option(table, row, None).await
-    }
-
-    /// Stage a deletion through a head-over-base branch view.
-    async fn delete_in_branch_view(
-        &self,
-        table: &str,
-        head: BranchSelector,
-        base: Option<BranchViewBase>,
-        row: RowUuid,
-    ) -> Result<(), Error> {
-        self.db()
-            .stage_mergeable_delete_in_branch_view(self.tx_id(), table, head, base, row, None)
-            .await
-    }
-
-    /// Stage a soft delete with explicit millisecond provenance time.
-    async fn delete_at_ms(&self, table: &str, row: RowUuid, now_ms: u64) -> Result<(), Error> {
-        self.delete_at_ms_option(table, row, Some(now_ms)).await
-    }
-
-    /// Stage a restore, applying defaults for omitted columns.
-    async fn restore(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
-        self.restore_at_ms_option(table, row, cells, None).await
-    }
-
-    /// Stage a restore in one exact branch-local row.
-    async fn restore_in_branch(
-        &self,
-        table: &str,
-        branch: BranchSelector,
-        row: RowUuid,
-        cells: RowCells,
-    ) -> Result<(), Error> {
-        self.db()
-            .stage_mergeable_restore_in_branch(self.tx_id(), table, branch, row, cells, None)
-            .await
+        })?;
+        match options.target {
+            ExactWriteTarget::Root => {
+                self.db()
+                    .stage_mergeable_restore(self.tx_id(), table, row, cells, options.updated_at_ms)
+                    .await
+            }
+            ExactWriteTarget::Branch(branch) => {
+                self.db()
+                    .stage_mergeable_restore_in_branch(
+                        self.tx_id(),
+                        table,
+                        branch,
+                        row,
+                        cells,
+                        options.updated_at_ms,
+                    )
+                    .await
+            }
+        }
     }
 
     /// Stage an atomic move of one object branch-local row between exact branch
@@ -2308,20 +2484,28 @@ where
             .project_branch_selector(table_schema, &target)
             .map_err(|message| Error::new(ErrorCode::Schema, message))?;
         cells.extend(target_cells);
-        self.restore_in_branch(table, target, row, cells).await?;
-        self.delete_in_branch_view(table, source, None, row).await
-    }
-
-    /// Stage a restore with explicit millisecond provenance time, applying defaults for omitted columns.
-    async fn restore_at_ms(
-        &self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: u64,
-    ) -> Result<(), Error> {
-        self.restore_at_ms_option(table, row, cells, Some(now_ms))
-            .await
+        self.restore(
+            table,
+            row,
+            Some(cells),
+            RestoreOptions {
+                target: ExactWriteTarget::Branch(target),
+                ..Default::default()
+            },
+        )
+        .await?;
+        self.delete(
+            table,
+            row,
+            DeleteOptions {
+                target: WriteTarget::BranchView {
+                    head: source,
+                    base: None,
+                },
+                ..Default::default()
+            },
+        )
+        .await
     }
 
     /// Read one row with this transaction's pending writes overlaid.
@@ -2365,57 +2549,6 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         self.db()
             .transaction_all_for_identity(self.tx_id(), prepared, author, opts)
-            .await
-    }
-
-    /// Stage an insert with an optional explicit provenance time.
-    async fn insert_with_id_at_ms_option(
-        &self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        self.db()
-            .stage_mergeable_insert(self.tx_id(), table, row, cells, now_ms)
-            .await
-    }
-
-    /// Stage an update with an optional explicit provenance time.
-    async fn update_at_ms_option(
-        &self,
-        table: &str,
-        row: RowUuid,
-        patch: RowCells,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        self.db()
-            .stage_mergeable_update(self.tx_id(), table, row, patch, now_ms)
-            .await
-    }
-
-    /// Stage a deletion with an optional explicit provenance time.
-    async fn delete_at_ms_option(
-        &self,
-        table: &str,
-        row: RowUuid,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        self.db()
-            .stage_mergeable_delete(self.tx_id(), table, row, now_ms)
-            .await
-    }
-
-    /// Stage a restore with an optional explicit provenance time.
-    async fn restore_at_ms_option(
-        &self,
-        table: &str,
-        row: RowUuid,
-        cells: RowCells,
-        now_ms: Option<u64>,
-    ) -> Result<(), Error> {
-        self.db()
-            .stage_mergeable_restore(self.tx_id(), table, row, cells, now_ms)
             .await
     }
 }
@@ -2573,43 +2706,81 @@ where
             .await
     }
 
-    /// Stage an insert with a generated row id.
-    async fn insert(&self, table: &str, cells: RowCells) -> Result<RowUuid, Error> {
-        let row = self.db().row_id_source.borrow_mut().next_row_id();
-        self.insert_with_id(table, row, cells).await?;
+    /// Stage one insert.
+    async fn insert(
+        &self,
+        table: &str,
+        cells: RowCells,
+        options: InsertOptions,
+    ) -> Result<RowUuid, Error> {
+        ensure_transaction_identity(options.identity)?;
+        ensure_exclusive_target(&options.target)?;
+        let row = options
+            .row_id
+            .unwrap_or_else(|| self.db().row_id_source.borrow_mut().next_row_id());
+        self.db()
+            .stage_exclusive_insert(self.tx_id(), table, row, cells, options.updated_at_ms)
+            .await?;
         Ok(row)
     }
 
-    /// Stage an insert with a caller-supplied row id.
-    async fn insert_with_id(
+    /// Stage an update; omitted fields keep the transaction-local value.
+    async fn update(
+        &self,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+        options: UpdateOptions,
+    ) -> Result<(), Error> {
+        ensure_transaction_identity(options.identity)?;
+        ensure_exclusive_view_target(&options.target)?;
+        self.db()
+            .stage_exclusive_update(self.tx_id(), table, row, patch, options.updated_at_ms)
+            .await
+    }
+
+    /// Stage one upsert.
+    async fn upsert(
         &self,
         table: &str,
         row: RowUuid,
         cells: RowCells,
+        options: UpsertOptions,
     ) -> Result<(), Error> {
+        ensure_transaction_identity(options.identity)?;
+        ensure_exclusive_target(&options.target)?;
         self.db()
-            .stage_exclusive_insert(self.tx_id(), table, row, cells)
-            .await
-    }
-
-    /// Stage an update; omitted fields keep the transaction-local value.
-    async fn update(&self, table: &str, row: RowUuid, patch: RowCells) -> Result<(), Error> {
-        self.db()
-            .stage_exclusive_update(self.tx_id(), table, row, patch)
+            .stage_exclusive_upsert(self.tx_id(), table, row, cells, options.updated_at_ms)
             .await
     }
 
     /// Stage a soft delete.
-    async fn delete(&self, table: &str, row: RowUuid) -> Result<(), Error> {
+    async fn delete(&self, table: &str, row: RowUuid, options: DeleteOptions) -> Result<(), Error> {
+        ensure_transaction_identity(options.identity)?;
+        ensure_exclusive_view_target(&options.target)?;
         self.db()
-            .stage_exclusive_delete(self.tx_id(), table, row)
+            .stage_exclusive_delete(self.tx_id(), table, row, options.updated_at_ms)
             .await
     }
 
     /// Stage a restore, applying defaults for omitted columns.
-    async fn restore(&self, table: &str, row: RowUuid, cells: RowCells) -> Result<(), Error> {
+    async fn restore(
+        &self,
+        table: &str,
+        row: RowUuid,
+        cells: Option<RowCells>,
+        options: RestoreOptions,
+    ) -> Result<(), Error> {
+        ensure_transaction_identity(options.identity)?;
+        ensure_exclusive_target(&options.target)?;
+        let cells = cells.ok_or_else(|| {
+            Error::new(
+                ErrorCode::Schema,
+                "exclusive transaction restores require replacement cells",
+            )
+        })?;
         self.db()
-            .stage_exclusive_restore(self.tx_id(), table, row, cells)
+            .stage_exclusive_restore(self.tx_id(), table, row, cells, options.updated_at_ms)
             .await
     }
 }
@@ -2721,7 +2892,11 @@ where
     /// ```rust
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
     /// let db = block_on(open_todos_db())?;
-    /// let write = block_on(db.insert("todos", todo_cells("has id", false)))?;
+    /// let write = block_on(db.insert(
+    ///     "todos",
+    ///     todo_cells("has id", false),
+    ///     Default::default(),
+    /// ))?;
     ///
     /// let _row_id = write.row_uuid();
     /// let _tx_id = write.mergeable_tx_id();
@@ -2737,7 +2912,11 @@ where
     /// # use jazz::db::doctest_support::{block_on, open_todos_db, todo_cells};
     /// # use jazz::tx::DurabilityTier;
     /// let db = block_on(open_todos_db())?;
-    /// let write = block_on(db.insert("todos", todo_cells("wait locally", false)))?;
+    /// let write = block_on(db.insert(
+    ///     "todos",
+    ///     todo_cells("wait locally", false),
+    ///     Default::default(),
+    /// ))?;
     ///
     /// let tx_id = block_on(write.wait(DurabilityTier::Local))?;
     /// assert_eq!(tx_id, write.mergeable_tx_id());

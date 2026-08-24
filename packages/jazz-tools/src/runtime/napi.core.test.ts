@@ -605,6 +605,53 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     ]);
   });
 
+  it("allocates clock-backed ordered UUIDv7 ids in Rust for ordinary and staged inserts", async () => {
+    const { NapiDb } = await loadNapiModule();
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+      TEST_SCHEMA,
+      deterministicBytes("jazz-napi-native-runtime:uuidv7-node"),
+      deterministicBytes("jazz-napi-native-runtime:uuidv7-author"),
+      1,
+      true,
+    );
+    runtimes.push(runtime);
+
+    const insert = (title: string, writeContext?: string) =>
+      runtime.insert(
+        "todos",
+        {
+          title: { type: "Text", value: title },
+          done: { type: "Boolean", value: false },
+        },
+        writeContext,
+      );
+
+    const first = insert("first");
+    const second = insert("second");
+    const openBatchId = beginTestBatch(runtime);
+    const writeContext = JSON.stringify({ batch_id: openBatchId });
+    const third = insert("third", writeContext);
+    const fourth = insert("fourth", writeContext);
+
+    for (const row of [first, second, third, fourth]) {
+      expect(row.id).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+    }
+
+    const generatedAtMs = Number.parseInt(first.id.replaceAll("-", "").slice(0, 12), 16);
+    expect(Math.abs(Date.now() - generatedAtMs)).toBeLessThan(60_000);
+    const ids = [first.id, second.id, third.id, fourth.id];
+    expect(ids).toEqual([...ids].sort());
+
+    await runtime.commitTransaction(openBatchId);
+    const rows = (await runtime.query(JSON.stringify({ table: "todos" }))) as Array<{
+      id: string;
+    }>;
+    expect(rows.map((row) => row.id)).toEqual([first.id, second.id, third.id, fourth.id]);
+  });
+
   it("applies column defaults for direct napi inserts with omitted cells", async () => {
     const { NapiDb } = await loadNapiModule();
     const runtime = new NativeRuntimeAdapter(

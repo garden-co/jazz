@@ -23,7 +23,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
 
     let update = core.view_update_for_current_rows("todos").unwrap();
     let version_bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
         reset_result_set,
@@ -34,7 +34,7 @@ fn view_updates_ship_current_versions_to_downstream_nodes() {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };
@@ -142,9 +142,9 @@ fn global_read_ignores_a_newer_unacknowledged_local_write() {
 
     let mut link = PeerState::client_link(AuthorSubject::SYSTEM);
     let update = link.current_rows_update(&mut core, "todos").unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         settled_through, ..
-    } = &update
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -179,7 +179,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
 
     let initial = core.view_update_for_current_rows("todos").unwrap();
     let version_bundles = version_bundles_for_update(&initial);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through,
         reset_result_set,
@@ -190,7 +190,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
         result_member_adds,
         result_member_removes,
         ..
-    } = initial
+    }) = initial
     else {
         panic!("expected view update");
     };
@@ -225,7 +225,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
         )
         .unwrap();
     let version_bundles = version_bundles_for_update(&deduped);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         settled_through,
         peer_payload_inventory:
             crate::protocol::PeerPayloadInventory {
@@ -234,7 +234,7 @@ fn view_updates_use_peer_payload_inventory_refs_for_previously_shipped_complete_
         result_member_adds,
         result_member_removes,
         ..
-    } = deduped
+    }) = deduped
     else {
         panic!("expected view update");
     };

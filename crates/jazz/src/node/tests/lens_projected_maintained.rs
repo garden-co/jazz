@@ -76,12 +76,12 @@ fn maintained_projected_current_picks_winner_before_lens_projection() {
     let mut peer = PeerState::new();
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
     let bundles = version_bundles_for_update(&update);
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         reset_result_set,
         ..
-    } = update
+    }) = update
     else {
         panic!("current-row subscription should produce a view update");
     };
