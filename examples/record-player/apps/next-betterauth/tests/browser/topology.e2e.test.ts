@@ -47,7 +47,11 @@ const recipientPermissions = s.definePermissions(recipientApp, ({ policy, sessio
 // This adds exactly the branch which distinguishes RecordPlayer from the
 // scalar control: a correlated owner path through a referenced playlist.
 const relationalRecipientApp = s.defineApp({
-  albums: s.table({ title: s.string() }),
+  albums: s.table({
+    title: s.string(),
+    artist: s.string(),
+    cover_locator: s.string().optional(),
+  }),
   tracks: s.table({
     album_id: s.ref("albums"),
     title: s.string(),
