@@ -364,6 +364,48 @@ describe("NativeRuntimeAdapter server transport", () => {
     await runtime.close();
   });
 
+  it("terminates a native subscription once when retained hydration fails fatally", async () => {
+    const close = vi.fn(() => true);
+    const subscription = {
+      readAll: () => {
+        throw new Error("planned fatal chunk integrity failure");
+      },
+      close,
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => new Uint8Array([0]),
+            subscribe: () => subscription,
+            prepareQuery: () => ({}),
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+    const updates = vi.fn();
+    const handle = runtime.createSubscription(
+      JSON.stringify({ table: "todos" }),
+      undefined,
+      "local",
+    );
+    runtime.executeSubscription(handle, updates);
+    await waitForFakeWebSocketNegotiation();
+
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(updates).toHaveBeenCalledTimes(1);
+    expect(updates.mock.calls[0]![0]).toEqual(new Error("planned fatal chunk integrity failure"));
+    expect(updates.mock.calls[0]![1]).toBeNull();
+    await runtime.close();
+  });
+
   it("pumps the newly owned transport before auth-refresh reconnect readiness", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {

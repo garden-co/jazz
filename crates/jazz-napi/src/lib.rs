@@ -913,6 +913,25 @@ enum NapiSubscriptionBatchError {
     Fatal(napi::Error),
 }
 
+/// Bound the raw source events retained while one event waits for remote
+/// large-value hydration.  Further events remain in the subscription receiver
+/// and are pulled by the adapter after this batch completes.
+const MAX_RETAINED_SUBSCRIPTION_BATCH_EVENTS: usize = 256;
+
+fn take_bounded_subscription_batch<T>(
+    pending: &mut VecDeque<T>,
+    mut try_next: impl FnMut() -> Option<T>,
+) -> Vec<T> {
+    let mut batch = Vec::with_capacity(MAX_RETAINED_SUBSCRIPTION_BATCH_EVENTS);
+    while batch.len() < MAX_RETAINED_SUBSCRIPTION_BATCH_EVENTS {
+        let Some(event) = pending.pop_front().or_else(&mut try_next) else {
+            break;
+        };
+        batch.push(event);
+    }
+    batch
+}
+
 fn read_or_start_subscription_batch<S>(
     db: &Rc<CoreDb<S>>,
     stream: &mut SubscriptionStream,
@@ -934,12 +953,7 @@ where
             Err(error) => return Err(NapiSubscriptionBatchError::Fatal(error)),
         }
     }
-    let mut raw_events = std::mem::take(pending_events)
-        .into_iter()
-        .collect::<Vec<_>>();
-    while let Some(event) = stream.try_next_event() {
-        raw_events.push(event);
-    }
+    let raw_events = take_bounded_subscription_batch(pending_events, || stream.try_next_event());
     if raw_events.is_empty() {
         return Ok(Some(Vec::new()));
     }
@@ -4641,12 +4655,13 @@ pub fn verify_local_first_identity_proof_napi(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, HashSet};
+    use std::collections::{BTreeMap, HashSet, VecDeque};
     use std::rc::Rc;
 
     use super::{
-        PendingNativeRead, PendingNativeSubscriptionBatch, PendingNativeWrite,
-        PendingSubscriptionBatchCompletion, Write,
+        MAX_RETAINED_SUBSCRIPTION_BATCH_EVENTS, PendingNativeRead, PendingNativeSubscriptionBatch,
+        PendingNativeWrite, PendingSubscriptionBatchCompletion, Write,
+        take_bounded_subscription_batch,
     };
     use crate::{
         NapiDb, NapiDbInnerStorage, NapiTxKind, PreparedQuery, TransactionId, Tx, TxId,
@@ -4756,6 +4771,20 @@ mod tests {
         assert!(sender.send(expected).is_ok());
         assert_eq!(pending.poll_once().unwrap().unwrap().payload, vec![9]);
         assert!(pending.poll_once().is_err());
+    }
+
+    #[test]
+    fn suspended_subscription_batches_leave_excess_events_at_the_source() {
+        let mut pending = (0..MAX_RETAINED_SUBSCRIPTION_BATCH_EVENTS + 3).collect::<VecDeque<_>>();
+        let mut source_calls = 0;
+        let batch = take_bounded_subscription_batch(&mut pending, || {
+            source_calls += 1;
+            Some(usize::MAX)
+        });
+
+        assert_eq!(batch.len(), MAX_RETAINED_SUBSCRIPTION_BATCH_EVENTS);
+        assert_eq!(pending.len(), 3, "excess retained events stay queued");
+        assert_eq!(source_calls, 0, "the source is not drained past the bound");
     }
     use jazz::db::{
         Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,

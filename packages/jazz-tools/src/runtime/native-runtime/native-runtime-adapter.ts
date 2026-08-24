@@ -2485,7 +2485,17 @@ export class NativeRuntimeAdapter implements Runtime {
             );
           }
         }
-        return;
+        // Native batches are deliberately bounded so one remotely hydrated
+        // event cannot retain an unbounded receiver backlog. Keep draining
+        // completed batches until the binding reports that its queue is empty.
+        if (batch.length === 0) return;
+      }
+    } catch (error) {
+      if (!subscription.cancelled && this.subscriptions.get(handle) === subscription) {
+        this.failSubscription(
+          subscription,
+          error instanceof Error ? error : new Error(String(error)),
+        );
       }
     } finally {
       source.reading = false;
