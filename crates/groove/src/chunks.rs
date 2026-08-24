@@ -50,11 +50,10 @@ pub trait ChunkKvStorage {
 /// Groove-owned integrity and staging layer over a policy-blind byte KV.
 ///
 /// Every batch's size and object hashes are mechanically prevalidated before
-/// its first backend put. A backend process crash can nevertheless occur after
-/// one immutable put and before later puts or upload metadata: those bytes are
-/// unreachable and have no metadata reclaimer entry. Closing that residual
-/// crash-only orphan window requires a backend transaction spanning chunk puts
-/// and metadata writes.
+/// its first backend put. This layer cannot itself make separate blob puts and
+/// metadata writes atomic; durable callers must journal every locator before
+/// invoking it. Groove's database upload facade does so with pending-upload
+/// metadata and per-node upload references.
 pub struct ManagedChunkStorage {
     backend: Rc<dyn ChunkKvStorage>,
 }

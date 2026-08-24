@@ -227,19 +227,14 @@ impl Database {
         &self,
         prepared: crate::large_values::PreparedLargeValue,
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
-        let accounting = crate::large_values::StagedLargeValueAccounting {
-            encoded_bytes: prepared.staged_chunks.iter().fold(0_u64, |total, chunk| {
-                total.saturating_add(chunk.encoded.len() as u64)
-            }),
-            node_count: prepared.staged_chunks.len() as u64,
-        };
-        let _installed = self
-            .chunk_storage
-            .stage(prepared.staged_chunks)
-            .await
-            .map_err(crate::chunks::ChunkError::from)
-            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
-        self.register_staged_large_value(prepared.value_ref, accounting)
+        let upload_id = crate::large_values::StagedLargeValueId(*uuid::Uuid::new_v4().as_bytes());
+        self.stage_large_value_chunk_batch(
+            upload_id,
+            prepared.value_ref.kind,
+            prepared.staged_chunks,
+        )
+        .await?;
+        self.finalize_large_value_upload(upload_id, prepared.value_ref)
             .await
     }
 
@@ -283,28 +278,22 @@ impl Database {
         };
         let mut new_members = BTreeSet::new();
         for chunk in &chunks {
-            upload.accounting.encoded_bytes = upload
-                .accounting
-                .encoded_bytes
-                .checked_add(chunk.encoded.len() as u64)
-                .ok_or_else(|| {
-                    Error::InvalidLargeValueMetadata("upload byte count overflow".to_owned())
-                })?;
-            upload.accounting.node_count =
-                upload.accounting.node_count.checked_add(1).ok_or_else(|| {
-                    Error::InvalidLargeValueMetadata("upload node count overflow".to_owned())
-                })?;
             if !upload.chunks.contains(&chunk.node_ref) {
+                upload.accounting.encoded_bytes = upload
+                    .accounting
+                    .encoded_bytes
+                    .checked_add(chunk.encoded.len() as u64)
+                    .ok_or_else(|| {
+                        Error::InvalidLargeValueMetadata("upload byte count overflow".to_owned())
+                    })?;
+                upload.accounting.node_count =
+                    upload.accounting.node_count.checked_add(1).ok_or_else(|| {
+                        Error::InvalidLargeValueMetadata("upload node count overflow".to_owned())
+                    })?;
                 upload.chunks.push(chunk.node_ref.clone());
                 new_members.insert(chunk.node_ref.clone());
             }
         }
-        self.chunk_storage
-            .stage(chunks.clone())
-            .await
-            .map_err(crate::chunks::ChunkError::from)
-            .map_err(crate::ivm::runtime::IvmRuntimeError::from)
-            .map_err(Error::from)?;
         let mut operations = vec![OwnedWriteOperation::Set {
             cf: LARGE_VALUE_METADATA_CF.to_owned(),
             key,
@@ -314,8 +303,8 @@ impl Database {
                 ))
             })?,
         }];
-        for chunk in chunks {
-            if !new_members.contains(&chunk.node_ref) {
+        for chunk in &chunks {
+            if !new_members.remove(&chunk.node_ref) {
                 continue;
             }
             let node_key = large_value_node_key(&chunk.node_ref)?;
@@ -366,7 +355,17 @@ impl Database {
                 })?,
             });
         }
+        // The pending-upload record and its per-node upload references are a
+        // durable intent journal. It is committed before any separate blob
+        // backend put, so a crash before or during chunk staging leaves every
+        // possibly-written locator discoverable by expiry/reclamation.
         self.storage.write_many(operations).await?;
+        self.chunk_storage
+            .stage(chunks)
+            .await
+            .map_err(crate::chunks::ChunkError::from)
+            .map_err(crate::ivm::runtime::IvmRuntimeError::from)
+            .map_err(Error::from)?;
         Ok(())
     }
 

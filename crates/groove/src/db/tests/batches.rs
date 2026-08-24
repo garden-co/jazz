@@ -2,6 +2,75 @@
 
 use super::*;
 
+use bytes::Bytes;
+use std::cell::Cell;
+
+#[derive(Clone)]
+struct CrashAfterChunkPut {
+    storage: Rc<crate::chunks::MemoryChunkStorage>,
+    fail_after_successes: Cell<Option<usize>>,
+    successful_puts: Cell<usize>,
+}
+
+impl CrashAfterChunkPut {
+    fn new(fail_after_successes: Option<usize>) -> Self {
+        Self {
+            storage: Rc::new(crate::chunks::MemoryChunkStorage::new()),
+            fail_after_successes: Cell::new(fail_after_successes),
+            successful_puts: Cell::new(0),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.storage.len()
+    }
+}
+
+impl crate::chunks::ChunkKvStorage for CrashAfterChunkPut {
+    fn get_exact(
+        &self,
+        locator: Vec<u8>,
+    ) -> crate::chunks::ChunkFuture<
+        '_,
+        Result<Option<(crate::large_values::ContentHash, Bytes)>, crate::chunks::ChunkStorageError>,
+    > {
+        crate::chunks::ChunkKvStorage::get_exact(&*self.storage, locator)
+    }
+
+    fn put_if_absent(
+        &self,
+        locator: Vec<u8>,
+        hash: crate::large_values::ContentHash,
+        bytes: Bytes,
+    ) -> crate::chunks::ChunkFuture<
+        '_,
+        Result<Option<(crate::large_values::ContentHash, Bytes)>, crate::chunks::ChunkStorageError>,
+    > {
+        if self
+            .fail_after_successes
+            .get()
+            .is_some_and(|limit| self.successful_puts.get() >= limit)
+        {
+            return Box::pin(async {
+                Err(crate::chunks::ChunkStorageError::Backend(
+                    "injected crash after durable chunk put".to_owned(),
+                ))
+            });
+        }
+        self.successful_puts
+            .set(self.successful_puts.get().saturating_add(1));
+        crate::chunks::ChunkKvStorage::put_if_absent(&*self.storage, locator, hash, bytes)
+    }
+
+    fn delete_exact(
+        &self,
+        locator: Vec<u8>,
+        expected_hash: crate::large_values::ContentHash,
+    ) -> crate::chunks::ChunkFuture<'_, Result<(), crate::chunks::ChunkStorageError>> {
+        crate::chunks::ChunkKvStorage::delete_exact(&*self.storage, locator, expected_hash)
+    }
+}
+
 #[futures_test::test]
 async fn staged_large_value_is_consumed_atomically_with_its_referencing_row() {
     let schema = DatabaseSchema::new([TableSchema::new(
@@ -163,6 +232,116 @@ async fn incomplete_push_upload_is_restart_persistent_and_reclaimable() {
             > 0
     );
     assert_eq!(chunks.len(), 0);
+}
+
+// The chunk backend is deliberately separate from metadata storage here. Each
+// injected backend error represents a process loss at the exact boundary after
+// metadata intent is durable, but before the indicated next blob put returns.
+#[futures_test::test]
+async fn upload_intent_reclaims_crash_window_chunks_and_promotes_completed_uploads() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &(0..crate::large_values::INLINE_VALUE_MAX_BYTES * 8)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>(),
+        |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
+    )
+    .unwrap();
+
+    for (fail_after_successes, expected_chunks) in [(0, 0), (1, 1)] {
+        let storage = MemoryStorage::new(&schema.column_families());
+        let backend = Rc::new(CrashAfterChunkPut::new(Some(fail_after_successes)));
+        let mut database = Database::new(schema.clone(), storage.clone())
+            .await
+            .unwrap();
+        database.set_chunk_storage(Rc::new(crate::chunks::ManagedChunkStorage::new(
+            backend.clone(),
+        )));
+        let upload_id = crate::large_values::StagedLargeValueId([fail_after_successes as u8; 16]);
+
+        assert!(
+            database
+                .stage_large_value_chunk_batch(
+                    upload_id,
+                    prepared.value_ref.kind,
+                    prepared.staged_chunks.clone(),
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(backend.len(), expected_chunks);
+        assert_eq!(
+            database.pending_large_value_uploads().await.unwrap().len(),
+            1
+        );
+        drop(database);
+
+        let mut reopened = Database::new(schema.clone(), storage).await.unwrap();
+        reopened.set_chunk_storage(Rc::new(crate::chunks::ManagedChunkStorage::new(
+            backend.clone(),
+        )));
+        assert!(
+            reopened
+                .evict_pending_large_value_upload(upload_id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            reopened
+                .reclaim_orphaned_large_value_chunks(usize::MAX)
+                .await
+                .unwrap()
+                > 0
+        );
+        assert_eq!(backend.len(), 0);
+    }
+
+    let storage = MemoryStorage::new(&schema.column_families());
+    let backend = Rc::new(CrashAfterChunkPut::new(None));
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(Rc::new(crate::chunks::ManagedChunkStorage::new(
+        backend.clone(),
+    )));
+    let upload_id = crate::large_values::StagedLargeValueId([0x99; 16]);
+    database
+        .stage_large_value_chunk_batch(upload_id, prepared.value_ref.kind, prepared.staged_chunks)
+        .await
+        .unwrap();
+    let staged = database
+        .finalize_large_value_upload(upload_id, prepared.value_ref)
+        .await
+        .unwrap();
+    assert!(
+        database
+            .pending_large_value_uploads()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(backend.len() > 0);
+    assert_eq!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap(),
+        0,
+        "a promoted staged receipt keeps its referenced chunks live"
+    );
+    assert!(
+        database
+            .staged_large_values()
+            .await
+            .unwrap()
+            .contains(&staged)
+    );
 }
 
 #[futures_test::test]
