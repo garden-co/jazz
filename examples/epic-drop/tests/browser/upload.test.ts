@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createDb, generateAuthSecret, type Db } from "jazz-tools";
 import { app } from "../../schema.js";
+import { fileListQuery } from "../../src/file-list-query.js";
 import { APP_ID, TEST_PORT } from "./test-constants.js";
 
 const dbs: Db[] = [];
@@ -36,7 +37,7 @@ async function waitFor<T>(check: () => Promise<T | undefined>, description: stri
 }
 
 describe("EpicDrop upload", () => {
-  it("creates a bytes file from multiple chunks and lists its metadata", async () => {
+  it("creates a bytes file from multiple chunks and lists folder metadata without contents", async () => {
     const db = await openDb("local");
 
     const folder = db.insert(app.folders, { name: "Demos", owner_id: "anonymous" });
@@ -53,14 +54,12 @@ describe("EpicDrop upload", () => {
       })(),
     });
 
-    await expect(db.all(app.files)).resolves.toEqual([
+    await expect(db.all(fileListQuery(folder.value.id)!)).resolves.toEqual([
       expect.objectContaining({
         id: uploaded.value.id,
-        folder_id: folder.value.id,
         name: "set-list.wav",
         content_type: "audio/wav",
         size_bytes: 9,
-        owner_id: "anonymous",
       }),
     ]);
   });

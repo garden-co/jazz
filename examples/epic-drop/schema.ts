@@ -5,14 +5,18 @@ const schema = {
     name: s.string(),
     owner_id: s.string(),
   }),
-  files: s.table({
-    folder_id: s.ref("folders"),
-    name: s.string(),
-    content_type: s.string(),
-    size_bytes: s.int(),
-    owner_id: s.string(),
-    contents: s.bytes(),
-  }),
+  files: s
+    .table({
+      folder_id: s.ref("folders"),
+      name: s.string(),
+      content_type: s.string(),
+      size_bytes: s.int(),
+      owner_id: s.string(),
+      contents: s.bytes(),
+    })
+    // The browser lists a single folder at a time; make that metadata query
+    // an explicit part of the app schema rather than scanning every file.
+    .indexOnly(["folder_id"]),
 };
 
 type AppSchema = s.Schema<typeof schema>;

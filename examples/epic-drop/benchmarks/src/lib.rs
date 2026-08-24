@@ -10,7 +10,7 @@ use jazz::groove::large_values::LargeValueKind;
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
-use jazz::query::{Query, col, eq, lit};
+use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
@@ -94,7 +94,12 @@ impl Fixture {
         .expect("stream file into fixture");
         block_on(write.wait(DurabilityTier::Local)).expect("fixture file reaches local durability");
         let list = db
-            .prepare_query(&Query::from("files").filter(eq(col("folder_id"), lit(folder_id().0))))
+            .prepare_query(
+                &Query::from("files")
+                    .filter(eq(col("folder_id"), lit(folder_id().0)))
+                    .select(["id", "name", "content_type", "size_bytes"])
+                    .order_by("name", OrderDirection::Asc),
+            )
             .expect("prepare EpicDrop folder listing");
         debug_assert_eq!(table.name, "files");
         Self {

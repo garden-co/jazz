@@ -2,6 +2,7 @@ import * as React from "react";
 import { JazzProvider, useAll, useDb, useLocalFirstAuth, useSession } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
 import { app } from "../schema.js";
+import { fileListQuery } from "./file-list-query.js";
 
 const appId = import.meta.env.VITE_JAZZ_APP_ID;
 const serverUrl = import.meta.env.VITE_JAZZ_SERVER_URL;
@@ -15,7 +16,6 @@ function FileBrowser() {
   const session = useSession();
   const userId = session?.user_id;
   const { data: folders = [] } = useAll(app.folders);
-  const { data: files = [] } = useAll(app.files);
   const [folderId, setFolderId] = React.useState<string | null>(null);
   const [isUploading, setIsUploading] = React.useState(false);
 
@@ -24,7 +24,10 @@ function FileBrowser() {
   }, [folderId, folders]);
 
   const selectedFolder = folderId ?? folders[0]?.id;
-  const visibleFiles = files.filter((file) => file.folder_id === selectedFolder);
+  // A file browser needs only metadata for its list. Selecting it explicitly
+  // keeps `contents` out of the hydrated list result and scopes the query to
+  // the folder the user is actually browsing.
+  const { data: visibleFiles = [] } = useAll(fileListQuery(selectedFolder));
 
   async function createFolder() {
     if (!userId) return;

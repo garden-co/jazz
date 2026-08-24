@@ -14,7 +14,9 @@ Create a folder, choose a file, and see its metadata appear in the live file lis
 ## Shape shared with the benchmark
 
 - `folders`: ownership boundary and browse root.
-- `files`: a folder-scoped binary object with name, content type, byte length, owner, and `contents: bytes`.
+- `files`: a folder-scoped binary object with name, content type, byte length, owner, and
+  `contents: bytes`. `folder_id` is indexed because the browser's file-list query is scoped to one
+  folder and selects metadata only.
 - The eventual benchmark should use the same folder/file cardinalities, metadata list query, streamed create operation, and ranged download operation.
 
 The current vertical slice intentionally stops at metadata listing after upload. Download and preview require typed `Db` range reads; see [LEARNINGS.md](./LEARNINGS.md).
