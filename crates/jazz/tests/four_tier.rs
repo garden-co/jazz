@@ -138,10 +138,7 @@ fn reopen_node(
 fn cells(title: &str, owner: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
-        (
-            "owner".to_owned(),
-            Value::String(owner.canonical().to_owned()),
-        ),
+        ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
     ])
 }
 
@@ -163,7 +160,7 @@ fn permission_scope_key(
     let mut values = BTreeMap::new();
     values.insert(
         "__jazz_claim_sub".to_owned(),
-        Value::String(writer.canonical().to_owned()),
+        Value::Uuid(writer.test_uuid()),
     );
     let shape = Query::from(table)
         .filter(eq(col("owner"), param("__jazz_claim_sub")))
@@ -192,10 +189,7 @@ fn whole_table_key(schema: &JazzSchema, table: &str) -> SubscriptionKey {
 fn invite_cells(canvas: RowUuid, user: AuthorSubject) -> BTreeMap<String, Value> {
     BTreeMap::from([
         ("canvas".to_owned(), Value::Uuid(canvas.0)),
-        (
-            "userID".to_owned(),
-            Value::String(user.canonical().to_owned()),
-        ),
+        ("userID".to_owned(), Value::Uuid(user.test_uuid())),
     ])
 }
 
@@ -220,11 +214,12 @@ fn commit(
     owner: AuthorSubject,
     parents: impl IntoIterator<Item = TxId>,
 ) -> (TxId, SyncMessage) {
+    let writer = AuthorSubject::for_test_bytes([7; 16]);
     block_on(async {
         let (published, unit) = ui
             .commit_mergeable_unit(
                 MergeableCommit::new("todos", row_uuid, made_at)
-                    .made_by(AuthorSubject::for_test_bytes([7; 16]))
+                    .made_by(writer)
                     .parents(parents.into_iter().collect())
                     .cells(cells(title, owner)),
             )
