@@ -554,6 +554,9 @@ describe("RecordPlayer authenticated playlist topology", () => {
     let editorDbName: string;
     let streamedTrackId: string;
     let streamedTrackAlbumId: string;
+    const failedTrackId = "00000000-0000-0000-0000-000000000091";
+    const streamedAudioChunks = deterministicAudioChunks();
+    const streamedAudioPayload = concatenateBytes(streamedAudioChunks);
     let streamedAlbumTracks: Array<{
       id: string;
       albumId: string;
@@ -789,13 +792,20 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 title: "Streaming receipt",
                 ordinal: 0,
                 duration_ms: 2,
-                audio_bytes: audioStream([0x52, 0x50, 0x2d, 0x31, 0x2d, 0x32]),
+                audio_bytes: audioStream(streamedAudioChunks),
               });
               await withTimeout(
                 streamedTrack.wait({ tier: "local" }),
                 15_000,
                 "offline streamed audio track did not settle locally",
               );
+              await expect(
+                listener.all(app.tracks.where({ id: streamedTrack.value.id }), { tier: "edge" }),
+              ).resolves.toEqual([]);
+              await delay(100);
+              await expect(
+                listener.all(app.tracks.where({ id: streamedTrack.value.id }), { tier: "edge" }),
+              ).resolves.toEqual([]);
               await owner.reconnect();
               streamedTrackId = (
                 await withTimeout(
@@ -842,7 +852,6 @@ describe("RecordPlayer authenticated playlist topology", () => {
               // Source failure is intentionally tested at the app boundary:
               // a stream that has yielded bytes but then errors must not
               // publish a partly populated track locally or after reconnect.
-              const failedTrackId = "00000000-0000-0000-0000-000000000091";
               await expect(
                 owner.insertStreaming(
                   app.tracks,
@@ -856,14 +865,41 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   { id: failedTrackId },
                 ),
               ).rejects.toThrow("record-player injected audio source failure");
+              await expect(
+                owner.all(app.tracks.where({ id: failedTrackId }), { tier: "local" }),
+              ).resolves.toEqual([]);
+              await delay(100);
+              await expect(
+                owner.all(app.tracks.where({ id: failedTrackId }), { tier: "local" }),
+              ).resolves.toEqual([]);
+
+              // Advance both peers through a later accepted edge mutation.
+              // Absence after this barrier rules out a merely delayed partial
+              // publication from the failed stream.
+              await owner.disconnect();
+              await owner.reconnect();
+              const failureBarrier = await owner
+                .insert(app.albums, { title: "Failed-stream barrier", artist: "Jazz" })
+                .wait({ tier: "edge" });
               await waitForQuery(
-                owner,
-                app.tracks.where({ id: failedTrackId }),
-                (rows) => rows.length === 0,
-                "failed streamed track is absent locally",
+                listener,
+                app.albums.where({ id: failureBarrier.id }),
+                (rows) => rows[0]?.id === failureBarrier.id,
+                "listener advances beyond failed streamed mutation",
                 15_000,
-                "local",
+                "edge",
               );
+              for (const db of [owner, listener]) {
+                await expect(
+                  db.all(app.tracks.where({ id: failedTrackId }), { tier: "edge" }),
+                ).resolves.toEqual([]);
+              }
+              await delay(100);
+              for (const db of [owner, listener]) {
+                await expect(
+                  db.all(app.tracks.where({ id: failedTrackId }), { tier: "edge" }),
+                ).resolves.toEqual([]);
+              }
             },
           },
           {
@@ -941,16 +977,21 @@ describe("RecordPlayer authenticated playlist topology", () => {
               // A metadata-only projection requests no streamed-byte column
               // for a visible catalogue row. The focused store receipt also
               // pins its translated runtime projection below.
-              await waitForQuery(
+              const projectedTrack = await waitForQuery(
                 listener,
                 app.tracks
                   .where({ id: streamedTrackId })
                   .select("id", "album_id", "title", "ordinal", "duration_ms"),
-                (rows) => rows[0]?.id === streamedTrackId && rows[0]?.title === "Streaming receipt",
+                (rows) =>
+                  rows[0]?.id === streamedTrackId &&
+                  rows[0]?.title === "Streaming receipt" &&
+                  !Object.hasOwn(rows[0], "audio_bytes"),
                 "streamed track metadata without audio materialization",
                 15_000,
                 "edge",
               );
+              expect(Object.hasOwn(projectedTrack[0]!, "audio_bytes")).toBe(false);
+              expect("audio_bytes" in projectedTrack[0]!).toBe(false);
 
               // Playback is the exceptional path that explicitly asks for
               // the bytes. It proves that the offline-created, multi-chunk
@@ -962,14 +1003,14 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 (rows) =>
                   rows[0]?.id === streamedTrackId &&
                   rows[0]?.audio_bytes instanceof Uint8Array &&
-                  Array.from(rows[0].audio_bytes).join(",") === "82,80,45,49,45,50",
+                  rows[0].audio_bytes.byteLength === streamedAudioPayload.byteLength &&
+                  rows[0].audio_bytes[0] === streamedAudioPayload[0] &&
+                  rows[0].audio_bytes.at(-1) === streamedAudioPayload.at(-1),
                 "listener receives intact streamed audio after owner reconnect",
                 15_000,
                 "edge",
               );
-              expect(Array.from(playbackTrack[0]!.audio_bytes!)).toEqual([
-                0x52, 0x50, 0x2d, 0x31, 0x2d, 0x32,
-              ]);
+              expect(playbackTrack[0]!.audio_bytes).toEqual(streamedAudioPayload);
 
               // The page itself deliberately returns only the bounded prefix,
               // but wait until the extra record has replicated before asking
@@ -1265,23 +1306,56 @@ async function openClient(
   );
 }
 
-function audioStream(bytes: readonly number[]): ReadableStream<Uint8Array> {
+function audioStream(chunks: readonly Uint8Array[]): ReadableStream<Uint8Array> {
+  let next = 0;
   return new ReadableStream({
-    start(controller) {
-      // Deliberately split the payload so this test covers stream consumption,
-      // not only a one-chunk convenience path.
-      controller.enqueue(new Uint8Array(bytes.slice(0, 2)));
-      controller.enqueue(new Uint8Array(bytes.slice(2)));
-      controller.close();
+    async pull(controller) {
+      await delay(0);
+      const chunk = chunks[next];
+      if (chunk) {
+        controller.enqueue(chunk);
+        next += 1;
+      } else {
+        controller.close();
+      }
     },
   });
 }
 
 function failingAudioStream(): ReadableStream<Uint8Array> {
+  let yielded = false;
   return new ReadableStream({
-    start(controller) {
-      controller.enqueue(new Uint8Array([0x70, 0x61, 0x72, 0x74]));
+    async pull(controller) {
+      await delay(0);
+      if (!yielded) {
+        yielded = true;
+        controller.enqueue(new Uint8Array(32 * 1024).fill(0x70));
+        return;
+      }
       controller.error(new Error("record-player injected audio source failure"));
     },
   });
+}
+
+function deterministicAudioChunks(): Uint8Array[] {
+  return Array.from({ length: 4 }, (_, chunkIndex) =>
+    Uint8Array.from(
+      { length: 32 * 1024 },
+      (_, byteIndex) => (chunkIndex * 67 + byteIndex * 31) % 251,
+    ),
+  );
+}
+
+function concatenateBytes(chunks: readonly Uint8Array[]): Uint8Array {
+  const bytes = new Uint8Array(chunks.reduce((length, chunk) => length + chunk.byteLength, 0));
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+async function delay(milliseconds: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
