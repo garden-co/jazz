@@ -215,7 +215,7 @@ fn push_streaming_stops_at_the_ingress_limit_and_closes_the_upload() {
 /// stale push/finish ──► LargeValueStageExpired; remains absent
 /// ```
 #[test]
-fn expired_local_stream_handles_cannot_recreate_pending_uploads() {
+fn maintenance_evicted_local_stream_handles_cannot_recreate_pending_uploads() {
     let db = open_db();
     let cells = BTreeMap::from([("done".to_owned(), Value::Bool(false))]);
     let mut push_upload = db

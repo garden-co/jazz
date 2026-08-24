@@ -186,9 +186,11 @@ accounting. Jazz charges every upload against a simple incoming-byte
 rate limit, including an idempotent upload whose immutable mappings already
 exist. This bounds ingress work rather than retained physical storage. Jazz
 queries opaque receipts to evict expired roots and never enumerates locators or
-chunks. Expiry is checked again when accepting the referencing row and may also
-be driven periodically by a host scheduler. If the receipt is missing or too
-old, the row write fails safely and the client must upload the value again.
+chunks. Expiry is performed only by explicit host maintenance. Ordinary chunk
+push, finalization, and row acceptance check that the journal or receipt is
+still present, but do not reject it based on wall-clock age. If maintenance has
+removed it, the operation fails safely and the client must upload again; a
+stale handle cannot recreate an evicted journal.
 
 `RateLimited` is retryable backpressure, not rejection: the receiver retains
 the descriptor-scoped pending claim and every previously accepted node, and the
@@ -209,9 +211,10 @@ Rust `Db`, server-shell, NAPI, and WASM boundaries. Native servers/NAPI runtimes
 invoke maintenance from their host timer; browser runtimes use a JavaScript
 timer or worker alarm. A timer merely requests `evictExpiredStagedLargeValues`:
 the host never receives staging ids, locators, chunks, or deletion authority.
-Maintenance does not have to run for acceptance safety because every referencing
-row rechecks receipt age; periodic work only bounds retention of abandoned
-uploads while a process is otherwise idle.
+Maintenance is the only TTL enforcement point and bounds retention of abandoned
+uploads. Its eviction is serialized with upload continuation and receipt
+consumption, so an operation observes either a present journal/receipt or its
+absence rather than racing eviction into recreation.
 
 The initial unconfigured policy admits 256 MiB of pushed bytes per one-second
 window and expires unaccepted completed roots after ten minutes. The byte bound

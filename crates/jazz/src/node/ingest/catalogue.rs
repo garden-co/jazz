@@ -78,10 +78,6 @@ where
                 .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
             match message {
                 SyncMessage::ChunkUploadStart(start) => {
-                    // Expiry is an admission boundary, not merely a periodic
-                    // cleanup task. A new start may recreate the descriptor's
-                    // journal after eviction; an old one never resumes.
-                    self.evict_expired_staged_large_values().await?;
                     let progress = match self
                         .database
                         .begin_large_value_upload(start.value_ref.clone())
@@ -117,7 +113,6 @@ where
                     ]))
                 }
                 SyncMessage::ChunkUploadNodes(batch) => {
-                    self.evict_expired_staged_large_values().await?;
                     let upload_exists = self
                         .database
                         .pending_large_value_uploads()
@@ -162,7 +157,6 @@ where
                         .continue_large_value_upload_if_current(
                             batch.value_ref.clone(),
                             batch.chunks,
-                            self.large_value_staging_policy.max_age_ms,
                         )
                         .await
                     {

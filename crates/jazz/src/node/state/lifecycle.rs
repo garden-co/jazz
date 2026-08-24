@@ -824,26 +824,6 @@ where
             self.database.evict_staged_large_value(newest.id).await?;
             return Err(Error::LargeValueIngressRateLimited);
         }
-        self.evict_expired_large_value_stages_except(newest.id).await
-    }
-
-    async fn evict_expired_large_value_stages_except(
-        &self,
-        retained_id: groove::large_values::StagedLargeValueId,
-    ) -> Result<(), Error> {
-        let now_ms: u64 = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX);
-        for staged in self.database.staged_large_values().await? {
-            let expired = now_ms.saturating_sub(staged.created_at_ms)
-                > self.large_value_staging_policy.max_age_ms;
-            if expired && staged.id != retained_id {
-                self.database.evict_staged_large_value(staged.id).await?;
-            }
-        }
         Ok(())
     }
 
@@ -877,12 +857,6 @@ where
         if ids.is_empty() {
             return Ok(());
         }
-        let now_ms: u64 = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX);
         let staged = self
             .database
             .staged_large_values()
@@ -891,13 +865,7 @@ where
             .map(|staged| (staged.id, staged))
             .collect::<BTreeMap<_, _>>();
         for id in ids {
-            let Some(receipt) = staged.get(id) else {
-                return Err(Error::LargeValueStageExpired);
-            };
-            if now_ms.saturating_sub(receipt.created_at_ms)
-                > self.large_value_staging_policy.max_age_ms
-            {
-                self.database.evict_staged_large_value(*id).await?;
+            if !staged.contains_key(id) {
                 return Err(Error::LargeValueStageExpired);
             }
         }
@@ -912,27 +880,12 @@ where
         if descriptors.is_empty() {
             return Ok(Vec::new());
         }
-        let now_ms: u64 = web_time::SystemTime::now()
-            .duration_since(web_time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            .try_into()
-            .unwrap_or(u64::MAX);
         let staged = self.database.staged_large_values().await?;
         let mut ids = Vec::new();
         for descriptor in descriptors {
-            if let Some(expired) = staged.iter().find(|receipt| {
-                &receipt.value_ref == descriptor
-                    && now_ms.saturating_sub(receipt.created_at_ms)
-                        > self.large_value_staging_policy.max_age_ms
-            }) {
-                self.database.evict_staged_large_value(expired.id).await?;
-            }
-            let receipt = staged.iter().find(|receipt| {
-                &receipt.value_ref == descriptor
-                    && now_ms.saturating_sub(receipt.created_at_ms)
-                        <= self.large_value_staging_policy.max_age_ms
-            });
+            let receipt = staged
+                .iter()
+                .find(|receipt| &receipt.value_ref == descriptor);
             if let Some(receipt) = receipt {
                 ids.push(receipt.id);
             } else if require_every_descriptor {
@@ -953,8 +906,8 @@ where
     }
 
     /// Evict unpublished Groove staging roots older than the configured Jazz
-    /// policy. Hosts may call this from their ordinary maintenance cadence;
-    /// row acceptance independently performs the same freshness check.
+    /// policy. TTL is maintenance and resource-management policy only; normal
+    /// operations continue any journal or receipt that remains present.
     pub async fn evict_expired_staged_large_values(&self) -> Result<usize, Error> {
         let max_age_ms = self.large_value_staging_policy.max_age_ms;
         let now_ms: u64 = web_time::SystemTime::now()
@@ -1017,7 +970,6 @@ where
                 upload_id,
                 kind,
                 chunks,
-                self.large_value_staging_policy.max_age_ms,
             )
             .await?;
         if !staged {
@@ -1054,24 +1006,18 @@ where
         upload_id: groove::large_values::StagedLargeValueId,
         value_ref: groove::large_values::LargeValueRef,
     ) -> Result<groove::large_values::StagedLargeValue, Error> {
-        // A pending upload's creation time is the admission clock. Do not let
-        // finalization stamp a new staged receipt after that finite window has
-        // elapsed: maintenance is retention-only, never acceptance safety.
+        // Presence is the semantic boundary: maintenance may evict an old
+        // journal, but wall-clock age alone cannot reject an active upload.
         let Some(staged) = self
             .database
             .finalize_large_value_upload_if_current(
                 upload_id,
                 value_ref,
-                self.large_value_staging_policy.max_age_ms,
             )
             .await?
         else {
             return Err(Error::LargeValueStageExpired);
         };
-        // Push uploads were charged batch-by-batch before persistence. Do not
-        // charge the completed tree a second time at root registration.
-        self.evict_expired_large_value_stages_except(staged.id)
-            .await?;
         Ok(staged)
     }
 

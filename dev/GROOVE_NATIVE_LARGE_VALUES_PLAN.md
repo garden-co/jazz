@@ -322,9 +322,10 @@ of scope.
 7. Let Jazz enforce staging quotas/expiry by querying accounting receipts and
    invoking Groove's idempotent accept/evict APIs; Groove owns mechanics only.
    Expose the same policy setter and bounded maintenance operation through Rust
-   `Db`, server-shell, NAPI, and WASM. Environment-owned timers invoke it; row
-   acceptance independently rejects an expired/missing receipt, so timer delay
-   affects abandoned-byte retention but never authorization correctness.
+   `Db`, server-shell, NAPI, and WASM. Environment-owned timers invoke it. TTL
+   is maintenance policy rather than an operation-time deadline: continuation
+   and row acceptance require the journal/receipt to remain present, while
+   timer cadence determines when abandoned state is removed.
 8. Persist root and recursive node counts in Groove's reserved metadata plane;
    zero-crossings append exact orphan work and Groove reclaims it without
    walking Jazz history.

@@ -160,6 +160,37 @@ fn expired_staged_tree_requires_reupload_before_row_publication() {
 }
 
 #[test]
+fn delayed_staged_tree_publishes_while_receipt_remains_present() {
+    let schema = two_column_schema();
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x7c), schema);
+    node.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: u64::MAX,
+        window_ms: 1_000,
+        max_age_ms: 0,
+    });
+    let prepared = groove::large_values::prepare(
+        groove::large_values::LargeValueKind::String,
+        "delayed staged body/".repeat(8_000).as_bytes(),
+        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
+    )
+    .unwrap();
+    let commit = crate::db::block_on(node.attach_prepared_large_cell(
+        MergeableCommit::new("todos", row(0x7c), 10).cells(BTreeMap::from([(
+            "title".to_owned(),
+            Value::String("title".to_owned()),
+        )])),
+        "body",
+        &prepared,
+    ))
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+
+    node.commit_mergeable_settled(commit)
+        .expect("wall-clock age alone must not reject a present receipt");
+    assert_eq!(node.current_rows("todos", DurabilityTier::Local).unwrap().len(), 1);
+}
+
+#[test]
 fn pushed_chunks_must_be_staged_before_the_referencing_authority_commit() {
     let schema = two_column_schema();
     let (_writer_dir, mut writer) = open_node_with_schema(node(0x7c), schema.clone());
@@ -434,7 +465,7 @@ fn rate_limited_upload_preserves_pending_claim_for_retry() {
 }
 
 #[test]
-fn pending_upload_expires_under_the_mandatory_finite_staging_age() {
+fn maintenance_evicts_pending_upload_after_the_configured_age() {
     let schema = two_column_schema();
     let (_temp_dir, mut receiver) = open_node_with_schema(node(0x81), schema);
     let prepared = groove::large_values::prepare(
@@ -473,16 +504,16 @@ fn pending_upload_expires_under_the_mandatory_finite_staging_age() {
 }
 
 /// An authenticated sender starts a large upload, then waits past the receiver
-/// policy deadline. The receiver rejects the delayed final batch without a
-/// maintenance call, so the old pending journal cannot become a fresh staged
-/// receipt.
+/// configured TTL without running maintenance. The still-present journal may
+/// continue all the way through finalization: TTL is GC policy, not a
+/// synchronous admission deadline.
 ///
 /// ```text
 /// alice ──start──► receiver ──Need(root)──► alice
-/// alice ──delay──► receiver ──nodes──► Rejected + journal evicted
+/// alice ──delay──► receiver ──nodes──► Staged
 /// ```
 #[test]
-fn delayed_chunk_upload_is_rejected_before_it_can_refresh_pending_stage_age() {
+fn delayed_chunk_upload_succeeds_while_pending_journal_remains_present() {
     let schema = two_column_schema();
     let (_temp_dir, mut receiver) = open_node_with_schema(node(0x82), schema);
     let prepared = groove::large_values::prepare(
@@ -506,11 +537,11 @@ fn delayed_chunk_upload_is_rejected_before_it_can_refresh_pending_stage_age() {
         .resolve()
         .unwrap()
         .value;
-    let root = match started.as_slice() {
+    let mut pending_nodes = match started.as_slice() {
         [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
             status: crate::protocol::ChunkUploadStatus::Need(nodes),
             ..
-        })] => nodes[0].clone(),
+        })] => nodes.clone(),
         other => panic!("unexpected upload start: {other:?}"),
     };
     receiver.set_large_value_staging_policy(LargeValueStagingPolicy {
@@ -519,36 +550,50 @@ fn delayed_chunk_upload_is_rejected_before_it_can_refresh_pending_stage_age() {
         max_age_ms: 0,
     });
     std::thread::sleep(std::time::Duration::from_millis(2));
-    let root_chunk = prepared
-        .staged_chunks
-        .iter()
-        .find(|chunk| chunk.node_ref == root)
-        .unwrap()
-        .clone();
-    let rejected = receiver
-        .apply_sync_message_with_ingest_context(
-            SyncMessage::ChunkUploadNodes(crate::protocol::ChunkUploadNodes {
-                value_ref: prepared.value_ref.clone(),
-                chunks: vec![root_chunk],
-            }),
-            context,
-        )
-        .resolve()
-        .unwrap()
-        .value;
-    assert!(matches!(
-        rejected.as_slice(),
-        [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
-            status: crate::protocol::ChunkUploadStatus::Rejected,
-            ..
-        })]
-    ));
+    loop {
+        let chunks = pending_nodes
+            .into_iter()
+            .map(|node_ref| {
+                prepared
+                    .staged_chunks
+                    .iter()
+                    .find(|chunk| chunk.node_ref == node_ref)
+                    .unwrap()
+                    .clone()
+            })
+            .collect();
+        let response = receiver
+            .apply_sync_message_with_ingest_context(
+                SyncMessage::ChunkUploadNodes(crate::protocol::ChunkUploadNodes {
+                    value_ref: prepared.value_ref.clone(),
+                    chunks,
+                }),
+                context,
+            )
+            .resolve()
+            .unwrap()
+            .value;
+        match response.as_slice() {
+            [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                status: crate::protocol::ChunkUploadStatus::Need(nodes),
+                ..
+            })] => pending_nodes = nodes.clone(),
+            [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                status: crate::protocol::ChunkUploadStatus::Staged,
+                ..
+            })] => break,
+            other => panic!("delayed upload did not resume: {other:?}"),
+        }
+    }
     assert!(crate::db::block_on(receiver.database.pending_large_value_uploads())
         .unwrap()
         .is_empty());
-    assert!(crate::db::block_on(receiver.database.staged_large_values())
-        .unwrap()
-        .is_empty());
+    assert_eq!(
+        crate::db::block_on(receiver.database.staged_large_values())
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
