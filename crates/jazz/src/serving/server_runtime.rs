@@ -4,6 +4,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 use std::thread;
 
 use crate::db::{
@@ -260,8 +261,33 @@ fn run_server_shell_owner(
                     return;
                 }
             }
+
+            // A shell tick can discover and enqueue another immediate tick.
+            // The owner also hosts upstream wire pumps in this LocalPool, so
+            // consuming a run of already-ready commands without yielding can
+            // indefinitely delay an edge's inbound/outbound wire progress.
+            // Cooperate once per command: queued shell work remains ordered,
+            // while a ready wire pump gets an opportunity to transfer the
+            // corresponding core update.
+            yield_to_local_tasks().await;
         }
     });
+}
+
+/// Yield exactly once through the current local executor without introducing a
+/// host timer or moving the thread-affine shell to another thread.
+async fn yield_to_local_tasks() {
+    let mut yielded = false;
+    futures::future::poll_fn(move |context| {
+        if yielded {
+            Poll::Ready(())
+        } else {
+            yielded = true;
+            context.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
+    .await;
 }
 
 async fn drive_upstream_wire(
