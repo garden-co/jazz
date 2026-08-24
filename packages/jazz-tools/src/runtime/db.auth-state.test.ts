@@ -88,7 +88,7 @@ describe("Db auth state", () => {
   it("refreshes a dedicated local-first session without entering generic JWT admission", () => {
     const initialToken = makeJwt({ iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice", version: 1 });
     const initialSession = sessionFromVerifiedReservedJwtPayload(
-      { iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice", version: 1 },
+      { iss: LOCAL_FIRST_JWT_ISSUER, sub: "alice" },
       "local-first",
     )!;
     const refreshedToken = makeJwt({
