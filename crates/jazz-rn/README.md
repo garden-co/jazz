@@ -18,10 +18,11 @@ a broken alternative runtime path.
 
 The package reserves a generated `JazzRelay` TurboModule boundary. Android and
 iOS autolink the module, report ABI `0` (unavailable), and explicitly reject
-commands until a development or release build embeds the shared Rust relay
-artifact. `expo prebuild` and bare React Native integration can therefore
-succeed without a stale native framework, but they do **not** make Jazz usable
-on a device yet.
+commands unless a development or release assembly stages the shared Rust relay
+artifact. Staged Android libraries, the shared header, and the iOS XCFramework
+are included by the npm package file contract. `expo prebuild` and bare React
+Native integration can therefore succeed without an artifact, but they do
+**not** make Jazz usable on a device yet.
 
 `jazz-rn` requires the React Native **New Architecture**. Android Gradle and
 iOS CocoaPods fail early with an install/configuration instruction otherwise.
@@ -34,11 +35,13 @@ inspects Expo's autolinking contracts for this package. It is intentionally not
 a native build receipt: this Linux development environment has neither Java
 nor CocoaPods, so Gradle configuration/build and `pod install` must run on the
 respective Blacksmith runners before claiming platform or device support.
-The shared host codec now stages scope/client open-close, bounded `Pump`,
-directional opaque peer-frame send/drain, and handle/queue diagnostics; no
-platform artifact calls it yet. This is a thin platform
-checkpoint, not device support: there is still no linked JNI artifact,
-XCFramework, AAR, or Expo development-build receipt.
+The shared host codec now stages trusted native scope admission, client
+open-close, bounded `Pump`, directional bounded peer-frame send/drain, and
+handle/queue diagnostics. The thin JNI and Objective-C++ wrappers forward the
+opaque command channel when their staged artifacts are present; platform-owned
+scope admission remains part of the device integration. This is still a
+platform checkpoint, not device support: there is no assembled release-package
+or Expo development-build receipt yet.
 
 The shared artifact seam is `jazz_native_relay_abi_version` from
 `jazz-native-relay`'s C ABI (`include/jazz_native_relay.h`). Android/JNI will

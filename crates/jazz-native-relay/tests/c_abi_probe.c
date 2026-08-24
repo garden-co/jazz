@@ -5,11 +5,11 @@
 
 int main(void) {
   const uint16_t abi = jazz_native_relay_abi_version();
-  if (abi != 1) {
+  if (abi != 2) {
     fprintf(stderr, "unexpected Jazz native relay ABI: %u\n", abi);
     return 1;
   }
-  /* RelayCommandRequest::Probe's v1 postcard discriminant. The response is
+  /* RelayCommandRequest::Probe's postcard discriminant. The response is
    * intentionally opaque to JNI/C; only the shared Rust/JS codec decodes it. */
   const uint8_t probe[] = {0};
   jazz_native_relay_bytes response = {0};

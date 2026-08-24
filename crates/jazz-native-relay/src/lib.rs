@@ -9,18 +9,19 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
 #[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 
 use futures::lock::Mutex as LocalMutex;
 use jazz::db::{Db, DbConfig, DbIdentity, PeerConnection, Transport, block_on};
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::protocol::SyncMessage;
-use jazz::protocol_limits::validate_logical_message_len;
+use jazz::protocol_limits::{MAX_LOGICAL_MESSAGE_BYTES, validate_logical_message_len};
 use jazz::schema::JazzSchema;
 use jazz::wire::{TransportError, decode_sync_message, encode_sync_message};
 use jazz_storage_sqlite::SqliteStorage;
@@ -30,7 +31,13 @@ use thiserror::Error;
 /// JS wrappers must compare this with their expected range during startup and
 /// explain that an OTA update needs a new native development build when it is
 /// incompatible.
-pub const NATIVE_RELAY_ABI_VERSION: u16 = 1;
+pub const NATIVE_RELAY_ABI_VERSION: u16 = 2;
+
+const NATIVE_RELAY_QUEUE_MAX_MESSAGES: usize = 1024;
+const NATIVE_RELAY_QUEUE_MAX_BYTES: usize = MAX_LOGICAL_MESSAGE_BYTES;
+const NATIVE_RELAY_DRAIN_MAX_MESSAGES: usize = 64;
+const NATIVE_RELAY_DRAIN_TARGET_BYTES: usize = 8 * 1024 * 1024;
+const NATIVE_RELAY_PUMP_MAX_CLIENTS: usize = 64;
 
 /// Codec-owned commands accepted by the native relay C ABI.
 ///
@@ -43,10 +50,7 @@ pub enum RelayCommandRequest {
     Open {
         supported_abi_minimum: u16,
         supported_abi_maximum: u16,
-        scope: RelayScopeRequest,
-        sqlite_path: String,
-        schema_json: String,
-        identity: DbIdentity,
+        admitted_scope: u64,
     },
     Attach {
         relay: u64,
@@ -94,6 +98,22 @@ pub struct RelayScopeRequest {
     pub app_namespace: String,
     pub storage_namespace: String,
     pub auth_scope: Option<String>,
+}
+
+/// Configuration admitted by trusted platform code before JavaScript may open
+/// a relay. This uses a separate C ABI entry point and is deliberately not a
+/// [`RelayCommandRequest`] variant.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct RelayScopeAdmissionRequest {
+    pub scope: RelayScopeRequest,
+    pub sqlite_path: String,
+    pub schema_json: String,
+    pub identity: DbIdentity,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct RelayScopeAdmissionResponse {
+    pub admitted_scope: u64,
 }
 
 impl From<RelayScopeRequest> for RelayScope {
@@ -162,11 +182,13 @@ pub enum JazzNativeRelayStatus {
     LifecycleFailure = 5,
     InvalidAbiRange = 6,
     IncompatibleAbi = 7,
+    Backpressure = 8,
 }
 
 /// Explicit host-owned lifecycle registry for JNI/Swift. No global relay map.
 pub struct NativeRelayHost {
     registry: NativeRelayRegistry,
+    admitted_scopes: BTreeMap<u64, RelayOpenConfig>,
     relays: BTreeMap<u64, (RelayScope, NativeRelay)>,
     clients: BTreeMap<u64, (u64, NativeRelayClient)>,
     next_handle: u64,
@@ -178,6 +200,7 @@ impl Default for NativeRelayHost {
     fn default() -> Self {
         Self {
             registry: NativeRelayRegistry::default(),
+            admitted_scopes: BTreeMap::new(),
             relays: BTreeMap::new(),
             clients: BTreeMap::new(),
             next_handle: 1,
@@ -208,10 +231,7 @@ impl NativeRelayHost {
             RelayCommandRequest::Open {
                 supported_abi_minimum,
                 supported_abi_maximum,
-                scope,
-                sqlite_path,
-                schema_json,
-                identity,
+                admitted_scope,
             } => {
                 let supported_abi = NativeRelayAbiRange {
                     minimum: supported_abi_minimum,
@@ -222,23 +242,14 @@ impl NativeRelayHost {
                     RelayError::IncompatibleAbi { .. } => JazzNativeRelayStatus::IncompatibleAbi,
                     _ => JazzNativeRelayStatus::LifecycleFailure,
                 })?;
-                let public_schema = serde_json::from_str(&schema_json)
-                    .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
-                let schema = JazzSchema::new(&public_schema)
-                    .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
-                let scope = RelayScope::from(scope);
-                let relay = self
-                    .registry
-                    .open(RelayOpenConfig {
-                        supported_abi,
-                        scope: scope.clone(),
-                        sqlite_path: PathBuf::from(sqlite_path),
-                        schema,
-                        identity,
-                        #[cfg(test)]
-                        thread_start_counter: self.thread_start_counter.clone(),
-                    })
-                    .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+                let mut config = self
+                    .admitted_scopes
+                    .get(&admitted_scope)
+                    .cloned()
+                    .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
+                config.supported_abi = supported_abi;
+                let scope = config.scope.clone();
+                let relay = self.registry.open(config).map_err(relay_status)?;
                 let handle = self
                     .allocate()
                     .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
@@ -303,7 +314,7 @@ impl NativeRelayHost {
                     .ok_or(JazzNativeRelayStatus::InvalidHandle)?
                     .1
                     .pump()
-                    .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+                    .map_err(relay_status)?;
                 Ok(RelayCommandResponse::Pumped)
             }
             RelayCommandRequest::SendClientFrame { client, frame } => {
@@ -313,7 +324,7 @@ impl NativeRelayHost {
                     .1
                     .wire()
                     .push_inbound_encoded(&frame)
-                    .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+                    .map_err(relay_status)?;
                 Ok(RelayCommandResponse::Pumped)
             }
             RelayCommandRequest::ReceiveClientFrames { client } => {
@@ -335,7 +346,7 @@ impl NativeRelayHost {
                     .1
                     .wire()
                     .push_inbound_encoded(&frame)
-                    .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+                    .map_err(relay_status)?;
                 Ok(RelayCommandResponse::Pumped)
             }
             RelayCommandRequest::ReceiveRelayFrames { relay } => Ok(RelayCommandResponse::Frames {
@@ -370,6 +381,46 @@ impl NativeRelayHost {
                 })
             }
         }
+    }
+
+    fn admit_scope(
+        &mut self,
+        request: RelayScopeAdmissionRequest,
+    ) -> Result<RelayScopeAdmissionResponse, JazzNativeRelayStatus> {
+        let public_schema = serde_json::from_str(&request.schema_json)
+            .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        let schema =
+            JazzSchema::new(&public_schema).map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+        let handle = self.allocate().map_err(relay_status)?;
+        self.admitted_scopes.insert(
+            handle,
+            RelayOpenConfig {
+                supported_abi: NativeRelayAbiRange {
+                    minimum: NATIVE_RELAY_ABI_VERSION,
+                    maximum: NATIVE_RELAY_ABI_VERSION,
+                },
+                scope: request.scope.into(),
+                sqlite_path: PathBuf::from(request.sqlite_path),
+                schema,
+                identity: request.identity,
+                #[cfg(test)]
+                thread_start_counter: self.thread_start_counter.clone(),
+            },
+        );
+        Ok(RelayScopeAdmissionResponse {
+            admitted_scope: handle,
+        })
+    }
+}
+
+fn relay_status(error: RelayError) -> JazzNativeRelayStatus {
+    match error {
+        RelayError::InvalidAbiRange { .. } => JazzNativeRelayStatus::InvalidAbiRange,
+        RelayError::IncompatibleAbi { .. } => JazzNativeRelayStatus::IncompatibleAbi,
+        RelayError::QueueCapacityExceeded { .. } | RelayError::TransportBackpressure => {
+            JazzNativeRelayStatus::Backpressure
+        }
+        _ => JazzNativeRelayStatus::LifecycleFailure,
     }
 }
 
@@ -446,13 +497,13 @@ pub unsafe extern "C" fn jazz_native_relay_execute(
 /// Opaque C-owned native relay host. It owns one scope registry and all handles.
 #[repr(C)]
 pub struct JazzNativeRelayHost {
-    inner: NativeRelayHost,
+    inner: Mutex<NativeRelayHost>,
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn jazz_native_relay_host_new() -> *mut JazzNativeRelayHost {
     Box::into_raw(Box::new(JazzNativeRelayHost {
-        inner: NativeRelayHost::default(),
+        inner: Mutex::new(NativeRelayHost::default()),
     }))
 }
 
@@ -500,7 +551,66 @@ pub unsafe extern "C" fn jazz_native_relay_host_execute(
         Ok(command) => command,
         Err(_) => return JazzNativeRelayStatus::InvalidCommand,
     };
-    let response = match unsafe { (&mut *host).inner.execute(command) } {
+    let mut host = match unsafe { (&*host).inner.lock() } {
+        Ok(host) => host,
+        Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
+    };
+    let response = match host.execute(command) {
+        Ok(response) => response,
+        Err(status) => return status,
+    };
+    let bytes = match postcard::to_allocvec(&response) {
+        Ok(bytes) => bytes,
+        Err(_) => return JazzNativeRelayStatus::EncodeFailure,
+    };
+    let boxed = bytes.into_boxed_slice();
+    unsafe {
+        *out = JazzNativeRelayBytes {
+            len: boxed.len(),
+            data: Box::into_raw(boxed).cast(),
+        };
+    }
+    JazzNativeRelayStatus::Ok
+}
+
+/// Admit one persistence/authentication scope from trusted platform code.
+///
+/// This entry point is intentionally separate from the opaque JavaScript
+/// command channel. JNI/Swift derive the path, schema, database identity, and
+/// opaque authentication scope, admit them here, then reveal only the returned
+/// handle to JavaScript.
+///
+/// # Safety
+/// `host`, request bytes, and `out` follow the same rules as
+/// [`jazz_native_relay_host_execute`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn jazz_native_relay_host_admit_scope(
+    host: *mut JazzNativeRelayHost,
+    request: *const u8,
+    request_len: usize,
+    out: *mut JazzNativeRelayBytes,
+) -> JazzNativeRelayStatus {
+    if out.is_null() {
+        return JazzNativeRelayStatus::InvalidArgument;
+    }
+    unsafe { *out = JazzNativeRelayBytes::EMPTY };
+    if host.is_null() || (request.is_null() && request_len != 0) {
+        return JazzNativeRelayStatus::InvalidArgument;
+    }
+    let request = if request_len == 0 {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(request, request_len) }
+    };
+    let request = match postcard::from_bytes::<RelayScopeAdmissionRequest>(request) {
+        Ok(request) => request,
+        Err(_) => return JazzNativeRelayStatus::InvalidCommand,
+    };
+    let mut host = match unsafe { (&*host).inner.lock() } {
+        Ok(host) => host,
+        Err(_) => return JazzNativeRelayStatus::LifecycleFailure,
+    };
+    let response = match host.admit_scope(request) {
         Ok(response) => response,
         Err(status) => return status,
     };
@@ -703,6 +813,7 @@ struct RelayInner {
     wire: NativeRelayWire,
     sqlite_path: PathBuf,
     schema_version: jazz::ids::SchemaVersionId,
+    identity: DbIdentity,
 }
 
 impl Drop for RelayInner {
@@ -726,19 +837,99 @@ impl Drop for RelayInner {
 /// A native network/ABI wrapper writes authenticated upstream messages to
 /// `inbound` and drains `outbound`. The relay only sees normal `SyncMessage`
 /// traffic through a regular `Db::connect_upstream` transport.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct NativeRelayWire {
-    inbound: Arc<Mutex<VecDeque<SyncMessage>>>,
-    outbound: Arc<Mutex<VecDeque<SyncMessage>>>,
+    inbound: Arc<Mutex<BoundedMessageQueue>>,
+    outbound: Arc<Mutex<BoundedMessageQueue>>,
+    backpressured: Arc<AtomicBool>,
+}
+
+impl Default for NativeRelayWire {
+    fn default() -> Self {
+        Self {
+            inbound: Arc::new(Mutex::new(BoundedMessageQueue::default())),
+            outbound: Arc::new(Mutex::new(BoundedMessageQueue::default())),
+            backpressured: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+struct QueuedMessage {
+    message: SyncMessage,
+    encoded_len: usize,
+}
+
+#[derive(Default)]
+struct BoundedMessageQueue {
+    messages: VecDeque<QueuedMessage>,
+    encoded_bytes: usize,
+}
+
+impl BoundedMessageQueue {
+    fn push(&mut self, message: SyncMessage, direction: &'static str) -> Result<(), RelayError> {
+        let encoded_len = encode_sync_message(&message)
+            .map_err(RelayError::EncodePeerMessage)?
+            .len();
+        validate_encoded_peer_message_len(encoded_len)?;
+        let next_bytes = self.encoded_bytes.saturating_add(encoded_len);
+        if self.messages.len() >= NATIVE_RELAY_QUEUE_MAX_MESSAGES
+            || next_bytes > NATIVE_RELAY_QUEUE_MAX_BYTES
+        {
+            return Err(RelayError::QueueCapacityExceeded {
+                direction,
+                queued_messages: self.messages.len(),
+                queued_bytes: self.encoded_bytes,
+            });
+        }
+        self.messages.push_back(QueuedMessage {
+            message,
+            encoded_len,
+        });
+        self.encoded_bytes = next_bytes;
+        Ok(())
+    }
+
+    fn pop(&mut self) -> Option<SyncMessage> {
+        let queued = self.messages.pop_front()?;
+        self.encoded_bytes -= queued.encoded_len;
+        Some(queued.message)
+    }
+
+    fn drain_messages(&mut self) -> Vec<SyncMessage> {
+        let mut drained = Vec::new();
+        let mut drained_bytes = 0_usize;
+        while drained.len() < NATIVE_RELAY_DRAIN_MAX_MESSAGES {
+            let Some(front) = self.messages.front() else {
+                break;
+            };
+            if !drained.is_empty()
+                && drained_bytes.saturating_add(front.encoded_len) > NATIVE_RELAY_DRAIN_TARGET_BYTES
+            {
+                break;
+            }
+            let queued = self.messages.pop_front().expect("front was present");
+            drained_bytes += queued.encoded_len;
+            self.encoded_bytes -= queued.encoded_len;
+            drained.push(queued.message);
+        }
+        drained
+    }
+
+    fn len(&self) -> usize {
+        self.messages.len()
+    }
 }
 
 impl NativeRelayWire {
+    fn take_transport_backpressure(&self) -> bool {
+        self.backpressured.swap(false, Ordering::AcqRel)
+    }
+
     pub fn push_inbound(&self, message: SyncMessage) -> Result<(), RelayError> {
         self.inbound
             .lock()
             .map_err(|_| RelayError::Poisoned("upstream inbound queue"))?
-            .push_back(message);
-        Ok(())
+            .push(message, "inbound")
     }
 
     pub fn take_outbound(&self) -> Result<Vec<SyncMessage>, RelayError> {
@@ -746,8 +937,7 @@ impl NativeRelayWire {
             .outbound
             .lock()
             .map_err(|_| RelayError::Poisoned("upstream outbound queue"))?
-            .drain(..)
-            .collect())
+            .drain_messages())
     }
 
     /// Admit one postcard-encoded ordinary peer message from a binding.
@@ -775,7 +965,18 @@ impl NativeRelayWire {
         // Encode while the batch remains queued. A failed codec/size check
         // leaves every message intact for retry and diagnostics.
         let encoded = outbound
+            .messages
             .iter()
+            .take(NATIVE_RELAY_DRAIN_MAX_MESSAGES)
+            .scan(0_usize, |bytes, queued| {
+                if *bytes != 0
+                    && bytes.saturating_add(queued.encoded_len) > NATIVE_RELAY_DRAIN_TARGET_BYTES
+                {
+                    return None;
+                }
+                *bytes += queued.encoded_len;
+                Some(&queued.message)
+            })
             .map(|message| {
                 let bytes = encode_sync_message(message).map_err(RelayError::EncodePeerMessage)?;
                 validate_logical_message_len(bytes.len())
@@ -783,7 +984,9 @@ impl NativeRelayWire {
                 Ok(bytes)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        outbound.clear();
+        for _ in 0..encoded.len() {
+            let _ = outbound.pop();
+        }
         Ok(encoded)
     }
 
@@ -807,59 +1010,61 @@ fn validate_encoded_peer_message_len(len: usize) -> Result<(), RelayError> {
 }
 
 struct QueueTransport {
-    inbound: Arc<Mutex<VecDeque<SyncMessage>>>,
-    outbound: Arc<Mutex<VecDeque<SyncMessage>>>,
+    wire: NativeRelayWire,
 }
 
 impl Transport for QueueTransport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        self.outbound
+        let result = self
+            .wire
+            .outbound
             .lock()
             .map_err(|_| TransportError::Failed("native relay outbound queue poisoned".to_owned()))?
-            .push_back(message);
-        Ok(())
+            .push(message, "outbound");
+        if result.is_err() {
+            self.wire.backpressured.store(true, Ordering::Release);
+        }
+        result.map_err(|error| TransportError::Failed(error.to_string()))
     }
 
     fn try_recv(&mut self) -> Option<SyncMessage> {
-        self.inbound.lock().ok()?.pop_front()
+        self.wire.inbound.lock().ok()?.pop()
     }
 }
 
 struct DuplexTransport {
-    inbound: Arc<Mutex<VecDeque<SyncMessage>>>,
-    outbound: Arc<Mutex<VecDeque<SyncMessage>>>,
+    wire: NativeRelayWire,
 }
 
 impl Transport for DuplexTransport {
     fn send(&mut self, message: SyncMessage) -> Result<(), TransportError> {
-        self.outbound
+        let result = self
+            .wire
+            .outbound
             .lock()
             .map_err(|_| TransportError::Failed("native relay client queue poisoned".to_owned()))?
-            .push_back(message);
-        Ok(())
+            .push(message, "client outbound");
+        if result.is_err() {
+            self.wire.backpressured.store(true, Ordering::Release);
+        }
+        result.map_err(|error| TransportError::Failed(error.to_string()))
     }
 
     fn try_recv(&mut self) -> Option<SyncMessage> {
-        self.inbound.lock().ok()?.pop_front()
+        self.wire.inbound.lock().ok()?.pop()
     }
 }
 
 fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>, NativeRelayWire) {
-    let left = Arc::new(Mutex::new(VecDeque::new()));
-    let right = Arc::new(Mutex::new(VecDeque::new()));
-    let wire = NativeRelayWire {
-        inbound: Arc::clone(&left),
-        outbound: Arc::clone(&right),
+    let wire = NativeRelayWire::default();
+    let reverse = NativeRelayWire {
+        inbound: Arc::clone(&wire.outbound),
+        outbound: Arc::clone(&wire.inbound),
+        backpressured: Arc::clone(&wire.backpressured),
     };
     (
-        Box::new(DuplexTransport {
-            inbound: Arc::clone(&left),
-            outbound: Arc::clone(&right),
-        }),
-        Box::new(DuplexTransport {
-            inbound: right,
-            outbound: left,
-        }),
+        Box::new(DuplexTransport { wire: wire.clone() }),
+        Box::new(DuplexTransport { wire: reverse }),
         wire,
     )
 }
@@ -876,8 +1081,10 @@ struct ConnectedClient {
 struct RelayWorker {
     persistent: Db<SqliteStorage>,
     _upstream: Rc<LocalMutex<PeerConnection<SqliteStorage>>>,
+    wire: NativeRelayWire,
     clients: BTreeMap<u64, ConnectedClient>,
     next_client_id: u64,
+    pump_cursor: Option<u64>,
     schema: JazzSchema,
 }
 
@@ -895,15 +1102,15 @@ impl RelayWorker {
             id_source: None,
         }))
         .map_err(RelayError::Db)?;
-        let upstream = block_on(persistent.connect_upstream(Box::new(QueueTransport {
-            inbound: wire.inbound,
-            outbound: wire.outbound,
-        })));
+        let upstream =
+            block_on(persistent.connect_upstream(Box::new(QueueTransport { wire: wire.clone() })));
         Ok(Self {
             persistent,
             _upstream: upstream,
+            wire,
             clients: BTreeMap::new(),
             next_client_id: 1,
+            pump_cursor: None,
             schema: config.schema,
         })
     }
@@ -953,15 +1160,42 @@ impl RelayWorker {
         // observe resulting view/fate messages. More cascades schedule another
         // host turn; spinning until quiescence here would make a busy
         // subscription graph monopolize the native owner thread.
-        for client in self.clients.values() {
-            block_on(client.db.tick()).map_err(RelayError::Db)?;
+        let client_ids = bounded_round_robin_ids(&self.clients, self.pump_cursor);
+        if let Some(last) = client_ids.last() {
+            self.pump_cursor = Some(*last);
         }
-        block_on(self.persistent.tick()).map_err(RelayError::Db)?;
-        for client in self.clients.values() {
-            block_on(client.db.tick()).map_err(RelayError::Db)?;
+        for id in &client_ids {
+            let client = &self.clients[id];
+            map_tick_result(block_on(client.db.tick()), &client.wire)?;
+        }
+        map_tick_result(block_on(self.persistent.tick()), &self.wire)?;
+        for id in &client_ids {
+            let client = &self.clients[id];
+            map_tick_result(block_on(client.db.tick()), &client.wire)?;
         }
         Ok(())
     }
+}
+
+fn map_tick_result<T>(
+    result: Result<T, jazz::db::Error>,
+    wire: &NativeRelayWire,
+) -> Result<(), RelayError> {
+    match result {
+        Ok(_) => Ok(()),
+        Err(_) if wire.take_transport_backpressure() => Err(RelayError::TransportBackpressure),
+        Err(error) => Err(RelayError::Db(error)),
+    }
+}
+
+fn bounded_round_robin_ids<T>(clients: &BTreeMap<u64, T>, cursor: Option<u64>) -> Vec<u64> {
+    let mut client_ids = clients.keys().copied().collect::<Vec<_>>();
+    if let Some(cursor) = cursor {
+        let split = client_ids.partition_point(|id| *id <= cursor);
+        client_ids.rotate_left(split);
+    }
+    client_ids.truncate(NATIVE_RELAY_PUMP_MAX_CLIENTS);
+    client_ids
 }
 
 type RelayJob = Box<dyn FnOnce(&mut RelayWorker) + Send + 'static>;
@@ -977,6 +1211,7 @@ impl NativeRelay {
         config.validate()?;
         let sqlite_path = config.sqlite_path.clone();
         let schema_version = config.schema.version_id();
+        let identity = config.identity;
         let wire = NativeRelayWire::default();
         let (commands, receiver) = mpsc::channel::<RelayCommand>();
         let (started_tx, started_rx) = mpsc::channel();
@@ -1020,6 +1255,7 @@ impl NativeRelay {
                 wire,
                 sqlite_path,
                 schema_version,
+                identity,
             }),
         })
     }
@@ -1101,6 +1337,7 @@ impl NativeRelayRegistry {
         if let Some(existing) = relays.get(&config.scope) {
             if existing.inner.sqlite_path != config.sqlite_path
                 || existing.inner.schema_version != config.schema.version_id()
+                || existing.inner.identity != config.identity
             {
                 return Err(RelayError::ScopeConfigurationMismatch);
             }
@@ -1139,6 +1376,16 @@ pub enum RelayError {
     DecodePeerMessage(postcard::Error),
     #[error("failed to encode native relay peer message: {0}")]
     EncodePeerMessage(postcard::Error),
+    #[error(
+        "native relay {direction} queue capacity exceeded ({queued_messages} messages, {queued_bytes} encoded bytes); drain or pump before retrying"
+    )]
+    QueueCapacityExceeded {
+        direction: &'static str,
+        queued_messages: usize,
+        queued_bytes: usize,
+    },
+    #[error("native relay transport queue requires draining before the pump can continue")]
+    TransportBackpressure,
     #[error("invalid native relay scope: {0}")]
     InvalidScope(String),
     #[error("failed to open native relay owner thread: {0}")]
@@ -1219,6 +1466,26 @@ mod tests {
         assert!(!Arc::ptr_eq(&first.inner, &other.inner));
         assert!(matches!(
             registry.open(config(directory.path().join("wrong.sqlite"), Some("alice"))),
+            Err(RelayError::ScopeConfigurationMismatch)
+        ));
+        let mut wrong_identity = config(directory.path().join("alice.sqlite"), Some("alice"));
+        wrong_identity.identity = DbIdentity {
+            node: NodeUuid::from_bytes([0xe1; 16]),
+            author: AuthorId::from_bytes([0xe2; 16]),
+        };
+        assert!(matches!(
+            registry.open(wrong_identity),
+            Err(RelayError::ScopeConfigurationMismatch)
+        ));
+        let mut wrong_schema = config(directory.path().join("alice.sqlite"), Some("alice"));
+        wrong_schema.schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("notes").column("body", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        assert!(matches!(
+            registry.open(wrong_schema),
             Err(RelayError::ScopeConfigurationMismatch)
         ));
 
@@ -1395,15 +1662,16 @@ mod tests {
         let bytes = encode_sync_message(&message).unwrap();
 
         wire.push_inbound_encoded(&bytes).unwrap();
-        assert_eq!(
-            wire.inbound.lock().unwrap().pop_front(),
-            Some(message.clone())
-        );
+        assert_eq!(wire.inbound.lock().unwrap().pop(), Some(message.clone()));
 
-        wire.outbound.lock().unwrap().push_back(message);
+        wire.outbound
+            .lock()
+            .unwrap()
+            .push(message, "test outbound")
+            .unwrap();
         let encoded = wire.take_outbound_encoded().unwrap();
         assert_eq!(encoded.len(), 1);
-        assert!(wire.outbound.lock().unwrap().is_empty());
+        assert_eq!(wire.outbound.lock().unwrap().len(), 0);
         assert_eq!(
             decode_sync_message(&encoded[0]).unwrap(),
             SyncMessage::SessionClaims {
@@ -1459,36 +1727,62 @@ mod tests {
     }
 
     #[test]
-    fn outbound_queue_keeps_messages_when_an_oversized_batch_is_rejected() {
-        let normal = SyncMessage::SessionClaims {
+    fn native_queue_applies_count_backpressure_without_losing_admitted_messages() {
+        let message = SyncMessage::SessionClaims {
             identity: AuthorId::SYSTEM,
             claims: BTreeMap::new(),
         };
-        let oversized = SyncMessage::SessionClaims {
-            identity: AuthorId::SYSTEM,
-            claims: BTreeMap::from([(
-                "payload".to_owned(),
-                Value::String("x".repeat(MAX_LOGICAL_MESSAGE_BYTES + 1)),
-            )]),
-        };
         let wire = NativeRelayWire::default();
-        wire.outbound
-            .lock()
-            .unwrap()
-            .extend([normal.clone(), oversized]);
+        for _ in 0..NATIVE_RELAY_QUEUE_MAX_MESSAGES {
+            wire.push_inbound(message.clone()).unwrap();
+        }
+        assert!(matches!(
+            wire.push_inbound(message),
+            Err(RelayError::QueueCapacityExceeded {
+                queued_messages: NATIVE_RELAY_QUEUE_MAX_MESSAGES,
+                ..
+            })
+        ));
+        assert_eq!(
+            wire.queue_depths().unwrap().0,
+            NATIVE_RELAY_QUEUE_MAX_MESSAGES
+        );
+    }
 
-        assert!(matches!(
-            wire.take_outbound_encoded(),
-            Err(RelayError::PeerMessageTooLarge(_))
-        ));
-        let queued = wire.outbound.lock().unwrap();
-        assert_eq!(queued.len(), 2, "a rejected batch must not be drained");
-        assert_eq!(queued.front(), Some(&normal));
-        assert!(matches!(
-            queued.back(),
-            Some(SyncMessage::SessionClaims { claims, .. })
-                if matches!(claims.get("payload"), Some(Value::String(value)) if value.len() == MAX_LOGICAL_MESSAGE_BYTES + 1)
-        ));
+    #[test]
+    fn native_queue_drains_in_bounded_batches() {
+        let wire = NativeRelayWire::default();
+        for _ in 0..(NATIVE_RELAY_DRAIN_MAX_MESSAGES + 1) {
+            wire.outbound
+                .lock()
+                .unwrap()
+                .push(
+                    SyncMessage::SessionClaims {
+                        identity: AuthorId::SYSTEM,
+                        claims: BTreeMap::new(),
+                    },
+                    "test outbound",
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            wire.take_outbound_encoded().unwrap().len(),
+            NATIVE_RELAY_DRAIN_MAX_MESSAGES
+        );
+        assert_eq!(wire.queue_depths().unwrap().1, 1);
+    }
+
+    #[test]
+    fn pump_client_selection_is_bounded_and_round_robins() {
+        let clients = (1..=(NATIVE_RELAY_PUMP_MAX_CLIENTS as u64 + 3))
+            .map(|id| (id, ()))
+            .collect::<BTreeMap<_, _>>();
+        let first = bounded_round_robin_ids(&clients, None);
+        assert_eq!(first.len(), NATIVE_RELAY_PUMP_MAX_CLIENTS);
+        assert_eq!(first[0], 1);
+        let second = bounded_round_robin_ids(&clients, first.last().copied());
+        assert_eq!(&second[..3], &[65, 66, 67]);
+        assert_eq!(second[3], 1);
     }
 
     #[test]
@@ -1500,9 +1794,7 @@ mod tests {
             node: NodeUuid::from_bytes([0x71; 16]),
             author: AuthorId::from_bytes([0x72; 16]),
         };
-        let open = RelayCommandRequest::Open {
-            supported_abi_minimum: NATIVE_RELAY_ABI_VERSION,
-            supported_abi_maximum: NATIVE_RELAY_ABI_VERSION,
+        let admission = RelayScopeAdmissionRequest {
             scope: RelayScopeRequest {
                 app_namespace: "host-receipt".to_owned(),
                 storage_namespace: "default".to_owned(),
@@ -1511,6 +1803,30 @@ mod tests {
             sqlite_path: directory.path().join("host.sqlite").display().to_string(),
             schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
             identity,
+        };
+        let admission_bytes = postcard::to_allocvec(&admission).unwrap();
+        let mut admission_output = JazzNativeRelayBytes::EMPTY;
+        assert_eq!(
+            unsafe {
+                jazz_native_relay_host_admit_scope(
+                    host,
+                    admission_bytes.as_ptr(),
+                    admission_bytes.len(),
+                    &mut admission_output,
+                )
+            },
+            JazzNativeRelayStatus::Ok
+        );
+        let admitted_scope = postcard::from_bytes::<RelayScopeAdmissionResponse>(unsafe {
+            std::slice::from_raw_parts(admission_output.data, admission_output.len)
+        })
+        .unwrap()
+        .admitted_scope;
+        unsafe { jazz_native_relay_bytes_free(&mut admission_output) };
+        let open = RelayCommandRequest::Open {
+            supported_abi_minimum: NATIVE_RELAY_ABI_VERSION,
+            supported_abi_maximum: NATIVE_RELAY_ABI_VERSION,
+            admitted_scope,
         };
         unsafe fn command(
             host: *mut JazzNativeRelayHost,
@@ -1541,9 +1857,10 @@ mod tests {
         };
         assert_ne!(relay, alias);
         unsafe {
+            let host = (*host).inner.lock().unwrap();
             assert!(Arc::ptr_eq(
-                &(*host).inner.relays.get(&relay).unwrap().1.inner,
-                &(*host).inner.relays.get(&alias).unwrap().1.inner,
+                &host.relays.get(&relay).unwrap().1.inner,
+                &host.relays.get(&alias).unwrap().1.inner,
             ));
         }
         let client = match unsafe {
@@ -1585,9 +1902,10 @@ mod tests {
             response => panic!("unexpected reopen response: {response:?}"),
         };
         unsafe {
+            let host = (*host).inner.lock().unwrap();
             assert!(Arc::ptr_eq(
-                &(*host).inner.relays.get(&alias).unwrap().1.inner,
-                &(*host).inner.relays.get(&reopened).unwrap().1.inner,
+                &host.relays.get(&alias).unwrap().1.inner,
+                &host.relays.get(&reopened).unwrap().1.inner,
             ));
         }
         assert_eq!(
@@ -1619,25 +1937,38 @@ mod tests {
         let sqlite_path = directory.path().join("must-not-open.sqlite");
         let host = jazz_native_relay_host_new();
         let threads_started = Arc::new(AtomicUsize::new(0));
-        unsafe { (*host).inner.thread_start_counter = Some(Arc::clone(&threads_started)) };
+        unsafe {
+            (*host).inner.lock().unwrap().thread_start_counter = Some(Arc::clone(&threads_started))
+        };
+        let admitted_scope = unsafe {
+            (*host)
+                .inner
+                .lock()
+                .unwrap()
+                .admit_scope(RelayScopeAdmissionRequest {
+                    scope: RelayScopeRequest {
+                        app_namespace: "abi-rejection".to_owned(),
+                        storage_namespace: "default".to_owned(),
+                        auth_scope: None,
+                    },
+                    sqlite_path: sqlite_path.display().to_string(),
+                    schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
+                    identity: DbIdentity {
+                        node: NodeUuid::from_bytes([0x81; 16]),
+                        author: AuthorId::from_bytes([0x82; 16]),
+                    },
+                })
+                .unwrap()
+                .admitted_scope
+        };
         let request = |minimum, maximum| RelayCommandRequest::Open {
             supported_abi_minimum: minimum,
             supported_abi_maximum: maximum,
-            scope: RelayScopeRequest {
-                app_namespace: "abi-rejection".to_owned(),
-                storage_namespace: "default".to_owned(),
-                auth_scope: None,
-            },
-            sqlite_path: sqlite_path.display().to_string(),
-            schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
-            identity: DbIdentity {
-                node: NodeUuid::from_bytes([0x81; 16]),
-                author: AuthorId::from_bytes([0x82; 16]),
-            },
+            admitted_scope,
         };
         for (request, expected) in [
-            (request(2, 1), JazzNativeRelayStatus::InvalidAbiRange),
-            (request(2, 2), JazzNativeRelayStatus::IncompatibleAbi),
+            (request(3, 2), JazzNativeRelayStatus::InvalidAbiRange),
+            (request(3, 3), JazzNativeRelayStatus::IncompatibleAbi),
         ] {
             let encoded = postcard::to_allocvec(&request).unwrap();
             let mut output = JazzNativeRelayBytes {
@@ -1678,5 +2009,37 @@ mod tests {
         assert!(output.data.is_null());
         assert_eq!(output.len, 0);
         unsafe { jazz_native_relay_host_free(host) };
+    }
+
+    #[test]
+    fn c_host_serializes_concurrent_commands() {
+        let host = jazz_native_relay_host_new() as usize;
+        let probe = postcard::to_allocvec(&RelayCommandRequest::Probe).unwrap();
+        let workers = (0..8)
+            .map(|_| {
+                let probe = probe.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..100 {
+                        let mut output = JazzNativeRelayBytes::EMPTY;
+                        assert_eq!(
+                            unsafe {
+                                jazz_native_relay_host_execute(
+                                    host as *mut JazzNativeRelayHost,
+                                    probe.as_ptr(),
+                                    probe.len(),
+                                    &mut output,
+                                )
+                            },
+                            JazzNativeRelayStatus::Ok
+                        );
+                        unsafe { jazz_native_relay_bytes_free(&mut output) };
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        unsafe { jazz_native_relay_host_free(host as *mut JazzNativeRelayHost) };
     }
 }

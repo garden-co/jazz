@@ -30,12 +30,21 @@ typedef enum jazz_native_relay_status {
   JAZZ_NATIVE_RELAY_LIFECYCLE_FAILURE = 5,
   JAZZ_NATIVE_RELAY_INVALID_ABI_RANGE = 6,
   JAZZ_NATIVE_RELAY_INCOMPATIBLE_ABI = 7,
+  JAZZ_NATIVE_RELAY_BACKPRESSURE = 8,
 } jazz_native_relay_status;
 
 typedef struct jazz_native_relay_host jazz_native_relay_host;
 jazz_native_relay_host *jazz_native_relay_host_new(void);
 void jazz_native_relay_host_free(jazz_native_relay_host *host);
 jazz_native_relay_status jazz_native_relay_host_execute(
+    jazz_native_relay_host *host,
+    const uint8_t *request,
+    size_t request_len,
+    jazz_native_relay_bytes *out);
+
+/* Admit a postcard RelayScopeAdmissionRequest supplied by trusted platform
+ * code. JavaScript receives only the resulting opaque admitted-scope handle. */
+jazz_native_relay_status jazz_native_relay_host_admit_scope(
     jazz_native_relay_host *host,
     const uint8_t *request,
     size_t request_len,

@@ -35,9 +35,13 @@ The relay is a normal non-history-complete `Db`:
 - No binding may read directly from SQLite or bypass a `Db` to answer an app
   query.
 
-The scope key has no token material. The platform wrapper derives an opaque
-`auth_scope` only after authentication; tokens and claims belong to upstream
-session negotiation. Logout explicitly closes the old scope and chooses either
+The scope key has no token material. Trusted platform code derives an opaque
+`auth_scope` only after authentication and admits the complete scope config to
+the native host: auth scope, SQLite path, schema, and persistent `DbIdentity`.
+JavaScript receives only an opaque admission handle and cannot choose or amend
+those values through the command codec. Reusing a scope with a different path,
+schema, or identity fails. Tokens and claims belong to upstream session
+negotiation. Logout explicitly closes the old scope and chooses either
 retention or deletion through a separate, user-visible storage-lifecycle API.
 No current host may reuse a relay after an auth-scope change.
 
@@ -70,6 +74,13 @@ Host wrappers must not create an object-per-row native API. Subscription events
 remain the maintained event stream from chapter 16. The RN TurboModule is one
 such host; it is not part of the core crate.
 
+The C host serializes all commands internally. Every directional peer queue has
+both encoded-byte and message-count budgets; admission reports typed
+backpressure without dropping already-admitted messages. Receive calls drain a
+bounded batch, and each pump services a bounded round-robin subset of UI peers.
+Callers retry after draining or scheduling another pump rather than spinning an
+unbounded native turn.
+
 ### 19.3 SQLite backend contract
 
 `jazz-storage-sqlite` is a native implementation of Groove's existing async
@@ -97,12 +108,12 @@ with an actionable instruction to enable it (Expo: add the `jazz-rn` config
 plugin, then run `expo prebuild`).
 
 **Current checkpoint (not device support).** The package autolinks an Android
-and iOS `JazzRelay` TurboModule stub. Both report ABI `0` and reject commands
-until a matching `jazz-native-relay` artifact is embedded. It contains no
-XCFramework, AAR, or Rust relay artifact, so a prebuilt Expo development build
-or bare RN app can prove package integration but must not be presented as a
-usable Jazz client. Stock Expo Go cannot load arbitrary native code and is
-unsupported.
+and iOS `JazzRelay` TurboModule. A source/package build without staged native
+artifacts reports ABI `0` and rejects commands. Trusted artifact jobs build the
+Android static libraries and iOS XCFramework, and the npm file contract includes
+them when the release assembly stages them; merely producing a CI artifact does
+not make an npm package usable. Stock Expo Go cannot load arbitrary native code
+and is unsupported.
 
 **Target shipping contract.** A published `jazz-rn` package is a standard
 current React Native New Architecture TurboModule package:
