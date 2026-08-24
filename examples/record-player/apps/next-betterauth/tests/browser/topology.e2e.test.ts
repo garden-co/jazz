@@ -49,7 +49,7 @@ const recipientPermissions = s.definePermissions(recipientApp, ({ policy, sessio
 const relationalRecipientApp = s.defineApp({
   albums: s.table({ title: s.string() }),
   tracks: s.table({ album_id: s.ref("albums"), title: s.string() }),
-  playlists: s.table({ name: s.string() }),
+  playlists: s.table({ name: s.string(), owner_subject: s.string() }),
   invitations: s.table({
     playlist_id: s.ref("playlists"),
     subject: s.string(),
@@ -212,14 +212,19 @@ describe("RecordPlayer authenticated playlist topology", () => {
       schema: relationalRecipientApp,
       permissions: relationalRecipientPermissions,
     });
-    const [ownerToken, recipientToken] = await Promise.all([
+    const [ownerToken, recipientToken, secondRecipientToken] = await Promise.all([
       getJazzServerJwtForUser("record-player-relation-owner", undefined, server.appId),
       getJazzServerJwtForUser("record-player-relation-recipient", undefined, server.appId),
+      getJazzServerJwtForUser("record-player-relation-listener", undefined, server.appId),
     ]);
     const owner = await openClient(server, "relation-owner", ownerToken);
     const recipient = await openClient(server, "relation-recipient", recipientToken);
+    const secondRecipient = await openClient(server, "relation-listener", secondRecipientToken);
     const playlist = await owner
-      .insert(relationalRecipientApp.playlists, { name: "recipient relation receipt" })
+      .insert(relationalRecipientApp.playlists, {
+        name: "recipient relation receipt",
+        owner_subject: "record-player-relation-owner",
+      })
       .wait({ tier: "edge" });
     const invite = await owner
       .insert(relationalRecipientApp.invitations, {
@@ -230,17 +235,36 @@ describe("RecordPlayer authenticated playlist topology", () => {
         status: "pending",
       })
       .wait({ tier: "edge" });
+    const secondInvite = await owner
+      .insert(relationalRecipientApp.invitations, {
+        playlist_id: playlist.id,
+        subject: "record-player-relation-listener",
+        label: "second recipient relation receipt",
+        role: "listener",
+        status: "pending",
+      })
+      .wait({ tier: "edge" });
 
     await expect(
-      waitForQuery(
-        recipient,
-        relationalRecipientApp.invitations.where({ subject: "record-player-relation-recipient" }),
-        (rows) => rows.length === 1 && rows[0]?.id === invite.id,
-        "external-JWT recipient receives scalar grant with correlated owner branch",
-        15_000,
-        "edge",
-      ),
-    ).resolves.toHaveLength(1);
+      Promise.all([
+        waitForQuery(
+          recipient,
+          relationalRecipientApp.invitations.where({ subject: "record-player-relation-recipient" }),
+          (rows) => rows.length === 1 && rows[0]?.id === invite.id,
+          "external-JWT recipient receives scalar grant with correlated owner branch",
+          15_000,
+          "edge",
+        ),
+        waitForQuery(
+          secondRecipient,
+          relationalRecipientApp.invitations.where({ subject: "record-player-relation-listener" }),
+          (rows) => rows.length === 1 && rows[0]?.id === secondInvite.id,
+          "second external-JWT recipient receives scalar grant with correlated owner branch",
+          15_000,
+          "edge",
+        ),
+      ]),
+    ).resolves.toHaveLength(2);
   }, 30_000);
 
   it("rejects forged acceptance and converges two offline playlist editors exactly", async () => {
