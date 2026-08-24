@@ -415,13 +415,20 @@ impl PeerChunkResolver {
                         .collect::<BTreeSet<_>>();
                     let retries = state
                         .pending_by_chunk
-                        .iter()
+                        .iter_mut()
                         .filter(|(_, pending)| !queued.contains(&pending.upstream_id))
-                        .map(|(request, pending)| ChunkRequestEntry {
-                            request_id: pending.upstream_id,
-                            locator: request.locator.clone(),
-                            expected_hash: request.object_hash,
-                            remaining_hops: pending.remaining_hops,
+                        .map(|(request, pending)| {
+                            // Failover is the retry for this pending demand.
+                            // Disarm the old carrier's deadline so it cannot
+                            // enqueue the same request again after the
+                            // successor has already sent it.
+                            pending.retry_at = None;
+                            ChunkRequestEntry {
+                                request_id: pending.upstream_id,
+                                locator: request.locator.clone(),
+                                expected_hash: request.object_hash,
+                                remaining_hops: pending.remaining_hops,
+                            }
                         })
                         .collect::<Vec<_>>();
                     state.outbound.extend(retries);

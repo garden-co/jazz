@@ -6,6 +6,7 @@ use std::task::{Context, Poll};
 use groove::chunks::{ChunkProvider, ChunkStorage, MissingChunkResolver};
 
 use super::super::*;
+use super::test_empty_local_chunk_reader;
 
 #[test]
 fn auxiliary_pump_completes_a_suspended_groove_chunk_read_without_a_semantic_tick() {
@@ -212,5 +213,61 @@ fn a_late_response_from_a_disconnected_upstream_cannot_complete_reassigned_deman
             .await
             .unwrap();
         assert_eq!(pending.await.unwrap().as_ref(), &[2]);
+    });
+}
+
+#[test]
+fn successor_reissue_disarms_the_disconnected_upstreams_retry_deadline() {
+    crate::db::block_on(async {
+        let resolver = PeerChunkResolver::default();
+        let first = PeerIoPump::new(
+            resolver.clone(),
+            test_empty_local_chunk_reader(),
+            20,
+            PeerIoPumpRole::Upstream,
+        );
+        let successor = PeerIoPump::new(
+            resolver.clone(),
+            test_empty_local_chunk_reader(),
+            21,
+            PeerIoPumpRole::Upstream,
+        );
+        let request = groove::chunks::ChunkRequest {
+            object_hash: [8; 32],
+            locator: vec![9; 16],
+        };
+        let _pending = resolver.resolve(request);
+        let request_id = match first.take_outbound(64).unwrap() {
+            SyncMessage::ChunkRequestBatch(batch) => batch.requests[0].request_id,
+            _ => unreachable!(),
+        };
+        first
+            .route_incoming(SyncMessage::ChunkResponseBatch(ChunkResponseBatch {
+                responses: vec![ChunkResponseEntry {
+                    request_id,
+                    result: ChunkResponse::Retryable { retry_after_ms: 1 },
+                }],
+            }))
+            .await
+            .unwrap();
+
+        first.disconnect();
+        let replacement = match successor.take_outbound(64).unwrap() {
+            SyncMessage::ChunkRequestBatch(batch) => batch.requests,
+            _ => unreachable!(),
+        };
+        assert_eq!(replacement.len(), 1, "failover reissues exactly once");
+        assert_eq!(replacement[0].request_id, request_id);
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert_eq!(
+            resolver.promote_due_retries(),
+            0,
+            "the old carrier deadline must be disarmed by successor reissue"
+        );
+        assert!(
+            successor.take_outbound(64).is_none(),
+            "no duplicate may queue after the old deadline"
+        );
     });
 }
