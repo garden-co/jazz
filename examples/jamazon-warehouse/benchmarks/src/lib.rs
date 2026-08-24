@@ -179,6 +179,25 @@ impl Fixture {
                 ],
             );
         }
+        // A pending row in the same warehouse but a different district makes
+        // the production district scope observable in benchmark receipts.
+        insert(
+            &db,
+            "orders",
+            row(6, order_count),
+            [
+                ("warehouse_id", Value::Uuid(warehouse.0)),
+                ("district_id", Value::Uuid(other_district.0)),
+                ("customer_id", Value::Uuid(customer.0)),
+                ("order_number", Value::I32(-1)),
+                ("status", Value::String("pending".into())),
+                ("total_cents", Value::I32(1)),
+                (
+                    "idempotency_key",
+                    Value::String("other-district-distractor".into()),
+                ),
+            ],
+        );
         let warehouse_districts = db
             .prepare_query(
                 &Query::from("districts")
@@ -199,6 +218,7 @@ impl Fixture {
         let pending_orders = db
             .prepare_query(
                 &Query::from("orders")
+                    .filter(eq(col("warehouse_id"), lit(warehouse.0)))
                     .filter(eq(col("district_id"), lit(district.0)))
                     .filter(eq(col("status"), lit("pending")))
                     .order_by("order_number", OrderDirection::Asc)
@@ -225,7 +245,12 @@ impl Fixture {
             )
             .expect("prepare district next order number");
         let all_orders = db
-            .prepare_query(&Query::from("orders").filter(eq(col("warehouse_id"), lit(warehouse.0))))
+            .prepare_query(
+                &Query::from("orders")
+                    .filter(eq(col("warehouse_id"), lit(warehouse.0)))
+                    .filter(eq(col("district_id"), lit(district.0)))
+                    .order_by("order_number", OrderDirection::Asc),
+            )
             .expect("prepare all orders");
         let all_order_lines = db
             .prepare_query(&Query::from("order_lines"))
@@ -568,14 +593,15 @@ fn schema() -> JazzSchema {
                 TableSchemaBuilder::new("warehouses")
                     .column("name", ColumnType::Text)
                     .column("region", ColumnType::Text)
-                    .column("operator_id", ColumnType::Text),
+                    .column("operator_id", ColumnType::Text)
+                    .index_only(["operator_id"]),
             )
             .table(
                 TableSchemaBuilder::new("districts")
                     .fk_column("warehouse_id", "warehouses")
                     .column("name", ColumnType::Text)
                     .column("next_order_number", ColumnType::Integer)
-                    .index_only(["warehouse_id"]),
+                    .index_only(["warehouse_id", "name"]),
             )
             .table(
                 TableSchemaBuilder::new("items")
@@ -597,7 +623,7 @@ fn schema() -> JazzSchema {
                     .fk_column("district_id", "districts")
                     .column("name", ColumnType::Text)
                     .column("balance_cents", ColumnType::Integer)
-                    .index_only(["warehouse_id", "district_id"]),
+                    .index_only(["warehouse_id", "district_id", "name"]),
             )
             .table(
                 TableSchemaBuilder::new("orders")
@@ -621,14 +647,16 @@ fn schema() -> JazzSchema {
                     .fk_column("order_id", "orders")
                     .fk_column("item_id", "items")
                     .column("quantity", ColumnType::Integer)
-                    .column("amount_cents", ColumnType::Integer),
+                    .column("amount_cents", ColumnType::Integer)
+                    .index_only(["order_id"]),
             )
             .table(
                 TableSchemaBuilder::new("payments")
                     .fk_column("customer_id", "customers")
                     .nullable_fk_column("order_id", "orders")
                     .column("amount_cents", ColumnType::Integer)
-                    .column("idempotency_key", ColumnType::Text),
+                    .column("idempotency_key", ColumnType::Text)
+                    .index_only(["order_id"]),
             )
             .table(
                 TableSchemaBuilder::new("deliveries")
@@ -668,24 +696,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn orders_schema_keeps_the_idempotency_lookup_indexed() {
+    fn schema_indexes_match_the_operational_query_shapes() {
         let warehouse_schema = schema();
-        let orders = warehouse_schema
-            .tables()
-            .iter()
-            .find(|table| table.name == "orders")
-            .expect("orders table");
-        for column in [
-            "warehouse_id",
-            "idempotency_key",
-            "district_id",
-            "status",
-            "order_number",
+        for (table_name, columns) in [
+            ("warehouses", &["operator_id"][..]),
+            ("districts", &["warehouse_id", "name"][..]),
+            ("stock", &["warehouse_id", "item_id", "on_hand"][..]),
+            ("customers", &["warehouse_id", "district_id", "name"][..]),
+            (
+                "orders",
+                &[
+                    "warehouse_id",
+                    "district_id",
+                    "status",
+                    "order_number",
+                    "idempotency_key",
+                ][..],
+            ),
+            ("order_lines", &["order_id"][..]),
+            ("payments", &["order_id"][..]),
         ] {
-            assert!(
-                orders.indexed_columns.contains(column),
-                "orders index must retain {column}"
-            );
+            let table = warehouse_schema
+                .tables()
+                .iter()
+                .find(|table| table.name == table_name)
+                .unwrap_or_else(|| panic!("missing {table_name} table"));
+            for column in columns {
+                assert!(
+                    table.indexed_columns.contains(*column),
+                    "{table_name} index must retain {column}"
+                );
+            }
         }
     }
 }

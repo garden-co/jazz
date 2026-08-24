@@ -6,6 +6,13 @@ fn pending_order_access_path_is_bounded() {
     assert_eq!(fixture.district_customer_count(), 1);
     assert_eq!(fixture.pending_order_count(), 20);
     assert_eq!(fixture.low_stock_count(), 2);
+
+    let scope_sensitivity = Fixture::new(2);
+    assert_eq!(
+        scope_sensitivity.pending_order_count(),
+        1,
+        "a pending order from another district must not enter this district's window"
+    );
 }
 
 #[test]
