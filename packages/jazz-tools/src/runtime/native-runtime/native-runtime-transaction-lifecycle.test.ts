@@ -58,13 +58,17 @@ function encodeRows(rows: EncodedTestRow[]): Uint8Array {
 
 function fakeDb<T extends object>(
   db: T,
-): T & { setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void } {
+): T & {
+  setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void;
+  tick(): Promise<void>;
+} {
   type FakeOpenBatch = {
     kind: "mergeable" | "exclusive";
     author?: Uint8Array;
     tx?: TxForTest;
   };
   const implementation = db as T & {
+    tick?(): void | Promise<void>;
     mergeableTx?(openBatchId: string): TxForTest;
     mergeableTxForIdentity?(openBatchId: string, author: Uint8Array): TxForTest;
     exclusiveTx?(openBatchId: string): TxForTest;
@@ -102,6 +106,11 @@ function fakeDb<T extends object>(
       openBatches.delete(openBatchId);
     },
     ...db,
+    // Every adapter-facing fake needs a tick: production wakeups may arrive
+    // independently of a particular test's explicit progress call.
+    tick: async () => {
+      await implementation.tick?.();
+    },
   };
 }
 
@@ -590,6 +599,7 @@ it("does not emit onMutationError when an active wait handles the rejection", as
     batchId,
     payload: new Uint8Array(),
     wait: async () => {
+      if (rejected) throw new Error("WriteRejected: AuthorizationDenied");
       await nextWriteStateChange();
       if (rejected) throw new Error("WriteRejected: AuthorizationDenied");
     },
@@ -619,7 +629,7 @@ it("does not emit onMutationError when an active wait handles the rejection", as
     "00000000-0000-0000-0000-000000000043",
   );
   const wait = runtime.waitForTransaction(batchId, "edge");
-  await Promise.resolve();
+  await vi.waitFor(() => expect(stateChangeWaiters).toHaveLength(1));
   rejected = true;
   stateChangeWaiters.splice(0).forEach((resolve) => resolve());
 

@@ -829,14 +829,13 @@ function fakeDb<T extends object>(
       return upstream;
     };
   }
-  if (implementation.tick) {
-    result.tick = async () => {
-      await implementation.tick!();
-      await upstream?.tick();
-    };
-  }
+  result.tick = async () => {
+    await implementation.tick?.();
+    await upstream?.tick();
+  };
   return result as T & {
     setTickScheduler(callback: (urgency: "immediate" | "deferred") => void): void;
+    tick(): Promise<void>;
   };
 }
 
