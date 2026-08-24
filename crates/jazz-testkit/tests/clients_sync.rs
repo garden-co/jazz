@@ -593,6 +593,26 @@ async fn caller_supplied_uuid_keeps_created_at_as_explicit_metadata_impl() {
 
     let provenance_query = jazz::query::Query::from("todos").select(["$createdAt", "$updatedAt"]);
 
+    let inserted_rows = wait_for_query(
+        &client,
+        provenance_query.clone(),
+        Some(DurabilityTier::Local),
+        Duration::from_secs(25),
+        "inserted provenance query returns row",
+        |rows| (rows.len() == 1 && rows[0].0.uuid() == &external_id).then_some(rows),
+    )
+    .await;
+    let Value::Timestamp(inserted_created_at) = inserted_rows[0].1[0] else {
+        panic!("inserted $createdAt should decode as timestamp")
+    };
+    let Value::Timestamp(inserted_updated_at) = inserted_rows[0].1[1] else {
+        panic!("inserted $updatedAt should decode as timestamp")
+    };
+    assert_eq!(
+        inserted_created_at, inserted_updated_at,
+        "a new row exposes the same physical millisecond for creation and update"
+    );
+
     client
         .upsert(
             "todos",
@@ -623,8 +643,12 @@ async fn caller_supplied_uuid_keeps_created_at_as_explicit_metadata_impl() {
 
     assert_eq!(updated_rows[0].0.uuid(), &external_id);
     assert!(
-        updated_created_at < updated_updated_at,
-        "created_at should remain the original timestamp after an update"
+        updated_updated_at >= updated_created_at,
+        "$updatedAt cannot precede $createdAt"
+    );
+    assert_eq!(
+        updated_created_at, inserted_created_at,
+        "$createdAt remains the original public physical-millisecond timestamp after an update"
     );
 
     client.shutdown().await.expect("shutdown writer");

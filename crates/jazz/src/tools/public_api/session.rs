@@ -167,7 +167,9 @@ impl Session {
 /// `session` controls permission evaluation. `attribution`, when present,
 /// controls who is recorded as the commit author without changing permission
 /// identity. `updated_at`, when present, overrides the row provenance
-/// timestamp recorded for update-like writes.
+/// physical-millisecond timestamp recorded for update-like writes. Core packs
+/// this value into an HLC with a zero logical counter; public reads expose the
+/// supplied physical millisecond unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WriteContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]

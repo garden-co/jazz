@@ -348,11 +348,18 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
+        updated_at_ms: Option<u64>,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(
-            crate::db::block_on(self.0.upsert(table, row_id, cells, Default::default()))?
-                .mergeable_tx_id(),
-        )
+        Ok(crate::db::block_on(self.0.upsert(
+            table,
+            row_id,
+            cells,
+            crate::db::UpsertOptions {
+                updated_at_ms,
+                ..Default::default()
+            },
+        ))?
+        .mergeable_tx_id())
     }
 
     fn upsert_for_identity(
@@ -361,6 +368,7 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
+        updated_at_ms: Option<u64>,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
         Ok(crate::db::block_on(self.0.upsert(
             table,
@@ -368,6 +376,7 @@ impl Backend {
             cells,
             crate::db::UpsertOptions {
                 identity: crate::db::WriteIdentity::Session(identity),
+                updated_at_ms,
                 ..Default::default()
             },
         ))?
@@ -379,11 +388,18 @@ impl Backend {
         table: &str,
         row_id: CoreRowUuid,
         cells: crate::db::RowCells,
+        updated_at_ms: Option<u64>,
     ) -> std::result::Result<CoreTxId, CoreDbError> {
-        Ok(
-            crate::db::block_on(self.0.update(table, row_id, cells, Default::default()))?
-                .mergeable_tx_id(),
-        )
+        Ok(crate::db::block_on(self.0.update(
+            table,
+            row_id,
+            cells,
+            crate::db::UpdateOptions {
+                updated_at_ms,
+                ..Default::default()
+            },
+        ))?
+        .mergeable_tx_id())
     }
 
     fn delete_for_identity(
@@ -783,15 +799,20 @@ impl ClientDb {
         row_id: Uuid,
         cells: crate::db::RowCells,
         identity: Option<CoreAuthorId>,
+        updated_at_ms: Option<u64>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let write = match identity {
-            Some(identity) => {
-                inner
-                    .db
-                    .upsert_for_identity(identity, &table, CoreRowUuid(row_id), cells)
-            }
-            None => inner.db.upsert(&table, CoreRowUuid(row_id), cells),
+            Some(identity) => inner.db.upsert_for_identity(
+                identity,
+                &table,
+                CoreRowUuid(row_id),
+                cells,
+                updated_at_ms,
+            ),
+            None => inner
+                .db
+                .upsert(&table, CoreRowUuid(row_id), cells, updated_at_ms),
         }
         .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(&inner.db, write)?;
@@ -833,18 +854,23 @@ impl ClientDb {
         row_id: ObjectId,
         cells: crate::db::RowCells,
         identity: Option<CoreAuthorId>,
+        updated_at_ms: Option<u64>,
     ) -> Result<CoreTxId> {
         let mut inner = self.inner.borrow_mut();
         let table = inner.row_tables.get(&row_id).cloned().ok_or_else(|| {
             JazzError::Write("update requires a row created or observed by this client".to_string())
         })?;
         let write = match identity {
-            Some(identity) => {
-                inner
-                    .db
-                    .upsert_for_identity(identity, &table, CoreRowUuid(*row_id.uuid()), cells)
-            }
-            None => inner.db.update(&table, CoreRowUuid(*row_id.uuid()), cells),
+            Some(identity) => inner.db.upsert_for_identity(
+                identity,
+                &table,
+                CoreRowUuid(*row_id.uuid()),
+                cells,
+                updated_at_ms,
+            ),
+            None => inner
+                .db
+                .update(&table, CoreRowUuid(*row_id.uuid()), cells, updated_at_ms),
         }
         .map_err(|error| JazzError::Write(error.to_string()))?;
         JazzClient::check_core_write_not_rejected(&inner.db, write)?;
@@ -2248,6 +2274,26 @@ impl JazzClient {
             .map(|session| core_author_from_principal(session.get_user_id()))
     }
 
+    /// Convert a public write-context timestamp to core's packed HLC form.
+    /// Public callers supply physical milliseconds; logical counters remain
+    /// internal ordering state.
+    fn write_updated_at(&self) -> Result<Option<u64>> {
+        let Some(updated_at) = self
+            .write_context
+            .as_ref()
+            .and_then(WriteContext::updated_at)
+        else {
+            return Ok(None);
+        };
+        const MAX_PHYSICAL_MS: u64 = (1 << 48) - 1;
+        if updated_at > MAX_PHYSICAL_MS {
+            return Err(JazzError::Write(format!(
+                "updated_at {updated_at} exceeds the 48-bit physical millisecond range"
+            )));
+        }
+        Ok(Some(crate::time::TxTime::new(updated_at, 0).0))
+    }
+
     fn check_core_write_not_rejected(db: &Backend, tx_id: CoreTxId) -> Result<()> {
         let state = db
             .write_state(tx_id)
@@ -3123,9 +3169,13 @@ impl JazzClient {
                     .stage_upsert(transaction_id, table.to_string(), object_id, cells)?;
                 Ok(None)
             } else {
-                let tx_id =
-                    self.db
-                        .upsert(table.to_string(), object_id, cells, self.write_identity())?;
+                let tx_id = self.db.upsert(
+                    table.to_string(),
+                    object_id,
+                    cells,
+                    self.write_identity(),
+                    self.write_updated_at()?,
+                )?;
                 Ok(Some(core_batch_id(tx_id)))
             }
         }
@@ -3159,7 +3209,12 @@ impl JazzClient {
                 self.db.stage_update(transaction_id, object_id, cells)?;
                 Ok(None)
             } else {
-                let tx_id = self.db.update(object_id, cells, self.write_identity())?;
+                let tx_id = self.db.update(
+                    object_id,
+                    cells,
+                    self.write_identity(),
+                    self.write_updated_at()?,
+                )?;
                 Ok(Some(core_batch_id(tx_id)))
             }
         }
