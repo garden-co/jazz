@@ -43,6 +43,22 @@ export const app: s.App<AppSchema> = s.defineApp(schema);
 
 The generated `schema-better-auth/schema.ts` also ships a `permissions` export that denies all operations on the Better Auth tables. Merge it with your own permissions so regular client sessions can't read or write Better Auth rows — the adapter itself uses `context.asBackend()`, which authenticates with `backendSecret` and bypasses permission checks entirely.
 
+```ts title="permissions.ts"
+import { definePermissions } from "jazz-tools/permissions";
+import { permissions as betterAuthPermissions } from "./schema-better-auth/schema";
+import { app } from "./schema";
+
+const appPermissions = definePermissions(app, ({ policy }) => {
+  // Define policies for your own tables.
+  policy.messages.allowRead.always();
+});
+
+export default {
+  ...betterAuthPermissions,
+  ...appPermissions,
+};
+```
+
 ## Database Adapter
 
 Create a server-side [Jazz context](/docs/getting-started/server-setup#backend-context-setup), then pass it to `jazzAdapter(...)` as the `database` in your Better Auth config. Point both `db` and `schema` at the merged `app` — not at the generated module directly — so Better Auth and your own tables share a single Jazz app.
