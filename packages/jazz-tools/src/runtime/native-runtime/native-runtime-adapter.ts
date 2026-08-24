@@ -3070,7 +3070,7 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
           : parsed.attribution === SYSTEM_AUTHOR_ID
             ? SYSTEM_AUTHOR_ID
             : undefined);
-    if (!userId) return null;
+    if (!userId || !isUsableSubject(userId)) return null;
     const issuer =
       parsed.attribution === SYSTEM_AUTHOR_ID
         ? SYSTEM_READ_SESSION.issuer
@@ -3218,7 +3218,7 @@ function readSession(sessionJson?: string | null): RuntimeSession | null {
     claims?: unknown;
     authMode?: unknown;
   };
-  if (typeof parsed.user_id !== "string") {
+  if (typeof parsed.user_id !== "string" || !isUsableSubject(parsed.user_id)) {
     throw new Error("Native runtime session is missing user_id");
   }
   if (typeof parsed.issuer !== "string" || !isUsableSubject(parsed.issuer)) {

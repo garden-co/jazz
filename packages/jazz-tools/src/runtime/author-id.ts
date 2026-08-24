@@ -10,19 +10,39 @@ export type CanonicalAuthorSubject = {
   canonical: string;
 };
 
-/** Opaque provider identity components retain exact spelling; only ASCII blanks are invalid. */
-export function isUsableSubject(subject: string): boolean {
-  for (let index = 0; index < subject.length; index++) {
-    const codePoint = subject.charCodeAt(index)!;
-    if (codePoint !== 0x20 && (codePoint < 0x09 || codePoint > 0x0d)) return true;
+/**
+ * Opaque provider identity components retain exact spelling, but must be
+ * portable across Rust and JS: nonempty after ASCII-blank filtering and no
+ * unpaired UTF-16 surrogates.
+ */
+export function isPortableAuthorComponent(component: string): boolean {
+  let hasNonAsciiBlank = false;
+  for (let index = 0; index < component.length; index++) {
+    const codeUnit = component.charCodeAt(index)!;
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = component.charCodeAt(index + 1);
+      if (Number.isNaN(next) || next < 0xdc00 || next > 0xdfff) return false;
+      hasNonAsciiBlank = true;
+      index += 1;
+      continue;
+    }
+    if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) return false;
+    if (codeUnit !== 0x20 && (codeUnit < 0x09 || codeUnit > 0x0d)) {
+      hasNonAsciiBlank = true;
+    }
   }
-  return false;
+  return hasNonAsciiBlank;
+}
+
+/** Existing subject helper now shares the canonical author component predicate. */
+export function isUsableSubject(subject: string): boolean {
+  return isPortableAuthorComponent(subject);
 }
 
 /** Portable logical author identity. Rust interns this canonical string only internally. */
 export function canonicalAuthorSubject(issuer: string, subject: string): string {
-  if (!isUsableSubject(issuer) || !isUsableSubject(subject)) {
-    throw new Error("Author issuer and subject must be nonempty");
+  if (!isPortableAuthorComponent(issuer) || !isPortableAuthorComponent(subject)) {
+    throw new Error("Author issuer and subject must be portable and nonempty");
   }
   return JSON.stringify([issuer, subject]);
 }
