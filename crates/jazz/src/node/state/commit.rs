@@ -732,12 +732,17 @@ where
         persistence: PersistedBatch,
         retract_on_failure: bool,
     ) -> Result<(), Error> {
-        if retract_on_failure && persistence.failed() {
-            self.database.retract_failed_persistence(persistence).await?;
+        let result = if retract_on_failure && persistence.failed() {
+            self.database.retract_failed_persistence(persistence).await
         } else {
-            self.database.finish_persistence(persistence)?;
-        }
+            self.database.finish_persistence(persistence)
+        };
+        // A resident failure has already been exactly removed from Groove. Do
+        // not leave the transaction marked as a pending durable publication:
+        // that would make a later scheduler pass retry a consumed receipt and
+        // hide the failed local write behind stale durability state.
         self.pending_persistence.remove(&tx_id);
+        let _ = result?;
         Ok(())
     }
 
