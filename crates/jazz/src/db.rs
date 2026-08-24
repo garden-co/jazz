@@ -2719,7 +2719,7 @@ where
             .row_id
             .unwrap_or_else(|| self.db().row_id_source.borrow_mut().next_row_id());
         self.db()
-            .stage_exclusive_insert(self.tx_id(), table, row, cells)
+            .stage_exclusive_insert(self.tx_id(), table, row, cells, options.updated_at_ms)
             .await?;
         Ok(row)
     }
@@ -2752,7 +2752,7 @@ where
         let mut merged = self.read(table, row).await?.unwrap_or_default();
         merged.extend(cells);
         self.db()
-            .stage_exclusive_insert(self.tx_id(), table, row, merged)
+            .stage_exclusive_insert(self.tx_id(), table, row, merged, options.updated_at_ms)
             .await
     }
 
@@ -2761,7 +2761,7 @@ where
         ensure_transaction_identity(options.identity)?;
         ensure_exclusive_view_target(&options.target)?;
         self.db()
-            .stage_exclusive_delete(self.tx_id(), table, row)
+            .stage_exclusive_delete(self.tx_id(), table, row, options.updated_at_ms)
             .await
     }
 
@@ -2782,7 +2782,7 @@ where
             )
         })?;
         self.db()
-            .stage_exclusive_restore(self.tx_id(), table, row, cells)
+            .stage_exclusive_restore(self.tx_id(), table, row, cells, options.updated_at_ms)
             .await
     }
 }

@@ -603,8 +603,9 @@ where
         table: &str,
         row: RowUuid,
         cells: RowCells,
+        updated_at_ms: Option<u64>,
     ) -> Result<(), Error> {
-        let now_ms = self.next_now_ms();
+        let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let cells = self.apply_insert_defaults(table, cells)?;
         self.node
             .node
@@ -656,8 +657,9 @@ where
         tx_id: OpenTransactionId,
         table: &str,
         row: RowUuid,
+        updated_at_ms: Option<u64>,
     ) -> Result<(), Error> {
-        let now_ms = self.next_now_ms();
+        let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         self.node
             .node
             .lock()
@@ -681,8 +683,9 @@ where
         table: &str,
         row: RowUuid,
         cells: RowCells,
+        updated_at_ms: Option<u64>,
     ) -> Result<(), Error> {
-        let now_ms = self.next_now_ms();
+        let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.node.node.lock().await;
         // Restore needs one content version and one deletion-register version:

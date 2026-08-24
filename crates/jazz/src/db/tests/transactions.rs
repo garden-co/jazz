@@ -391,6 +391,112 @@ fn exclusive_overlay_reserves_stable_provenance_for_insert_and_update() {
     assert_eq!(provenance(&committed, existing), updated_overlay);
 }
 
+#[test]
+fn exclusive_crud_preserves_explicit_updated_at() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let inserted = row(0xc1);
+    let upserted = row(0xc2);
+    let deleted = row(0xc3);
+    let restored = row(0xc4);
+
+    for (row, title, updated_at_ms) in [
+        (upserted, "upsert base", 10),
+        (deleted, "delete base", 20),
+        (restored, "restore base", 30),
+    ] {
+        db.insert(
+            "todos",
+            doctest_support::todo_cells(title, false),
+            InsertOptions {
+                row_id: Some(row),
+                updated_at_ms: Some(updated_at_ms),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    }
+    db.delete(
+        "todos",
+        restored,
+        DeleteOptions {
+            updated_at_ms: Some(40),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let tx = db.exclusive_tx().unwrap();
+    tx.insert(
+        "todos",
+        doctest_support::todo_cells("inserted", false),
+        InsertOptions {
+            row_id: Some(inserted),
+            updated_at_ms: Some(100),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tx.upsert(
+        "todos",
+        upserted,
+        BTreeMap::from([("title".to_owned(), Value::String("upserted".to_owned()))]),
+        UpsertOptions {
+            updated_at_ms: Some(200),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tx.delete(
+        "todos",
+        deleted,
+        DeleteOptions {
+            updated_at_ms: Some(300),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tx.restore(
+        "todos",
+        restored,
+        Some(doctest_support::todo_cells("restored", true)),
+        RestoreOptions {
+            updated_at_ms: Some(400),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+
+    let query = db
+        .prepare_query(
+            &db.table("todos")
+                .select(["title", "$createdAt", "$updatedAt"]),
+        )
+        .unwrap();
+    let rows = block_on(db.all(
+        &query,
+        ReadOpts {
+            include_deleted: true,
+            ..Default::default()
+        },
+    ))
+    .unwrap();
+    let updated_at = |row_id| {
+        rows.iter()
+            .find(|row| row.row_uuid() == row_id)
+            .unwrap()
+            .provenance()
+            .unwrap()
+            .unwrap()
+            .updated_at
+    };
+
+    assert_eq!(updated_at(inserted), TxTime(100));
+    assert_eq!(updated_at(upserted), TxTime(200));
+    assert_eq!(updated_at(deleted), TxTime(300));
+    assert_eq!(updated_at(restored), TxTime(400));
+}
+
 /// This stays internal because transaction overlays are not sync-visible. The
 /// point, table, and prepared-query paths are separate overlay consumers, so
 /// exercise all three with the same row UUID present in two logical tables.
