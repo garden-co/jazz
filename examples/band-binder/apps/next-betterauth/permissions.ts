@@ -11,65 +11,43 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
       subject: session.user_id,
       role: { in: ["owner", "stage_manager"] },
     });
-  const managerJoin = () => ({
-    "members.subject": session.user_id,
-    "members.role": { in: ["owner", "stage_manager"] as ("owner" | "stage_manager")[] },
-  });
-
   type PageScoped = WorkspaceScoped & { parentPageId: string | null };
-  const managedParentPage = (page: RowContext<PageScoped>) =>
-    policy.exists(
-      policy.pages
-        .where({})
-        .join(policy.members, { left: "workspaceId", right: "workspaceId" })
-        .where({
-          "members.workspaceId": page.workspaceId,
-          "pages.id": page.parentPageId,
-          ...managerJoin(),
-        }),
-    );
   const validPageWrite = (page: RowContext<PageScoped>) =>
-    anyOf([allOf([management(page), { parentPageId: null }]), managedParentPage(page)]);
+    anyOf([
+      allOf([management(page), { parentPageId: null }]),
+      allOf([
+        management(page),
+        policy.exists(policy.pages.where({ id: page.parentPageId, workspaceId: page.workspaceId })),
+      ]),
+    ]);
 
   type BlockScoped = WorkspaceScoped & { pageId: string; parentBlockId: string | null };
-  const managedBlockPage = (block: RowContext<BlockScoped>) =>
-    policy.exists(
-      policy.pages
-        .where({})
-        .join(policy.members, { left: "workspaceId", right: "workspaceId" })
-        .where({
-          "members.workspaceId": block.workspaceId,
-          "pages.id": block.pageId,
-          ...managerJoin(),
-        }),
-    );
-  const managedParentBlock = (block: RowContext<BlockScoped>) =>
-    policy.exists(
-      policy.blocks
-        .where({})
-        .join(policy.members, { left: "workspaceId", right: "workspaceId" })
-        .where({
-          "members.workspaceId": block.workspaceId,
-          "blocks.id": block.parentBlockId,
-          "blocks.pageId": block.pageId,
-          ...managerJoin(),
-        }),
-    );
   const validBlockWrite = (block: RowContext<BlockScoped>) =>
-    anyOf([allOf([managedBlockPage(block), { parentBlockId: null }]), managedParentBlock(block)]);
+    anyOf([
+      allOf([
+        management(block),
+        policy.exists(policy.pages.where({ id: block.pageId, workspaceId: block.workspaceId })),
+        { parentBlockId: null },
+      ]),
+      allOf([
+        management(block),
+        policy.exists(policy.pages.where({ id: block.pageId, workspaceId: block.workspaceId })),
+        policy.exists(
+          policy.blocks.where({
+            id: block.parentBlockId,
+            workspaceId: block.workspaceId,
+            pageId: block.pageId,
+          }),
+        ),
+      ]),
+    ]);
 
   type BlockDependent = WorkspaceScoped & { blockId: string };
   const blockWithMembership = (row: RowContext<BlockDependent>, managerOnly: boolean) =>
-    policy.exists(
-      policy.blocks
-        .where({})
-        .join(policy.members, { left: "workspaceId", right: "workspaceId" })
-        .where({
-          "members.workspaceId": row.workspaceId,
-          "blocks.id": row.blockId,
-          ...(managerOnly ? managerJoin() : { "members.subject": session.user_id }),
-        }),
-    );
+    allOf([
+      managerOnly ? management(row) : membership(row),
+      policy.exists(policy.blocks.where({ id: row.blockId, workspaceId: row.workspaceId })),
+    ]);
   const managedBlock = (row: RowContext<BlockDependent>) => blockWithMembership(row, true);
   const memberBlock = (row: RowContext<BlockDependent>) => blockWithMembership(row, false);
 
@@ -83,7 +61,12 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
   policy.workspaces.allowUpdate.where({ ownerSubject: session.user_id });
   policy.workspaces.allowDelete.where({ ownerSubject: session.user_id });
 
-  policy.members.allowRead.where(allowedTo.read("workspaceId"));
+  // A member must be able to discover their own grant without first reading
+  // the workspace that the grant unlocks. Managers can still inspect the
+  // complete roster through the workspace policy.
+  policy.members.allowRead.where(
+    anyOf([{ subject: session.user_id }, allowedTo.read("workspaceId")]),
+  );
   policy.members.allowInsert.where(allowedTo.update("workspaceId"));
   policy.members.allowUpdate.where(allowedTo.update("workspaceId"));
   policy.members.allowDelete.where(allowedTo.update("workspaceId"));

@@ -104,6 +104,14 @@ describe("BandBinder cross-topology recovery", () => {
               managerMembershipId = membership.id;
               await waitForQuery(
                 manager,
+                app.members.where({ id: managerMembershipId, subject: "band-binder-manager" }),
+                (rows) => rows.length === 1,
+                "manager receives own membership grant",
+                15_000,
+                "edge",
+              );
+              await waitForQuery(
+                manager,
                 app.workspaces.where({ id: workspaceId }),
                 (rows) => rows.length === 1,
                 "manager receives workspace",

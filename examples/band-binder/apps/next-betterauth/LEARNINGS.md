@@ -16,15 +16,17 @@
   rejected-write rollback and absence at the owner, not impossible remote
   deletion of a former member's local knowledge.
 - The correlated membership receipt depends on the core carrying outer join
-  inputs through maintained policy relations. The strict policy and its exact
-  authority receipts are preserved here, but remain expected failures until the
-  core carrier repair is in this branch's stack; BandBinder must not be treated
-  as securely runnable before that restack.
+  inputs through maintained policy relations. The strict policy keeps exact
+  authority receipts for recursive and block-dependent references on both
+  insertion and mutation.
+- A member can read their own membership grant directly, avoiding a bootstrap
+  cycle where reading that grant first requires the workspace it unlocks. The
+  browser receipt proves the grant arrives before asking the correlated
+  workspace policy to admit it; the remaining core closure defect is tracked by
+  [#1871](https://github.com/garden-co/jazz/issues/1871).
 - Large rich text and large attachment streaming remain tracked by #1833,
   #1839, and #1844. Small attachment bytes are represented directly today.
 - The Rust root-query builder accepts `$createdAt` in `select(...)`, but a
-  filtered root query ordered by it currently fails capability lowering because
-  the provenance key is absent from the root projection. Both the TS live query
-  and native benchmark preserve the intended `$createdAt` ordering; the native
-  receipt remains an expected failure until the provenance projection repair is
-  in this branch's stack.
+  filtered root query ordered by it needs the provenance key carried through the
+  root projection. Both the TS live query and native benchmark preserve and test
+  that `$createdAt` ordering.
