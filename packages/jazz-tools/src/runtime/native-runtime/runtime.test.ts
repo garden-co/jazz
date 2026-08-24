@@ -30,7 +30,7 @@ import {
 } from "../subscription-manager.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 import { encodeNativeNullValue, storageColumnValueType } from "./native-row-codec.js";
-import { type BatchId, type WriteReceipt } from "../client.js";
+import { createOpenBatchId, type BatchId, type WriteReceipt } from "../client.js";
 import {
   ANONYMOUS_JWT_ISSUER,
   LOCAL_FIRST_JWT_ISSUER,
@@ -49,6 +49,10 @@ type NativeDbForTest = ReturnType<
 async function committedBatchId(receipt: WriteReceipt): Promise<BatchId> {
   if (receipt.kind !== "committed") throw new Error("expected committed write receipt");
   return await receipt.batchId;
+}
+
+function decodeOptionalBytes(value: unknown): string | undefined {
+  return value instanceof Uint8Array ? new TextDecoder().decode(value) : undefined;
 }
 
 const previousWebSocket = globalThis.WebSocket;
@@ -5006,16 +5010,35 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
   });
 
   it("keeps backend policy admission separate from attributed provenance", async () => {
-    const insertWithIdEncodedAttributed = vi.fn(() => fakeWrite());
-    const updateEncodedAttributed = vi.fn(() => fakeWrite());
-    const upsertEncodedAttributed = vi.fn(() => fakeWrite());
-    const restoreEncodedAttributed = vi.fn(() => fakeWrite());
-    const deleteAttributed = vi.fn(() => fakeWrite());
-    const beginStreamingMutationAttributedEncoded = vi.fn(() => ({
-      push: () => undefined,
-      finish: () => fakeWrite(),
-      abort: () => true,
-    }));
+    const attributedEncodedWrite = (
+      _table: string,
+      _rowId: Uint8Array,
+      _cells: Uint8Array,
+      _author: Uint8Array,
+    ) => fakeWrite();
+    const insertWithIdEncodedAttributed = vi.fn(attributedEncodedWrite);
+    const updateEncodedAttributed = vi.fn(attributedEncodedWrite);
+    const upsertEncodedAttributed = vi.fn(attributedEncodedWrite);
+    const restoreEncodedAttributed = vi.fn(attributedEncodedWrite);
+    const deleteAttributed = vi.fn((_table: string, _rowId: Uint8Array, _author: Uint8Array) =>
+      fakeWrite(),
+    );
+    const beginStreamingMutationAttributedEncoded = vi.fn(
+      (
+        _table: string,
+        _rowId: Uint8Array,
+        _cells: Uint8Array,
+        _column: string,
+        _kind: "Text" | "Json" | "Bytea",
+        _mutation: "insert" | "update" | "upsert" | undefined,
+        _author: Uint8Array | undefined,
+        _attribution: Uint8Array,
+      ) => ({
+        push: () => undefined,
+        finish: () => fakeWrite(),
+        abort: () => true,
+      }),
+    );
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
@@ -5050,9 +5073,13 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     });
     const id = "00000000-0000-0000-0000-000000000123";
 
+    expect(() => runtime.beginTransaction("exclusive", createOpenBatchId(), context)).toThrow(
+      "Backend-attributed transactions currently require mergeable kind",
+    );
+
     runtime.insert(
       "todos",
-      { title: { type: "Text", value: "attributed" }, done: false },
+      { title: { type: "Text", value: "attributed" }, done: { type: "Boolean", value: false } },
       context,
       id,
     );
@@ -5060,13 +5087,13 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     runtime.upsert(
       "todos",
       id,
-      { title: { type: "Text", value: "upserted" }, done: false },
+      { title: { type: "Text", value: "upserted" }, done: { type: "Boolean", value: false } },
       context,
     );
     runtime.restore(
       "todos",
       id,
-      { title: { type: "Text", value: "restored" }, done: false },
+      { title: { type: "Text", value: "restored" }, done: { type: "Boolean", value: false } },
       context,
     );
     await runtime.streamingMutation(
@@ -5090,15 +5117,10 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       restoreEncodedAttributed.mock.calls[0],
       deleteAttributed.mock.calls[0],
     ]) {
-      const author = call?.at(-1);
-      expect(author instanceof Uint8Array ? new TextDecoder().decode(author) : undefined).toBe(
-        expected,
-      );
+      expect(decodeOptionalBytes(call?.at(-1))).toBe(expected);
     }
     const streamingAuthor = beginStreamingMutationAttributedEncoded.mock.calls[0]?.[7];
-    expect(
-      streamingAuthor instanceof Uint8Array ? new TextDecoder().decode(streamingAuthor) : undefined,
-    ).toBe(expected);
+    expect(decodeOptionalBytes(streamingAuthor)).toBe(expected);
   });
 
   it("keeps every mergeable transaction operation on its initial provenance", () => {
@@ -5111,9 +5133,10 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       true,
       { backendCredential: "backend-only-test-capability" },
     );
+    const batch = createOpenBatchId();
     const context = (attribution?: string) =>
       JSON.stringify({
-        batch_id: "attribution-mixing",
+        batch_id: batch,
         session: {
           ...SYSTEM_READ_SESSION,
           [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: trustedReservedSessionToken(SYSTEM_READ_SESSION),
@@ -5124,16 +5147,19 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     const bob = JSON.stringify(["https://issuer.example", "bob"]);
     const row = "00000000-0000-0000-0000-000000000123";
 
-    runtime.beginTransaction("mergeable", "attribution-mixing", context(alice));
+    runtime.beginTransaction("mergeable", batch, context(alice));
     runtime.insert(
       "todos",
-      { title: { type: "Text", value: "alice write" }, done: false },
+      {
+        title: { type: "Text", value: "alice write" },
+        done: { type: "Boolean", value: false },
+      },
       context(alice),
       row,
     );
-    expect(() => runtime.update("todos", row, { done: true }, context(bob))).toThrow(
-      "cannot mix provenance attributions",
-    );
+    expect(() =>
+      runtime.update("todos", row, { done: { type: "Boolean", value: true } }, context(bob)),
+    ).toThrow("cannot mix provenance attributions");
     expect(() => runtime.delete("todos", row, context())).toThrow(
       "cannot mix provenance attributions",
     );
@@ -5162,19 +5188,19 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     expect(() =>
       runtime.insert(
         "todos",
-        { title: { type: "Text", value: "draft" }, done: false },
+        { title: { type: "Text", value: "draft" }, done: { type: "Boolean", value: false } },
         context,
         row,
       ),
     ).toThrow("Backend-attributed branch mutations are not supported yet");
-    expect(() => runtime.update("todos", row, { done: true }, context)).toThrow(
-      "Backend-attributed branch mutations are not supported yet",
-    );
+    expect(() =>
+      runtime.update("todos", row, { done: { type: "Boolean", value: true } }, context),
+    ).toThrow("Backend-attributed branch mutations are not supported yet");
     expect(() =>
       runtime.restore(
         "todos",
         row,
-        { title: { type: "Text", value: "draft" }, done: false },
+        { title: { type: "Text", value: "draft" }, done: { type: "Boolean", value: false } },
         context,
       ),
     ).toThrow("Backend-attributed branch mutations are not supported yet");
