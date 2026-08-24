@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start"
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "better-auth": "1.6.24",
@@ -19,6 +21,7 @@
     "@types/node": "catalog:default",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "typescript": "catalog:default"
+    "typescript": "catalog:default",
+    "vitest": "catalog:default"
   }
 }

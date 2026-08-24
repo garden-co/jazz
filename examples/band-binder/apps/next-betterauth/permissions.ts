@@ -1,28 +1,73 @@
-import { schema as s } from "jazz-tools";
-import { app } from "./schema";
+import { definePermissions, type RowContext } from "jazz-tools/permissions";
+import { app } from "./schema.js";
 
-// The first implementation deliberately keeps permission scope visible in the
-// schema: membership is workspace-scoped, while pages/blocks inherit through
-// their workspace/page relation. The exact recursive policy lowering is a
-// required app-facing E2E concern, not a client-side filtering convention.
-export default s.definePermissions(app, ({ policy, session }) => {
-  policy.workspaces.allowRead.where({ $createdBy: session.user_id });
-  policy.workspaces.allowInsert.always();
-  policy.workspaces.allowUpdate.where({ $createdBy: session.user_id });
+export default definePermissions(app, ({ policy, session, anyOf }) => {
+  type WorkspaceScoped = { workspaceId: string };
+  const membership = (row: RowContext<WorkspaceScoped>) =>
+    policy.members.exists.where({ workspaceId: row.workspaceId, subject: session.user_id });
+  const management = (row: RowContext<WorkspaceScoped>) =>
+    anyOf([
+      policy.members.exists.where({
+        workspaceId: row.workspaceId,
+        subject: session.user_id,
+        role: "owner",
+      }),
+      policy.members.exists.where({
+        workspaceId: row.workspaceId,
+        subject: session.user_id,
+        role: "stage_manager",
+      }),
+    ]);
 
-  policy.members.allowRead.where({ subject: session.user_id });
-  policy.members.allowInsert.always();
+  policy.workspaces.allowRead.where((workspace) =>
+    anyOf([
+      { ownerSubject: session.user_id },
+      policy.members.exists.where({ workspaceId: workspace.id, subject: session.user_id }),
+    ]),
+  );
+  policy.workspaces.allowInsert.where({ ownerSubject: session.user_id });
+  policy.workspaces.allowUpdate.where({ ownerSubject: session.user_id });
+  policy.workspaces.allowDelete.where({ ownerSubject: session.user_id });
 
-  // Product policy is intentionally conservative until the recursive
-  // workspace-membership traversal is wired and tested with real sessions.
-  policy.pages.allowRead.where({ $createdBy: session.user_id });
-  policy.pages.allowInsert.always();
-  policy.pages.allowUpdate.where({ $createdBy: session.user_id });
-  policy.blocks.allowRead.where({ $createdBy: session.user_id });
-  policy.blocks.allowInsert.always();
-  policy.blocks.allowUpdate.where({ $createdBy: session.user_id });
-  policy.suggestions.allowRead.where({ $createdBy: session.user_id });
-  policy.suggestions.allowInsert.always();
-  policy.attachments.allowRead.where({ $createdBy: session.user_id });
-  policy.attachments.allowInsert.always();
+  const ownsMembershipWorkspace = (member: RowContext<WorkspaceScoped>) =>
+    policy.workspaces.exists.where({
+      id: member.workspaceId,
+      ownerSubject: session.user_id,
+    });
+  policy.members.allowRead.where((member) =>
+    anyOf([membership(member), ownsMembershipWorkspace(member)]),
+  );
+  policy.members.allowInsert.where(ownsMembershipWorkspace);
+  policy.members.allowUpdate.where(ownsMembershipWorkspace);
+  policy.members.allowDelete.where(ownsMembershipWorkspace);
+
+  policy.pages.allowRead.where(membership);
+  policy.pages.allowInsert.where(management);
+  policy.pages.allowUpdate.where(management);
+  policy.pages.allowDelete.where(management);
+  policy.blocks.allowRead.where(membership);
+  policy.blocks.allowInsert.where(management);
+  policy.blocks.allowUpdate.where(management);
+  policy.blocks.allowDelete.where(management);
+  policy.tasks.allowRead.where(membership);
+  policy.tasks.allowInsert.where(management);
+  policy.tasks.allowUpdate.where(management);
+  policy.tasks.allowDelete.where(management);
+  policy.calendarEvents.allowRead.where(membership);
+  policy.calendarEvents.allowInsert.where(management);
+  policy.calendarEvents.allowUpdate.where(management);
+  policy.calendarEvents.allowDelete.where(management);
+  policy.songs.allowRead.where(membership);
+  policy.songs.allowInsert.where(management);
+  policy.songs.allowUpdate.where(management);
+  policy.songs.allowDelete.where(management);
+  policy.attachments.allowRead.where(membership);
+  policy.attachments.allowInsert.where(management);
+  policy.attachments.allowUpdate.where(management);
+  policy.attachments.allowDelete.where(management);
+
+  policy.suggestions.allowRead.where(membership);
+  policy.suggestions.allowInsert.where(membership);
+  policy.suggestions.allowUpdate.where(management);
+  policy.suggestions.allowDelete.where(management);
 });

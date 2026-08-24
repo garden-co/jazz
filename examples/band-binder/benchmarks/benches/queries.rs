@@ -15,3 +15,9 @@ fn recursive_child_page_step(bencher: divan::Bencher<'_, '_>, block_count: usize
     let fixture = Fixture::new(block_count);
     bencher.bench_local(|| divan::black_box(fixture.child_page_count()));
 }
+
+#[divan::bench(args = [128, 4096])]
+fn bounded_app_surfaces(bencher: divan::Bencher<'_, '_>, block_count: usize) {
+    let fixture = Fixture::new(block_count);
+    bencher.bench_local(|| divan::black_box(fixture.surface_window_counts()));
+}
