@@ -911,9 +911,9 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
 }
 
 /// `allowedTo.insert(release)` composes the release INSERT policy with the
-/// assignment's tenant-correlated existence checks. Its decision-only plan
-/// must reach an authorization fate without treating policy joins as a public
-/// result occurrence.
+/// assignment's tenant-correlated existence checks: an eligible owner is
+/// accepted while that same owner cannot attach a foreign membership. The
+/// compiler-plan regression separately asserts occurrence-carrier suppression.
 #[test]
 fn correlated_inherited_insert_policy_accepts_owner_and_denies_cross_tenant_membership() {
     let owner = user(0xa1);
