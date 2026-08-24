@@ -231,7 +231,7 @@ describe("MusicAgent adopter E2E", () => {
         },
         phases: [
           {
-            name: "start a core with peer edges and open a direct core reader",
+            name: "start a core with peer edges and open a direct peer-edge reader",
             run: async () => {
               const modules = await loadMusicAgentModules();
               app = modules.app;
@@ -240,7 +240,7 @@ describe("MusicAgent adopter E2E", () => {
               topology = await getJazzServerTopologyInfo(uniqueDbName("music-agent-direct-read"));
               await publish(
                 topology.appId,
-                topology.coreUrl,
+                topology.peerEdgeUrl,
                 topology.adminSecret,
                 app.wasmSchema,
                 defineMusicAgentPermissions(app),
@@ -259,7 +259,7 @@ describe("MusicAgent adopter E2E", () => {
                 topology.appId,
                 topology.coreUrl,
                 topology.adminSecret,
-                "music-agent-direct-core-reader",
+                "music-agent-direct-peer-reader",
                 secret,
               );
               conversation = await new JazzMusicStore(writer).createConversation("Edge read");
@@ -294,7 +294,7 @@ describe("MusicAgent adopter E2E", () => {
             faultsAfter: [{ kind: "reconnect", target: "writerEdge" }],
           },
           {
-            name: "flush writer edge and directly read logical text from the core",
+            name: "flush writer edge and directly read logical text through the peer edge",
             run: async () => {
               await writer!.all(app!.turns.where({ conversation_id: conversation }), {
                 tier: "global",
@@ -308,7 +308,7 @@ describe("MusicAgent adopter E2E", () => {
                   return rows.length === 3;
                 },
                 15_000,
-                "core reader did not receive the direct-read transcript",
+                "peer edge did not receive the direct-read transcript",
               );
               expect(rows.map((row) => row.role)).toEqual(["user", "assistant", "tool"]);
               expect(rows[1]?.body).toContain("night drive");
