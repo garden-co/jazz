@@ -430,21 +430,35 @@ impl Database {
         upload_id: crate::large_values::StagedLargeValueId,
         value_ref: crate::large_values::LargeValueRef,
     ) -> Result<crate::large_values::LargeValueUploadProgress, Error> {
-        let missing =
-            crate::large_values::missing_upload_frontier(&value_ref, self.local_chunk_reader(), 64)
-                .await
-                .map_err(|error| match error {
+        let missing = match crate::large_values::missing_upload_frontier(
+            &value_ref,
+            self.local_chunk_reader(),
+            64,
+        )
+        .await
+        {
+            Ok(missing) => missing,
+            Err(error) => {
+                let error = match error {
                     crate::large_values::ReachabilityError::LargeValue(error) => {
                         crate::ivm::runtime::IvmRuntimeError::from(error)
                     }
                     crate::large_values::ReachabilityError::Chunk(error) => {
                         crate::ivm::runtime::IvmRuntimeError::from(error)
                     }
-                })?;
+                };
+                self.evict_pending_large_value_upload(upload_id).await?;
+                return Err(error.into());
+            }
+        };
         if !missing.is_empty() {
             return Ok(crate::large_values::LargeValueUploadProgress::Missing(
                 missing,
             ));
+        }
+        if let Err(error) = self.validate_completed_large_value(&value_ref).await {
+            self.evict_pending_large_value_upload(upload_id).await?;
+            return Err(error);
         }
         let staged = self
             .finalize_large_value_upload(upload_id, value_ref)
@@ -452,6 +466,32 @@ impl Database {
         Ok(crate::large_values::LargeValueUploadProgress::Staged(
             staged,
         ))
+    }
+
+    /// Recheck the complete final logical scalar immediately before a remote
+    /// upload becomes publishable. Descriptor shape checks alone cannot prove
+    /// that an untrusted edit tail preserves text or JSON validity.
+    async fn validate_completed_large_value(
+        &self,
+        value: &crate::large_values::LargeValueRef,
+    ) -> Result<(), Error> {
+        let mut validator = crate::large_values::LogicalValueValidator::new(value)
+            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+        let mut offset = 0_u64;
+        while offset < value.byte_length {
+            let end = offset
+                .saturating_add(crate::large_values::LEAF_MIN_BYTES as u64)
+                .min(value.byte_length);
+            let bytes = self.read_large_value_range(value, offset..end).await?;
+            validator
+                .push(&bytes)
+                .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+            offset = end;
+        }
+        validator
+            .finish(value)
+            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+        Ok(())
     }
 
     /// Finalize a streamed push upload into an opaque persisted staging

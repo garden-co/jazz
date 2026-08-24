@@ -424,6 +424,142 @@ async fn root_first_upload_requests_only_authenticated_missing_frontier() {
     assert_ne!(first_claim.id, second_claim.id);
 }
 
+// This facade-level test is intentionally below Jazz's public mutation API:
+// only the peer upload protocol can carry an untrusted physical descriptor.
+// It proves that Groove rejects one before issuing a publishable staging claim.
+#[futures_test::test]
+async fn malformed_json_tail_upload_is_rejected_and_reclaimed_before_staging() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let prepared =
+        crate::large_values::prepare(crate::large_values::LargeValueKind::Json, b"[]", |hash| {
+            crate::large_values::Locator(hash.0[..16].to_vec())
+        })
+        .unwrap();
+    let mut malformed = prepared.value_ref.clone();
+    malformed.byte_length += 1;
+    malformed.utf16_length = Some(malformed.utf16_length.unwrap() + 1);
+    malformed.edit_tail.push(crate::large_values::ReplaceEdit {
+        offset: 0,
+        delete_length: 0,
+        insert_bytes: b"x".to_vec(),
+        utf16_offset: 0,
+        delete_utf16_length: 0,
+        insert_utf16_length: 1,
+    });
+
+    assert!(matches!(
+        database
+            .begin_large_value_upload(malformed.clone())
+            .await
+            .unwrap(),
+        crate::large_values::LargeValueUploadProgress::Missing(_)
+    ));
+    assert!(matches!(
+        database
+            .continue_large_value_upload(malformed, prepared.staged_chunks)
+            .await,
+        Err(Error::IvmRuntime(
+            crate::ivm::runtime::IvmRuntimeError::LargeValue(
+                crate::large_values::Error::InvalidJson
+            )
+        ))
+    ));
+    assert!(
+        database
+            .pending_large_value_uploads()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(database.staged_large_values().await.unwrap().is_empty());
+    assert!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap()
+            > 0
+    );
+    assert_eq!(chunks.len(), 0);
+}
+
+#[futures_test::test]
+async fn utf8_boundary_tail_upload_is_rejected_and_reclaimed_before_staging() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::String,
+        "é".as_bytes(),
+        |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
+    )
+    .unwrap();
+    let mut malformed = prepared.value_ref.clone();
+    malformed.byte_length += 1;
+    malformed.utf16_length = Some(malformed.utf16_length.unwrap() + 1);
+    malformed.edit_tail.push(crate::large_values::ReplaceEdit {
+        offset: 1,
+        delete_length: 0,
+        insert_bytes: b"x".to_vec(),
+        utf16_offset: 0,
+        delete_utf16_length: 0,
+        insert_utf16_length: 1,
+    });
+
+    assert!(matches!(
+        database
+            .begin_large_value_upload(malformed.clone())
+            .await
+            .unwrap(),
+        crate::large_values::LargeValueUploadProgress::Missing(_)
+    ));
+    assert!(matches!(
+        database
+            .continue_large_value_upload(malformed, prepared.staged_chunks)
+            .await,
+        Err(Error::IvmRuntime(
+            crate::ivm::runtime::IvmRuntimeError::LargeValue(
+                crate::large_values::Error::InvalidUtf8
+            )
+        ))
+    ));
+    assert!(
+        database
+            .pending_large_value_uploads()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(database.staged_large_values().await.unwrap().is_empty());
+    assert!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap()
+            > 0
+    );
+    assert_eq!(chunks.len(), 0);
+}
+
 #[futures_test::test]
 async fn root_first_upload_resumes_from_the_persisted_authenticated_frontier() {
     let schema = DatabaseSchema::new([TableSchema::new(

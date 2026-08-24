@@ -300,6 +300,86 @@ impl LargeValueCursor {
     }
 }
 
+/// Incremental write-admission validation for an already-chunked logical
+/// value. The caller feeds consecutive final-logical windows, so this retains
+/// only an incomplete UTF-8 sequence and JSON syntax state, never the value.
+pub(crate) struct LogicalValueValidator {
+    kind: LargeValueKind,
+    utf8_tail: Vec<u8>,
+    utf16_length: u64,
+    json: Option<StreamingJsonValidator>,
+}
+
+impl LogicalValueValidator {
+    pub(crate) fn new(value: &LargeValueRef) -> Result<Self, Error> {
+        validate_descriptor(value)?;
+        Ok(Self {
+            kind: value.kind,
+            utf8_tail: Vec::new(),
+            utf16_length: 0,
+            json: (value.kind == LargeValueKind::Json).then(StreamingJsonValidator::new),
+        })
+    }
+
+    pub(crate) fn push(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        if self.kind == LargeValueKind::Bytes {
+            return Ok(());
+        }
+
+        self.utf8_tail.extend_from_slice(bytes);
+        match std::str::from_utf8(&self.utf8_tail) {
+            Ok(text) => {
+                self.utf16_length = self
+                    .utf16_length
+                    .checked_add(
+                        u64::try_from(text.encode_utf16().count())
+                            .map_err(|_| Error::MetricOverflow)?,
+                    )
+                    .ok_or(Error::MetricOverflow)?;
+                if let Some(json) = &mut self.json {
+                    json.push(text.as_bytes())
+                        .map_err(|()| Error::InvalidJson)?;
+                }
+                self.utf8_tail.clear();
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                if error.error_len().is_some() {
+                    return Err(Error::InvalidUtf8);
+                }
+                let valid_text = std::str::from_utf8(&self.utf8_tail[..valid])
+                    .expect("UTF-8 parser reported a valid prefix");
+                self.utf16_length = self
+                    .utf16_length
+                    .checked_add(
+                        u64::try_from(valid_text.encode_utf16().count())
+                            .map_err(|_| Error::MetricOverflow)?,
+                    )
+                    .ok_or(Error::MetricOverflow)?;
+                if let Some(json) = &mut self.json {
+                    json.push(valid_text.as_bytes())
+                        .map_err(|()| Error::InvalidJson)?;
+                }
+                self.utf8_tail.drain(..valid);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish(self, value: &LargeValueRef) -> Result<(), Error> {
+        if !self.utf8_tail.is_empty() {
+            return Err(Error::InvalidUtf8);
+        }
+        if let Some(json) = self.json {
+            json.finish().map_err(|()| Error::InvalidJson)?;
+        }
+        if value.kind != LargeValueKind::Bytes && value.utf16_length != Some(self.utf16_length) {
+            return Err(Error::DescriptorMismatch);
+        }
+        Ok(())
+    }
+}
+
 /// Construct the canonical tree from a reader without retaining the logical
 /// value or emitted chunks. `stage` receives immutable nodes as soon as their
 /// content boundary is final. This is a pure construction adapter: if `stage`

@@ -14,10 +14,10 @@ use crate::protocol::SyncMessage;
 use crate::protocol_limits::{validate_logical_message_len, validate_wire_frame_len};
 
 /// Current Jazz wire protocol version.
-/// Version 11 adds explicit complete-transaction versus view-scoped bundle
-/// semantics. This is an intentional breaking baseline: older peers cannot
-/// safely decode the extended bundle payload, so negotiation rejects them.
-pub const WIRE_PROTOCOL_VERSION: u16 = 11;
+/// Version 12 changes postcard discriminants for large-value-bearing semantic
+/// payloads. This is an intentional breaking baseline: version 11 peers could
+/// otherwise decode a changed ordinal as a different valid variant.
+pub const WIRE_PROTOCOL_VERSION: u16 = 12;
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;
@@ -1409,6 +1409,29 @@ mod tests {
         )
         .expect_err("current wire protocol must not negotiate with an old peer");
 
+        assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
+        assert_eq!(error.retry, WireRetry::Never);
+    }
+
+    #[test]
+    fn large_value_wire_era_rejects_v11_peer_before_payload_decode() {
+        let v11_peer = WireHello {
+            min_protocol_version: 11,
+            max_protocol_version: 11,
+            features: current_wire_features(),
+            role: WirePeerRole::Core,
+            authority: None,
+        };
+
+        let error = negotiate_wire(
+            &v11_peer,
+            WIRE_PROTOCOL_VERSION,
+            WIRE_PROTOCOL_VERSION,
+            current_wire_features(),
+        )
+        .expect_err("v11 postcard ordinals must fail during handshake");
+
+        assert_eq!(WIRE_PROTOCOL_VERSION, 12);
         assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
         assert_eq!(error.retry, WireRetry::Never);
     }
