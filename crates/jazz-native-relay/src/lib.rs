@@ -54,8 +54,6 @@ pub enum RelayCommandRequest {
     },
     Attach {
         relay: u64,
-        identity: DbIdentity,
-        claims: BTreeMap<String, Value>,
     },
     CloseClient {
         client: u64,
@@ -109,6 +107,7 @@ pub struct RelayScopeAdmissionRequest {
     pub sqlite_path: String,
     pub schema_json: String,
     pub identity: DbIdentity,
+    pub claims: BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -188,12 +187,24 @@ pub enum JazzNativeRelayStatus {
 /// Explicit host-owned lifecycle registry for JNI/Swift. No global relay map.
 pub struct NativeRelayHost {
     registry: NativeRelayRegistry,
-    admitted_scopes: BTreeMap<u64, RelayOpenConfig>,
-    relays: BTreeMap<u64, (RelayScope, NativeRelay)>,
+    admitted_scopes: BTreeMap<u64, AdmittedRelayScope>,
+    relays: BTreeMap<u64, OpenedRelay>,
     clients: BTreeMap<u64, (u64, NativeRelayClient)>,
     next_handle: u64,
     #[cfg(test)]
     thread_start_counter: Option<Arc<AtomicUsize>>,
+}
+
+#[derive(Clone)]
+struct AdmittedRelayScope {
+    config: RelayOpenConfig,
+    claims: BTreeMap<String, Value>,
+}
+
+struct OpenedRelay {
+    scope: RelayScope,
+    admitted_scope: u64,
+    relay: NativeRelay,
 }
 
 impl Default for NativeRelayHost {
@@ -245,7 +256,7 @@ impl NativeRelayHost {
                 let mut config = self
                     .admitted_scopes
                     .get(&admitted_scope)
-                    .cloned()
+                    .map(|admitted| admitted.config.clone())
                     .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
                 config.supported_abi = supported_abi;
                 let scope = config.scope.clone();
@@ -253,26 +264,40 @@ impl NativeRelayHost {
                 let handle = self
                     .allocate()
                     .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
-                self.relays.insert(handle, (scope, relay));
+                self.relays.insert(
+                    handle,
+                    OpenedRelay {
+                        scope,
+                        admitted_scope,
+                        relay,
+                    },
+                );
                 Ok(RelayCommandResponse::Opened { relay: handle })
             }
             RelayCommandRequest::Attach {
                 relay: relay_handle,
-                identity,
-                claims,
             } => {
-                let relay = self
-                    .relays
-                    .get(&relay_handle)
-                    .ok_or(JazzNativeRelayStatus::InvalidHandle)?
-                    .1
-                    .clone();
-                let client = relay
-                    .attach_client(identity, claims)
-                    .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+                let (relay, author, claims) = {
+                    let opened = self
+                        .relays
+                        .get(&relay_handle)
+                        .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
+                    let admitted = self
+                        .admitted_scopes
+                        .get(&opened.admitted_scope)
+                        .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
+                    (
+                        opened.relay.clone(),
+                        admitted.config.identity.author,
+                        admitted.claims.clone(),
+                    )
+                };
                 let handle = self
                     .allocate()
                     .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+                let client = relay
+                    .attach_client(client_identity(handle, author), claims)
+                    .map_err(relay_status)?;
                 self.clients.insert(handle, (relay_handle, client));
                 Ok(RelayCommandResponse::Attached { client: handle })
             }
@@ -284,9 +309,10 @@ impl NativeRelayHost {
                     .unwrap_or(false),
             }),
             RelayCommandRequest::CloseRelay { relay } => {
-                let Some((scope, _)) = self.relays.remove(&relay) else {
+                let Some(opened) = self.relays.remove(&relay) else {
                     return Ok(RelayCommandResponse::Closed { closed: false });
                 };
+                let scope = opened.scope;
                 let clients = self
                     .clients
                     .iter()
@@ -300,7 +326,7 @@ impl NativeRelayHost {
                 let final_alias = !self
                     .relays
                     .values()
-                    .any(|(remaining_scope, _)| remaining_scope == &scope);
+                    .any(|remaining| remaining.scope == scope);
                 if final_alias {
                     self.registry
                         .close(&scope)
@@ -312,7 +338,7 @@ impl NativeRelayHost {
                 self.relays
                     .get(&relay)
                     .ok_or(JazzNativeRelayStatus::InvalidHandle)?
-                    .1
+                    .relay
                     .pump()
                     .map_err(relay_status)?;
                 Ok(RelayCommandResponse::Pumped)
@@ -343,7 +369,7 @@ impl NativeRelayHost {
                 self.relays
                     .get(&relay)
                     .ok_or(JazzNativeRelayStatus::InvalidHandle)?
-                    .1
+                    .relay
                     .wire()
                     .push_inbound_encoded(&frame)
                     .map_err(relay_status)?;
@@ -354,7 +380,7 @@ impl NativeRelayHost {
                     .relays
                     .get(&relay)
                     .ok_or(JazzNativeRelayStatus::InvalidHandle)?
-                    .1
+                    .relay
                     .wire()
                     .take_outbound_encoded()
                     .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?,
@@ -366,7 +392,7 @@ impl NativeRelayHost {
                     .get(&relay_handle)
                     .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
                 let (inbound_frames, outbound_frames) = relay
-                    .1
+                    .relay
                     .wire()
                     .queue_depths()
                     .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
@@ -394,22 +420,35 @@ impl NativeRelayHost {
         let handle = self.allocate().map_err(relay_status)?;
         self.admitted_scopes.insert(
             handle,
-            RelayOpenConfig {
-                supported_abi: NativeRelayAbiRange {
-                    minimum: NATIVE_RELAY_ABI_VERSION,
-                    maximum: NATIVE_RELAY_ABI_VERSION,
+            AdmittedRelayScope {
+                config: RelayOpenConfig {
+                    supported_abi: NativeRelayAbiRange {
+                        minimum: NATIVE_RELAY_ABI_VERSION,
+                        maximum: NATIVE_RELAY_ABI_VERSION,
+                    },
+                    scope: request.scope.into(),
+                    sqlite_path: PathBuf::from(request.sqlite_path),
+                    schema,
+                    identity: request.identity,
+                    #[cfg(test)]
+                    thread_start_counter: self.thread_start_counter.clone(),
                 },
-                scope: request.scope.into(),
-                sqlite_path: PathBuf::from(request.sqlite_path),
-                schema,
-                identity: request.identity,
-                #[cfg(test)]
-                thread_start_counter: self.thread_start_counter.clone(),
+                claims: request.claims,
             },
         );
         Ok(RelayScopeAdmissionResponse {
             admitted_scope: handle,
         })
+    }
+}
+
+fn client_identity(handle: u64, author: jazz::ids::AuthorId) -> DbIdentity {
+    let mut node = [0_u8; 16];
+    node[..8].copy_from_slice(b"JAZZRN\0\0");
+    node[8..].copy_from_slice(&handle.to_be_bytes());
+    DbIdentity {
+        node: jazz::ids::NodeUuid::from_bytes(node),
+        author,
     }
 }
 
@@ -867,14 +906,19 @@ struct BoundedMessageQueue {
 
 impl BoundedMessageQueue {
     fn push(&mut self, message: SyncMessage, direction: &'static str) -> Result<(), RelayError> {
+        if self.messages.len() >= NATIVE_RELAY_QUEUE_MAX_MESSAGES {
+            return Err(RelayError::QueueCapacityExceeded {
+                direction,
+                queued_messages: self.messages.len(),
+                queued_bytes: self.encoded_bytes,
+            });
+        }
         let encoded_len = encode_sync_message(&message)
             .map_err(RelayError::EncodePeerMessage)?
             .len();
         validate_encoded_peer_message_len(encoded_len)?;
         let next_bytes = self.encoded_bytes.saturating_add(encoded_len);
-        if self.messages.len() >= NATIVE_RELAY_QUEUE_MAX_MESSAGES
-            || next_bytes > NATIVE_RELAY_QUEUE_MAX_BYTES
-        {
+        if next_bytes > NATIVE_RELAY_QUEUE_MAX_BYTES {
             return Err(RelayError::QueueCapacityExceeded {
                 direction,
                 queued_messages: self.messages.len(),
@@ -1803,6 +1847,7 @@ mod tests {
             sqlite_path: directory.path().join("host.sqlite").display().to_string(),
             schema_json: serde_json::to_string(schema().public_schema()).unwrap(),
             identity,
+            claims: BTreeMap::new(),
         };
         let admission_bytes = postcard::to_allocvec(&admission).unwrap();
         let mut admission_output = JazzNativeRelayBytes::EMPTY;
@@ -1859,24 +1904,11 @@ mod tests {
         unsafe {
             let host = (*host).inner.lock().unwrap();
             assert!(Arc::ptr_eq(
-                &host.relays.get(&relay).unwrap().1.inner,
-                &host.relays.get(&alias).unwrap().1.inner,
+                &host.relays.get(&relay).unwrap().relay.inner,
+                &host.relays.get(&alias).unwrap().relay.inner,
             ));
         }
-        let client = match unsafe {
-            command(
-                host,
-                RelayCommandRequest::Attach {
-                    relay,
-                    identity: DbIdentity {
-                        node: NodeUuid::from_bytes([0x73; 16]),
-                        author: AuthorId::from_bytes([0x74; 16]),
-                    },
-                    claims: BTreeMap::new(),
-                },
-            )
-        }
-        .unwrap()
+        let client = match unsafe { command(host, RelayCommandRequest::Attach { relay }) }.unwrap()
         {
             RelayCommandResponse::Attached { client } => client,
             response => panic!("unexpected attach response: {response:?}"),
@@ -1904,8 +1936,8 @@ mod tests {
         unsafe {
             let host = (*host).inner.lock().unwrap();
             assert!(Arc::ptr_eq(
-                &host.relays.get(&alias).unwrap().1.inner,
-                &host.relays.get(&reopened).unwrap().1.inner,
+                &host.relays.get(&alias).unwrap().relay.inner,
+                &host.relays.get(&reopened).unwrap().relay.inner,
             ));
         }
         assert_eq!(
@@ -1957,6 +1989,7 @@ mod tests {
                         node: NodeUuid::from_bytes([0x81; 16]),
                         author: AuthorId::from_bytes([0x82; 16]),
                     },
+                    claims: BTreeMap::new(),
                 })
                 .unwrap()
                 .admitted_scope

@@ -37,11 +37,13 @@ The relay is a normal non-history-complete `Db`:
 
 The scope key has no token material. Trusted platform code derives an opaque
 `auth_scope` only after authentication and admits the complete scope config to
-the native host: auth scope, SQLite path, schema, and persistent `DbIdentity`.
-JavaScript receives only an opaque admission handle and cannot choose or amend
-those values through the command codec. Reusing a scope with a different path,
-schema, or identity fails. Tokens and claims belong to upstream session
-negotiation. Logout explicitly closes the old scope and chooses either
+the native host: auth scope, SQLite path, schema, persistent `DbIdentity`, and
+validated session claims. JavaScript receives only an opaque admission handle
+and cannot choose or amend those values through the command codec. UI peer
+identities are derived inside the host from the admitted author and a fresh
+process-local node handle. Reusing a scope with a different path, schema, or
+identity fails. Tokens belong to upstream session negotiation. Logout
+explicitly closes the old scope and chooses either
 retention or deletion through a separate, user-visible storage-lifecycle API.
 No current host may reuse a relay after an auth-scope change.
 
