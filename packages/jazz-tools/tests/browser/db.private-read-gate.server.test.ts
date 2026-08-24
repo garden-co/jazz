@@ -141,6 +141,45 @@ const chatStyleMessagePermissions = schema.definePermissions(app, ({ policy, any
   policy.announcements.allowDelete.always(),
 ]);
 
+// Keep this separate from `chatStyleMessagePermissions`: the public branch in
+// that policy is a constant predicate.  This receipt needs both branches to
+// read session claims, matching the owner-or-membership bootstrap used by
+// application schemas.
+const ownerOrMembershipPermissions = schema.definePermissions(
+  app,
+  ({ policy, anyOf, allowedTo, session }) => [
+    policy.chats.allowRead.where((chat) =>
+      anyOf([
+        { owner_id: session.user_id },
+        policy.chat_members.exists.where({
+          chat_id: chat.id,
+          user_id: session.user_id,
+        }),
+      ]),
+    ),
+    policy.chats.allowInsert.always(),
+    policy.chats.allowUpdate.always(),
+    policy.chats.allowDelete.always(),
+
+    policy.chat_members.allowRead.where(
+      anyOf([{ user_id: session.user_id }, allowedTo.read("chat_id")]),
+    ),
+    policy.chat_members.allowInsert.always(),
+    policy.chat_members.allowUpdate.always(),
+    policy.chat_members.allowDelete.always(),
+
+    policy.messages.allowRead.never(),
+    policy.messages.allowInsert.never(),
+    policy.messages.allowUpdate.never(),
+    policy.messages.allowDelete.never(),
+
+    policy.announcements.allowRead.never(),
+    policy.announcements.allowInsert.never(),
+    policy.announcements.allowUpdate.never(),
+    policy.announcements.allowDelete.never(),
+  ],
+);
+
 const camelChatStyleMessagePermissions = schema.definePermissions(
   camelChatApp,
   ({ policy, anyOf, allowedTo, session }) => [
@@ -726,6 +765,54 @@ describe("raw websocket private read gate", () => {
           .orderBy("createdAt", "desc"),
         (rows) => rows.some((row) => row.id === bobMessage.id),
         "Alice should receive Bob's private invite message",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
+  }, 60_000);
+
+  it("delivers a parent row after an external-JWT membership grant satisfies a claim disjunction", async () => {
+    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
+      uniqueDbName("external-owner-or-member-read"),
+    );
+    await publishSchemaAndPermissions(appId, serverUrl, adminSecret, ownerOrMembershipPermissions);
+
+    const [ownerToken, managerToken] = await Promise.all([
+      getJazzServerJwtForUser("external-owner", undefined, appId),
+      getJazzServerJwtForUser("external-manager", undefined, appId),
+    ]);
+    const owner = await openJwtUserDb(appId, serverUrl, "external-owner", ownerToken);
+    const manager = await openJwtUserDb(appId, serverUrl, "external-manager", managerToken);
+    const chat = await owner
+      .insert(app.chats, {
+        title: `owner-or-member-${Date.now()}`,
+        visibility: "private",
+        owner_id: "external-owner",
+      })
+      .wait({ tier: "edge" });
+    await owner
+      .insert(app.chat_members, { chat_id: chat.id, user_id: "external-owner" })
+      .wait({ tier: "edge" });
+    const managerMembership = await owner
+      .insert(app.chat_members, { chat_id: chat.id, user_id: "external-manager" })
+      .wait({ tier: "edge" });
+
+    await expect(
+      waitForQuery(
+        manager,
+        app.chat_members.where({ id: managerMembership.id, user_id: "external-manager" }),
+        (rows) => rows.length === 1,
+        "external manager receives its direct membership grant",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
+    await expect(
+      waitForQuery(
+        manager,
+        app.chats.where({ id: chat.id }),
+        (rows) => rows.some((row) => row.id === chat.id),
+        "external manager receives the parent through the membership disjunct",
         15_000,
         "edge",
       ),
