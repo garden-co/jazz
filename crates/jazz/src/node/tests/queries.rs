@@ -75,6 +75,15 @@ fn query_rows_by_uuid_for_identity(
     tier: DurabilityTier,
     identity: AuthorSubject,
 ) -> (Vec<RowUuid>, QueryEngineReadMetrics) {
+    // This harness models a UUID-backed application `sub` claim separately
+    // from the canonical authenticated author used to select the session.
+    if identity != AuthorSubject::SYSTEM {
+        let mut claims = node.session_claims.get(&identity).cloned().unwrap_or_default();
+        claims
+            .entry("sub".to_owned())
+            .or_insert_with(|| Value::Uuid(identity.test_uuid()));
+        node.set_session_claims(identity, claims);
+    }
     let shape = query.validate(&node.catalogue.schema).unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
     node.reset_query_engine_read_metrics();

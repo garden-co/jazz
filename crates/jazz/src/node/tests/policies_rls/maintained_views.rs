@@ -6,6 +6,8 @@ fn maintained_view_seeded_query_engine_snapshot_matches_rows_and_witnesses() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let author_a = user(0xa1);
     let author_b = user(0xb2);
+    install_test_uuid_sub_claim(&mut core, author_a);
+    install_test_uuid_sub_claim(&mut core, author_b);
 
     let sibling_tx = core
         .commit_mergeable_many_settled(vec![
@@ -85,6 +87,8 @@ fn maintained_view_query_engine_seed_clean_owner_policy_claim_params_match_one_s
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let author = user(0xa1);
     let other = user(0xb2);
+    install_test_uuid_sub_claim(&mut core, author);
+    install_test_uuid_sub_claim(&mut core, other);
 
     accept_global(
         &mut core,
@@ -124,6 +128,8 @@ fn maintained_view_cold_snapshot_seeds_maintained_indexes_equal_one_shot() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let author_a = user(0xa1);
     let author_b = user(0xb2);
+    install_test_uuid_sub_claim(&mut core, author_a);
+    install_test_uuid_sub_claim(&mut core, author_b);
 
     let sibling_tx = core
         .commit_mergeable_many_settled(vec![
@@ -866,7 +872,7 @@ fn retained_user_param_filter_graph_matches_literal_filter() {
 }
 
 #[test]
-fn session_sub_claim_cannot_override_authenticated_subject() {
+fn session_sub_claim_remains_an_application_owned_value() {
     let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
         PublicTableSchemaBuilder::new("docs")
             .column("title", PublicColumnType::Text)
@@ -906,7 +912,7 @@ fn session_sub_claim_cannot_override_authenticated_subject() {
             .into_iter()
             .map(|row| row.row_uuid())
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from([owned_doc])
+        BTreeSet::from([other_doc])
     );
 }
 

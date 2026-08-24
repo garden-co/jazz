@@ -844,21 +844,11 @@ mod tests {
     }
 
     #[test]
-    fn claim_column_type_mismatch_errors_loudly() {
-        let err = Query::from("issues")
+    fn application_claims_are_not_statically_typed() {
+        Query::from("issues")
             .filter(eq(col("state"), claim("sub")))
             .validate_runtime(&schema())
-            .unwrap_err();
-
-        assert_eq!(
-            err,
-            QueryError::ClaimTypeMismatch {
-                claim_path: "sub".to_owned(),
-                column: "state".to_owned(),
-                claim_type: "Uuid".to_owned(),
-                column_type: "String".to_owned(),
-            }
-        );
+            .unwrap();
     }
 
     #[test]
