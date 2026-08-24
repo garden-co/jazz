@@ -1,9 +1,14 @@
 "use client";
 
-import { useState } from "react";
 import { JazzProvider, useAll, useDb, useSession } from "jazz-tools/react";
 import type { DbConfig } from "jazz-tools";
+import { useState } from "react";
 import { app } from "../schema.js";
+import { AssetShelf } from "./components/AssetShelf.js";
+import { CanvasSurface } from "./components/CanvasSurface.js";
+import { CheckpointShelf } from "./components/CheckpointShelf.js";
+import { CollaboratorCursors } from "./components/CollaboratorCursors.js";
+import { LayerPanel } from "./components/LayerPanel.js";
 
 export function PosterShopApp({ config }: { config: DbConfig }) {
   return (
@@ -13,6 +18,8 @@ export function PosterShopApp({ config }: { config: DbConfig }) {
   );
 }
 
+/** The shell only reads canvas metadata. Child surfaces keep independent Jazz
+ * subscriptions, so a cursor or asset update cannot invalidate the canvas UI. */
 export function PosterStudio() {
   const db = useDb();
   const session = useSession();
@@ -37,46 +44,34 @@ export function PosterStudio() {
     return (
       <main>
         <h1>PosterShop</h1>
+        <p>A local-first studio for a shared gig-poster canvas.</p>
         <button onClick={create}>Create poster</button>
       </main>
     );
-  return <CanvasEditor canvasId={active.id} title={active.title} />;
-}
-
-function CanvasEditor({ canvasId, title }: { canvasId: string; title: string }) {
-  const db = useDb();
-  const { data: layers = [] } = useAll(app.layers.where({ canvasId }).orderBy("zIndex", "asc"));
-  const { data: shapes = [] } = useAll(app.shapes.where({ canvasId }).orderBy("zIndex", "asc"));
-  const addShape = () => {
-    const layer = layers[0];
-    if (!layer) return;
-    db.insert(app.shapes, {
-      canvasId,
-      layerId: layer.id,
-      kind: "rect",
-      x: 80,
-      y: 120,
-      width: 360,
-      height: 240,
-      rotation: 0,
-      zIndex: shapes.length,
-      fill: "#ff5a36",
-    });
-  };
   return (
     <main>
-      <h1>{title}</h1>
-      <p>
-        {shapes.length} shapes · {layers.length} layers
-      </p>
-      <button onClick={addShape}>Add shape</button>
-      <ol aria-label="Poster shapes">
-        {shapes.map((shape) => (
-          <li key={shape.id}>
-            {shape.kind} at {shape.x}, {shape.y}
-          </li>
-        ))}
-      </ol>
+      <header>
+        <h1>{active.title}</h1>
+        <label>
+          Poster{" "}
+          <select value={active.id} onChange={(event) => setActiveId(event.target.value)}>
+            {canvases.map((canvas) => (
+              <option key={canvas.id} value={canvas.id}>
+                {canvas.title}
+              </option>
+            ))}
+          </select>
+        </label>
+      </header>
+      <section aria-label="Poster editor">
+        <LayerPanel canvasId={active.id} />
+        <CanvasSurface canvasId={active.id} />
+        <aside>
+          <CollaboratorCursors canvasId={active.id} userId={session?.user_id ?? "local"} />
+          <AssetShelf canvasId={active.id} />
+          <CheckpointShelf canvasId={active.id} />
+        </aside>
+      </section>
     </main>
   );
 }

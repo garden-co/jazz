@@ -1,16 +1,21 @@
-export const POSTER_SHOP_FIXTURE_VERSION = 1;
+export const POSTER_SHOP_FIXTURE_VERSION = 2;
+/**
+ * A framework-neutral, deterministic workload contract for the app and its
+ * topology receipt. "checkpoint" is a durable admin marker, not a request to
+ * select or merge a branch winner; that semantics is intentionally deferred.
+ */
 export const posterShopScenario = {
   id: "poster-shop.canvas-fanout-recovery",
   fixtureVersion: POSTER_SHOP_FIXTURE_VERSION,
   operations: [
     "invite-editors",
-    "batch-transform",
+    "concurrent-shape-insert",
     "publish-cursors",
-    "checkpoint-branch",
+    "save-checkpoint",
     "offline-replay",
     "revoke-editor",
   ],
-  queries: ["canvas-layers", "ordered-shapes", "cursor-fanout", "branch-history"],
-  faults: ["delay", "drop", "partition", "edge-restart", "core-restart"],
+  queries: ["canvas-layers", "ordered-shapes", "asset-metadata", "cursor-fanout", "checkpoints"],
+  faults: ["authorization", "disconnect", "reconnect"],
   soak: { editors: 8, transformsPerEditor: 40, cursorHz: 20, rounds: 3 },
 } as const;
