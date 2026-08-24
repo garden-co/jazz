@@ -2922,14 +2922,21 @@ fn lower_not_predicate_inner(
             source,
             request,
         )?,
-        PredicateExpr::In { value, options } => GroovePredicateExpr::And(
-            options
-                .iter()
-                .map(|option| {
-                    lower_compare(value, ComparisonOp::Ne, option, source_id, source, request)
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        ),
+        PredicateExpr::In { value, options } => GroovePredicateExpr::Or(vec![
+            // Jazz comparisons are two-valued: a nullable field differs from
+            // every non-null membership option. Groove's primitive comparison
+            // operators deliberately use SQL-null semantics, so preserve the
+            // public contract explicitly when lowering Not(In(...)).
+            lower_null_test(value, true, source_id, source, request)?,
+            GroovePredicateExpr::And(
+                options
+                    .iter()
+                    .map(|option| {
+                        lower_compare(value, ComparisonOp::Ne, option, source_id, source, request)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+        ]),
         PredicateExpr::ArrayContains { .. } | PredicateExpr::TextContains { .. } => {
             return Err(UnsupportedReason::Operator(
                 "negated containment predicates are not lowered yet".to_owned(),

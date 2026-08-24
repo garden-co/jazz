@@ -645,9 +645,12 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
           reject(new Error("Timed out waiting for included in-filter update"));
         }, 10_000);
         unsubscribe = db.subscribeAll(
-          app.projects.where({ id: { eq: project.id } }).include({
-            todosViaProject: app.todos.where({ title: { in: ["Published"] } }).select("id"),
-          }),
+          app.projects
+            .where({ id: { eq: project.id } })
+            .select("id")
+            .include({
+              todosViaProject: app.todos.where({ title: { in: ["Published"] } }).select("id"),
+            }),
           (delta) => {
             const next = applySubscriptionDelta(current, delta as any);
             current.splice(0, current.length, ...next);
@@ -683,9 +686,12 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
           reject(error);
         }, 10_000);
         unsubscribe = db.subscribeAll(
-          app.projects.where({ id: { eq: project.id } }).include({
-            todosViaProject: app.todos.where({ title: { notIn: ["Blocked"] } }).select("id"),
-          }),
+          app.projects
+            .where({ id: { eq: project.id } })
+            .select("id")
+            .include({
+              todosViaProject: app.todos.where({ title: { notIn: ["Blocked"] } }).select("id"),
+            }),
           (delta) => {
             const next = applySubscriptionDelta(current, delta as any);
             current.splice(0, current.length, ...next);
