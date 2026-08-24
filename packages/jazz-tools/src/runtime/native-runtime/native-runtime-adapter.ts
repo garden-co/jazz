@@ -658,6 +658,8 @@ function openMemoryDb(
   );
 }
 
+const NATIVE_TRUSTED_BACKEND_MODE_MARKER = "jazz:trusted-backend-host";
+
 export class NativeRuntimeAdapter implements Runtime {
   private readonly db: NativeDb;
   private readonly schemaBytes: Uint8Array;
@@ -724,7 +726,7 @@ export class NativeRuntimeAdapter implements Runtime {
     return new NativeRuntimeAdapter(null, schema, this.node, this.peerIdentity, 1, true, {
       db: this.db.registerSchema(encodeSchema(schema)),
       owner: this,
-      backendCredential: this.trustedBackend ? "inherited-backend-capability" : undefined,
+      trustedBackendHost: this.trustedBackend,
     });
   }
 
@@ -741,6 +743,8 @@ export class NativeRuntimeAdapter implements Runtime {
       initialSyncFlushEvery?: number;
       selfSignedClientProof?: NativeSelfSignedClientProof;
       readAuthorizationHost?: ReadAuthorizationHost;
+      /** Internal server-host authority; never derived from a public session. */
+      trustedBackendHost?: boolean;
       backendCredential?: string;
       owner?: NativeRuntimeAdapter;
     },
@@ -757,14 +761,24 @@ export class NativeRuntimeAdapter implements Runtime {
     this.completedTxs = this.transactionOwner.completedTxs;
     this.writes = this.transactionOwner.writes;
     this.schemaBytes = encodeSchema(schema);
-    this.trustedBackend = opts?.owner?.trustedBackend ?? opts?.backendCredential !== undefined;
+    this.trustedBackend =
+      opts?.owner?.trustedBackend ??
+      opts?.trustedBackendHost ??
+      opts?.backendCredential !== undefined;
+    // The current native ABI selects its trusted open path by presence of a
+    // credential. Keep that mode marker private to this adapter: callers use
+    // the explicit host-authority option, while backendCredential remains the
+    // real optional upstream credential.
+    const nativeBackendCredential =
+      opts?.backendCredential ??
+      (this.trustedBackend ? NATIVE_TRUSTED_BACKEND_MODE_MARKER : undefined);
     this.configBytes = openConfig(
       node,
       author,
       sourceId,
       historyComplete,
       opts?.initialSyncFlushEvery,
-      opts?.backendCredential,
+      nativeBackendCredential,
     );
     this.peerIdentity = author;
     this.schemaHash = serializeRuntimeSchema(schema);
