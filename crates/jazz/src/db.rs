@@ -999,6 +999,10 @@ where
     node: Rc<Node<S>>,
     row_id_source: Rc<RefCell<Box<dyn RowIdSource>>>,
     next_now_ms: Rc<Cell<u64>>,
+    // Minted only by the explicitly unsafe trusted-backend open path. SYSTEM
+    // itself is an admission identity, not proof that a Db may forge external
+    // row provenance.
+    backend_attribution: bool,
 }
 
 /// Process-local, content-addressed identity for an exact typed schema view.
@@ -2174,7 +2178,8 @@ pub enum WriteIdentity {
     /// Author and authorize the write as this trusted session identity.
     Session(AuthorSubject),
     /// Attribute provenance while retaining the database identity as policy subject.
-    /// Client databases reject attribution to a different author.
+    /// Only a Db opened through the trusted-backend capability may attribute
+    /// to a different author; its database identity remains the policy subject.
     Attribution(AuthorSubject),
 }
 

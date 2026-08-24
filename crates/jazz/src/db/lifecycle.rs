@@ -64,7 +64,21 @@ where
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
             )),
             next_now_ms: Rc::new(Cell::new(1)),
+            backend_attribution: false,
         })
+    }
+
+    /// Open a Db allowed to record external provenance while preserving this
+    /// Db's identity for permission admission.
+    ///
+    /// # Safety
+    /// The caller must authenticate trusted backend authority before calling
+    /// this constructor and must not expose it to ordinary application code.
+    #[doc(hidden)]
+    pub async unsafe fn open_with_backend_attribution(config: DbConfig<S>) -> Result<Self, Error> {
+        let mut db = Self::open(config).await?;
+        db.backend_attribution = true;
+        Ok(db)
     }
 
     #[cfg(feature = "testing")]
@@ -97,6 +111,7 @@ where
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
             )),
             next_now_ms: Rc::new(Cell::new(1)),
+            backend_attribution: false,
         };
         Ok((db, receipt))
     }
@@ -130,7 +145,21 @@ where
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
             )),
             next_now_ms: Rc::new(Cell::new(1)),
+            backend_attribution: false,
         })
+    }
+
+    /// History-complete counterpart to [`Db::open_with_backend_attribution`].
+    ///
+    /// # Safety
+    /// The caller must have authenticated trusted backend authority.
+    #[doc(hidden)]
+    pub async unsafe fn open_history_complete_with_backend_attribution(
+        config: DbConfig<S>,
+    ) -> Result<Self, Error> {
+        let mut db = Self::open_history_complete(config).await?;
+        db.backend_attribution = true;
+        Ok(db)
     }
 
     /// Open an edge whose durable store has no authority catalogue yet.
@@ -166,6 +195,7 @@ where
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
             )),
             next_now_ms: Rc::new(Cell::new(1)),
+            backend_attribution: false,
         })
     }
 
@@ -275,6 +305,7 @@ where
             node: Rc::clone(&self.node),
             row_id_source: Rc::clone(&self.row_id_source),
             next_now_ms: Rc::clone(&self.next_now_ms),
+            backend_attribution: self.backend_attribution,
         })
     }
 
