@@ -1657,25 +1657,11 @@ fn lower_value_source(
                 .chain(
                     domain
                         .claim_route_tokens
-                        .iter()
-                        .map(|(claim, token)| {
-                            let parameter = domain
-                                .claim_params
-                                .get(claim)
-                                .expect("claim token has parameter");
-                            let value = claim_value(&parameter.path, &request.policy)?;
-                            let bytes = crate::groove::records::encode_value_canonical(
-                                &value,
-                                &parameter.ty,
-                            )
-                            .map_err(|error| {
-                                UnsupportedReason::Runtime(format!(
-                                    "canonical claim route token: {error}"
-                                ))
-                            })?;
+                        .values()
+                        .map(|token| {
                             Ok(ProjectField::literal(
                                 token.clone(),
-                                Value::String(hex::encode(bytes)),
+                                Value::String("claim-route".to_owned()),
                             ))
                         })
                         .collect::<Result<Vec<_>, UnsupportedReason>>()?,

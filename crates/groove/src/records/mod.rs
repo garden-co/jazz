@@ -113,14 +113,6 @@ pub(crate) fn encode_single_field_value(
     encode_value(value, value_type)
 }
 
-/// Canonical typed value bytes for internal cross-crate identity carriers.
-///
-/// Callers must retain the matching `ValueType`; the encoding is canonical for
-/// that pair and is not a display or application serialization.
-pub fn encode_value_canonical(value: &Value, value_type: &ValueType) -> Result<Vec<u8>, Error> {
-    encode_value(value, value_type)
-}
-
 /// Interned schema-side description needed to interpret compact record bytes.
 ///
 /// Equality and hashing are intern-handle based; deterministic code must not
