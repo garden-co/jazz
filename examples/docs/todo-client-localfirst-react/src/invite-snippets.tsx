@@ -12,6 +12,7 @@ const schema = {
   chatInvites: s.table({
     chatId: s.ref("chats"),
     code: s.string(),
+    singleUse: s.boolean(),
   }),
 };
 
@@ -25,13 +26,17 @@ function navigate(to: string) {
 }
 
 // #region invite-create-link
-export function createInviteLink(db: ReturnType<typeof useDb>, userId: string): string {
+export function createInviteLink(
+  db: ReturnType<typeof useDb>,
+  userId: string,
+  { singleUse = false }: { singleUse?: boolean } = {},
+): string {
   const joinCode = crypto.randomUUID();
 
   const { value: chat } = db.insert(app.chats, {});
 
   db.insert(app.chatMembers, { chatId: chat.id, user_id: userId });
-  db.insert(app.chatInvites, { chatId: chat.id, code: joinCode });
+  db.insert(app.chatInvites, { chatId: chat.id, code: joinCode, singleUse });
 
   return `${window.location.origin}/#/invite/${chat.id}/${joinCode}`;
 }

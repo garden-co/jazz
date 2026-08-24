@@ -12,6 +12,7 @@ const schema = {
   chatInvites: s.table({
     chatId: s.ref("chats"),
     code: s.string(),
+    singleUse: s.boolean(),
   }),
 };
 // #endregion invite-schema
@@ -82,21 +83,25 @@ export async function POST(req: AuthenticatedRequest): Promise<Response> {
 
   const { chatId, code } = (await req.json()) as { chatId: string; code: string };
 
-  const backend = context.asBackend(app);
-  const invite = await backend.one(app.chatInvites.where({ chatId, code }));
-  if (!invite) {
-    return new Response("invalid invite", { status: 400 });
-  }
+  // This handle has backend permissions but attributes writes to the authenticated session.
+  const backendDb = context.withAttributionForSession(session, app);
+  const result = await backendDb.exclusiveTransaction(async (tx) => {
+    // Checking membership first keeps re-opening a successfully redeemed link idempotent,
+    // even after a single-use invite has been consumed.
+    const existing = await tx.one(app.chatMembers.where({ chatId, user_id: session.user_id }));
+    if (existing) return "already-member" as const;
 
-  // Idempotent: a repeated redeem (link reopened, retry after a transient error)
-  // must not insert a second membership row.
-  const existing = await backend.one(app.chatMembers.where({ chatId, user_id: session.user_id }));
-  if (existing) return Response.json({ ok: true });
+    const invite = await tx.one(app.chatInvites.where({ chatId, code }));
+    if (!invite) return "invalid" as const;
 
-  await context
-    .withAttributionForSession(session, app)
-    .insert(app.chatMembers, { chatId, user_id: session.user_id, inviteId: invite.id })
-    .wait({ tier: "edge" });
+    tx.insert(app.chatMembers, { chatId, user_id: session.user_id, inviteId: invite.id });
+    if (invite.singleUse) tx.delete(app.chatInvites, invite.id);
+    return "joined" as const;
+  });
+
+  // Exclusive transactions settle at the authority, so wait() takes no tier.
+  await result.wait();
+  if (result.value === "invalid") return new Response("invalid invite", { status: 400 });
 
   return Response.json({ ok: true });
 }

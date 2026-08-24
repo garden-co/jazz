@@ -64,9 +64,10 @@ the membership and invite rules let the creator bootstrap resources that match t
 ## Accepting an invite
 
 The invitee opens the link while signed in. The client posts the chat ID and code to a server route.
-The server reads the private invite with backend privileges, checks the code, and inserts the
-membership row. The route is idempotent&hairsp;—&hairsp;it skips the insert if the user already has a
-membership, so re-opening the link or retrying after a transient error won't create duplicate rows.
+The server uses one exclusive transaction to read the private invite, check whether the user is
+already a member, insert their membership, and consume a single-use invite. The route is
+idempotent&hairsp;—&hairsp;it skips the insert if the user already has a membership, so re-opening the
+link or retrying after a transient error won't create duplicate rows.
 
 ### Server route
 
@@ -75,6 +76,13 @@ a member, and the `chatMembers.allowInsert` rule only admits the chat's creator,
 insert their own membership directly. Your normal auth middleware resolves the caller to a Jazz
 `Session` first. `withAttributionForSession` then keeps backend permissions while stamping the
 membership's edit metadata to that exact issuer/subject pair.
+
+The transaction is what makes redemption correct under concurrency. A multi-use invite stays in
+the table, so it is deliberately replayable by anyone holding the link. A single-use invite is
+deleted in the same exclusive transaction as the membership insert: two simultaneous redeems
+cannot both succeed. If the authority rejects the transaction because another redemption won the
+race, report that failure to the client and let it retry only if that remains appropriate for your
+UI.
 
 The `context` referenced below is the backend Jazz context for your app&hairsp;—&hairsp;see [Backend context setup](/docs/getting-started/server-setup#backend-context-setup) for how to create one.
 
@@ -85,7 +93,9 @@ The `context` referenced below is the backend Jazz context for your app&hairsp;�
 <Accordions type="single">
 <Accordion title="Single-use, expiring, or role-scoped codes">
 
-For single-use codes, rotate the code in your server route after a successful redeem. For richer requirements (expiry, codes that grant specific roles, audit metadata), put codes in their own table alongside the data you need to colocate with each one&hairsp;—&hairsp;creation date, granted role, expiry timestamp, and so on.
+Pass `{ singleUse: true }` when creating a link to consume it atomically on successful redemption.
+For richer requirements (expiry, codes that grant specific roles, audit metadata), add those fields
+to the invite table and check them in the same exclusive transaction.
 
 The example uses the full `crypto.randomUUID()` value. Keep at least that much entropy for a link
 that is not single-use or expiring.
