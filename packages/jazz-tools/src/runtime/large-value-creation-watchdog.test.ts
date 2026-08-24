@@ -115,6 +115,39 @@ describe.runIf(modes.includes(fixture as (typeof modes)[number]))(
                   oneChunk(largeText),
                 );
         console.error(`phase:${fixture}:returned`);
+        if (fixture === "direct-wasm-text") {
+          expect(() =>
+            client.insert(
+              "todos",
+              {
+                title: { type: "Text", value: largeText },
+                done: { type: "Boolean", value: false },
+              },
+              { id: write.value.id },
+            ),
+          ).toThrow(/already exists/i);
+          const updated = client.update("todos", write.value.id, {
+            done: { type: "Boolean", value: true },
+          });
+          const deleted = client.delete("todos", write.value.id);
+          const restored = client.restore("todos", write.value.id, {
+            title: { type: "Text", value: largeText },
+            done: { type: "Boolean", value: true },
+          });
+          await updated.wait({ tier: "local" });
+          await deleted.wait({ tier: "local" });
+          await restored.wait({ tier: "local" });
+        }
+        if (fixture === "direct-wasm-bytes") {
+          await expect(
+            runtime.readValueRange("blobs", write.value.id, "data", 0, largeText.length),
+          ).resolves.toEqual(new TextEncoder().encode(largeText));
+        }
+        if (fixture === "direct-wasm-json") {
+          await expect(
+            runtime.readJsonPointer("documents", write.value.id, "body", "/selected/answer"),
+          ).resolves.toBe(42);
+        }
         await write.wait({ tier: "local" });
         console.error(`phase:${fixture}:local`);
         if (fixture?.endsWith("-json")) {

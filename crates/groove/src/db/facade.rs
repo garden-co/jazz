@@ -71,10 +71,87 @@ impl LargeValueStager {
             .map_err(crate::chunks::ChunkError::from)
             .map_err(crate::ivm::runtime::IvmRuntimeError::from)
             .map_err(Error::from)?;
-        self.stage_chunk_batch(stage.id(), stage.value_ref().kind, chunks)
-            .await?;
-        self.finalize_with_id(stage.id(), stage.value_ref().clone())
-            .await?;
+        let result = async {
+            self.stage_chunk_batch(stage.id(), stage.value_ref().kind, chunks)
+                .await?;
+            self.finalize_with_id(stage.id(), stage.value_ref().clone())
+                .await
+        }
+        .await;
+        if result.is_err() {
+            // A failed pre-promotion phase must not leave upload retainers to
+            // await TTL. A completed receipt remains crash-safe and is
+            // collected by the ordinary staged-root expiry path until the
+            // final atomic row write settles.
+            let _ = self.cleanup_pending_upload(stage.id()).await;
+        }
+        result
+    }
+
+    async fn cleanup_pending_upload(
+        &self,
+        id: crate::large_values::StagedLargeValueId,
+    ) -> Result<(), Error> {
+        let _lifecycle = self.lifecycle.lock().await;
+        let key = pending_large_value_upload_key(id);
+        let Some(encoded) = self
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
+            .await?
+        else {
+            return Ok(());
+        };
+        let upload: crate::large_values::PendingLargeValueUpload = postcard::from_bytes(&encoded)
+            .map_err(|error| {
+            Error::InvalidLargeValueMetadata(format!(
+                "cannot decode pending large-value upload: {error}"
+            ))
+        })?;
+        let mut operations = vec![OwnedWriteOperation::Delete {
+            cf: LARGE_VALUE_METADATA_CF.to_owned(),
+            key,
+        }];
+        for node_ref in upload.chunks {
+            let node_key = large_value_node_key(&node_ref)?;
+            let Some(encoded) = self
+                .storage
+                .get(LARGE_VALUE_METADATA_CF.to_owned(), node_key.clone())
+                .await?
+            else {
+                continue;
+            };
+            let mut metadata: LargeValueNodeReferences =
+                postcard::from_bytes(&encoded).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot decode upload node metadata: {error}"
+                    ))
+                })?;
+            metadata.upload_references =
+                metadata.upload_references.checked_sub(1).ok_or_else(|| {
+                    Error::InvalidLargeValueMetadata("upload reference count underflow".to_owned())
+                })?;
+            operations.push(OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: node_key,
+                value: postcard::to_allocvec(&metadata).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot encode upload node metadata: {error}"
+                    ))
+                })?,
+            });
+            if metadata.references == 0 && metadata.upload_references == 0 {
+                operations.push(OwnedWriteOperation::Set {
+                    cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                    key: large_value_reclaim_key(&node_ref)?,
+                    value: postcard::to_allocvec(&node_ref).map_err(|error| {
+                        Error::InvalidLargeValueMetadata(format!(
+                            "cannot encode reclaim entry: {error}"
+                        ))
+                    })?,
+                });
+            }
+        }
+        self.storage.write_many(operations).await?;
         Ok(())
     }
 
