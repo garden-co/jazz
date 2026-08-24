@@ -60,6 +60,42 @@ describe("EpicDrop upload", () => {
     ]);
   });
 
+  it("abandons a failed streamed upload without publishing a file, then permits a clean retry", async () => {
+    const db = await openDb("retry");
+    const ownerId = "anonymous";
+    const folder = db.insert(app.folders, { name: "Interrupted uploads", owner_id: ownerId });
+
+    await expect(
+      db.insertStreaming(app.files, {
+        folder_id: folder.value.id,
+        name: "partial.wav",
+        content_type: "audio/wav",
+        size_bytes: 64 * 1024,
+        owner_id: ownerId,
+        contents: (async function* () {
+          yield new Uint8Array(40 * 1024).fill(7);
+          throw new Error("simulated browser stream cancellation");
+        })(),
+      }),
+    ).rejects.toThrow("simulated browser stream cancellation");
+    await expect(db.all(app.files)).resolves.toEqual([]);
+
+    const retried = await db.insertStreaming(app.files, {
+      folder_id: folder.value.id,
+      name: "retry.wav",
+      content_type: "audio/wav",
+      size_bytes: 64 * 1024,
+      owner_id: ownerId,
+      contents: (async function* () {
+        yield new Uint8Array(32 * 1024).fill(3);
+        yield new Uint8Array(32 * 1024).fill(5);
+      })(),
+    });
+    await expect(db.all(app.files)).resolves.toEqual([
+      expect.objectContaining({ id: retried.value.id, name: "retry.wav" }),
+    ]);
+  });
+
   it("streams a large upload through edge A and converges at a peer edge subscription", async () => {
     const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
     const secret = generateAuthSecret();
