@@ -16,9 +16,19 @@ fn ordered_track_window_is_complete_and_stable() {
 }
 
 #[test]
-fn edit_burst_preserves_a_readable_converged_pattern() {
+fn app_session_queries_keep_their_order_and_cardinality_contracts() {
     let fixture = Fixture::new();
-    assert!(fixture.concurrent_edit_burst(32) <= STEPS);
+    let (track_positions, membership_count, presence_count) = fixture.session_browser_shape();
+
+    assert_eq!(track_positions, (0..16).collect::<Vec<_>>());
+    assert_eq!(membership_count, 1);
+    assert_eq!(presence_count, 1);
+}
+
+#[test]
+fn editor_edit_burst_preserves_a_readable_pattern() {
+    let fixture = Fixture::new();
+    assert!(fixture.editor_edit_burst(32) <= STEPS);
     assert_eq!(fixture.playhead_window(0, 1).len(), 1);
 }
 

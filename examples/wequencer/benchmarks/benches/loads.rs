@@ -17,10 +17,10 @@ fn playhead_window(bencher: divan::Bencher<'_, '_>, range: (usize, usize)) {
 }
 
 #[divan::bench(args = [8, 32, 64])]
-fn concurrent_edit_burst(bencher: divan::Bencher<'_, '_>, editors: usize) {
+fn editor_edit_burst(bencher: divan::Bencher<'_, '_>, editors: usize) {
     bencher.bench_local(|| {
         let fixture = Fixture::new();
-        divan::black_box(fixture.concurrent_edit_burst(editors))
+        divan::black_box(fixture.editor_edit_burst(editors))
     });
 }
 

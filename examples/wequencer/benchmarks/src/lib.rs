@@ -24,8 +24,13 @@ type BenchDb = Db<MemoryStorage>;
 
 pub struct Fixture {
     db: BenchDb,
+    member_table: TableSchema,
+    track_table: TableSchema,
     step_table: TableSchema,
     transport_table: TableSchema,
+    session_tracks: PreparedQuery,
+    own_membership: PreparedQuery,
+    session_presence: PreparedQuery,
     track_window: PreparedQuery,
     transport_receipts: PreparedQuery,
 }
@@ -38,7 +43,7 @@ impl Default for Fixture {
 
 impl Fixture {
     pub fn new() -> Self {
-        let (db, step_table, transport_table) = open_db();
+        let (db, member_table, track_table, step_table, transport_table) = open_db();
         let session_id = row_id(1, 0);
         let profile_id = row_id(2, 0);
         insert(
@@ -109,6 +114,32 @@ impl Fixture {
                 ("heartbeat_at".into(), Value::U64(0)),
             ]),
         );
+        // `useAll(app.sessions.orderBy("$createdAt", "desc"))` is prepared
+        // here too. The native Db's direct-read facade cannot materialize a
+        // provenance ordering key, but preparation validates the exact public
+        // query shape; ordered materialization is covered below by tracks.
+        let _session_list = db
+            .prepare_query(&Query::from("sessions").order_by("$createdAt", OrderDirection::Desc))
+            .expect("prepare Wequencer session-browser query");
+        let session_tracks = db
+            .prepare_query(
+                &Query::from("tracks")
+                    .filter(eq(col("session_id"), lit(session_id.0)))
+                    .order_by("position", OrderDirection::Asc),
+            )
+            .expect("prepare Wequencer session-track query");
+        let own_membership = db
+            .prepare_query(
+                &Query::from("session_members")
+                    .filter(eq(col("session_id"), lit(session_id.0)))
+                    .filter(eq(col("user_id"), lit("fixture-owner"))),
+            )
+            .expect("prepare Wequencer membership query");
+        let session_presence = db
+            .prepare_query(
+                &Query::from("presence").filter(eq(col("session_id"), lit(session_id.0))),
+            )
+            .expect("prepare Wequencer presence query");
         let track_window = db
             .prepare_query(
                 &Query::from("steps")
@@ -125,11 +156,44 @@ impl Fixture {
             .expect("prepare Wequencer transport receipt query");
         Self {
             db,
+            member_table,
+            track_table,
             step_table,
             transport_table,
+            session_tracks,
+            own_membership,
+            session_presence,
             track_window,
             transport_receipts,
         }
+    }
+
+    /// Reads the parent-scoped browser query shapes. The values make their
+    /// index, ordering, and cardinality contracts observable in the fixture.
+    pub fn session_browser_shape(&self) -> (Vec<u64>, usize, usize) {
+        let track_positions = self
+            .db
+            .read(&self.session_tracks)
+            .expect("read Wequencer session-track query")
+            .into_iter()
+            .map(|row| match row.cell(&self.track_table, "position") {
+                Some(Value::I32(position)) => position as u64,
+                value => panic!("unexpected track position: {value:?}"),
+            })
+            .collect();
+        let membership_count = self
+            .db
+            .read(&self.own_membership)
+            .expect("read Wequencer membership query")
+            .into_iter()
+            .filter(|row| matches!(row.cell(&self.member_table, "role"), Some(Value::String(_))))
+            .count();
+        let presence_count = self
+            .db
+            .read(&self.session_presence)
+            .expect("read Wequencer presence query")
+            .len();
+        (track_positions, membership_count, presence_count)
     }
 
     pub fn track_steps(&self) -> Vec<(u64, bool)> {
@@ -180,7 +244,10 @@ impl Fixture {
         (playing, bar)
     }
 
-    pub fn concurrent_edit_burst(&self, editor_count: usize) -> usize {
+    /// Applies a deterministic sequence of editor-shaped writes through one
+    /// local client. Multi-client contention belongs to the browser scenario,
+    /// not this native single-DB timing fixture.
+    pub fn editor_edit_burst(&self, editor_count: usize) -> usize {
         assert!(editor_count > 0);
         for editor in 0..editor_count {
             let step = editor % STEPS;
@@ -328,20 +395,20 @@ fn schema() -> JazzSchema {
     JazzSchema::new(&source).expect("Wequencer schema compiles")
 }
 
-fn open_db() -> (BenchDb, TableSchema, TableSchema) {
+fn open_db() -> (BenchDb, TableSchema, TableSchema, TableSchema, TableSchema) {
     let schema = schema();
-    let step_table = schema
-        .tables()
-        .iter()
-        .find(|table| table.name == "steps")
-        .expect("steps table")
-        .clone();
-    let transport_table = schema
-        .tables()
-        .iter()
-        .find(|table| table.name == "transport_observations")
-        .expect("transport observations table")
-        .clone();
+    let table = |name| {
+        schema
+            .tables()
+            .iter()
+            .find(|table| table.name == name)
+            .unwrap_or_else(|| panic!("{name} table"))
+            .clone()
+    };
+    let member_table = table("session_members");
+    let track_table = table("tracks");
+    let step_table = table("steps");
+    let transport_table = table("transport_observations");
     let families = schema.column_families();
     let family_refs = families.iter().map(String::as_str).collect::<Vec<_>>();
     let db = block_on(Db::open(DbConfig::new(
@@ -363,7 +430,7 @@ fn open_db() -> (BenchDb, TableSchema, TableSchema) {
             ("loop_steps".into(), Value::I32(STEPS as i32)),
         ]),
     );
-    (db, step_table, transport_table)
+    (db, member_table, track_table, step_table, transport_table)
 }
 
 fn insert(db: &BenchDb, table: &str, id: RowUuid, cells: BTreeMap<String, Value>) {

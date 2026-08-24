@@ -10,8 +10,8 @@ several difficult local-first shapes concrete:
 - owner/editor/viewer permissions on one shared session;
 - an explicit reconnect/partition and permission test contract while transport
   observations remain deliberately ephemeral; and
-- a deterministic native benchmark and soak fixture that duplicate the public
-  schema and query shapes rather than importing application helpers.
+- a deterministic native benchmark and soak fixture that mirrors the public
+  schema and key query shapes rather than importing application helpers.
 
 ## Variants
 
@@ -19,7 +19,8 @@ several difficult local-first shapes concrete:
   It follows the `create-jazz` Next/Better Auth structure: the server owns
   account bootstrap and the client owns only local-first interaction.
 - `benchmarks/` is the matching native Divan/CodSpeed model. It exercises
-  ordered pattern windows, subscription refreshes, and concurrent step edits.
+  ordered pattern windows, subscription refreshes, and deterministic local
+  edit bursts; the browser scenario covers two-client contention and recovery.
 
 The app models clock and presence as short-lived observations. They are useful
 for a UI but are not used to authorize or deterministically schedule audio.
