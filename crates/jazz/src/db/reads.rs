@@ -8,7 +8,7 @@ use super::*;
 /// storage errors before they are flattened into a public [`Error`].
 #[doc(hidden)]
 pub enum BindingHydrationError {
-    ChunkUnavailable,
+    RetryableChunkUnavailable { retry_after_ms: u32 },
     Error(Error),
 }
 
@@ -16,6 +16,20 @@ fn binding_hydration_error(error: crate::node::Error) -> BindingHydrationError {
     use groove::chunks::ChunkError;
     use groove::ivm::runtime::IvmRuntimeError;
 
+    let retry_after_ms = match &error {
+        crate::node::Error::LargeValueReachability(
+            groove::large_values::ReachabilityError::Chunk(ChunkError::Retryable {
+                retry_after_ms,
+            }),
+        )
+        | crate::node::Error::Groove(groove::db::Error::IvmRuntime(IvmRuntimeError::Chunk(
+            ChunkError::Retryable { retry_after_ms },
+        ))) => Some(*retry_after_ms),
+        _ => None,
+    };
+    if let Some(retry_after_ms) = retry_after_ms {
+        return BindingHydrationError::RetryableChunkUnavailable { retry_after_ms };
+    }
     let unavailable = matches!(
         &error,
         crate::node::Error::ChunkStorage(groove::chunks::ChunkStorageError::Unavailable)
@@ -27,7 +41,10 @@ fn binding_hydration_error(error: crate::node::Error) -> BindingHydrationError {
             )))
     );
     if unavailable {
-        BindingHydrationError::ChunkUnavailable
+        BindingHydrationError::Error(Error::new(
+            ErrorCode::NotObserved,
+            "large-value chunk is permanently unavailable",
+        ))
     } else {
         BindingHydrationError::Error(error.into())
     }
@@ -394,9 +411,9 @@ where
         self.hydrate_subscription_event_for_binding_outcome(event)
             .await
             .map_err(|error| match error {
-                BindingHydrationError::ChunkUnavailable => Error::new(
+                BindingHydrationError::RetryableChunkUnavailable { .. } => Error::new(
                     ErrorCode::NotObserved,
-                    "large-value chunk is not locally available",
+                    "large-value chunk is temporarily unavailable",
                 ),
                 BindingHydrationError::Error(error) => error,
             })
@@ -419,21 +436,27 @@ where
             return Ok(());
         };
         let node = self.node.node.lock().await;
-        for output in added.iter_mut().chain(updated.iter_mut()) {
-            node.hydrate_current_rows(std::slice::from_mut(&mut output.row))
-                .await
-                .map_err(binding_hydration_error)?;
-        }
-        for operation in terminal_operations {
-            let value = match &mut operation.edit {
-                groove::ivm::TerminalEdit::Insert { value, .. }
-                | groove::ivm::TerminalEdit::Update { value, .. } => value,
-                groove::ivm::TerminalEdit::Remove { .. }
-                | groove::ivm::TerminalEdit::Move { .. } => continue,
-            };
-            node.hydrate_encoded_record(&operation.root_descriptor, value)
-                .await
-                .map_err(binding_hydration_error)?;
+        if terminal_operations.is_empty() {
+            for output in added.iter_mut().chain(updated.iter_mut()) {
+                node.hydrate_current_rows(std::slice::from_mut(&mut output.row))
+                    .await
+                    .map_err(binding_hydration_error)?;
+            }
+        } else {
+            // Structured terminal edits replace the row batches at this
+            // binding. Do not fetch discarded rows just because the internal
+            // event happened to retain them for its own reconciliation.
+            for operation in terminal_operations {
+                let value = match &mut operation.edit {
+                    groove::ivm::TerminalEdit::Insert { value, .. }
+                    | groove::ivm::TerminalEdit::Update { value, .. } => value,
+                    groove::ivm::TerminalEdit::Remove { .. }
+                    | groove::ivm::TerminalEdit::Move { .. } => continue,
+                };
+                node.hydrate_encoded_record(&operation.root_descriptor, value)
+                    .await
+                    .map_err(binding_hydration_error)?;
+            }
         }
         Ok(())
     }

@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use futures_util::future::{AbortHandle, Abortable};
 use futures_util::lock::Mutex as LocalMutex;
 use futures_util::stream;
 use futures_util::{Stream, StreamExt};
@@ -34,7 +35,7 @@ use serde::{Deserialize, Serialize};
 type BrowserStorage = IdbStorage<IndexedDbPageStore>;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use wasm_bindgen_futures::future_to_promise;
+use wasm_bindgen_futures::{future_to_promise, JsFuture};
 
 mod identity;
 
@@ -1232,7 +1233,7 @@ impl WasmDb {
     pub fn all(&self, query: &WasmPreparedQuery, opts: JsValue) -> Result<Vec<u8>, JsValue> {
         let opts = read_opts_from_js(opts)?;
         let rows = self.inner.all(&query.inner, opts).map_err(to_js_error)?;
-        encode_rows(&rows).map_err(to_js_error)
+        encode_synchronous_rows(&rows)
     }
 
     #[wasm_bindgen(js_name = one)]
@@ -1240,7 +1241,7 @@ impl WasmDb {
         let opts = read_opts_from_js(opts)?;
         let mut rows = self.inner.all(&query.inner, opts).map_err(to_js_error)?;
         rows.truncate(1);
-        encode_rows(&rows).map_err(to_js_error)
+        encode_synchronous_rows(&rows)
     }
 
     #[wasm_bindgen(js_name = allInTransaction)]
@@ -1258,7 +1259,7 @@ impl WasmDb {
             WasmTxKind::Exclusive => self.inner.exclusive_all(tx_id, &query.inner, opts),
         }
         .map_err(to_js_error)?;
-        encode_rows(&rows).map_err(to_js_error)
+        encode_synchronous_rows(&rows)
     }
 
     #[wasm_bindgen(js_name = allInTransactionForIdentity)]
@@ -1284,7 +1285,7 @@ impl WasmDb {
             }
         }
         .map_err(to_js_error)?;
-        encode_rows(&rows).map_err(to_js_error)
+        encode_synchronous_rows(&rows)
     }
 
     #[wasm_bindgen(js_name = oneInTransaction)]
@@ -1296,7 +1297,7 @@ impl WasmDb {
     ) -> Result<Vec<u8>, JsValue> {
         let mut rows = read_rows_for_transaction(&self.inner, query, tx, None, opts)?;
         rows.truncate(1);
-        encode_rows(&rows).map_err(to_js_error)
+        encode_synchronous_rows(&rows)
     }
 
     #[wasm_bindgen(js_name = oneInTransactionForIdentity)]
@@ -1310,7 +1311,7 @@ impl WasmDb {
         let author = author_id_from_bytes(&author)?;
         let mut rows = read_rows_for_transaction(&self.inner, query, tx, Some(author), opts)?;
         rows.truncate(1);
-        encode_rows(&rows).map_err(to_js_error)
+        encode_synchronous_rows(&rows)
     }
 
     #[wasm_bindgen(js_name = setIdentityClaims)]
@@ -1334,7 +1335,7 @@ impl WasmDb {
             .inner
             .all_for_identity(&query.inner, opts, author)
             .map_err(to_js_error)?;
-        encode_rows(&rows).map_err(to_js_error)
+        encode_synchronous_rows(&rows)
     }
 
     #[wasm_bindgen(js_name = allRelationQuery)]
@@ -2912,6 +2913,31 @@ fn encode_rows(rows: &[jazz::node::CurrentRow]) -> Result<Vec<u8>, postcard::Err
     jazz::binding_codec::encode_rows(rows)
 }
 
+/// Synchronous WASM reads cannot suspend for a missing immutable chunk. Until
+/// their API is made asynchronous, fail at the binding boundary instead of
+/// handing a physical `Value::Large` tag to JavaScript's logical row decoder.
+/// Relation reads and subscriptions already use the async materialization path.
+fn encode_synchronous_rows(rows: &[jazz::node::CurrentRow]) -> Result<Vec<u8>, JsValue> {
+    for row in rows {
+        let (descriptor, raw) = row.encoded_record();
+        let values = descriptor.bind(raw).to_values().map_err(to_js_error)?;
+        if values.iter().any(value_contains_indirect_scalar) {
+            return Err(JsValue::from_str(
+                "synchronous WASM all/transaction reads cannot materialize a large value; use an async relation read or subscription instead",
+            ));
+        }
+    }
+    encode_rows(rows).map_err(to_js_error)
+}
+
+fn value_contains_indirect_scalar(value: &Value) -> bool {
+    match value {
+        Value::Large(_) => true,
+        Value::Nullable(Some(value)) => value_contains_indirect_scalar(value),
+        _ => false,
+    }
+}
+
 fn encode_relation_snapshot(
     snapshot: &jazz::node::RelationSnapshot,
 ) -> Result<Vec<u8>, postcard::Error> {
@@ -2933,37 +2959,79 @@ fn subscription_stream_to_js(
     let state = (
         db,
         Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>,
-        None::<SubscriptionEvent>,
         HashSet::<String>::new(),
     );
     readable_stream_from_stream(stream::unfold(
         state,
-        |(db, mut source, pending, layouts)| async move {
-            let mut event = match pending {
+        |(db, mut source, layouts)| async move {
+            let mut event = match source.next().await {
                 Some(event) => event,
-                None => match source.next().await {
-                    Some(event) => event,
-                    None => return None,
-                },
+                None => return None,
             };
-            match db.hydrate_subscription_event_for_binding(&mut event).await {
-                Ok(()) => {}
-                Err(jazz::db::BindingHydrationError::ChunkUnavailable) => {
-                    return Some((Ok(None), (db, source, Some(event), layouts)));
-                }
-                Err(jazz::db::BindingHydrationError::Error(error)) => {
-                    // Do not retain a fatal event: surfacing the stream error
-                    // drops SubscriptionStream and runs its cleanup guard.
-                    return Some((Err(to_js_error(error)), (db, source, None, layouts)));
+            let mut retry_attempt = 0;
+            loop {
+                match db.hydrate_subscription_event_for_binding(&mut event).await {
+                    Ok(()) => break,
+                    Err(jazz::db::BindingHydrationError::RetryableChunkUnavailable {
+                        retry_after_ms,
+                    }) => {
+                        // Keep this event ahead of the source stream. A fulfilled
+                        // ReadableStream pull without enqueueing does not cause a
+                        // new pull at HWM 0, so wait for a real delayed wake before
+                        // retrying rather than returning an empty chunk or spinning.
+                        let delay_ms = retry_delay_ms(retry_attempt).max(
+                            retry_after_ms
+                                .clamp(INITIAL_SUBSCRIPTION_RETRY_MS, MAX_SUBSCRIPTION_RETRY_MS),
+                        );
+                        if let Err(error) = wait_for_subscription_retry(delay_ms).await {
+                            return Some((Err(error), (db, source, layouts)));
+                        }
+                        retry_attempt = retry_attempt.saturating_add(1);
+                    }
+                    Err(jazz::db::BindingHydrationError::Error(error)) => {
+                        // Do not retain a fatal event: surfacing the stream error
+                        // drops SubscriptionStream and runs its cleanup guard.
+                        return Some((Err(to_js_error(error)), (db, source, layouts)));
+                    }
                 }
             }
             let mut prospective_layouts = layouts.clone();
             match subscription_chunk_to_js(event, &mut prospective_layouts) {
-                Ok(chunk) => Some((Ok(Some(chunk)), (db, source, None, prospective_layouts))),
-                Err(error) => Some((Err(error), (db, source, None, layouts))),
+                Ok(chunk) => Some((Ok(chunk), (db, source, prospective_layouts))),
+                Err(error) => Some((Err(error), (db, source, layouts))),
             }
         },
     ))
+}
+
+const INITIAL_SUBSCRIPTION_RETRY_MS: u32 = 25;
+const MAX_SUBSCRIPTION_RETRY_MS: u32 = 1_000;
+
+fn retry_delay_ms(attempt: u8) -> u32 {
+    INITIAL_SUBSCRIPTION_RETRY_MS
+        .saturating_mul(1_u32 << attempt.min(6))
+        .min(MAX_SUBSCRIPTION_RETRY_MS)
+}
+
+async fn wait_for_subscription_retry(delay_ms: u32) -> Result<(), JsValue> {
+    let promise = js_sys::Promise::new(&mut |resolve, reject| {
+        let global = js_sys::global();
+        let timeout = match js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
+            .and_then(|value| value.dyn_into::<js_sys::Function>())
+        {
+            Ok(timeout) => timeout,
+            Err(error) => {
+                let _ = reject.call1(&JsValue::UNDEFINED, &error);
+                return;
+            }
+        };
+        if let Err(error) =
+            timeout.call2(&global, &resolve, &JsValue::from_f64(f64::from(delay_ms)))
+        {
+            let _ = reject.call1(&JsValue::UNDEFINED, &error);
+        }
+    });
+    JsFuture::from(promise).await.map(|_| ())
 }
 
 fn subscription_chunk_to_js(
@@ -3113,33 +3181,48 @@ fn set_prop(object: &js_sys::Object, name: &str, value: JsValue) -> Result<(), J
     js_sys::Reflect::set(object, &JsValue::from_str(name), &value).map(|_| ())
 }
 
-type JsResultStream = dyn Stream<Item = Result<Option<JsValue>, JsValue>>;
+type JsResultStream = dyn Stream<Item = Result<JsValue, JsValue>>;
 
 fn readable_stream_from_stream<St>(stream: St) -> Result<JsValue, JsValue>
 where
-    St: Stream<Item = Result<Option<JsValue>, JsValue>> + 'static,
+    St: Stream<Item = Result<JsValue, JsValue>> + 'static,
 {
     let stream: Pin<Box<JsResultStream>> = Box::pin(stream);
     let state = std::rc::Rc::new(std::cell::RefCell::new(Some(stream)));
+    let cancelled = std::rc::Rc::new(std::cell::Cell::new(false));
+    let active_abort = std::rc::Rc::new(std::cell::RefCell::new(None::<AbortHandle>));
     let source = js_sys::Object::new();
 
     let pull_state = std::rc::Rc::clone(&state);
+    let pull_cancelled = std::rc::Rc::clone(&cancelled);
+    let pull_abort = std::rc::Rc::clone(&active_abort);
     let pull = Closure::<dyn FnMut(JsValue) -> js_sys::Promise>::new(move |controller| {
         let pull_state = std::rc::Rc::clone(&pull_state);
+        let pull_cancelled = std::rc::Rc::clone(&pull_cancelled);
+        let pull_abort = std::rc::Rc::clone(&pull_abort);
         future_to_promise(async move {
+            if pull_cancelled.get() {
+                return Ok(JsValue::undefined());
+            }
             let Some(mut stream) = pull_state.borrow_mut().take() else {
                 return Err(JsValue::from_str(
                     "subscription stream pull already in progress",
                 ));
             };
-            let next = stream.next().await;
+            let (abort_handle, abort_registration) = AbortHandle::new_pair();
+            *pull_abort.borrow_mut() = Some(abort_handle);
+            let next = Abortable::new(stream.next(), abort_registration).await;
+            pull_abort.borrow_mut().take();
+            if pull_cancelled.get() {
+                // Do not restore the stream after cancellation: dropping it
+                // runs the subscription cleanup guard even during a retry wait.
+                return Ok(JsValue::undefined());
+            }
+            let next = next.map_err(|_| JsValue::from_str("subscription pull was aborted"))?;
             match next {
-                Some(Ok(Some(chunk))) => {
+                Some(Ok(chunk)) => {
                     *pull_state.borrow_mut() = Some(stream);
                     call_controller_method(&controller, "enqueue", Some(&chunk))?;
-                }
-                Some(Ok(None)) => {
-                    *pull_state.borrow_mut() = Some(stream);
                 }
                 Some(Err(error)) => {
                     call_controller_method(&controller, "error", Some(&error))?;
@@ -3156,7 +3239,13 @@ where
     pull.forget();
 
     let cancel_state = std::rc::Rc::clone(&state);
+    let cancel_flag = std::rc::Rc::clone(&cancelled);
+    let cancel_abort = std::rc::Rc::clone(&active_abort);
     let cancel = Closure::<dyn FnMut()>::new(move || {
+        cancel_flag.set(true);
+        if let Some(handle) = cancel_abort.borrow_mut().take() {
+            handle.abort();
+        }
         cancel_state.borrow_mut().take();
     });
     js_sys::Reflect::set(&source, &JsValue::from_str("cancel"), cancel.as_ref())?;
@@ -3210,6 +3299,14 @@ mod dynamic_schema_view_tests {
     use jazz::tools::public_schema::{
         ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema,
     };
+
+    #[test]
+    fn subscription_chunk_retry_uses_a_bounded_nonzero_backoff() {
+        assert_eq!(retry_delay_ms(0), 25);
+        assert_eq!(retry_delay_ms(1), 50);
+        assert_eq!(retry_delay_ms(5), 800);
+        assert_eq!(retry_delay_ms(u8::MAX), 1_000);
+    }
 
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test::wasm_bindgen_test]

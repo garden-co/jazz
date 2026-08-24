@@ -277,8 +277,10 @@ impl PeerChunkResolver {
                     let result = match &response.result {
                         ChunkResponse::Found(bytes) => Ok(bytes::Bytes::copy_from_slice(bytes)),
                         ChunkResponse::Unavailable => Err(groove::chunks::ChunkError::Unavailable),
-                        ChunkResponse::Retryable { .. } => {
-                            Err(groove::chunks::ChunkError::Unavailable)
+                        ChunkResponse::Retryable { retry_after_ms } => {
+                            Err(groove::chunks::ChunkError::Retryable {
+                                retry_after_ms: *retry_after_ms,
+                            })
                         }
                     };
                     let _ = sender.send(result);

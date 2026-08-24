@@ -9,6 +9,7 @@ fn is_retryable_upload_error(error: &Error) -> bool {
                     | crate::ivm::runtime::IvmRuntimeError::Chunk(
                         crate::chunks::ChunkError::Backend(_)
                             | crate::chunks::ChunkError::Unavailable
+                            | crate::chunks::ChunkError::Retryable { .. }
                     )
             )
     )

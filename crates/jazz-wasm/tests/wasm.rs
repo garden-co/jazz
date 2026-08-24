@@ -315,6 +315,16 @@ async fn public_wasm_large_values_hydrate_before_relation_and_subscription_encod
         Some(&Value::String(json.clone()))
     );
 
+    let synchronous_error = db
+        .all(&query, JsValue::NULL)
+        .expect_err("synchronous public read must reject an indirect scalar");
+    assert!(
+        synchronous_error
+            .as_string()
+            .is_some_and(|message| message.contains("cannot materialize a large value")),
+        "the legacy synchronous path must fail helpfully instead of leaking tag 14 to the logical decoder"
+    );
+
     let relation = await_promise(
         db.all_relation_snapshot(&query, JsValue::NULL)
             .expect("start public relation snapshot"),

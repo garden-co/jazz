@@ -171,6 +171,10 @@ fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
 #[test]
 fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let chunks = std::rc::Rc::new(groove::chunks::MemoryChunkStorage::new());
+    block_on(async {
+        db.node.node.lock().await.set_chunk_storage(chunks.clone());
+    });
     let mut title = "a".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 257);
     title.push_str("🙂tail");
     let write = db
@@ -270,37 +274,44 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
     let prepared = db.prepare_query(&db.table("todos")).unwrap();
     let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
     let mut event = block_on(subscription.next_raw()).unwrap();
-    let SubscriptionEvent::Delta { added, .. } = &mut event else {
-        panic!("expected opening subscription delta");
+    let (descriptor, title_index, terminal_value) = {
+        let SubscriptionEvent::Delta { added, .. } = &mut event else {
+            panic!("expected opening subscription delta");
+        };
+        let (descriptor, record) = added[0].row.encoded_record();
+        let descriptor = descriptor.clone();
+        let mut values = descriptor.bind(record).to_values().unwrap();
+        let title_index = values
+            .iter()
+            .position(|value| {
+                matches!(value, Value::String(value) if value == &title)
+                    || matches!(value, Value::Nullable(Some(value)) if matches!(value.as_ref(), Value::String(value) if value == &title))
+            })
+            .expect("opening row contains the logical title");
+        values[title_index] = match &values[title_index] {
+            Value::Nullable(_) => Value::Nullable(Some(Box::new(Value::Large(edited_ref.clone())))),
+            _ => Value::Large(edited_ref.clone()),
+        };
+        added[0].row = CurrentRow::new(
+            "todos",
+            OwnedRecord::new(descriptor.create(&values).unwrap(), descriptor.clone()),
+        );
+        assert!(
+            matches!(
+                added[0]
+                    .row
+                    .cell(&doctest_support::schema().tables[0], "title"),
+                Some(Value::Large(_))
+            ),
+            "planted positive: the maintained event reaches the binding with a physical descriptor"
+        );
+        (
+            descriptor,
+            title_index,
+            added[0].row.encoded_record().1.to_vec(),
+        )
     };
-    let (descriptor, record) = added[0].row.encoded_record();
-    let descriptor = descriptor.clone();
-    let mut values = descriptor.bind(record).to_values().unwrap();
-    let title_index = values
-        .iter()
-        .position(|value| {
-            matches!(value, Value::String(value) if value == &title)
-                || matches!(value, Value::Nullable(Some(value)) if matches!(value.as_ref(), Value::String(value) if value == &title))
-        })
-        .expect("opening row contains the logical title");
-    values[title_index] = match &values[title_index] {
-        Value::Nullable(_) => Value::Nullable(Some(Box::new(Value::Large(edited_ref.clone())))),
-        _ => Value::Large(edited_ref.clone()),
-    };
-    added[0].row = CurrentRow::new(
-        "todos",
-        OwnedRecord::new(descriptor.create(&values).unwrap(), descriptor.clone()),
-    );
-    assert!(
-        matches!(
-            added[0]
-                .row
-                .cell(&doctest_support::schema().tables[0], "title"),
-            Some(Value::Large(_))
-        ),
-        "planted positive: the maintained event reaches the binding with a physical descriptor"
-    );
-    let terminal_value = added[0].row.encoded_record().1.to_vec();
+    let mut ordinary_event = event.clone();
     let SubscriptionEvent::Delta {
         terminal_operations,
         ..
@@ -317,13 +328,30 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
             value: terminal_value,
         },
     });
-    block_on(db.hydrate_subscription_event_for_binding(&mut event)).unwrap();
-    let SubscriptionEvent::Delta {
-        added,
-        terminal_operations,
-        ..
-    } = event
-    else {
+    // A locally absent chunk with no peer retry instruction is terminal. The
+    // event remains physically intact so a caller can safely abandon it; it is
+    // never silently retried forever.
+    block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .set_chunk_storage(std::rc::Rc::new(groove::chunks::MemoryChunkStorage::new()));
+        db.node
+            .node
+            .lock()
+            .await
+            .set_missing_chunk_resolver(std::rc::Rc::new(groove::chunks::UnavailableChunkResolver));
+    });
+    assert!(matches!(
+        block_on(db.hydrate_subscription_event_for_binding_outcome(&mut ordinary_event)),
+        Err(BindingHydrationError::Error(_))
+    ));
+    block_on(async {
+        db.node.node.lock().await.set_chunk_storage(chunks.clone());
+    });
+    block_on(db.hydrate_subscription_event_for_binding(&mut ordinary_event)).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = ordinary_event else {
         panic!("expected opening subscription delta");
     };
     assert_eq!(
@@ -333,6 +361,21 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
         Some(Value::String(title.clone())),
         "the subscription binding boundary must materialize the indirect text scalar"
     );
+    block_on(db.hydrate_subscription_event_for_binding(&mut event)).unwrap();
+    let SubscriptionEvent::Delta {
+        added: terminal_added,
+        terminal_operations,
+        ..
+    } = event
+    else {
+        panic!("expected terminal subscription delta");
+    };
+    assert!(matches!(
+        terminal_added[0]
+            .row
+            .cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::Large(_))
+    ));
     let groove::ivm::TerminalEdit::Update { value, .. } = &terminal_operations[0].edit else {
         unreachable!("planted terminal operation is an update");
     };
