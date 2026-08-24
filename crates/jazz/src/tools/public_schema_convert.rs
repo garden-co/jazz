@@ -3212,6 +3212,102 @@ mod tests {
     }
 
     #[test]
+    fn converts_runtime_comparable_policy_literal_categories() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("events")
+                    .column("occurred_at", ColumnType::Timestamp)
+                    .column("ratio", ColumnType::Double)
+                    .column("digest", ColumnType::Bytea)
+                    .column(
+                        "roles",
+                        ColumnType::Array {
+                            element: Box::new(ColumnType::Text),
+                        },
+                    )
+                    .policies(TablePolicies::new().with_select(PolicyExpr::And(vec![
+                        PolicyExpr::eq_literal("occurred_at", Value::Timestamp(1_767_323_045_000)),
+                        PolicyExpr::eq_literal("ratio", Value::Double(1.5)),
+                        PolicyExpr::eq_literal("digest", Value::Bytea(vec![1, 2, 3])),
+                        PolicyExpr::eq_literal(
+                            "roles",
+                            Value::Array(vec![
+                                Value::Text("owner".to_owned()),
+                                Value::Text("editor".to_owned()),
+                            ]),
+                        ),
+                    ]))),
+            )
+            .build();
+
+        let converted =
+            convert_public_schema(&schema).expect("runtime-comparable policy literals compile");
+        let events = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "events")
+            .unwrap();
+
+        assert_eq!(
+            events.read_policy.as_ref().unwrap().filters,
+            vec![
+                Predicate::Eq(
+                    Operand::Column("occurred_at".to_owned()),
+                    Operand::Literal(GrooveValue::U64(1_767_323_045_000)),
+                ),
+                Predicate::Eq(
+                    Operand::Column("ratio".to_owned()),
+                    Operand::Literal(GrooveValue::F64(1.5)),
+                ),
+                Predicate::Eq(
+                    Operand::Column("digest".to_owned()),
+                    Operand::Literal(GrooveValue::Bytes(vec![1, 2, 3])),
+                ),
+                Predicate::Eq(
+                    Operand::Column("roles".to_owned()),
+                    Operand::Literal(GrooveValue::Array(vec![
+                        GrooveValue::String("owner".to_owned()),
+                        GrooveValue::String("editor".to_owned()),
+                    ])),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_non_finite_policy_doubles_at_the_literal_path() {
+        for (literal, path_suffix) in [
+            (Value::Double(f64::NAN), ""),
+            (
+                Value::Array(vec![Value::Double(f64::INFINITY)]),
+                ".Array[0]",
+            ),
+        ] {
+            let schema = SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("events")
+                        .column("ratio", ColumnType::Double)
+                        .policies(
+                            TablePolicies::new()
+                                .with_select(PolicyExpr::eq_literal("ratio", literal)),
+                        ),
+                )
+                .build();
+
+            let error =
+                convert_public_schema(&schema).expect_err("non-finite double must not compile");
+            assert_eq!(
+                error.path,
+                format!("$.events.policies.select.using{path_suffix}")
+            );
+            assert_eq!(
+                error.message,
+                "core schema policy floating-point literals must be finite numbers"
+            );
+        }
+    }
+
+    #[test]
     fn converts_auth_mode_session_comparison_to_reserved_claim() {
         let schema = SchemaBuilder::new()
             .table(
