@@ -608,6 +608,13 @@ impl Transport {
         self.auxiliary_pump.outbound_is_ready()
     }
 
+    #[napi(js_name = "nextAuxiliaryRetryDelayMs")]
+    pub fn next_auxiliary_retry_delay_ms(&self) -> Option<f64> {
+        self.auxiliary_pump
+            .next_retry_delay()
+            .map(|delay| delay.as_millis() as f64)
+    }
+
     #[napi(js_name = "sendWireFrame")]
     pub fn send_wire_frame(&self, frame: Uint8Array) {
         self.queues.inbound.borrow_mut().push_back(frame.to_vec());

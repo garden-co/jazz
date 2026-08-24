@@ -3288,6 +3288,15 @@ impl WasmTransport {
         })
     }
 
+    /// One-shot retry deadline for a host-owned transport timer. The host must
+    /// call `tick()` when it fires; this avoids subscription-pull polling.
+    #[wasm_bindgen(js_name = nextAuxiliaryRetryDelayMs)]
+    pub fn next_auxiliary_retry_delay_ms(&self) -> Option<f64> {
+        self.auxiliary_pump
+            .next_retry_delay()
+            .map(|delay| delay.as_millis() as f64)
+    }
+
     #[wasm_bindgen(js_name = sendWireFrame)]
     pub fn send_wire_frame(&self, frame: Vec<u8>) {
         self.queues.inbound.borrow_mut().push_back(frame);
