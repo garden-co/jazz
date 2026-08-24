@@ -62,6 +62,8 @@
   "scripts": {
     "build": "bob build",
     "test:codegen": "bash scripts/test-codegen.sh",
+    "build:relay:android": "bash scripts/build-relay-artifacts.sh android",
+    "build:relay:ios": "bash scripts/build-relay-artifacts.sh ios",
     "test": "jest",
     "typecheck": "tsc",
     "lint": "eslint \"**/*.{js,ts,tsx}\"",

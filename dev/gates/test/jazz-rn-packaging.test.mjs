@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import test from "node:test";
 import { createRequire } from "node:module";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 
 const require = createRequire(import.meta.url);
@@ -25,6 +26,14 @@ test("jazz-rn publishes an Expo config plugin for a New Architecture development
 
 test("the canonical Expo scaffold really prebuilds both relay-only platforms", () => {
   const root = new URL("../../../", import.meta.url);
+  const expoBin = new URL(
+    "../../../examples/todo-client-localfirst-expo/node_modules/.bin/expo",
+    import.meta.url,
+  );
+  assert.ok(
+    existsSync(expoBin),
+    "Expo prebuild requires the example workspace dependencies. Run `pnpm install --frozen-lockfile` from the repository root, then rerun this gate.",
+  );
   for (const script of ["verify:expo:android", "verify:expo:ios"]) {
     execFileSync("pnpm", ["--filter", "todo-client-localfirst-expo", "run", script], {
       cwd: root,
@@ -144,4 +153,21 @@ test("jazz-rn reserves a thin binary relay TurboModule boundary for matching nat
   assert.match(codegenGate, /NativeJazzRelay/);
   assert.match(androidRelay, /getAbiVersion\(\): Double = 0\.0/);
   assert.match(androidRelay, /E_JAZZ_RELAY_UNAVAILABLE/);
+});
+
+test("relay artifact staging targets every Android ABI and iOS framework slice", async () => {
+  const script = await readFile(
+    new URL("../../../crates/jazz-rn/scripts/build-relay-artifacts.sh", import.meta.url),
+    "utf8",
+  );
+
+  assert.equal(packageJson.scripts["build:relay:android"], "bash scripts/build-relay-artifacts.sh android");
+  assert.equal(packageJson.scripts["build:relay:ios"], "bash scripts/build-relay-artifacts.sh ios");
+  assert.match(script, /\[arm64-v8a\]=aarch64-linux-android/);
+  assert.match(script, /\[armeabi-v7a\]=armv7-linux-androideabi/);
+  assert.match(script, /\[x86\]=i686-linux-android/);
+  assert.match(script, /\[x86_64\]=x86_64-linux-android/);
+  assert.match(script, /JazzNativeRelay\.xcframework/);
+  assert.match(script, /aarch64-apple-ios-sim x86_64-apple-ios/);
+  assert.match(script, /nativeRelayAbi/);
 });
