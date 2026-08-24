@@ -53,6 +53,15 @@ pub fn init() {
     console_error_panic_hook::set_once();
 }
 
+/// Protocol marker for this generated WASM artifact.
+///
+/// JS startup checks it after instantiation so mismatched glue/binary pairs
+/// fail before a runtime method is invoked.
+#[wasm_bindgen(js_name = nativeArtifactProtocolVersion)]
+pub fn native_artifact_protocol_version() -> u32 {
+    jazz::wire::WIRE_PROTOCOL_VERSION.into()
+}
+
 /// Generate a new UUID v7 (time-ordered).
 ///
 /// Useful when a caller wants the default generated row-id shape.

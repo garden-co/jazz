@@ -17,6 +17,7 @@ import {
 } from "./runtime-config.js";
 import { httpUrlToWs } from "./url.js";
 import { PostcardWriter } from "./native-runtime/native-codec.js";
+import { assertNativeArtifactProtocol } from "./native-artifact-compatibility.js";
 
 function encodeBranchColumnValue(value: Value): Uint8Array {
   const writer = new PostcardWriter();
@@ -1698,6 +1699,7 @@ async function initializeWasmModule(runtime?: RuntimeSourcesConfig): Promise<Was
 
   if (syncInitInput) {
     wasmModule.initSync(syncInitInput);
+    assertNativeArtifactProtocol(wasmModule, "WASM");
     return wasmModule;
   }
 
@@ -1729,5 +1731,6 @@ async function initializeWasmModule(runtime?: RuntimeSourcesConfig): Promise<Was
     }
   }
 
+  assertNativeArtifactProtocol(wasmModule, "WASM");
   return wasmModule;
 }

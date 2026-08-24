@@ -34,7 +34,7 @@ export declare class NapiDb {
   onMutationError(callback: (event: any) => void): void
   prepareQuery(query: Uint8Array): PreparedQuery
   all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
-  /** Read an open transaction using the identity bound at begin. */
+  /** Read through an open transaction using the identity bound at begin. */
   allInTransaction(query: PreparedQuery, tx: Tx, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
@@ -156,6 +156,15 @@ export declare class Write {
 }
 
 export declare function mintLocalFirstToken(seedB64: string, audience: string, ttlSeconds: number): string
+
+/**
+ * Protocol marker for the generated native artifact.
+ *
+ * The JavaScript loader checks this before exposing the binding so a stale
+ * `.node` file fails at import time rather than later as a missing runtime
+ * method (for example `db.tick`).
+ */
+export declare function nativeArtifactProtocolVersion(): number
 
 export interface SubscriptionClosedEvent {
   type: 'closed'
