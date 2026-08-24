@@ -234,7 +234,7 @@ describe("EpicDrop upload", () => {
     );
   });
 
-  it("streams a large upload through edge A and converges at a peer edge subscription", async () => {
+  it("streams a large upload and converges at another app subscription", async () => {
     const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
     const secret = generateAuthSecret();
     const writer = await openDb("edge-a", serverUrl, secret);
@@ -283,12 +283,12 @@ describe("EpicDrop upload", () => {
 
       await waitFor(
         async () => (observed.includes(uploaded.value.id) ? uploaded.value.id : undefined),
-        "the peer-edge subscription to receive the streamed file",
+        "the receiving app subscription to receive the streamed file",
       );
       const peerFile = await waitFor(async () => {
         const files = await reader.all(app.files, { tier: "edge" });
         return files.find((file) => file.id === uploaded.value.id);
-      }, "the peer edge to materialize the streamed bytes");
+      }, "the receiving app to materialize the streamed bytes");
       expect(peerFile.contents).toEqual(expected);
     } finally {
       unsubscribe();
