@@ -78,6 +78,10 @@ where
                 .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
             match message {
                 SyncMessage::ChunkUploadStart(start) => {
+                    // Expiry is an admission boundary, not merely a periodic
+                    // cleanup task. A new start may recreate the descriptor's
+                    // journal after eviction; an old one never resumes.
+                    self.evict_expired_staged_large_values().await?;
                     let progress = match self
                         .database
                         .begin_large_value_upload(start.value_ref.clone())
@@ -113,6 +117,24 @@ where
                     ]))
                 }
                 SyncMessage::ChunkUploadNodes(batch) => {
+                    self.evict_expired_staged_large_values().await?;
+                    let Some(upload_id) = self
+                        .database
+                        .pending_large_value_uploads()
+                        .await?
+                        .into_iter()
+                        .find(|upload| upload.descriptor.as_ref() == Some(&batch.value_ref))
+                        .map(|upload| upload.id)
+                    else {
+                        return Ok(PublicationOutcome::settled(vec![
+                            SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                                value_ref: batch.value_ref,
+                                status: crate::protocol::ChunkUploadStatus::Rejected,
+                            }),
+                        ]));
+                    };
+                    self.require_pending_large_value_upload_current(upload_id)
+                        .await?;
                     let accounting = batch.chunks.iter().try_fold(
                         groove::large_values::StagedLargeValueAccounting::default(),
                         |mut total, chunk| {
