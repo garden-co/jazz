@@ -404,6 +404,124 @@ describe("shared example topology harness", () => {
     expect(receipt.faults.every(({ status }) => status === "completed")).toBe(true);
   });
 
+  it("compensates route-style fault state after a later phase fails and leaves the next scenario clean", async () => {
+    let routeBlocked = false;
+    const calls: string[] = [];
+    let failure: unknown;
+    try {
+      await runTopologyScenario({
+        id: "harness.fixture.compensating-route",
+        topology: ["fixture"],
+        seed: 53,
+        phaseTimeoutMs: 50,
+        faultTimeoutMs: 50,
+        targets: {
+          route: {
+            failure: async ({ defer }) => {
+              routeBlocked = true;
+              defer("unblock fixture route", async () => {
+                calls.push("unblock");
+                routeBlocked = false;
+              });
+            },
+          },
+        },
+        replay: "compensating-route-fixture",
+        phases: [
+          {
+            name: "acquire test route",
+            run: async () => undefined,
+            faultsAfter: [{ kind: "failure", target: "route" }],
+          },
+          {
+            name: "planted later phase failure",
+            run: async () => {
+              expect(routeBlocked).toBe(true);
+              throw new Error("planted later phase failure");
+            },
+          },
+        ],
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(TopologyScenarioError);
+    const receipt = (failure as TopologyScenarioError).receipt;
+    expect(receipt.error).toContain("planted later phase failure");
+    expect(receipt.compensations).toMatchObject([
+      { name: "unblock fixture route", status: "completed" },
+    ]);
+    expect(calls).toEqual(["unblock"]);
+    expect(routeBlocked).toBe(false);
+
+    const next = await runTopologyScenario({
+      id: "harness.fixture.compensating-route-next",
+      topology: ["fixture"],
+      seed: 54,
+      phaseTimeoutMs: 50,
+      faultTimeoutMs: 50,
+      targets: {},
+      replay: "compensating-route-next-fixture",
+      phases: [
+        {
+          name: "prove route was released",
+          run: async () => expect(routeBlocked).toBe(false),
+        },
+      ],
+    });
+    expect(next.status).toBe("passed");
+  });
+
+  it("runs every compensation in reverse order while retaining the primary failure", async () => {
+    const primary = new Error("planted primary failure");
+    const calls: string[] = [];
+    let failure: unknown;
+    try {
+      await runTopologyScenario({
+        id: "harness.fixture.compensation-failure",
+        topology: ["fixture"],
+        seed: 55,
+        phaseTimeoutMs: 50,
+        faultTimeoutMs: 50,
+        targets: {},
+        replay: "compensation-failure-fixture",
+        phases: [
+          {
+            name: "register compensations",
+            run: async ({ defer }) => {
+              defer("first cleanup", async () => {
+                calls.push("first");
+              });
+              defer("failing cleanup", async () => {
+                calls.push("failing");
+                throw new Error("planted cleanup failure");
+              });
+            },
+          },
+          {
+            name: "fail after acquisition",
+            run: async () => {
+              throw primary;
+            },
+          },
+        ],
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(TopologyScenarioError);
+    expect((failure as Error).cause).toBe(primary);
+    const receipt = (failure as TopologyScenarioError).receipt;
+    expect(receipt.error).toBe(
+      "planted primary failure; compensation failing cleanup failed: planted cleanup failure",
+    );
+    expect(receipt.compensations).toMatchObject([
+      { name: "failing cleanup", status: "failed", error: "planted cleanup failure" },
+      { name: "first cleanup", status: "completed" },
+    ]);
+    expect(calls).toEqual(["failing", "first"]);
+  });
+
   it("bounds a stalled phase and retains its exact replay command", async () => {
     let postTimeoutEffect = false;
     let cleanedUp = false;
