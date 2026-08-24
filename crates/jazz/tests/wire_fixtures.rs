@@ -170,7 +170,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         Vec::<String>::new(),
         Vec::<String>::new(),
     );
-    let large_value = groove::large_values::prepare(
+    let large_value = groove::large_values::prepare_for_test(
         groove::large_values::LargeValueKind::Bytes,
         &vec![0x5a; groove::large_values::INLINE_VALUE_MAX_BYTES + 1],
     )
