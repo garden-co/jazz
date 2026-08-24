@@ -1638,17 +1638,27 @@ fn prepared_policy_union_joins_claimless_arm_to_binding_route() {
     )));
 }
 
-// `allowedTo.insert(release)` followed by tenant-correlated `exists` checks
-// lowers to consecutive inner joins in the authorization program. Those joins
-// prove a decision; they are not a public flat result whose occurrence key
-// needs synthetic join-row carriers.
+/// Keeps a public assignment occurrence address through an inherited-policy
+/// semi-join while Alice's allowed release and tenant-correlated checks are
+/// lowered as consecutive joins.
+///
+/// ```text
+/// alice ──insert assignment──► release + membership + organization checks
+///                                  │
+///                                  └──► public assignment result occurrence
+/// ```
+///
+/// The matching authorization subplan keeps the same join inputs internal:
+/// its policy proof must never expose public occurrence carriers.
 #[test]
 fn authorization_subplan_with_correlated_allowed_to_joins_lowers_without_occurrence_carriers() {
     let root = RowSetNodeId("assignment".to_owned());
     let release_input = RowSetNodeId("release-source".to_owned());
     let release_join = RowSetNodeId("release-allowed-to".to_owned());
     let membership_input = RowSetNodeId("membership-source".to_owned());
-    let policy_root = RowSetNodeId("membership-tenant-check".to_owned());
+    let membership_join = RowSetNodeId("membership-tenant-check".to_owned());
+    let organization_input = RowSetNodeId("organization-source".to_owned());
+    let policy_root = RowSetNodeId("organization-tenant-check".to_owned());
     let assignment = source("assignments", SourceRole::Root);
     let release = source(
         "releases",
@@ -1657,6 +1667,10 @@ fn authorization_subplan_with_correlated_allowed_to_joins_lowers_without_occurre
     let membership = source(
         "memberships",
         SourceRole::Alias("exists:membership-tenant".to_owned()),
+    );
+    let organization = source(
+        "organizations",
+        SourceRole::Alias("exists:organization-tenant".to_owned()),
     );
     let request = QueryProgramRequest {
         authorization_mode: QueryAuthorizationMode::TrustedServing,
@@ -1674,6 +1688,10 @@ fn authorization_subplan_with_correlated_allowed_to_joins_lowers_without_occurre
                 ),
                 (
                     membership.clone(),
+                    requested_current_source(DurabilityTier::Global),
+                ),
+                (
+                    organization.clone(),
                     requested_current_source(DurabilityTier::Global),
                 ),
             ]),
@@ -1742,16 +1760,43 @@ fn authorization_subplan_with_correlated_allowed_to_joins_lowers_without_occurre
                         },
                     ),
                     (
-                        policy_root,
+                        membership_join,
                         RowSetExpr::Join {
                             left: release_join,
                             right: RowSetNodeId("membership-source".to_owned()),
                             mode: JoinMode::Inner,
                             on: PredicateExpr::Compare {
-                                left: NormalizedValueRef::RowId(RowIdRef::Source(assignment)),
+                                left: NormalizedValueRef::RowId(RowIdRef::Source(
+                                    assignment.clone(),
+                                )),
                                 op: ComparisonOp::Eq,
                                 right: NormalizedValueRef::SourceField {
                                     source: membership,
+                                    field: "todo".to_owned(),
+                                },
+                            },
+                        },
+                    ),
+                    (
+                        organization_input,
+                        RowSetExpr::Source {
+                            source: organization.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        policy_root,
+                        RowSetExpr::Join {
+                            left: RowSetNodeId("membership-tenant-check".to_owned()),
+                            right: RowSetNodeId("organization-source".to_owned()),
+                            mode: JoinMode::Inner,
+                            on: PredicateExpr::Compare {
+                                left: NormalizedValueRef::RowId(RowIdRef::Source(
+                                    assignment.clone(),
+                                )),
+                                op: ComparisonOp::Eq,
+                                right: NormalizedValueRef::SourceField {
+                                    source: organization,
                                     field: "todo".to_owned(),
                                 },
                             },
@@ -1799,6 +1844,59 @@ fn authorization_subplan_with_correlated_allowed_to_joins_lowers_without_occurre
         panic!("result-membership terminal must retain its schema");
     };
     assert_eq!(schema.occurrence_id_fields, vec!["row_uuid"]);
+
+    // The source-read terminal uses an ordinary identity context, not the
+    // authorization-subplan context above. Its trailing inherited-policy
+    // semi-join must keep the first two public join carriers.
+    let mut public_input = program.request.input.clone();
+    let public_root = public_input.shape.root.clone();
+    let RowSetExpr::Join { mode, .. } = public_input
+        .shape
+        .nodes
+        .get_mut(&public_root)
+        .expect("public assignment root join")
+    else {
+        panic!("public assignment root must be a join");
+    };
+    *mode = JoinMode::Semi;
+    let public_request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
+        reads: program.request.reads.clone(),
+        policy: PolicyContext::Identity {
+            mode: PolicyEnforcementMode::Enforcing,
+            permission_subject: author(0x91),
+            claims: BTreeMap::new(),
+            attribution: None,
+        },
+        input: public_input,
+        output: row_set_output(BTreeSet::new()),
+    };
+    let public_program = lower_query_program(public_request, &mut FakeSourceResolver::default())
+        .expect("public correlated assignment read should lower");
+    let public_terminal = public_program
+        .lowered
+        .terminals
+        .iter()
+        .find(|terminal| matches!(terminal.output, OutputTerminalSchema::AppRows(_)))
+        .expect("public app-rows terminal");
+    let collector_inputs = BTreeSet::from([
+        "__collect_root___flat_join_source_0_row_uuid".to_owned(),
+        "__collect_root___flat_join_source_1_row_uuid".to_owned(),
+    ]);
+    assert!(
+        graph_any(&public_terminal.graph, &|graph| matches!(
+            graph,
+            GraphBuilder::Project { fields, .. }
+                if collector_inputs.is_subset(
+                    &fields
+                        .iter()
+                        .map(|field| field.output_name.clone())
+                        .collect()
+                )
+        )),
+        "the collector must receive every projected public occurrence carrier: {:#?}",
+        public_terminal.graph
+    );
 }
 
 #[test]
