@@ -228,6 +228,21 @@ test("assembled NAPI packages carry only matching manifests and reject stale or 
     /provenance\/\*\.manifest\.json/,
   );
 
+  const darwinManifest = join(
+    root,
+    "crates/jazz-napi/artifacts/jazz-napi.darwin-x64.manifest.json",
+  );
+  const crossTargetMismatch = JSON.parse(readFileSync(darwinManifest, "utf8"));
+  crossTargetMismatch.nativeArtifactFingerprint = "c".repeat(64);
+  writeFileSync(darwinManifest, JSON.stringify(crossTargetMismatch));
+  assert.throws(() => stageNapiManifests(root), /different ABI fingerprint or package inputs/);
+  crossTargetMismatch.nativeArtifactFingerprint = "a".repeat(64);
+  crossTargetMismatch.packageInputs = "d".repeat(64);
+  writeFileSync(darwinManifest, JSON.stringify(crossTargetMismatch));
+  assert.throws(() => stageNapiManifests(root), /different ABI fingerprint or package inputs/);
+  crossTargetMismatch.packageInputs = "b".repeat(64);
+  writeFileSync(darwinManifest, JSON.stringify(crossTargetMismatch));
+
   writeFileSync(node, "stale");
   assert.match(
     verifyPublishedNapiManifest(manifest, platforms["linux-x64-gnu"], node),
