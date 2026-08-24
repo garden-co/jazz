@@ -910,6 +910,180 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     // output-row policies into the subscription graph.
 }
 
+/// `allowedTo.insert(release)` composes the release INSERT policy with the
+/// assignment's tenant-correlated existence checks. Its decision-only plan
+/// must reach an authorization fate without treating policy joins as a public
+/// result occurrence.
+#[test]
+fn correlated_inherited_insert_policy_accepts_owner_and_denies_cross_tenant_membership() {
+    let owner = user(0xa1);
+    let outsider = user(0xb2);
+    let organization = row(0xc1);
+    let foreign_organization = row(0xc2);
+    let owner_membership = row(0xd1);
+    let foreign_membership = row(0xd2);
+    let artist = row(0xd3);
+    let release = row(0xe1);
+    let owner_assignment = row(0xf1);
+    let outsider_assignment = row(0xf2);
+
+    let same_outer_organization = || {
+        PublicPolicyExpr::eq_session(
+            "organization",
+            vec!["__jazz_outer_row".to_owned(), "organization".to_owned()],
+        )
+    };
+    let release_insert_policy = PublicPolicyExpr::And(vec![
+        public_outer_exists(
+            "memberships",
+            "organization",
+            "organization",
+            [
+                public_claim_eq("user", "sub"),
+                public_literal_eq("role", PublicValue::Text("admin".to_owned())),
+            ],
+        ),
+        public_outer_exists(
+            "artists",
+            "id",
+            "artist",
+            [same_outer_organization()],
+        ),
+    ]);
+    let assignment_insert_policy = PublicPolicyExpr::And(vec![
+        PublicPolicyExpr::Inherits {
+            operation: PublicOperation::Insert,
+            via_column: "release".to_owned(),
+            max_depth: None,
+        },
+        public_outer_exists("releases", "id", "release", [same_outer_organization()]),
+        public_outer_exists(
+            "memberships",
+            "id",
+            "membership",
+            [same_outer_organization()],
+        ),
+    ]);
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("organizations")
+                    .column("name", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("memberships")
+                    .fk_column("organization", "organizations")
+                    .column("user", PublicColumnType::Uuid)
+                    .column("role", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("releases")
+                    .fk_column("organization", "organizations")
+                    .fk_column("artist", "artists")
+                    .column("title", PublicColumnType::Text)
+                    .policies(PublicTablePolicies::new().with_insert(release_insert_policy)),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("artists")
+                    .fk_column("organization", "organizations")
+                    .column("name", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("release_assignments")
+                    .fk_column("organization", "organizations")
+                    .fk_column("release", "releases")
+                    .fk_column("membership", "memberships")
+                    .policies(PublicTablePolicies::new().with_insert(assignment_insert_policy)),
+            ),
+    );
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+
+    accept_global(
+        &mut core,
+        MergeableCommit::new("organizations", organization, 1).cells(BTreeMap::from([(
+            "name".to_owned(),
+            Value::String("owner organization".to_owned()),
+        )])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("organizations", foreign_organization, 2).cells(BTreeMap::from([(
+            "name".to_owned(),
+            Value::String("foreign organization".to_owned()),
+        )])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("memberships", owner_membership, 3).cells(BTreeMap::from([
+            ("organization".to_owned(), Value::Uuid(organization.0)),
+            ("user".to_owned(), Value::Uuid(owner.0)),
+            ("role".to_owned(), Value::String("admin".to_owned())),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("memberships", foreign_membership, 4).cells(BTreeMap::from([
+            ("organization".to_owned(), Value::Uuid(foreign_organization.0)),
+            ("user".to_owned(), Value::Uuid(outsider.0)),
+            ("role".to_owned(), Value::String("admin".to_owned())),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("artists", artist, 5).cells(BTreeMap::from([
+            ("organization".to_owned(), Value::Uuid(organization.0)),
+            ("name".to_owned(), Value::String("artist".to_owned())),
+        ])),
+    );
+    accept_global(
+        &mut core,
+        MergeableCommit::new("releases", release, 6).cells(BTreeMap::from([
+            ("organization".to_owned(), Value::Uuid(organization.0)),
+            ("artist".to_owned(), Value::Uuid(artist.0)),
+            ("title".to_owned(), Value::String("release".to_owned())),
+        ])),
+    );
+    core.set_session_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.0))]));
+
+    let accepted = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("release_assignments", owner_assignment, 7)
+                .made_by(owner)
+                .cells(BTreeMap::from([
+                    ("organization".to_owned(), Value::Uuid(organization.0)),
+                    ("release".to_owned(), Value::Uuid(release.0)),
+                    ("membership".to_owned(), Value::Uuid(owner_membership.0)),
+                ])),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit_settled(accepted).unwrap();
+    assert!(matches!(
+        core.transaction_state_settled(accepted),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+
+    let denied = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("release_assignments", outsider_assignment, 8)
+                .made_by(owner)
+                .cells(BTreeMap::from([
+                    ("organization".to_owned(), Value::Uuid(organization.0)),
+                    ("release".to_owned(), Value::Uuid(release.0)),
+                    ("membership".to_owned(), Value::Uuid(foreign_membership.0)),
+                ])),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit_settled(denied).unwrap();
+    assert!(matches!(
+        core.transaction_state_settled(denied),
+        Some((
+            Fate::Rejected(RejectionReason::AuthorizationDenied),
+            None,
+            DurabilityTier::Local
+        ))
+    ));
+}
+
 #[test]
 fn write_policy_branch_or_join_allows_either_literal_branch_or_membership_join() {
     let invited = user(0xa1);
