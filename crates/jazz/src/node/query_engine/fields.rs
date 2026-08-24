@@ -140,4 +140,15 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn non_scalar_claim_routes_use_distinct_hidden_field_names() {
+        let teams = ClaimPath(vec!["team_ids".to_owned()]);
+        let roles = ClaimPath(vec!["roles".to_owned()]);
+        let teams_route = claim_route_token_field(&teams);
+        let roles_route = claim_route_token_field(&roles);
+        assert_ne!(teams_route, roles_route);
+        assert!(teams_route.starts_with(CLAIM_ROUTE_TOKEN_PREFIX));
+        assert!(roles_route.starts_with(CLAIM_ROUTE_TOKEN_PREFIX));
+    }
 }
