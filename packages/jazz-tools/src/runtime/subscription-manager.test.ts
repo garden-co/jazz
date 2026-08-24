@@ -6,6 +6,8 @@ import { describe, it, expect } from "vitest";
 import { SubscriptionManager, applySubscriptionDelta } from "./subscription-manager.js";
 import type { SubscriptionDelta } from "./subscription-manager.js";
 import {
+  createRecord,
+  encodeNativeColumnValue,
   encodeNativeRowValues,
   logicalStorageColumns,
   storageColumnValueType,
@@ -1192,28 +1194,32 @@ describe("SubscriptionManager", () => {
     expect(result.all).toEqual([{ id, name: "layout", count: 9 }]);
   });
 
-  it("decodes UUID provenance through reordered public text columns", () => {
+  it("distinguishes packed provenance HLCs from ordinary timestamps in terminal roots", () => {
     const id = "00000000-0000-4000-8000-000000000001";
     const author = "00000000-0000-4000-8000-0000000000aa";
     const key = [10, ...uuidBytes(id)];
     const producerColumns: ColumnDescriptor[] = [
       { name: "$createdBy", column_type: { type: "Uuid" }, nullable: false },
       { name: "$createdAt", column_type: { type: "Timestamp" }, nullable: false },
+      { name: "publishedAt", column_type: { type: "Timestamp" }, nullable: true },
     ];
     const publicColumns: ColumnDescriptor[] = [
       { name: "$createdAt", column_type: { type: "Timestamp" }, nullable: false },
       { name: "$createdBy", column_type: { type: "Text" }, nullable: false },
+      { name: "publishedAt", column_type: { type: "Timestamp" }, nullable: false },
     ];
     const descriptorWriter = new PostcardWriter();
     writeDescriptor(descriptorWriter, [
       { name: "row_uuid", valueType: { tag: 10 } },
       { name: "$createdBy", valueType: { tag: 10 } },
       { name: "$createdAt", valueType: { tag: 3 } },
+      { name: "publishedAt", valueType: { tag: 14, inner: { tag: 3 } } },
     ]);
     const value = Uint8Array.from([
       ...uuidBytes(id),
       ...encodeNativeRowValues(producerColumns, [
         { type: "Uuid", value: author },
+        { type: "Timestamp", value: (42 << 16) | 17 },
         { type: "Timestamp", value: 42 },
       ]),
     ]);
@@ -1235,6 +1241,7 @@ describe("SubscriptionManager", () => {
             publicFields: [
               { name: "$createdBy", descriptorFieldName: "$createdBy", slot: 1 },
               { name: "$createdAt", descriptorFieldName: "$createdAt", slot: 2 },
+              { name: "publishedAt", descriptorFieldName: "publishedAt", slot: 3 },
             ],
             carrier: "CurrentRow",
           },
@@ -1255,7 +1262,87 @@ describe("SubscriptionManager", () => {
     expect(result.all?.[0]?.values).toEqual([
       { type: "Timestamp", value: 42_000 },
       { type: "Text", value: author },
+      { type: "Timestamp", value: 42 },
     ]);
+  });
+
+  it("decodes packed provenance HLCs in terminal child rows", () => {
+    const rootId = "00000000-0000-4000-8000-000000000001";
+    const childId = "00000000-0000-4000-8000-000000000002";
+    const rootKey = [10, ...uuidBytes(rootId)];
+    const childKey = [10, ...uuidBytes(childId)];
+    const physicalMs = 43;
+    const childColumns: ColumnDescriptor[] = [
+      { name: "$updatedAt", column_type: { type: "Timestamp" }, nullable: false },
+    ];
+    const rootColumns: ColumnDescriptor[] = [
+      { name: "title", column_type: { type: "Text" }, nullable: false },
+      {
+        name: "children",
+        column_type: { type: "Array", element: { type: "Row", columns: childColumns } },
+        nullable: false,
+      },
+    ];
+    const currentRootColumns = currentRowColumns(rootColumns);
+    const rootPayload = createRecord(
+      [
+        { name: "row_uuid", valueType: { tag: 10 } },
+        ...currentRootColumns.map((column) => ({
+          name: `user_${column.name}`,
+          valueType: storageColumnValueType(column),
+        })),
+      ],
+      [
+        uuidBytes(rootId),
+        encodeNativeColumnValue(currentRootColumns[0]!, { type: "Text", value: "root" }),
+        encodeNativeColumnValue(currentRootColumns[1]!, { type: "Array", value: [] }),
+      ],
+    );
+    const childPayload = Uint8Array.from([
+      ...uuidBytes(childId),
+      ...encodeNativeRowValues(childColumns, [
+        { type: "Timestamp", value: (physicalMs << 16) | 23 },
+      ]),
+    ]);
+
+    const result = new SubscriptionManager<{ childUpdatedAt: Date | null }>().handleDelta(
+      {
+        __jazzNativeRowDelta: true,
+        added: new Uint8Array(),
+        removed: new Uint8Array(),
+        updated: new Uint8Array(),
+        addedCount: 0,
+        removedCount: 0,
+        updatedCount: 0,
+        terminalOperations: [
+          {
+            root_key: rootKey,
+            rootDescriptor: currentRowTerminalDescriptor(rootColumns),
+            path: [],
+            edit: { Insert: { index: 0, key: rootKey, value: [...rootPayload] } },
+          },
+          {
+            root_key: rootKey,
+            path: [{ Collection: "children" }],
+            edit: { Insert: { index: 0, key: childKey, value: [...childPayload] } },
+          },
+        ],
+      },
+      (row) => {
+        const children = row.values[1];
+        const child = children?.type === "Array" ? children.value[0] : undefined;
+        const timestamp =
+          child?.type === "Row"
+            ? (child.value.values[0] as { type: "Timestamp"; value: number }).value
+            : undefined;
+        return {
+          childUpdatedAt: timestamp === undefined ? null : new Date(Math.trunc(timestamp / 1_000)),
+        };
+      },
+      rootColumns,
+    );
+
+    expect(result.all).toEqual([{ childUpdatedAt: new Date(physicalMs) }]);
   });
 
   it("decodes logical collector roots and rejects the wrong carrier kind", () => {
