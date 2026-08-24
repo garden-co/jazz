@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import test from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -63,10 +64,32 @@ test("prepared journal before the first rename retains the intact old package", 
   try {
     writePackage(pkg, "old");
     const stage = createWasmPackageStage(root, "fast"); writePackage(stage.path, "new");
-    writeFileSync(join(wasmRoot, ".pkg-transaction.json"), JSON.stringify({ schema: 1, state: "prepared", hadCurrent: true, stage: stage.outDir, backup: ".pkg-backup-never-created", hashes: { "jazz_wasm_bg.wasm": "not-new" } }));
+    const hashes = Object.fromEntries(wasmPackageFiles.map((file) => [file, requireHash(join(stage.path, file))]));
+    writeFileSync(join(wasmRoot, ".pkg-transaction.json"), JSON.stringify({ schema: 1, state: "prepared", hadCurrent: true, stage: stage.outDir, backup: ".pkg-backup-never-created", hashes }));
     recoverWasmPackageTransaction(wasmRoot);
     assert.deepEqual(markers(pkg), wasmPackageFiles.map((file) => `old:${file}`));
     assert.equal(existsSync(stage.path), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+function requireHash(path) { return createHash("sha256").update(readFileSync(path)).digest("hex"); }
+test("recovery refuses external stage or backup symlinks", () => {
+  const { root, wasmRoot, pkg } = fixture();
+  const external = join(root, "external");
+  try {
+    mkdirSync(external); writePackage(external, "external");
+    for (const [field, name] of [["stage", ".pkg-stage-external"], ["backup", ".pkg-backup-external"]]) {
+      writePackage(pkg, "old");
+      const stage = createWasmPackageStage(root, "fast"); writePackage(stage.path, "new");
+      const link = join(wasmRoot, name); symlinkSync(external, link);
+      const hashes = Object.fromEntries(wasmPackageFiles.map((file) => [file, requireHash(join(stage.path, file))]));
+      const journal = { schema: 1, state: "old-moved", hadCurrent: true, stage: stage.outDir, backup: ".pkg-backup-safe", hashes };
+      journal[field] = name;
+      writeFileSync(join(wasmRoot, ".pkg-transaction.json"), JSON.stringify(journal));
+      assert.throws(() => recoverWasmPackageTransaction(wasmRoot), /must be a real directory/);
+      assert.deepEqual(markers(external), wasmPackageFiles.map((file) => `external:${file}`));
+      rmSync(link, { force: true }); rmSync(join(wasmRoot, ".pkg-transaction.json"), { force: true }); rmSync(stage.path, { recursive: true, force: true });
+    }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
