@@ -971,6 +971,11 @@ impl Drop for Tx {
 pub struct NapiDb {
     inner: NapiDbInner,
     owns_runtime: bool,
+    /// This is derived once from the opaque open credential.  Attribution is
+    /// deliberately not a public capability of an otherwise ordinary local
+    /// runtime: only a backend-opened NAPI handle may select the core's
+    /// SYSTEM admission identity while stamping another author.
+    trusted_backend: bool,
 }
 
 /// Native bounded-memory sink used by the TypeScript async streaming-mutation
@@ -1089,6 +1094,16 @@ impl StreamingMutation {
 
 #[napi]
 impl NapiDb {
+    fn require_trusted_backend(&self) -> napi::Result<()> {
+        if self.trusted_backend {
+            Ok(())
+        } else {
+            Err(napi::Error::from_reason(
+                "backend attribution requires a backend-credential runtime",
+            ))
+        }
+    }
+
     #[napi(js_name = "beginStreamingMutationEncoded")]
     #[allow(clippy::too_many_arguments)] // Flat arguments are the generated NAPI ABI.
     pub fn begin_streaming_mutation_encoded(
@@ -1176,12 +1191,17 @@ impl NapiDb {
     pub fn open_memory(schema: Uint8Array, config: Uint8Array) -> napi::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
         let identity = core_open_identity(&config, None)?;
+        let trusted_backend = config
+            .backend_credential
+            .as_deref()
+            .is_some_and(|credential| !credential.is_empty());
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let db = open_core_db(schema, CoreMemoryStorage::new(&refs), config, identity)?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::new(db))))),
             owns_runtime: true,
+            trusted_backend,
         })
     }
 
@@ -1210,6 +1230,7 @@ impl NapiDb {
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::new(db))))),
             owns_runtime: true,
+            trusted_backend: false,
         })
     }
 
@@ -1221,6 +1242,10 @@ impl NapiDb {
     ) -> napi::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
         let identity = core_open_identity(&config, None)?;
+        let trusted_backend = config
+            .backend_credential
+            .as_deref()
+            .is_some_and(|credential| !credential.is_empty());
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = CoreRocksDbStorage::open(data_path, &refs)
@@ -1231,6 +1256,7 @@ impl NapiDb {
                 db,
             ))))),
             owns_runtime: true,
+            trusted_backend,
         })
     }
 
@@ -1260,6 +1286,7 @@ impl NapiDb {
                 db,
             ))))),
             owns_runtime: true,
+            trusted_backend: false,
         })
     }
 
@@ -1284,6 +1311,7 @@ impl NapiDb {
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(view))),
             owns_runtime: false,
+            trusted_backend: self.trusted_backend,
         })
     }
 
@@ -1978,6 +2006,39 @@ impl NapiDb {
         }
     }
 
+    /// Admit as the backend runtime while storing `author` as provenance.
+    /// The credential check is intentionally in NAPI, not merely in the TS
+    /// adapter, so direct consumers cannot forge another author's receipts.
+    #[napi(js_name = "insertWithIdEncodedAttributed")]
+    pub fn insert_with_id_encoded_attributed(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+        author: Uint8Array,
+    ) -> napi::Result<Write> {
+        self.require_trusted_backend()?;
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let cells = decode_core_cells(&cells)?;
+        let author = core_author_id_from_bytes(&author)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                core_block_on(db.insert_with_id_attributed(author, &table, row_id, cells))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                core_block_on(db.insert_with_id_attributed(author, &table, row_id, cells))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
     #[napi(js_name = "insertWithIdEncodedInBranch")]
     pub fn insert_with_id_encoded_in_branch(
         &self,
@@ -2116,6 +2177,36 @@ impl NapiDb {
                     db.update(&table, row_id, patch)
                 )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "updateEncodedAttributed")]
+    pub fn update_encoded_attributed(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        patch: Uint8Array,
+        author: Uint8Array,
+    ) -> napi::Result<Write> {
+        self.require_trusted_backend()?;
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let patch = decode_core_cells(&patch)?;
+        let author = core_author_id_from_bytes(&author)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                core_block_on(db.update_attributed(author, &table, row_id, patch))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                core_block_on(db.update_attributed(author, &table, row_id, patch))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
     }
@@ -2367,6 +2458,34 @@ impl NapiDb {
                     db.delete(&table, row_id)
                 )
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+        }
+    }
+
+    #[napi(js_name = "deleteAttributed")]
+    pub fn delete_attributed(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        author: Uint8Array,
+    ) -> napi::Result<Write> {
+        self.require_trusted_backend()?;
+        let row_id = core_row_uuid_from_bytes(&row_id)?;
+        let author = core_author_id_from_bytes(&author)?;
+        let db = self.inner.borrow();
+        let db = db
+            .as_ref()
+            .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => core_write_memory(
+                Rc::clone(db),
+                core_block_on(db.delete_attributed(author, &table, row_id))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+            ),
+            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
+                Rc::clone(db),
+                core_block_on(db.delete_attributed(author, &table, row_id))
+                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
         }
     }
