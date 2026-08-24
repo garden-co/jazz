@@ -2449,7 +2449,22 @@ fn convert_policy_literal(
         Value::Text(value) => Ok(GrooveValue::String(value.clone())),
         Value::Integer(value) => Ok(GrooveValue::I32(*value)),
         Value::BigInt(value) => Ok(GrooveValue::I64(*value)),
+        Value::Double(value) if value.is_finite() => Ok(GrooveValue::F64(*value)),
+        Value::Double(_) => Err(err(
+            format!("$.{}.{}", table.as_str(), path),
+            "core schema policy floating-point literals must be finite numbers",
+        )),
+        Value::Timestamp(value) => Ok(GrooveValue::U64(*value)),
         Value::Uuid(value) => Ok(GrooveValue::Uuid(*value.uuid())),
+        Value::Bytea(value) => Ok(GrooveValue::Bytes(value.clone())),
+        Value::Array(values) => values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                convert_policy_literal(table, &format!("{path}.Array[{index}]"), value)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(GrooveValue::Array),
         other => Err(err(
             format!("$.{}.{}", table.as_str(), path),
             format!("core schema policies do not support {other:?} literals yet"),
