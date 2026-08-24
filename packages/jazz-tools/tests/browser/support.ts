@@ -210,9 +210,15 @@ export class TestCleanup {
     }
     for (const db of this.dbs.splice(0).reverse()) {
       try {
-        await db.shutdown();
-      } catch {
-        // Best effort
+        await withTimeout(
+          db.shutdown(),
+          5_000,
+          "Browser test cleanup: Db shutdown did not resolve",
+        );
+      } catch (error) {
+        // Teardown must not mask the test failure, but it must also never hold
+        // the browser worker/process open indefinitely after one.
+        console.error("[jazz-browser-topology] cleanup failed", error);
       }
     }
   }

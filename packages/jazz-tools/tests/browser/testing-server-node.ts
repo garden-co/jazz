@@ -15,6 +15,7 @@ interface StartedJazzServer {
 }
 
 const DEFAULT_JAZZ_SERVER_KEY = "__default__";
+const SERVER_LIFECYCLE_TIMEOUT_MS = 10_000;
 const jazzServerPromises = new Map<string, Promise<StartedJazzServer>>();
 interface JazzServerRouteBlock {
   blocked: boolean;
@@ -32,17 +33,29 @@ async function startJazzServer(
   appId?: string,
   schema?: ArrayLike<number>,
 ): Promise<StartedJazzServer> {
-  const jwtIssuer = await startTestJwtIssuer();
+  const jwtIssuer = await withServerLifecycleTimeout(startTestJwtIssuer(), "start test JWT issuer");
   const adminSecret = "jazz-browser-test-admin";
   const backendSecret = "jazz-browser-test-backend";
-  const server = await startLocalJazzServer({
-    appId: appId ?? "00000000-0000-0000-0000-000000000001",
-    jwksUrl: jwtIssuer.jwksUrl,
-    inMemory: true,
-    adminSecret,
-    backendSecret,
-    schema: schema ? Uint8Array.from(schema) : undefined,
-  });
+  let server: LocalJazzServerHandle;
+  try {
+    server = await withServerLifecycleTimeout(
+      startLocalJazzServer({
+        appId: appId ?? "00000000-0000-0000-0000-000000000001",
+        jwksUrl: jwtIssuer.jwksUrl,
+        inMemory: true,
+        adminSecret,
+        backendSecret,
+        schema: schema ? Uint8Array.from(schema) : undefined,
+      }),
+      "start local Jazz server",
+    );
+  } catch (error) {
+    await withServerLifecycleTimeout(
+      jwtIssuer.stop(),
+      "stop test JWT issuer after failed server start",
+    ).catch(() => undefined);
+    throw error;
+  }
   return {
     server,
     jwtIssuer,
@@ -118,13 +131,31 @@ export async function stopJazzServer(): Promise<void> {
   for (const runningServer of runningServers) {
     try {
       const { server, jwtIssuer } = await runningServer;
-      await server.stop();
-      await jwtIssuer.stop();
+      await withServerLifecycleTimeout(server.stop(), "stop local Jazz server");
+      await withServerLifecycleTimeout(jwtIssuer.stop(), "stop test JWT issuer");
     } catch {
       // Swallow all errors: either startup never produced a server (nothing to stop),
       // or stop() itself failed (nothing recoverable during teardown).
     }
   }
+}
+
+function withServerLifecycleTimeout<T>(operation: Promise<T>, label: string): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    operation,
+    new Promise<T>((_, reject) => {
+      timeout = setTimeout(() => {
+        reject(
+          new Error(
+            `Jazz browser test server lifecycle timed out after ${SERVER_LIFECYCLE_TIMEOUT_MS}ms: ${label}`,
+          ),
+        );
+      }, SERVER_LIFECYCLE_TIMEOUT_MS);
+    }),
+  ]).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
 }
 
 function jazzServerUrlPattern(serverUrl: string): string {

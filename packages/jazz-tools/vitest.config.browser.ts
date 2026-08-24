@@ -63,6 +63,13 @@ export default defineConfig({
     alias: {
       // Needed because jazz-tools browser tests import from source (../../src/),
       // bypassing node_modules resolution. Consumers don't need this.
+      //
+      // Example-app browser scenarios import the SDK through their normal
+      // `jazz-tools` dependency. Resolve that consumer import to this same
+      // source graph too: mixing it with dist/ makes the browser load two
+      // independent runtime/WASM module graphs before a test callback can
+      // report a useful setup phase.
+      "jazz-tools": resolve(__dirname, "src/index.ts"),
       // Point Vite at the workspace package, rather than its generated
       // directory. The package manifest selects pkg/jazz_wasm.js; wasm-pack's
       // web target intentionally does not emit a second manifest in pkg/.
@@ -91,6 +98,9 @@ export default defineConfig({
       ],
       commands: {
         jazzServerInfo: async (_context, appId, schema) => jazzServerInfo(appId, schema),
+        jazzBrowserTopologyLog: async (_context, status, label, elapsedMs) => {
+          console.info(`[jazz-browser-topology] ${status} ${label} (${elapsedMs}ms)`);
+        },
         jazzServerBlockNetwork: async ({ context }, serverUrl) =>
           blockJazzServerNetwork(context, serverUrl),
         jazzServerUnblockNetwork: async ({ context }, serverUrl) =>
