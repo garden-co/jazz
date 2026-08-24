@@ -819,6 +819,102 @@ describe("permissions DSL", () => {
     expect(JSON.stringify(rel.input.right)).toContain('"personBId"');
   });
 
+  it("rejects filtered join RHS shapes the relation lowering cannot alias safely", () => {
+    expect(() =>
+      definePermissions(socialApp, ({ policy }) => [
+        policy.profiles.allowRead.where(
+          policy.exists(
+            policy.people
+              .where({})
+              .join(policy.friendships.where({}), { left: "id", right: "personAId" }),
+          ),
+        ),
+      ]),
+    ).toThrow(/must include where\(\.\.\.\).*pass policy\.<table> directly/i);
+
+    expect(() =>
+      definePermissions(socialApp, ({ policy, session }) => [
+        policy.profiles.allowRead.where(
+          policy.exists(
+            policy.people.where({}).join(policy.people.where({ profileId: session.personId }), {
+              left: "id",
+              right: "id",
+            }),
+          ),
+        ),
+      ]),
+    ).toThrow(/same-table RHS without an alias/i);
+
+    expect(() =>
+      definePermissions(socialApp, ({ policy, session }) => [
+        policy.profiles.allowRead.where(
+          policy.exists(
+            policy.people
+              .where({})
+              .join(
+                policy.friendships
+                  .where({ personBId: session.personId })
+                  .join(policy.people, { left: "personAId", right: "id" }),
+                { left: "id", right: "personAId" },
+              ),
+          ),
+        ),
+      ]),
+    ).toThrow(/nested join\(\.\.\.\) and hopTo\(\.\.\.\) RHS are unsupported/i);
+
+    expect(() =>
+      definePermissions(socialApp, ({ policy, session }) => [
+        policy.profiles.allowRead.where(
+          policy.exists(
+            policy.people
+              .where({})
+              .join(
+                policy.friendships
+                  .where({ personBId: session.personId })
+                  .select({ friend: "personAId" }),
+                { left: "id", right: "personAId" },
+              ),
+          ),
+        ),
+      ]),
+    ).toThrow(/select\(\.\.\.\) RHS are unsupported/i);
+
+    expect(() =>
+      definePermissions(socialApp, ({ policy, session }) => [
+        policy.profiles.allowRead.where(
+          policy.exists(
+            policy.people
+              .where({})
+              .join(
+                policy.union([
+                  policy.friendships.where({ personAId: session.personId }),
+                  policy.friendships.where({ personBId: session.personId }),
+                ]),
+                { left: "id", right: "personAId" },
+              ),
+          ),
+        ),
+      ]),
+    ).toThrow(/union\(\.\.\.\) and gather\(\.\.\.\) RHS are unsupported/i);
+
+    expect(() =>
+      definePermissions(app, ({ policy }) => {
+        const reachableTeams = policy.teams.gather({
+          start: { kind: "individual" },
+          step: ({ current }) =>
+            policy.team_team_edges.where({ child_team: current }).hopTo("parent_team"),
+        });
+        return [
+          policy.todos.allowRead.where(
+            policy.exists(
+              policy.projects.where({}).join(reachableTeams, { left: "id", right: "id" }),
+            ),
+          ),
+        ];
+      }),
+    ).toThrow(/union\(\.\.\.\) and gather\(\.\.\.\) RHS are unsupported/i);
+  });
+
   it("supports one-clause friend-profile chain style using hopTo(...).where(...)", () => {
     const compiled = definePermissions(socialApp, ({ policy, anyOf, session }) => [
       policy.profiles.allowRead.where((profile) =>
