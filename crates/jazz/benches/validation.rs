@@ -152,7 +152,7 @@ impl ValidationBench {
             let client_idx = self.rng.usize(self.config.clients);
             let tx_id = OpenTransactionId::new();
             self.clients[client_idx]
-                .open_exclusive(tx_id)
+                .open_exclusive_for_test(tx_id, author(client_idx))
                 .expect("open exclusive");
 
             let read_count = 1 + self.rng.usize(3);
@@ -566,6 +566,7 @@ fn core_ingest(core: &mut NodeState<RocksDbStorage>, unit: &SyncMessage) -> Sync
     let SyncMessage::CommitUnit { tx, versions } = unit else {
         panic!("expected commit unit");
     };
+    install_uuid_user_claim(core, tx.permission_subject.unwrap_or(tx.made_by));
     let outcome = core
         .ingest_commit_unit(tx.clone(), versions.clone(), u64::MAX - SKEW_TOLERANCE_MS)
         .expect("core ingest");
@@ -589,6 +590,19 @@ fn accepted_global_time(fate: &SyncMessage) -> GlobalTime {
         panic!("expected accepted fate");
     };
     *global_time
+}
+
+fn install_uuid_user_claim(node: &mut NodeState<RocksDbStorage>, identity: AuthorSubject) {
+    if identity != AuthorSubject::SYSTEM {
+        let raw = identity.test_uuid().to_string();
+        node.admit_test_session_claims(
+            identity,
+            BTreeMap::from([
+                ("sub".to_owned(), Value::String(raw.clone())),
+                ("user_id".to_owned(), Value::String(raw)),
+            ]),
+        );
+    }
 }
 
 fn unit_versions(unit: &SyncMessage) -> Vec<VersionRecord> {

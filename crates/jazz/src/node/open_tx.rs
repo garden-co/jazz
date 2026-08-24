@@ -17,6 +17,16 @@ where
             .await
     }
 
+    #[cfg(feature = "testing")]
+    /// Open an exclusive transaction for a synthetic test identity.
+    pub async fn open_exclusive_for_test(
+        &mut self,
+        id: OpenTransactionId,
+        made_by: AuthorSubject,
+    ) -> Result<(), Error> {
+        self.open_exclusive_for_identity(id, made_by).await
+    }
+
     pub(crate) async fn open_exclusive_for_identity(
         &mut self,
         id: OpenTransactionId,
