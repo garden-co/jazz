@@ -192,7 +192,7 @@ fn seed_missing_required_include_fixture(core: &mut NodeState<RocksDbStorage>) {
                 ("target".to_owned(), Value::Uuid(row(0xc2).0)),
             ])),
             MergeableCommit::new("targets", row(0xc2), 10)
-                .cells(owner_cells(AuthorSubject::SYSTEM, "existing target")),
+                .cells(owner_cells(user(0xc2), "existing target")),
         ])
         .unwrap();
     core.accept_global_for_test(root_tx).unwrap();
@@ -208,7 +208,7 @@ fn seed_null_required_include_fixture(core: &mut NodeState<RocksDbStorage>) {
                 ("target".to_owned(), Value::Uuid(row(0xc2).0)),
             ])),
             MergeableCommit::new("targets", row(0xc2), 10)
-                .cells(owner_cells(AuthorSubject::SYSTEM, "existing target")),
+                .cells(owner_cells(user(0xc2), "existing target")),
         ])
         .unwrap();
     core.accept_global_for_test(root_tx).unwrap();
