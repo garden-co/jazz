@@ -72,7 +72,7 @@ impl LargeValueStager {
             .map_err(crate::ivm::runtime::IvmRuntimeError::from)
             .map_err(Error::from)?;
         let result = async {
-            self.stage_chunk_batch(stage.id(), stage.value_ref().kind, chunks)
+            self.stage_chunk_batch(stage.id(), stage.value_ref(), chunks)
                 .await?;
             self.finalize_with_id(stage.id(), stage.value_ref().clone())
                 .await
@@ -275,11 +275,11 @@ impl LargeValueStager {
     async fn stage_chunk_batch(
         &self,
         upload_id: crate::large_values::StagedLargeValueId,
-        kind: crate::large_values::LargeValueKind,
+        value_ref: &crate::large_values::LargeValueRef,
         chunks: Vec<crate::large_values::StagedChunk>,
     ) -> Result<(), Error> {
         let _lifecycle = self.lifecycle.lock().await;
-        crate::large_values::validate_staged_chunk_batch(kind, &chunks)
+        crate::large_values::validate_staged_chunk_batch(value_ref.kind, &chunks)
             .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
         let key = pending_large_value_upload_key(upload_id);
         let mut upload = match self
@@ -287,13 +287,26 @@ impl LargeValueStager {
             .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
             .await?
         {
-            Some(encoded) => postcard::from_bytes(&encoded).map_err(|error| {
-                Error::InvalidLargeValueMetadata(format!(
-                    "cannot decode pending large-value upload: {error}"
-                ))
-            })?,
+            Some(encoded) => {
+                let upload: crate::large_values::PendingLargeValueUpload =
+                    postcard::from_bytes(&encoded).map_err(|error| {
+                        Error::InvalidLargeValueMetadata(format!(
+                            "cannot decode pending large-value upload: {error}"
+                        ))
+                    })?;
+                if upload.descriptor.as_ref() != Some(value_ref)
+                    || upload.receipt_id != Some(upload_id)
+                {
+                    return Err(Error::InvalidLargeValueMetadata(
+                        "resident upload id is bound to a different descriptor".to_owned(),
+                    ));
+                }
+                upload
+            }
             None => crate::large_values::PendingLargeValueUpload {
                 id: upload_id,
+                descriptor: Some(value_ref.clone()),
+                receipt_id: Some(upload_id),
                 accounting: crate::large_values::StagedLargeValueAccounting::default(),
                 created_at_ms: large_value_now_ms(),
                 chunks: Vec::new(),
@@ -413,6 +426,30 @@ impl LargeValueStager {
                 "cannot decode pending large-value upload: {error}"
             ))
         })?;
+        if upload.descriptor.as_ref() != Some(&value_ref) || upload.receipt_id != Some(id) {
+            return Err(Error::InvalidLargeValueMetadata(
+                "resident finalization is not bound to its exact descriptor".to_owned(),
+            ));
+        }
+        let uploaded_chunks = upload.chunks.iter().cloned().collect();
+        let reader = crate::chunks::LocalChunkReader::new(self.chunk_storage.clone());
+        crate::large_values::validate_finalized_upload(
+            &value_ref,
+            reader.clone(),
+            &uploaded_chunks,
+            true,
+        )
+        .await
+        .map_err(|error| match error {
+            crate::large_values::ReachabilityError::LargeValue(error) => {
+                crate::ivm::runtime::IvmRuntimeError::from(error)
+            }
+            crate::large_values::ReachabilityError::Chunk(error) => {
+                crate::ivm::runtime::IvmRuntimeError::from(error)
+            }
+        })?;
+        self.validate_completed_large_value(&value_ref, reader)
+            .await?;
         let staged = crate::large_values::StagedLargeValue {
             id,
             value_ref: value_ref.clone(),
@@ -538,6 +575,60 @@ impl LargeValueStager {
         self.storage.write_many(operations).await?;
         Ok(())
     }
+
+    /// Revalidate the final logical value through bounded windows after its
+    /// resident nodes have reached durable chunk storage. This is the same
+    /// admission check performed for remote/streaming finalization.
+    async fn validate_completed_large_value(
+        &self,
+        value: &crate::large_values::LargeValueRef,
+        reader: crate::chunks::LocalChunkReader,
+    ) -> Result<(), Error> {
+        let mut validator = crate::large_values::LogicalValueValidator::new(value)
+            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+        let mut offset = 0_u64;
+        while offset < value.byte_length {
+            let end = offset
+                .saturating_add(crate::large_values::LEAF_MIN_BYTES as u64)
+                .min(value.byte_length);
+            let mut inputs = crate::ivm::runtime::evaluation_session::EvaluationInputs::default();
+            let bytes = loop {
+                match crate::large_values::byte_range_attempt(value, offset..end, &mut inputs) {
+                    Ok(bytes) => break bytes,
+                    Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked) => {
+                        let requests = inputs.take_missing_chunks();
+                        if requests.is_empty() {
+                            return Err(
+                                crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked.into()
+                            );
+                        }
+                        for request in requests {
+                            let bytes = reader
+                                .get(
+                                    request.locator.clone(),
+                                    crate::large_values::ContentHash(request.object_hash),
+                                )
+                                .await
+                                .map_err(crate::chunks::ChunkError::from)
+                                .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+                            inputs.install_chunk(request, bytes);
+                        }
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            };
+            validator
+                .push(&bytes)
+                .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+            offset = end;
+        }
+        validator
+            .finish(value)
+            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+        Ok(())
+    }
+}
+
 impl Database {
     pub(crate) fn large_value_stager(&self) -> LargeValueStager {
         LargeValueStager {

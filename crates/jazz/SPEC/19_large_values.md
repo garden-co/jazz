@@ -168,7 +168,7 @@ pipeline afterwards. The pipeline is strictly ordered:
 
 ```text
 resident row + resident chunks (local lane only)
-  -> durable timestamped upload intent
+  -> durable timestamped upload intent bound to the exact descriptor/receipt
   -> immutable blob/node installation
   -> durable staged receipt
   -> one metadata write: consume receipt + install root references + row
