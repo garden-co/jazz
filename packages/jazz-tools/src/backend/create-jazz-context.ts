@@ -125,12 +125,10 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
             persistentPath: this.config.driver.dataPath,
             readAuthorizationHost: "trusted-serving",
             trustedBackendHost: true,
-            backendCredential: this.config.backendSecret,
           }
         : {
             readAuthorizationHost: "trusted-serving",
             trustedBackendHost: true,
-            backendCredential: this.config.backendSecret,
           },
     );
 
@@ -224,6 +222,10 @@ function deterministicBytes(seed: string): Uint8Array {
 function assertValidBackendConfig(config: BackendContextConfig): void {
   if (config.driver.type === "memory" && !config.serverUrl) {
     throw new Error("driver.type='memory' requires serverUrl.");
+  }
+
+  if (config.backendSecret !== undefined && config.backendSecret.trim() === "") {
+    throw new Error("backendSecret must be non-empty when provided.");
   }
 
   if (config.jwksUrl !== undefined && config.jwtPublicKey !== undefined) {
