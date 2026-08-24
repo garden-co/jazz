@@ -1034,7 +1034,31 @@ mod tests {
     use crate::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
     use crate::wire::{WireEnvelope, encode_frame, encode_sync_message};
     use futures::FutureExt;
+    use std::collections::VecDeque;
     use std::time::Duration;
+
+    /// A host-facing wire queue whose canonical input can be withheld until
+    /// after the shell has consumed an earlier, empty activity tick.
+    #[derive(Default)]
+    struct QueuedWireTransport {
+        inbound: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    }
+
+    impl QueuedWireTransport {
+        fn push_inbound(&self, frame: Vec<u8>) {
+            self.inbound.lock().unwrap().push_back(frame);
+        }
+    }
+
+    impl WireTransport for QueuedWireTransport {
+        fn send_frame(&mut self, _frame: Vec<u8>) -> Result<(), crate::wire::TransportError> {
+            Ok(())
+        }
+
+        fn try_recv_frame(&mut self) -> Option<Vec<u8>> {
+            self.inbound.lock().unwrap().pop_front()
+        }
+    }
 
     fn encode_message(message: SyncMessage) -> Vec<u8> {
         let payload = encode_sync_message(&message).unwrap();
@@ -1098,6 +1122,80 @@ mod tests {
             receiver.next().now_or_never().flatten(),
             Some(ServerShellCommand::RunAsync(_))
         ));
+    }
+
+    #[test]
+    fn native_wire_input_rearms_after_an_earlier_empty_activity_tick() {
+        let schema = JazzSchema::new(
+            &SchemaBuilder::new()
+                .table(TableSchemaBuilder::new("todos").column("title", ColumnType::Text))
+                .build(),
+        )
+        .unwrap();
+        let mut shell = InMemoryServerShell::start(InMemoryServerShellConfig::new(
+            schema,
+            DbIdentity {
+                node: NodeUuid::from_bytes([0x73; 16]),
+                author: AuthorId::SYSTEM,
+            },
+        ))
+        .unwrap();
+        let (jobs, mut pending_ticks) = mpsc::unbounded();
+        let (activity_tx, _) = watch::channel(0_u64);
+        let scheduler = ServerShellTickScheduler {
+            jobs,
+            activity_tx,
+            io_wakers: Arc::new(Mutex::new(Vec::new())),
+            state: Arc::new(ServerShellTickState::default()),
+        };
+        shell.set_tick_scheduler(Some(Rc::new(scheduler.clone())));
+
+        let io = shell.connect_upstream_wire_io(
+            crate::wire::WIRE_PROTOCOL_VERSION,
+            crate::wire::FEATURE_NONE,
+            None,
+        );
+
+        // Connecting the upstream may have queued setup work. Service all of
+        // it first: the only outstanding turn below is the host activity tick
+        // whose queue we deliberately make empty.
+        while let Some(ServerShellCommand::RunAsync(setup_tick)) =
+            pending_ticks.next().now_or_never().flatten()
+        {
+            futures::executor::block_on(setup_tick(&mut shell));
+        }
+
+        // A host activity notification can run before the local wire pump has
+        // translated bytes into canonical input. Consume that tick while the
+        // upstream queue is still empty.
+        scheduler.schedule_tick(TickUrgency::Immediate);
+        let Some(ServerShellCommand::RunAsync(empty_tick)) =
+            pending_ticks.next().now_or_never().flatten()
+        else {
+            panic!("the pre-stage activity wake queues one shell tick");
+        };
+        futures::executor::block_on(empty_tick(&mut shell));
+
+        let wire = QueuedWireTransport::default();
+        wire.push_inbound(encode_message(SyncMessage::SessionClaims {
+            identity: AuthorId::from_bytes([0x74; 16]),
+            claims: BTreeMap::new(),
+        }));
+        let (_wake_tx, wake_rx) = mpsc::unbounded();
+        let mut executor = futures::executor::LocalPool::new();
+        executor
+            .spawner()
+            .spawn_local(drive_upstream_wire(Box::new(wire), io, wake_rx, scheduler))
+            .unwrap();
+        executor.run_until_stalled();
+
+        assert!(
+            matches!(
+                pending_ticks.next().now_or_never().flatten(),
+                Some(ServerShellCommand::RunAsync(_))
+            ),
+            "canonical input staged after an empty activity tick must queue a post-stage shell tick"
+        );
     }
 
     #[tokio::test]
