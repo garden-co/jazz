@@ -124,9 +124,22 @@ test.describe("inspector overlay (embedded, shared runtime peer end-to-end)", ()
     await expect(inspector.getByRole("link", { name: "View todos data" })).toBeVisible({
       timeout: 30_000,
     });
-    await expect(inspector.getByLabel("Runtime context")).toBeVisible({ timeout: 10_000 });
-    await expect(inspector.getByLabel("Runtime context").locator("option")).toHaveCount(2);
-    await inspector.getByLabel("Runtime context").selectOption({ index: 1 });
+    const runtimeSelect = inspector.getByLabel("Runtime context");
+    await expect(runtimeSelect).toBeVisible({ timeout: 10_000 });
+    const runtimeOptions = runtimeSelect.locator("option");
+    await expect(runtimeOptions).toHaveCount(2);
+    const primaryContext = runtimeOptions.filter({ hasNotText: "inspector-secondary-context" });
+    const secondaryContext = runtimeOptions.filter({ hasText: "inspector-secondary-context" });
+    const primaryContextValue = await primaryContext.getAttribute("value");
+    const secondaryContextValue = await secondaryContext.getAttribute("value");
+    expect(primaryContextValue).toBeTruthy();
+    expect(secondaryContextValue).toBeTruthy();
+
+    await runtimeSelect.selectOption(primaryContextValue!);
+    await inspector.getByRole("link", { name: "View todos data" }).click();
+    await expect(inspector.getByText("First seeded todo")).toBeVisible({ timeout: 30_000 });
+
+    await runtimeSelect.selectOption(secondaryContextValue!);
     await expect(inspector.getByRole("link", { name: "Data Explorer" })).toBeVisible({
       timeout: 10_000,
     });
