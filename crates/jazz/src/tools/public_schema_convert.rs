@@ -1380,7 +1380,16 @@ fn append_exists_rel_policy_clause(
     let correlation_index = lowered
         .filters
         .iter()
-        .position(|filter| matches!(filter.value, Some(LoweredRelValue::OuterRow(_))))
+        .position(|filter| {
+            matches!(filter.value, Some(LoweredRelValue::OuterRow(_)))
+                && filter.column.as_deref() == Some("id")
+        })
+        .or_else(|| {
+            lowered
+                .filters
+                .iter()
+                .position(|filter| matches!(filter.value, Some(LoweredRelValue::OuterRow(_))))
+        })
         .ok_or_else(|| {
             err(
                 format!("$.{}.{}", table.as_str(), path),
@@ -1401,11 +1410,23 @@ fn append_exists_rel_policy_clause(
         ));
     };
 
-    let remaining_filters = lowered
-        .filters
-        .iter()
-        .map(|filter| filter.predicate.clone())
-        .collect::<Vec<_>>();
+    // An ExistsRel can correlate more than one key from the protected row.
+    // Keep every extra outer-row equality as part of the join predicate;
+    // lowering it as the placeholder `Predicate::All([])` would otherwise
+    // prove the referenced row but not that it belongs to the same workspace.
+    let mut correlated_filters = Vec::new();
+    let mut remaining_filters = Vec::new();
+    for filter in &lowered.filters {
+        match (&filter.column, &filter.value) {
+            (Some(join_column), Some(LoweredRelValue::OuterRow(source_column))) => {
+                correlated_filters.push(JoinCorrelation {
+                    join_column: join_column.clone(),
+                    source_column: source_column.clone(),
+                });
+            }
+            _ => remaining_filters.push(filter.predicate.clone()),
+        }
+    }
 
     for reachable in &mut lowered.reachable {
         if reachable.access_row_column == "__pending_outer_row" {
@@ -1441,17 +1462,57 @@ fn append_exists_rel_policy_clause(
     }
 
     if !lowered.joins.is_empty() {
-        if lowered.joins.len() != 1 {
-            return Err(err(
-                format!("$.{}.{}", table.as_str(), path),
-                "core schema ExistsRel policies support one join chain at the server shell boundary",
-            ));
+        // The relation's left-most scan is the row correlated to the
+        // protected row. Its joins remain nested beneath that root; replacing
+        // it with the first nested join loses the FK relation and produces a
+        // `JoinNotRefCompatible` plan (for example task.block -> member.id).
+        // Lift outer correlations on a nested join through its equality edge,
+        // so `member.workspace = outer.workspace` constrains the root block's
+        // workspace without publishing any proof carrier.
+        for nested in &mut lowered.joins {
+            if nested
+                .nested_joins
+                .iter()
+                .any(|child| !child.correlated_filters.is_empty())
+            {
+                return Err(err(
+                    format!("$.{}.{}", table.as_str(), path),
+                    "core schema ExistsRel does not yet support outer correlations beyond one nested join",
+                ));
+            }
+            let source_column = nested.source_column.clone().ok_or_else(|| {
+                err(
+                    format!("$.{}.{}", table.as_str(), path),
+                    "core schema ExistsRel nested join is missing its source column",
+                )
+            })?;
+            for correlation in std::mem::take(&mut nested.correlated_filters) {
+                if correlation.join_column != nested.on_column {
+                    return Err(err(
+                        format!("$.{}.{}", table.as_str(), path),
+                        "core schema ExistsRel nested outer correlation must use its join key",
+                    ));
+                }
+                correlated_filters.push(JoinCorrelation {
+                    join_column: source_column.clone(),
+                    source_column: correlation.source_column,
+                });
+            }
         }
-        let mut join = lowered.joins.remove(0);
-        join.source_column = Some(source_column);
-        join.on_column = correlation_column;
-        join.filters.extend(remaining_filters);
-        query.joins.push(join);
+        query.joins.push(JoinVia {
+            table: lowered.table,
+            on_column: correlation_column.clone(),
+            target: if correlation_column == "id" {
+                JoinTarget::RowId
+            } else {
+                JoinTarget::Column
+            },
+            source_column: Some(source_column),
+            source_lookup: None,
+            correlated_filters,
+            filters: remaining_filters,
+            nested_joins: lowered.joins,
+        });
         return Ok(query);
     }
 
@@ -1461,9 +1522,20 @@ fn append_exists_rel_policy_clause(
         .map(|filter| filter.predicate)
         .collect::<Vec<_>>();
     if correlation_column == "id" {
-        Ok(query.join_via_row_id(lowered.table, source_column, filters))
+        Ok(query.join_via_row_id_with_correlations(
+            lowered.table,
+            source_column,
+            correlated_filters,
+            filters,
+        ))
     } else {
-        Ok(query.join_via_column(lowered.table, correlation_column, source_column, filters))
+        Ok(query.join_via_column_with_correlations(
+            lowered.table,
+            correlation_column,
+            source_column,
+            correlated_filters,
+            filters,
+        ))
     }
 }
 
@@ -1557,6 +1629,21 @@ fn lower_exists_rel(
                 });
             }
 
+            let mut correlated_filters = Vec::new();
+            let filters = right
+                .filters
+                .into_iter()
+                .filter_map(|filter| match (filter.column, filter.value) {
+                    (Some(join_column), Some(LoweredRelValue::OuterRow(source_column))) => {
+                        correlated_filters.push(JoinCorrelation {
+                            join_column,
+                            source_column,
+                        });
+                        None
+                    }
+                    _ => Some(filter.predicate),
+                })
+                .collect();
             let join = JoinVia {
                 table: right.table,
                 on_column: on.right.column.clone(),
@@ -1567,12 +1654,8 @@ fn lower_exists_rel(
                 },
                 source_column: Some(on.left.column.clone()),
                 source_lookup: None,
-                correlated_filters: Vec::new(),
-                filters: right
-                    .filters
-                    .into_iter()
-                    .map(|filter| filter.predicate)
-                    .collect(),
+                correlated_filters,
+                filters,
                 nested_joins: right.joins,
             };
             left.joins.push(join);
