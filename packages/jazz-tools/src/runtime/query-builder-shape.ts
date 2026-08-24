@@ -48,6 +48,7 @@ export interface NormalizedBuiltQuery {
   includes: NormalizedIncludeSpec;
   requireIncludes: boolean;
   select: string[];
+  partialSelect: Record<string, LargeValueSelectDescriptor>;
   orderBy: Array<[string, "asc" | "desc"]>;
   limit?: number;
   offset?: number;
@@ -55,6 +56,11 @@ export interface NormalizedBuiltQuery {
   hops: string[];
   gather?: BuiltGather;
 }
+
+export type LargeValueSelectDescriptor =
+  | { from: number; to: number }
+  | { fromUtf8: number; toUtf8: number }
+  | { at: string };
 
 type BuiltQueryShape = {
   table?: unknown;
@@ -107,6 +113,39 @@ function normalizeSelect(value: unknown): string[] {
   }
 
   return value.filter((column): column is string => typeof column === "string");
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function normalizePartialSelect(value: unknown): Record<string, LargeValueSelectDescriptor> {
+  if (!isPlainObject(value)) return {};
+  const result: Record<string, LargeValueSelectDescriptor> = {};
+  for (const [column, descriptor] of Object.entries(value)) {
+    if (!column || !isPlainObject(descriptor)) {
+      throw new Error(`Invalid large-value selection for column "${column}".`);
+    }
+    const keys = Object.keys(descriptor);
+    if (typeof descriptor.at === "string" && keys.length === 1) {
+      result[column] = { at: descriptor.at };
+    } else if (
+      isNonNegativeSafeInteger(descriptor.from) &&
+      isNonNegativeSafeInteger(descriptor.to) &&
+      keys.length === 2
+    ) {
+      result[column] = { from: descriptor.from, to: descriptor.to };
+    } else if (
+      isNonNegativeSafeInteger(descriptor.fromUtf8) &&
+      isNonNegativeSafeInteger(descriptor.toUtf8) &&
+      keys.length === 2
+    ) {
+      result[column] = { fromUtf8: descriptor.fromUtf8, toUtf8: descriptor.toUtf8 };
+    } else {
+      throw new Error(`Invalid large-value selection for column "${column}".`);
+    }
+  }
+  return result;
 }
 
 function normalizeGather(value: unknown): BuiltGather | undefined {
@@ -261,6 +300,7 @@ export function normalizeBuiltQuery(raw: unknown): NormalizedBuiltQuery {
     includes: normalizeIncludeEntries(value.includes),
     requireIncludes: value[INTERNAL_REQUIRE_INCLUDES_KEY] === true,
     select: normalizeSelect(value.select),
+    partialSelect: normalizePartialSelect(value.select),
     orderBy: normalizeOrderBy(value.orderBy),
     limit: typeof value.limit === "number" ? value.limit : undefined,
     offset: typeof value.offset === "number" ? value.offset : undefined,

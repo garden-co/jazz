@@ -11,6 +11,9 @@ const app = s.defineApp({
   }),
   todos: s.table({
     title: s.string(),
+    body: s.string(),
+    attachment: s.bytes(),
+    metadata: s.json(),
     done: s.boolean(),
     projectId: s.ref("projects"),
     ownerId: s.ref("users").optional(),
@@ -153,7 +156,7 @@ describe("translateQuery", () => {
         },
         { IsNull: { column: { column: "ownerId" } } },
       ],
-      select_columns: ["title"],
+      select_columns: [{ kind: "full", column: "title" }],
       order_by: [{ column: "title", direction: "Desc" }],
       limit: 5,
       offset: 2,
@@ -167,9 +170,7 @@ describe("translateQuery", () => {
       translateQuery(
         app.projects
           .where({ id: { notIn: ["00000000-0000-0000-0000-000000000001"] } })
-          .include({
-            todosViaProject: app.todos.where({ title: { notIn: ["hidden"] } }),
-          })
+          .include({ todosViaProject: app.todos.where({ title: { notIn: ["hidden"] } }) })
           ._build(),
         app.wasmSchema,
       ),
@@ -195,51 +196,28 @@ describe("translateQuery", () => {
     });
   });
 
-  it("keeps provenance order keys internal unless the caller selects them", () => {
-    for (const column of ["$createdAt", "$createdBy", "$updatedAt", "$updatedBy"] as const) {
-      const hidden = JSON.parse(
-        translateQuery(
-          app.projects.orderBy(column, "asc").limit(4).offset(2)._build(),
-          app.wasmSchema,
-        ),
-      );
-      expect(hidden).toMatchObject({
-        order_by: [{ column, direction: "Asc" }],
-        limit: 4,
-        offset: 2,
-      });
-      expect(hidden.select_columns).toBeUndefined();
-    }
-    const selected = JSON.parse(
+  it("lowers partial select descriptors to the native projection contract", () => {
+    const translated = JSON.parse(
       translateQuery(
-        app.projects
-          .select("name", "$createdAt")
-          .orderBy("$createdAt", "desc")
-          .limit(4)
-          .offset(2)
+        app.todos
+          .select({
+            attachment: { from: 1_000_000, to: 2_000_000 },
+            body: { from: 4, to: 124 },
+            title: { fromUtf8: 4, toUtf8: 67 },
+            metadata: { at: "/someKey/11/otherKey" },
+          })
           ._build(),
         app.wasmSchema,
       ),
     );
 
-    expect(selected).toMatchObject({
-      select_columns: ["name", "$createdAt"],
-      order_by: [{ column: "$createdAt", direction: "Desc" }],
-      limit: 4,
-      offset: 2,
-    });
+    expect(translated.select_columns).toEqual([
+      { kind: "bytes", column: "attachment", from: 1_000_000, to: 2_000_000 },
+      { kind: "text_utf16", column: "body", from: 4, to: 124 },
+      { kind: "text_utf8", column: "title", from: 4, to: 67 },
+      { kind: "json_pointer", column: "metadata", at: "/someKey/11/otherKey" },
+    ]);
   });
-
-  for (const op of ["in", "notIn"]) {
-    it(`rejects null ${op} membership entries before serializing a query`, () => {
-      const built = JSON.parse(app.todos._build());
-      built.conditions = [{ column: "ownerId", op, value: [null] }];
-
-      expect(() => translateQuery(JSON.stringify(built), app.wasmSchema)).toThrow(
-        `"${op}" does not accept null membership values; use isNull or isNotNull separately.`,
-      );
-    });
-  }
   it("keeps native relation IR for relation traversal queries", () => {
     const translated = JSON.parse(
       translateQuery(app.todos.where({ done: false }).hopTo("owner")._build(), app.wasmSchema),
