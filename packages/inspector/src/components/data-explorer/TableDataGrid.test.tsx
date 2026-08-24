@@ -776,7 +776,7 @@ describe("TableDataGrid", () => {
     expect(screen.queryByText("row-2")).toBeNull();
   });
 
-  it("clears staged mutations when the routed table changes", async () => {
+  it("keeps staged mutations scoped to their routed table", async () => {
     const { rerender } = renderGrid();
     fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
     expect(screen.getByText("1 staged insert")).not.toBeNull();
@@ -792,6 +792,96 @@ describe("TableDataGrid", () => {
     expect(mockInsert).not.toHaveBeenCalled();
     expect(mockUpdate).not.toHaveBeenCalled();
     expect(mockDelete).not.toHaveBeenCalled();
+
+    currentTable = "todos";
+    currentRows = [
+      {
+        id: "row-2",
+        title: "zeta",
+        done: false,
+        maybe_done: null,
+        meta: { done: true },
+        owner_id: "owner-a",
+        blob: new Uint8Array([1, 2]),
+        status: "open",
+      },
+    ];
+    rerender(renderGridUi());
+
+    expect(screen.getByText("1 staged insert")).not.toBeNull();
+  });
+
+  it("keeps a completed save scoped to its originating table after navigation", async () => {
+    let resolveSave: (() => void) | undefined;
+    mockUpdateWait.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    mockUpdateWait.mockImplementationOnce(() => Promise.reject(new Error("B save failed")));
+    const { rerender } = renderGrid();
+
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.change(screen.getByLabelText("Edit title"), { target: { value: "A draft" } });
+    fireEvent.blur(screen.getByLabelText("Edit title"));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(1));
+
+    currentTable = "users";
+    currentRows = [];
+    rerender(renderGridUi());
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "Alice" }));
+    fireEvent.change(screen.getByLabelText("Edit displayName"), { target: { value: "B draft" } });
+    fireEvent.blur(screen.getByLabelText("Edit displayName"));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("B save failed"));
+
+    await act(async () => resolveSave?.());
+
+    expect(screen.getByText("B draft")).not.toBeNull();
+    expect(screen.getByText("1 edit across 1 row")).not.toBeNull();
+    expect(screen.getByRole("alert").textContent).toContain("B save failed");
+
+    currentTable = "todos";
+    currentRows = [{ id: "row-2", title: "zeta", done: false, maybe_done: null, status: "open" }];
+    rerender(renderGridUi());
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull());
+  });
+
+  it("keeps a failed save error scoped to its originating table after navigation", async () => {
+    let rejectSave: ((error: Error) => void) | undefined;
+    mockUpdateWait.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectSave = reject;
+        }),
+    );
+    const { rerender } = renderGrid();
+
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.change(screen.getByLabelText("Edit title"), { target: { value: "A draft" } });
+    fireEvent.blur(screen.getByLabelText("Edit title"));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(1));
+
+    currentTable = "users";
+    currentRows = [];
+    rerender(renderGridUi());
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "Alice" }));
+    fireEvent.change(screen.getByLabelText("Edit displayName"), { target: { value: "B draft" } });
+    fireEvent.blur(screen.getByLabelText("Edit displayName"));
+
+    await act(async () => rejectSave?.(new Error("A save failed")));
+
+    expect(screen.getByText("B draft")).not.toBeNull();
+    expect(screen.queryByText("A save failed")).toBeNull();
+
+    currentTable = "todos";
+    currentRows = [{ id: "row-2", title: "zeta", done: false, maybe_done: null, status: "open" }];
+    rerender(renderGridUi());
+    expect(screen.getByText("A draft")).not.toBeNull();
+    expect(screen.getByRole("alert").textContent).toContain("A save failed");
   });
 
   it("appends a staged insert row and inserts it from the banner", async () => {

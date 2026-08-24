@@ -135,6 +135,26 @@ interface StagedInsert {
   edits: QueuedRowEdits;
 }
 
+interface TableMutationState {
+  queuedEdits: Record<string, QueuedRowEdits>;
+  stagedInserts: StagedInsert[];
+  isQueuedSavePending: boolean;
+  queuedSaveError: string | null;
+  queuedDeletes: Set<string>;
+  pendingScrollToRowId: string | null;
+}
+
+function createTableMutationState(): TableMutationState {
+  return {
+    queuedEdits: {},
+    stagedInserts: [],
+    isQueuedSavePending: false,
+    queuedSaveError: null,
+    queuedDeletes: new Set(),
+    pendingScrollToRowId: null,
+  };
+}
+
 interface EditableGridRow extends AnimatedGridRow {
   row: DynamicTableRow;
   sourceRow: DynamicTableRow;
@@ -715,13 +735,50 @@ export function TableDataGrid() {
       { replace: true },
     );
   };
-  const [queuedEdits, setQueuedEdits] = useState<Record<string, QueuedRowEdits>>({});
-  const [stagedInserts, setStagedInserts] = useState<StagedInsert[]>([]);
+  const [mutationStateByTable, setMutationStateByTable] = useState<
+    Record<string, TableMutationState>
+  >({});
   const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(new Set());
-  const [isQueuedSavePending, setIsQueuedSavePending] = useState(false);
-  const [queuedSaveError, setQueuedSaveError] = useState<string | null>(null);
-  const [queuedDeletes, setQueuedDeletes] = useState<Set<string>>(new Set());
-  const [pendingScrollToRowId, setPendingScrollToRowId] = useState<string | null>(null);
+  const mutationState = mutationStateByTable[table] ?? createTableMutationState();
+  const updateCurrentTableMutationState = (update: SetStateAction<TableMutationState>) => {
+    setMutationStateByTable((current) => {
+      const previous = current[table] ?? createTableMutationState();
+      const next = typeof update === "function" ? update(previous) : update;
+      return { ...current, [table]: next };
+    });
+  };
+  const queuedEdits = mutationState.queuedEdits;
+  const stagedInserts = mutationState.stagedInserts;
+  const isQueuedSavePending = mutationState.isQueuedSavePending;
+  const queuedSaveError = mutationState.queuedSaveError;
+  const queuedDeletes = mutationState.queuedDeletes;
+  const pendingScrollToRowId = mutationState.pendingScrollToRowId;
+  const setQueuedEdits: Dispatch<SetStateAction<Record<string, QueuedRowEdits>>> = (update) =>
+    updateCurrentTableMutationState((current) => ({
+      ...current,
+      queuedEdits: typeof update === "function" ? update(current.queuedEdits) : update,
+    }));
+  const setStagedInserts: Dispatch<SetStateAction<StagedInsert[]>> = (update) =>
+    updateCurrentTableMutationState((current) => ({
+      ...current,
+      stagedInserts: typeof update === "function" ? update(current.stagedInserts) : update,
+    }));
+  const setQueuedSaveError: Dispatch<SetStateAction<string | null>> = (update) =>
+    updateCurrentTableMutationState((current) => ({
+      ...current,
+      queuedSaveError: typeof update === "function" ? update(current.queuedSaveError) : update,
+    }));
+  const setQueuedDeletes: Dispatch<SetStateAction<Set<string>>> = (update) =>
+    updateCurrentTableMutationState((current) => ({
+      ...current,
+      queuedDeletes: typeof update === "function" ? update(current.queuedDeletes) : update,
+    }));
+  const setPendingScrollToRowId: Dispatch<SetStateAction<string | null>> = (update) =>
+    updateCurrentTableMutationState((current) => ({
+      ...current,
+      pendingScrollToRowId:
+        typeof update === "function" ? update(current.pendingScrollToRowId) : update,
+    }));
   const [isColumnCustomizationOpen, setIsColumnCustomizationOpen] = useState(false);
   const columnPreferencesStorageKey = `${COLUMN_PREFERENCES_STORAGE_KEY_PREFIX}.${table}`;
   const [storedColumnPreferences, setStoredColumnPreferences] = useLocalStorageState<
@@ -858,14 +915,6 @@ export function TableDataGrid() {
     setSelectedRowIds(new Set());
   }, [gridAnimationScopeKey]);
 
-  useEffect(() => {
-    setQueuedEdits({});
-    setStagedInserts([]);
-    setQueuedDeletes(new Set());
-    setQueuedSaveError(null);
-    setPendingScrollToRowId(null);
-  }, [table]);
-
   const handleSortColumnsChange = (nextSortColumns: SortColumn[]): void => {
     const nextSort =
       nextSortColumns.length === 0
@@ -935,9 +984,16 @@ export function TableDataGrid() {
       return;
     }
 
+    const mutationTable = table;
     try {
-      setIsQueuedSavePending(true);
-      setQueuedSaveError(null);
+      setMutationStateByTable((current) => ({
+        ...current,
+        [mutationTable]: {
+          ...(current[mutationTable] ?? createTableMutationState()),
+          isQueuedSavePending: true,
+          queuedSaveError: null,
+        },
+      }));
 
       const rowUpdates = Object.entries(queuedEdits)
         .filter(([rowId]) => !queuedDeletes.has(rowId))
@@ -972,17 +1028,34 @@ export function TableDataGrid() {
         }),
       ]);
 
-      setQueuedEdits({});
-      setStagedInserts([]);
-      setQueuedDeletes(new Set());
+      setMutationStateByTable((current) => ({
+        ...current,
+        [mutationTable]: {
+          ...(current[mutationTable] ?? createTableMutationState()),
+          queuedEdits: {},
+          stagedInserts: [],
+          queuedDeletes: new Set(),
+        },
+      }));
     } catch (error) {
-      setQueuedSaveError(
-        error instanceof Error || (typeof Error.isError === "function" && Error.isError(error))
-          ? error.message
-          : "Could not persist queued cell edits.",
-      );
+      setMutationStateByTable((current) => ({
+        ...current,
+        [mutationTable]: {
+          ...(current[mutationTable] ?? createTableMutationState()),
+          queuedSaveError:
+            error instanceof Error || (typeof Error.isError === "function" && Error.isError(error))
+              ? error.message
+              : "Could not persist queued cell edits.",
+        },
+      }));
     } finally {
-      setIsQueuedSavePending(false);
+      setMutationStateByTable((current) => ({
+        ...current,
+        [mutationTable]: {
+          ...(current[mutationTable] ?? createTableMutationState()),
+          isQueuedSavePending: false,
+        },
+      }));
     }
   };
 
