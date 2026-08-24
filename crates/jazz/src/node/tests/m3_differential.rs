@@ -848,7 +848,7 @@ fn m3_differential_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "teams",
         "identity_key",
-        &["claims", "sub"],
+        &["author"],
         "id",
     );
     let string_same_table_policy = crate::test_public_schema::seeded_recursive_access_policy(
@@ -864,7 +864,7 @@ fn m3_differential_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "teams",
         "identity_key_text",
-        &["claims", "sub"],
+        &["author"],
         "id",
     );
 
@@ -874,7 +874,6 @@ fn m3_differential_schema() -> JazzSchema {
                 PublicTableSchemaBuilder::new("docs")
                     .column("title", PublicColumnType::Text)
                     .column("kind", PublicColumnType::Text)
-                    .column("createdBy", PublicColumnType::Uuid)
                     .column("createdAt", PublicColumnType::Timestamp)
                     .column("bucket", PublicColumnType::Timestamp)
                     .column("f64_value", PublicColumnType::Double)
@@ -999,7 +998,7 @@ fn m3_differential_shapes(schema: &JazzSchema) -> Vec<DifferentialShape> {
                 "parent",
                 [],
             )
-            .seeded_by("group_access_edges", "user_id", "sub", "group_id")
+            .seeded_by("group_access_edges", "user_id", "author", "group_id")
             .validate(schema)
             .unwrap(),
     );
@@ -1131,7 +1130,7 @@ fn aggregate_differential_specs() -> Vec<AggregateSpec> {
 
 fn created_by_shape(schema: &JazzSchema) -> ValidatedQuery {
     Query::from("docs")
-        .filter(eq(col("createdBy"), claim("sub")))
+        .filter(eq(col("$createdBy"), claim("author")))
         .validate(schema)
         .unwrap()
 }
@@ -1280,7 +1279,7 @@ fn seed_m3_differential_base(core: &mut NodeState<RocksDbStorage>, seed: u64) {
     ] {
         accept_global(
             core,
-            MergeableCommit::new("docs", doc, 10 + seed % 3).cells(differential_doc_cells(
+            MergeableCommit::new("docs", doc, 10 + seed % 3).made_by(author).cells(differential_doc_cells(
                 title,
                 kind,
                 author,
@@ -1400,7 +1399,7 @@ fn m3_differential_parent_map(
 fn differential_doc_cells(
     title: &str,
     kind: &str,
-    author: AuthorSubject,
+    _author: AuthorSubject,
     created_at: u64,
     bucket: u64,
     f64_value: f64,
@@ -1411,7 +1410,6 @@ fn differential_doc_cells(
     BTreeMap::from([
         ("title".to_owned(), Value::String(title.to_owned())),
         ("kind".to_owned(), Value::String(kind.to_owned())),
-        ("createdBy".to_owned(), Value::Uuid(author.test_uuid())),
         ("createdAt".to_owned(), Value::U64(created_at)),
         ("bucket".to_owned(), Value::U64(bucket)),
         ("f64_value".to_owned(), Value::F64(f64_value)),
