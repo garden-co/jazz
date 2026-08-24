@@ -330,15 +330,11 @@ async fn raw_finalization_rejects_dishonest_or_unrelated_descriptors_and_survive
     let prepared = crate::large_values::prepare(
         crate::large_values::LargeValueKind::String,
         b"trusted upload",
-        |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
     )
     .unwrap();
-    let unrelated = crate::large_values::prepare(
-        crate::large_values::LargeValueKind::String,
-        b"other upload",
-        |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
-    )
-    .unwrap();
+    let unrelated =
+        crate::large_values::prepare(crate::large_values::LargeValueKind::String, b"other upload")
+            .unwrap();
     let upload_id = crate::large_values::StagedLargeValueId([0x84; 16]);
     let unrelated_upload_id = crate::large_values::StagedLargeValueId([0x85; 16]);
     database
