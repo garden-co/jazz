@@ -5,6 +5,7 @@ import test from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createWasmPackageStage, publishWasmPackage, recoverWasmPackageTransaction, wasmPackageFiles, writeWasmStageManifest } from "./build.mjs";
+import { acquireArtifactBuildLock, artifactBuildLease, verifyArtifactBuildLease } from "../gates/build-test-artifacts.mjs";
 
 function fixture() {
   const root = join(tmpdir(), `jazz-wasm-artifact-${process.pid}-${Date.now()}-${Math.random()}`);
@@ -57,13 +58,38 @@ test("killed directory swap restores the old generation on the next locked produ
   }); } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("prepared journal before the first rename retains the intact old package", () => {
+  const { root, wasmRoot, pkg } = fixture();
+  try {
+    writePackage(pkg, "old");
+    const stage = createWasmPackageStage(root, "fast"); writePackage(stage.path, "new");
+    writeFileSync(join(wasmRoot, ".pkg-transaction.json"), JSON.stringify({ schema: 1, state: "prepared", hadCurrent: true, stage: stage.outDir, backup: ".pkg-backup-never-created", hashes: { "jazz_wasm_bg.wasm": "not-new" } }));
+    recoverWasmPackageTransaction(wasmRoot);
+    assert.deepEqual(markers(pkg), wasmPackageFiles.map((file) => `old:${file}`));
+    assert.equal(existsSync(stage.path), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("inherited artifact leases require the exact live clone owner", () => {
+  const { root, lock } = fixture();
+  try { withLock(lock, () => {
+    const acquired = acquireArtifactBuildLock(lock); const envLease = artifactBuildLease(acquired);
+    const lease = { token: envLease.JAZZ_ARTIFACT_BUILD_LEASE, lockPath: envLease.JAZZ_ARTIFACT_BUILD_LOCK_PATH };
+    assert.deepEqual(verifyArtifactBuildLease(lease), lease);
+    assert.throws(() => verifyArtifactBuildLease({ ...lease, lockPath: `${lock}-other` }), /different clone lock/);
+    assert.throws(() => verifyArtifactBuildLease({ ...lease, token: "forged" }), /missing or no longer owned/);
+    acquired.release();
+    assert.throws(() => verifyArtifactBuildLease(lease), /missing or no longer owned/);
+  }); } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("two independent fast/release producers serialize and publish one internally consistent generation", async () => {
   const { root, pkg, lock } = fixture();
   const previous = process.env.JAZZ_TEST_ARTIFACT_LOCK_PATH;
   process.env.JAZZ_TEST_ARTIFACT_LOCK_PATH = lock;
   try {
     writePackage(pkg, "old");
-    const producer = `import { createWasmPackageStage, publishWasmPackage, wasmPackageFiles } from ${JSON.stringify(new URL("./build.mjs", import.meta.url).href)}; import { writeFileSync } from 'node:fs'; const [root, pkg, profile] = process.argv.slice(1); const stage=createWasmPackageStage(root, profile); for (const file of wasmPackageFiles) writeFileSync(stage.path+'/'+file, profile+':'+file); publishWasmPackage(stage.path,pkg,{profile});`;
+    const producer = `import { createWasmPackageStage, publishWasmPackage, wasmPackageFiles, writeWasmStageManifest } from ${JSON.stringify(new URL("./build.mjs", import.meta.url).href)}; import { writeFileSync } from 'node:fs'; const [root, pkg, profile] = process.argv.slice(1); const stage=createWasmPackageStage(root, profile); for (const file of wasmPackageFiles.filter((file)=>file!=='.jazz-artifact-manifest.json')) writeFileSync(stage.path+'/'+file, profile+':'+file); writeWasmStageManifest(stage.path,profile); publishWasmPackage(stage.path,pkg,{profile});`;
     const run = (profile) => new Promise((resolveRun) => {
       const child = spawn(process.execPath, ["--input-type=module", "-e", producer, root, pkg, profile], { env: { ...process.env, JAZZ_TEST_ARTIFACT_LOCK_PATH: lock } });
       let stderr = ""; child.stderr.on("data", (chunk) => { stderr += chunk; });
@@ -72,7 +98,9 @@ test("two independent fast/release producers serialize and publish one internall
     const [one, two] = await Promise.all([run("fast"), run("release")]);
     assert.equal(one.status, 0, one.stderr); assert.equal(two.status, 0, two.stderr);
     const final = markers(pkg); const generation = final[0].split(":")[0];
-    assert.ok(["fast", "release"].includes(generation)); assert.ok(final.every((value) => value.startsWith(`${generation}:`)));
+    assert.ok(["fast", "release"].includes(generation)); assert.ok(final.slice(0, -1).every((value) => value.startsWith(`${generation}:`)));
+    const manifest = JSON.parse(readFileSync(join(pkg, ".jazz-artifact-manifest.json"), "utf8"));
+    assert.equal(manifest.profile, generation, "manifest must be published with the winning generation");
     assert.equal(existsSync(join(root, "crates", "jazz-wasm", ".pkg-transaction.json")), false);
   } finally { if (previous === undefined) delete process.env.JAZZ_TEST_ARTIFACT_LOCK_PATH; else process.env.JAZZ_TEST_ARTIFACT_LOCK_PATH = previous; rmSync(root, { recursive: true, force: true }); }
 });
