@@ -886,6 +886,8 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
             ),
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    install_test_uuid_sub_claim(&mut core, invited);
+    install_test_uuid_sub_claim(&mut core, spy);
     let shape = Query::from("shapes")
         .validate(&core.catalogue.schema)
         .unwrap();
