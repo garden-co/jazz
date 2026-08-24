@@ -1638,6 +1638,151 @@ fn prepared_policy_union_joins_claimless_arm_to_binding_route() {
     )));
 }
 
+// `allowedTo.insert(release)` followed by tenant-correlated `exists` checks
+// lowers to consecutive inner joins in the authorization program. Those joins
+// prove a decision; they are not a public flat result whose occurrence key
+// needs synthetic join-row carriers.
+#[test]
+fn authorization_subplan_with_correlated_allowed_to_joins_lowers_without_occurrence_carriers() {
+    let root = RowSetNodeId("assignment".to_owned());
+    let release_input = RowSetNodeId("release-source".to_owned());
+    let release_join = RowSetNodeId("release-allowed-to".to_owned());
+    let membership_input = RowSetNodeId("membership-source".to_owned());
+    let policy_root = RowSetNodeId("membership-tenant-check".to_owned());
+    let assignment = source("assignments", SourceRole::Root);
+    let release = source(
+        "releases",
+        SourceRole::Alias("allowed-to:release".to_owned()),
+    );
+    let membership = source(
+        "memberships",
+        SourceRole::Alias("exists:membership-tenant".to_owned()),
+    );
+    let request = QueryProgramRequest {
+        authorization_mode: QueryAuthorizationMode::TrustedServing,
+        reads: QueryReadSet::primary(ReadView {
+            read_schema: schema(0x91),
+            policy_schema: schema(0x92),
+            sources: BTreeMap::from([
+                (
+                    assignment.clone(),
+                    requested_current_source(DurabilityTier::Global),
+                ),
+                (
+                    release.clone(),
+                    requested_current_source(DurabilityTier::Global),
+                ),
+                (
+                    membership.clone(),
+                    requested_current_source(DurabilityTier::Global),
+                ),
+            ]),
+        }),
+        policy: PolicyContext::AuthorizationSubplan {
+            protected_source: assignment.clone(),
+            role: PolicyDecisionRole::Write,
+            mode: PolicyEnforcementMode::Enforcing,
+            permission_subject: author(0x91),
+            claims: BTreeMap::new(),
+            attribution: None,
+        },
+        input: RowSetProgramInput {
+            shape: NormalizedRowSetShape {
+                identity: NormalizedShapeIdentity {
+                    shape_id: shape(0x91),
+                    canonical: vec![0x91],
+                },
+                root: policy_root.clone(),
+                result: ResultId::RealRow {
+                    table: "assignments".to_owned(),
+                    row: ResultRowRef::Source(assignment.clone()),
+                },
+                auxiliary_sources: BTreeSet::new(),
+                closure_paths: Vec::new(),
+                join_contributions: Vec::new(),
+                reachable_contributions: Vec::new(),
+                nodes: BTreeMap::from([
+                    (
+                        root.clone(),
+                        RowSetExpr::Source {
+                            source: assignment.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        release_input,
+                        RowSetExpr::Source {
+                            source: release.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        release_join.clone(),
+                        RowSetExpr::Join {
+                            left: root,
+                            right: RowSetNodeId("release-source".to_owned()),
+                            mode: JoinMode::Inner,
+                            on: PredicateExpr::Compare {
+                                left: NormalizedValueRef::RowId(RowIdRef::Source(
+                                    assignment.clone(),
+                                )),
+                                op: ComparisonOp::Eq,
+                                right: NormalizedValueRef::SourceField {
+                                    source: release.clone(),
+                                    field: "todo".to_owned(),
+                                },
+                            },
+                        },
+                    ),
+                    (
+                        membership_input,
+                        RowSetExpr::Source {
+                            source: membership.clone(),
+                            visibility: RowVisibility::Visible,
+                        },
+                    ),
+                    (
+                        policy_root,
+                        RowSetExpr::Join {
+                            left: release_join,
+                            right: RowSetNodeId("membership-source".to_owned()),
+                            mode: JoinMode::Inner,
+                            on: PredicateExpr::Compare {
+                                left: NormalizedValueRef::RowId(RowIdRef::Source(assignment)),
+                                op: ComparisonOp::Eq,
+                                right: NormalizedValueRef::SourceField {
+                                    source: membership,
+                                    field: "todo".to_owned(),
+                                },
+                            },
+                        },
+                    ),
+                ]),
+            },
+            binding: ProgramBinding {
+                id: BindingId(uuid::Uuid::from_bytes([0x91; 16])),
+                source_shape: None,
+                extra_user_params: BTreeMap::new(),
+                param_types: BTreeMap::new(),
+                claim_params: BTreeMap::new(),
+                values: BTreeMap::new(),
+            },
+        },
+        output: RowSetOutputRequest {
+            app_rows: None,
+            facts: BTreeSet::from([ProgramFactKey::AuthorizedRows]),
+        },
+    };
+
+    let program = lower_query_program(request, &mut FakeSourceResolver::default())
+        .expect("correlated write authorization should lower");
+    let graph = format!("{:?}", program.lowered.terminals);
+    assert!(
+        !graph.contains("__flat_join_source_"),
+        "authorization decision graph must not request public occurrence carriers: {graph}"
+    );
+}
+
 #[test]
 fn claim_filter_lowers_from_identity_policy_context() {
     let request = QueryProgramRequest {
