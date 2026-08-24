@@ -48,6 +48,7 @@ import {
   type NativeRelationSubscriptionSnapshot,
   type NativeRowBatch,
   type NativeSubscriptionDelta,
+  type NativeSelfSignedClientProof,
   type QueryArraySubquery,
   type DescriptorField,
   type QueryLiteral,
@@ -98,6 +99,21 @@ type CoreTickWake = "immediate" | "deferred" | `after:${number}`;
 type NativeDbConstructor = {
   openMemory(schema: Uint8Array, config: Uint8Array): NativeDb;
   openPersistent?(dataPath: string, schema: Uint8Array, config: Uint8Array): NativeDb;
+  openMemoryWithSelfSignedProof?(
+    schema: Uint8Array,
+    config: Uint8Array,
+    token: string,
+    appId: string,
+    claimedAuthor: string,
+  ): NativeDb;
+  openPersistentWithSelfSignedProof?(
+    dataPath: string,
+    schema: Uint8Array,
+    config: Uint8Array,
+    token: string,
+    appId: string,
+    claimedAuthor: string,
+  ): NativeDb;
 };
 
 type NativeDb = {
@@ -554,11 +570,48 @@ function openPersistentDb(
   dataPath: string,
   schema: Uint8Array,
   config: Uint8Array,
+  selfSignedClientProof?: NativeSelfSignedClientProof,
 ): NativeDb {
+  if (selfSignedClientProof) {
+    if (!Runtime.openPersistentWithSelfSignedProof) {
+      throw new Error(
+        "Native runtime does not support self-signed client opens; rebuild the matching Jazz native artifact",
+      );
+    }
+    return Runtime.openPersistentWithSelfSignedProof(
+      dataPath,
+      schema,
+      config,
+      selfSignedClientProof.token,
+      selfSignedClientProof.appId,
+      selfSignedClientProof.claimedAuthor,
+    );
+  }
   if (!Runtime.openPersistent) {
     throw new Error("Native runtime does not expose persistent storage");
   }
   return Runtime.openPersistent(dataPath, schema, config);
+}
+
+function openMemoryDb(
+  Runtime: NativeDbConstructor,
+  schema: Uint8Array,
+  config: Uint8Array,
+  selfSignedClientProof?: NativeSelfSignedClientProof,
+): NativeDb {
+  if (!selfSignedClientProof) return Runtime.openMemory(schema, config);
+  if (!Runtime.openMemoryWithSelfSignedProof) {
+    throw new Error(
+      "Native runtime does not support self-signed client opens; rebuild the matching Jazz native artifact",
+    );
+  }
+  return Runtime.openMemoryWithSelfSignedProof(
+    schema,
+    config,
+    selfSignedClientProof.token,
+    selfSignedClientProof.appId,
+    selfSignedClientProof.claimedAuthor,
+  );
 }
 
 export class NativeRuntimeAdapter implements Runtime {
@@ -641,6 +694,7 @@ export class NativeRuntimeAdapter implements Runtime {
       persistentPath?: string;
       db?: NativeDb;
       initialSyncFlushEvery?: number;
+      selfSignedClientProof?: NativeSelfSignedClientProof;
       readAuthorizationHost?: ReadAuthorizationHost;
       backendCredential?: string;
       owner?: NativeRuntimeAdapter;
@@ -675,12 +729,23 @@ export class NativeRuntimeAdapter implements Runtime {
       if (!Runtime) {
         throw new Error("Native runtime constructor required for persistent storage");
       }
-      this.db = openPersistentDb(Runtime, opts.persistentPath, this.schemaBytes, this.configBytes);
+      this.db = openPersistentDb(
+        Runtime,
+        opts.persistentPath,
+        this.schemaBytes,
+        this.configBytes,
+        opts?.selfSignedClientProof,
+      );
     } else {
       if (!Runtime) {
         throw new Error("Native runtime constructor required for memory storage");
       }
-      this.db = Runtime.openMemory(this.schemaBytes, this.configBytes);
+      this.db = openMemoryDb(
+        Runtime,
+        this.schemaBytes,
+        this.configBytes,
+        opts?.selfSignedClientProof,
+      );
     }
     if (opts?.owner) return;
     if (typeof this.db.setTickScheduler !== "function") {
