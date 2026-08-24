@@ -38,12 +38,15 @@ The relay is a normal non-history-complete `Db`:
 The scope key has no token material. Trusted platform code derives an opaque
 `auth_scope` only after authentication and admits the complete scope config to
 the native host: auth scope, SQLite path, schema, persistent `DbIdentity`, and
-validated session claims. JavaScript receives only an opaque admission handle
+validated session claims. JavaScript receives only an opaque random 256-bit
+admission capability
 and cannot choose or amend those values through the command codec. UI peer
 identities are derived inside the host from the admitted author and a fresh
 process-local node handle. Reusing a scope with a different path, schema, or
-identity fails. Tokens belong to upstream session negotiation. Logout
-explicitly closes the old scope and chooses either
+identity fails. Trusted logout revokes the capability and atomically closes all
+relay/client aliases opened through it; guessed and revoked capabilities cannot
+open a scope. Tokens belong to upstream session negotiation. Logout also
+chooses either
 retention or deletion through a separate, user-visible storage-lifecycle API.
 No current host may reuse a relay after an auth-scope change.
 
@@ -77,8 +80,10 @@ remain the maintained event stream from chapter 16. The RN TurboModule is one
 such host; it is not part of the core crate.
 
 The C host serializes all commands internally. Every directional peer queue has
-both encoded-byte and message-count budgets; admission reports typed
-backpressure without dropping already-admitted messages. Receive calls drain a
+both encoded-byte and message-count budgets. The transport seam returns its
+typed `Backpressure` outcome for capacity exhaustion, allowing the ordinary
+peer state machine to retain and retry a stateful send; diagnostics remain the
+separate source of queue depth. Receive calls drain a
 bounded batch, and each pump services a bounded round-robin subset of UI peers.
 Callers retry after draining or scheduling another pump rather than spinning an
 unbounded native turn.

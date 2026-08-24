@@ -35,9 +35,10 @@ inspects Expo's autolinking contracts for this package. It is intentionally not
 a native build receipt: this Linux development environment has neither Java
 nor CocoaPods, so Gradle configuration/build and `pod install` must run on the
 respective Blacksmith runners before claiming platform or device support.
-The shared host codec now stages trusted native scope admission, client
-open-close, bounded `Pump`, directional bounded peer-frame send/drain, and
-handle/queue diagnostics. The thin JNI and Objective-C++ wrappers forward the
+The shared host codec now stages trusted native scope admission/revocation via
+random 256-bit capabilities, client open-close, bounded `Pump`, directional
+bounded peer-frame send/drain, and handle/queue diagnostics. The thin JNI and
+Objective-C++ wrappers forward the
 opaque command channel when their staged artifacts are present; platform-owned
 scope admission remains part of the device integration. This is still a
 platform checkpoint, not device support: there is no assembled release-package

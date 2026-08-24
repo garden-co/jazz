@@ -2146,6 +2146,7 @@ name = "jazz-native-relay"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "getrandom 0.3.4",
  "jazz",
  "jazz-storage-sqlite",
  "postcard",
