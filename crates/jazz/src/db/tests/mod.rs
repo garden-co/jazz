@@ -108,6 +108,56 @@ fn retryable_chunk_response_keeps_the_original_waiter_until_the_scheduled_reissu
     });
     assert_eq!(crate::db::block_on(waiter).unwrap().as_ref(), &[0x42]);
 }
+
+#[test]
+fn cancelled_chunk_waiter_removes_its_pending_retry_state() {
+    use groove::chunks::MissingChunkResolver;
+
+    let resolver = PeerChunkResolver::default();
+    resolver.register_connection(8, true);
+    let request = groove::chunks::ChunkRequest {
+        object_hash: [0x32; 32],
+        locator: b"cancelled-binding-receipt".to_vec(),
+    };
+    let waiter = resolver.resolve(request);
+    let request_id = resolver.take_outbound(1)[0].request_id;
+    resolver.complete(ChunkResponseEntry {
+        request_id,
+        result: ChunkResponse::Retryable {
+            retry_after_ms: 60_000,
+        },
+    });
+    drop(waiter);
+    assert!(resolver.state.borrow().pending_by_chunk.is_empty());
+    assert!(resolver.next_retry_delay().is_none());
+    assert!(resolver.take_outbound(1).is_empty());
+}
+
+#[test]
+fn terminal_chunk_unavailable_completes_waiter_once_as_an_error() {
+    use groove::chunks::MissingChunkResolver;
+
+    let resolver = PeerChunkResolver::default();
+    resolver.register_connection(9, true);
+    let waiter = resolver.resolve(groove::chunks::ChunkRequest {
+        object_hash: [0x33; 32],
+        locator: b"terminal-binding-receipt".to_vec(),
+    });
+    let request_id = resolver.take_outbound(1)[0].request_id;
+    resolver.complete(ChunkResponseEntry {
+        request_id,
+        result: ChunkResponse::Unavailable,
+    });
+    assert!(matches!(
+        crate::db::block_on(waiter),
+        Err(groove::chunks::ChunkError::Backend(_))
+    ));
+    resolver.complete(ChunkResponseEntry {
+        request_id,
+        result: ChunkResponse::Found(vec![1]),
+    });
+    assert!(resolver.state.borrow().pending_by_chunk.is_empty());
+}
 use catalogue::assert_authority_rejects_staged_write;
 use support::block_on;
 use support::*;
