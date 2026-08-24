@@ -67,9 +67,17 @@ describe("BandBinder cross-topology recovery", () => {
     let nestedPageId = "";
     let nestedBlockId = "";
     let nestedAttachmentId = "";
+    const expectedChildPages: { id: string; title: string }[] = [];
     const ownerMutationErrors: unknown[] = [];
     const taskSubscriptionSnapshots: string[][] = [];
     const expectedBlockIds = new Set<string>();
+    const isExpectedChildPageWindow = (rows: { id: string; title: string }[]) =>
+      rows.length === PAGE_SIZE &&
+      rows.every(
+        (row, index) =>
+          row.id === expectedChildPages[index]?.id &&
+          row.title === expectedChildPages[index]?.title,
+      );
 
     const receipt = await runTopologyScenario(
       {
@@ -215,7 +223,7 @@ describe("BandBinder cross-topology recovery", () => {
               // query.  Seed one more row than the page so the receipt proves
               // both the ordering and the bound rather than merely eventual
               // delivery of a single child.
-              await settle(
+              const childPages = await settle(
                 "manager creates bounded child pages",
                 Promise.all(
                   Array.from({ length: PAGE_SIZE }, (_, index) =>
@@ -228,6 +236,9 @@ describe("BandBinder cross-topology recovery", () => {
                       .wait({ tier: "edge" }),
                   ),
                 ),
+              );
+              expectedChildPages.push(
+                ...childPages.map((childPage) => ({ id: childPage.id, title: childPage.title })),
               );
               await waitForQuery(
                 owner!,
@@ -431,11 +442,7 @@ describe("BandBinder cross-topology recovery", () => {
                     .orderBy("title", "asc")
                     .offset(1)
                     .limit(PAGE_SIZE),
-                  (rows) =>
-                    rows.length === PAGE_SIZE &&
-                    rows.every(
-                      (row, index) => row.title === `Child page ${String(index).padStart(2, "0")}`,
-                    ),
+                  isExpectedChildPageWindow,
                   "bounded child-page navigation follows its parent permission witness",
                   15_000,
                   "edge",
@@ -449,7 +456,7 @@ describe("BandBinder cross-topology recovery", () => {
                   blockId: nestedBlockId,
                 }),
                 (rows) => rows.length === 1,
-                "nested attachment bytes resolve through the block and workspace witnesses",
+                "nested attachment bytes propagate to another workspace member",
                 15_000,
                 "edge",
               );
@@ -477,7 +484,7 @@ describe("BandBinder cross-topology recovery", () => {
                     rows.every(
                       (row, index) => row.name === `asset-${String(index).padStart(2, "0")}.txt`,
                     ),
-                  "bounded attachment list follows its nested block permission witness",
+                  "bounded attachment list follows the workspace membership permission",
                   15_000,
                   "edge",
                 ),
@@ -586,16 +593,21 @@ describe("BandBinder cross-topology recovery", () => {
                 "local",
               );
               expect(persistedStagePlot?.bytes).toEqual(new TextEncoder().encode("channels 1-16"));
-              expect(
-                await manager!.all(
-                  app.pages
-                    .where({ workspaceId, parentPageId: pageId })
-                    .orderBy("title", "asc")
-                    .offset(1)
-                    .limit(PAGE_SIZE),
-                  { tier: "local" },
-                ),
-              ).toHaveLength(PAGE_SIZE);
+              const persistedChildPages = await waitForQuery(
+                manager!,
+                app.pages
+                  .where({ workspaceId, parentPageId: pageId })
+                  .orderBy("title", "asc")
+                  .offset(1)
+                  .limit(PAGE_SIZE),
+                isExpectedChildPageWindow,
+                "manager rehydrates the exact bounded child-page window after browser restart",
+                15_000,
+                "local",
+              );
+              expect(persistedChildPages.map(({ id, title }) => ({ id, title }))).toEqual(
+                expectedChildPages,
+              );
               await owner!.delete(app.members, managerMembershipId).wait({ tier: "edge" });
               const rejected = manager!.insert(app.pages, {
                 workspaceId,
@@ -624,6 +636,40 @@ describe("BandBinder cross-topology recovery", () => {
                 15_000,
                 "edge",
               );
+              await Promise.all([
+                waitForQuery(
+                  manager!,
+                  app.pages.where({ id: nestedPageId, workspaceId }),
+                  (rows) => rows.length === 0,
+                  "revocation removes the nested page from the manager read surface",
+                  15_000,
+                  "edge",
+                ),
+                waitForQuery(
+                  manager!,
+                  app.pages
+                    .where({ workspaceId, parentPageId: pageId })
+                    .orderBy("title", "asc")
+                    .offset(1)
+                    .limit(PAGE_SIZE),
+                  (rows) => rows.length === 0,
+                  "revocation removes the bounded child-page window from the manager read surface",
+                  15_000,
+                  "edge",
+                ),
+                waitForQuery(
+                  manager!,
+                  app.attachments.where({
+                    id: nestedAttachmentId,
+                    workspaceId,
+                    blockId: nestedBlockId,
+                  }),
+                  (rows) => rows.length === 0,
+                  "revocation removes the nested attachment from the manager read surface",
+                  15_000,
+                  "edge",
+                ),
+              ]);
             },
           },
         ],
