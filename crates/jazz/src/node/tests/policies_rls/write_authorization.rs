@@ -1478,6 +1478,8 @@ fn write_policy_branch_or_join_allows_either_literal_branch_or_membership_join()
     let (_invited_dir, mut invited_writer) = open_node_with_schema(node(1), schema.clone());
     let (_uninvited_dir, mut uninvited_writer) = open_node_with_schema(node(2), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    install_test_uuid_sub_claim(&mut core, invited);
+    install_test_uuid_sub_claim(&mut core, uninvited);
 
     let invite_tx = core
         .commit_mergeable_settled(MergeableCommit::new("canvasInvites", invite_row, 3).cells(
