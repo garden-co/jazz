@@ -3,6 +3,8 @@ import { createPolicyTestApp, type PolicyTestApp } from "jazz-tools/testing";
 import { app } from "../schema.js";
 import permissions from "../permissions.js";
 
+const BIG_LABEL_ISSUER = "https://auth.biglabel.example";
+
 let testApp: PolicyTestApp | undefined;
 afterEach(async () => await testApp?.shutdown());
 
@@ -10,10 +12,26 @@ describe("BigLabel deployed tenant authority", () => {
   it("admits only the server-bootstrap identity or an existing organization admin", async () => {
     testApp = await createPolicyTestApp(app, permissions, expect);
     const seeded = await seed(testApp);
-    const admin = testApp.as({ user_id: "admin", claims: {}, authMode: "local-first" });
-    const member = testApp.as({ user_id: "member", claims: {}, authMode: "local-first" });
-    const outsider = testApp.as({ user_id: "outsider", claims: {}, authMode: "local-first" });
+    const admin = testApp.as({
+      issuer: BIG_LABEL_ISSUER,
+      user_id: "admin",
+      claims: {},
+      authMode: "external",
+    });
+    const member = testApp.as({
+      issuer: BIG_LABEL_ISSUER,
+      user_id: "member",
+      claims: {},
+      authMode: "external",
+    });
+    const outsider = testApp.as({
+      issuer: BIG_LABEL_ISSUER,
+      user_id: "outsider",
+      claims: {},
+      authMode: "external",
+    });
     const bootstrap = testApp.as({
+      issuer: BIG_LABEL_ISSUER,
       user_id: "bootstrap",
       claims: { biglabel_admin: true },
       authMode: "external",

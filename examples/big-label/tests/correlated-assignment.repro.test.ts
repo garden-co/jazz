@@ -47,7 +47,12 @@ describe("CB-012 correlated assignment policy", () => {
     const membership = await testApp.seed((db) =>
       db.insert(app.memberships, { organizationId: foreign.id, userId: "foreign" }),
     );
-    const user = testApp.as({ user_id: "user", claims: {}, authMode: "external" });
+    const user = testApp.as({
+      issuer: "https://auth.biglabel.example",
+      user_id: "user",
+      claims: {},
+      authMode: "external",
+    });
     await user.expectDenied((db) =>
       db.insert(app.assignments, {
         organizationId: owned.id,
