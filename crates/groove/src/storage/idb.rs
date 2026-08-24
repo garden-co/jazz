@@ -1,9 +1,10 @@
 //! Async IDBTree adapter for Groove's ordered storage contract.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+use futures::lock::Mutex;
 use idb_tree::{IdbTree, Options, PageStore, WriteOperation};
 
 use super::{
@@ -16,6 +17,7 @@ use super::{
 pub struct IdbStorage<S> {
     tree: IdbTree<S>,
     column_families: Rc<RefCell<BTreeSet<String>>>,
+    mutation_gate: Rc<Mutex<()>>,
 }
 
 impl<S> IdbStorage<S>
@@ -28,6 +30,7 @@ where
             column_families: Rc::new(RefCell::new(
                 column_families.iter().map(|cf| (*cf).to_owned()).collect(),
             )),
+            mutation_gate: Rc::new(Mutex::new(())),
         })
     }
 
@@ -85,6 +88,7 @@ where
     ) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
             let key = self.encoded_key(&cf, &key)?;
+            let _guard = self.mutation_gate.lock().await;
             self.tree.put(key, value).await?;
             self.tree.flush().await?;
             Ok(())
@@ -94,6 +98,7 @@ where
     fn delete(&self, cf: String, key: Vec<u8>) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
             let key = self.encoded_key(&cf, &key)?;
+            let _guard = self.mutation_gate.lock().await;
             self.tree.delete(&key).await?;
             self.tree.flush().await?;
             Ok(())
@@ -102,6 +107,7 @@ where
 
     fn close(&self) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
+            let _guard = self.mutation_gate.lock().await;
             self.tree.flush().await?;
             Ok(())
         })
@@ -109,6 +115,7 @@ where
 
     fn flush_write_boundary(&self) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
+            let _guard = self.mutation_gate.lock().await;
             self.tree.flush().await?;
             Ok(())
         })
@@ -193,25 +200,39 @@ where
     ) -> StorageFuture<'_, Result<(), Error>> {
         Box::pin(async move {
             self.prevalidate_write_many(&operations)?;
-            let mut writes = Vec::with_capacity(operations.len());
+            let _guard = self.mutation_gate.lock().await;
+            // Resolve each key's prospective value before changing the tree so
+            // deltas observe earlier operations in this ordered batch.
+            let mut planned = BTreeMap::<Vec<u8>, Option<Vec<u8>>>::new();
             for operation in operations {
-                writes.push(match operation {
-                    OwnedWriteOperation::Set { cf, key, value } => WriteOperation::Set {
-                        key: self.encoded_key(&cf, &key)?,
-                        value,
-                    },
-                    OwnedWriteOperation::Delete { cf, key } => WriteOperation::Delete {
-                        key: self.encoded_key(&cf, &key)?,
-                    },
+                match operation {
+                    OwnedWriteOperation::Set { cf, key, value } => {
+                        planned.insert(self.encoded_key(&cf, &key)?, Some(value));
+                    }
+                    OwnedWriteOperation::Delete { cf, key } => {
+                        planned.insert(self.encoded_key(&cf, &key)?, None);
+                    }
                     OwnedWriteOperation::Delta { cf, key, delta } => {
                         let key = self.encoded_key(&cf, &key)?;
-                        let existing = self.tree.get(&key).await?;
                         let encoded = delta.encode()?;
-                        let value = apply_storage_delta(existing.as_deref(), &encoded)?;
-                        WriteOperation::Set { key, value }
+                        let value = match planned.get(&key) {
+                            Some(existing) => apply_storage_delta(existing.as_deref(), &encoded)?,
+                            None => {
+                                let existing = self.tree.get(&key).await?;
+                                apply_storage_delta(existing.as_deref(), &encoded)?
+                            }
+                        };
+                        planned.insert(key, Some(value));
                     }
-                });
+                }
             }
+            let writes = planned
+                .into_iter()
+                .map(|(key, value)| match value {
+                    Some(value) => WriteOperation::Set { key, value },
+                    None => WriteOperation::Delete { key },
+                })
+                .collect();
             self.tree.write_many(writes).await?;
             self.tree.flush().await?;
             Ok(())
@@ -392,10 +413,7 @@ mod tests {
             let reopened = IdbStorage::open(page_store, &["records"]).await.unwrap();
             let key = b"same-key".to_vec();
             assert_eq!(
-                reopened
-                    .get("records".into(), key.clone())
-                    .await
-                    .unwrap(),
+                reopened.get("records".into(), key.clone()).await.unwrap(),
                 memory.get("records".into(), key).await.unwrap(),
             );
         });
