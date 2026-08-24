@@ -6,6 +6,19 @@
       "topology": ["fixture"],
       "cwd": ".",
       "argv": ["pnpm", "--filter", "jazz-tools", "test:topology-fixture"]
+    },
+    {
+      "id": "band-chat.topology.room-recovery",
+      "topology": ["browser", "edge", "core"],
+      "cwd": ".",
+      "argv": [
+        "pnpm",
+        "--dir",
+        "examples/band-chat/apps/nextjs-betterauth",
+        "test:browser",
+        "--",
+        "topology.e2e.test.tsx"
+      ]
     }
   ]
 }
