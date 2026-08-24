@@ -151,6 +151,45 @@ A pending upload's chunk journal or accounting cannot be reused to finalize a
 different descriptor. A failed/rejected mutation publishes neither the row
 version nor root reachability.
 
+### Resident direct-value publication
+
+The ordinary synchronous `insert`/`insert_with_id` surface has the same local
+lane contract for an oversized complete primitive as for an inline value: once
+it returns its `WriteHandle`, the pending row is immediately visible to local
+reads, uniqueness checks, same-turn update/delete/restore calls, and local
+subscriptions. The handle, rather than an artificial async constructor, is
+the observation point for the later durable outcome. This is not an exception
+to `INV-CONTENT-4`: the transient descriptor and its chunks belong to one
+unpublished _resident publication_, not to Jazz history or to another reader.
+
+Groove may therefore construct direct host input in its bounded resident chunk
+store, apply the normal physical-record/IVM delta, and start the durable
+pipeline afterwards. The pipeline is strictly ordered:
+
+```text
+resident row + resident chunks (local lane only)
+  -> durable timestamped upload intent
+  -> immutable blob/node installation
+  -> durable staged receipt
+  -> one metadata write: consume receipt + install root references + row
+  -> durable promotion, or exact resident retraction on any failure
+```
+
+Before the final metadata write, a restart sees at most an ordinary expiring
+upload intent, never a durable row reference. On an error before promotion,
+Groove retracts that exact still-pending publication through the normal inverse
+IVM delta, drops its resident overlay and chunks, discards deferred
+notifications, and reports the same transaction rejected. A later resident
+publication remains usable only when its own ordering and dependencies still
+hold; a failure is not allowed to leave a phantom row, index entry, uniqueness
+claim, or subscription delta. Once durable promotion starts, the existing
+ordered-persistence failure rules apply; the database poisons only if it can no
+longer prove that resident state was restored.
+
+This lifecycle is an internal Groove publication primitive, shared by any
+future asynchronous storage preparation. It is not a TypeScript overlay, a
+second evaluator, or a new asynchronous form of the ordinary mutation API.
+
 Groove persists timestamped retainer claims keyed by the completed descriptor.
 After ordinary Jazz write authorization, the same Groove physical-record batch
 that inserts the owner version consumes any live matching claim and installs a
