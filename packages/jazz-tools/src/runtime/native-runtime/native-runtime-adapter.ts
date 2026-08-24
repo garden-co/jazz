@@ -3194,15 +3194,29 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
       typeof parsed.attribution === "string"
         ? parsePublicCanonicalAuthor(parsed.attribution)
         : null;
-    const userId =
-      attributedAuthor?.user_id ??
-      (typeof parsed.user_id === "string"
-        ? parsed.user_id
-        : typeof parsed.session?.user_id === "string"
-          ? parsed.session.user_id
-          : undefined);
+    const trustedSystemSession =
+      parsed.session?.issuer === "urn:jazz:system" &&
+      parsed.session?.user_id === SYSTEM_AUTHOR_ID &&
+      isTrustedReservedSession(
+        {
+          issuer: parsed.session.issuer,
+          user_id: parsed.session.user_id,
+          authMode: parsed.session.authMode as Session["authMode"],
+        },
+        parsed.session?.[TRUSTED_RESERVED_SESSION_TOKEN_FIELD],
+      );
+    const userId = trustedSystemSession
+      ? SYSTEM_AUTHOR_ID
+      : (attributedAuthor?.user_id ??
+        (typeof parsed.user_id === "string"
+          ? parsed.user_id
+          : typeof parsed.session?.user_id === "string"
+            ? parsed.session.user_id
+            : undefined));
     if (!userId || !isUsableSubject(userId)) return null;
-    const issuer = attributedAuthor?.issuer ?? parsed.session?.issuer ?? parsed.issuer;
+    const issuer = trustedSystemSession
+      ? "urn:jazz:system"
+      : (attributedAuthor?.issuer ?? parsed.session?.issuer ?? parsed.issuer);
     if (typeof issuer !== "string" || !isUsableSubject(issuer)) {
       throw new Error("session is missing issuer");
     }
