@@ -362,6 +362,29 @@ where
         Ok(())
     }
 
+    /// Resolve physical indirect scalars in ordinary row output immediately
+    /// before a language binding encodes it.
+    #[doc(hidden)]
+    pub async fn hydrate_rows_for_binding(&self, rows: &mut [CurrentRow]) -> Result<(), Error> {
+        self.node
+            .node
+            .lock()
+            .await
+            .hydrate_current_rows(rows)
+            .await?;
+        Ok(())
+    }
+
+    /// Resolve physical indirect scalars in a relation snapshot immediately
+    /// before a language binding encodes it.
+    #[doc(hidden)]
+    pub async fn hydrate_relation_snapshot_for_binding(
+        &self,
+        snapshot: &mut RelationSnapshot,
+    ) -> Result<(), Error> {
+        self.hydrate_rows_for_binding(&mut snapshot.rows).await
+    }
+
     /// Tier-gated one-shot relation read evaluated as the database identity.
     pub async fn all_relation_snapshot(
         &self,

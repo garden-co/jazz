@@ -1582,12 +1582,21 @@ impl NapiDb {
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let snapshot = match db {
+        let mut snapshot = match db {
             NapiDbInnerStorage::Memory(db) => {
                 core_block_on(db.all_relation_snapshot(&query.inner, opts))
             }
             NapiDbInnerStorage::Persistent(db) => {
                 core_block_on(db.all_relation_snapshot(&query.inner, opts))
+            }
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => {
+                core_block_on(db.hydrate_relation_snapshot_for_binding(&mut snapshot))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.hydrate_relation_snapshot_for_binding(&mut snapshot))
             }
         }
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;
@@ -1612,12 +1621,21 @@ impl NapiDb {
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let snapshot = match db {
+        let mut snapshot = match db {
             NapiDbInnerStorage::Memory(db) => {
                 core_block_on(db.all_relation_snapshot_for_identity(&query.inner, opts, author))
             }
             NapiDbInnerStorage::Persistent(db) => {
                 core_block_on(db.all_relation_snapshot_for_identity(&query.inner, opts, author))
+            }
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        match db {
+            NapiDbInnerStorage::Memory(db) => {
+                core_block_on(db.hydrate_relation_snapshot_for_binding(&mut snapshot))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                core_block_on(db.hydrate_relation_snapshot_for_binding(&mut snapshot))
             }
         }
         .map_err(|error| napi::Error::from_reason(error.to_string()))?;

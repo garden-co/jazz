@@ -297,6 +297,33 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
         "the subscription binding boundary must materialize the indirect text scalar"
     );
 
+    let mut snapshot = RelationSnapshot {
+        root_count: 1,
+        rows: vec![added[0].row.clone()],
+        edges: Vec::new(),
+    };
+    let (descriptor, record) = snapshot.rows[0].encoded_record();
+    let descriptor = descriptor.clone();
+    let mut values = descriptor.bind(record).to_values().unwrap();
+    values[title_index] = match &values[title_index] {
+        Value::Nullable(_) => Value::Nullable(Some(Box::new(Value::Large(edited_ref.clone())))),
+        _ => Value::Large(edited_ref.clone()),
+    };
+    snapshot.rows[0] = CurrentRow::new(
+        "todos",
+        OwnedRecord::new(descriptor.create(&values).unwrap(), descriptor),
+    );
+    assert!(matches!(
+        snapshot.rows[0].cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::Large(_))
+    ));
+    block_on(db.hydrate_relation_snapshot_for_binding(&mut snapshot)).unwrap();
+    assert_eq!(
+        snapshot.rows[0].cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String(title.clone())),
+        "relation snapshots must not encode physical indirect scalars for bindings"
+    );
+
     let json = format!(
         "{{\"padding\":\"{}\",\"selected\":{{\"answer\":42}}}}",
         "p".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES)
