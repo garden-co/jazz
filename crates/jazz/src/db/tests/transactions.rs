@@ -69,6 +69,31 @@ fn exclusive_transactions_lower_oversized_scalars_before_publication() {
     });
     assert_eq!(physical, after_update, "unchanged locators must be stable");
 
+    let upsert = db.exclusive_tx().unwrap();
+    upsert
+        .upsert(
+            "todos",
+            row,
+            BTreeMap::from([("done".to_owned(), Value::Bool(false))]),
+            Default::default(),
+        )
+        .unwrap();
+    upsert.commit().unwrap();
+    let after_upsert = block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .current_physical_cell_in_schema(db.schema_version_id, "todos", row, "title")
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    assert_eq!(
+        physical, after_upsert,
+        "upserting unrelated cells must preserve unchanged locators"
+    );
+
     let mergeable = db.mergeable_tx().unwrap();
     assert_eq!(
         mergeable.read("todos", row).unwrap().unwrap().get("title"),

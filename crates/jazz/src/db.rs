@@ -2749,10 +2749,8 @@ where
     ) -> Result<(), Error> {
         ensure_transaction_identity(options.identity)?;
         ensure_exclusive_target(&options.target)?;
-        let mut merged = self.read(table, row).await?.unwrap_or_default();
-        merged.extend(cells);
         self.db()
-            .stage_exclusive_insert(self.tx_id(), table, row, merged, options.updated_at_ms)
+            .stage_exclusive_upsert(self.tx_id(), table, row, cells, options.updated_at_ms)
             .await
     }
 
