@@ -55,6 +55,10 @@ describe("shared example topology harness", () => {
     expect(receipt.activities.map(({ action }) => action)).toContain("dropped");
     expect(receipt.activities.map(({ action }) => action)).toContain("retried");
     expect(receipt.activities.map(({ action }) => action)).toContain("partitioned");
+    const retry = receipt.activities.find(({ action }) => action === "retried");
+    const dropped = receipt.activities.find(({ action }) => action === "dropped");
+    expect(retry?.envelopeId).toBe(dropped?.envelopeId);
+    expect(retry?.sequence).toBe(dropped?.sequence);
   });
 
   it("closes held envelopes after scenario cleanup, proving faults cannot leak between cases", async () => {
@@ -79,6 +83,182 @@ describe("shared example topology harness", () => {
     await expect(
       scheduler.intercept({ from: "a", to: "b" }, "late", () => undefined),
     ).rejects.toThrow("scheduler is closed");
+  });
+
+  it("waits for an in-flight delivery to finish before the scenario returns", async () => {
+    const scheduler = new TopologyEnvelopeScheduler(19);
+    let deliveryFinished = false;
+    void scheduler.intercept(
+      { from: "a", to: "b", label: "in-flight" },
+      "in-flight",
+      (_, { signal }) =>
+        new Promise<void>((resolve) => {
+          signal.addEventListener(
+            "abort",
+            () => {
+              deliveryFinished = true;
+              resolve();
+            },
+            { once: true },
+          );
+        }),
+    );
+    await Promise.resolve();
+
+    const receipt = await runTopologyScenario({
+      id: "harness.fixture.in-flight-cleanup",
+      topology: ["fixture"],
+      seed: 19,
+      phaseTimeoutMs: 50,
+      faultTimeoutMs: 50,
+      targets: {},
+      replay: "in-flight-cleanup-fixture",
+      envelopeSchedulers: [scheduler],
+      phases: [],
+    });
+    expect(deliveryFinished).toBe(true);
+    expect(receipt.envelopes[0]).toMatchObject({ closed: true, pending: 0, inFlight: 0 });
+    expect(receipt.envelopes[0]?.cleanup?.status).toBe("completed");
+  });
+
+  it("records a rejected delivery without retaining it for cleanup", async () => {
+    const scheduler = new TopologyEnvelopeScheduler(23);
+    await expect(
+      scheduler.intercept({ from: "a", to: "b", label: "reject" }, "reject", () =>
+        Promise.reject(new Error("planted delivery rejection")),
+      ),
+    ).rejects.toThrow("planted delivery rejection");
+    await scheduler.close(20);
+    const receipt = scheduler.receipt();
+    expect(receipt).toMatchObject({ closed: true, pending: 0, inFlight: 0 });
+    expect(receipt.activities.find(({ action }) => action === "deliveryFailed")?.error).toContain(
+      "planted delivery rejection",
+    );
+  });
+
+  it("bounds a delivery that ignores cancellation and retains an explicit timeout receipt", async () => {
+    const scheduler = new TopologyEnvelopeScheduler(31);
+    let release!: () => void;
+    const delivery = scheduler.intercept(
+      { from: "a", to: "b", label: "ignores-abort" },
+      "ignores-abort",
+      () => new Promise<void>((resolve) => (release = resolve)),
+    );
+    await Promise.resolve();
+    let failure: unknown;
+    try {
+      await runTopologyScenario({
+        id: "harness.fixture.in-flight-timeout",
+        topology: ["fixture"],
+        seed: 31,
+        phaseTimeoutMs: 50,
+        faultTimeoutMs: 5,
+        targets: {},
+        replay: "in-flight-timeout-fixture",
+        envelopeSchedulers: [scheduler],
+        phases: [],
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(TopologyScenarioError);
+    const receipt = (failure as TopologyScenarioError).receipt.envelopes[0];
+    expect(receipt).toMatchObject({ closed: true, inFlight: 1, cleanup: { status: "failed" } });
+    expect(receipt?.activities.at(-1)?.action).toBe("closeTimedOut");
+    release();
+    await delivery;
+  });
+
+  it("serializes concurrent intercepts and permits a delivery to enqueue a follow-up", async () => {
+    const scheduler = new TopologyEnvelopeScheduler(37);
+    let releaseFirst!: () => void;
+    const delivered: string[] = [];
+    const first = scheduler.intercept(
+      { from: "a", to: "b", label: "first" },
+      "first",
+      () =>
+        new Promise<void>((resolve) => {
+          releaseFirst = () => {
+            delivered.push("first");
+            resolve();
+          };
+        }),
+    );
+    await Promise.resolve();
+    const second = scheduler.intercept(
+      { from: "a", to: "b", label: "second" },
+      "second",
+      () => void delivered.push("second"),
+    );
+    expect(delivered).toEqual([]);
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(delivered).toEqual(["first", "second"]);
+
+    await scheduler.intercept({ from: "a", to: "b", label: "parent" }, "parent", async () => {
+      await scheduler.intercept(
+        { from: "a", to: "b", label: "child" },
+        "child",
+        () => void delivered.push("child"),
+      );
+      delivered.push("parent");
+    });
+    expect(delivered).toEqual(["first", "second", "parent", "child"]);
+    expect(
+      scheduler
+        .receipt()
+        .activities.filter(({ action }) => action === "delivered")
+        .map(({ label }) => label),
+    ).toEqual(["first", "second", "parent", "child"]);
+  });
+
+  it("snapshots bounded descriptors and rejects receipt-field or payload injection", async () => {
+    const scheduler = new TopologyEnvelopeScheduler(41);
+    const envelope = { from: "a", to: "b", label: "before" };
+    scheduler.delayNext();
+    await scheduler.intercept(envelope, "value", () => undefined);
+    envelope.label = "after";
+    await scheduler.advance();
+    expect(
+      scheduler
+        .receipt()
+        .activities.filter(({ action }) => action === "delivered")
+        .map(({ label }) => label),
+    ).toEqual(["before"]);
+    await expect(
+      scheduler.intercept(
+        {
+          from: "a",
+          to: "b",
+          label: "safe",
+          action: "delivered",
+          payload: "not-a-receipt",
+        } as never,
+        "value",
+        () => undefined,
+      ),
+    ).rejects.toThrow("unsupported metadata");
+    await expect(
+      scheduler.intercept({ from: "a", to: "b", label: "x".repeat(257) }, "value", () => undefined),
+    ).rejects.toThrow("at most 256");
+    scheduler.delayNext();
+    expect(() => scheduler.reorderNext()).toThrow("only one envelope fault kind");
+  });
+
+  it("fail-stops after a callback failure and discards remaining duplicate deliveries", async () => {
+    const scheduler = new TopologyEnvelopeScheduler(43);
+    scheduler.duplicateNext(2);
+    await expect(
+      scheduler.intercept({ from: "a", to: "b", label: "fail" }, "value", () => {
+        throw new Error("planted terminal delivery failure");
+      }),
+    ).rejects.toThrow("planted terminal delivery failure");
+    const receipt = scheduler.receipt();
+    expect(receipt.activities.filter(({ action }) => action === "deliveryFailed")).toHaveLength(1);
+    expect(receipt.activities.filter(({ action }) => action === "discarded")).toHaveLength(2);
+    await expect(
+      scheduler.intercept({ from: "a", to: "b" }, "later", () => undefined),
+    ).rejects.toThrow("scheduler is failed");
   });
 
   it("runs deterministic phases and every fault callback with a replayable receipt", async () => {
