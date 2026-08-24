@@ -1,23 +1,36 @@
 import { describe, expect, it } from "vitest";
-import { WIRE_PROTOCOL_VERSION } from "./native-runtime/websocket.js";
-import { assertNativeArtifactProtocol } from "./native-artifact-compatibility.js";
+import { EXPECTED_NATIVE_ARTIFACT_FINGERPRINTS } from "./native-artifact-fingerprints.js";
+import { assertNativeArtifactCompatibility } from "./native-artifact-compatibility.js";
 
-describe("native artifact protocol compatibility", () => {
-  it("accepts the current generated artifact marker", () => {
+describe("native artifact ABI compatibility", () => {
+  it("accepts the current generated artifact fingerprint", () => {
     expect(() =>
-      assertNativeArtifactProtocol(
-        { nativeArtifactProtocolVersion: () => WIRE_PROTOCOL_VERSION },
+      assertNativeArtifactCompatibility(
+        { nativeArtifactFingerprint: () => EXPECTED_NATIVE_ARTIFACT_FINGERPRINTS.wasm },
         "WASM",
       ),
     ).not.toThrow();
   });
 
   it("rejects a stale generated artifact before runtime startup", () => {
-    expect(() => assertNativeArtifactProtocol({}, "NAPI")).toThrow(
-      "missing the native protocol marker",
+    expect(() => assertNativeArtifactCompatibility({}, "NAPI")).toThrow(
+      "missing nativeArtifactFingerprint",
     );
     expect(() =>
-      assertNativeArtifactProtocol({ nativeArtifactProtocolVersion: () => 11 }, "WASM"),
-    ).toThrow(`expected ${WIRE_PROTOCOL_VERSION}, got 11`);
+      assertNativeArtifactCompatibility(
+        { nativeArtifactFingerprint: () => "old-artifact" },
+        "WASM",
+      ),
+    ).toThrow(`expected ${EXPECTED_NATIVE_ARTIFACT_FINGERPRINTS.wasm}, got old-artifact`);
+  });
+
+  it("rejects a same-fingerprint partial artifact", () => {
+    expect(() =>
+      assertNativeArtifactCompatibility(
+        { nativeArtifactFingerprint: () => EXPECTED_NATIVE_ARTIFACT_FINGERPRINTS.wasm },
+        "WASM",
+        ["WasmDb"],
+      ),
+    ).toThrow("missing WasmDb");
   });
 });

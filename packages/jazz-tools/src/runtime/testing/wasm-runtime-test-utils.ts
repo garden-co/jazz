@@ -6,7 +6,7 @@ import type { Runtime } from "../client.js";
 import type { WasmSchema } from "../../drivers/types.js";
 import { onTestFinished } from "vitest";
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
-import { assertNativeArtifactProtocol } from "../native-artifact-compatibility.js";
+import { assertNativeArtifactCompatibility } from "../native-artifact-compatibility.js";
 
 export type TestRuntime = Runtime & {
   free?(): void;
@@ -88,7 +88,7 @@ function loadWasmModule(): Promise<any> {
 
       const wasmModule: any = await import(pathToFileURL(paths.modulePath).href);
       wasmModule.initSync({ module: readFileSync(paths.wasmPath) });
-      assertNativeArtifactProtocol(wasmModule, "WASM");
+      assertNativeArtifactCompatibility(wasmModule, "WASM", ["initSync", "WasmDb"]);
       return wasmModule;
     })();
   }
