@@ -1,6 +1,3 @@
-// A descriptor-only start performs durable work despite carrying no chunk
-// bytes. Charge one MiB of the existing ingress budget to bound that work rate.
-const LARGE_VALUE_UPLOAD_START_INGRESS_CHARGE_BYTES: u64 = 1 << 20;
 // Global restart-persistent metadata ceiling across every connected peer.
 const MAX_PENDING_LARGE_VALUE_UPLOADS: usize = 1024;
 
@@ -85,7 +82,7 @@ where
             match message {
                 SyncMessage::ChunkUploadStart(start) => {
                     if !self.admit_large_value_ingress(
-                        LARGE_VALUE_UPLOAD_START_INGRESS_CHARGE_BYTES,
+                        super::LARGE_VALUE_UPLOAD_START_INGRESS_CHARGE_BYTES,
                     ) {
                         return Ok(PublicationOutcome::settled(vec![
                             SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {

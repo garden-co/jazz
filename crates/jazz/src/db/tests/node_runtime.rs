@@ -192,7 +192,8 @@ fn rate_limited_push_waits_then_retries_the_exact_batch_without_rejecting_the_wr
     core.node()
         .borrow_mut()
         .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
-            incoming_bytes_per_window: 1,
+            incoming_bytes_per_window: crate::node::LARGE_VALUE_UPLOAD_START_INGRESS_CHARGE_BYTES
+                + 1,
             window_ms: 60_000,
             max_age_ms: 10 * 60 * 1_000,
         });
@@ -336,7 +337,8 @@ fn unauthenticated_reconnect_restarts_after_deadline_and_does_not_prevent_ttl_cl
     core.node()
         .borrow_mut()
         .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
-            incoming_bytes_per_window: 1,
+            incoming_bytes_per_window: crate::node::LARGE_VALUE_UPLOAD_START_INGRESS_CHARGE_BYTES
+                + 1,
             window_ms: 60_000,
             max_age_ms: 10 * 60 * 1_000,
         });
@@ -451,7 +453,8 @@ fn assert_different_authenticated_destination_restarts_upload(
     core.node()
         .borrow_mut()
         .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
-            incoming_bytes_per_window: 1,
+            incoming_bytes_per_window: crate::node::LARGE_VALUE_UPLOAD_START_INGRESS_CHARGE_BYTES
+                + 1,
             window_ms: 60_000,
             max_age_ms: 10 * 60 * 1_000,
         });
