@@ -93,7 +93,7 @@ fn point_read_authorization_keeps_using_physical_row_uuid_with_declared_id() {
     let (_core_dir, mut core) = open_node_with_schema(node(0xa9), schema);
     core.set_session_claims(
         alice,
-        BTreeMap::from([("user_id".to_owned(), Value::Uuid(alice.test_uuid()))]),
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(alice.test_uuid()))]),
     );
     let physical_row = row(0xc1);
     let declared_id = row(0xd1);
