@@ -330,6 +330,7 @@ fn current_source_select_projection_and_default_ordered_slice_lower() {
                 public_terminal: true,
                 projection: PayloadProjection::Tree(AppProjectionTree {
                     fields: FieldProjection::Fields(BTreeSet::from(["title".to_owned()])),
+                    demands: BTreeMap::new(),
                     paths: Vec::new(),
                 }),
             }),

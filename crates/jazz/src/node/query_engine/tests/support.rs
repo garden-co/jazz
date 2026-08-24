@@ -808,6 +808,7 @@ pub(super) fn collector_path_projection(children: Vec<AppPathProjection>) -> App
     let child_source = source("todo_tags", SourceRole::CorrelatedChild("tags".to_owned()));
     AppProjectionTree {
         fields: FieldProjection::All,
+        demands: BTreeMap::new(),
         paths: vec![app_path_projection(
             parent_source,
             child_source,

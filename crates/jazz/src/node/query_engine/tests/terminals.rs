@@ -370,6 +370,7 @@ fn collector_tree_keeps_sibling_slots_distinct_and_nests_grandchildren_by_path()
         .expect("app rows")
         .projection = PayloadProjection::Tree(AppProjectionTree {
         fields: FieldProjection::All,
+        demands: BTreeMap::new(),
         paths: vec![
             app_path_projection(
                 parent.clone(),

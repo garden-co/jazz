@@ -174,6 +174,7 @@ pub(super) fn lowered_terminals(
                         closure.visible_root.clone(),
                         &AppProjectionTree {
                             fields: FieldProjection::All,
+                            demands: BTreeMap::new(),
                             paths: Vec::new(),
                         },
                         plan,

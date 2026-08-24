@@ -124,7 +124,21 @@ fn app_row_payload_projection(
             FieldProjection::Fields(fields)
         })
         .unwrap_or(FieldProjection::All);
-    PayloadProjection::Tree(AppProjectionTree { fields, paths })
+    let demands = query
+        .select
+        .as_ref()
+        .map(|select| {
+            select
+                .iter()
+                .map(|projection| (projection.column().to_owned(), projection.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    PayloadProjection::Tree(AppProjectionTree {
+        fields,
+        demands,
+        paths,
+    })
 }
 
 fn app_row_path_projections(

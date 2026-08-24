@@ -34,6 +34,10 @@ pub(crate) enum PayloadProjection {
 pub(crate) struct AppProjectionTree {
     /// Root public field projection.
     pub(crate) fields: FieldProjection,
+    /// Per-field large-value demand.  Absent entries retain ordinary full
+    /// materialization semantics; this lets old terminals coexist while the
+    /// evaluator lowers demand-aware chunk reads.
+    pub(crate) demands: BTreeMap<String, crate::query::SelectProjection>,
     /// Nested path/relation projections.
     pub(crate) paths: Vec<AppPathProjection>,
 }

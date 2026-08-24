@@ -46,6 +46,20 @@ pub enum LargeValueKind {
     Json,
 }
 
+/// The exact logical subset an evaluator needs from an indirect scalar.
+///
+/// This deliberately lives beside the chunk reader so a terminal can suspend
+/// only on intersecting authenticated nodes instead of hydrating a whole
+/// value before projecting it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LargeValueDemand {
+    Full,
+    Bytes(std::ops::Range<u64>),
+    TextUtf16(std::ops::Range<u64>),
+    TextUtf8(std::ops::Range<u64>),
+    JsonPointer(String),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeRef {
     pub object_hash: ContentHash,
@@ -2603,6 +2617,40 @@ pub(crate) fn byte_range_attempt(
         return Err(IvmRuntimeError::EvaluationBlocked);
     }
     Ok(outputs.into_iter().flatten().collect())
+}
+
+/// Materialize precisely the logical subset requested by a terminal.
+///
+/// UTF-8 range requests use byte coordinates but validate that both endpoints
+/// are code-point boundaries. JSON pointers currently require a complete JSON
+/// document when the pointer cannot be proven from a prefix; keeping that
+/// fallback here preserves the evaluator's suspension protocol.
+#[allow(dead_code)] // Wired by demand-carrying terminals during the next runtime layer.
+pub(crate) fn materialize_demand_attempt(
+    value: &LargeValueRef,
+    demand: &LargeValueDemand,
+    inputs: &mut EvaluationInputs,
+) -> Result<Vec<u8>, IvmRuntimeError> {
+    match demand {
+        LargeValueDemand::Full => materialize_attempt(value, inputs),
+        LargeValueDemand::Bytes(range) => byte_range_attempt(value, range.clone(), inputs),
+        LargeValueDemand::TextUtf16(range) => utf16_range_attempt(value, range.clone(), inputs),
+        LargeValueDemand::TextUtf8(range) => {
+            let bytes = byte_range_attempt(value, range.clone(), inputs)?;
+            std::str::from_utf8(&bytes).map_err(|_| Error::InvalidUtf8)?;
+            Ok(bytes)
+        }
+        LargeValueDemand::JsonPointer(pointer) => {
+            let bytes = materialize_attempt(value, inputs)?;
+            let json: serde_json::Value =
+                serde_json::from_slice(&bytes).map_err(|_| Error::InvalidJson)?;
+            let selected = json
+                .pointer(pointer)
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            serde_json::to_vec(&selected).map_err(|_| Error::InvalidJson.into())
+        }
+    }
 }
 
 /// Count UTF-16 units in a byte-coordinate range without hydrating complete

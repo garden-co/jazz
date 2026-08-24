@@ -86,6 +86,7 @@ fn closure_requirements_merge_sparse_root_and_every_alias_hop_key() {
     output.app_rows.as_mut().expect("app rows").projection =
         PayloadProjection::Tree(AppProjectionTree {
             fields: FieldProjection::Fields(BTreeSet::from(["title".to_owned()])),
+            demands: BTreeMap::new(),
             paths: Vec::new(),
         });
     let request = QueryProgramRequest {
