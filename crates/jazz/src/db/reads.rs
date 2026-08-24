@@ -302,13 +302,15 @@ where
                     .await
                 }
             }?;
-            return Ok(snapshot
+            let mut rows = snapshot
                 .rows
                 .into_iter()
                 .take(snapshot.root_count)
-                .collect());
+                .collect::<Vec<_>>();
+            node.hydrate_current_rows(&mut rows).await?;
+            return Ok(rows);
         }
-        match (opts.include_deleted, authorization_mode) {
+        let mut rows = match (opts.include_deleted, authorization_mode) {
             (true, mode) => {
                 node.query_rows_including_deleted_in_authorization_mode(
                     &prepared.shape,
@@ -337,7 +339,27 @@ where
                     .await
             }
         }
-        .map_err(Into::into)
+        .map_err(Error::from)?;
+        node.hydrate_current_rows(&mut rows).await?;
+        Ok(rows)
+    }
+
+    /// Resolve physical indirect scalars before a subscription event crosses
+    /// a language binding boundary.
+    #[doc(hidden)]
+    pub async fn hydrate_subscription_event_for_binding(
+        &self,
+        event: &mut SubscriptionEvent,
+    ) -> Result<(), Error> {
+        let SubscriptionEvent::Delta { added, updated, .. } = event else {
+            return Ok(());
+        };
+        let node = self.node.node.lock().await;
+        for output in added.iter_mut().chain(updated.iter_mut()) {
+            node.hydrate_current_rows(std::slice::from_mut(&mut output.row))
+                .await?;
+        }
+        Ok(())
     }
 
     /// Tier-gated one-shot relation read evaluated as the database identity.

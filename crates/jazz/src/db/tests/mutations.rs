@@ -242,7 +242,59 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
         .unwrap();
     assert_eq!(
         rows[0].cell(&doctest_support::schema().tables[0], "title"),
-        Some(Value::String(title))
+        Some(Value::String(title.clone()))
+    );
+
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let rows = block_on(db.all(&prepared, ReadOpts::default())).unwrap();
+    assert_eq!(
+        rows[0].cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String(title.clone())),
+        "the async public read boundary must materialize the indirect text scalar"
+    );
+
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let mut event = block_on(subscription.next_raw()).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = &mut event else {
+        panic!("expected opening subscription delta");
+    };
+    let (descriptor, record) = added[0].row.encoded_record();
+    let descriptor = descriptor.clone();
+    let mut values = descriptor.bind(record).to_values().unwrap();
+    let title_index = values
+        .iter()
+        .position(|value| {
+            matches!(value, Value::String(value) if value == &title)
+                || matches!(value, Value::Nullable(Some(value)) if matches!(value.as_ref(), Value::String(value) if value == &title))
+        })
+        .expect("opening row contains the logical title");
+    values[title_index] = match &values[title_index] {
+        Value::Nullable(_) => Value::Nullable(Some(Box::new(Value::Large(edited_ref.clone())))),
+        _ => Value::Large(edited_ref.clone()),
+    };
+    added[0].row = CurrentRow::new(
+        "todos",
+        OwnedRecord::new(descriptor.create(&values).unwrap(), descriptor),
+    );
+    assert!(
+        matches!(
+            added[0]
+                .row
+                .cell(&doctest_support::schema().tables[0], "title"),
+            Some(Value::Large(_))
+        ),
+        "planted positive: the maintained event reaches the binding with a physical descriptor"
+    );
+    block_on(db.hydrate_subscription_event_for_binding(&mut event)).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = event else {
+        panic!("expected opening subscription delta");
+    };
+    assert_eq!(
+        added[0]
+            .row
+            .cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String(title.clone())),
+        "the subscription binding boundary must materialize the indirect text scalar"
     );
 
     let json = format!(

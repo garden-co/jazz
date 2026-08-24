@@ -437,8 +437,16 @@ impl NapiTransportInner {
 }
 
 enum NapiSubscription {
-    Memory(SubscriptionStream),
-    Persistent(SubscriptionStream),
+    Memory {
+        db: Rc<CoreDb<CoreMemoryStorage>>,
+        stream: SubscriptionStream,
+        pending_event: Option<CoreSubscriptionEvent>,
+    },
+    Persistent {
+        db: Rc<CoreDb<CoreRocksDbStorage>>,
+        stream: SubscriptionStream,
+        pending_event: Option<CoreSubscriptionEvent>,
+    },
 }
 
 #[napi(js_name = "Tx")]
@@ -664,11 +672,40 @@ impl Subscription {
         let mut events = Vec::new();
         loop {
             let event = match subscription {
-                NapiSubscription::Memory(stream) => stream.try_next_event(),
-                NapiSubscription::Persistent(stream) => stream.try_next_event(),
-            };
-            let Some(event) = event else {
-                break;
+                NapiSubscription::Memory {
+                    db,
+                    stream,
+                    pending_event,
+                } => {
+                    let Some(mut event) = pending_event.take().or_else(|| stream.try_next_event())
+                    else {
+                        break;
+                    };
+                    if let Err(error) =
+                        core_block_on(db.hydrate_subscription_event_for_binding(&mut event))
+                    {
+                        *pending_event = Some(event);
+                        return Err(napi::Error::from_reason(error.to_string()));
+                    }
+                    event
+                }
+                NapiSubscription::Persistent {
+                    db,
+                    stream,
+                    pending_event,
+                } => {
+                    let Some(mut event) = pending_event.take().or_else(|| stream.try_next_event())
+                    else {
+                        break;
+                    };
+                    if let Err(error) =
+                        core_block_on(db.hydrate_subscription_event_for_binding(&mut event))
+                    {
+                        *pending_event = Some(event);
+                        return Err(napi::Error::from_reason(error.to_string()));
+                    }
+                    event
+                }
             };
             events.push(core_subscription_event_to_napi(
                 &event,
@@ -1751,14 +1788,18 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let inner = match db {
-            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory(
-                core_block_on(db.subscribe(&query.inner, opts))
+            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory {
+                db: Rc::clone(db),
+                stream: core_block_on(db.subscribe(&query.inner, opts))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent(
-                core_block_on(db.subscribe(&query.inner, opts))
+                pending_event: None,
+            },
+            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
+                db: Rc::clone(db),
+                stream: core_block_on(db.subscribe(&query.inner, opts))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
+                pending_event: None,
+            },
         };
         Ok(Subscription {
             inner: Some(inner),
@@ -1783,14 +1824,18 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let inner = match db {
-            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory(
-                core_block_on(db.subscribe_for_identity(&query.inner, opts, author))
+            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory {
+                db: Rc::clone(db),
+                stream: core_block_on(db.subscribe_for_identity(&query.inner, opts, author))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent(
-                core_block_on(db.subscribe_for_identity(&query.inner, opts, author))
+                pending_event: None,
+            },
+            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
+                db: Rc::clone(db),
+                stream: core_block_on(db.subscribe_for_identity(&query.inner, opts, author))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
+                pending_event: None,
+            },
         };
         Ok(Subscription {
             inner: Some(inner),
@@ -1814,14 +1859,18 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let inner = match db {
-            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory(
-                core_block_on(db.subscribe_relation_query(&query, opts))
+            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory {
+                db: Rc::clone(db),
+                stream: core_block_on(db.subscribe_relation_query(&query, opts))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent(
-                core_block_on(db.subscribe_relation_query(&query, opts))
+                pending_event: None,
+            },
+            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
+                db: Rc::clone(db),
+                stream: core_block_on(db.subscribe_relation_query(&query, opts))
                     .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
+                pending_event: None,
+            },
         };
         Ok(Subscription {
             inner: Some(inner),
@@ -1847,14 +1896,22 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         let inner = match db {
-            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory(
-                core_block_on(db.subscribe_relation_query_for_identity(&query, opts, author))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent(
-                core_block_on(db.subscribe_relation_query_for_identity(&query, opts, author))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
+            NapiDbInnerStorage::Memory(db) => NapiSubscription::Memory {
+                db: Rc::clone(db),
+                stream: core_block_on(
+                    db.subscribe_relation_query_for_identity(&query, opts, author),
+                )
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                pending_event: None,
+            },
+            NapiDbInnerStorage::Persistent(db) => NapiSubscription::Persistent {
+                db: Rc::clone(db),
+                stream: core_block_on(
+                    db.subscribe_relation_query_for_identity(&query, opts, author),
+                )
+                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
+                pending_event: None,
+            },
         };
         Ok(Subscription {
             inner: Some(inner),
