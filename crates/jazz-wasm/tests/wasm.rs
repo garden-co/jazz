@@ -10,11 +10,8 @@ use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
 use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema};
-use jazz_wasm::{
-    current_timestamp, derive_user_id, generate_id, mint_anonymous_token, WasmDb, WasmDbIdentity,
-    WasmOpenDbConfig,
-};
-use serde::Deserialize;
+use jazz_wasm::{current_timestamp, derive_user_id, generate_id, mint_anonymous_token, WasmDb};
+use serde::{Deserialize, Serialize};
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
@@ -94,6 +91,23 @@ struct DecodedSubscriptionDelta {
     updated: Vec<DecodedRowBatch>,
 }
 
+// This mirrors the private postcard input envelope exactly. It is intentionally
+// local to the binding receipt: making the config a Rust API would freeze an
+// implementation detail that JavaScript only ever sees as bytes.
+#[derive(Serialize)]
+struct OpenDbConfigFixture {
+    identity: OpenDbIdentityFixture,
+    row_id_seed: Option<u64>,
+    history_complete: bool,
+    initial_sync_flush_every: Option<u32>,
+}
+
+#[derive(Serialize)]
+struct OpenDbIdentityFixture {
+    node: NodeUuid,
+    author: AuthorId,
+}
+
 fn fixture_db() -> WasmDb {
     let schema = SchemaBuilder::new()
         .table(
@@ -110,8 +124,8 @@ fn fixture_db() -> WasmDb {
                 ),
         )
         .build();
-    let config = WasmOpenDbConfig {
-        identity: WasmDbIdentity {
+    let config = OpenDbConfigFixture {
+        identity: OpenDbIdentityFixture {
             node: NodeUuid::from_bytes([0x51; 16]),
             author: AuthorId::from_bytes([0xa1; 16]),
         },

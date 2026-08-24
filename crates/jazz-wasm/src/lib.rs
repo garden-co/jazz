@@ -165,24 +165,18 @@ pub fn mint_anonymous_token(
     .map_err(|e| JsValue::from_str(&e))
 }
 
-/// Stable postcard envelope accepted by [`WasmDb::open_memory`] and
-/// `WasmDb.openMemory`.
-///
-/// The schema travels as public-schema JSON; this separately encodes only the
-/// runtime identity and deterministic test/open options.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct WasmOpenDbConfig {
-    pub identity: WasmDbIdentity,
-    pub row_id_seed: Option<u64>,
-    pub history_complete: bool,
-    pub initial_sync_flush_every: Option<u32>,
+struct WasmOpenDbConfig {
+    identity: WasmDbIdentity,
+    row_id_seed: Option<u64>,
+    history_complete: bool,
+    initial_sync_flush_every: Option<u32>,
 }
 
-/// Runtime identity carried in [`WasmOpenDbConfig`].
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-pub struct WasmDbIdentity {
-    pub node: NodeUuid,
-    pub author: AuthorId,
+struct WasmDbIdentity {
+    node: NodeUuid,
+    author: AuthorId,
 }
 
 impl From<WasmDbIdentity> for DbIdentity {
@@ -438,11 +432,17 @@ impl WasmDbInner {
     async fn hydrate_subscription_event_for_binding(
         &self,
         event: &mut SubscriptionEvent,
-    ) -> Result<(), jazz::db::Error> {
+    ) -> Result<(), jazz::db::BindingHydrationError> {
         match self {
-            Self::Memory(db) => db.hydrate_subscription_event_for_binding(event).await,
+            Self::Memory(db) => {
+                db.hydrate_subscription_event_for_binding_outcome(event)
+                    .await
+            }
             #[cfg(target_arch = "wasm32")]
-            Self::Browser(db) => db.hydrate_subscription_event_for_binding(event).await,
+            Self::Browser(db) => {
+                db.hydrate_subscription_event_for_binding_outcome(event)
+                    .await
+            }
             Self::Closed => panic!("WasmDb is closed"),
         }
     }
@@ -4025,12 +4025,14 @@ fn subscription_stream_to_js(
                     None => return None,
                 },
             };
-            if db
-                .hydrate_subscription_event_for_binding(&mut event)
-                .await
-                .is_err()
-            {
-                return Some((Ok(None), (db, source, Some(event), layouts)));
+            match db.hydrate_subscription_event_for_binding(&mut event).await {
+                Ok(()) => {}
+                Err(jazz::db::BindingHydrationError::ChunkUnavailable) => {
+                    return Some((Ok(None), (db, source, Some(event), layouts)));
+                }
+                Err(jazz::db::BindingHydrationError::Error(error)) => {
+                    return Some((Err(to_js_error(error)), (db, source, None, layouts)));
+                }
             }
             let mut prospective_layouts = layouts.clone();
             match subscription_chunk_to_js(event, &mut prospective_layouts) {
