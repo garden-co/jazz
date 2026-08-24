@@ -5,11 +5,16 @@ const wasmInitSync = vi.fn();
 const wasmBinary = new Uint8Array([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
 const compiledWasmModule = new WebAssembly.Module(wasmBinary);
 
-vi.mock("jazz-wasm", () => ({
-  default: wasmDefaultInit,
-  initSync: wasmInitSync,
-  nativeArtifactProtocolVersion: () => 12,
-}));
+vi.mock("jazz-wasm", async () => {
+  const { EXPECTED_NATIVE_ARTIFACT_FINGERPRINTS } =
+    await import("./native-artifact-fingerprints.js");
+  return {
+    default: wasmDefaultInit,
+    initSync: wasmInitSync,
+    nativeArtifactFingerprint: () => EXPECTED_NATIVE_ARTIFACT_FINGERPRINTS.wasm,
+    WasmDb: class {},
+  };
+});
 
 import { loadWasmModule } from "./client.js";
 

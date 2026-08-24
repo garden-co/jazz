@@ -99,6 +99,10 @@ function files(root, paths) {
       if (
         repoPath.endsWith(".node") ||
         repoPath.endsWith(".jazz-artifact-manifest.json") ||
+        // These tracked files are generated from packageInputs below. Including
+        // them would make the artifact fingerprint self-referential.
+        repoPath.endsWith("native-artifact-fingerprint.cjs") ||
+        repoPath.endsWith("native-artifact-fingerprints.ts") ||
         isStagedNapiBinding(repoPath)
       )
         return;
@@ -223,6 +227,25 @@ export function expectedManifest(root, kind, profile, targetOverride, options = 
     packageInputs: inputHash.digest("hex"),
     artifacts: artifactHashes(root, kind, options),
   };
+}
+
+/**
+ * ABI identity for generated bindings. Unlike the transport protocol this
+ * covers the exact package inputs plus the checked-in JS/TS binding surface.
+ */
+export function nativeArtifactFingerprint(root, kind, profile, targetOverride) {
+  const manifest = expectedManifest(root, kind, profile, targetOverride);
+  const surface =
+    kind === "napi"
+      ? ["crates/jazz-napi/index.d.ts", "crates/jazz-napi/index.cjs"]
+      : ["packages/jazz-tools/src/types/jazz-wasm.d.ts"];
+  const surfaceHash = createHash("sha256");
+  for (const path of surface) {
+    surfaceHash.update(`${path}\0`);
+    surfaceHash.update(existsSync(join(root, path)) ? readFileSync(join(root, path)) : "missing");
+    surfaceHash.update("\0");
+  }
+  return sha256(`${manifest.packageInputs}\0${surfaceHash.digest("hex")}`);
 }
 
 export const manifestPath = (root, kind) =>

@@ -53,13 +53,12 @@ pub fn init() {
     console_error_panic_hook::set_once();
 }
 
-/// Protocol marker for this generated WASM artifact.
-///
-/// JS startup checks it after instantiation so mismatched glue/binary pairs
-/// fail before a runtime method is invoked.
-#[wasm_bindgen(js_name = nativeArtifactProtocolVersion)]
-pub fn native_artifact_protocol_version() -> u32 {
-    jazz::wire::WIRE_PROTOCOL_VERSION.into()
+/// Exact build/ABI fingerprint for this generated WASM artifact.
+#[wasm_bindgen(js_name = nativeArtifactFingerprint)]
+pub fn native_artifact_fingerprint() -> String {
+    option_env!("JAZZ_NATIVE_ARTIFACT_FINGERPRINT")
+        .unwrap_or("missing-build-fingerprint")
+        .to_owned()
 }
 
 /// Generate a new UUID v7 (time-ordered).
