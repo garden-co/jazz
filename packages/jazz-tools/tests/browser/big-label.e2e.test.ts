@@ -79,9 +79,23 @@ describe("BigLabel browser edge/core topology", () => {
         "Editor",
       ),
     );
-    const [adminToken, editorToken] = await Promise.all([
+    // Give the editor a second, real tenant before opening their edge. The
+    // application queries below deliberately stay scoped to `org`: a dropped
+    // `organizationId` constraint would otherwise be invisible because all
+    // rows the editor can read happen to belong to the same organization.
+    const foreignOrg = await browserTopologyPhase(
+      "bootstrap a second BigLabel tenant through backend authority",
+      () =>
+        bootstrapBigLabelOrganization(
+          { appId, serverUrl, adminSecret, backendSecret },
+          "foreign-admin",
+          "Foreign Admin",
+        ),
+    );
+    const [adminToken, editorToken, foreignAdminToken] = await Promise.all([
       getJazzServerJwtForUser("admin", {}, appId),
       getJazzServerJwtForUser("editor", {}, appId),
+      getJazzServerJwtForUser("foreign-admin", {}, appId),
     ]);
     const writer = await browserTopologyPhase("open authenticated admin edge", () =>
       openDb({
@@ -124,6 +138,52 @@ describe("BigLabel browser edge/core topology", () => {
           personId: editorPerson.id,
           userId: "editor",
           role: "editor",
+        })
+        .wait({ tier: "edge" });
+    });
+    const foreignWriter = await browserTopologyPhase("open second tenant admin edge", () =>
+      openDb({
+        appId,
+        serverUrl,
+        jwtToken: foreignAdminToken,
+        label: "big-label-foreign-writer",
+      }),
+    );
+    await browserTopologyPhase("admit editor to the second tenant", async () => {
+      const foreignEditor = await foreignWriter.all(
+        app.people.where({ userId: "editor" }).limit(1),
+        { tier: "edge" },
+      );
+      expect(foreignEditor).toHaveLength(1);
+      await foreignWriter
+        .insert(app.memberships, {
+          organizationId: foreignOrg.id,
+          personId: foreignEditor[0]!.id,
+          userId: "editor",
+          role: "editor",
+        })
+        .wait({ tier: "edge" });
+    });
+    await browserTopologyPhase("seed readable foreign tenant rows", async () => {
+      // These values sort before the org-one rows below. They are intentionally
+      // authorized for the same editor, so removing either query's
+      // `organizationId` predicate makes its bounded result deterministically
+      // contain a foreign row rather than merely widening an invisible set.
+      const foreignArtist = await foreignWriter
+        .insert(app.artists, {
+          organizationId: foreignOrg.id,
+          name: "Aardvark",
+          genre: "ambient",
+          status: "active",
+        })
+        .wait({ tier: "edge" });
+      await foreignWriter
+        .insert(app.releases, {
+          organizationId: foreignOrg.id,
+          artistId: foreignArtist.id,
+          title: "Foreign Prelude",
+          releaseDate: new Date("2025-01-01"),
+          status: "scheduled",
         })
         .wait({ tier: "edge" });
     });
@@ -186,8 +246,8 @@ describe("BigLabel browser edge/core topology", () => {
           {
             name: "editor reads exact bounded roster and subscribes",
             async run() {
-              await expect(reader.all(roster, { tier: "edge" })).resolves.toMatchObject([
-                { name: "Aster" },
+              await expect(reader.all(roster, { tier: "edge" })).resolves.toEqual([
+                expect.objectContaining({ name: "Aster", organizationId: org.id }),
               ]);
               ctx.trackSubscription(
                 reader.subscribeAll(roster, (delta) =>
@@ -272,7 +332,11 @@ describe("BigLabel browser edge/core topology", () => {
                 "reader did not retain the ordered bounded BigLabel roster after reconnect",
               );
               await expect(reader.all(releasePipeline, { tier: "edge" })).resolves.toMatchObject([
-                { title: "First Light", artist: { name: "Blue Hour" } },
+                {
+                  title: "First Light",
+                  organizationId: org.id,
+                  artist: { name: "Blue Hour", organizationId: org.id },
+                },
               ]);
               await expect(reader.all(releasePipeline, { tier: "edge" })).resolves.toHaveLength(1);
             },
@@ -289,12 +353,16 @@ describe("BigLabel browser edge/core topology", () => {
                 label: "big-label-reader",
               });
               await expect(reader.all(roster, { tier: "local" })).resolves.toMatchObject([
-                { name: "Aster" },
-                { name: "Blue Hour" },
+                { name: "Aster", organizationId: org.id },
+                { name: "Blue Hour", organizationId: org.id },
               ]);
               await expect(reader.all(roster, { tier: "local" })).resolves.toHaveLength(2);
               await expect(reader.all(releasePipeline, { tier: "local" })).resolves.toMatchObject([
-                { title: "First Light", artist: { name: "Blue Hour" } },
+                {
+                  title: "First Light",
+                  organizationId: org.id,
+                  artist: { name: "Blue Hour", organizationId: org.id },
+                },
               ]);
               await expect(reader.all(releasePipeline, { tier: "local" })).resolves.toHaveLength(1);
             },
