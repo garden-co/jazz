@@ -90,6 +90,8 @@ type PendingNativeRead = {
 
 type NativeReadResult = Uint8Array | PendingNativeRead;
 
+type PendingNativeSubscriptionBatch = object;
+
 function isPendingNativeRead(value: NativeReadResult): value is PendingNativeRead {
   return typeof (value as PendingNativeRead).poll === "function";
 }
@@ -107,12 +109,12 @@ type NativeDb = {
   attachExclusiveTx?(openBatchId: string): Tx;
   all(query: PreparedQuery, opts: unknown): NativeReadResult;
   allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): NativeReadResult;
-  allRelationQuery?(queryJson: string, opts: unknown): Uint8Array | Promise<Uint8Array>;
+  allRelationQuery?(queryJson: string, opts: unknown): NativeReadResult | Promise<NativeReadResult>;
   allRelationQueryForIdentity?(
     queryJson: string,
     author: Uint8Array,
     opts: unknown,
-  ): Uint8Array | Promise<Uint8Array>;
+  ): NativeReadResult | Promise<NativeReadResult>;
   allRelationSnapshot?(
     query: PreparedQuery,
     opts: unknown,
@@ -363,8 +365,8 @@ type NativePermissionAdviceRequest = {
 type PreparedQuery = object;
 
 type Subscription = {
-  readAll(): unknown[];
-  drain?(): unknown[];
+  readAll(): unknown[] | PendingNativeSubscriptionBatch;
+  drain?(): unknown[] | PendingNativeSubscriptionBatch;
   close?(): boolean;
 };
 
@@ -1515,17 +1517,21 @@ export class NativeRuntimeAdapter implements Runtime {
         if (!this.db.allRelationQueryForIdentity) {
           throw new Error("Native runtime does not support trusted-serving relation queries");
         }
-        const payload = await this.db.allRelationQueryForIdentity(
-          coreQueryJson,
-          session?.identity ?? this.peerIdentity,
-          opts,
+        const payload = await this.awaitNativeRead(
+          await this.db.allRelationQueryForIdentity(
+            coreQueryJson,
+            session?.identity ?? this.peerIdentity,
+            opts,
+          ),
         );
         return rowsFromBatches(readRowBatches(payload), this.schema);
       }
       if (!this.db.allRelationQuery) {
         throw new Error("Native runtime does not support relation queries");
       }
-      const payload = await this.db.allRelationQuery(coreQueryJson, opts);
+      const payload = await this.awaitNativeRead(
+        await this.db.allRelationQuery(coreQueryJson, opts),
+      );
       return rowsFromBatches(readRowBatches(payload), this.schema);
     }
     const query = this.prepareQuery(coreQueryJson);
@@ -1995,32 +2001,36 @@ export class NativeRuntimeAdapter implements Runtime {
     for (;;) {
       const value = pending.poll();
       if (value) return value;
-      const transport = this.serverTransport;
-      const carrier = this.serverCarrier;
-      if (!transport || !carrier || this.closed) {
-        throw new Error("large-value hydration is waiting for an unavailable upstream transport");
+      await this.waitForNativeHydrationWake();
+    }
+  }
+
+  private async waitForNativeHydrationWake(): Promise<void> {
+    const transport = this.serverTransport;
+    const carrier = this.serverCarrier;
+    if (!transport || !carrier || this.closed) {
+      throw new Error("large-value hydration is waiting for an unavailable upstream transport");
+    }
+    const generation = this.serverConnectionGeneration;
+    const observedWork = this.serverTransportWorkEpoch;
+    const work = this.waitForServerTransportWork("edge", observedWork);
+    try {
+      this.flushAuxiliaryOutbound(transport, carrier, generation);
+      void this.pumpServerTransport();
+      if (!work) {
+        throw new Error("large-value hydration has no concrete transport wake");
       }
-      const generation = this.serverConnectionGeneration;
-      const observedWork = this.serverTransportWorkEpoch;
-      const work = this.waitForServerTransportWork("edge", observedWork);
-      try {
-        this.flushAuxiliaryOutbound(transport, carrier, generation);
-        void this.pumpServerTransport();
-        if (!work) {
-          throw new Error("large-value hydration has no concrete transport wake");
-        }
-        await work.promise;
-      } finally {
-        work?.cancel();
-      }
-      if (
-        this.closed ||
-        generation !== this.serverConnectionGeneration ||
-        transport !== this.serverTransport ||
-        carrier !== this.serverCarrier
-      ) {
-        throw new Error("large-value hydration transport was replaced before completion");
-      }
+      await work.promise;
+    } finally {
+      work?.cancel();
+    }
+    if (
+      this.closed ||
+      generation !== this.serverConnectionGeneration ||
+      transport !== this.serverTransport ||
+      carrier !== this.serverCarrier
+    ) {
+      throw new Error("large-value hydration transport was replaced before completion");
     }
   }
 
@@ -2407,7 +2417,9 @@ export class NativeRuntimeAdapter implements Runtime {
     if (subscription.cancelled) return;
     for (const source of subscription.sources) {
       if (!isReadableSubscriptionReader(source.source)) {
-        this.drainNativeSubscription(handle, subscription, source);
+        if (source.reading) continue;
+        source.reading = true;
+        void this.drainNativeSubscription(handle, subscription, source);
         continue;
       }
       if (source.reading) continue;
@@ -2440,22 +2452,34 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
-  private drainNativeSubscription(
+  private async drainNativeSubscription(
     handle: number,
     subscription: SubscriptionState,
     source: SubscriptionSourceState,
-  ): void {
+  ): Promise<void> {
     if (isReadableSubscriptionReader(source.source)) return;
-    for (const event of source.source.readAll()) {
-      if (subscription.cancelled || this.subscriptions.get(handle) !== subscription) return;
-      try {
-        this.applySubscriptionChunk(subscription, event);
-      } catch (error) {
-        this.failSubscription(
-          subscription,
-          error instanceof Error ? error : new Error(String(error)),
-        );
+    try {
+      while (!subscription.cancelled && this.subscriptions.get(handle) === subscription) {
+        const batch = source.source.readAll();
+        if (!Array.isArray(batch)) {
+          await this.waitForNativeHydrationWake();
+          continue;
+        }
+        for (const event of batch) {
+          if (subscription.cancelled || this.subscriptions.get(handle) !== subscription) return;
+          try {
+            this.applySubscriptionChunk(subscription, event);
+          } catch (error) {
+            this.failSubscription(
+              subscription,
+              error instanceof Error ? error : new Error(String(error)),
+            );
+          }
+        }
+        return;
       }
+    } finally {
+      source.reading = false;
     }
   }
 

@@ -33,15 +33,15 @@ export declare class NapiDb {
   setTickScheduler(callback: ((err: Error | null, arg: string) => void)): void
   onMutationError(callback: (event: any) => void): void
   prepareQuery(query: Uint8Array): PreparedQuery
-  all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
+  all(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   /** Read an open transaction using the identity bound at begin. */
-  allInTransaction(query: PreparedQuery, tx: Tx, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
+  allInTransaction(query: PreparedQuery, tx: Tx, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   setIdentityClaims(author: Uint8Array, claims?: Record<string, unknown> | undefined | null): void
-  allForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
-  allRelationSnapshot(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
-  allRelationSnapshotForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
-  allRelationQuery(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
-  allRelationQueryForIdentity(queryJson: string, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array
+  allForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  allRelationSnapshot(query: PreparedQuery, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  allRelationSnapshotForIdentity(query: PreparedQuery, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  allRelationQuery(queryJson: string, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
+  allRelationQueryForIdentity(queryJson: string, author: Uint8Array, opts?: { tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null): Uint8Array | PendingNativeRead
   localCurrentRow(table: string, rowId: Uint8Array): Uint8Array
   attachQuery(query: PreparedQuery, opts?: any | undefined | null): QueryAttachment
   attachQueryForIdentity(query: PreparedQuery, author: Uint8Array, opts?: any | undefined | null): QueryAttachment
@@ -110,10 +110,16 @@ export declare class StreamingMutation {
 }
 
 export declare class Subscription {
-  readAll(): Array<SubscriptionEvent>
-  drain(): Array<SubscriptionEvent>
+  readAll(): Array<SubscriptionEvent> | PendingNativeSubscriptionBatch
+  drain(): Array<SubscriptionEvent> | PendingNativeSubscriptionBatch
   close(): boolean
 }
+
+export declare class PendingNativeRead {
+  poll(): Uint8Array | null
+}
+
+export declare class PendingNativeSubscriptionBatch {}
 
 export declare class TestJwtIssuer {
   static start(): Promise<TestJwtIssuer>
