@@ -102,11 +102,15 @@ impl Database {
             Rc::new(crate::chunks::ManagedChunkStorage::new(Rc::new(
                 crate::chunks::OrderedChunkStorage::new(Rc::downgrade(&storage)),
             )));
+        let resident_chunks = crate::chunks::ResidentChunkStorage::default();
         let chunk_resolver: Rc<dyn crate::chunks::MissingChunkResolver> =
             Rc::new(crate::chunks::UnavailableChunkResolver);
         ivm_runtime.set_chunk_provider(Rc::new(
             crate::chunks::StorageChunkProvider::with_resolver_and_observer(
-                chunk_storage.clone(),
+                crate::chunks::LayeredChunkStorage::new(
+                    resident_chunks.clone(),
+                    chunk_storage.clone(),
+                ),
                 chunk_resolver.clone(),
                 Rc::new(MetadataChunkInstallObserver {
                     storage: Rc::downgrade(&storage),
@@ -116,6 +120,7 @@ impl Database {
         Ok(Self {
             storage,
             chunk_storage,
+            resident_chunks,
             chunk_resolver,
             ivm_runtime,
             last_commit_metrics: None,
@@ -216,7 +221,10 @@ impl Database {
     pub fn set_chunk_storage(&mut self, storage: Rc<dyn crate::chunks::ChunkStorage>) {
         self.ivm_runtime.set_chunk_provider(Rc::new(
             crate::chunks::StorageChunkProvider::with_resolver_and_observer(
-                storage.clone(),
+                crate::chunks::LayeredChunkStorage::new(
+                    self.resident_chunks.clone(),
+                    storage.clone(),
+                ),
                 self.chunk_resolver.clone(),
                 Rc::new(MetadataChunkInstallObserver {
                     storage: Rc::downgrade(&self.storage),
@@ -232,7 +240,10 @@ impl Database {
     ) {
         self.ivm_runtime.set_chunk_provider(Rc::new(
             crate::chunks::StorageChunkProvider::with_resolver_and_observer(
-                self.chunk_storage.clone(),
+                crate::chunks::LayeredChunkStorage::new(
+                    self.resident_chunks.clone(),
+                    self.chunk_storage.clone(),
+                ),
                 resolver.clone(),
                 Rc::new(MetadataChunkInstallObserver {
                     storage: Rc::downgrade(&self.storage),
@@ -244,6 +255,44 @@ impl Database {
 
     fn fresh_chunk_locator(_: crate::large_values::ContentHash) -> crate::large_values::Locator {
         crate::large_values::Locator(uuid::Uuid::new_v4().as_bytes().to_vec())
+    }
+
+    /// Construct a complete direct value into the process-resident chunk layer
+    /// without touching asynchronous metadata or blob storage.  The caller
+    /// attaches the returned stage to the same batch that owns the descriptor;
+    /// [`AppliedBatch::persist`](super::AppliedBatch::persist) later journals,
+    /// stages and atomically promotes it.
+    pub fn prepare_resident_large_value(
+        &self,
+        kind: crate::large_values::LargeValueKind,
+        bytes: &[u8],
+    ) -> Result<crate::large_values::ResidentLargeValueStage, Error> {
+        let node_refs = Rc::new(RefCell::new(Vec::new()));
+        let node_refs_for_stage = Rc::clone(&node_refs);
+        let resident_chunks = self.resident_chunks.clone();
+        let mut preparation = crate::large_values::PushStreamingPreparation::new(
+            kind,
+            Self::fresh_chunk_locator,
+            move |chunk| {
+                node_refs_for_stage
+                    .borrow_mut()
+                    .push(chunk.node_ref.clone());
+                resident_chunks
+                    .install(chunk)
+                    .map_err(|_| crate::large_values::Error::MalformedNode)
+            },
+        );
+        preparation
+            .push(bytes)
+            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+        let (value_ref, _) = preparation
+            .finish()
+            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+        Ok(crate::large_values::ResidentLargeValueStage::new(
+            crate::large_values::StagedLargeValueId(*uuid::Uuid::new_v4().as_bytes()),
+            value_ref,
+            std::mem::take(&mut *node_refs.borrow_mut()),
+        ))
     }
 
     /// Prepare and stage a complete logical value entirely inside Groove.

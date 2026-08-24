@@ -137,6 +137,11 @@ impl Database {
     pub async fn apply_batch(&mut self, batch: DatabaseBatch) -> Result<AppliedBatch, Error> {
         self.ensure_not_poisoned()?;
         let accepted_large_values = batch.accepted_large_values.clone();
+        let resident_large_values = batch.resident_large_values.clone();
+        let resident_stages = resident_large_values
+            .iter()
+            .map(|stage| (stage.id(), stage))
+            .collect::<BTreeMap<_, _>>();
         let retractable =
             batch.resident_publication == ResidentPublicationPolicy::RetractableBeforePersistence;
         let defer_notifications_until_durable =
@@ -144,6 +149,15 @@ impl Database {
         let pending_writes = self.pending_writes_from_batch(batch)?;
         let mut accepted_staging = Vec::new();
         for staged_id in &accepted_large_values {
+            if let Some(stage) = resident_stages.get(staged_id) {
+                accepted_staging.push(crate::large_values::StagedLargeValue {
+                    id: *staged_id,
+                    value_ref: stage.value_ref().clone(),
+                    accounting: crate::large_values::StagedLargeValueAccounting::default(),
+                    created_at_ms: 0,
+                });
+                continue;
+            }
             let key = staged_large_value_key(*staged_id);
             let encoded = self
                 .storage
@@ -188,6 +202,42 @@ impl Database {
                 ));
             }
         }
+        // Resident direct values have authenticated nodes in the process-local
+        // chunk layer but deliberately no durable metadata yet.  Derive the
+        // same child-edge metadata that journaled staging would persist, so
+        // the final row batch can install references atomically after its
+        // pre-persist hook has made those nodes durable.
+        let mut resident_node_metadata = BTreeMap::new();
+        for stage in &resident_large_values {
+            for node_ref in stage.node_refs() {
+                let chunk = self
+                    .resident_chunks
+                    .staged_chunk(node_ref)
+                    .map_err(crate::chunks::ChunkError::from)
+                    .map_err(crate::ivm::runtime::IvmRuntimeError::from)
+                    .map_err(Error::from)?;
+                let node: crate::large_values::ChunkNode = postcard::from_bytes(&chunk.encoded)
+                    .map_err(|error| {
+                        Error::InvalidLargeValueMetadata(format!(
+                            "cannot decode resident large-value node: {error}"
+                        ))
+                    })?;
+                let children = match node {
+                    crate::large_values::ChunkNode::Leaf { .. } => Vec::new(),
+                    crate::large_values::ChunkNode::Branch { children, .. } => {
+                        children.into_iter().map(|child| child.node_ref).collect()
+                    }
+                };
+                resident_node_metadata.insert(
+                    node_ref.clone(),
+                    LargeValueNodeReferences {
+                        references: 0,
+                        upload_references: 0,
+                        children,
+                    },
+                );
+            }
+        }
         let descriptors = pending_writes
             .iter()
             .map(PendingTableWrite::descriptor)
@@ -207,6 +257,10 @@ impl Database {
         let table_deltas =
             compute_table_deltas(&pending_writes, &stores, self.ivm_runtime.schema()).await?;
         let inverse_table_deltas = retractable.then(|| invert_table_deltas(&table_deltas));
+        let resident_node_refs = resident_large_values
+            .iter()
+            .flat_map(|stage| stage.node_refs().iter().cloned())
+            .collect::<Vec<_>>();
         let mut durable_root_deltas = BTreeMap::<crate::large_values::NodeRef, i64>::new();
         for table_delta in &table_deltas {
             for delta in &table_delta.deltas {
@@ -230,6 +284,18 @@ impl Database {
             })
             .collect::<Vec<_>>();
         for staged_id in accepted_large_values {
+            if resident_stages.contains_key(&staged_id) {
+                // The receipt is produced immediately before this already
+                // computed atomic metadata/row write.  A Delete remains
+                // correct even if a storage backend treats absent deletes as
+                // no-ops, but it must not require the receipt before resident
+                // publication.
+                staged_operations.push(OwnedWriteOperation::Delete {
+                    cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                    key: staged_large_value_key(staged_id),
+                });
+                continue;
+            }
             let key = staged_large_value_key(staged_id);
             if self
                 .storage
@@ -247,10 +313,16 @@ impl Database {
             });
         }
         let mut accepted_roots = BTreeMap::<crate::large_values::NodeRef, u64>::new();
+        let mut resident_accepted_roots = BTreeMap::<crate::large_values::NodeRef, u64>::new();
         for staged in &accepted_staging {
             *accepted_roots
                 .entry(staged.value_ref.root.clone())
                 .or_default() += 1;
+            if resident_stages.contains_key(&staged.id) {
+                *resident_accepted_roots
+                    .entry(staged.value_ref.root.clone())
+                    .or_default() += 1;
+            }
         }
         let roots = durable_root_deltas
             .keys()
@@ -272,6 +344,23 @@ impl Database {
                 })?,
                 None => LargeValueRootReferences::default(),
             };
+            // Journaled staging ordinarily contributes this count before the
+            // row batch consumes it.  Resident staging deliberately defers
+            // that durable mutation until persist, but its final atomic batch
+            // must calculate the identical staged-to-durable transition.
+            references.staged = references
+                .staged
+                .checked_add(
+                    resident_accepted_roots
+                        .get(&root)
+                        .copied()
+                        .unwrap_or_default(),
+                )
+                .ok_or_else(|| {
+                    Error::InvalidLargeValueMetadata(
+                        "resident staged root count overflow".to_owned(),
+                    )
+                })?;
             let previous_total = references.durable.saturating_add(references.staged);
             let durable_delta = durable_root_deltas.get(&root).copied().unwrap_or_default();
             references.durable = if durable_delta >= 0 {
@@ -290,14 +379,15 @@ impl Database {
                 })?;
             let next_total = references.durable.saturating_add(references.staged);
             if previous_total == 0 && next_total > 0 && !references.node_active {
-                if self
-                    .storage
-                    .get(
-                        LARGE_VALUE_METADATA_CF.to_owned(),
-                        large_value_node_key(&root)?,
-                    )
-                    .await?
-                    .is_some()
+                if resident_node_metadata.contains_key(&root)
+                    || self
+                        .storage
+                        .get(
+                            LARGE_VALUE_METADATA_CF.to_owned(),
+                            large_value_node_key(&root)?,
+                        )
+                        .await?
+                        .is_some()
                 {
                     references.node_active = true;
                     node_transitions.push((root.clone(), 1));
@@ -322,6 +412,8 @@ impl Database {
         while let Some((node_ref, delta)) = pending.pop() {
             let mut metadata = if let Some(metadata) = node_updates.remove(&node_ref) {
                 metadata
+            } else if let Some(metadata) = resident_node_metadata.get(&node_ref) {
+                metadata.clone()
             } else {
                 let encoded = self
                     .storage
@@ -430,6 +522,7 @@ impl Database {
             ResidentPublication {
                 operations: staged_operations.clone(),
                 inverse_table_deltas: inverse_table_deltas.unwrap_or_default(),
+                resident_node_refs,
                 notifications_deferred: defer_notifications_until_durable,
                 retractable,
             },
@@ -564,6 +657,8 @@ impl Database {
                     .discard_deferred_notifications(*publication_id);
             }
             self.retracted_publications.insert(*publication_id);
+            self.resident_chunks
+                .release(&publication.resident_node_refs);
         }
 
         {
@@ -585,7 +680,9 @@ impl Database {
         loop {
             let publication = PublicationId(frontier);
             if self.persisted_publications.remove(&publication) {
-                self.resident_publications.remove(&publication);
+                if let Some(released) = self.resident_publications.remove(&publication) {
+                    self.resident_chunks.release(&released.resident_node_refs);
+                }
                 self.durable_publication_frontier = Some(publication);
                 frontier = frontier.saturating_add(1);
             } else if self.retracted_publications.contains(&publication) {

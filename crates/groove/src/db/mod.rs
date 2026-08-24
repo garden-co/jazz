@@ -224,6 +224,7 @@ pub use crate::ivm::{
 pub struct Database {
     storage: Rc<LayoutStorage>,
     chunk_storage: Rc<dyn crate::chunks::ChunkStorage>,
+    resident_chunks: crate::chunks::ResidentChunkStorage,
     chunk_resolver: Rc<dyn crate::chunks::MissingChunkResolver>,
     /// Owns query/index maintenance over the storage-backed base tables.
     ivm_runtime: IvmRuntime,
@@ -255,6 +256,7 @@ pub struct Database {
 struct ResidentPublication {
     operations: Vec<OwnedWriteOperation>,
     inverse_table_deltas: Vec<TableDelta>,
+    resident_node_refs: Vec<crate::large_values::NodeRef>,
     notifications_deferred: bool,
     retractable: bool,
 }
