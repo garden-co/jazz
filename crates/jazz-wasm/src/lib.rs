@@ -79,6 +79,14 @@ pub fn current_timestamp() -> u64 {
         .unwrap_or(0)
 }
 
+fn current_unix_timestamp_secs() -> Result<u64, String> {
+    use web_time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())
+        .map(|duration| duration.as_secs())
+}
+
 #[cfg(feature = "bench-probes")]
 #[wasm_bindgen(js_name = benchProbeArithmeticHash)]
 pub fn bench_probe_arithmetic_hash(iterations: u32) -> u64 {
@@ -178,6 +186,15 @@ struct WasmOpenDbConfig {
     row_id_seed: Option<u64>,
     history_complete: bool,
     initial_sync_flush_every: Option<u32>,
+}
+
+/// Binding-internal proof that may derive a client-owned reserved author only
+/// after signature and audience verification.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct WasmSelfSignedClientProof {
+    token: String,
+    app_id: String,
+    claimed_author: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -1720,10 +1737,38 @@ impl WasmDb {
     pub fn open_memory(schema: Vec<u8>, config: Vec<u8>) -> Result<WasmDb, JsValue> {
         console_error_panic_hook::set_once();
         let (schema, config) = decode_open_args(&schema, &config)?;
+        let identity = wasm_open_identity(&config, None)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let db =
-            block_on(open_db(schema, MemoryStorage::new(&refs), config)).map_err(to_js_error)?;
+        let db = block_on(open_db(schema, MemoryStorage::new(&refs), config, identity))?;
+        db.set_deferred_local_persistence(true);
+        Ok(Self {
+            inner: WasmDbInner::Memory(Rc::new(db)),
+            owns_runtime: true,
+        })
+    }
+
+    /// Separate proof-bearing ABI so independently deployed JS and WASM
+    /// artifacts fail closed rather than reinterpret an open-config payload.
+    #[wasm_bindgen(js_name = openMemoryWithSelfSignedProof)]
+    pub fn open_memory_with_self_signed_proof(
+        schema: Vec<u8>,
+        config: Vec<u8>,
+        token: String,
+        app_id: String,
+        claimed_author: String,
+    ) -> Result<WasmDb, JsValue> {
+        console_error_panic_hook::set_once();
+        let (schema, config) = decode_open_args(&schema, &config)?;
+        let proof = WasmSelfSignedClientProof {
+            token,
+            app_id,
+            claimed_author,
+        };
+        let identity = wasm_open_identity(&config, Some(&proof))?;
+        let refs = schema.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let db = block_on(open_db(schema, MemoryStorage::new(&refs), config, identity))?;
         db.set_deferred_local_persistence(true);
         Ok(Self {
             inner: WasmDbInner::Memory(Rc::new(db)),
@@ -1740,14 +1785,44 @@ impl WasmDb {
     ) -> Result<WasmDb, JsValue> {
         console_error_panic_hook::set_once();
         let (schema, config) = decode_open_args(&schema, &config)?;
+        let identity = wasm_open_identity(&config, None)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = BrowserStorage::open(IndexedDbPageStore::from_js(page_store), &refs)
             .await
             .map_err(to_js_error)?;
-        let db = open_db(schema, storage, config)
+        let db = open_db(schema, storage, config, identity).await?;
+        db.set_deferred_local_persistence(true);
+        Ok(Self {
+            inner: WasmDbInner::Browser(Rc::new(db)),
+            owns_runtime: true,
+        })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = openBrowserWithSelfSignedProof)]
+    pub async fn open_browser_with_self_signed_proof(
+        page_store: JsValue,
+        schema: Vec<u8>,
+        config: Vec<u8>,
+        token: String,
+        app_id: String,
+        claimed_author: String,
+    ) -> Result<WasmDb, JsValue> {
+        console_error_panic_hook::set_once();
+        let (schema, config) = decode_open_args(&schema, &config)?;
+        let proof = WasmSelfSignedClientProof {
+            token,
+            app_id,
+            claimed_author,
+        };
+        let identity = wasm_open_identity(&config, Some(&proof))?;
+        let refs = schema.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = BrowserStorage::open(IndexedDbPageStore::from_js(page_store), &refs)
             .await
             .map_err(to_js_error)?;
+        let db = open_db(schema, storage, config, identity).await?;
         db.set_deferred_local_persistence(true);
         Ok(Self {
             inner: WasmDbInner::Browser(Rc::new(db)),
@@ -3677,24 +3752,47 @@ async fn open_db<S>(
     schema: JazzSchema,
     storage: S,
     config: WasmOpenDbConfig,
-) -> Result<Db<S>, jazz::db::Error>
+    identity: DbIdentity,
+) -> Result<Db<S>, JsValue>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
 {
-    let mut db_config = DbConfig::new(schema, storage, config.identity.into());
+    let mut db_config = DbConfig::new(schema, storage, identity);
     if let Some(seed) = config.row_id_seed {
         db_config = db_config.with_id_source(SeededRowIdSource::new(seed));
     }
     let initial_sync_flush_every = config.initial_sync_flush_every;
     if config.history_complete {
-        let db = Db::open_history_complete(db_config).await?;
-        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
+        let db = Db::open_history_complete(db_config)
+            .await
+            .map_err(to_js_error)?;
+        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every).map_err(to_js_error)?;
         Ok(db)
     } else {
-        let db = Db::open(db_config).await?;
-        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
+        let db = Db::open(db_config).await.map_err(to_js_error)?;
+        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every).map_err(to_js_error)?;
         Ok(db)
     }
+}
+
+fn wasm_open_identity(
+    config: &WasmOpenDbConfig,
+    self_signed_client_proof: Option<&WasmSelfSignedClientProof>,
+) -> Result<DbIdentity, JsValue> {
+    let author = match self_signed_client_proof {
+        Some(proof) => jazz::tools::identity::verify_client_runtime_author_at(
+            &proof.token,
+            &proof.app_id,
+            &proof.claimed_author,
+            current_unix_timestamp_secs().map_err(to_js_error)?,
+        )
+        .map_err(to_js_error)?,
+        None => config.identity.author,
+    };
+    Ok(DbIdentity {
+        node: config.identity.node,
+        author,
+    })
 }
 
 fn configure_initial_sync_flush_cadence<S>(
@@ -4230,18 +4328,34 @@ mod dynamic_schema_view_tests {
     }
 
     #[test]
-    fn public_open_config_rejects_reserved_subjects() {
-        let bytes = postcard::to_allocvec(&WasmOpenDbConfig {
-            identity: WasmDbIdentity {
-                node: NodeUuid::from_bytes([7; 16]),
-                author: AuthorSubject::SYSTEM,
-            },
-            row_id_seed: None,
-            history_complete: false,
-            initial_sync_flush_every: None,
-        })
-        .unwrap();
-        assert!(postcard::from_bytes::<WasmOpenDbConfig>(&bytes).is_err());
+    fn public_open_config_requires_verified_self_signed_client_proofs() {
+        for issuer in [
+            AuthorSubject::SYSTEM_ISSUER,
+            AuthorSubject::LOCAL_FIRST_ISSUER,
+            AuthorSubject::STATIC_BEARER_ISSUER,
+            AuthorSubject::ANONYMOUS_ISSUER,
+        ] {
+            let author = if issuer == AuthorSubject::SYSTEM_ISSUER {
+                AuthorSubject::SYSTEM
+            } else {
+                AuthorSubject::from_canonical(&serde_json::to_string(&(issuer, "caller")).unwrap())
+                    .unwrap()
+            };
+            let bytes = postcard::to_allocvec(&WasmOpenDbConfig {
+                identity: WasmDbIdentity {
+                    node: NodeUuid::from_bytes([7; 16]),
+                    author,
+                },
+                row_id_seed: None,
+                history_complete: false,
+                initial_sync_flush_every: None,
+            })
+            .unwrap();
+            assert!(
+                postcard::from_bytes::<WasmOpenDbConfig>(&bytes).is_err(),
+                "raw open author must reject {issuer} without a proof"
+            );
+        }
 
         let bytes = postcard::to_allocvec(&WasmOpenDbConfig {
             identity: WasmDbIdentity {
@@ -4253,7 +4367,52 @@ mod dynamic_schema_view_tests {
             initial_sync_flush_every: None,
         })
         .unwrap();
-        assert!(postcard::from_bytes::<WasmOpenDbConfig>(&bytes).is_ok());
+        let external = postcard::from_bytes::<WasmOpenDbConfig>(&bytes).unwrap();
+        assert_eq!(
+            wasm_open_identity(&external, None).unwrap().author,
+            external.identity.author,
+            "external open identity remains unmodified"
+        );
+
+        for issuer in [
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            jazz::tools::identity::ANONYMOUS_ISSUER,
+        ] {
+            let token = jazz::tools::identity::mint_jazz_self_signed_token(
+                &[issuer.len() as u8; 32],
+                issuer,
+                "wasm-proof-app",
+                60,
+            )
+            .unwrap();
+            let verified =
+                jazz::tools::identity::verify_jazz_self_signed_proof(&token, "wasm-proof-app")
+                    .unwrap();
+            let claimed_author = serde_json::to_string(&(issuer, verified.user_id)).unwrap();
+            let config = WasmOpenDbConfig {
+                identity: WasmDbIdentity {
+                    node: NodeUuid::from_bytes([7; 16]),
+                    author: AuthorSubject::authenticated("https://issuer.example", "alice")
+                        .unwrap(),
+                },
+                row_id_seed: None,
+                history_complete: false,
+                initial_sync_flush_every: None,
+            };
+            let proof = WasmSelfSignedClientProof {
+                token,
+                app_id: "wasm-proof-app".to_owned(),
+                claimed_author: claimed_author.clone(),
+            };
+            assert_eq!(
+                wasm_open_identity(&config, Some(&proof))
+                    .unwrap()
+                    .author
+                    .canonical(),
+                claimed_author,
+                "verified {issuer} proof derives the exact author"
+            );
+        }
     }
 
     #[cfg(target_arch = "wasm32")]

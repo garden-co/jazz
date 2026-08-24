@@ -161,11 +161,24 @@ async function initialize(context: RuntimeContext): Promise<void> {
   context.pageStore = await IndexedDbPageStore.open(options.dbName, () =>
     handleStorageInvalidation(context),
   );
-  const db = await wasmModule.WasmDb.openBrowser(
-    context.pageStore,
-    encodeSchema(options.schema),
-    openConfig(options.node, options.author, 1, false, options.initialSyncFlushEvery),
-  );
+  const schema = encodeSchema(options.schema);
+  const config = openConfig(options.node, options.author, 1, false, options.initialSyncFlushEvery);
+  const proof = options.selfSignedClientProof;
+  if (proof && typeof wasmModule.WasmDb.openBrowserWithSelfSignedProof !== "function") {
+    throw new Error(
+      "WASM runtime does not support self-signed client opens; rebuild the matching Jazz WASM artifact",
+    );
+  }
+  const db = proof
+    ? await wasmModule.WasmDb.openBrowserWithSelfSignedProof(
+        context.pageStore,
+        schema,
+        config,
+        proof.token,
+        proof.appId,
+        proof.claimedAuthor,
+      )
+    : await wasmModule.WasmDb.openBrowser(context.pageStore, schema, config);
   context.runtime = NativeRuntimeAdapter.fromDb(
     db as never,
     options.schema,

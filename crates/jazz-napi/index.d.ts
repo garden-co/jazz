@@ -14,7 +14,9 @@ export declare class JazzServer {
 export declare class NapiDb {
   beginStreamingMutationEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, kind: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
   static openMemory(schema: Uint8Array, config: Uint8Array): NapiDb
+  static openMemoryWithSelfSignedProof(schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
   static openPersistent(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
+  static openPersistentWithSelfSignedProof(dataPath: string, schema: Uint8Array, config: Uint8Array, token: string, appId: string, claimedAuthor: string): NapiDb
   /** Register and return a typed view backed by this same runtime owner. */
   registerSchema(schema: Uint8Array): NapiDb
   /**

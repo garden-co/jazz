@@ -79,7 +79,22 @@ declare module "jazz-wasm" {
 
   export class WasmDb {
     static openMemory(schema: Uint8Array, config: Uint8Array): WasmDb;
+    static openMemoryWithSelfSignedProof(
+      schema: Uint8Array,
+      config: Uint8Array,
+      token: string,
+      appId: string,
+      claimedAuthor: string,
+    ): WasmDb;
     static openBrowser(pageStore: unknown, schema: Uint8Array, config: Uint8Array): Promise<WasmDb>;
+    static openBrowserWithSelfSignedProof(
+      pageStore: unknown,
+      schema: Uint8Array,
+      config: Uint8Array,
+      token: string,
+      appId: string,
+      claimedAuthor: string,
+    ): Promise<WasmDb>;
     setLargeValueStagingPolicy(
       incomingBytesPerWindow: number,
       windowMs: number,

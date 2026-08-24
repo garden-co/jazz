@@ -108,6 +108,16 @@ struct CoreOpenDbConfig {
     backend_credential: Option<String>,
 }
 
+/// This is a binding-internal wire capability, not a generic author parser.
+/// The claimed author is accepted only after the signed proof derives the
+/// exact same canonical local-first or anonymous subject.
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+struct CoreSelfSignedClientProof {
+    token: String,
+    app_id: String,
+    claimed_author: String,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize)]
 struct CoreOpenDbIdentity {
     node: CoreNodeUuid,
@@ -1165,10 +1175,38 @@ impl NapiDb {
     #[napi(factory, js_name = "openMemory")]
     pub fn open_memory(schema: Uint8Array, config: Uint8Array) -> napi::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
+        let identity = core_open_identity(&config, None)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let db = open_core_db(schema, CoreMemoryStorage::new(&refs), config)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let db = open_core_db(schema, CoreMemoryStorage::new(&refs), config, identity)?;
+        Ok(Self {
+            inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::new(db))))),
+            owns_runtime: true,
+        })
+    }
+
+    /// Open with a verified Jazz self-signed client identity. This is a
+    /// separate ABI entrypoint deliberately: a new client cannot accidentally
+    /// hand proof bytes to an old constructor, and an old client cannot enter
+    /// the proof-bearing path.
+    #[napi(factory, js_name = "openMemoryWithSelfSignedProof")]
+    pub fn open_memory_with_self_signed_proof(
+        schema: Uint8Array,
+        config: Uint8Array,
+        token: String,
+        app_id: String,
+        claimed_author: String,
+    ) -> napi::Result<Self> {
+        let (schema, config) = decode_core_open_args(&schema, &config)?;
+        let proof = CoreSelfSignedClientProof {
+            token,
+            app_id,
+            claimed_author,
+        };
+        let identity = core_open_identity(&config, Some(&proof))?;
+        let refs = schema.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let db = open_core_db(schema, CoreMemoryStorage::new(&refs), config, identity)?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::new(db))))),
             owns_runtime: true,
@@ -1182,12 +1220,41 @@ impl NapiDb {
         config: Uint8Array,
     ) -> napi::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
+        let identity = core_open_identity(&config, None)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = CoreRocksDbStorage::open(data_path, &refs)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        let db = open_core_db(schema, storage, config)
+        let db = open_core_db(schema, storage, config, identity)?;
+        Ok(Self {
+            inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
+                db,
+            ))))),
+            owns_runtime: true,
+        })
+    }
+
+    #[napi(factory, js_name = "openPersistentWithSelfSignedProof")]
+    pub fn open_persistent_with_self_signed_proof(
+        data_path: String,
+        schema: Uint8Array,
+        config: Uint8Array,
+        token: String,
+        app_id: String,
+        claimed_author: String,
+    ) -> napi::Result<Self> {
+        let (schema, config) = decode_core_open_args(&schema, &config)?;
+        let proof = CoreSelfSignedClientProof {
+            token,
+            app_id,
+            claimed_author,
+        };
+        let identity = core_open_identity(&config, Some(&proof))?;
+        let refs = schema.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = CoreRocksDbStorage::open(data_path, &refs)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let db = open_core_db(schema, storage, config, identity)?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
                 db,
@@ -3071,36 +3138,61 @@ fn open_core_db<S>(
     schema: JazzSchema,
     storage: S,
     config: CoreOpenDbConfig,
-) -> std::result::Result<CoreDb<S>, jazz::db::Error>
+    identity: CoreDbIdentity,
+) -> napi::Result<CoreDb<S>>
 where
     S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
-    let identity = if config
-        .backend_credential
-        .as_deref()
-        .is_some_and(|credential| !credential.is_empty())
-    {
-        CoreDbIdentity {
-            node: config.identity.node,
-            author: CoreAuthorSubject::SYSTEM,
-        }
-    } else {
-        config.identity.into()
-    };
     let mut db_config = CoreDbConfig::new(schema, storage, identity);
     if let Some(seed) = config.row_id_seed {
         db_config = db_config.with_id_source(CoreSeededRowIdSource::new(seed));
     }
     let initial_sync_flush_every = config.initial_sync_flush_every;
     if config.history_complete {
-        let db = core_block_on(CoreDb::open_history_complete(db_config))?;
-        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
+        let db = core_block_on(CoreDb::open_history_complete(db_config))
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         Ok(db)
     } else {
-        let db = core_block_on(CoreDb::open(db_config))?;
-        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)?;
+        let db = core_block_on(CoreDb::open(db_config))
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         Ok(db)
     }
+}
+
+fn core_open_identity(
+    config: &CoreOpenDbConfig,
+    self_signed_client_proof: Option<&CoreSelfSignedClientProof>,
+) -> napi::Result<CoreDbIdentity> {
+    if let Some(proof) = self_signed_client_proof {
+        let author = identity::verify_client_runtime_author(
+            &proof.token,
+            &proof.app_id,
+            &proof.claimed_author,
+        )
+        .map_err(napi::Error::from_reason)?;
+        return Ok(CoreDbIdentity {
+            node: config.identity.node,
+            author,
+        });
+    }
+    if config
+        .backend_credential
+        .as_deref()
+        .is_some_and(|credential| !credential.is_empty())
+    {
+        return Ok(CoreDbIdentity {
+            node: config.identity.node,
+            author: CoreAuthorSubject::SYSTEM,
+        });
+    }
+    Ok(CoreDbIdentity {
+        node: config.identity.node,
+        author: config.identity.author,
+    })
 }
 
 fn configure_initial_sync_flush_cadence<S>(
@@ -4140,14 +4232,16 @@ pub fn verify_local_first_identity_proof_napi(
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use std::collections::{BTreeMap, HashSet};
     use std::rc::Rc;
 
     use crate::{
-        CoreOpenDbConfig, NapiDb, NapiDbInnerStorage, NapiTxKind, PreparedQuery, Tx,
-        authority_epoch_from_bigint, core_author_id_from_bytes, core_block_on,
-        core_claim_value_from_json, core_read_opts_from_json, core_subscription_event_to_napi,
-        encode_core_subscription_delta, terminal_bytes_to_numbers,
+        CoreOpenDbConfig, CoreSelfSignedClientProof, NapiDb, NapiDbInnerStorage, NapiTxKind,
+        PreparedQuery, Tx, authority_epoch_from_bigint, core_author_id_from_bytes, core_block_on,
+        core_claim_value_from_json, core_open_identity, core_read_opts_from_json,
+        core_subscription_event_to_napi, encode_core_subscription_delta, terminal_bytes_to_numbers,
         unknown_transaction_kind_message,
     };
 
@@ -4182,7 +4276,11 @@ mod tests {
     use std::cell::RefCell;
 
     #[test]
-    fn public_author_ingress_rejects_reserved_subjects_and_accepts_external_subjects() {
+    fn public_author_ingress_requires_a_verified_self_signed_open_proof() {
+        // This exercises the binding's raw postcard configuration boundary
+        // directly. A normal DB operation cannot construct an invalid native
+        // open envelope, so this internal receipt is required to prove that
+        // reserved identity selection stays closed at that ingress.
         let external = br#"["https://issuer.example","alice"]"#;
         assert_eq!(
             core_author_id_from_bytes(external).unwrap().canonical(),
@@ -4214,7 +4312,7 @@ mod tests {
             initial_sync_flush_every: Option<u32>,
             backend_credential: Option<String>,
         }
-        let encode_config = |author| {
+        let encode_config = |author, backend_credential| {
             postcard::to_allocvec(&EncodedConfig {
                 identity: EncodedIdentity {
                     node: CoreNodeUuid::from_bytes([7; 16]),
@@ -4223,16 +4321,187 @@ mod tests {
                 row_id_seed: None,
                 history_complete: false,
                 initial_sync_flush_every: None,
-                backend_credential: None,
+                backend_credential,
             })
             .unwrap()
         };
-        let bytes = encode_config(CoreAuthorSubject::SYSTEM);
-        assert!(postcard::from_bytes::<CoreOpenDbConfig>(&bytes).is_err());
-        let bytes = encode_config(
-            CoreAuthorSubject::authenticated("https://issuer.example", "alice").unwrap(),
+        for issuer in [
+            CoreAuthorSubject::SYSTEM_ISSUER,
+            CoreAuthorSubject::LOCAL_FIRST_ISSUER,
+            CoreAuthorSubject::STATIC_BEARER_ISSUER,
+            CoreAuthorSubject::ANONYMOUS_ISSUER,
+        ] {
+            let author = if issuer == CoreAuthorSubject::SYSTEM_ISSUER {
+                CoreAuthorSubject::SYSTEM
+            } else {
+                CoreAuthorSubject::from_canonical(
+                    &serde_json::to_string(&(issuer, "caller")).unwrap(),
+                )
+                .unwrap()
+            };
+            let bytes = encode_config(author, None);
+            assert!(
+                postcard::from_bytes::<CoreOpenDbConfig>(&bytes).is_err(),
+                "raw open author must reject {issuer} without a proof"
+            );
+        }
+
+        let external_author =
+            CoreAuthorSubject::authenticated("https://issuer.example", "alice").unwrap();
+        let bytes = encode_config(external_author, None);
+        let external_config = postcard::from_bytes::<CoreOpenDbConfig>(&bytes).unwrap();
+        assert_eq!(
+            core_open_identity(&external_config, None).unwrap().author,
+            external_author,
+            "an old TS caller uses only this ordinary raw-open path"
         );
-        assert!(postcard::from_bytes::<CoreOpenDbConfig>(&bytes).is_ok());
+        assert_ne!(
+            core_open_identity(&external_config, None).unwrap().author,
+            CoreAuthorSubject::SYSTEM,
+            "the ordinary legacy open config cannot become SYSTEM without its explicit credential"
+        );
+
+        for issuer in [
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            jazz::tools::identity::ANONYMOUS_ISSUER,
+        ] {
+            let token = jazz::tools::identity::mint_jazz_self_signed_token(
+                &[issuer.len() as u8; 32],
+                issuer,
+                "proof-app",
+                60,
+            )
+            .unwrap();
+            let verified =
+                jazz::tools::identity::verify_jazz_self_signed_proof(&token, "proof-app").unwrap();
+            let claimed_author = serde_json::to_string(&(issuer, verified.user_id)).unwrap();
+            let bytes = encode_config(external_author, None);
+            let config = postcard::from_bytes::<CoreOpenDbConfig>(&bytes).unwrap();
+            let proof = CoreSelfSignedClientProof {
+                token,
+                app_id: "proof-app".to_owned(),
+                claimed_author: claimed_author.clone(),
+            };
+            assert_eq!(
+                core_open_identity(&config, Some(&proof))
+                    .unwrap()
+                    .author
+                    .canonical(),
+                claimed_author,
+                "the separate proof constructor derives {issuer}, never backend/SYSTEM identity"
+            );
+            let bytes = encode_config(external_author, Some("misdecode-me".to_owned()));
+            let config = postcard::from_bytes::<CoreOpenDbConfig>(&bytes).unwrap();
+            assert_eq!(
+                core_open_identity(&config, Some(&proof))
+                    .unwrap()
+                    .author
+                    .canonical(),
+                claimed_author,
+                "a proof-bearing constructor never treats a config field as backend authority"
+            );
+        }
+
+        let token = jazz::tools::identity::mint_jazz_self_signed_token(
+            &[9; 32],
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            "proof-app",
+            60,
+        )
+        .unwrap();
+        let verified =
+            jazz::tools::identity::verify_jazz_self_signed_proof(&token, "proof-app").unwrap();
+        let claimed_author =
+            serde_json::to_string(&(jazz::tools::identity::LOCAL_FIRST_ISSUER, verified.user_id))
+                .unwrap();
+        let bytes = encode_config(external_author, None);
+        let config = postcard::from_bytes::<CoreOpenDbConfig>(&bytes).unwrap();
+        let (signing_input, signature_b64) = token.rsplit_once('.').unwrap();
+        let mut signature = URL_SAFE_NO_PAD.decode(signature_b64).unwrap();
+        assert_eq!(signature.len(), 64);
+        signature[0] ^= 1;
+        let proof = CoreSelfSignedClientProof {
+            token: format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(signature)),
+            app_id: "proof-app".to_owned(),
+            claimed_author: claimed_author.clone(),
+        };
+        assert!(
+            core_open_identity(&config, Some(&proof)).is_err(),
+            "same-length, valid-base64 signature tampering must fail"
+        );
+        let persistent_path = std::env::temp_dir().join(format!(
+            "jazz-invalid-self-signed-open-{}",
+            std::process::id()
+        ));
+        assert!(
+            !persistent_path.exists(),
+            "test path must be fresh: {}",
+            persistent_path.display()
+        );
+        let result = NapiDb::open_persistent_with_self_signed_proof(
+            persistent_path.to_string_lossy().into_owned(),
+            Uint8Array::from(b"{}".to_vec()),
+            Uint8Array::from(encode_config(external_author, None)),
+            proof.token.clone(),
+            proof.app_id.clone(),
+            proof.claimed_author.clone(),
+        );
+        let created_storage = persistent_path.exists();
+        if created_storage {
+            std::fs::remove_dir_all(&persistent_path).unwrap();
+        }
+        assert!(
+            result.is_err(),
+            "invalid proof must reject the persistent open"
+        );
+        assert!(
+            !created_storage,
+            "invalid proof must be rejected before RocksDB creates its data directory"
+        );
+
+        let bytes = encode_config(external_author, None);
+        let config = postcard::from_bytes::<CoreOpenDbConfig>(&bytes).unwrap();
+        let proof = CoreSelfSignedClientProof {
+            token: token.clone(),
+            app_id: "wrong-app".to_owned(),
+            claimed_author: claimed_author.clone(),
+        };
+        assert!(
+            core_open_identity(&config, Some(&proof)).is_err(),
+            "wrong audience must fail"
+        );
+
+        let bytes = encode_config(external_author, None);
+        let config = postcard::from_bytes::<CoreOpenDbConfig>(&bytes).unwrap();
+        let proof = CoreSelfSignedClientProof {
+            token,
+            app_id: "proof-app".to_owned(),
+            claimed_author: r#"["urn:jazz:local-first","another-subject"]"#.to_owned(),
+        };
+        assert!(
+            core_open_identity(&config, Some(&proof)).is_err(),
+            "claimed author must match the signed issuer and subject"
+        );
+
+        let expired = jazz::tools::identity::mint_jazz_self_signed_token_at(
+            &[10; 32],
+            jazz::tools::identity::LOCAL_FIRST_ISSUER,
+            "proof-app",
+            1,
+            0,
+        )
+        .unwrap();
+        let bytes = encode_config(external_author, None);
+        let config = postcard::from_bytes::<CoreOpenDbConfig>(&bytes).unwrap();
+        let proof = CoreSelfSignedClientProof {
+            token: expired,
+            app_id: "proof-app".to_owned(),
+            claimed_author,
+        };
+        assert!(
+            core_open_identity(&config, Some(&proof)).is_err(),
+            "expired proof must fail"
+        );
     }
 
     #[test]

@@ -16,12 +16,14 @@ import {
   type RuntimeTokenOptions,
 } from "./runtime-source.js";
 import { NativeRuntimeAdapter } from "./native-runtime/native-runtime-adapter.js";
+import type { NativeSelfSignedClientProof } from "./native-runtime/native-codec.js";
 import { SharedBrowserWorkerConnection } from "./native-runtime/browser-shared-worker-connection.js";
 import { AttachedBrowserWorkerConnection } from "./native-runtime/attached-browser-worker-connection.js";
 import { MessagePortBrowserFollowerConnection } from "./native-runtime/browser-follower-connection.js";
 import { installWasmTelemetry } from "./sync-telemetry.js";
 import {
   ANONYMOUS_JWT_ISSUER,
+  LOCAL_FIRST_JWT_ISSUER,
   isReservedJazzIssuer,
   resolveClientSessionSync,
 } from "./client-session.js";
@@ -75,6 +77,24 @@ function runtimeAuthorFromConfig(config: DbConfig) {
         issuer: "urn:jazz:runtime-host",
         user_id: `${config.appId}:${config.env ?? "dev"}:${session?.user_id ?? "unauthenticated"}`,
       };
+}
+
+export function selfSignedClientProofFromConfig(
+  config: DbConfig,
+  session: ReturnType<typeof sessionFromConfig>,
+): NativeSelfSignedClientProof | undefined {
+  if (
+    !session ||
+    !config.jwtToken ||
+    (session.issuer !== LOCAL_FIRST_JWT_ISSUER && session.issuer !== ANONYMOUS_JWT_ISSUER)
+  ) {
+    return undefined;
+  }
+  return {
+    token: config.jwtToken,
+    appId: config.appId,
+    claimedAuthor: canonicalAuthorSubject(session.issuer, session.user_id),
+  };
 }
 
 function persistentIdentitySeed(
@@ -137,6 +157,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     };
 
     const session = sessionFromConfig(config);
+    const selfSignedClientProof = selfSignedClientProofFromConfig(config, session);
     const identitySeed = persistentIdentitySeed(config, session);
     // A persistent worker may replay a main-thread-authored transaction after
     // the page has reopened. Keep that logical client's node identity stable
@@ -154,6 +175,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       author,
       flushEvery,
       !browserMode,
+      selfSignedClientProof,
     );
     if (browserMode) {
       mainThreadPeerRuntime.setNonDurableClient();
@@ -193,6 +215,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
       throw new Error("Browser worker connections require the native runtime adapter");
     }
     const session = sessionFromConfig(config);
+    const selfSignedClientProof = selfSignedClientProofFromConfig(config, session);
     const identitySeed = persistentIdentitySeed(config, session);
     const dbName = resolveDefaultPersistentDbName(config);
     const author = authorBytesForSession(runtimeAuthorFromConfig(config));
@@ -213,6 +236,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         dbName,
         node: deterministicBytes(`${identitySeed}:${dbName}:node`),
         author,
+        selfSignedClientProof,
         initialSyncFlushEvery: initialSyncFlushEvery(config),
         appId: config.appId,
         authSessionKey: createBrowserAuthSessionKey(config),
@@ -261,6 +285,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
     author: Uint8Array,
     flushEvery: number,
     historyComplete: boolean,
+    selfSignedClientProof?: NativeSelfSignedClientProof,
   ): NativeRuntimeAdapter {
     if (!this.ownerRuntime || this.ownerRuntime.isClosed()) {
       this.ownerRuntime = new NativeRuntimeAdapter(
@@ -270,7 +295,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         author,
         1,
         historyComplete,
-        { initialSyncFlushEvery: flushEvery },
+        { initialSyncFlushEvery: flushEvery, selfSignedClientProof },
       );
       return this.ownerRuntime;
     }
