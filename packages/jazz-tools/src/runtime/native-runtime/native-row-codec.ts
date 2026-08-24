@@ -719,16 +719,26 @@ function decodeTerminalColumnBytes(
   bytes: Uint8Array,
   valueType: ValueType | undefined,
 ): Value {
-  let storageType = valueType;
-  while (storageType?.tag === 14) storageType = storageType.inner;
   if (
     isProvenanceMagicColumn(column.name) &&
     column.column_type.type === "Text" &&
-    storageType?.tag === 8
+    nonNullableValueType(valueType)?.tag === 8
   ) {
-    return { type: "Text", value: textDecoder.decode(bytes) };
+    return { type: "Text", value: decodeProvenanceText(bytes) };
   }
   return decodeTerminalBytes(column.column_type, bytes);
+}
+
+function decodeProvenanceText(bytes: Uint8Array): string {
+  // Producers may hand terminal/public provenance across either as Groove's
+  // stored-scalar String bytes or as already-unwrapped logical Text.  Canonical
+  // AuthorSubject JSON begins with `[`, so a leading NUL is only the scalar tag.
+  return textDecoder.decode(bytes[0] === 0 ? bytes.subarray(1) : bytes);
+}
+
+function nonNullableValueType(valueType: ValueType | undefined): ValueType | undefined {
+  while (valueType?.tag === 14) valueType = valueType.inner;
+  return valueType;
 }
 
 function isKnownValueType(valueType: ValueType): boolean {

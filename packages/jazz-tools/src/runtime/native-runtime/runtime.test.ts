@@ -4344,7 +4344,11 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         yield "updated";
       })(),
       JSON.stringify({
-        session: { user_id: "user-1", claims: { role: "editor" } },
+        session: {
+          issuer: "https://issuer.example",
+          user_id: "user-1",
+          claims: { role: "editor" },
+        },
         updated_at: 1_234_000,
         branch_view: { head, base },
       }),
@@ -5472,7 +5476,7 @@ function encodeUserWrappedSubscriptionDelta(row: {
           row.rowId,
           presentBytes(inlineScalar(row.title)),
           presentBytes(presentBytes(inlineScalar(row.note))),
-          new TextEncoder().encode(JSON.stringify(["https://issuer.example", "user-1"])),
+          inlineScalar(JSON.stringify(["https://issuer.example", "user-1"])),
           u64Bytes(123),
         ]),
       );
@@ -5539,9 +5543,9 @@ function writeTeamGatherBatches(
               : presentBytes(inlineScalar(source.name)),
             encodeNativeNullValue(descriptor[2]!.valueType),
             encodeNativeNullValue(descriptor[3]!.valueType),
-            new TextEncoder().encode(JSON.stringify(["https://issuer.example", "user-1"])),
+            inlineScalar(JSON.stringify(["https://issuer.example", "user-1"])),
             u64Bytes(123),
-            new TextEncoder().encode(JSON.stringify(["https://issuer.example", "user-1"])),
+            inlineScalar(JSON.stringify(["https://issuer.example", "user-1"])),
             u64Bytes(123),
           ]),
         );
