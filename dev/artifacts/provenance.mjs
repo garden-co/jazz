@@ -318,6 +318,12 @@ export function verifyManifest(root, kind, profile, targetOverride) {
     return `manifest is invalid (${path})`;
   }
   const expected = expectedManifest(root, kind, profile, targetOverride);
+  expected.nativeArtifactFingerprint = nativeArtifactFingerprint(
+    root,
+    kind,
+    profile,
+    targetOverride,
+  );
   for (const key of [
     "schema",
     "kind",
@@ -329,6 +335,7 @@ export function verifyManifest(root, kind, profile, targetOverride) {
     "features",
     "packageInputs",
     "artifacts",
+    "nativeArtifactFingerprint",
   ]) {
     if (JSON.stringify(actual[key]) !== JSON.stringify(expected[key]))
       return `${key} differs (built ${JSON.stringify(actual[key])}, expected ${JSON.stringify(expected[key])})`;

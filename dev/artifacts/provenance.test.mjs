@@ -66,6 +66,18 @@ test("provenance rejects stale tree, lock, toolchain, and profile", () => {
   assert.match(verifyManifest(root, "wasm", "fast"), /rustToolchain differs/);
 });
 
+test("provenance rejects a fingerprint-only sealed manifest drift", () => {
+  const root = fixture();
+  writeManifest(root, "wasm", "fast");
+  const path = manifestPath(root, "wasm");
+  const stale = JSON.parse(readFileSync(path, "utf8"));
+  stale.nativeArtifactFingerprint = "0".repeat(64);
+  writeFileSync(path, JSON.stringify(stale));
+  assert.match(verifyManifest(root, "wasm", "fast"), /nativeArtifactFingerprint differs/);
+  writeManifest(root, "wasm", "fast");
+  assert.equal(verifyManifest(root, "wasm", "fast"), null);
+});
+
 test("dirty source changes invalidate the manifest", () => {
   const root = fixture();
   writeManifest(root, "wasm", "release");
@@ -241,6 +253,17 @@ test("assembled NAPI packages carry only matching manifests and reject stale or 
   writeFileSync(darwinManifest, JSON.stringify(crossTargetMismatch));
   assert.throws(() => stageNapiManifests(root), /different ABI fingerprint or package inputs/);
   crossTargetMismatch.packageInputs = "b".repeat(64);
+  writeFileSync(darwinManifest, JSON.stringify(crossTargetMismatch));
+
+  for (const [field, value] of [
+    ["nativeArtifactFingerprint", "not-a-fingerprint"],
+    ["packageInputs", undefined],
+  ]) {
+    const malformed = JSON.parse(readFileSync(darwinManifest, "utf8"));
+    malformed[field] = value;
+    writeFileSync(darwinManifest, JSON.stringify(malformed));
+    assert.throws(() => stageNapiManifests(root), /missing native fingerprint or package inputs/);
+  }
   writeFileSync(darwinManifest, JSON.stringify(crossTargetMismatch));
 
   writeFileSync(node, "stale");

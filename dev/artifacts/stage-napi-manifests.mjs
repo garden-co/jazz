@@ -33,6 +33,13 @@ export function stageNapiManifests(root) {
     const manifest = JSON.parse(readFileSync(source, "utf8"));
     const problem = verifyPublishedNapiManifest(manifest, target, node);
     if (problem) throw new Error(`invalid provenance for ${platform}: ${problem}`);
+    if (
+      !/^[a-f0-9]{64}$/.test(manifest.nativeArtifactFingerprint ?? "") ||
+      !/^[a-f0-9]{64}$/.test(manifest.packageInputs ?? "")
+    )
+      throw new Error(
+        `invalid provenance for ${platform}: missing native fingerprint or package inputs`,
+      );
     const identity = `${manifest.nativeArtifactFingerprint}\0${manifest.packageInputs}`;
     if (!shared) shared = identity;
     else if (shared !== identity)
