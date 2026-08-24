@@ -6,7 +6,7 @@ use jazz::db::{Db, DbConfig, DbIdentity, PreparedQuery, block_on};
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::query::{OrderDirection, Query, all_of, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
@@ -110,6 +110,12 @@ impl Fixture {
                     ("blockId".into(), Value::Uuid(block.0)),
                     ("title".into(), Value::String(format!("Task {index:02}"))),
                     ("completed".into(), Value::Bool(index % 3 == 0)),
+                    (
+                        "dueAt".into(),
+                        Value::Nullable(Some(Box::new(Value::U64(
+                            1_800_000_000_000_000 + index as u64,
+                        )))),
+                    ),
                 ]),
             );
             insert(
@@ -146,7 +152,9 @@ impl Fixture {
                 row_id(7, index),
                 BTreeMap::from([
                     ("workspaceId".into(), Value::Uuid(workspace.0)),
-                    ("blockId".into(), Value::Uuid(block.0)),
+                    // A real suggestion surface is a bounded window for one
+                    // block, not one suggestion from every block.
+                    ("blockId".into(), Value::Uuid(row_id(3, 0).0)),
                     (
                         "payload".into(),
                         Value::String(format!("{{\"replacement\":\"Verse {index:02}\"}}")),
@@ -160,7 +168,7 @@ impl Fixture {
                 row_id(8, index),
                 BTreeMap::from([
                     ("workspaceId".into(), Value::Uuid(workspace.0)),
-                    ("blockId".into(), Value::Uuid(block.0)),
+                    ("blockId".into(), Value::Uuid(row_id(3, 0).0)),
                     (
                         "name".into(),
                         Value::String(format!("chart-{index:02}.pdf")),
@@ -173,7 +181,10 @@ impl Fixture {
         let sibling_window = db
             .prepare_query(
                 &Query::from("blocks")
-                    .filter(eq(col("pageId"), lit(root.0)))
+                    .filter(all_of([
+                        eq(col("workspaceId"), lit(workspace.0)),
+                        eq(col("pageId"), lit(root.0)),
+                    ]))
                     .order_by("position", OrderDirection::Asc)
                     .offset(8)
                     .limit(16),
@@ -182,15 +193,40 @@ impl Fixture {
         let child_pages = db
             .prepare_query(
                 &Query::from("pages")
-                    .filter(eq(col("parentPageId"), lit(root.0)))
+                    .filter(all_of([
+                        eq(col("workspaceId"), lit(workspace.0)),
+                        eq(col("parentPageId"), lit(root.0)),
+                    ]))
                     .order_by("title", OrderDirection::Asc),
             )
             .expect("prepare child page traversal");
-        let task_window = bounded_workspace_query(&db, "tasks", "title", workspace);
+        let task_window = bounded_workspace_query(&db, "tasks", "dueAt", workspace);
         let calendar_window = bounded_workspace_query(&db, "calendarEvents", "startsAt", workspace);
         let song_window = bounded_workspace_query(&db, "songs", "title", workspace);
-        let suggestion_window = bounded_workspace_query(&db, "suggestions", "status", workspace);
-        let attachment_window = bounded_workspace_query(&db, "attachments", "name", workspace);
+        let suggestion_window = db
+            .prepare_query(
+                &Query::from("suggestions")
+                    .filter(all_of([
+                        eq(col("workspaceId"), lit(workspace.0)),
+                        eq(col("blockId"), lit(row_id(3, 0).0)),
+                        eq(col("status"), lit("open")),
+                    ]))
+                    .select(["payload", "status", "$createdAt"])
+                    .order_by("$createdAt", OrderDirection::Asc)
+                    .limit(12),
+            )
+            .expect("prepare live suggestion surface");
+        let attachment_window = db
+            .prepare_query(
+                &Query::from("attachments")
+                    .filter(all_of([
+                        eq(col("workspaceId"), lit(workspace.0)),
+                        eq(col("blockId"), lit(row_id(3, 0).0)),
+                    ]))
+                    .order_by("name", OrderDirection::Asc)
+                    .limit(12),
+            )
+            .expect("prepare block attachment surface");
         Self {
             db,
             sibling_window,
@@ -217,7 +253,7 @@ impl Fixture {
             .len()
     }
 
-    pub fn surface_window_counts(&self) -> [usize; 5] {
+    pub fn surface_window_counts(&self) -> [usize; 4] {
         [
             self.db.read(&self.task_window).expect("read tasks").len(),
             self.db
@@ -226,14 +262,17 @@ impl Fixture {
                 .len(),
             self.db.read(&self.song_window).expect("read songs").len(),
             self.db
-                .read(&self.suggestion_window)
-                .expect("read suggestions")
-                .len(),
-            self.db
                 .read(&self.attachment_window)
                 .expect("read attachments")
                 .len(),
         ]
+    }
+
+    pub fn suggestion_window_count(&self) -> usize {
+        self.db
+            .read(&self.suggestion_window)
+            .expect("read live suggestion window")
+            .len()
     }
 }
 
@@ -258,7 +297,8 @@ fn schema() -> JazzSchema {
             .table(
                 TableSchemaBuilder::new("workspaces")
                     .column("name", ColumnType::Text)
-                    .column("ownerSubject", ColumnType::Text),
+                    .column("ownerSubject", ColumnType::Text)
+                    .index_only(["ownerSubject"]),
             )
             .table(
                 TableSchemaBuilder::new("members")
@@ -272,7 +312,7 @@ fn schema() -> JazzSchema {
                     .fk_column("workspaceId", "workspaces")
                     .nullable_fk_column("parentPageId", "pages")
                     .column("title", ColumnType::Text)
-                    .index_only(["parentPageId", "title"]),
+                    .index_only(["workspaceId", "parentPageId", "title"]),
             )
             .table(
                 TableSchemaBuilder::new("blocks")
@@ -282,7 +322,7 @@ fn schema() -> JazzSchema {
                     .column("position", ColumnType::Double)
                     .column("kind", ColumnType::Text)
                     .column("payload", ColumnType::Json { schema: None })
-                    .index_only(["pageId", "position", "kind"]),
+                    .index_only(["workspaceId", "pageId", "position"]),
             )
             .table(
                 TableSchemaBuilder::new("tasks")
@@ -292,7 +332,7 @@ fn schema() -> JazzSchema {
                     .column("completed", ColumnType::Boolean)
                     .nullable_column("assigneeSubject", ColumnType::Text)
                     .nullable_column("dueAt", ColumnType::Timestamp)
-                    .index_only(["workspaceId", "dueAt"]),
+                    .index_only(["workspaceId", "dueAt", "blockId"]),
             )
             .table(
                 TableSchemaBuilder::new("calendarEvents")
@@ -301,7 +341,7 @@ fn schema() -> JazzSchema {
                     .column("title", ColumnType::Text)
                     .column("startsAt", ColumnType::Timestamp)
                     .column("endsAt", ColumnType::Timestamp)
-                    .index_only(["workspaceId", "startsAt"]),
+                    .index_only(["workspaceId", "startsAt", "blockId"]),
             )
             .table(
                 TableSchemaBuilder::new("songs")
@@ -310,7 +350,7 @@ fn schema() -> JazzSchema {
                     .column("title", ColumnType::Text)
                     .nullable_column("key", ColumnType::Text)
                     .nullable_column("bpm", ColumnType::Double)
-                    .index_only(["workspaceId", "title"]),
+                    .index_only(["workspaceId", "title", "blockId"]),
             )
             .table(
                 TableSchemaBuilder::new("suggestions")

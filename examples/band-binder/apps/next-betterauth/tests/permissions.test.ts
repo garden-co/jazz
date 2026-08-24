@@ -89,4 +89,163 @@ describe("BandBinder workspace roles", () => {
       db.insert(app.pages, { workspaceId: workspace.id, title: "after revocation" }),
     );
   });
+
+  it.fails("rejects cross-workspace UUIDs for every recursive and block-dependent relation", async () => {
+    const owner = testApp.as(session("owner"));
+    const workspaceA = await owner
+      .insert(app.workspaces, { name: "A", ownerSubject: "owner" })
+      .wait({ tier: "edge" });
+    const workspaceB = await owner
+      .insert(app.workspaces, { name: "B", ownerSubject: "owner" })
+      .wait({ tier: "edge" });
+    for (const workspaceId of [workspaceA.id, workspaceB.id]) {
+      await owner
+        .insert(app.members, { workspaceId, subject: "owner", role: "owner" })
+        .wait({ tier: "edge" });
+    }
+    const pageA = await owner
+      .insert(app.pages, { workspaceId: workspaceA.id, title: "A" })
+      .wait({ tier: "edge" });
+    const pageB = await owner
+      .insert(app.pages, { workspaceId: workspaceB.id, title: "B" })
+      .wait({ tier: "edge" });
+    await owner.expectDenied((db) =>
+      db.insert(app.pages, {
+        workspaceId: workspaceA.id,
+        parentPageId: pageB.id,
+        title: "cross-workspace child",
+      }),
+    );
+    await owner.expectDenied((db) =>
+      db.insert(app.blocks, {
+        workspaceId: workspaceA.id,
+        pageId: pageB.id,
+        position: 1,
+        kind: "text",
+        payload: {},
+      }),
+    );
+    await owner.expectDenied((db) => db.update(app.pages, pageA.id, { parentPageId: pageB.id }));
+    const blockA = await owner
+      .insert(app.blocks, {
+        workspaceId: workspaceA.id,
+        pageId: pageA.id,
+        position: 1,
+        kind: "text",
+        payload: {},
+      })
+      .wait({ tier: "edge" });
+    await owner.expectDenied((db) => db.update(app.blocks, blockA.id, { pageId: pageB.id }));
+    await owner.expectDenied((db) =>
+      db.update(app.blocks, blockA.id, { parentBlockId: blockB.id }),
+    );
+    const blockB = await owner
+      .insert(app.blocks, {
+        workspaceId: workspaceB.id,
+        pageId: pageB.id,
+        position: 1,
+        kind: "text",
+        payload: {},
+      })
+      .wait({ tier: "edge" });
+    await owner.expectDenied((db) =>
+      db.insert(app.blocks, {
+        workspaceId: workspaceA.id,
+        pageId: pageA.id,
+        parentBlockId: blockB.id,
+        position: 2,
+        kind: "text",
+        payload: {},
+      }),
+    );
+    await owner.expectDenied((db) =>
+      db.insert(app.tasks, {
+        workspaceId: workspaceA.id,
+        blockId: blockB.id,
+        title: "cross task",
+        completed: false,
+      }),
+    );
+    await owner.expectDenied((db) =>
+      db.insert(app.calendarEvents, {
+        workspaceId: workspaceA.id,
+        blockId: blockB.id,
+        title: "cross event",
+        startsAt: new Date(0),
+        endsAt: new Date(1),
+      }),
+    );
+    await owner.expectDenied((db) =>
+      db.insert(app.songs, { workspaceId: workspaceA.id, blockId: blockB.id, title: "cross song" }),
+    );
+    await owner.expectDenied((db) =>
+      db.insert(app.suggestions, {
+        workspaceId: workspaceA.id,
+        blockId: blockB.id,
+        payload: {},
+        status: "open",
+      }),
+    );
+    await owner.expectDenied((db) =>
+      db.insert(app.attachments, {
+        workspaceId: workspaceA.id,
+        blockId: blockB.id,
+        name: "cross",
+        mediaType: "text/plain",
+        bytes: new Uint8Array(),
+      }),
+    );
+    const task = await owner
+      .insert(app.tasks, {
+        workspaceId: workspaceA.id,
+        blockId: blockA.id,
+        title: "valid",
+        completed: false,
+      })
+      .wait({ tier: "edge" });
+    const event = await owner
+      .insert(app.calendarEvents, {
+        workspaceId: workspaceA.id,
+        blockId: blockA.id,
+        title: "valid",
+        startsAt: new Date(0),
+        endsAt: new Date(1),
+      })
+      .wait({ tier: "edge" });
+    const song = await owner
+      .insert(app.songs, {
+        workspaceId: workspaceA.id,
+        blockId: blockA.id,
+        title: "valid",
+      })
+      .wait({ tier: "edge" });
+    const suggestion = await owner
+      .insert(app.suggestions, {
+        workspaceId: workspaceA.id,
+        blockId: blockA.id,
+        payload: {},
+        status: "open",
+      })
+      .wait({ tier: "edge" });
+    const attachment = await owner
+      .insert(app.attachments, {
+        workspaceId: workspaceA.id,
+        blockId: blockA.id,
+        name: "valid",
+        mediaType: "text/plain",
+        bytes: new Uint8Array(),
+      })
+      .wait({ tier: "edge" });
+    await owner.expectDenied((db) => db.update(app.tasks, task.id, { blockId: blockB.id }));
+    await owner.expectDenied((db) =>
+      db.update(app.calendarEvents, event.id, { blockId: blockB.id }),
+    );
+    await owner.expectDenied((db) => db.update(app.songs, song.id, { blockId: blockB.id }));
+    await owner.expectDenied((db) =>
+      db.update(app.suggestions, suggestion.id, { blockId: blockB.id }),
+    );
+    await owner.expectDenied((db) =>
+      db.update(app.attachments, attachment.id, { blockId: blockB.id }),
+    );
+  });
 });

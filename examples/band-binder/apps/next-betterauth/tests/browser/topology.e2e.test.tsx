@@ -172,6 +172,17 @@ describe("BandBinder cross-topology recovery", () => {
               );
               expect(blocks.map((block) => block.position)).toEqual([10, 20]);
               expect(new Set(blocks.map((block) => block.id))).toEqual(expectedBlockIds);
+              const managerBlocks = await waitForQuery(
+                manager!,
+                app.blocks.where({ workspaceId, pageId }).orderBy("position", "asc").limit(12),
+                (rows) => rows.length === 2,
+                "manager receives the exact ordered block window",
+                15_000,
+                "edge",
+              );
+              expect(managerBlocks.map((block) => [block.id, block.position])).toEqual(
+                blocks.map((block) => [block.id, block.position]),
+              );
             },
             faultsAfter: [{ kind: "disconnect", target: "manager" }],
           },

@@ -1,7 +1,7 @@
 "use client";
 
 import { useAll, useDb } from "jazz-tools/react";
-import { app } from "../schema.js";
+import { app } from "../schema";
 
 const PAGE_SIZE = 12;
 
@@ -153,6 +153,7 @@ export function SuggestionList({ workspaceId, blockId }: { workspaceId: string; 
   const { data: suggestions = [] } = useAll(
     app.suggestions
       .where({ workspaceId, blockId, status: "open" })
+      .select("*", "$createdAt")
       .orderBy("$createdAt", "asc")
       .limit(PAGE_SIZE),
   );
