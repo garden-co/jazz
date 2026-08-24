@@ -1546,6 +1546,8 @@ fn deletion_read_policy_requires_visible_global_content_winner() {
     let (_dir, mut core) = open_node_with_schema(node(9), schema);
     let owner = user(0xa1);
     let other = user(0xb2);
+    install_test_uuid_sub_claim(&mut core, owner);
+    install_test_uuid_sub_claim(&mut core, other);
     let row_uuid = row(0x81);
     let content = core
         .commit_mergeable_settled(
