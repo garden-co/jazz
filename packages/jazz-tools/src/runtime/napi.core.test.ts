@@ -339,9 +339,25 @@ it("runs every supported backend-attributed mutation family through real NAPI pr
     null,
     "local",
   );
+  if (
+    !Array.isArray(rows) ||
+    !rows.every(
+      (candidate: unknown): candidate is WasmRow =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        "id" in candidate &&
+        typeof candidate.id === "string" &&
+        "values" in candidate &&
+        Array.isArray(candidate.values),
+    )
+  ) {
+    throw new Error("expected attributed query to return rows");
+  }
   const expectedAuthor = { type: "Text", value: provenance };
   for (const title of ["updated", "upserted", "restored", "transactional"]) {
-    const row = rows.find((candidate) => candidate.values[0]?.value === title);
+    const row = rows.find(
+      (candidate) => candidate.values[0]?.type === "Text" && candidate.values[0].value === title,
+    );
     expect(row).toMatchObject({
       values: [{ type: "Text", value: title }, expectedAuthor, expectedAuthor],
     });
