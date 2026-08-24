@@ -77,11 +77,11 @@ export declare class NapiDb {
   setLargeValueStagingPolicy(incomingBytesPerWindow: number, windowMs: number, maxAgeMs?: number | undefined | null): void
   /** Run one idempotent expiry pass; native hosts normally call this on a timer. */
   evictExpiredStagedLargeValues(): number
-  readValueRange(table: string, rowId: Uint8Array, column: string, start: number, end: number): Uint8Array
-  readTextUtf16Range(table: string, rowId: Uint8Array, column: string, start: number, end: number): string
-  readJsonPointer(table: string, rowId: Uint8Array, column: string, pointer: string): string | null
-  appendValue(table: string, rowId: Uint8Array, column: string, bytes: Uint8Array): Write
-  spliceValue(table: string, rowId: Uint8Array, column: string, offset: number, deleteLength: number, insert: Uint8Array): Write
+  readValueRange(table: string, rowId: Uint8Array, column: string, start: number, end: number): Uint8Array | PendingNativeRead
+  readTextUtf16Range(table: string, rowId: Uint8Array, column: string, start: number, end: number): Uint8Array | PendingNativeRead
+  readJsonPointer(table: string, rowId: Uint8Array, column: string, pointer: string): Uint8Array | PendingNativeRead
+  appendValue(table: string, rowId: Uint8Array, column: string, bytes: Uint8Array): Write | PendingNativeWrite
+  spliceValue(table: string, rowId: Uint8Array, column: string, offset: number, deleteLength: number, insert: Uint8Array): Write | PendingNativeWrite
   setNonDurableClient(): void
   connectUpstream(): Transport
   connectUpstreamWithSession(protocolVersion: number, features: number, remoteNode: Buffer, remoteEpoch: bigint, localNode: Buffer, localEpoch: bigint): Transport
@@ -117,6 +117,10 @@ export declare class Subscription {
 
 export declare class PendingNativeRead {
   poll(): Uint8Array | null
+}
+
+export declare class PendingNativeWrite {
+  poll(): Write | null
 }
 
 export declare class PendingNativeSubscriptionBatch {}

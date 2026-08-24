@@ -141,9 +141,21 @@ declare module "jazz-wasm" {
     attachExclusiveTx(openBatchId: string): WasmTx;
 
     prepareQuery(query: Uint8Array): WasmPreparedQuery;
-    all(query: WasmPreparedQuery, opts: unknown): Uint8Array;
-    one(query: WasmPreparedQuery, opts: unknown): Uint8Array;
-    allForIdentity(query: WasmPreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
+    all(query: WasmPreparedQuery, opts: unknown): Promise<Uint8Array>;
+    one(query: WasmPreparedQuery, opts: unknown): Promise<Uint8Array>;
+    allForIdentity(
+      query: WasmPreparedQuery,
+      author: Uint8Array,
+      opts: unknown,
+    ): Promise<Uint8Array>;
+    allInTransaction(query: WasmPreparedQuery, tx: WasmTx, opts: unknown): Promise<Uint8Array>;
+    allInTransactionForIdentity(
+      query: WasmPreparedQuery,
+      tx: WasmTx,
+      author: Uint8Array,
+      opts: unknown,
+    ): Promise<Uint8Array>;
+    localCurrentRow(table: string, rowId: Uint8Array): Uint8Array;
     allRelationQuery(queryJson: string, opts: unknown): Promise<Uint8Array>;
     allRelationQueryForIdentity(
       queryJson: string,

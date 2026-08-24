@@ -229,6 +229,14 @@ pub struct PendingNativeRead {
     future: Rc<RefCell<Option<LocalBoxFuture<'static, napi::Result<Uint8Array>>>>>,
 }
 
+/// JS-thread-owned mutation setup suspended on async storage or a peer chunk.
+/// The completed write retains its ordinary settlement handle; only setup is
+/// pending here.
+#[napi]
+pub struct PendingNativeWrite {
+    future: Rc<RefCell<Option<LocalBoxFuture<'static, napi::Result<Write>>>>>,
+}
+
 struct PendingSubscriptionBatchCompletion {
     events: Vec<SubscriptionEvent>,
     layouts: HashSet<String>,
@@ -304,6 +312,31 @@ impl PendingNativeRead {
     }
 }
 
+impl PendingNativeWrite {
+    fn new(future: LocalBoxFuture<'static, napi::Result<Write>>) -> Self {
+        Self {
+            future: Rc::new(RefCell::new(Some(future))),
+        }
+    }
+
+    fn poll_once(&self) -> napi::Result<Option<Write>> {
+        let Some(mut future) = self.future.borrow_mut().take() else {
+            return Err(napi::Error::from_reason(
+                "native pending write is already complete",
+            ));
+        };
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        match Pin::new(&mut future).poll(&mut context) {
+            Poll::Ready(result) => result.map(Some),
+            Poll::Pending => {
+                *self.future.borrow_mut() = Some(future);
+                Ok(None)
+            }
+        }
+    }
+}
+
 #[napi]
 impl PendingNativeRead {
     /// Advance this read once. `null` means its concrete storage/peer wake has
@@ -314,12 +347,31 @@ impl PendingNativeRead {
     }
 }
 
+#[napi]
+impl PendingNativeWrite {
+    /// Advance mutation setup once after a concrete storage/peer wake.
+    #[napi]
+    pub fn poll(&self) -> napi::Result<Option<Write>> {
+        self.poll_once()
+    }
+}
+
 fn native_read_or_pending(
     future: LocalBoxFuture<'static, napi::Result<Uint8Array>>,
 ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
     let pending = PendingNativeRead::new(future);
     match pending.poll_once()? {
         Some(bytes) => Ok(Either::A(bytes)),
+        None => Ok(Either::B(pending)),
+    }
+}
+
+fn native_write_or_pending(
+    future: LocalBoxFuture<'static, napi::Result<Write>>,
+) -> napi::Result<Either<Write, PendingNativeWrite>> {
+    let pending = PendingNativeWrite::new(future);
+    match pending.poll_once()? {
+        Some(write) => Ok(Either::A(write)),
         None => Ok(Either::B(pending)),
     }
 }
@@ -3073,23 +3125,33 @@ impl NapiDb {
         column: String,
         start: f64,
         end: f64,
-    ) -> napi::Result<Uint8Array> {
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let range = checked_u64_range(start, end)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let bytes = match db {
+        match db {
             NapiDbInnerStorage::Memory(db) => {
-                core_block_on(db.read_value_range(&table, row_id, &column, range))
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    db.read_value_range(&table, row_id, &column, range)
+                        .await
+                        .map(Uint8Array::new)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }))
             }
             NapiDbInnerStorage::Persistent(db) => {
-                core_block_on(db.read_value_range(&table, row_id, &column, range))
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    db.read_value_range(&table, row_id, &column, range)
+                        .await
+                        .map(Uint8Array::new)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }))
             }
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        Ok(Uint8Array::new(bytes))
     }
 
     #[napi(js_name = "readTextUtf16Range")]
@@ -3100,7 +3162,7 @@ impl NapiDb {
         column: String,
         start: f64,
         end: f64,
-    ) -> napi::Result<String> {
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let range = checked_u64_range(start, end)?;
         let db = self.inner.borrow();
@@ -3109,13 +3171,24 @@ impl NapiDb {
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
             NapiDbInnerStorage::Memory(db) => {
-                core_block_on(db.read_text_utf16_range(&table, row_id, &column, range))
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    db.read_text_utf16_range(&table, row_id, &column, range)
+                        .await
+                        .map(|text| Uint8Array::new(text.into_bytes()))
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }))
             }
             NapiDbInnerStorage::Persistent(db) => {
-                core_block_on(db.read_text_utf16_range(&table, row_id, &column, range))
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    db.read_text_utf16_range(&table, row_id, &column, range)
+                        .await
+                        .map(|text| Uint8Array::new(text.into_bytes()))
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }))
             }
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     #[napi(js_name = "readJsonPointer")]
@@ -3125,25 +3198,38 @@ impl NapiDb {
         row_id: Uint8Array,
         column: String,
         pointer: String,
-    ) -> napi::Result<Option<String>> {
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let value = match db {
+        match db {
             NapiDbInnerStorage::Memory(db) => {
-                core_block_on(db.read_json_pointer(&table, row_id, &column, &pointer))
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    let value = db
+                        .read_json_pointer(&table, row_id, &column, &pointer)
+                        .await
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    serde_json::to_vec(&value)
+                        .map(Uint8Array::new)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }))
             }
             NapiDbInnerStorage::Persistent(db) => {
-                core_block_on(db.read_json_pointer(&table, row_id, &column, &pointer))
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    let value = db
+                        .read_json_pointer(&table, row_id, &column, &pointer)
+                        .await
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    serde_json::to_vec(&value)
+                        .map(Uint8Array::new)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }))
             }
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        value
-            .map(|value| serde_json::to_string(&value))
-            .transpose()
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     #[napi(js_name = "appendValue")]
@@ -3153,23 +3239,33 @@ impl NapiDb {
         row_id: Uint8Array,
         column: String,
         bytes: Uint8Array,
-    ) -> napi::Result<Write> {
+    ) -> napi::Result<Either<Write, PendingNativeWrite>> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on(db.append_value(&table, row_id, &column, bytes.to_vec()))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on(db.append_value(&table, row_id, &column, bytes.to_vec()))
-                    .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
+            NapiDbInnerStorage::Memory(db) => {
+                let db = Rc::clone(db);
+                native_write_or_pending(Box::pin(async move {
+                    let write = db
+                        .append_value(&table, row_id, &column, bytes.to_vec())
+                        .await
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    core_write_memory(db, write)
+                }))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                let db = Rc::clone(db);
+                native_write_or_pending(Box::pin(async move {
+                    let write = db
+                        .append_value(&table, row_id, &column, bytes.to_vec())
+                        .await
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    core_write_persistent(db, write)
+                }))
+            }
         }
     }
 
@@ -3182,7 +3278,7 @@ impl NapiDb {
         offset: f64,
         delete_length: f64,
         insert: Uint8Array,
-    ) -> napi::Result<Write> {
+    ) -> napi::Result<Either<Write, PendingNativeWrite>> {
         let row_id = core_row_uuid_from_bytes(&row_id)?;
         let offset = checked_u64(offset, "offset")?;
         let delete_length = checked_u64(delete_length, "deleteLength")?;
@@ -3191,30 +3287,40 @@ impl NapiDb {
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
         match db {
-            NapiDbInnerStorage::Memory(db) => core_write_memory(
-                Rc::clone(db),
-                core_block_on(db.splice_value(
-                    &table,
-                    row_id,
-                    &column,
-                    offset,
-                    delete_length,
-                    insert.to_vec(),
-                ))
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
-            NapiDbInnerStorage::Persistent(db) => core_write_persistent(
-                Rc::clone(db),
-                core_block_on(db.splice_value(
-                    &table,
-                    row_id,
-                    &column,
-                    offset,
-                    delete_length,
-                    insert.to_vec(),
-                ))
-                .map_err(|error| napi::Error::from_reason(error.to_string()))?,
-            ),
+            NapiDbInnerStorage::Memory(db) => {
+                let db = Rc::clone(db);
+                native_write_or_pending(Box::pin(async move {
+                    let write = db
+                        .splice_value(
+                            &table,
+                            row_id,
+                            &column,
+                            offset,
+                            delete_length,
+                            insert.to_vec(),
+                        )
+                        .await
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    core_write_memory(db, write)
+                }))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                let db = Rc::clone(db);
+                native_write_or_pending(Box::pin(async move {
+                    let write = db
+                        .splice_value(
+                            &table,
+                            row_id,
+                            &column,
+                            offset,
+                            delete_length,
+                            insert.to_vec(),
+                        )
+                        .await
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    core_write_persistent(db, write)
+                }))
+            }
         }
     }
 
@@ -4539,13 +4645,14 @@ mod tests {
     use std::rc::Rc;
 
     use super::{
-        PendingNativeRead, PendingNativeSubscriptionBatch, PendingSubscriptionBatchCompletion,
+        PendingNativeRead, PendingNativeSubscriptionBatch, PendingNativeWrite,
+        PendingSubscriptionBatchCompletion, Write,
     };
     use crate::{
-        NapiDb, NapiDbInnerStorage, NapiTxKind, PreparedQuery, Tx, authority_epoch_from_bigint,
-        core_block_on, core_claim_value_from_json, core_read_opts_from_json,
-        core_subscription_event_to_napi, encode_core_subscription_delta, terminal_bytes_to_numbers,
-        unknown_transaction_kind_message,
+        NapiDb, NapiDbInnerStorage, NapiTxKind, PreparedQuery, TransactionId, Tx, TxId,
+        authority_epoch_from_bigint, core_block_on, core_claim_value_from_json,
+        core_read_opts_from_json, core_subscription_event_to_napi, encode_core_subscription_delta,
+        terminal_bytes_to_numbers, unknown_transaction_kind_message,
     };
     use futures::channel::oneshot;
 
@@ -4578,6 +4685,33 @@ mod tests {
     }
 
     #[test]
+    fn pending_native_read_reports_a_later_fatal_error_exactly_once() {
+        let (sender, receiver) = oneshot::channel::<()>();
+        let pending = PendingNativeRead::new(Box::pin(async move {
+            receiver
+                .await
+                .map_err(|_| napi::Error::from_reason("planned sender drop"))?;
+            Err(napi::Error::from_reason("fatal chunk integrity failure"))
+        }));
+        assert!(pending.poll_once().unwrap().is_none());
+        assert!(sender.send(()).is_ok());
+        let first_error = match pending.poll_once() {
+            Err(error) => error,
+            Ok(_) => panic!("fatal pending read must fail"),
+        };
+        assert!(
+            first_error
+                .to_string()
+                .contains("fatal chunk integrity failure")
+        );
+        let repeated_error = match pending.poll_once() {
+            Err(error) => error,
+            Ok(_) => panic!("completed pending read must not replay"),
+        };
+        assert!(repeated_error.to_string().contains("already complete"));
+    }
+
+    #[test]
     fn pending_native_subscription_batch_preserves_one_future_until_completion() {
         let (sender, receiver) = oneshot::channel::<PendingSubscriptionBatchCompletion>();
         let pending = PendingNativeSubscriptionBatch::new(Box::pin(async move {
@@ -4600,6 +4734,28 @@ mod tests {
             pending.poll_once().is_err(),
             "completed batch cannot replay"
         );
+    }
+
+    #[test]
+    fn pending_native_write_preserves_one_suspended_future_until_completion() {
+        let (sender, receiver) = oneshot::channel::<Write>();
+        let pending = PendingNativeWrite::new(Box::pin(async move {
+            receiver
+                .await
+                .map_err(|_| napi::Error::from_reason("planned sender drop"))
+        }));
+        assert!(pending.poll_once().unwrap().is_none());
+        let expected = Write {
+            payload: vec![9],
+            batch_id: TransactionId::from_committed_tx(TxId::new(
+                jazz::time::TxTime::from(1),
+                jazz::ids::NodeUuid::from_bytes([3; 16]),
+            )),
+            inner: None,
+        };
+        assert!(sender.send(expected).is_ok());
+        assert_eq!(pending.poll_once().unwrap().unwrap().payload, vec![9]);
+        assert!(pending.poll_once().is_err());
     }
     use jazz::db::{
         Db as CoreDb, DbConfig as CoreDbConfig, DbIdentity as CoreDbIdentity, ExclusiveTxOps,

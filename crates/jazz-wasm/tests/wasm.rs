@@ -315,9 +315,13 @@ async fn public_wasm_large_values_hydrate_before_direct_relation_and_subscriptio
         Some(&Value::String(json.clone()))
     );
 
+    let direct_bytes = await_promise(db.all(&query, JsValue::NULL).expect("direct public read"))
+        .await
+        .dyn_into::<js_sys::Uint8Array>()
+        .expect("direct public read resolves Uint8Array")
+        .to_vec();
     let direct: Vec<DecodedRowBatch> =
-        postcard::from_bytes(&db.all(&query, JsValue::NULL).expect("direct public read"))
-            .expect("decode direct public rows");
+        postcard::from_bytes(&direct_bytes).expect("decode direct public rows");
     let direct_values = values_from_batches(&direct);
     assert_eq!(
         direct_values.get("text"),
