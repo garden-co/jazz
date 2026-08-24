@@ -23,6 +23,13 @@ const testArgs = [
   "--features",
   "jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test",
 ];
+const m3TestName = "node::tests::harness::m3_maintained_one_shot_differential_oracle";
+const m3Features = "testing,transport-compression-zstd";
+const m3Environment = {
+  JAZZ_SEED: "11",
+  JAZZ_DIFFERENTIAL_CHURN_DEPTHS: "10,1000",
+  JAZZ_DIFFERENTIAL_STEP_COUNT: "3",
+};
 const now = () => new Date().toISOString();
 const run = (command, args, options = {}) =>
   spawnSync(command, args, {
@@ -84,6 +91,36 @@ function inventory(partition) {
   const result = run("cargo", args);
   if (result.status !== 0) fail(`Nextest inventory failed: ${result.stderr}`);
   return parsedInventory(result.stdout);
+}
+
+function m3OracleTestBinary() {
+  // Keep this invocation semantically identical to ci-suite.yml's maintained
+  // oracle gate: compile the libtest, then execute that exact binary directly.
+  const result = run("cargo", [
+    "test",
+    "-p",
+    "jazz",
+    "--lib",
+    "--features",
+    m3Features,
+    "--no-run",
+    "--message-format=json",
+  ]);
+  if (result.status !== 0) fail(`M3 oracle compilation failed: ${result.stderr}`);
+  let executable;
+  for (const line of result.stdout.split("\n")) {
+    try {
+      const message = JSON.parse(line);
+      if (
+        message.reason === "compiler-artifact" &&
+        message.target?.name === "jazz" &&
+        typeof message.executable === "string"
+      )
+        executable = message.executable;
+    } catch {}
+  }
+  if (!executable || !fs.statSync(executable).isFile()) fail("M3 oracle test binary was not built");
+  return executable;
 }
 
 function phase(phases, name, action) {
@@ -169,6 +206,7 @@ function shard(argv) {
     if (index === 1) {
       // This is the same maintained seed required by CI, folded into shard 1
       // after the complete ordinary workspace partition has run.
+      const testBinary = phase(phases, "m3-compile-libtest", m3OracleTestBinary);
       phase(phases, "m3-maintained-seed-11", () => {
         const result = run(
           "timeout",
@@ -176,18 +214,9 @@ function shard(argv) {
             "--kill-after=30s",
             "60s",
             "env",
-            "JAZZ_SEED=11",
-            "JAZZ_DIFFERENTIAL_CHURN_DEPTHS=10,1000",
-            "JAZZ_DIFFERENTIAL_STEP_COUNT=3",
-            "cargo",
-            "test",
-            "-p",
-            "jazz",
-            "--lib",
-            "--features",
-            "testing,transport-compression-zstd",
-            "node::tests::harness::m3_maintained_one_shot_differential_oracle",
-            "--",
+            ...Object.entries(m3Environment).map(([name, value]) => `${name}=${value}`),
+            testBinary,
+            m3TestName,
             "--exact",
             "--ignored",
           ],
@@ -197,7 +226,14 @@ function shard(argv) {
         );
         if (result.status !== 0) fail(`M3 seed 11 exited ${result.status}`);
       });
-      value.m3 = { seed: 11, status: "passed" };
+      value.m3 = {
+        seed: 11,
+        status: "passed",
+        runner: "compiled-libtest",
+        testName: m3TestName,
+        testArgs: ["--exact", "--ignored"],
+        environment: m3Environment,
+      };
     } else value.m3 = { status: "not-assigned" };
     value.status = "passed";
   } catch (error) {
@@ -327,7 +363,14 @@ function aggregate(argv) {
     if (selected.size !== expected.length || expected.some((test) => !selected.has(test)))
       fail("hash shards do not cover the exact executable inventory");
     const m3 = shards.filter((item) => item.m3?.seed === 11 && item.m3?.status === "passed");
-    if (m3.length !== 1 || m3[0].shard.index !== 1)
+    if (
+      m3.length !== 1 ||
+      m3[0].shard.index !== 1 ||
+      m3[0].m3.runner !== "compiled-libtest" ||
+      m3[0].m3.testName !== m3TestName ||
+      JSON.stringify(m3[0].m3.testArgs) !== JSON.stringify(["--exact", "--ignored"]) ||
+      JSON.stringify(m3[0].m3.environment) !== JSON.stringify(m3Environment)
+    )
       fail("maintained M3 seed 11 was not folded into shard 1 exactly once");
     Object.assign(aggregateReceipt, {
       status: "passed",

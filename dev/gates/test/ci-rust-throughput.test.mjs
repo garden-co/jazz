@@ -611,11 +611,13 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
   assert.match(rustShadowLauncher, /--require-nextest/);
   assert.match(rustShadowLauncher, /RUST_MIN_STACK.*4 \* 1024 \* 1024/);
   assert.match(rustShadowLauncher, /"--workspace",\s*"--lib",\s*"--bins",\s*"--tests"/);
-  assert.match(rustShadowLauncher, /"--kill-after=30s",\s*"60s",\s*"env",\s*"JAZZ_SEED=11"/);
-  const exactM3Invocation =
-    /m3_maintained_one_shot_differential_oracle",\s*"--",\s*"--exact",\s*"--ignored"/;
+  assert.match(rustShadowLauncher, /"--kill-after=30s",\s*"60s",\s*"env"/);
+  assert.match(rustShadowLauncher, /JAZZ_SEED: "11"/);
+  const exactM3Invocation = /testBinary,\s*m3TestName,\s*"--exact",\s*"--ignored"/;
   assert.match(rustShadowLauncher, exactM3Invocation);
-  assert.match(rustShadowLauncher, /m3\.length !== 1.*shard\.index !== 1/);
+  assert.match(rustShadowLauncher, /"--no-run",\s*"--message-format=json"/);
+  assert.match(rustShadowLauncher, /runner: "compiled-libtest"/);
+  assert.match(rustShadowLauncher, /m3\.length !== 1[\s\S]*m3\[0\]\.shard\.index !== 1/);
   assert.match(rustShadowLauncher, /test belongs to more than one shard/);
   assert.match(rustShadowLauncher, /hash shards do not cover the exact executable inventory/);
   assert.match(rustShadowLauncher, /sourceIdentity\(root\)/);
@@ -640,7 +642,10 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
   assert.throws(
     () =>
       assert.match(
-        rustShadowLauncher.replace('"--",\n            "--exact"', '"--exact"'),
+        rustShadowLauncher.replace(
+          "testBinary,\n            m3TestName,",
+          '"cargo",\n            "test",',
+        ),
         exactM3Invocation,
       ),
     /m3_maintained_one_shot_differential_oracle/,
@@ -699,7 +704,21 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
       source: structuredClone(source),
       environment: { rustMinStack: String(4 * 1024 * 1024) },
     },
-    m3: index === 1 ? { seed: 11, status: "passed" } : { status: "not-assigned" },
+    m3:
+      index === 1
+        ? {
+            seed: 11,
+            status: "passed",
+            runner: "compiled-libtest",
+            testName: "node::tests::harness::m3_maintained_one_shot_differential_oracle",
+            testArgs: ["--exact", "--ignored"],
+            environment: {
+              JAZZ_SEED: "11",
+              JAZZ_DIFFERENTIAL_CHURN_DEPTHS: "10,1000",
+              JAZZ_DIFFERENTIAL_STEP_COUNT: "3",
+            },
+          }
+        : { status: "not-assigned" },
   });
   const runAggregate = (mutate) => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-shadow-receipts-"));
@@ -769,6 +788,11 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
       /exact shard selector/,
     ],
     ["test arguments", (shards) => shards[0].testArgs.pop(), /test arguments/],
+    [
+      "M3 receipt semantics",
+      (shards) => (shards[0].m3.runner = "cargo-test"),
+      /maintained M3 seed 11/,
+    ],
     [
       "nested receipt source identity",
       (shards) => {
