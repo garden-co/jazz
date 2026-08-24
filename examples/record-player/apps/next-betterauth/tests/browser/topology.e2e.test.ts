@@ -79,6 +79,20 @@ const relationalRecipientPermissions = s.definePermissions(
     policy.invitations.allowInsert.where((invite) =>
       policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.author }),
     );
+    policy.invitations.allowUpdate.where((invite) =>
+      policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.author }),
+    );
+    policy.invitations.allowUpdate
+      .whereOld({ subject: session.user_id, status: "pending" })
+      .whereNew((invite) =>
+        policy.invitations.exists.where({
+          id: invite.id,
+          playlist_id: invite.playlist_id,
+          subject: invite.subject,
+          status: "pending",
+        }),
+      )
+      .whereNew({ subject: session.user_id, status: "accepted" });
   },
 );
 
