@@ -1210,6 +1210,11 @@ impl NapiDb {
         base: Option<JsonValue>,
     ) -> napi::Result<StreamingMutation> {
         self.require_trusted_backend()?;
+        if author.is_some() {
+            return Err(napi::Error::from_reason(
+                "backend-attributed streaming mutations must not override backend admission identity",
+            ));
+        }
         if self.inner.borrow().is_none() {
             return Err(napi::Error::from_reason("database is closed"));
         }
@@ -1233,10 +1238,7 @@ impl NapiDb {
                 ));
             }
         };
-        let identity = author
-            .as_ref()
-            .map(|author| core_author_id_from_bytes(author))
-            .transpose()?;
+        let identity = None;
         let attribution = core_author_id_from_bytes(&attribution)?;
         let head = head.map(core_branch_selector_from_json).transpose()?;
         let base = core_branch_base_from_json(base)?;
@@ -1290,7 +1292,13 @@ impl NapiDb {
             .is_some_and(|credential| !credential.is_empty());
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let db = open_core_db(schema, CoreMemoryStorage::new(&refs), config, identity)?;
+        let db = open_core_db(
+            schema,
+            CoreMemoryStorage::new(&refs),
+            config,
+            identity,
+            trusted_backend,
+        )?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::new(db))))),
             owns_runtime: true,
@@ -1319,7 +1327,13 @@ impl NapiDb {
         let identity = core_open_identity(&config, Some(&proof))?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
-        let db = open_core_db(schema, CoreMemoryStorage::new(&refs), config, identity)?;
+        let db = open_core_db(
+            schema,
+            CoreMemoryStorage::new(&refs),
+            config,
+            identity,
+            false,
+        )?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::new(db))))),
             owns_runtime: true,
@@ -1343,7 +1357,7 @@ impl NapiDb {
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = CoreRocksDbStorage::open(data_path, &refs)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        let db = open_core_db(schema, storage, config, identity)?;
+        let db = open_core_db(schema, storage, config, identity, trusted_backend)?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
                 db,
@@ -1373,7 +1387,7 @@ impl NapiDb {
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = CoreRocksDbStorage::open(data_path, &refs)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        let db = open_core_db(schema, storage, config, identity)?;
+        let db = open_core_db(schema, storage, config, identity, false)?;
         Ok(Self {
             inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
                 db,
@@ -3430,6 +3444,7 @@ fn open_core_db<S>(
     storage: S,
     config: CoreOpenDbConfig,
     identity: CoreDbIdentity,
+    trusted_backend: bool,
 ) -> napi::Result<CoreDb<S>>
 where
     S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
@@ -3440,14 +3455,22 @@ where
     }
     let initial_sync_flush_every = config.initial_sync_flush_every;
     if config.history_complete {
-        let db = core_block_on(CoreDb::open_history_complete(db_config))
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let db = if trusted_backend {
+            core_block_on(CoreDb::open_with_backend_attribution(db_config))
+        } else {
+            core_block_on(CoreDb::open_history_complete(db_config))
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         Ok(db)
     } else {
-        let db = core_block_on(CoreDb::open(db_config))
-            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let db = if trusted_backend {
+            core_block_on(CoreDb::open_with_backend_attribution(db_config))
+        } else {
+            core_block_on(CoreDb::open(db_config))
+        }
+        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         configure_initial_sync_flush_cadence(&db, initial_sync_flush_every)
             .map_err(|error| napi::Error::from_reason(error.to_string()))?;
         Ok(db)

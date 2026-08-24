@@ -926,6 +926,10 @@ where
     node: Rc<Node<S>>,
     row_id_source: Rc<RefCell<Box<dyn RowIdSource>>>,
     next_now_ms: Rc<Cell<u64>>,
+    // Capability is minted by the native credentialed-open path, never by a
+    // session or an author value. SYSTEM is an admission identity, not proof
+    // that a caller may forge user provenance.
+    backend_attribution: bool,
 }
 
 /// Process-local, content-addressed identity for an exact typed schema view.

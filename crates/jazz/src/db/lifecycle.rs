@@ -64,7 +64,19 @@ where
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
             )),
             next_now_ms: Rc::new(Cell::new(1)),
+            backend_attribution: false,
         })
+    }
+
+    /// Native bindings call this only after accepting their backend credential.
+    /// It is deliberately separate from the SYSTEM author string: normal Db
+    /// construction, including a Rust Db using SYSTEM for internal work, has
+    /// no cross-author attribution capability.
+    #[doc(hidden)]
+    pub async fn open_with_backend_attribution(config: DbConfig<S>) -> Result<Self, Error> {
+        let mut db = Self::open(config).await?;
+        db.backend_attribution = true;
+        Ok(db)
     }
 
     #[cfg(feature = "testing")]
@@ -97,6 +109,7 @@ where
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
             )),
             next_now_ms: Rc::new(Cell::new(1)),
+            backend_attribution: false,
         };
         Ok((db, receipt))
     }
@@ -130,6 +143,7 @@ where
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
             )),
             next_now_ms: Rc::new(Cell::new(1)),
+            backend_attribution: false,
         })
     }
 
@@ -166,6 +180,7 @@ where
                     .unwrap_or_else(|| Box::new(ProductionRowIdSource)),
             )),
             next_now_ms: Rc::new(Cell::new(1)),
+            backend_attribution: false,
         })
     }
 
@@ -275,6 +290,7 @@ where
             node: Rc::clone(&self.node),
             row_id_source: Rc::clone(&self.row_id_source),
             next_now_ms: Rc::clone(&self.next_now_ms),
+            backend_attribution: self.backend_attribution,
         })
     }
 
