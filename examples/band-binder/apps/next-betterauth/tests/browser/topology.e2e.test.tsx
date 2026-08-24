@@ -23,24 +23,9 @@ import { app } from "../../schema.js";
 const PAGE_SIZE = 12;
 
 const cleanup = new TestCleanup();
-let pendingServerUnblock: string | undefined;
 
 afterEach(async () => {
-  let networkError: unknown;
-  if (pendingServerUnblock) {
-    try {
-      await unblockJazzServerNetwork(pendingServerUnblock);
-      pendingServerUnblock = undefined;
-    } catch (error) {
-      networkError = error;
-    }
-  }
   await cleanup.cleanup();
-  if (networkError) {
-    throw new Error("failed to restore BandBinder test network after scenario cleanup", {
-      cause: networkError,
-    });
-  }
 });
 
 async function settle<T>(
@@ -118,10 +103,16 @@ describe("BandBinder cross-topology recovery", () => {
             reconnect: async () => manager!.reconnect(),
             // A browser-runtime restart is deliberately distinct from a
             // transport reconnect: this exercises IndexedDB rehydration.
-            restart: async () => {
+            restart: async ({ defer }) => {
               managerChildPageWindowSubscriptionSnapshots.length = 0;
-              pendingServerUnblock = server!.serverUrl;
-              await blockJazzServerNetwork(server!.serverUrl);
+              const serverUrl = server!.serverUrl;
+              // Register this before acquiring the external route fault: a
+              // failure in any later restart step must not leak the block into
+              // another topology scenario.
+              defer("unblock BandBinder Jazz server network", async () =>
+                unblockJazzServerNetwork(serverUrl),
+              );
+              await blockJazzServerNetwork(serverUrl);
               await manager!.disconnect();
               await manager!.shutdown();
               cleanup.untrack(manager!);
@@ -131,7 +122,6 @@ describe("BandBinder cross-topology recovery", () => {
           serverNetwork: {
             reconnect: async () => {
               await unblockJazzServerNetwork(server!.serverUrl);
-              pendingServerUnblock = undefined;
             },
           },
           authorization: {
@@ -735,7 +725,6 @@ describe("BandBinder cross-topology recovery", () => {
               expect(persistedChildPages.map(({ id, title }) => ({ id, title }))).toEqual(
                 expectedChildPages,
               );
-              expect(pendingServerUnblock).toBe(server!.serverUrl);
             },
             faultsAfter: [
               { kind: "reconnect", target: "serverNetwork" },
@@ -857,14 +846,6 @@ describe("BandBinder cross-topology recovery", () => {
         ],
         cleanup: async () => {
           const errors: Error[] = [];
-          if (pendingServerUnblock) {
-            try {
-              await unblockJazzServerNetwork(pendingServerUnblock);
-              pendingServerUnblock = undefined;
-            } catch (error) {
-              errors.push(new Error("failed to unblock BandBinder test network", { cause: error }));
-            }
-          }
           for (const [label, db] of [
             ["outsider", outsider],
             ["manager", manager],
