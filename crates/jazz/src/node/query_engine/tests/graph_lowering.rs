@@ -2134,6 +2134,44 @@ fn built_in_sub_claim_lowers_to_permission_subject() {
 }
 
 #[test]
+fn only_ordered_scalar_claims_enter_collector_routing() {
+    let scalar = ClaimPath(vec!["tier".to_owned()]);
+    let array = ClaimPath(vec!["teams".to_owned()]);
+    let mut input = row_set_input(0xd3);
+    let root = input.shape.root.clone();
+    input.shape.nodes.insert(
+        root,
+        RowSetExpr::ValueSource {
+            shape: "claim-routing".to_owned(),
+            columns: vec![
+                ValueSourceColumn {
+                    name: "tier".to_owned(),
+                    value: NormalizedValueRef::Claim(scalar.clone()),
+                    ty: ColumnType::String.nullable(),
+                },
+                ValueSourceColumn {
+                    name: "teams".to_owned(),
+                    value: NormalizedValueRef::Claim(array.clone()),
+                    ty: ColumnType::Array(Box::new(ColumnType::Uuid)),
+                },
+            ],
+            mode: ValueSourceMode::Binding,
+        },
+    );
+
+    let domain = super::super::lowering::parameter_domain_for_shape_for_test(&input.shape);
+    let scalar_field = claim_param_field(&scalar);
+    let array_field = claim_param_field(&array);
+    assert!(domain.claim_params.contains_key(&scalar_field));
+    assert!(domain.claim_params.contains_key(&array_field));
+    assert!(domain.routing_params.contains(&scalar_field));
+    assert!(
+        !domain.routing_params.contains(&array_field),
+        "compound claim stays a prepared predicate input and never becomes a collector key"
+    );
+}
+
+#[test]
 fn missing_claim_lowers_to_deny_predicate() {
     let request = QueryProgramRequest {
         authorization_mode: QueryAuthorizationMode::TrustedServing,

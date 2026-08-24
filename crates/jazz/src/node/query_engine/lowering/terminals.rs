@@ -1737,16 +1737,6 @@ pub(super) fn route_literal_project_field(
     request: &QueryProgramRequest,
 ) -> Result<ProjectField, UnsupportedReason> {
     let domain = parameter_domain_for_request(request)?;
-    if let Some((_claim, _)) = domain
-        .claim_route_tokens
-        .iter()
-        .find(|(_, token)| token.as_str() == route_field)
-    {
-        return Ok(ProjectField::literal(
-            route_field.to_owned(),
-            Value::String("claim-route".to_owned()),
-        ));
-    }
     if let Some(path) = claim_path_from_param_field(route_field) {
         let value = claim_value(&path, &request.policy)?;
         let literal = domain
