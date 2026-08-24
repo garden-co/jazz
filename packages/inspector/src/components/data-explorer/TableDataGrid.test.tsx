@@ -1,7 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router";
+import { Link, MemoryRouter, Route, Routes } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TableDataGrid } from "./TableDataGrid";
+import { DataExplorer } from "../../pages/data-explorer";
 
 const mockUseAll = vi.fn();
 const mockUpdate = vi.fn();
@@ -54,6 +55,22 @@ function renderGridUi() {
 
 function renderGrid() {
   return render(renderGridUi());
+}
+
+function renderRoutedGrid() {
+  return render(
+    <MemoryRouter initialEntries={["/data-explorer/todos/data"]}>
+      <Routes>
+        <Route path="data-explorer" element={<DataExplorer />}>
+          <Route path=":table/data" element={<TableDataGrid />} />
+          <Route
+            path=":table/schema"
+            element={<Link to="/data-explorer/todos/data">Return to data</Link>}
+          />
+        </Route>
+      </Routes>
+    </MemoryRouter>,
+  );
 }
 
 const mockWasmSchema = {
@@ -865,11 +882,14 @@ describe("TableDataGrid", () => {
     await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(1));
 
     fireEvent.doubleClick(screen.getByRole("gridcell", { name: "submitted" }));
-    fireEvent.change(screen.getByLabelText("Edit title"), { target: { value: "later draft" } });
+    fireEvent.change(screen.getByLabelText("Edit title"), { target: { value: "temporary" } });
+    fireEvent.blur(screen.getByLabelText("Edit title"));
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "temporary" }));
+    fireEvent.change(screen.getByLabelText("Edit title"), { target: { value: "submitted" } });
     fireEvent.blur(screen.getByLabelText("Edit title"));
     await act(async () => resolveSave?.());
 
-    expect(screen.getByText("later draft")).not.toBeNull();
+    expect(screen.getByText("submitted")).not.toBeNull();
     expect(screen.getByRole("button", { name: "Save changes" })).not.toBeNull();
   });
 
@@ -906,6 +926,49 @@ describe("TableDataGrid", () => {
     rerender(renderGridUi());
     expect(screen.getByText("A draft")).not.toBeNull();
     expect(screen.getByRole("alert").textContent).toContain("A save failed");
+  });
+
+  it("retains a deferred save failure across the schema route", async () => {
+    let rejectSave: ((error: Error) => void) | undefined;
+    mockUpdateWait.mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectSave = reject;
+        }),
+    );
+    renderRoutedGrid();
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.change(screen.getByLabelText("Edit title"), { target: { value: "route draft" } });
+    fireEvent.blur(screen.getByLabelText("Edit title"));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("link", { name: "Schema" }));
+    expect(screen.getByText("Return to data")).not.toBeNull();
+    await act(async () => rejectSave?.(new Error("route save failed")));
+    fireEvent.click(screen.getByRole("link", { name: "Return to data" }));
+    expect(screen.getByText("route draft")).not.toBeNull();
+    expect(screen.getByRole("alert").textContent).toContain("route save failed");
+  });
+
+  it("retains a deferred save success across the schema route", async () => {
+    let resolveSave: (() => void) | undefined;
+    mockUpdateWait.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    renderRoutedGrid();
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.change(screen.getByLabelText("Edit title"), { target: { value: "route draft" } });
+    fireEvent.blur(screen.getByLabelText("Edit title"));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("link", { name: "Schema" }));
+    await act(async () => resolveSave?.());
+    fireEvent.click(screen.getByRole("link", { name: "Return to data" }));
+    expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   it("appends a staged insert row and inserts it from the banner", async () => {
