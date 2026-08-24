@@ -67,6 +67,8 @@ export default defineConfig({
       // directory. The package manifest selects pkg/jazz_wasm.js; wasm-pack's
       // web target intentionally does not emit a second manifest in pkg/.
       "jazz-wasm": resolve(__dirname, "../../crates/jazz-wasm"),
+      "jazz-tools": resolve(__dirname, "src/index.ts"),
+      "jazz-tools/permissions": resolve(__dirname, "src/permissions/index.ts"),
     },
   },
   worker: {
