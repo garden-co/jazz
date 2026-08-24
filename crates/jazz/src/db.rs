@@ -57,7 +57,7 @@ use crate::protocol::{
     SubscriptionKey, SyncMessage, TableLens,
 };
 use crate::protocol_limits::{
-    validate_fetch_row_versions, validate_known_state_declaration, validate_shape_ast_size,
+    validate_fetch_row_versions, validate_known_state_declaration, validate_shape_registration_size,
 };
 use crate::query::{
     Binding, BindingId, Operand, Predicate, Query, QueryError, RelationQuery, ShapeId,

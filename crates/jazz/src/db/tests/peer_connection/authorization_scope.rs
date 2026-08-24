@@ -861,35 +861,31 @@ fn oversized_register_shape_read_view_is_rejected_before_key_derivation_or_reten
                     local_base: TxTime(0),
                     dots: vec![
                         TxId::new(TxTime(1), NodeUuid::from_bytes([0x97; 16]));
-                        MAX_SHAPE_AST_BYTES
+                        MAX_SHAPE_REGISTRATION_BYTES
                     ],
                 },
             },
         },
         ..RegisterShapeOptions::default()
     };
+    let shape_id = shape.shape_id();
     let (mut client_transport, server_transport) = duplex();
     let subscriber = server.accept_subscriber(server_transport, AuthorId::from_bytes([0x96; 16]));
 
     client_transport
         .send(SyncMessage::RegisterShape {
-            shape_id: shape.shape_id(),
+            shape_id,
             ast: ShapeAst::from_validated(&shape),
             opts: oversized_opts,
         })
         .unwrap();
-    subscriber.borrow_mut().tick().unwrap();
+    let error = subscriber.borrow_mut().tick().unwrap_err();
 
-    assert_subscribe_rejected_unsupported_shape_capability_detail(
-        client_transport
-            .try_recv()
-            .expect("oversized registration must receive a rejection"),
-        SubscriptionKey {
-            shape_id: shape.shape_id(),
-            binding_id: BindingId(uuid::Uuid::nil()),
-            read_view: crate::protocol::ReadViewKey::default(),
-        },
-        "shape registration size",
+    assert_eq!(error.code, crate::db::ErrorCode::Protocol);
+    assert!(error.message.contains("shape registration size"));
+    assert!(
+        client_transport.try_recv().is_none(),
+        "an invalid oversized registration must terminate the link instead of using a new wire-level rejection convention"
     );
     let subscriber = subscriber.borrow();
     let crate::db::peer_connection::ConnectionLink::Subscriber(state) = &subscriber.link else {
@@ -905,7 +901,7 @@ fn oversized_register_shape_read_view_is_rejected_before_key_derivation_or_reten
 fn oversized_register_shape_is_rejected_at_admission() {
     let schema = schema();
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let huge_table = "t".repeat(MAX_SHAPE_AST_BYTES + 1);
+    let huge_table = "t".repeat(MAX_SHAPE_REGISTRATION_BYTES + 1);
     let ast = ShapeAst::new(Query::from(huge_table), schema.version_id());
     let error = server
         .node()
@@ -918,7 +914,7 @@ fn oversized_register_shape_is_rejected_at_admission() {
         .unwrap_err();
     assert!(matches!(
         error,
-        crate::node::Error::UnsupportedSyncMessage("shape AST exceeds byte limit")
+        crate::node::Error::UnsupportedSyncMessage("shape registration exceeds byte limit")
     ));
 }
 
