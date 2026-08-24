@@ -13,5 +13,8 @@ export default defineConfig({
       instances: [{ browser: "chromium", headless: true }],
     },
     include: ["tests/browser/**/*.test.ts"],
+    globalSetup: ["tests/browser/global-setup.ts"],
+    fileParallelism: false,
+    testTimeout: 30_000,
   },
 });
