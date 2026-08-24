@@ -915,44 +915,23 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
         added_occurrence_keys: vec![v1],
         updated_occurrence_keys: vec![v2.clone()],
         removed_occurrence_keys: vec![v2],
+        added_indices: vec![2],
+        updated_previous_indices: vec![4],
+        updated_indices: vec![1],
+        removed_indices: vec![3],
     };
 
-    let current_layout = jazz::db::TerminalRootLayout {
-        id: "current-row-v1".to_owned(),
-        root_descriptor: current_descriptor,
-        root_key_slot: 0,
-        root_key_field_name: "row_uuid".to_owned(),
-        public_fields: vec![jazz::db::TerminalRootPublicField {
-            name: "title".to_owned(),
-            descriptor_field_name: "user_title".to_owned(),
-            slot: 1,
-            carrier: jazz::db::TerminalRootCarrier::CurrentRow,
-        }],
-        carrier: jazz::db::TerminalRootCarrier::CurrentRow,
-    };
-    let logical_layout = jazz::db::TerminalRootLayout {
-        id: "logical-v1".to_owned(),
-        root_descriptor: logical_descriptor,
-        root_key_slot: 0,
-        root_key_field_name: "row_uuid".to_owned(),
-        public_fields: vec![jazz::db::TerminalRootPublicField {
-            name: "title".to_owned(),
-            descriptor_field_name: "title".to_owned(),
-            slot: 1,
-            carrier: jazz::db::TerminalRootCarrier::Logical,
-        }],
-        carrier: jazz::db::TerminalRootCarrier::Logical,
-    };
     let current_key = std::iter::once(10)
         .chain(todo_one_id.0.as_bytes().iter().copied())
         .collect::<Vec<_>>();
     let logical_key = std::iter::once(10)
         .chain(note_id.0.as_bytes().iter().copied())
         .collect::<Vec<_>>();
+    let child_path = vec![TerminalPathSegment::Collection("children".to_owned())];
     let current_insert = TerminalOperation {
         root_descriptor: current_descriptor,
         root_key: current_key.clone(),
-        path: Vec::new(),
+        path: child_path.clone(),
         edit: TerminalEdit::Insert {
             index: 0,
             key: current_key.clone(),
@@ -962,7 +941,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
     let logical_insert = TerminalOperation {
         root_descriptor: logical_descriptor,
         root_key: logical_key.clone(),
-        path: Vec::new(),
+        path: child_path.clone(),
         edit: TerminalEdit::Insert {
             index: 0,
             key: logical_key.clone(),
@@ -972,7 +951,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
     let current_update = TerminalOperation {
         root_descriptor: current_descriptor,
         root_key: current_key.clone(),
-        path: Vec::new(),
+        path: child_path.clone(),
         edit: TerminalEdit::Update {
             key: current_key.clone(),
             value: todo_updated,
@@ -981,7 +960,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
     let logical_remove = TerminalOperation {
         root_descriptor: logical_descriptor,
         root_key: logical_key.clone(),
-        path: Vec::new(),
+        path: child_path.clone(),
         edit: TerminalEdit::Remove {
             key: logical_key.clone(),
         },
@@ -989,7 +968,7 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
     let logical_move = TerminalOperation {
         root_descriptor: logical_descriptor,
         root_key: logical_key.clone(),
-        path: Vec::new(),
+        path: child_path,
         edit: TerminalEdit::Move {
             key: logical_key,
             index: 1,
@@ -1016,33 +995,16 @@ fn binding_codec_golden_fixture() -> BindingCodecGoldenFixture {
             payload_hex: hex(&postcard::to_allocvec(&delta).expect("subscription delta encodes")),
         }],
         terminal: BindingCodecGoldenTerminal {
-            // These are the exact NAPI/WASM event field names.  Publication is
-            // represented by a non-empty `terminalLayouts` list, not an
-            // invented flag on a layout object.
             events: serde_json::json!([
                 {
                     "type": "delta",
-                    "terminalLayouts": [jazz::binding_codec::terminal_layout_to_json(&current_layout).expect("current layout encodes")],
-                    "terminalOperations": jazz::binding_codec::terminal_operations_to_json(&[current_insert], &current_layout.id).expect("current insert encodes")
-                },
-                {
-                    "type": "delta",
-                    "terminalLayouts": [jazz::binding_codec::terminal_layout_to_json(&logical_layout).expect("logical layout encodes")],
-                    "terminalOperations": jazz::binding_codec::terminal_operations_to_json(&[logical_insert], &logical_layout.id).expect("logical insert encodes")
-                },
-                {
-                    "type": "delta",
-                    "terminalLayouts": [],
-                    "terminalOperations": jazz::binding_codec::terminal_operations_to_json(&[current_update], &current_layout.id).expect("current update encodes")
-                },
-                {
-                    "type": "delta",
-                    "terminalLayouts": [],
-                    "terminalOperations": jazz::binding_codec::terminal_operations_to_json(&[logical_move, logical_remove], &logical_layout.id).expect("logical move/remove encodes")
+                    "terminalOperations": jazz::binding_codec::terminal_operations_to_json(
+                        &[current_insert, logical_insert, current_update, logical_move, logical_remove]
+                    ).expect("descendant terminal operations encode")
                 }
             ]),
             rejections: serde_json::json!([
-                { "type": "UnsupportedShapeCapability", "detail": "terminal layout missing" },
+                { "type": "UnsupportedShapeCapability", "detail": "unsupported descendant terminal shape" },
                 { "type": "ServerFailure", "code": "TableNotFound" }
             ]),
         },

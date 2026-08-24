@@ -16,10 +16,10 @@ QueryProgram { LoweredGraph, typed output schemas }
         │  execute / maintain
         ▼
 MaintainedSubscriptionView + terminal operations
-        │  publish through NAPI or WASM
+        │  reduce top-level edits in Rust
         ▼
-TerminalRootLayout + packed Record bytes
-        │  register layout once, decode many operations
+Indexed root row deltas + descendant terminal operations
+        │  publish through NAPI or WASM
         ▼
 TypeScript subscription result
 ```
@@ -33,8 +33,9 @@ TypeScript subscription result
 | Lowered graph      | `node/query_engine/lowering.rs`                                                                                                                                          | `QueryProgram`, `LoweredGraph`, `LoweredTerminal`                                  | internal compiler/runtime contract                 | One graph and its typed outputs serve ordinary rows as well as structured include/relation views; consumers select the outputs they need rather than defining another query meaning.     |
 | Terminal schema    | `node/query_engine/schemas.rs`                                                                                                                                           | `OutputTerminalSchema`, `AppRowSchema`, `ProgramFactSchema`                        | internal typed output contract                     | App rows and internal facts are separate outputs of the same program. Hidden routing/provenance fields never become app fields.                                                          |
 | Maintained state   | `node/maintained_subscription_view.rs`; consumed by `node/query_eval.rs`, `node/views.rs`, and `peer.rs`; `db.rs` turns derived transitions into app subscription events | `MaintainedSubscriptionView`, membership/payload/fact indexes, `ResultTransitions` | internal runtime state                             | The maintained path consumes typed terminal deltas; it does not use a second semantic diff engine. Facts such as policy or version witnesses inform maintenance but are not result rows. |
-| Binding payload    | `node/maintained_subscription_view.rs` creates `TerminalRootLayout` from `AppRowSchema`; `db.rs` defines/exposes it in subscription events; NAPI and WASM adapt it       | layout ID, encoded `RecordDescriptor`, terminal operation, packed `Record` bytes   | binding ABI, distinct from peer sync wire protocol | Rust publishes an immutable layout before operations naming it. NAPI and WASM carry the same contract; they do not invent per-host layouts.                                              |
-| TypeScript decoder | `packages/jazz-tools/src/runtime/subscription-manager.ts` and `native-runtime/native-row-codec.ts`                                                                       | registered `NativeTerminalRootLayout` and compiled decoder                         | public TypeScript result                           | Register once by layout ID; reject redefinition, unknown IDs, bad descriptor/slot compatibility, or a root-key mismatch.                                                                 |
+| Root delta reducer | `db.rs`, using the internal `TerminalRootLayout` prepared by `node/maintained_subscription_view.rs`                                                                      | ordered subscription snapshot plus indexed added/updated/removed occurrences       | Rust subscription event                            | Apply every top-level terminal edit exactly once in Rust and publish its authoritative pre/post positions; never forward a parallel root terminal edit.                                  |
+| Binding payload    | `binding_codec.rs`; NAPI and WASM are thin host adapters                                                                                                                 | packed root rows, occurrence identities, explicit indices, descendant operations   | binding ABI, distinct from peer sync wire protocol | Both hosts carry the same Rust-indexed root delta. Terminal operations crossing this boundary must have a non-empty path.                                                                |
+| TypeScript reducer | `packages/jazz-tools/src/runtime/subscription-manager.ts` and `native-runtime/native-row-codec.ts`                                                                       | indexed root changes plus nested collection edits                                  | public TypeScript result                           | Trust producer root positions and apply only descendant edits to already decoded or deferred root object trees. Reject any root terminal operation.                                      |
 
 ## What is public, wire, and internal
 
@@ -48,10 +49,10 @@ TypeScript subscription result
   authority-filtered witness/admission facts — never projected app rows or a
   terminal cache as truth (ch. 8 §8.4.1). Bindings move these bytes but do not
   treat `SyncMessage` as their application API.
-- **Binding ABI:** descriptors and packed `Record` row bytes, plus
-  `TerminalRootLayout` and terminal operations. It is deliberately separate
-  from peer wire protocol and may use native host objects for non-hot-path core
-  types.
+- **Binding ABI:** descriptors and packed `Record` row bytes, aligned
+  occurrence identities and root indices, plus descendant terminal operations.
+  It is deliberately separate from peer wire protocol and may use native host
+  objects for non-hot-path core types.
 - **Internal only:** normalized shapes, bindings, lowered graphs, terminal
   schemas, maintained facts, routing fields, and physical carrier choices.
   Their names and layouts are not public compatibility promises.
@@ -69,15 +70,15 @@ TypeScript subscription result
    row-sync facts.
 2. **Projection is downstream of row semantics.** The source resolver preserves
    the complete current-row material needed by query, policy, and maintenance;
-   node materialization may then apply the requested app projection. A terminal
-   layout separately omits internal route/provenance slots from its app payload.
-   Those are compiler bookkeeping fields, not hidden application cells.
-3. **The producer owns physical decoding facts.** The maintained-view layer
-   creates `TerminalRootLayout` from the typed app-row schema. It binds the
-   exact descriptor, root-key slot, public field slots, and each field's carrier
-   (`CurrentRow` or `Logical`); `db.rs` carries that contract to bindings.
-   TypeScript compiles a decoder from the early-bound layout rather than
-   guessing from a query projection at each operation.
+   node materialization may then apply the requested app projection. Internal
+   route/provenance slots remain compiler bookkeeping fields and never become
+   hidden application cells.
+3. **Rust owns root materialization.** The maintained-view layer creates an
+   internal `TerminalRootLayout` from the typed app-row schema. `db.rs` uses it
+   to decode and apply root inserts, updates, removals, and moves to the retained
+   subscription snapshot. The binding publishes ordinary packed root rows with
+   occurrence identities and explicit positions; TypeScript never decodes a
+   root terminal payload or reconstructs root ordering.
 4. **One graph, many consumers.** Typed fact terminals support membership,
    payload, replacement, policy, settlement, and coverage maintenance for both
    ordinary and structured include/relation results. They must remain internal
@@ -98,9 +99,9 @@ TypeScript subscription result
   and `node/query_engine/lowering.rs`.
 - Change maintained delivery: start in `SPEC/16_maintained_subscription_views.md`
   and `node/maintained_subscription_view.rs`.
-- Change NAPI/WASM output: preserve `TerminalRootLayout` in both adapters and
-  update the fast TypeScript matrix test
-  `packages/jazz-tools/src/runtime/terminal-layout-contract-matrix.test.ts`.
+- Change NAPI/WASM subscription output: preserve the shared indexed payload in
+  `binding_codec.rs`, keep both adapters free of root-layout decoding, and
+  update the binding golden plus `subscription-manager.test.ts`.
 
 This map intentionally defines ownership, not a second source of query or
 protocol semantics. The numbered chapters and invariant registries remain

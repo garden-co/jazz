@@ -3178,6 +3178,10 @@ describe("NativeRuntimeAdapter server transport", () => {
             rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
           },
         ],
+        addedIndices: [1],
+        updatedPreviousIndices: [1],
+        updatedIndices: [0],
+        removedIndices: [0],
       }),
     });
     await Promise.resolve();
@@ -4322,7 +4326,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       ),
     );
 
-    const applied = applySubscriptionDeltaWithWireDelta([], new Map(), nativeDelta, schema, true, {
+    const applied = applySubscriptionDeltaWithWireDelta([], nativeDelta, schema, true, {
       rootTable: "notes",
       rootColumns: publicColumns,
     });
@@ -4385,7 +4389,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     expect(() =>
-      applySubscriptionDeltaWithWireDelta([], new Map(), nativeDelta, schema, true, {
+      applySubscriptionDeltaWithWireDelta([], nativeDelta, schema, true, {
         rootTable: "notes",
         rootColumns: publicColumns,
       }),
@@ -4419,7 +4423,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     expect(() =>
-      applySubscriptionDeltaWithWireDelta([], new Map(), nativeDelta, schema, true, {
+      applySubscriptionDeltaWithWireDelta([], nativeDelta, schema, true, {
         rootTable: "notes",
         rootColumns: publicColumns,
       }),
@@ -5978,6 +5982,10 @@ function encodeSubscriptionDelta(delta: {
   addedOccurrenceKeys?: Uint8Array[];
   updatedOccurrenceKeys?: Uint8Array[];
   removedOccurrenceKeys?: Uint8Array[];
+  addedIndices?: number[];
+  updatedPreviousIndices?: number[];
+  updatedIndices?: number[];
+  removedIndices?: number[];
 }): Uint8Array {
   const writer = new PostcardWriter();
   writeRowBatches(writer, delta.added);
@@ -5994,6 +6002,14 @@ function encodeSubscriptionDelta(delta: {
     delta.removedOccurrenceKeys ?? delta.removed.map((row) => rowKey(row.rowId)),
   ]) {
     writer.vec((key, index) => key.bytes(keys[index]!), keys.length);
+  }
+  for (const indices of [
+    delta.addedIndices ?? delta.added.map((_, index) => index),
+    delta.updatedPreviousIndices ?? delta.updated.map((_, index) => index),
+    delta.updatedIndices ?? delta.updated.map((_, index) => index),
+    delta.removedIndices ?? delta.removed.map((_, index) => index),
+  ]) {
+    writer.vec((indexWriter, index) => indexWriter.u64(indices[index]!), indices.length);
   }
   return writer.finish();
 }
@@ -6027,7 +6043,7 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
       addedOccurrenceKeys: [direct, inherited],
     }),
   );
-  const first = applySubscriptionDeltaWithWireDelta([], new Map(), initial, testSchema);
+  const first = applySubscriptionDeltaWithWireDelta([], initial, testSchema);
   const firstDelta = decodeNativeDelta(first.wireDelta, testSchema.todos.columns);
   expect(first.rows).toHaveLength(2);
   expect(firstDelta.map((change) => change.id)).toEqual([
@@ -6058,12 +6074,7 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
       updatedOccurrenceKeys: [inherited],
     }),
   );
-  const afterUpdate = applySubscriptionDeltaWithWireDelta(
-    first.rows,
-    first.rowIndexByKey,
-    update,
-    testSchema,
-  );
+  const afterUpdate = applySubscriptionDeltaWithWireDelta(first.rows, update, testSchema);
   const updatedDelta = decodeNativeDelta(afterUpdate.wireDelta, testSchema.todos.columns);
   expect(updatedDelta).toHaveLength(1);
   expect(updatedDelta[0]!.id).toBe(firstDelta[1]!.id);
@@ -6088,12 +6099,7 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
       removedOccurrenceKeys: [direct],
     }),
   );
-  const second = applySubscriptionDeltaWithWireDelta(
-    afterUpdate.rows,
-    afterUpdate.rowIndexByKey,
-    removal,
-    testSchema,
-  );
+  const second = applySubscriptionDeltaWithWireDelta(afterUpdate.rows, removal, testSchema);
   expect(second.rows).toHaveLength(1);
   expect(decodeNativeDelta(second.wireDelta, testSchema.todos.columns)[0]!.id).toBe(
     firstDelta[0]!.id,
@@ -6109,7 +6115,6 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
 
   const reopened = applySubscriptionDeltaWithWireDelta(
     [],
-    new Map(),
     decode(
       encodeSubscriptionDelta({
         added: [{ table: "todos", rowId, title: "inherited" }],
@@ -6127,7 +6132,7 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
   );
 });
 
-it("keeps a remove/add root replacement in place without a terminal move", () => {
+it("uses Rust's explicit indices for root replacement and movement", () => {
   const ids = [1, 2, 3].map((value) => {
     const bytes = new Uint8Array(16);
     bytes[15] = value;
@@ -6136,7 +6141,6 @@ it("keeps a remove/add root replacement in place without a terminal move", () =>
   const decode = (bytes: Uint8Array) => readNativeSubscriptionDelta(new PostcardReader(bytes));
   const initial = applySubscriptionDeltaWithWireDelta(
     [],
-    new Map(),
     decode(
       encodeSubscriptionDelta({
         added: ids.map((rowId, index) => ({ table: "todos", rowId, title: `todo-${index}` })),
@@ -6149,24 +6153,16 @@ it("keeps a remove/add root replacement in place without a terminal move", () =>
   const replaced = ids[0]!;
   const afterTitleOnlyReplacement = applySubscriptionDeltaWithWireDelta(
     initial.rows,
-    initial.rowIndexByKey,
     decode(
       encodeSubscriptionDelta({
-        added: [{ table: "todos", rowId: replaced, title: "renamed" }],
-        updated: [],
-        removed: [{ table: "todos", rowId: replaced }],
+        added: [],
+        updated: [{ table: "todos", rowId: replaced, title: "renamed" }],
+        removed: [],
+        updatedPreviousIndices: [0],
+        updatedIndices: [0],
       }),
     ),
     testSchema,
-    false,
-    null,
-    [
-      {
-        root_key: [10, ...replaced],
-        path: [],
-        edit: { Update: { key: [10, ...replaced], value: [] } },
-      },
-    ],
   );
 
   expect(afterTitleOnlyReplacement.rows.map((row) => row.id)).toEqual(
@@ -6178,29 +6174,16 @@ it("keeps a remove/add root replacement in place without a terminal move", () =>
 
   const afterSortReplacement = applySubscriptionDeltaWithWireDelta(
     afterTitleOnlyReplacement.rows,
-    afterTitleOnlyReplacement.rowIndexByKey,
     decode(
       encodeSubscriptionDelta({
-        added: [{ table: "todos", rowId: replaced, title: "renamed and moved" }],
-        updated: [],
-        removed: [{ table: "todos", rowId: replaced }],
+        added: [],
+        updated: [{ table: "todos", rowId: replaced, title: "renamed and moved" }],
+        removed: [],
+        updatedPreviousIndices: [0],
+        updatedIndices: [2],
       }),
     ),
     testSchema,
-    false,
-    null,
-    [
-      {
-        root_key: [10, ...replaced],
-        path: [],
-        edit: { Remove: { key: [10, ...replaced] } },
-      },
-      {
-        root_key: [10, ...replaced],
-        path: [],
-        edit: { Insert: { key: [10, ...replaced], index: 2, value: [] } },
-      },
-    ],
   );
   expect(afterSortReplacement.rows.map((row) => row.id)).toEqual([
     formatUuid(ids[1]!),
@@ -6211,18 +6194,16 @@ it("keeps a remove/add root replacement in place without a terminal move", () =>
   const moved = ids[2]!;
   const afterExplicitMove = applySubscriptionDeltaWithWireDelta(
     afterSortReplacement.rows,
-    afterSortReplacement.rowIndexByKey,
-    decode(encodeSubscriptionDelta({ added: [], updated: [], removed: [] })),
+    decode(
+      encodeSubscriptionDelta({
+        added: [],
+        updated: [{ table: "todos", rowId: moved, title: "todo-2" }],
+        removed: [],
+        updatedPreviousIndices: [1],
+        updatedIndices: [0],
+      }),
+    ),
     testSchema,
-    false,
-    null,
-    [
-      {
-        root_key: [10, ...moved],
-        path: [],
-        edit: { Move: { key: [10, ...moved], index: 0 } },
-      },
-    ],
   );
   expect(afterExplicitMove.rows.map((row) => row.id)).toEqual([
     formatUuid(moved),
@@ -6231,25 +6212,23 @@ it("keeps a remove/add root replacement in place without a terminal move", () =>
   ]);
 });
 
-it("preserves the producer position for an ordered suffix over lazy relation state", () => {
+it("preserves the producer's explicit position over lazy relation state", () => {
   const rowId = new Uint8Array(16);
   rowId[15] = 3;
   const decode = (bytes: Uint8Array) => readNativeSubscriptionDelta(new PostcardReader(bytes));
   const applied = applySubscriptionDeltaWithWireDelta(
     [],
-    new Map(),
     decode(
       encodeSubscriptionDelta({
         added: [{ table: "todos", rowId, title: "third" }],
         updated: [],
         removed: [],
+        addedIndices: [2],
       }),
     ),
     testSchema,
     false,
     null,
-    undefined,
-    2,
   );
 
   expect(decodeNativeDelta(applied.wireDelta, testSchema.todos.columns)).toEqual([
@@ -6295,6 +6274,10 @@ function encodeUserWrappedSubscriptionDelta(row: {
   delta.vec((key) => key.bytes(Uint8Array.from([1, ...row.rowId])), 1);
   delta.vec(() => undefined, 0);
   delta.vec(() => undefined, 0);
+  delta.vec((index) => index.u64(0), 1);
+  delta.vec(() => undefined, 0);
+  delta.vec(() => undefined, 0);
+  delta.vec(() => undefined, 0);
   return delta.finish();
 }
 
@@ -6327,6 +6310,10 @@ function encodeTeamGatherSubscriptionDelta(delta: {
   ]) {
     writer.vec((key, index) => key.bytes(keys[index]!), keys.length);
   }
+  writer.vec((indexWriter, index) => indexWriter.u64(index), added.length);
+  writer.vec((indexWriter, index) => indexWriter.u64(index), updated.length);
+  writer.vec((indexWriter, index) => indexWriter.u64(index), updated.length);
+  writer.vec(() => undefined, 0);
   return writer.finish();
 }
 

@@ -23,6 +23,10 @@ function encodeSubscriptionDelta(delta: {
   writer.vec((key, index) => key.bytes(addedKeys[index]!), addedKeys.length);
   writer.vec((key, index) => key.bytes(updatedKeys[index]!), updatedKeys.length);
   writer.vec((key, index) => key.bytes(removedKeys[index]!), removedKeys.length);
+  writer.vec((indexWriter, index) => indexWriter.u64(index), addedKeys.length);
+  writer.vec((indexWriter, index) => indexWriter.u64(index), updatedKeys.length);
+  writer.vec((indexWriter, index) => indexWriter.u64(index), updatedKeys.length);
+  writer.vec((indexWriter, index) => indexWriter.u64(index), removedKeys.length);
   return writer.finish();
 }
 

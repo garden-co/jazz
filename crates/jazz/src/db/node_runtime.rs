@@ -1748,7 +1748,7 @@ where
                             read_tier,
                             previous_settled,
                             terminal_rows,
-                        );
+                        )?;
                     }
                     consumed_authoritative_resets.insert(binding_view);
                 } else {
@@ -2147,7 +2147,7 @@ where
                         snapshot_tier,
                         previous_settled,
                         terminal_rows,
-                    );
+                    )?;
                 }
                 let settled = subscription_is_settled(
                     &node.borrow(),
@@ -2193,18 +2193,22 @@ where
                         requires_authority_receipt,
                     );
                     let state_ref = &mut refresh;
-                    let event = SubscriptionEvent::Delta {
-                        reset: false,
-                        publishable: true,
-                        added: Vec::new(),
-                        updated: Vec::new(),
-                        removed: Vec::new(),
-                        ordered_suffix_start: None,
-                        terminal_operations: peer_terminal_operations,
+                    let terminal_layout = terminal_layout.ok_or_else(|| {
+                        Error::new(
+                            ErrorCode::Protocol,
+                            "terminal operation arrived without a prepared root layout",
+                        )
+                    })?;
+                    let event = apply_terminal_operations_to_subscription_snapshot(
+                        &mut state_ref.snapshot,
+                        &mut state_ref.snapshot_index,
+                        peer_terminal_operations,
+                        None,
                         terminal_layout,
+                        shape.query().table.as_str(),
+                        snapshot_tier,
                         settled,
-                        tier: snapshot_tier,
-                    };
+                    )?;
                     state_ref.settled = settled;
                     retained.push(Rc::downgrade(&state));
                     if state_ref.sender.unbounded_send(event).is_ok() {
@@ -2263,18 +2267,22 @@ where
                                 requires_authority_receipt,
                             );
                             let state_ref = &mut refresh;
-                            let event = SubscriptionEvent::Delta {
-                                reset: false,
-                                publishable: true,
-                                added: Vec::new(),
-                                updated: Vec::new(),
-                                removed: Vec::new(),
-                                ordered_suffix_start: None,
-                                terminal_operations: update.terminal_operations,
-                                terminal_layout: update.terminal_layout,
+                            let terminal_layout = update.terminal_layout.ok_or_else(|| {
+                                Error::new(
+                                    ErrorCode::Protocol,
+                                    "terminal operation arrived without a prepared root layout",
+                                )
+                            })?;
+                            let event = apply_terminal_operations_to_subscription_snapshot(
+                                &mut state_ref.snapshot,
+                                &mut state_ref.snapshot_index,
+                                update.terminal_operations,
+                                None,
+                                terminal_layout,
+                                shape.query().table.as_str(),
+                                snapshot_tier,
                                 settled,
-                                tier: snapshot_tier,
-                            };
+                            )?;
                             state_ref.settled = settled;
                             retained.push(Rc::downgrade(&state));
                             if state_ref.sender.unbounded_send(event).is_ok() {
@@ -2345,7 +2353,7 @@ where
                             snapshot_tier,
                             previous_settled,
                             terminal_rows,
-                        );
+                        )?;
                         if authoritative_membership_changed {
                             order_maintained_snapshot_roots(
                                 &node.borrow(),

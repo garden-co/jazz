@@ -162,6 +162,7 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     let SubscriptionEvent::Delta {
         reset,
         added,
+        updated,
         removed,
         terminal_operations,
         ..
@@ -171,18 +172,11 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     };
     assert!(!*reset, "root reordering must remain incremental");
     assert!(removed.is_empty());
-    assert!(added.is_empty());
-    assert!(
-        matches!(
-            terminal_operations.as_slice(),
-            [groove::ivm::TerminalOperation {
-                path,
-                edit: groove::ivm::TerminalEdit::Insert { index: 0, .. },
-                ..
-            }] if path.is_empty()
-        ),
-        "unexpected root operations: {terminal_operations:?}"
-    );
+    assert!(updated.is_empty());
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row.row_uuid(), row(0xb1));
+    assert_eq!(added[0].index, 0);
+    assert!(terminal_operations.is_empty());
 
     let binding_view_key = BindingViewKey::new(
         prepared_query.shape().shape_id(),
@@ -225,6 +219,7 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     let SubscriptionEvent::Delta {
         reset,
         added,
+        updated,
         removed,
         terminal_operations,
         ..
@@ -235,21 +230,11 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     assert!(!*reset);
     assert!(removed.is_empty());
     assert!(added.is_empty());
-    assert!(matches!(
-        terminal_operations.as_slice(),
-        [
-            groove::ivm::TerminalOperation {
-                path: remove_path,
-                edit: groove::ivm::TerminalEdit::Remove { .. },
-                ..
-            },
-            groove::ivm::TerminalOperation {
-                path: insert_path,
-                edit: groove::ivm::TerminalEdit::Insert { index: 1, .. },
-                ..
-            }
-        ] if remove_path.is_empty() && insert_path.is_empty()
-    ));
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].row.row_uuid(), row(0xb1));
+    assert_eq!(updated[0].previous_index, Some(0));
+    assert_eq!(updated[0].index, 1);
+    assert!(terminal_operations.is_empty());
 
     db.delete("users", row(0xa1), Default::default()).unwrap();
     db.tick().unwrap();
@@ -258,18 +243,18 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
         panic!("expected removal splice")
     };
     assert!(!*reset);
-    assert!(matches!(
+    let SubscriptionEvent::Delta {
         removed,
-        SubscriptionEvent::Delta { terminal_operations, .. }
-            if matches!(
-                terminal_operations.as_slice(),
-                [groove::ivm::TerminalOperation {
-                    path,
-                    edit: groove::ivm::TerminalEdit::Remove { .. },
-                    ..
-                }] if path.is_empty()
-            )
-    ));
+        terminal_operations,
+        ..
+    } = removed
+    else {
+        unreachable!()
+    };
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].row_uuid, row(0xa1));
+    assert_eq!(removed[0].index, 0);
+    assert!(terminal_operations.is_empty());
 }
 
 #[test]
@@ -590,21 +575,22 @@ fn flat_subscription_inserts_at_declared_root_position() {
         db.tick().unwrap();
         let event = block_on(subscription.next_raw()).unwrap();
         if id == 0xb1 {
-            assert!(
-                matches!(
-                    &event,
-                    SubscriptionEvent::Delta { terminal_operations, .. }
-                        if matches!(
-                            terminal_operations.as_slice(),
-                            [groove::ivm::TerminalOperation {
-                                path,
-                                edit: groove::ivm::TerminalEdit::Insert { index: 0, .. },
-                                ..
-                            }] if path.is_empty()
-                        )
-                ),
-                "unexpected flat root event: {event:?}"
-            );
+            let SubscriptionEvent::Delta {
+                added,
+                updated,
+                removed,
+                terminal_operations,
+                ..
+            } = &event
+            else {
+                panic!("unexpected flat root event: {event:?}");
+            };
+            assert_eq!(added.len(), 1);
+            assert_eq!(added[0].row.row_uuid(), row(0xb1));
+            assert_eq!(added[0].index, 0);
+            assert!(updated.is_empty());
+            assert!(removed.is_empty());
+            assert!(terminal_operations.is_empty());
         }
     }
 
@@ -617,14 +603,23 @@ fn flat_subscription_inserts_at_declared_root_position() {
     .unwrap();
     db.tick().unwrap();
     let event = block_on(subscription.next_raw()).unwrap();
-    assert!(matches!(
-        event,
-        SubscriptionEvent::Delta { terminal_operations, .. }
-            if terminal_operations.iter().any(|operation| matches!(
-                operation.edit,
-                groove::ivm::TerminalEdit::Update { .. }
-            ))
-    ));
+    let SubscriptionEvent::Delta {
+        added,
+        updated,
+        removed,
+        terminal_operations,
+        ..
+    } = event
+    else {
+        panic!("expected an indexed root update");
+    };
+    assert!(added.is_empty());
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].row.row_uuid(), row(0xa1));
+    assert_eq!(updated[0].previous_index, Some(1));
+    assert_eq!(updated[0].index, 1);
+    assert!(removed.is_empty());
+    assert!(terminal_operations.is_empty());
 }
 
 #[test]
@@ -680,27 +675,22 @@ fn flat_subscription_updates_with_nullable_sort_payload() {
     .unwrap();
     db.tick().unwrap();
     let SubscriptionEvent::Delta {
+        added,
+        updated,
+        removed,
         terminal_operations,
         ..
     } = block_on(subscription.next_raw()).unwrap()
     else {
-        panic!("title-only update must emit a terminal delta");
+        panic!("title-only update must emit an indexed delta");
     };
-    assert!(
-        terminal_operations
-            .iter()
-            .any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Update { .. })),
-        "title-only update must retain its root payload"
-    );
-    assert!(
-        !terminal_operations.iter().any(|operation| matches!(
-            operation.edit,
-            groove::ivm::TerminalEdit::Move { .. }
-                | groove::ivm::TerminalEdit::Remove { .. }
-                | groove::ivm::TerminalEdit::Insert { .. }
-        )),
-        "unchanged nullable sort key must not reposition the root"
-    );
+    assert!(added.is_empty());
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].row.row_uuid(), row(0xa1));
+    assert_eq!(updated[0].previous_index, Some(0));
+    assert_eq!(updated[0].index, 0);
+    assert!(removed.is_empty());
+    assert!(terminal_operations.is_empty());
 }
 
 #[test]
@@ -747,19 +737,22 @@ fn flat_subscription_update_respects_descending_row_id_tie_break() {
     .unwrap();
     db.tick().unwrap();
     let SubscriptionEvent::Delta {
+        added,
+        updated,
+        removed,
         terminal_operations,
         ..
     } = block_on(subscription.next_raw()).unwrap()
     else {
-        panic!("rank update must emit a terminal delta");
+        panic!("rank update must emit an indexed delta");
     };
-    assert!(
-        !terminal_operations.iter().any(|operation| matches!(
-            operation.edit,
-            groove::ivm::TerminalEdit::Move { index: 0, .. }
-        )),
-        "the smallest descending id must not move to the front: {terminal_operations:?}"
-    );
+    assert!(added.is_empty());
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].row.row_uuid(), row(0x10));
+    assert_eq!(updated[0].previous_index, Some(2));
+    assert_eq!(updated[0].index, 2);
+    assert!(removed.is_empty());
+    assert!(terminal_operations.is_empty());
 }
 
 #[test]
@@ -802,19 +795,22 @@ fn flat_subscription_update_moves_largest_descending_row_id_to_front() {
     .unwrap();
     db.tick().unwrap();
     let SubscriptionEvent::Delta {
+        added,
+        updated,
+        removed,
         terminal_operations,
         ..
     } = block_on(subscription.next_raw()).unwrap()
     else {
-        panic!("rank update must emit a terminal delta");
+        panic!("rank update must emit an indexed delta");
     };
-    assert!(
-        terminal_operations.iter().any(|operation| matches!(
-            operation.edit,
-            groove::ivm::TerminalEdit::Move { index: 0, .. }
-        )),
-        "the largest descending id must move to the front: {terminal_operations:?}"
-    );
+    assert!(added.is_empty());
+    assert_eq!(updated.len(), 1);
+    assert_eq!(updated[0].row.row_uuid(), row(0xff));
+    assert_eq!(updated[0].previous_index, Some(2));
+    assert_eq!(updated[0].index, 0);
+    assert!(removed.is_empty());
+    assert!(terminal_operations.is_empty());
 }
 
 #[test]
@@ -844,12 +840,24 @@ fn flat_subscription_shifts_offset_window_when_leading_row_is_deleted() {
     db.delete("users", row(0xa1), Default::default()).unwrap();
     db.tick().unwrap();
     let event = block_on(subscription.next_raw()).unwrap();
-    assert!(matches!(
-        event,
-        SubscriptionEvent::Delta { terminal_operations, .. }
-            if terminal_operations.iter().any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Remove { .. }))
-                && terminal_operations.iter().any(|operation| matches!(operation.edit, groove::ivm::TerminalEdit::Insert { index: 1, .. }))
-    ));
+    let SubscriptionEvent::Delta {
+        added,
+        updated,
+        removed,
+        terminal_operations,
+        ..
+    } = event
+    else {
+        panic!("expected an indexed window shift");
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row.row_uuid(), row(0xd1));
+    assert_eq!(added[0].index, 1);
+    assert!(updated.is_empty());
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].row_uuid, row(0xb1));
+    assert_eq!(removed[0].index, 0);
+    assert!(terminal_operations.is_empty());
 }
 
 #[test]
@@ -970,11 +978,12 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
     db.delete("todos", row(0x21), Default::default()).unwrap();
     assert!(matches!(
         block_on(subscription.next_raw()).unwrap(),
-        SubscriptionEvent::Delta { terminal_operations, .. }
-            if terminal_operations.iter().any(|operation| operation.path.is_empty() && matches!(
-                operation.edit,
-                groove::ivm::TerminalEdit::Remove { .. }
-            ))
+        SubscriptionEvent::Delta {
+            removed,
+            terminal_operations,
+            ..
+        } if removed.iter().any(|removed| removed.row_uuid == row(0x21))
+            && terminal_operations.iter().all(|operation| !operation.path.is_empty())
     ));
 }
 
@@ -1243,14 +1252,23 @@ fn array_subquery_subscription_projects_late_root_and_existing_forward_target() 
         },
     )
     .unwrap();
-    assert!(matches!(
-        block_on(subscription.next_raw()).unwrap(),
-        SubscriptionEvent::Delta { terminal_operations, .. }
-            if terminal_operations.iter().any(|operation| operation.path.is_empty() && matches!(
-                operation.edit,
-                groove::ivm::TerminalEdit::Insert { index: 0, .. }
-            ))
-    ));
+    let SubscriptionEvent::Delta {
+        added,
+        terminal_operations,
+        ..
+    } = block_on(subscription.next_raw()).unwrap()
+    else {
+        panic!("expected an indexed late-root insertion");
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row.row_uuid(), row(0x52));
+    assert_eq!(added[0].index, 0);
+    assert!(
+        terminal_operations
+            .iter()
+            .all(|operation| !operation.path.is_empty()),
+        "the root insertion is indexed while its existing child is a descendant patch"
+    );
 }
 
 #[test]
@@ -1291,14 +1309,23 @@ fn array_subquery_subscription_projects_late_camel_case_root_and_existing_forwar
         },
     )
     .unwrap();
-    assert!(matches!(
-        block_on(subscription.next_raw()).unwrap(),
-        SubscriptionEvent::Delta { terminal_operations, .. }
-            if terminal_operations.iter().any(|operation| operation.path.is_empty() && matches!(
-                operation.edit,
-                groove::ivm::TerminalEdit::Insert { index: 0, .. }
-            ))
-    ));
+    let SubscriptionEvent::Delta {
+        added,
+        terminal_operations,
+        ..
+    } = block_on(subscription.next_raw()).unwrap()
+    else {
+        panic!("expected an indexed late-root insertion");
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(added[0].row.row_uuid(), row(0x53));
+    assert_eq!(added[0].index, 0);
+    assert!(
+        terminal_operations
+            .iter()
+            .all(|operation| !operation.path.is_empty()),
+        "the root insertion is indexed while its existing child is a descendant patch"
+    );
 }
 
 #[test]
@@ -1404,7 +1431,7 @@ fn array_subquery_remote_subscription_hydrates_edge_referenced_child_rows() {
 }
 
 #[test]
-fn ordered_suffix_delta_preserves_typed_union_occurrence_ids_for_duplicate_rows() {
+fn indexed_root_delta_preserves_typed_union_occurrence_ids_for_duplicate_rows() {
     let schema = schema();
     let db = open_db(0xd1, AuthorSubject::SYSTEM, &schema);
     let root = row(0xd2);
@@ -1453,24 +1480,31 @@ fn ordered_suffix_delta_preserves_typed_union_occurrence_ids_for_duplicate_rows(
         &current,
         std::slice::from_ref(&right),
     )
-    .expect("sidecar-preserving ordered suffix delta");
-    let SubscriptionEvent::Delta { removed, added, .. } = event else {
+    .expect("sidecar-preserving indexed root delta");
+    let SubscriptionEvent::Delta {
+        removed,
+        added,
+        updated,
+        ..
+    } = event
+    else {
         panic!("expected delta");
     };
+    assert!(added.is_empty());
     assert_eq!(
         removed
-            .into_iter()
-            .map(|row| row.occurrence_id)
+            .iter()
+            .map(|row| (&row.occurrence_id, row.index))
             .collect::<Vec<_>>(),
-        vec![left, right.clone()],
-        "the ordered suffix carries the exact typed occurrences it retracts"
+        vec![(&left, 0)],
+        "the removed arm keeps its exact typed identity and prior position"
     );
     assert_eq!(
-        added
-            .into_iter()
-            .map(|row| row.occurrence_id)
+        updated
+            .iter()
+            .map(|row| (&row.occurrence_id, row.previous_index, row.index))
             .collect::<Vec<_>>(),
-        vec![right],
-        "the surviving arm is re-added with its original typed identity"
+        vec![(&right, Some(1), 0)],
+        "the surviving arm moves under its original typed identity"
     );
 }

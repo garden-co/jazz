@@ -6,7 +6,7 @@
 
 use serde::Serialize;
 
-use crate::db::{RemovedRow, SubscriptionOutputRow, TerminalRootCarrier, TerminalRootLayout};
+use crate::db::{RemovedRow, SubscriptionOutputRow};
 use crate::ids::RowUuid;
 use crate::node::{CurrentRow, RelationSnapshot};
 use crate::tools::ResultKey;
@@ -59,6 +59,14 @@ pub struct SubscriptionDeltaPayload<'a> {
     pub updated_occurrence_keys: Vec<ResultKey>,
     /// One opaque occurrence key per removed row.
     pub removed_occurrence_keys: Vec<ResultKey>,
+    /// Authoritative post-frame position for each added row.
+    pub added_indices: Vec<u64>,
+    /// Authoritative pre-frame position for each updated row.
+    pub updated_previous_indices: Vec<u64>,
+    /// Authoritative post-frame position for each updated row.
+    pub updated_indices: Vec<u64>,
+    /// Authoritative pre-frame position for each removed row.
+    pub removed_indices: Vec<u64>,
 }
 
 /// Removed-row wire identity.
@@ -116,6 +124,13 @@ pub fn encode_subscription_delta(
             .iter()
             .map(|row| ResultKey::from_occurrence(row.occurrence_id.clone()))
             .collect(),
+        added_indices: added.iter().map(|row| row.index as u64).collect(),
+        updated_previous_indices: updated
+            .iter()
+            .map(|row| row.previous_index.unwrap_or(row.index) as u64)
+            .collect(),
+        updated_indices: updated.iter().map(|row| row.index as u64).collect(),
+        removed_indices: removed.iter().map(|row| row.index as u64).collect(),
     })
 }
 
@@ -146,30 +161,9 @@ pub fn row_batches(rows: &[CurrentRow]) -> Vec<RowBatch<'_>> {
     batches
 }
 
-/// Encode a terminal root layout in the JavaScript-native object shape.
-pub fn terminal_layout_to_json(
-    layout: &TerminalRootLayout,
-) -> Result<serde_json::Value, postcard::Error> {
-    let descriptor = postcard::to_allocvec(&layout.root_descriptor)?;
-    Ok(serde_json::json!({
-        "id": layout.id,
-        "rootDescriptor": descriptor,
-        "rootKeySlot": layout.root_key_slot,
-        "rootKeyFieldName": layout.root_key_field_name,
-        "publicFields": layout.public_fields.iter().map(|field| serde_json::json!({
-            "name": field.name,
-            "descriptorFieldName": field.descriptor_field_name,
-            "slot": field.slot,
-            "carrier": terminal_carrier_name(field.carrier),
-        })).collect::<Vec<_>>(),
-        "carrier": terminal_carrier_name(layout.carrier),
-    }))
-}
-
 /// Encode terminal operations in the JavaScript-native object shape.
 pub fn terminal_operations_to_json(
     operations: &[TerminalOperation],
-    root_layout_id: &str,
 ) -> Result<serde_json::Value, serde_json::Error> {
     let mut encoded = serde_json::to_value(operations)?;
     if operations.is_empty() {
@@ -183,17 +177,6 @@ pub fn terminal_operations_to_json(
             unreachable!("terminal operation serializes as an object");
         };
         wire.remove("root_descriptor");
-        wire.insert(
-            "rootLayoutId".to_owned(),
-            serde_json::Value::String(root_layout_id.to_owned()),
-        );
     }
     Ok(encoded)
-}
-
-fn terminal_carrier_name(carrier: TerminalRootCarrier) -> &'static str {
-    match carrier {
-        TerminalRootCarrier::CurrentRow => "CurrentRow",
-        TerminalRootCarrier::Logical => "Logical",
-    }
 }

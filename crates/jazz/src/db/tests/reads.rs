@@ -2073,7 +2073,8 @@ fn projected_relation_edge_removal_removes_only_its_renamed_related_row() {
         DurabilityTier::Edge,
         true,
         false,
-    );
+    )
+    .unwrap();
 
     assert!(matches!(event, SubscriptionEvent::Delta { .. }));
     assert!(snapshot.edges.is_empty());

@@ -67,7 +67,7 @@ export type NativeTerminalEdit =
   | { Update: { key: number[]; value: number[] } }
   | { Remove: { key: number[] } }
   | { Move: { key: number[]; index: number } };
-/** Immutable producer-owned root descriptor contract, registered before use. */
+/** Immutable producer-owned root descriptor contract retained for codec compatibility. */
 export interface NativeTerminalRootLayout {
   id: string;
   rootDescriptor: number[];
@@ -82,9 +82,7 @@ export interface NativeTerminalRootLayout {
   carrier: "CurrentRow" | "Logical";
 }
 export interface NativeTerminalOperation {
-  /** Stable ID of a layout published in the same or an earlier delta. */
   rootLayoutId?: string;
-  /** Legacy self-describing operation; new native producers must not send it. */
   rootDescriptor?: number[];
   root_key: number[];
   path: NativeTerminalPathSegment[];

@@ -4,7 +4,6 @@ import type {
   InsertValues,
   NativeRowDelta,
   NativeTerminalOperation,
-  NativeTerminalRootLayout,
   TablePolicies,
   Value,
   WasmSchema,
@@ -460,7 +459,6 @@ type SubscriptionState = {
   deferredVisiblePublication: boolean;
   deferredVisibleReset: boolean;
   deferredTerminalOperations: NativeTerminalOperation[];
-  deferredTerminalLayouts: NativeTerminalRootLayout[];
   deferredPlaceholderChunks: number;
   deferredPlaceholderRows: number;
   deferredPlaceholderBytes: number;
@@ -1722,7 +1720,6 @@ export class NativeRuntimeAdapter implements Runtime {
       deferredVisiblePublication: false,
       deferredVisibleReset: false,
       deferredTerminalOperations: [],
-      deferredTerminalLayouts: [],
       deferredPlaceholderChunks: 0,
       deferredPlaceholderRows: 0,
       deferredPlaceholderBytes: 0,
@@ -2582,7 +2579,6 @@ export class NativeRuntimeAdapter implements Runtime {
         subscription.packedResetRows = packedResetRows;
         subscription.opened = true;
         packedResetRows.terminalOperations = chunk.terminalOperations;
-        packedResetRows.terminalLayouts = chunk.terminalLayouts;
         this.publishSubscriptionRows(subscription, packedResetRows, chunk.settled, true);
       } else {
         materializePackedResetRows(subscription, this.schema);
@@ -2590,23 +2586,18 @@ export class NativeRuntimeAdapter implements Runtime {
         try {
           applied = applySubscriptionDeltaWithWireDelta(
             subscription.rows,
-            subscription.rowIndexByKey,
             chunk.delta,
             this.schema,
             chunk.reset === true,
             subscription.outputColumns,
-            chunk.terminalOperations,
-            chunk.orderedSuffixStart,
           );
         } catch (error) {
           const buffered = applySubscriptionDeltaToState(
             subscription.rows,
-            subscription.rowIndexByKey,
             chunk.delta,
             this.schema,
             chunk.reset === true,
             subscription.outputColumns,
-            chunk.terminalOperations,
           );
           if (
             subscriptionRowsRequireBufferedPublication(
@@ -2626,7 +2617,6 @@ export class NativeRuntimeAdapter implements Runtime {
             this.deferSubscriptionRows(
               subscription,
               chunk.terminalOperations,
-              chunk.terminalLayouts,
               chunk.reset === true,
               chunk.delta,
             );
@@ -2652,14 +2642,12 @@ export class NativeRuntimeAdapter implements Runtime {
           this.deferSubscriptionRows(
             subscription,
             chunk.terminalOperations,
-            chunk.terminalLayouts,
             chunk.reset === true,
             chunk.delta,
           );
           return;
         }
         applied.wireDelta.terminalOperations = chunk.terminalOperations;
-        applied.wireDelta.terminalLayouts = chunk.terminalLayouts;
         this.publishSubscriptionRows(
           subscription,
           applied.wireDelta,
@@ -2680,7 +2668,6 @@ export class NativeRuntimeAdapter implements Runtime {
       subscription.deferredVisiblePublication = true;
       subscription.deferredVisibleReset ||= reset;
       subscription.deferredTerminalOperations.push(...(wireDelta.terminalOperations ?? []));
-      subscription.deferredTerminalLayouts.push(...(wireDelta.terminalLayouts ?? []));
       return;
     }
 
@@ -2719,14 +2706,9 @@ export class NativeRuntimeAdapter implements Runtime {
         ...subscription.deferredTerminalOperations,
         ...(wireDelta.terminalOperations ?? []),
       ];
-      const terminalLayouts = [
-        ...subscription.deferredTerminalLayouts,
-        ...(wireDelta.terminalLayouts ?? []),
-      ];
       if (terminalOperations.length > 0) {
         visibleDelta.terminalOperations = terminalOperations;
       }
-      if (terminalLayouts.length > 0) visibleDelta.terminalLayouts = terminalLayouts;
     }
 
     subscription.callback?.(visibleDelta);
@@ -2749,14 +2731,12 @@ export class NativeRuntimeAdapter implements Runtime {
   private deferSubscriptionRows(
     subscription: SubscriptionState,
     terminalOperations: NativeTerminalOperation[] | undefined,
-    terminalLayouts: NativeTerminalRootLayout[] | undefined,
     reset: boolean,
     delta: NativeSubscriptionDelta,
   ): void {
     subscription.deferredVisiblePublication = true;
     subscription.deferredVisibleReset ||= reset;
     subscription.deferredTerminalOperations.push(...(terminalOperations ?? []));
-    subscription.deferredTerminalLayouts.push(...(terminalLayouts ?? []));
     subscription.deferredPlaceholderChunks = reset ? 1 : subscription.deferredPlaceholderChunks + 1;
     subscription.deferredPlaceholderRows = subscription.rows.length;
     subscription.deferredPlaceholderBytes = reset
@@ -3081,7 +3061,6 @@ function clearDeferredPlaceholderBuffer(subscription: SubscriptionState): void {
   subscription.deferredVisiblePublication = false;
   subscription.deferredVisibleReset = false;
   subscription.deferredTerminalOperations = [];
-  subscription.deferredTerminalLayouts = [];
   subscription.deferredPlaceholderChunks = 0;
   subscription.deferredPlaceholderRows = 0;
   subscription.deferredPlaceholderBytes = 0;
@@ -4961,50 +4940,20 @@ function withValuesByColumn(row: RowState, valuesByColumn: Map<string, Value>): 
 
 export function applySubscriptionDeltaWithWireDelta(
   currentRows: RowState[],
-  currentIndexByKey: Map<string, number>,
   delta: NativeSubscriptionDelta,
   schema: WasmSchema,
   reset = false,
   outputColumns: SubscriptionOutputColumns | null = null,
-  terminalOperations?: readonly NativeTerminalOperation[],
-  orderedSuffixStart?: number,
 ): { rows: RowState[]; rowIndexByKey: Map<string, number>; wireDelta: NativeRowDelta } {
   const { addedRows, updatedRows, removedEntries, rows, rowIndexByKey } =
-    applySubscriptionDeltaToState(
-      currentRows,
-      currentIndexByKey,
-      delta,
-      schema,
-      reset,
-      outputColumns,
-      terminalOperations,
-    );
-  const wireIndexByKey = new Map(rowIndexByKey);
-  if (orderedSuffixStart !== undefined) {
-    for (const [index, row] of subscriptionOutputRows(addedRows, outputColumns).entries()) {
-      wireIndexByKey.set(rowStateKey(row), orderedSuffixStart + index);
-    }
-  }
-  // Relation storage order is not public terminal order. A local replacement
-  // carrying terminal edits retains its current slot until SubscriptionManager
-  // applies the edit. An edit-free remove/add pair is instead an authoritative
-  // ordered-suffix reconciliation and must use the producer's new order.
-  const replacedKeys = new Set(
-    delta.removed.map((removed, index) => {
-      const id = formatUuid(removed.rowId);
-      const occurrenceKey = delta.removedOccurrenceKeys[index];
-      return occurrenceKey
-        ? occurrenceStateKey(occurrenceKey, removed.table, id)
-        : rowKey(removed.table, id);
-    }),
+    applySubscriptionDeltaToState(currentRows, delta, schema, reset, outputColumns);
+  const wireIndexByKey = new Map<string, number>();
+  addedRows.forEach((row, index) =>
+    wireIndexByKey.set(rowStateKey(row), delta.addedIndices[index]!),
   );
-  for (const row of addedRows.concat(updatedRows)) {
-    const key = rowStateKey(row);
-    const currentIndex = currentIndexByKey.get(key);
-    if (currentIndex !== undefined && replacedKeys.has(key) && terminalOperations?.length) {
-      wireIndexByKey.set(key, currentIndex);
-    }
-  }
+  updatedRows.forEach((row, index) =>
+    wireIndexByKey.set(rowStateKey(row), delta.updatedIndices[index]!),
+  );
   return {
     rows,
     rowIndexByKey,
@@ -5038,12 +4987,10 @@ function subscriptionOutputRemovals(
 
 function applySubscriptionDeltaToState(
   currentRows: RowState[],
-  currentIndexByKey: Map<string, number>,
   delta: NativeSubscriptionDelta,
   schema: WasmSchema,
   reset = false,
   outputColumns: SubscriptionOutputColumns | null = null,
-  terminalOperations?: readonly NativeTerminalOperation[],
 ): {
   addedRows: RowState[];
   updatedRows: RowState[];
@@ -5071,36 +5018,38 @@ function applySubscriptionDeltaToState(
   attachOccurrenceKeys(addedRows, delta.addedOccurrenceKeys);
   attachOccurrenceKeys(updatedRows, delta.updatedOccurrenceKeys);
 
-  // A locally changed row can arrive as a remove/add pair because relational
-  // record bytes include the changed value. When the frame also carries
-  // terminal edits, it remains the same public occurrence and must retain its
-  // slot until those edits are applied. Edit-free remove/add pairs are ordered
-  // authority suffixes and intentionally fall through to deletion/reinsertion.
-  const replacementKeys = terminalOperations?.length
-    ? new Set(addedRows.concat(updatedRows).map((row) => rowStateKey(row)))
-    : new Set<string>();
   for (const [removedIndex, removed] of delta.removed.entries()) {
     const id = formatUuid(removed.rowId);
     const resultKeyBytes = delta.removedOccurrenceKeys[removedIndex];
     const key = resultKeyBytes
       ? occurrenceStateKey(resultKeyBytes, removed.table, id)
       : rowKey(removed.table, id);
-    if (replacementKeys.has(key)) continue;
     removedEntries.push({
       table: removed.table,
       id,
-      index: currentIndexByKey.get(key) ?? 0,
+      index: delta.removedIndices[removedIndex]!,
       resultKeyBytes,
     });
     rowsByKey.delete(key);
   }
 
-  for (const row of addedRows.concat(updatedRows)) {
+  const changedRows = addedRows.concat(updatedRows);
+  for (const row of changedRows) {
     rowsByKey.set(rowStateKey(row), row);
   }
 
-  const rows = Array.from(rowsByKey.values());
-  applyTerminalRootOrdering(rows, terminalOperations, outputColumns?.rootTable);
+  const changedKeys = new Set(changedRows.map((row) => rowStateKey(row)));
+  const rows = (reset ? [] : currentRows).filter((row) => {
+    const key = rowStateKey(row);
+    return rowsByKey.has(key) && !changedKeys.has(key);
+  });
+  const placements = [
+    ...addedRows.map((row, index) => ({ row, index: delta.addedIndices[index]! })),
+    ...updatedRows.map((row, index) => ({ row, index: delta.updatedIndices[index]! })),
+  ].sort((left, right) => left.index - right.index);
+  for (const placement of placements) {
+    rows.splice(Math.max(0, Math.min(placement.index, rows.length)), 0, placement.row);
+  }
   const rowIndexByKey = indexRowsByKey(rows);
   return {
     addedRows,
@@ -5109,40 +5058,6 @@ function applySubscriptionDeltaToState(
     rows,
     rowIndexByKey,
   };
-}
-
-/**
- * Relation deltas describe row membership while terminal edits own public
- * root positions. Root Remove edits therefore do not delete adapter state: a
- * changed sort key is represented as Remove followed by Insert for the same
- * occurrence, and the relation replacement already supplies its new payload.
- * Apply only unambiguous flat-root Insert/Move positions here; composite
- * occurrence keys intentionally remain opaque rather than guessing which
- * duplicate physical row they address.
- */
-function applyTerminalRootOrdering(
-  rows: RowState[],
-  operations: readonly NativeTerminalOperation[] | undefined,
-  rootTable: string | undefined,
-): void {
-  for (const operation of operations ?? []) {
-    if (operation.path.length !== 0) continue;
-    const rootEdit = operation.edit;
-    if (!("Insert" in rootEdit) && !("Move" in rootEdit)) continue;
-    const key = "Insert" in rootEdit ? rootEdit.Insert.key : rootEdit.Move.key;
-    if (key.length !== 17 || key[0] !== 10) continue;
-    const id = formatUuid(Uint8Array.from(key.slice(1)));
-    const matches = rows
-      .map((row, index) =>
-        row.id === id && (rootTable === undefined || row.table === rootTable) ? index : -1,
-      )
-      .filter((index) => index !== -1);
-    if (matches.length !== 1) continue;
-    const index = matches[0]!;
-    const target = "Insert" in rootEdit ? rootEdit.Insert.index : rootEdit.Move.index;
-    const [row] = rows.splice(index, 1);
-    rows.splice(Math.max(0, Math.min(target, rows.length)), 0, row!);
-  }
 }
 
 function rowsFromSubscriptionBatches(
@@ -5489,8 +5404,6 @@ function normalizeSubscriptionChunk(chunk: unknown):
       reset?: boolean;
       delta: NativeSubscriptionDelta;
       terminalOperations?: NativeTerminalOperation[];
-      terminalLayouts?: NativeTerminalRootLayout[];
-      orderedSuffixStart?: number;
       settled?: boolean;
       publishable?: boolean;
     }
@@ -5512,8 +5425,6 @@ function normalizeSubscriptionChunk(chunk: unknown):
     settled?: unknown;
     publishable?: unknown;
     terminalOperations?: unknown;
-    terminalLayouts?: unknown;
-    orderedSuffixStart?: unknown;
   };
   if (record.type === "closed" || record.type === "Closed") {
     return { type: "closed" };
@@ -5535,15 +5446,6 @@ function normalizeSubscriptionChunk(chunk: unknown):
       terminalOperations: Array.isArray(record.terminalOperations)
         ? (record.terminalOperations as NativeTerminalOperation[])
         : undefined,
-      terminalLayouts: Array.isArray(record.terminalLayouts)
-        ? (record.terminalLayouts as NativeTerminalRootLayout[])
-        : undefined,
-      orderedSuffixStart:
-        typeof record.orderedSuffixStart === "number" &&
-        Number.isSafeInteger(record.orderedSuffixStart) &&
-        record.orderedSuffixStart >= 0
-          ? record.orderedSuffixStart
-          : undefined,
       settled: typeof record.settled === "boolean" ? record.settled : undefined,
       publishable: typeof record.publishable === "boolean" ? record.publishable : undefined,
     };
@@ -5839,7 +5741,6 @@ function subscriptionDeltaPayloadBytes(
 }
 
 function nativeTerminalOperationBytes(operation: NativeTerminalOperation): number {
-  const layoutIdBytes = operation.rootLayoutId?.length ?? operation.rootDescriptor?.length ?? 0;
   const rootKeyBytes = operation.root_key.length;
   const pathBytes = operation.path.reduce((sum, segment) => {
     if ("Collection" in segment) {
@@ -5855,7 +5756,7 @@ function nativeTerminalOperationBytes(operation: NativeTerminalOperation): numbe
         : "Remove" in operation.edit
           ? operation.edit.Remove.key.length
           : operation.edit.Move.key.length;
-  return layoutIdBytes + rootKeyBytes + pathBytes + editBytes;
+  return rootKeyBytes + pathBytes + editBytes;
 }
 
 function utf8ByteLength(value: string): number {
