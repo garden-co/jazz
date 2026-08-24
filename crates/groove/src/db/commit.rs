@@ -417,6 +417,9 @@ impl Database {
         &mut self,
         persistence: PersistedBatch,
     ) -> Result<PublicationId, Error> {
+        if !Rc::ptr_eq(&self.publication_persistence, &persistence.receipt.order) {
+            return Err(Error::PublicationNotFound(persistence.publication));
+        }
         persistence.receipt.finish();
         self.last_tick_metrics = Some(persistence.metrics.tick.clone());
         self.last_commit_metrics = Some(persistence.metrics.clone());

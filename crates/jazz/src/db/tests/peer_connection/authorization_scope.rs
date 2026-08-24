@@ -845,11 +845,63 @@ fn subscriber_cannot_spoof_authority_view_updates() {
     assert!(!node.opening_pending_for_binding_view(binding_view));
 }
 
+// This stays internal because the admission ordering and retained peer registration
+// state are not exposed through the public client API.
+#[test]
+fn oversized_register_shape_read_view_is_rejected_before_key_derivation_or_retention() {
+    let schema = schema();
+    let server = open_core(0x5d, AuthorId::SYSTEM, &schema);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let oversized_opts = RegisterShapeOptions {
+        read_view: ReadViewSpec {
+            source: ReadViewSourceSpec::Snapshot {
+                snapshot: SnapshotRef {
+                    owner: NodeUuid::from_bytes([0x98; 16]),
+                    global_base: GlobalTime(0),
+                    local_base: TxTime(0),
+                    dots: vec![
+                        TxId::new(TxTime(1), NodeUuid::from_bytes([0x97; 16]));
+                        MAX_SHAPE_REGISTRATION_BYTES
+                    ],
+                },
+            },
+        },
+        ..RegisterShapeOptions::default()
+    };
+    let shape_id = shape.shape_id();
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, AuthorId::from_bytes([0x96; 16]));
+
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id,
+            ast: ShapeAst::from_validated(&shape),
+            opts: oversized_opts,
+        })
+        .unwrap();
+    let error = subscriber.borrow_mut().tick().unwrap_err();
+
+    assert_eq!(error.code, crate::db::ErrorCode::Protocol);
+    assert!(error.message.contains("shape registration size"));
+    assert!(
+        client_transport.try_recv().is_none(),
+        "an invalid oversized registration must terminate the link instead of using a new wire-level rejection convention"
+    );
+    let subscriber = subscriber.borrow();
+    let crate::db::peer_connection::ConnectionLink::Subscriber(state) = &subscriber.link else {
+        panic!("accepted subscriber must retain subscriber connection state");
+    };
+    assert!(
+        state.shape_registrations.is_empty(),
+        "oversized read-view options must not be retained"
+    );
+}
+
 #[test]
 fn oversized_register_shape_is_rejected_at_admission() {
     let schema = schema();
     let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
-    let huge_table = "t".repeat(MAX_SHAPE_AST_BYTES + 1);
+    let huge_table = "t".repeat(MAX_SHAPE_REGISTRATION_BYTES + 1);
     let ast = ShapeAst::new(Query::from(huge_table), schema.version_id());
     let error = server
         .node()
@@ -862,7 +914,7 @@ fn oversized_register_shape_is_rejected_at_admission() {
         .unwrap_err();
     assert!(matches!(
         error,
-        crate::node::Error::UnsupportedSyncMessage("shape AST exceeds byte limit")
+        crate::node::Error::UnsupportedSyncMessage("shape registration exceeds byte limit")
     ));
 }
 

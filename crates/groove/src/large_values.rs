@@ -205,6 +205,17 @@ pub struct StagedLargeValue {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingLargeValueUpload {
     pub id: StagedLargeValueId,
+    /// The exact descriptor that this upload has been admitted to finalize.
+    /// A failed or interrupted finalization may be retried only with this
+    /// descriptor; chunk accounting is never a transferable publication
+    /// capability.
+    #[serde(default)]
+    pub descriptor: Option<LargeValueRef>,
+    /// Idempotency key for the receipt after finalization has been admitted.
+    /// Kept with the descriptor so a crash between receipt registration and
+    /// pending-upload release cannot double-count root references on retry.
+    #[serde(default)]
+    pub receipt_id: Option<StagedLargeValueId>,
     pub accounting: StagedLargeValueAccounting,
     pub created_at_ms: u64,
     pub chunks: Vec<NodeRef>,
@@ -1672,6 +1683,80 @@ pub(crate) async fn missing_upload_frontier(
         }
     }
     Ok(missing)
+}
+
+/// Verify the complete local tree of an upload immediately before issuing its
+/// staging receipt.  In addition to authenticating every reachable node, this
+/// proves that every node belongs to this particular pending-upload journal.
+/// That ownership check prevents one upload's accounting from being used to
+/// publish a descriptor assembled from unrelated already-present chunks.
+pub(crate) async fn validate_finalized_upload(
+    value: &LargeValueRef,
+    reader: crate::chunks::LocalChunkReader,
+    uploaded_chunks: &std::collections::BTreeSet<NodeRef>,
+    descriptor_was_bound_before_completion: bool,
+) -> Result<(), ReachabilityError> {
+    validate_descriptor(value)?;
+    let root_metrics = value.edit_tail.is_empty().then_some(NodeMetrics {
+        byte_length: value.byte_length,
+        utf16_length: value.utf16_length,
+    });
+    let mut pending = vec![(
+        value.root.clone(),
+        0_usize,
+        root_metrics,
+        value.logical_hash,
+    )];
+    while let Some((node_ref, depth, expected_metrics, expected_logical_hash)) = pending.pop() {
+        if depth > MAX_TREE_DEPTH {
+            return Err(Error::InvalidTree.into());
+        }
+        // Descriptor-keyed peer uploads may legitimately discover that an
+        // identical descriptor was completed by another connection. Once its
+        // pending record was bound to that exact descriptor at `begin`, local
+        // immutable nodes are safe to reuse. Unbound/raw uploads, in contrast,
+        // must prove every reachable node was journaled by this upload.
+        if !descriptor_was_bound_before_completion && !uploaded_chunks.contains(&node_ref) {
+            return Err(Error::DescriptorMismatch.into());
+        }
+        let encoded = reader
+            .get(node_ref.locator, node_ref.object_hash)
+            .await
+            .map_err(crate::chunks::ChunkError::from)?;
+        let node = decode_node(value.kind, node_ref.object_hash, &encoded)?;
+        if node_logical_hash(&node) != expected_logical_hash {
+            return Err(Error::DescriptorMismatch.into());
+        }
+        match &node {
+            ChunkNode::Leaf { bytes, .. } => {
+                if expected_metrics
+                    .is_some_and(|expected| metrics(value.kind, bytes).ok() != Some(expected))
+                {
+                    return Err(Error::DescriptorMismatch.into());
+                }
+            }
+            ChunkNode::Branch { children, .. } => {
+                if let Some(expected) = expected_metrics {
+                    let mut child_metrics = children.iter().map(|child| child.metrics);
+                    let Some(first) = child_metrics.next() else {
+                        return Err(Error::MalformedNode.into());
+                    };
+                    if child_metrics.try_fold(first, add_metrics)? != expected {
+                        return Err(Error::DescriptorMismatch.into());
+                    }
+                }
+                for child in children.iter().rev() {
+                    pending.push((
+                        child.node_ref.clone(),
+                        depth + 1,
+                        Some(child.metrics),
+                        child.logical_hash,
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone)]

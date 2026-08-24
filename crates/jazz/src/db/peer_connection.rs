@@ -2142,25 +2142,17 @@ where
                             opts,
                             ast,
                         } => {
-                            let registration_key = (shape_id, opts.read_view_key());
-                            if let Err(message) = validate_shape_ast_size(&ast) {
-                                shape_registrations.insert(
-                                    registration_key,
-                                    SubscriberShapeRegistration::RejectedUnsupportedCapability(
-                                        message.clone(),
-                                    ),
-                                );
-                                send_unsupported_shape_capability_rejection(
-                                    &mut *self.transport,
-                                    register_shape_rejection_subscription(
-                                        shape_id,
-                                        opts.read_view_key(),
-                                    ),
-                                    message,
-                                )
-                                .map_err(transport_error)?;
-                                continue;
+                            if let Err(message) =
+                                validate_shape_registration_size(&ast, &opts)
+                            {
+                                // No stable subscription key exists before the
+                                // read-view key is derived. Fail the peer link
+                                // rather than inventing unnegotiated wire
+                                // semantics or hashing attacker-sized options.
+                                return Err(Error::new(ErrorCode::Protocol, message));
                             }
+                            let read_view_key = opts.read_view_key();
+                            let registration_key = (shape_id, read_view_key);
                             if let Err(error) = ensure_supported_register_shape_options(
                                 &opts,
                                 *local_receiver,
@@ -2176,7 +2168,7 @@ where
                                     &mut *self.transport,
                                     register_shape_rejection_subscription(
                                         shape_id,
-                                        opts.read_view_key(),
+                                        read_view_key,
                                     ),
                                     error.message,
                                 )
@@ -2196,7 +2188,7 @@ where
                                             &mut *self.transport,
                                             register_shape_rejection_subscription(
                                                 shape_id,
-                                                opts.read_view_key(),
+                                                read_view_key,
                                             ),
                                             &error,
                                         )
@@ -2247,7 +2239,7 @@ where
                                         let subscription = SubscriptionKey {
                                             shape_id,
                                             binding_id: binding.binding_id(),
-                                            read_view: opts.read_view_key(),
+                                            read_view: read_view_key,
                                         };
                                         send_unsupported_shape_capability_rejection(
                                             &mut *self.transport,
@@ -2262,7 +2254,7 @@ where
                                             SubscriptionKey {
                                                 shape_id,
                                                 binding_id: binding.binding_id(),
-                                                read_view: opts.read_view_key(),
+                                                read_view: read_view_key,
                                             },
                                             &error,
                                         )
@@ -2288,7 +2280,7 @@ where
                                             &mut *self.transport,
                                             register_shape_rejection_subscription(
                                                 shape_id,
-                                                opts.read_view_key(),
+                                                read_view_key,
                                             ),
                                             detail.clone(),
                                         )

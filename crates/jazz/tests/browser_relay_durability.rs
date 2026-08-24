@@ -195,6 +195,7 @@ fn non_durable_browser_client_waits_for_worker_local_ack() {
                 "title".to_owned(),
                 Value::String("persist me in the worker".to_owned()),
             )]),
+            Default::default(),
         )
         .expect("insert optimistic todo");
     let tx_id = write.mergeable_tx_id();
@@ -281,6 +282,7 @@ fn browser_worker_initial_view_preserves_newer_optimistic_membership() {
         .insert(
             "todos",
             BTreeMap::from([("title".to_owned(), Value::String("open".to_owned()))]),
+            Default::default(),
         )
         .expect("insert optimistic open todo");
     let row = insert.row_uuid();
@@ -329,6 +331,7 @@ fn browser_worker_initial_view_preserves_newer_optimistic_membership() {
             "todos",
             row,
             BTreeMap::from([("title".to_owned(), Value::String("done".to_owned()))]),
+            Default::default(),
         )
         .expect("move optimistic todo out of filtered subscription");
     assert!(
@@ -381,6 +384,7 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
                 "title".to_owned(),
                 Value::String("relay me unchanged".to_owned()),
             )]),
+            Default::default(),
         )
         .expect("insert relayed todo");
     let tx_id = write.mergeable_tx_id();
@@ -459,6 +463,7 @@ fn worker_relay_forwards_authority_fate_to_browser_client() {
             "todos",
             row,
             BTreeMap::from([("title".to_owned(), Value::String("relay update".to_owned()))]),
+            Default::default(),
         )
         .expect("update through settled relay");
     let update_tx = update.mergeable_tx_id();
@@ -498,6 +503,7 @@ fn browser_client_hydrates_local_subscription_from_worker_relay() {
                 "title".to_owned(),
                 Value::String("persisted before main thread opens".to_owned()),
             )]),
+            Default::default(),
         )
         .expect("seed worker-local todo");
 
@@ -554,6 +560,7 @@ fn reopened_browser_worker_hydrates_local_subscription_without_query_warmup() {
                 "title".to_owned(),
                 Value::String("persisted before worker restart".to_owned()),
             )]),
+            Default::default(),
         )
         .expect("seed worker-local todo");
     first_worker.tick().expect("persist worker-local todo");
@@ -609,6 +616,7 @@ fn worker_baseline_arriving_during_cold_main_hydration_is_delivered_exactly_once
             .insert(
                 "todos",
                 BTreeMap::from([("title".to_owned(), Value::String(title.to_owned()))]),
+                Default::default(),
             )
             .expect("seed worker-local todo");
     }
@@ -678,11 +686,13 @@ fn browser_client_local_only_subscription_stops_at_worker() {
         .insert(
             "todos",
             BTreeMap::from([("title".to_owned(), Value::String("worker-local".to_owned()))]),
+            Default::default(),
         )
         .expect("seed worker-local todo");
     core.insert(
         "todos",
         BTreeMap::from([("title".to_owned(), Value::String("server-only".to_owned()))]),
+        Default::default(),
     )
     .expect("seed server-only todo");
 
@@ -755,6 +765,7 @@ fn browser_relay_does_not_publish_a_premature_settled_snapshot() {
                 "title".to_owned(),
                 Value::String("already settled at the authority".to_owned()),
             )]),
+            Default::default(),
         )
         .expect("seed authority todo");
     let seeded_tx = seeded.mergeable_tx_id();
@@ -854,6 +865,7 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
         .insert(
             "profiles",
             BTreeMap::from([("name".to_owned(), Value::String("Alice".to_owned()))]),
+            Default::default(),
         )
         .expect("seed included profile");
     let message = seeder
@@ -867,6 +879,7 @@ fn browser_relay_hydrates_fresh_included_edge_subscription_from_authority() {
                 ),
                 ("created".to_owned(), Value::U64(1)),
             ]),
+            Default::default(),
         )
         .expect("seed included message");
     seeder.tick().expect("upload seeded relation");
@@ -1011,6 +1024,7 @@ fn browser_relay_replays_causal_ancestors_before_pending_write_fates() {
                 "title".to_owned(),
                 Value::String("accepted parent".to_owned()),
             )]),
+            Default::default(),
         )
         .expect("insert base row");
     let row = base.row_uuid();
@@ -1055,6 +1069,7 @@ fn browser_relay_replays_causal_ancestors_before_pending_write_fates() {
                 "title".to_owned(),
                 Value::String("pending child".to_owned()),
             )]),
+            Default::default(),
         )
         .expect("update accepted row offline");
     let update_tx = update.mergeable_tx_id();
@@ -1123,6 +1138,7 @@ fn worker_relay_forwards_authority_rejection_to_browser_client() {
                 "title".to_owned(),
                 Value::String("reject after local persistence".to_owned()),
             )]),
+            Default::default(),
         )
         .expect("insert optimistic todo");
     let tx_id = write.mergeable_tx_id();
@@ -1171,6 +1187,7 @@ fn reopened_worker_replays_pending_commit_before_later_fate() {
                 "title".to_owned(),
                 Value::String("pending across worker restart".to_owned()),
             )]),
+            Default::default(),
         )
         .expect("insert pending todo");
     let tx_id = write.mergeable_tx_id();
@@ -1236,6 +1253,7 @@ fn reopened_worker_routes_later_rejection_to_same_main_thread_identity() {
                 "title".to_owned(),
                 Value::String("reject after worker restart".to_owned()),
             )]),
+            Default::default(),
         )
         .expect("insert pending todo");
     let tx_id = write.mergeable_tx_id();
