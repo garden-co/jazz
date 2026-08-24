@@ -96,6 +96,7 @@ const relationalRecipientPermissions = s.definePermissions(
       ]),
     );
     policy.playlists.allowInsert.always();
+    policy.playlists.allowUpdate.where({ $createdBy: session.author });
     policy.playlist_entries.allowRead.where(allowedTo.read("playlist_id"));
     policy.playlist_entries.allowInsert.where((entry) => canEditPlaylist(entry.playlist_id));
     policy.playlist_entries.allowUpdate.where((entry) => canEditPlaylist(entry.playlist_id));
@@ -126,6 +127,9 @@ const relationalRecipientPermissions = s.definePermissions(
         }),
       )
       .whereNew({ subject: session.user_id, status: "accepted" });
+    policy.invitations.allowDelete.where((invite) =>
+      policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.author }),
+    );
   },
 );
 
