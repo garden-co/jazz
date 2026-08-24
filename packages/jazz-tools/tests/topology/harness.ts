@@ -2,8 +2,20 @@ export type TopologyKind = "core" | "edge" | "browser" | "native" | "fixture";
 
 export type TopologyFaultKind = "disconnect" | "reconnect" | "restart" | "failure";
 
+export interface TopologyCleanupContext {
+  signal: AbortSignal;
+}
+
+export type TopologyCompensation = (context: TopologyCleanupContext) => Promise<void>;
+
 export interface TopologyOperationContext {
   signal: AbortSignal;
+  /**
+   * Register a named, idempotent inverse for external state acquired by this
+   * phase or fault. Remaining compensations run in reverse registration order
+   * before scenario cleanup, even when a later operation fails.
+   */
+  defer(name: string, cleanup: TopologyCompensation): void;
 }
 
 export interface TopologyFaultTarget {
@@ -23,6 +35,7 @@ export interface TopologyPhaseContext {
   seed: number;
   random: () => number;
   signal: AbortSignal;
+  defer(name: string, cleanup: TopologyCompensation): void;
 }
 
 export interface TopologyPhase {
@@ -68,6 +81,7 @@ export interface TopologyReceipt {
   elapsedMs: number;
   phases: Array<TopologyActivityReceipt & { name: string }>;
   faults: Array<TopologyActivityReceipt & { kind: TopologyFaultKind; target: string }>;
+  compensations: Array<TopologyActivityReceipt & { name: string }>;
   envelopes: TopologyEnvelopeSchedulerReceipt[];
   cleanup?: TopologyActivityReceipt;
   replay: string;
@@ -94,12 +108,27 @@ export async function runTopologyScenario(
     elapsedMs: 0,
     phases: [],
     faults: [],
+    compensations: [],
     envelopes: scenario.envelopeSchedulers?.map((scheduler) => scheduler.receipt()) ?? [],
     replay: scenario.replay,
   };
   const scenarioStarted = now();
   const random = deterministicRandom(scenario.seed);
   let scenarioError: unknown;
+  let compensationsClosed = false;
+  const compensations: Array<{ name: string; cleanup: TopologyCompensation }> = [];
+  const defer = (name: string, cleanup: TopologyCompensation): void => {
+    if (compensationsClosed) {
+      throw new Error(`topology compensation registered after cleanup: ${name}`);
+    }
+    if (typeof name !== "string" || !name.trim()) {
+      throw new Error("topology compensation name must not be empty");
+    }
+    if (typeof cleanup !== "function") {
+      throw new Error(`topology compensation ${name} must be a function`);
+    }
+    compensations.push({ name, cleanup });
+  };
   try {
     for (const phase of scenario.phases) {
       const started = now();
@@ -112,7 +141,7 @@ export async function runTopologyScenario(
       reporter.phase("start", phase.name, 0);
       try {
         await withTopologyTimeout(
-          (signal) => phase.run({ seed: scenario.seed, random, signal }),
+          (signal) => phase.run({ seed: scenario.seed, random, signal, defer }),
           phase.timeoutMs ?? scenario.phaseTimeoutMs,
           `topology phase timed out: ${phase.name}`,
         );
@@ -143,7 +172,7 @@ export async function runTopologyScenario(
             throw new Error(`topology target ${fault.target} does not support ${fault.kind}`);
           }
           await withTopologyTimeout(
-            (signal) => operation({ signal }),
+            (signal) => operation({ signal, defer }),
             fault.timeoutMs ?? scenario.faultTimeoutMs,
             `topology fault timed out: ${fault.kind} ${fault.target}`,
           );
@@ -163,6 +192,34 @@ export async function runTopologyScenario(
     receipt.error = errorMessage(error);
     scenarioError = error;
   } finally {
+    compensationsClosed = true;
+    for (const compensation of [...compensations].reverse()) {
+      const started = now();
+      const activity: TopologyReceipt["compensations"][number] = {
+        name: compensation.name,
+        status: "attempted",
+        elapsedMs: 0,
+      };
+      receipt.compensations.push(activity);
+      try {
+        await withTopologyTimeout(
+          (signal) => compensation.cleanup({ signal }),
+          scenario.cleanupTimeoutMs ?? scenario.faultTimeoutMs,
+          `topology compensation timed out: ${compensation.name}`,
+        );
+        Object.assign(activity, { status: "completed", elapsedMs: elapsed(started) });
+      } catch (cleanupError) {
+        const message = `compensation ${compensation.name} failed: ${errorMessage(cleanupError)}`;
+        Object.assign(activity, {
+          status: "failed",
+          elapsedMs: elapsed(started),
+          error: errorMessage(cleanupError),
+        });
+        receipt.status = "failed";
+        receipt.error = receipt.error ? `${receipt.error}; ${message}` : message;
+        scenarioError ??= cleanupError;
+      }
+    }
     if (scenario.cleanup) {
       const started = now();
       const activity: TopologyActivityReceipt = { status: "attempted", elapsedMs: 0 };
