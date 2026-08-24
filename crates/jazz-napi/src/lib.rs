@@ -921,6 +921,7 @@ pub struct StreamingMutation {
     column: String,
     mutation: CoreStreamingMutationKind,
     identity: Option<CoreAuthorSubject>,
+    attribution: Option<CoreAuthorSubject>,
     updated_at_ms: Option<u64>,
     head: Option<CoreBranchSelector>,
     base: Option<CoreBranchViewBase>,
@@ -978,6 +979,7 @@ impl StreamingMutation {
                     self.updated_at_ms,
                     self.head.clone(),
                     self.base.clone(),
+                    self.attribution,
                 ))
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
@@ -994,6 +996,7 @@ impl StreamingMutation {
                     self.updated_at_ms,
                     self.head.clone(),
                     self.base.clone(),
+                    self.attribution,
                 ))
                 .map_err(|error| napi::Error::from_reason(error.to_string()))?,
             ),
@@ -1396,6 +1399,7 @@ impl NapiDb {
             column,
             mutation,
             identity,
+            attribution: None,
             updated_at_ms: updated_at_ms
                 .map(|value| checked_u64(value, "updatedAtMs"))
                 .transpose()?,
@@ -1403,6 +1407,54 @@ impl NapiDb {
             base,
             upload: Some(upload),
         })
+    }
+
+    /// Trusted-backend streaming counterpart: SYSTEM remains the admission
+    /// identity and `attribution` is retained only for final row provenance.
+    /// Branch streaming is intentionally unsupported until its split state is
+    /// designed, so it fails closed rather than silently losing attribution.
+    #[napi(js_name = "beginStreamingMutationAttributedEncoded")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_streaming_mutation_attributed_encoded(
+        &self,
+        table: String,
+        row_id: Uint8Array,
+        cells: Uint8Array,
+        column: String,
+        kind: String,
+        mutation: Option<String>,
+        author: Option<Uint8Array>,
+        attribution: Uint8Array,
+        updated_at_ms: Option<f64>,
+        head: Option<JsonValue>,
+        base: Option<JsonValue>,
+    ) -> napi::Result<StreamingMutation> {
+        self.require_trusted_backend()?;
+        if author.is_some() {
+            return Err(napi::Error::from_reason(
+                "backend-attributed streaming mutations cannot override backend admission identity",
+            ));
+        }
+        if head.is_some() || base.is_some() {
+            return Err(napi::Error::from_reason(
+                "backend-attributed streaming mutations do not support branch writes",
+            ));
+        }
+        let attribution = core_author_id_from_bytes(&attribution)?;
+        let mut upload = self.begin_streaming_mutation_encoded(
+            table,
+            row_id,
+            cells,
+            column,
+            kind,
+            mutation,
+            None,
+            updated_at_ms,
+            None,
+            None,
+        )?;
+        upload.attribution = Some(attribution);
+        Ok(upload)
     }
 
     #[napi(factory, js_name = "openMemory")]
@@ -1633,6 +1685,7 @@ impl NapiDb {
         open_batch_id: String,
         kind: String,
         author: Option<Uint8Array>,
+        attribution: Option<Uint8Array>,
     ) -> napi::Result<()> {
         let open_batch_id = open_batch_id
             .parse::<CoreOpenBatchId>()
@@ -1641,6 +1694,23 @@ impl NapiDb {
             .as_deref()
             .map(core_author_id_from_bytes)
             .transpose()?;
+        let attribution = attribution
+            .as_deref()
+            .map(core_author_id_from_bytes)
+            .transpose()?;
+        if attribution.is_some() {
+            self.require_trusted_backend()?;
+            if kind != "mergeable" {
+                return Err(napi::Error::from_reason(
+                    "backend-attributed transactions currently require mergeable kind",
+                ));
+            }
+            if author.is_some() {
+                return Err(napi::Error::from_reason(
+                    "backend-attributed transactions cannot override backend admission identity",
+                ));
+            }
+        }
         if kind != "mergeable" && kind != "exclusive" {
             return Err(napi::Error::from_reason(unknown_transaction_kind_message(
                 &kind,
@@ -1654,12 +1724,18 @@ impl NapiDb {
             ($db:expr) => {
                 core_block_on(async {
                     if kind == "mergeable" {
-                        match author {
-                            Some(author) => {
-                                $db.begin_mergeable_for_identity(open_batch_id, author)
+                        match attribution {
+                            Some(attribution) => {
+                                $db.begin_mergeable_attributed(open_batch_id, attribution)
                                     .await
                             }
-                            None => $db.begin_mergeable(open_batch_id).await,
+                            None => match author {
+                                Some(author) => {
+                                    $db.begin_mergeable_for_identity(open_batch_id, author)
+                                        .await
+                                }
+                                None => $db.begin_mergeable(open_batch_id).await,
+                            },
                         }
                     } else {
                         match author {
@@ -4794,6 +4870,7 @@ mod tests {
                 &owner,
             ))))),
             owns_runtime: false,
+            trusted_backend: false,
         };
         let alice = CoreAuthorSubject::for_test_bytes([0xa6; 16]);
         let bound = CoreOpenBatchId::new();
@@ -4802,6 +4879,7 @@ mod tests {
                 bound.to_string(),
                 "exclusive".to_owned(),
                 Some(Uint8Array::new(alice.canonical().as_bytes().to_vec())),
+                None,
             )
             .unwrap();
         let tx = binding.attach_exclusive_tx(bound.to_string()).unwrap();
@@ -4817,6 +4895,7 @@ mod tests {
                 &view,
             ))))),
             owns_runtime: false,
+            trusted_backend: false,
         };
         let view_query = PreparedQuery {
             inner: view.prepare_query(&view.table("items")).unwrap(),
@@ -4844,12 +4923,14 @@ mod tests {
                 &other_owner,
             ))))),
             owns_runtime: false,
+            trusted_backend: false,
         };
         other_binding
             .begin_transaction(
                 bound.to_string(),
                 "exclusive".to_owned(),
                 Some(Uint8Array::new(alice.canonical().as_bytes().to_vec())),
+                None,
             )
             .unwrap();
         core_block_on(other_owner.exclusive_tx_ref(bound).insert(

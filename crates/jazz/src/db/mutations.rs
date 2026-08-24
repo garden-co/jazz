@@ -640,7 +640,7 @@ where
         match result_rx.await {
             Ok(Ok(())) => {
                 self.finish_streaming_value_upload(
-                    upload, mutation, table, row, cells, column, identity, now_ms, head, base,
+                    upload, mutation, table, row, cells, column, identity, now_ms, head, base, None,
                 )
                 .await
             }
@@ -768,7 +768,16 @@ where
         now_ms: Option<u64>,
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
+        attribution: Option<AuthorSubject>,
     ) -> Result<WriteHandle<S>, Error> {
+        if let Some(author) = attribution {
+            if author != self.identity.author && !self.backend_attribution {
+                return Err(Error::new(
+                    ErrorCode::WriteRejected,
+                    "attribution requires a trusted serving node",
+                ));
+            }
+        }
         if !upload.initialized {
             self.node
                 .node
@@ -836,7 +845,18 @@ where
                 }
             };
         self.publish_streaming_value_with_id(
-            mutation, table, row, cells, column, staged, nullable, identity, now_ms, head, base,
+            mutation,
+            table,
+            row,
+            cells,
+            column,
+            staged,
+            nullable,
+            identity,
+            now_ms,
+            head,
+            base,
+            attribution,
         )
         .await
     }
@@ -899,8 +919,9 @@ where
         now_ms: Option<u64>,
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
+        attribution: Option<AuthorSubject>,
     ) -> Result<WriteHandle<S>, Error> {
-        let made_by = identity.unwrap_or(self.identity.author);
+        let made_by = attribution.or(identity).unwrap_or(self.identity.author);
         let permission_subject = identity;
         let branch = head.clone().unwrap_or_default();
         let (mut cells, parents, authored_columns, inserting) = match mutation {
@@ -909,7 +930,8 @@ where
                     self.ensure_exact_branch_row_absent(table, &branch, row)
                         .await?;
                 } else {
-                    self.ensure_row_absent(table, row, made_by).await?;
+                    self.ensure_row_absent(table, row, identity.unwrap_or(self.identity.author))
+                        .await?;
                 }
                 (cells, Vec::new(), None, true)
             }

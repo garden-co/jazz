@@ -146,7 +146,12 @@ type NativeDb = {
   // owns idempotence, so callers never observe that implementation detail.
   close?(): void | boolean | Promise<void | boolean>;
   registerSchema(schema: Uint8Array): NativeDb;
-  beginTransaction(openBatchId: string, kind: TransactionKind, author?: Uint8Array): void;
+  beginTransaction(
+    openBatchId: string,
+    kind: TransactionKind,
+    author?: Uint8Array,
+    attribution?: Uint8Array,
+  ): void;
   commitTransaction(openBatchId: string, kind?: TransactionKind): Write;
   rollbackTransaction(openBatchId: string): void;
   attachMergeableTx(openBatchId: string): Tx;
@@ -239,6 +244,17 @@ type NativeDb = {
     updatedAtMs?: number,
     head?: unknown,
     base?: unknown,
+  ): NativeStreamingMutation;
+  beginStreamingMutationAttributedEncoded?(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    column: string,
+    kind: "Text" | "Json" | "Bytea",
+    mutation: StreamingMutationKind | undefined,
+    author: Uint8Array | undefined,
+    attribution: Uint8Array,
+    updatedAtMs?: number,
   ): NativeStreamingMutation;
   requestInsertPermissionAdviceEncoded?(
     table: string,
@@ -994,7 +1010,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const branchView = branchViewFromWriteContext(_writeContext);
     const tx = this.currentTx(_writeContext, "Insert");
     if (tx) {
-      const nativeTx = this.txForWrite(tx, writeIdentity);
+      const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
       const rowId = nativeTx.insertEncoded(table, cells, {
         rowId: suppliedRowId,
         branch: branchView?.head,
@@ -1046,6 +1062,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const attribution = this.backendAttribution(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
 
@@ -1062,19 +1079,33 @@ export class NativeRuntimeAdapter implements Runtime {
       mutation === "insert"
         ? encodeCellsForStreamingRow(definition, values, column, table)
         : encodeCellsForStreamingPatch(definition, values, column);
-    const upload = begin.call(
-      this.db,
-      table,
-      rowId,
-      cells,
-      column,
-      kind,
-      mutation,
-      writeIdentity,
-      updatedAtMs ?? undefined,
-      branchView?.head,
-      branchView?.base,
-    );
+    const attributedBegin = attribution && this.db.beginStreamingMutationAttributedEncoded;
+    const upload = attributedBegin
+      ? attributedBegin.call(
+          this.db,
+          table,
+          rowId,
+          cells,
+          column,
+          kind,
+          mutation,
+          undefined,
+          attribution,
+          updatedAtMs ?? undefined,
+        )
+      : begin.call(
+          this.db,
+          table,
+          rowId,
+          cells,
+          column,
+          kind,
+          mutation,
+          writeIdentity,
+          updatedAtMs ?? undefined,
+          branchView?.head,
+          branchView?.base,
+        );
     const encoder = new TextEncoder();
     const pushBounded = async (bytes: Uint8Array): Promise<void> => {
       const hostWindowBytes = 64 * 1024;
@@ -1130,7 +1161,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const branchView = branchViewFromWriteContext(writeContext);
     const tx = this.currentTx(writeContext, "Restore");
     if (tx) {
-      const nativeTx = this.txForWrite(tx, writeIdentity);
+      const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
       nativeTx.restoreEncoded(table, rowId, cells, {
         branch: branchView?.head,
         updatedAtMs: updatedAtMs ?? undefined,
@@ -1172,7 +1203,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const branchView = branchViewFromWriteContext(writeContext);
     const tx = this.currentTx(writeContext, "Update");
     if (tx) {
-      const nativeTx = this.txForWrite(tx, writeIdentity);
+      const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
       nativeTx.updateEncoded(table, rowId, patch, {
         head: branchView?.head,
         base: branchView?.base,
@@ -1225,10 +1256,15 @@ export class NativeRuntimeAdapter implements Runtime {
       throw writeError("Upsert", normalizeWriteSetupMessage(errorMessage(error)));
     }
     if (tx) {
-      this.txForWrite(tx, writeIdentity).upsertEncoded(table, rowId, cells, {
-        branch: branchView?.head,
-        updatedAtMs: updatedAtMs ?? undefined,
-      });
+      this.txForWrite(tx, attribution ? undefined : writeIdentity).upsertEncoded(
+        table,
+        rowId,
+        cells,
+        {
+          branch: branchView?.head,
+          updatedAtMs: updatedAtMs ?? undefined,
+        },
+      );
       tx.writes.push({
         table,
         rowId,
@@ -1261,7 +1297,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const branchView = branchViewFromWriteContext(writeContext);
     const tx = this.currentTx(writeContext, "Delete");
     if (tx) {
-      const nativeTx = this.txForWrite(tx, writeIdentity);
+      const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
       nativeTx.deleteEncoded(table, rowId, {
         head: branchView?.head,
         base: branchView?.base,
@@ -1383,8 +1419,10 @@ export class NativeRuntimeAdapter implements Runtime {
     // the trusted-serving subject here so every staged operation and its
     // commit are authorized as that one subject.
     const identity = this.trustedWriteIdentity(session);
-    this.db.beginTransaction(id, kind, identity);
-    this.pendingTxs.set(id, { id, kind, identity, writes: [], txByView: new Map() });
+    const attribution = this.backendAttribution(sessionJson);
+    const admission = attribution ? undefined : identity;
+    this.db.beginTransaction(id, kind, admission, attribution);
+    this.pendingTxs.set(id, { id, kind, identity: admission, writes: [], txByView: new Map() });
     return id;
   }
 
