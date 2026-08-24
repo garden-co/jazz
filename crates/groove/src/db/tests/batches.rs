@@ -1303,6 +1303,77 @@ async fn failed_persistence_does_not_retract_an_applied_subscription_delta() {
 }
 
 #[futures_test::test]
+async fn retractable_failed_persistence_restores_resident_rows_indexes_and_subscribers() {
+    let (storage, control) = TestStorage::controlled(&["albums"]);
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("albums"))
+        .await
+        .unwrap();
+    assert!(
+        database
+            .next_subscription(&subscription)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let mut batch = database.open_batch();
+    batch.retract_if_persistence_fails();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+    );
+    let applied = database.apply_batch(batch).await.unwrap();
+    assert!(applied.is_retractable());
+    assert_eq!(
+        database
+            .primary_key_scan("albums", &[Value::U64(7)])
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the resident write is synchronously query-visible before durability"
+    );
+    assert_eq!(subscription.recv().unwrap().deltas.len(), 1);
+
+    control.fail_next(TestStorageOperation::WriteMany);
+    let persisted = applied.persist().await;
+    assert!(matches!(
+        database.retract_failed_persistence(persisted).await,
+        Err(Error::Storage(_))
+    ));
+    assert!(
+        database
+            .primary_key_scan("albums", &[Value::U64(7)])
+            .await
+            .unwrap()
+            .is_empty(),
+        "failed resident publication cannot retain a phantom uniqueness claim"
+    );
+    let rollback = subscription.recv().unwrap();
+    assert_eq!(rollback.deltas.len(), 1);
+    assert_eq!(rollback.deltas[0].weight, -1);
+
+    let mut retry = database.open_batch();
+    retry.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Giant Steps".to_owned())],
+    );
+    database.commit_batch(retry).await.unwrap();
+    assert_eq!(
+        database
+            .primary_key_scan("albums", &[Value::U64(7)])
+            .await
+            .unwrap()[0]
+            .get("title")
+            .unwrap(),
+        Value::String("Giant Steps".to_owned()),
+        "a restored runtime accepts the formerly-resident primary key"
+    );
+}
+
+#[futures_test::test]
 async fn failed_persistence_releases_later_publications_with_an_error() {
     let (storage, control) = TestStorage::controlled(&["albums"]);
     let mut database = Database::new(albums_schema(), storage).await.unwrap();

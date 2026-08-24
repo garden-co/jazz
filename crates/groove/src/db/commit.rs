@@ -1,4 +1,31 @@
 use super::*;
+
+/// Reverse an already-applied physical-record delta without consulting table
+/// storage.  Retraction uses this through the normal IVM tick, so maintained
+/// arrangements, indexes and subscribers observe the same negative facts they
+/// would observe for an ordinary delete.
+fn invert_table_deltas(table_deltas: &[TableDelta]) -> Vec<TableDelta> {
+    table_deltas
+        .iter()
+        .map(|table_delta| TableDelta {
+            table: table_delta.table.clone(),
+            variant_tag: table_delta.variant_tag,
+            descriptor: table_delta.descriptor,
+            deltas: table_delta
+                .deltas
+                .iter()
+                .map(|delta| RecordDelta {
+                    record: delta.record.clone(),
+                    weight: delta
+                        .weight
+                        .checked_neg()
+                        .expect("record delta cannot be i64::MIN"),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 impl Database {
     /// Run one IVM tick without base-table writes.
     ///
@@ -110,6 +137,8 @@ impl Database {
     pub async fn apply_batch(&mut self, batch: DatabaseBatch) -> Result<AppliedBatch, Error> {
         self.ensure_not_poisoned()?;
         let accepted_large_values = batch.accepted_large_values.clone();
+        let retractable =
+            batch.resident_publication == ResidentPublicationPolicy::RetractableBeforePersistence;
         let defer_notifications_until_durable =
             batch.notification_timing == NotificationTiming::AfterPersistence;
         let pending_writes = self.pending_writes_from_batch(batch)?;
@@ -177,6 +206,7 @@ impl Database {
             .collect::<Vec<_>>();
         let table_deltas =
             compute_table_deltas(&pending_writes, &stores, self.ivm_runtime.schema()).await?;
+        let inverse_table_deltas = retractable.then(|| invert_table_deltas(&table_deltas));
         let mut durable_root_deltas = BTreeMap::<crate::large_values::NodeRef, i64>::new();
         for table_delta in &table_deltas {
             for delta in &table_delta.deltas {
@@ -395,8 +425,15 @@ impl Database {
         self.resident_writes
             .borrow_mut()
             .extend(staged_operations.iter().cloned());
-        self.resident_publications
-            .insert(publication, staged_operations.clone());
+        self.resident_publications.insert(
+            publication,
+            ResidentPublication {
+                operations: staged_operations.clone(),
+                inverse_table_deltas: inverse_table_deltas.unwrap_or_default(),
+                notifications_deferred: defer_notifications_until_durable,
+                retractable,
+            },
+        );
         Ok(AppliedBatch {
             publication,
             storage: Rc::clone(&self.storage),
@@ -406,6 +443,7 @@ impl Database {
             storage_writes,
             tick,
             notifications_deferred: defer_notifications_until_durable,
+            retractable,
             lifecycle: Rc::new(Cell::new(AppliedBatchLifecycle::Applied)),
             abandoned_application: Rc::clone(&self.abandoned_application),
         })
@@ -421,6 +459,9 @@ impl Database {
         self.last_tick_metrics = Some(persistence.metrics.tick.clone());
         self.last_commit_metrics = Some(persistence.metrics.clone());
         if let Err(error) = persistence.result {
+            if self.retracted_publications.remove(&persistence.publication) {
+                return Err(Error::PublicationRetracted(persistence.publication));
+            }
             if persistence.notifications_deferred {
                 self.ivm_runtime
                     .discard_deferred_notifications(persistence.publication);
@@ -435,17 +476,10 @@ impl Database {
             return Err(Error::PublicationNotFound(persistence.publication));
         }
         self.persisted_publications.insert(persistence.publication);
-        let mut frontier = self
-            .durable_publication_frontier
-            .map_or(1, |publication| publication.0.saturating_add(1));
-        while self.persisted_publications.remove(&PublicationId(frontier)) {
-            self.resident_publications.remove(&PublicationId(frontier));
-            self.durable_publication_frontier = Some(PublicationId(frontier));
-            frontier = frontier.saturating_add(1);
-        }
+        self.advance_durable_frontier();
         let mut resident_writes = StagedWriteState::default();
-        for operations in self.resident_publications.values() {
-            resident_writes.extend(operations.iter().cloned());
+        for publication in self.resident_publications.values() {
+            resident_writes.extend(publication.operations.iter().cloned());
         }
         *self.resident_writes.borrow_mut() = resident_writes;
         if persistence.notifications_deferred {
@@ -453,6 +487,114 @@ impl Database {
                 .settle_deferred_notifications(persistence.publication);
         }
         Ok(persistence.publication)
+    }
+
+    /// Retract a failed explicitly-retractable resident publication before it
+    /// becomes durable.  Every later resident publication is retracted in
+    /// reverse order as well: its delta may have read the failed publication
+    /// through the resident overlay, so retaining it would manufacture state
+    /// with no durable predecessor.
+    ///
+    /// This is intentionally asynchronous because inverse deltas flow through
+    /// the same maintained IVM runtime as ordinary writes.  On success the
+    /// database remains usable; any inability to restore the runtime poisons
+    /// it rather than leaving a silently divergent resident view.
+    pub async fn retract_failed_persistence(
+        &mut self,
+        persistence: PersistedBatch,
+    ) -> Result<PublicationId, Error> {
+        persistence.receipt.finish();
+        self.last_tick_metrics = Some(persistence.metrics.tick.clone());
+        self.last_commit_metrics = Some(persistence.metrics.clone());
+        let failure = persistence.result.expect_err(
+            "retract_failed_persistence is only valid for a failed persistence receipt",
+        );
+        let failed = persistence.publication;
+        let Some(failed_publication) = self.resident_publications.get(&failed) else {
+            self.poisoned = true;
+            return Err(Error::PublicationNotFound(failed));
+        };
+        if !failed_publication.retractable {
+            self.poisoned = true;
+            return Err(Error::NonRetractablePublication(failed));
+        }
+        if self
+            .persisted_publications
+            .range((
+                std::ops::Bound::Excluded(failed),
+                std::ops::Bound::Unbounded,
+            ))
+            .next()
+            .is_some()
+        {
+            self.poisoned = true;
+            return Err(Error::InvalidResidentRetraction(
+                "a later publication is already durable".to_owned(),
+            ));
+        }
+
+        let retracted = self.resident_publications.split_off(&failed);
+        let mut resident_writes = StagedWriteState::default();
+        for publication in self.resident_publications.values() {
+            resident_writes.extend(publication.operations.iter().cloned());
+        }
+        *self.resident_writes.borrow_mut() = resident_writes;
+
+        for (publication_id, publication) in retracted.iter().rev() {
+            let resident_overlay = Rc::new(StagedWriteOverlay::new_owned(
+                Rc::clone(&self.storage),
+                Rc::clone(&self.resident_writes),
+            ));
+            let storage = OwnedStorage::new(resident_overlay);
+            if let Err(error) = self
+                .ivm_runtime
+                .tick_resident_staged(
+                    publication.inverse_table_deltas.clone(),
+                    storage,
+                    *publication_id,
+                    publication.notifications_deferred,
+                )
+                .await
+            {
+                self.poisoned = true;
+                return Err(Error::IvmRuntime(error));
+            }
+            if publication.notifications_deferred {
+                self.ivm_runtime
+                    .discard_deferred_notifications(*publication_id);
+            }
+            self.retracted_publications.insert(*publication_id);
+        }
+
+        {
+            let mut order = self.publication_persistence.borrow_mut();
+            order.failure = None;
+            for publication_id in retracted.keys() {
+                order.cancelled.insert(publication_id.0);
+            }
+            advance_cancelled_publications(&mut order);
+        }
+        self.advance_durable_frontier();
+        Err(Error::from(failure))
+    }
+
+    fn advance_durable_frontier(&mut self) {
+        let mut frontier = self
+            .durable_publication_frontier
+            .map_or(1, |publication| publication.0.saturating_add(1));
+        loop {
+            let publication = PublicationId(frontier);
+            if self.persisted_publications.remove(&publication) {
+                self.resident_publications.remove(&publication);
+                self.durable_publication_frontier = Some(publication);
+                frontier = frontier.saturating_add(1);
+            } else if self.retracted_publications.contains(&publication) {
+                self.durable_publication_frontier = Some(publication);
+                frontier = frontier.saturating_add(1);
+            } else {
+                break;
+            }
+        }
     }
 
     pub(super) fn pending_writes_from_batch(

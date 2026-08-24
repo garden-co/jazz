@@ -49,6 +49,7 @@ pub struct DatabaseBatch {
     pub(super) txn_indexed_operations: Cell<usize>,
     pub(super) notification_timing: NotificationTiming,
     pub(super) accepted_large_values: Vec<crate::large_values::StagedLargeValueId>,
+    pub(super) resident_publication: ResidentPublicationPolicy,
 }
 
 impl PartialEq for DatabaseBatch {
@@ -56,7 +57,22 @@ impl PartialEq for DatabaseBatch {
         self.operations == other.operations
             && self.notification_timing == other.notification_timing
             && self.accepted_large_values == other.accepted_large_values
+            && self.resident_publication == other.resident_publication
     }
+}
+
+/// Whether a resident publication may be exactly retracted if its owned
+/// durability attempt fails before promotion.
+///
+/// Ordinary database publications intentionally poison on persistence failure:
+/// their caller has no rollback contract.  Asynchronous preparation paths use
+/// this explicit policy to retain the inverse IVM delta and resident ownership
+/// until their first durable promotion succeeds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ResidentPublicationPolicy {
+    #[default]
+    DurableOnly,
+    RetractableBeforePersistence,
 }
 
 /// When subscription notifications produced by a batch become observable.
@@ -72,6 +88,16 @@ pub enum NotificationTiming {
 }
 
 impl DatabaseBatch {
+    /// Make this publication retractable until its first durable write settles.
+    ///
+    /// The caller that observes a failed [`AppliedBatch`](super::AppliedBatch)
+    /// persistence receipt must settle it through
+    /// [`Database::retract_failed_persistence`](super::Database::retract_failed_persistence),
+    /// rather than [`Database::finish_persistence`](super::Database::finish_persistence).
+    pub fn retract_if_persistence_fails(&mut self) {
+        self.resident_publication = ResidentPublicationPolicy::RetractableBeforePersistence;
+    }
+
     pub fn deliver_notifications(&mut self, timing: NotificationTiming) {
         self.notification_timing = timing;
     }
