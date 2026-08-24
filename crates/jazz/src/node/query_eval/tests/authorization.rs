@@ -3,6 +3,51 @@
 use super::*;
 
 #[test]
+fn negated_null_membership_policy_does_not_authorize_null_rows() {
+    let mut schema = public_query_eval_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("documents")
+                .nullable_column("classification", PublicColumnType::Text)
+                .nullable_column("null_option", PublicColumnType::Text),
+        ),
+    );
+    schema.runtime_mut_for_testing().tables[0].read_policy = Some(Query::from("documents").filter(
+        crate::query::not(in_list(col("classification"), [col("null_option")])),
+    ));
+    let (_dir, mut node) = open_node_with_uuid(NodeUuid::from_bytes([0x98; 16]), schema.clone());
+    for (id, timestamp, classification) in [
+        (row(1), 1_001, Value::Nullable(None)),
+        (
+            row(2),
+            1_002,
+            Value::Nullable(Some(Box::new(Value::String("public".to_owned())))),
+        ),
+    ] {
+        node.commit_mergeable_unit_settled(
+            MergeableCommit::new("documents", id, timestamp)
+                .made_by(AuthorId::SYSTEM)
+                .cells(BTreeMap::from([
+                    ("classification".to_owned(), classification),
+                    ("null_option".to_owned(), Value::Nullable(None)),
+                ])),
+        )
+        .unwrap();
+    }
+
+    let reader = author(9);
+    let shape = Query::from("documents").validate_runtime(&schema).unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    let visible = node
+        .query_rows_for_link(&shape, &binding, DurabilityTier::Local, reader)
+        .unwrap()
+        .into_iter()
+        .map(|row| row.row_uuid())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(visible, BTreeSet::from([row(2)]));
+}
+
+#[test]
 fn nested_read_policy_claim_slots_do_not_cross_validated_types() {
     let schema = RuntimeSchema::new([
         TableSchema::new(
