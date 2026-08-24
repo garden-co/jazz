@@ -4,9 +4,11 @@ import { resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const root = resolve(import.meta.dirname, "../..");
-const registry = JSON.parse(
-  readFileSync(resolve(root, "dev/example-topology-scenarios.json"), "utf8"),
-);
+const registryPath = process.env.JAZZ_EXAMPLE_TOPOLOGY_REGISTRY
+  ? resolve(process.env.JAZZ_EXAMPLE_TOPOLOGY_REGISTRY)
+  : resolve(root, "dev/example-topology-scenarios.json");
+const registry = JSON.parse(readFileSync(registryPath, "utf8"));
+validateRegistry(registry);
 let output = "target/example-topology-soak";
 let seedCount = 3;
 let watchdogSeconds = 90;
@@ -39,9 +41,10 @@ for (const scenario of scenarios) {
   for (let index = 0; index < seedCount; index++) {
     const seed = fixedSeeds[index] ?? 1000 + (index - fixedSeeds.length) * 7919;
     const logName = `${scenario.id.replaceAll(/[^a-zA-Z0-9.-]/g, "-")}-seed-${seed}.log`;
-    const replay = [`JAZZ_EXAMPLE_TOPOLOGY_SEED=${seed}`, ...scenario.argv.map(shellQuote)].join(
+    const command = [`JAZZ_EXAMPLE_TOPOLOGY_SEED=${seed}`, ...scenario.argv.map(shellQuote)].join(
       " ",
     );
+    const replay = scenario.cwd === "." ? command : `cd ${shellQuote(scenario.cwd)} && ${command}`;
     const started = Date.now();
     const result = spawnSync(scenario.argv[0], scenario.argv.slice(1), {
       cwd: resolve(root, scenario.cwd),
@@ -85,6 +88,33 @@ function positiveInteger(value, option) {
 
 function shellQuote(value) {
   return /^[a-zA-Z0-9_./:@=-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+function validateRegistry(value) {
+  if (value?.schemaVersion !== 1 || !Array.isArray(value.scenarios)) {
+    usage("scenario registry must have schemaVersion 1 and a scenarios array");
+  }
+  const ids = new Set();
+  for (const scenario of value.scenarios) {
+    if (typeof scenario?.id !== "string" || scenario.id.length === 0) {
+      usage("each scenario requires a non-empty id");
+    }
+    if (ids.has(scenario.id)) usage(`duplicate scenario id: ${scenario.id}`);
+    ids.add(scenario.id);
+    if (!Array.isArray(scenario.topology) || scenario.topology.length === 0) {
+      usage(`scenario ${scenario.id} requires at least one topology`);
+    }
+    if (typeof scenario.cwd !== "string" || scenario.cwd.length === 0) {
+      usage(`scenario ${scenario.id} requires cwd`);
+    }
+    if (
+      !Array.isArray(scenario.argv) ||
+      scenario.argv.length === 0 ||
+      scenario.argv.some((argument) => typeof argument !== "string")
+    ) {
+      usage(`scenario ${scenario.id} requires a non-empty string argv`);
+    }
+  }
 }
 
 function usage(error) {
