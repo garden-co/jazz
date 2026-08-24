@@ -23,6 +23,34 @@ const PAGE_SIZE = 12;
 const cleanup = new TestCleanup();
 afterEach(async () => cleanup.cleanup());
 
+async function settle<T>(
+  label: string,
+  work: Promise<T>,
+  timeoutMs = 15_000,
+  diagnostics?: () => string,
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () =>
+            reject(
+              new Error(
+                `${label}: edge settlement did not complete after ${timeoutMs}ms` +
+                  (diagnostics ? `; ${diagnostics()}` : ""),
+              ),
+            ),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 describe("BandBinder cross-topology recovery", () => {
   it("converges bounded workspace surfaces, offline work, and revocation exactly", async () => {
     const seed = Number(process.env.JAZZ_EXAMPLE_TOPOLOGY_SEED ?? 41);
@@ -38,6 +66,7 @@ describe("BandBinder cross-topology recovery", () => {
     let offlineTaskId = "";
     let nestedPageId = "";
     let nestedBlockId = "";
+    const ownerMutationErrors: unknown[] = [];
     const taskSubscriptionSnapshots: string[][] = [];
     const expectedBlockIds = new Set<string>();
 
@@ -96,6 +125,9 @@ describe("BandBinder cross-topology recovery", () => {
               managerJwt = managerToken;
               managerDbName = uniqueDbName("band-binder-manager");
               owner = await openClient(server, "owner", ownerToken);
+              cleanup.trackSubscription(
+                owner.onMutationError((event) => ownerMutationErrors.push(event)),
+              );
               manager = await openClient(server, "manager", managerJwt, managerDbName);
               // Bootstrap is an explicit grant, not an implicit initial read.
               // A signed-in client starts with no workspace-visible state.
@@ -144,148 +176,198 @@ describe("BandBinder cross-topology recovery", () => {
           {
             name: "two clients create bounded ordered surfaces",
             run: async () => {
-              const page = await manager!
-                .insert(app.pages, { workspaceId, title: "Berlin" })
-                .wait({ tier: "edge" });
+              const page = await settle(
+                "manager creates root page",
+                manager!.insert(app.pages, { workspaceId, title: "Berlin" }).wait({ tier: "edge" }),
+              );
               pageId = page.id;
-              const nestedPage = await manager!
-                .insert(app.pages, {
-                  workspaceId,
-                  parentPageId: pageId,
-                  title: "Berlin / stage notes",
-                })
-                .wait({ tier: "edge" });
+              const nestedPage = await settle(
+                "manager creates nested page",
+                manager!
+                  .insert(app.pages, {
+                    workspaceId,
+                    parentPageId: pageId,
+                    title: "Berlin / stage notes",
+                  })
+                  .wait({ tier: "edge" }),
+              );
               nestedPageId = nestedPage.id;
               // PageNavigation owns this exact bounded, ordered child-page
               // query.  Seed one more row than the page so the receipt proves
               // both the ordering and the bound rather than merely eventual
               // delivery of a single child.
-              await Promise.all(
-                Array.from({ length: PAGE_SIZE }, (_, index) =>
-                  manager!
-                    .insert(app.pages, {
-                      workspaceId,
-                      parentPageId: pageId,
-                      title: `Child page ${String(index).padStart(2, "0")}`,
-                    })
-                    .wait({ tier: "edge" }),
+              await settle(
+                "manager creates bounded child pages",
+                Promise.all(
+                  Array.from({ length: PAGE_SIZE }, (_, index) =>
+                    manager!
+                      .insert(app.pages, {
+                        workspaceId,
+                        parentPageId: pageId,
+                        title: `Child page ${String(index).padStart(2, "0")}`,
+                      })
+                      .wait({ tier: "edge" }),
+                  ),
                 ),
               );
+              await waitForQuery(
+                owner!,
+                app.pages.where({ id: pageId, workspaceId }),
+                (rows) => rows.length === 1,
+                "owner reads manager-created parent page before block write",
+                15_000,
+                "edge",
+              );
+              // Start the two independent writes together so this receipt keeps
+              // exercising concurrent authors. Waiting locally first is only a
+              // diagnostic boundary: edge settlement necessarily includes local
+              // admission, and the labels distinguish a client-side stall from
+              // an authority/delivery stall without weakening either assertion.
+              const ownerBlockWrite = owner!.insert(app.blocks, {
+                workspaceId,
+                pageId,
+                position: 10,
+                kind: "song",
+                payload: { title: "Encore" },
+              });
+              const managerBlockWrite = manager!.insert(app.blocks, {
+                workspaceId,
+                pageId,
+                position: 20,
+                kind: "task",
+                payload: { title: "Load in" },
+              });
               const [ownerBlock, managerBlock] = await Promise.all([
-                owner!
-                  .insert(app.blocks, {
-                    workspaceId,
-                    pageId,
-                    position: 10,
-                    kind: "song",
-                    payload: { title: "Encore" },
-                  })
-                  .wait({ tier: "edge" }),
-                manager!
-                  .insert(app.blocks, {
-                    workspaceId,
-                    pageId,
-                    position: 20,
-                    kind: "task",
-                    payload: { title: "Load in" },
-                  })
-                  .wait({ tier: "edge" }),
+                settle(
+                  "owner admits root block locally",
+                  ownerBlockWrite.wait({ tier: "local" }),
+                ).then(() =>
+                  settle(
+                    "owner settles root block at edge",
+                    ownerBlockWrite.wait({ tier: "edge" }),
+                    15_000,
+                    () => `mutationErrors=${JSON.stringify(ownerMutationErrors)}`,
+                  ),
+                ),
+                settle(
+                  "manager admits root block locally",
+                  managerBlockWrite.wait({ tier: "local" }),
+                ).then(() =>
+                  settle(
+                    "manager settles root block at edge",
+                    managerBlockWrite.wait({ tier: "edge" }),
+                  ),
+                ),
               ]);
               expectedBlockIds.add(ownerBlock.id);
               expectedBlockIds.add(managerBlock.id);
               taskBlockId = managerBlock.id;
-              await Promise.all(
-                Array.from({ length: PAGE_SIZE - 1 }, (_, index) =>
-                  manager!
-                    .insert(app.blocks, {
-                      workspaceId,
-                      pageId,
-                      position: 30 + index * 10,
-                      kind: "text",
-                      payload: { text: `Checklist ${index}` },
-                    })
-                    .wait({ tier: "edge" }),
+              await settle(
+                "manager creates bounded checklist blocks",
+                Promise.all(
+                  Array.from({ length: PAGE_SIZE - 1 }, (_, index) =>
+                    manager!
+                      .insert(app.blocks, {
+                        workspaceId,
+                        pageId,
+                        position: 30 + index * 10,
+                        kind: "text",
+                        payload: { text: `Checklist ${index}` },
+                      })
+                      .wait({ tier: "edge" }),
+                  ),
                 ),
               );
-              const nestedParent = await manager!
-                .insert(app.blocks, {
-                  workspaceId,
-                  pageId: nestedPageId,
-                  position: 10,
-                  kind: "text",
-                  payload: { text: "Venue notes" },
-                })
-                .wait({ tier: "edge" });
-              const nestedBlock = await manager!
-                .insert(app.blocks, {
-                  workspaceId,
-                  pageId: nestedPageId,
-                  parentBlockId: nestedParent.id,
-                  position: 20,
-                  kind: "attachment",
-                  payload: { caption: "Stage plot" },
-                })
-                .wait({ tier: "edge" });
-              nestedBlockId = nestedBlock.id;
-              await Promise.all([
-                owner!
-                  .insert(app.songs, {
+              const nestedParent = await settle(
+                "manager creates nested parent block",
+                manager!
+                  .insert(app.blocks, {
                     workspaceId,
-                    blockId: ownerBlock.id,
-                    title: "Encore",
-                    key: "D",
+                    pageId: nestedPageId,
+                    position: 10,
+                    kind: "text",
+                    payload: { text: "Venue notes" },
                   })
                   .wait({ tier: "edge" }),
-                ...Array.from({ length: PAGE_SIZE }, (_, index) =>
-                  manager!
+              );
+              const nestedBlock = await settle(
+                "manager creates nested attachment block",
+                manager!
+                  .insert(app.blocks, {
+                    workspaceId,
+                    pageId: nestedPageId,
+                    parentBlockId: nestedParent.id,
+                    position: 20,
+                    kind: "attachment",
+                    payload: { caption: "Stage plot" },
+                  })
+                  .wait({ tier: "edge" }),
+              );
+              nestedBlockId = nestedBlock.id;
+              await settle(
+                "clients create bounded songs calendar and attachments",
+                Promise.all([
+                  owner!
                     .insert(app.songs, {
                       workspaceId,
                       blockId: ownerBlock.id,
-                      title: `Song ${String(index).padStart(2, "0")}`,
+                      title: "Encore",
+                      key: "D",
                     })
                     .wait({ tier: "edge" }),
-                ),
-                manager!
-                  .insert(app.calendarEvents, {
-                    workspaceId,
-                    blockId: managerBlock.id,
-                    title: "Load in",
-                    startsAt: new Date("2030-04-01T14:00:00Z"),
-                    endsAt: new Date("2030-04-01T15:00:00Z"),
-                  })
-                  .wait({ tier: "edge" }),
-                ...Array.from({ length: PAGE_SIZE }, (_, index) =>
+                  ...Array.from({ length: PAGE_SIZE }, (_, index) =>
+                    manager!
+                      .insert(app.songs, {
+                        workspaceId,
+                        blockId: ownerBlock.id,
+                        title: `Song ${String(index).padStart(2, "0")}`,
+                      })
+                      .wait({ tier: "edge" }),
+                  ),
                   manager!
                     .insert(app.calendarEvents, {
                       workspaceId,
                       blockId: managerBlock.id,
-                      title: `Soundcheck ${String(index).padStart(2, "0")}`,
-                      startsAt: new Date(`2030-04-${String(index + 2).padStart(2, "0")}T14:00:00Z`),
-                      endsAt: new Date(`2030-04-${String(index + 2).padStart(2, "0")}T15:00:00Z`),
+                      title: "Load in",
+                      startsAt: new Date("2030-04-01T14:00:00Z"),
+                      endsAt: new Date("2030-04-01T15:00:00Z"),
                     })
                     .wait({ tier: "edge" }),
-                ),
-                manager!
-                  .insert(app.attachments, {
-                    workspaceId,
-                    blockId: nestedBlockId,
-                    name: "stage-plot.txt",
-                    mediaType: "text/plain",
-                    bytes: new TextEncoder().encode("channels 1-16"),
-                  })
-                  .wait({ tier: "edge" }),
-                ...Array.from({ length: PAGE_SIZE }, (_, index) =>
+                  ...Array.from({ length: PAGE_SIZE }, (_, index) =>
+                    manager!
+                      .insert(app.calendarEvents, {
+                        workspaceId,
+                        blockId: managerBlock.id,
+                        title: `Soundcheck ${String(index).padStart(2, "0")}`,
+                        startsAt: new Date(
+                          `2030-04-${String(index + 2).padStart(2, "0")}T14:00:00Z`,
+                        ),
+                        endsAt: new Date(`2030-04-${String(index + 2).padStart(2, "0")}T15:00:00Z`),
+                      })
+                      .wait({ tier: "edge" }),
+                  ),
                   manager!
                     .insert(app.attachments, {
                       workspaceId,
                       blockId: nestedBlockId,
-                      name: `asset-${String(index).padStart(2, "0")}.txt`,
+                      name: "stage-plot.txt",
                       mediaType: "text/plain",
-                      bytes: new TextEncoder().encode(`asset ${index}`),
+                      bytes: new TextEncoder().encode("channels 1-16"),
                     })
                     .wait({ tier: "edge" }),
-                ),
-              ]);
+                  ...Array.from({ length: PAGE_SIZE }, (_, index) =>
+                    manager!
+                      .insert(app.attachments, {
+                        workspaceId,
+                        blockId: nestedBlockId,
+                        name: `asset-${String(index).padStart(2, "0")}.txt`,
+                        mediaType: "text/plain",
+                        bytes: new TextEncoder().encode(`asset ${index}`),
+                      })
+                      .wait({ tier: "edge" }),
+                  ),
+                ]),
+              );
               const blocks = await waitForQuery(
                 owner!,
                 app.blocks
