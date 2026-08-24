@@ -620,13 +620,9 @@ impl SyncMessage {
         match self {
             Self::ViewUpdate {
                 version_carriers, ..
-            } => {
-                for carrier in version_carriers {
-                    if let VersionCarrier::Run(run) = carrier {
-                        run.validate()?;
-                    }
-                }
-                Ok(())
+            } => validate_version_carrier_runs(version_carriers),
+            Self::AuthorizationScopeView { view, .. } => {
+                validate_version_carrier_runs(&view.version_carriers)
             }
             _ => Ok(()),
         }
@@ -645,6 +641,17 @@ impl SyncMessage {
         }
         Ok(self)
     }
+}
+
+fn validate_version_carrier_runs(
+    version_carriers: &[VersionCarrier],
+) -> Result<(), VersionBundleRunError> {
+    for carrier in version_carriers {
+        if let VersionCarrier::Run(run) = carrier {
+            run.validate()?;
+        }
+    }
+    Ok(())
 }
 
 /// Exact row-version identity used by known-state repair requests.

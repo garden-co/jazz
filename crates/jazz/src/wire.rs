@@ -953,6 +953,39 @@ mod tests {
     }
 
     #[test]
+    fn malformed_version_carrier_run_is_rejected_in_ordinary_and_scope_views() {
+        let mut run = build_version_bundle_runs_from_singletons(&version_bundles(2))
+            .unwrap()
+            .remove(0);
+        run.header.body_count = 3;
+
+        let ordinary = view_update_with_carriers(vec![VersionCarrier::Run(run.clone())]);
+        let scope_view = SyncMessage::AuthorizationScopeView {
+            request_id: PermissionAdviceRequestId([0x11; 16]),
+            key: AuthorizationSupportScopeKey {
+                support_shape_digest: [0x22; 32],
+                subject: AuthorId::from_bytes([0x33; 16]),
+                claims_digest: [0x44; 32],
+                policy_digest: [0x55; 32],
+            },
+            clause_index: 0,
+            clause_count: 1,
+            view: crate::protocol::AuthorizationScopeViewPayload::from_view_update(
+                view_update_with_carriers(vec![VersionCarrier::Run(run)]),
+            )
+            .expect("fixture is a view update"),
+        };
+
+        for message in [ordinary, scope_view] {
+            let encoded = encode_sync_message(&message).expect("encode malformed fixture");
+            assert!(
+                decode_sync_message(&encoded).is_err(),
+                "malformed runs must be rejected at either view-update seam"
+            );
+        }
+    }
+
+    #[test]
     fn malformed_version_carrier_run_override_index_is_rejected() {
         let mut run = build_version_bundle_runs_from_singletons(&version_bundles(2))
             .unwrap()
