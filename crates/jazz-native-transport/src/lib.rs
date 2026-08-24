@@ -177,6 +177,23 @@ struct BoundedOutbound {
     backpressured: Arc<AtomicBool>,
 }
 
+/// A producer which received `Backpressure` relies on the pump's wake callback
+/// to retry its send. Keep that contract true when the pump terminates too:
+/// the retry then observes the closed channel instead of waiting forever for
+/// capacity that can no longer be released.
+struct OutboundTerminationWake {
+    backpressured: Arc<AtomicBool>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl Drop for OutboundTerminationWake {
+    fn drop(&mut self) {
+        if self.backpressured.swap(false, Ordering::AcqRel) {
+            (self.wake)();
+        }
+    }
+}
+
 impl BoundedOutbound {
     fn channel() -> (
         Self,
@@ -613,6 +630,13 @@ async fn run_ws_pump(
     wake: Arc<dyn Fn() + Send + Sync>,
     bootstrap_catalogue: bool,
 ) {
+    // This deliberately lives for the entire pump. Every terminal path,
+    // including a failed `ws.send`, drops the receiver then wakes a producer
+    // already blocked on the finite outbound budget.
+    let _outbound_termination_wake = OutboundTerminationWake {
+        backpressured: Arc::clone(&outbound_backpressured),
+        wake: Arc::clone(&wake),
+    };
     loop {
         tokio::select! {
             maybe_frame = outbound.recv() => {
@@ -910,5 +934,40 @@ mod tests {
         transport
             .send_frame(frame)
             .expect("releasing a queued frame restores capacity");
+    }
+
+    #[test]
+    fn terminal_outbound_failure_wakes_backpressured_producer_to_observe_closed_pump() {
+        let (outbound, receiver, backpressured) = BoundedOutbound::channel();
+        let wake_count = Arc::new(AtomicUsize::new(0));
+        let wake: Arc<dyn Fn() + Send + Sync> = {
+            let wake_count = Arc::clone(&wake_count);
+            Arc::new(move || {
+                wake_count.fetch_add(1, Ordering::AcqRel);
+            })
+        };
+
+        let frame = vec![0; MAX_WIRE_FRAME_BYTES];
+        for _ in 0..(WS_CLIENT_MAX_OUTBOUND_QUEUED_BYTES / MAX_WIRE_FRAME_BYTES) {
+            outbound.send(frame.clone()).expect("fill outbound budget");
+        }
+        assert!(matches!(
+            outbound.send(frame),
+            Err(TransportError::Backpressure)
+        ));
+
+        // A failed websocket send ends the pump and drops this receiver. The
+        // termination guard must wake the producer that saw Backpressure.
+        drop(receiver);
+        drop(OutboundTerminationWake {
+            backpressured: Arc::clone(&backpressured),
+            wake,
+        });
+
+        assert_eq!(wake_count.load(Ordering::Acquire), 1);
+        assert!(matches!(
+            outbound.send(vec![1]),
+            Err(TransportError::Failed(message)) if message == "websocket pump is closed"
+        ));
     }
 }
