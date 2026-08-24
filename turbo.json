@@ -36,6 +36,9 @@
         "src/**/*.rs",
         "$TURBO_ROOT$/dev/artifacts/**",
         "$TURBO_ROOT$/crates/jazz-napi/package.json",
+        "$TURBO_ROOT$/crates/jazz-napi/index.cjs",
+        "$TURBO_ROOT$/crates/jazz-napi/index.mjs",
+        "$TURBO_ROOT$/crates/jazz-napi/index.d.ts",
         "$TURBO_ROOT$/crates/jazz-napi/Cargo.toml",
         "$TURBO_ROOT$/crates/jazz-napi/build.rs",
         "$TURBO_ROOT$/crates/jazz-napi/scripts/**",
@@ -57,7 +60,11 @@
         "JAZZ_ARTIFACT_BUILD_LEASE",
         "JAZZ_ARTIFACT_BUILD_LOCK_PATH"
       ],
-      "outputs": ["*.node", "index.js", "index.d.ts", ".jazz-artifact-manifest.json"]
+      "outputs": [
+        "native-binding.cjs",
+        "native-artifact-fingerprint.cjs",
+        ".native-artifacts/**"
+      ]
     },
     "jazz-wasm#build": {
       "inputs": [

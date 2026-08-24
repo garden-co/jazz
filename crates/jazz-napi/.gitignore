@@ -2,3 +2,6 @@
 index.js
 .jazz-artifact-manifest.json
 *.manifest.json
+.native-artifacts/
+.napi-stage-*/
+native-loader.cjs
