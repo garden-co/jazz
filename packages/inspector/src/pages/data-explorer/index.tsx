@@ -1,8 +1,9 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import { NavLink, Outlet, useNavigate, useOutletContext, useParams } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { useLocalStorageState } from "../../utility/use-local-storage-state.js";
+import type { TableMutationState } from "../../components/data-explorer/TableDataGrid.js";
 import styles from "./index.module.css";
 
 const TABLES_SIDEBAR_SIZE_STORAGE_KEY = "jazz.inspector.dataExplorer.tablesSidebarSize";
@@ -75,6 +76,13 @@ export function DataExplorer() {
     TABLES_SIDEBAR_DEFAULT_SIZE,
     { isValid: isTablesSidebarSize },
   );
+  const [mutationStateByTable, setMutationStateByTable] = useState<
+    Record<string, TableMutationState>
+  >({});
+  const outletContext: {
+    mutationStateByTable: Record<string, TableMutationState>;
+    setMutationStateByTable: Dispatch<SetStateAction<Record<string, TableMutationState>>>;
+  } = { mutationStateByTable, setMutationStateByTable };
 
   return (
     <Group
@@ -115,7 +123,7 @@ export function DataExplorer() {
               <p className={styles.emptyText}>This schema doesn’t define any tables yet.</p>
             </section>
           ) : null}
-          <Outlet />
+          <Outlet context={outletContext} />
         </main>
       </Panel>
     </Group>

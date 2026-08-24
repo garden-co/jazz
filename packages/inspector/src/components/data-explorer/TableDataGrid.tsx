@@ -24,7 +24,7 @@ import {
   type RefObject,
   type SetStateAction,
 } from "react";
-import { Link, Navigate, useParams, useSearchParams } from "react-router";
+import { Link, Navigate, useOutletContext, useParams, useSearchParams } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { GenericQueryBuilder } from "../../utility/generic-query-builder.js";
 import { useLocalStorageState } from "../../utility/use-local-storage-state.js";
@@ -135,7 +135,7 @@ interface StagedInsert {
   edits: QueuedRowEdits;
 }
 
-interface TableMutationState {
+export interface TableMutationState {
   queuedEdits: Record<string, QueuedRowEdits>;
   stagedInserts: StagedInsert[];
   isQueuedSavePending: boolean;
@@ -153,6 +153,18 @@ function createTableMutationState(): TableMutationState {
     queuedDeletes: new Set(),
     pendingScrollToRowId: null,
   };
+}
+
+function queuedCellEditsEqual(a: QueuedCellEdit | undefined, b: QueuedCellEdit | undefined) {
+  return a?.text === b?.text && a?.isNull === b?.isNull;
+}
+
+function queuedRowEditsEqual(a: QueuedRowEdits, b: QueuedRowEdits) {
+  const aColumns = Object.keys(a);
+  return (
+    aColumns.length === Object.keys(b).length &&
+    aColumns.every((key) => queuedCellEditsEqual(a[key], b[key]))
+  );
 }
 
 interface EditableGridRow extends AnimatedGridRow {
@@ -735,9 +747,17 @@ export function TableDataGrid() {
       { replace: true },
     );
   };
-  const [mutationStateByTable, setMutationStateByTable] = useState<
+  const explorerContext = useOutletContext<{
+    mutationStateByTable: Record<string, TableMutationState>;
+    setMutationStateByTable: Dispatch<SetStateAction<Record<string, TableMutationState>>>;
+  } | null>();
+  const [fallbackMutationStateByTable, setFallbackMutationStateByTable] = useState<
     Record<string, TableMutationState>
   >({});
+  const mutationStateByTable =
+    explorerContext?.mutationStateByTable ?? fallbackMutationStateByTable;
+  const setMutationStateByTable =
+    explorerContext?.setMutationStateByTable ?? setFallbackMutationStateByTable;
   const [selectedRowIds, setSelectedRowIds] = useState<Set<string>>(new Set());
   const mutationState = mutationStateByTable[table] ?? createTableMutationState();
   const updateCurrentTableMutationState = (update: SetStateAction<TableMutationState>) => {
@@ -985,6 +1005,9 @@ export function TableDataGrid() {
     }
 
     const mutationTable = table;
+    const submittedQueuedEdits = queuedEdits;
+    const submittedStagedInserts = stagedInserts;
+    const submittedQueuedDeletes = queuedDeletes;
     try {
       setMutationStateByTable((current) => ({
         ...current,
@@ -1031,10 +1054,36 @@ export function TableDataGrid() {
       setMutationStateByTable((current) => ({
         ...current,
         [mutationTable]: {
-          ...(current[mutationTable] ?? createTableMutationState()),
-          queuedEdits: {},
-          stagedInserts: [],
-          queuedDeletes: new Set(),
+          ...(() => {
+            const previous = current[mutationTable] ?? createTableMutationState();
+            const nextQueuedEdits: Record<string, QueuedRowEdits> = {};
+            for (const [rowId, rowEdits] of Object.entries(previous.queuedEdits)) {
+              const submittedRowEdits = submittedQueuedEdits[rowId];
+              const remainingRowEdits = { ...rowEdits };
+              for (const [columnId, queuedEdit] of Object.entries(rowEdits)) {
+                if (queuedCellEditsEqual(queuedEdit, submittedRowEdits?.[columnId])) {
+                  delete remainingRowEdits[columnId];
+                }
+              }
+              if (Object.keys(remainingRowEdits).length > 0)
+                nextQueuedEdits[rowId] = remainingRowEdits;
+            }
+            const submittedInsertById = new Map(
+              submittedStagedInserts.map((insert) => [insert.id, insert]),
+            );
+            const nextStagedInserts = previous.stagedInserts.filter((insert) => {
+              const submitted = submittedInsertById.get(insert.id);
+              return !submitted || !queuedRowEditsEqual(insert.edits, submitted.edits);
+            });
+            const nextQueuedDeletes = new Set(previous.queuedDeletes);
+            for (const rowId of submittedQueuedDeletes) nextQueuedDeletes.delete(rowId);
+            return {
+              ...previous,
+              queuedEdits: nextQueuedEdits,
+              stagedInserts: nextStagedInserts,
+              queuedDeletes: nextQueuedDeletes,
+            };
+          })(),
         },
       }));
     } catch (error) {

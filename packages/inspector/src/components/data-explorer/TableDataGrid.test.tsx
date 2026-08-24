@@ -849,6 +849,30 @@ describe("TableDataGrid", () => {
     await waitFor(() => expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull());
   });
 
+  it("preserves a later same-table edit when an earlier save completes", async () => {
+    let resolveSave: (() => void) | undefined;
+    mockUpdateWait.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    renderGrid();
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "zeta" }));
+    fireEvent.change(screen.getByLabelText("Edit title"), { target: { value: "submitted" } });
+    fireEvent.blur(screen.getByLabelText("Edit title"));
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(1));
+
+    fireEvent.doubleClick(screen.getByRole("gridcell", { name: "submitted" }));
+    fireEvent.change(screen.getByLabelText("Edit title"), { target: { value: "later draft" } });
+    fireEvent.blur(screen.getByLabelText("Edit title"));
+    await act(async () => resolveSave?.());
+
+    expect(screen.getByText("later draft")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Save changes" })).not.toBeNull();
+  });
+
   it("keeps a failed save error scoped to its originating table after navigation", async () => {
     let rejectSave: ((error: Error) => void) | undefined;
     mockUpdateWait.mockImplementationOnce(
