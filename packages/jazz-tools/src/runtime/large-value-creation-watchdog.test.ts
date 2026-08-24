@@ -16,6 +16,13 @@ const fixture = process.env.JAZZ_LARGE_VALUE_CREATION_FIXTURE;
 const testFile = fileURLToPath(import.meta.url);
 const packageRoot = join(dirname(testFile), "../..");
 const vitestCli = join(dirname(require.resolve("vitest/package.json")), "vitest.mjs");
+// The direct-WASM-text fixture additionally verifies that a resident write can
+// hand off to update/delete/restore before its first local settlement. That is
+// three more asynchronous persistence turns after creation. Keep the watchdog
+// finite enough to catch the historical spin, while allowing that real work to
+// make progress when the parent test process is sharing CI CPU with the suite.
+const CHILD_WATCHDOG_MS = 12_000;
+const PARENT_TEST_TIMEOUT_MS = CHILD_WATCHDOG_MS + 3_000;
 
 const schema: WasmSchema = {
   todos: {
@@ -56,7 +63,7 @@ describe.runIf(!fixture && hasJazzNapiBuild() && hasJazzWasmBuild())(
             {
               cwd: packageRoot,
               encoding: "utf8",
-              timeout: 5_000,
+              timeout: CHILD_WATCHDOG_MS,
               env: { ...process.env, JAZZ_LARGE_VALUE_CREATION_FIXTURE: mode },
             },
           );
@@ -68,7 +75,7 @@ describe.runIf(!fixture && hasJazzNapiBuild() && hasJazzWasmBuild())(
           );
         }
       },
-      8_000,
+      PARENT_TEST_TIMEOUT_MS,
     );
   },
 );
@@ -118,6 +125,7 @@ describe.runIf(modes.includes(fixture as (typeof modes)[number]))(
         const residentWrite = write!;
         console.error(`phase:${fixture}:returned`);
         if (fixture === "direct-wasm-text") {
+          console.error(`phase:${fixture}:resident-handoff:start`);
           expect(() =>
             client.insert(
               "todos",
@@ -139,6 +147,7 @@ describe.runIf(modes.includes(fixture as (typeof modes)[number]))(
           await updated.wait({ tier: "local" });
           await deleted.wait({ tier: "local" });
           await restored.wait({ tier: "local" });
+          console.error(`phase:${fixture}:resident-handoff:local`);
         }
         if (fixture === "direct-wasm-bytes") {
           await expect(
