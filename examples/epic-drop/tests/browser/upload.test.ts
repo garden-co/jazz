@@ -96,6 +96,92 @@ describe("EpicDrop upload", () => {
     ]);
   });
 
+  it("converges concurrent inline file metadata mutations through public subscriptions", async () => {
+    const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
+    const secret = generateAuthSecret();
+    const writer = await openDb("metadata-writer", serverUrl, secret);
+    const collaborator = await openDb("metadata-collaborator", serverUrl, secret);
+    await waitFor(
+      async () =>
+        writer.getAuthState().authMode === "local-first" &&
+        collaborator.getAuthState().authMode === "local-first"
+          ? true
+          : undefined,
+      "both collaborators to establish local-first sessions",
+    );
+    const ownerId = writer.getAuthState().session?.user_id;
+    expect(ownerId).toBeDefined();
+    const folder = writer.insert(app.folders, { name: "Shared demos", owner_id: ownerId! });
+    await folder.wait({ tier: "global" });
+
+    const observed = new Set<string>();
+    const unsubscribe = collaborator.subscribeAll(
+      app.files,
+      (delta) => {
+        for (const file of delta.all) observed.add(file.id);
+      },
+      { tier: "edge" },
+    );
+    try {
+      const [fromWriter, fromCollaborator] = await Promise.all([
+        writer.insertStreaming(app.files, {
+          folder_id: folder.value.id,
+          name: "writer-note.txt",
+          content_type: "text/plain",
+          size_bytes: 3,
+          owner_id: ownerId!,
+          contents: (async function* () {
+            yield new Uint8Array([1, 2, 3]);
+          })(),
+        }),
+        collaborator.insertStreaming(app.files, {
+          folder_id: folder.value.id,
+          name: "collaborator-note.txt",
+          content_type: "text/plain",
+          size_bytes: 2,
+          owner_id: ownerId!,
+          contents: (async function* () {
+            yield new Uint8Array([4, 5]);
+          })(),
+        }),
+      ]);
+      await Promise.all([
+        fromWriter.wait({ tier: "global" }),
+        fromCollaborator.wait({ tier: "global" }),
+      ]);
+      await waitFor(
+        async () =>
+          observed.has(fromWriter.value.id) && observed.has(fromCollaborator.value.id)
+            ? true
+            : undefined,
+        "both concurrent file inserts to reach the subscription",
+      );
+
+      const [folderUpdate, fileUpdate] = [
+        writer.update(app.folders, folder.value.id, { name: "Renamed shared demos" }),
+        collaborator.update(app.files, fromWriter.value.id, { name: "writer-renamed.txt" }),
+      ];
+      await Promise.all([
+        folderUpdate.wait({ tier: "global" }),
+        fileUpdate.wait({ tier: "global" }),
+      ]);
+
+      const files = await waitFor(async () => {
+        const current = await collaborator.all(app.files, { tier: "edge" });
+        return current.length === 2 ? current : undefined;
+      }, "the collaborator's metadata view to settle");
+      expect(files.map((file) => file.name).sort()).toEqual([
+        "collaborator-note.txt",
+        "writer-renamed.txt",
+      ]);
+      await expect(collaborator.all(app.folders, { tier: "edge" })).resolves.toEqual([
+        expect.objectContaining({ id: folder.value.id, name: "Renamed shared demos" }),
+      ]);
+    } finally {
+      unsubscribe();
+    }
+  });
+
   it("streams a large upload through edge A and converges at a peer edge subscription", async () => {
     const serverUrl = `http://127.0.0.1:${TEST_PORT}`;
     const secret = generateAuthSecret();
