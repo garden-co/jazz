@@ -1879,10 +1879,42 @@ fn core_row_provenance_to_public(
 ) -> crate::tools::metadata::RowProvenance {
     crate::tools::metadata::RowProvenance {
         created_by: provenance.created_by.0.to_string(),
-        created_at: provenance.created_at.0,
+        // `TxTime` is an internal HLC: the low logical bits are meaningful for
+        // storage ordering, but are not part of the public timestamp value.
+        created_at: provenance.created_at.physical_ms(),
         updated_by: provenance.updated_by.0.to_string(),
-        updated_at: provenance.updated_at.0,
+        updated_at: provenance.updated_at.physical_ms(),
     }
+}
+
+/// Re-encode a subscription row for the public/native boundary.
+///
+/// Current-row records retain packed `TxTime` values so core can use their
+/// logical bits for ordering. Native consumers, however, decode provenance as
+/// public physical milliseconds. Normalize only the two provenance fields
+/// here; application `Timestamp` columns and the internal `tx_time` alias
+/// deliberately remain unchanged.
+fn public_subscription_record(row: &crate::node::CurrentRow) -> Result<Vec<u8>> {
+    let (descriptor, raw) = row.encoded_record();
+    let mut values = BorrowedRecord::new(raw, descriptor)
+        .to_values()
+        .map_err(|error| JazzError::Query(format!("invalid subscription row: {error}")))?;
+
+    for field in ["$createdAt", "$updatedAt"] {
+        let Some(index) = descriptor.field_index(field) else {
+            continue;
+        };
+        let CoreValue::U64(timestamp) = values[index] else {
+            return Err(JazzError::Query(format!(
+                "subscription provenance field {field} is not a u64 timestamp"
+            )));
+        };
+        values[index] = CoreValue::U64(crate::time::TxTime(timestamp).physical_ms());
+    }
+
+    descriptor
+        .create(&values)
+        .map_err(|error| JazzError::Query(format!("encode public subscription row: {error}")))
 }
 
 fn aggregate_output_column_type(
@@ -2401,7 +2433,7 @@ impl PublicQueryDecoder {
     ) -> Result<Row> {
         #[cfg(not(feature = "testing"))]
         let _ = query;
-        let (_, encoded) = row.row.encoded_record();
+        let encoded = public_subscription_record(&row.row)?;
         let provenance = db
             .row_provenance(&row.row)
             .map_err(|error| JazzError::Query(error.to_string()))?
@@ -2411,7 +2443,7 @@ impl PublicQueryDecoder {
             });
         let public = Row::new(
             ResultKey::from_occurrence(row.occurrence_id.clone()),
-            encoded.to_vec(),
+            encoded,
             TransactionId([0; 16]),
             provenance,
         );
@@ -2732,8 +2764,8 @@ impl PublicQueryDecoder {
                     )));
                 };
                 match column {
-                    "$createdAt" => Value::Timestamp(provenance.created_at.0),
-                    "$updatedAt" => Value::Timestamp(provenance.updated_at.0),
+                    "$createdAt" => Value::Timestamp(provenance.created_at.physical_ms()),
+                    "$updatedAt" => Value::Timestamp(provenance.updated_at.physical_ms()),
                     "$createdBy" => Value::Text(provenance.created_by.0.to_string()),
                     "$updatedBy" => Value::Text(provenance.updated_by.0.to_string()),
                     _ => unreachable!("matched provenance magic column"),
@@ -3365,6 +3397,66 @@ mod tests {
         );
         assert!(added.is_empty());
         assert_eq!(updated, vec![held]);
+    }
+
+    #[test]
+    fn public_provenance_strips_hlc_bits_without_touching_other_timestamps() {
+        use crate::groove::records::ValueType;
+        use crate::time::TxTime;
+
+        // This must remain an internal boundary test: public client writes do
+        // not let a caller choose HLC logical bits, and JavaScript cannot
+        // faithfully construct this packed value above its safe-integer range.
+        // This is intentionally above JavaScript's safe-integer range while
+        // still a valid packed 48-bit physical HLC. The public/native
+        // boundary must strip its logical bits before JavaScript observes it.
+        let physical_ms = 1_777_777_777_777;
+        let created = TxTime::new(physical_ms, 17);
+        let updated = TxTime::new(physical_ms + 1, u16::MAX.into());
+        assert!(created.0 > (1_u64 << 53));
+
+        let provenance = core_row_provenance_to_public(crate::node::RowProvenance {
+            created_by: CoreAuthorId::SYSTEM,
+            created_at: created,
+            updated_by: CoreAuthorId::SYSTEM,
+            updated_at: updated,
+        });
+        assert_eq!(provenance.created_at, physical_ms);
+        assert_eq!(provenance.updated_at, physical_ms + 1);
+
+        // Both ordinary current rows and terminal root/child rows traverse
+        // this encoder before they become a native subscription delta.
+        let descriptor = crate::groove::records::RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("user_occurred_at", ValueType::U64),
+            ("$createdAt", ValueType::U64),
+            ("$updatedAt", ValueType::U64),
+            ("tx_time", ValueType::U64),
+        ]);
+        let row_id = Uuid::from_u128(1);
+        let ordinary_timestamp_ms = 42;
+        let raw = descriptor
+            .create(&[
+                CoreValue::Uuid(row_id),
+                CoreValue::U64(ordinary_timestamp_ms),
+                CoreValue::U64(created.0),
+                CoreValue::U64(updated.0),
+                CoreValue::U64(created.0),
+            ])
+            .expect("encode current row");
+        let row = crate::node::CurrentRow::new("todos", OwnedRecord::new(raw, descriptor.clone()));
+        let encoded = public_subscription_record(&row).expect("encode public row");
+        let values = BorrowedRecord::new(&encoded, &descriptor)
+            .to_values()
+            .expect("decode public row");
+        assert_eq!(values[1], CoreValue::U64(ordinary_timestamp_ms));
+        assert_eq!(values[2], CoreValue::U64(physical_ms));
+        assert_eq!(values[3], CoreValue::U64(physical_ms + 1));
+        assert_eq!(
+            values[4],
+            CoreValue::U64(created.0),
+            "internal packed tx_time must not be rewritten"
+        );
     }
 
     #[test]
