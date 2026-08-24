@@ -16,7 +16,9 @@ use crate::db::{
     TerminalRootLayout, TickScheduler, TickUrgency, Transport as CoreTransport,
     WireTransportAdapter,
 };
-use crate::groove::records::{BorrowedRecord, OwnedRecord, Value as CoreValue};
+use crate::groove::records::{
+    BorrowedRecord, OwnedRecord, Value as CoreValue, ValueType as CoreValueType,
+};
 use crate::groove::storage::{BoxedStorage as CoreStorage, MemoryStorage as CoreMemoryStorage};
 use crate::ids::{AuthorId as CoreAuthorId, NodeUuid as CoreNodeUuid, RowUuid as CoreRowUuid};
 use crate::protocol::ReadViewSpec as CoreReadViewSpec;
@@ -1899,22 +1901,87 @@ fn public_subscription_record(row: &crate::node::CurrentRow) -> Result<Vec<u8>> 
     let mut values = BorrowedRecord::new(raw, descriptor)
         .to_values()
         .map_err(|error| JazzError::Query(format!("invalid subscription row: {error}")))?;
-
-    for field in ["$createdAt", "$updatedAt"] {
-        let Some(index) = descriptor.field_index(field) else {
-            continue;
-        };
-        let CoreValue::U64(timestamp) = values[index] else {
-            return Err(JazzError::Query(format!(
-                "subscription provenance field {field} is not a u64 timestamp"
-            )));
-        };
-        values[index] = CoreValue::U64(crate::time::TxTime(timestamp).physical_ms());
-    }
+    normalize_public_subscription_record_values(descriptor, &mut values)?;
 
     descriptor
         .create(&values)
         .map_err(|error| JazzError::Query(format!("encode public subscription row: {error}")))
+}
+
+fn normalize_public_subscription_record_values(
+    descriptor: &crate::groove::records::RecordDescriptor,
+    values: &mut [CoreValue],
+) -> Result<()> {
+    if descriptor.fields().len() != values.len() {
+        return Err(JazzError::Query(
+            "subscription record value count does not match its descriptor".to_owned(),
+        ));
+    }
+    for (field, value) in descriptor.fields().iter().zip(values) {
+        normalize_public_subscription_value(field.name.as_deref(), &field.value_type, value)?;
+    }
+    Ok(())
+}
+
+fn normalize_public_subscription_value(
+    field_name: Option<&str>,
+    value_type: &CoreValueType,
+    value: &mut CoreValue,
+) -> Result<()> {
+    match (value_type, value) {
+        (CoreValueType::Nullable(inner), CoreValue::Nullable(Some(value))) => {
+            normalize_public_subscription_value(field_name, inner, value)
+        }
+        (CoreValueType::Nullable(_), CoreValue::Nullable(None)) => Ok(()),
+        (CoreValueType::Array(element), CoreValue::Array(values)) => {
+            for value in values {
+                // Array elements have no field name of their own. A nested
+                // record supplies names from its descriptor below.
+                normalize_public_subscription_value(None, element, value)?;
+            }
+            Ok(())
+        }
+        (CoreValueType::Record(descriptor), CoreValue::Record(record)) => {
+            if record.descriptor() != descriptor.as_ref() {
+                return Err(JazzError::Query(
+                    "subscription nested record does not match its descriptor".to_owned(),
+                ));
+            }
+            let mut values = record.to_values().map_err(|error| {
+                JazzError::Query(format!("invalid nested subscription record: {error}"))
+            })?;
+            normalize_public_subscription_record_values(descriptor, &mut values)?;
+            let raw = descriptor.create(&values).map_err(|error| {
+                JazzError::Query(format!("encode nested public subscription record: {error}"))
+            })?;
+            *record = OwnedRecord::new(raw, (**descriptor).clone());
+            Ok(())
+        }
+        (CoreValueType::Tuple(members), CoreValue::Tuple(values)) => {
+            if members.len() != values.len() {
+                return Err(JazzError::Query(
+                    "subscription tuple value count does not match its descriptor".to_owned(),
+                ));
+            }
+            for (member, value) in members.iter().zip(values) {
+                normalize_public_subscription_value(None, member, value)?;
+            }
+            Ok(())
+        }
+        (CoreValueType::U64, CoreValue::U64(timestamp))
+            if matches!(field_name, Some("$createdAt" | "$updatedAt")) =>
+        {
+            *timestamp = crate::time::TxTime(*timestamp).physical_ms();
+            Ok(())
+        }
+        (_, _) if matches!(field_name, Some("$createdAt" | "$updatedAt")) => {
+            Err(JazzError::Query(format!(
+                "subscription provenance field {} is not a u64 timestamp",
+                field_name.expect("matched provenance field")
+            )))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn aggregate_output_column_type(
@@ -3457,6 +3524,119 @@ mod tests {
             CoreValue::U64(created.0),
             "internal packed tx_time must not be rewritten"
         );
+    }
+
+    #[test]
+    fn public_terminal_records_normalize_nested_child_provenance() {
+        use crate::db::{TerminalRootCarrier, TerminalRootPublicField};
+        use crate::groove::records::ValueType;
+        use crate::time::TxTime;
+
+        // This exercises the actual structured-terminal reconstruction path,
+        // rather than a flat synthetic wire row. Public APIs cannot choose
+        // these nonzero HLC bits or represent the packed value exactly in JS.
+        let physical_ms = 1_777_777_777_777;
+        let root_created = TxTime::new(physical_ms, 17);
+        let child_updated = TxTime::new(physical_ms + 1, 23);
+        assert!(root_created.0 > (1_u64 << 53));
+        assert!(child_updated.0 > (1_u64 << 53));
+
+        let child_descriptor = crate::groove::records::RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("$updatedAt", ValueType::U64),
+            ("publishedAt", ValueType::U64),
+            ("tx_time", ValueType::U64),
+        ]);
+        let child_id = Uuid::from_u128(2);
+        let child = OwnedRecord::new(
+            child_descriptor
+                .create(&[
+                    CoreValue::Uuid(child_id),
+                    CoreValue::U64(child_updated.0),
+                    CoreValue::U64(42),
+                    CoreValue::U64(child_updated.0),
+                ])
+                .expect("encode terminal child"),
+            child_descriptor.clone(),
+        );
+        let children_type =
+            ValueType::Nullable(Box::new(ValueType::Array(Box::new(ValueType::Nullable(
+                Box::new(ValueType::Record(Box::new(child_descriptor.clone()))),
+            )))));
+        let root_descriptor = crate::groove::records::RecordDescriptor::new([
+            ("row_uuid", ValueType::Uuid),
+            ("$createdAt", ValueType::U64),
+            ("children", children_type),
+            ("publishedAt", ValueType::U64),
+            ("tx_time", ValueType::U64),
+        ]);
+        let root_id = Uuid::from_u128(1);
+        let raw = root_descriptor
+            .create(&[
+                CoreValue::Uuid(root_id),
+                CoreValue::U64(root_created.0),
+                CoreValue::Nullable(Some(Box::new(CoreValue::Array(vec![
+                    CoreValue::Nullable(Some(Box::new(CoreValue::Record(child)))),
+                    CoreValue::Nullable(None),
+                ])))),
+                CoreValue::U64(41),
+                CoreValue::U64(root_created.0),
+            ])
+            .expect("encode terminal root");
+        let layout = TerminalRootLayout {
+            id: "nested-provenance-test".to_owned(),
+            root_descriptor: root_descriptor.clone(),
+            root_key_slot: 0,
+            root_key_field_name: "row_uuid".to_owned(),
+            public_fields: vec![
+                TerminalRootPublicField {
+                    name: "$createdAt".to_owned(),
+                    descriptor_field_name: "$createdAt".to_owned(),
+                    slot: 1,
+                    carrier: TerminalRootCarrier::CurrentRow,
+                },
+                TerminalRootPublicField {
+                    name: "children".to_owned(),
+                    descriptor_field_name: "children".to_owned(),
+                    slot: 2,
+                    carrier: TerminalRootCarrier::Logical,
+                },
+            ],
+            carrier: TerminalRootCarrier::CurrentRow,
+        };
+        let terminal = terminal_subscription_output_row(
+            "todos",
+            OutputOccurrenceId::single_source(ObjectId::from_uuid(root_id)),
+            &raw,
+            &layout,
+        )
+        .expect("reconstruct structured terminal root");
+
+        let encoded = public_subscription_record(&terminal.row).expect("encode public terminal");
+        let root_values = BorrowedRecord::new(&encoded, &root_descriptor)
+            .to_values()
+            .expect("decode public terminal root");
+        assert_eq!(root_values[1], CoreValue::U64(physical_ms));
+        assert_eq!(root_values[3], CoreValue::U64(41));
+        assert_eq!(root_values[4], CoreValue::U64(root_created.0));
+
+        let CoreValue::Nullable(Some(children)) = &root_values[2] else {
+            panic!("terminal children must remain present")
+        };
+        let CoreValue::Array(children) = children.as_ref() else {
+            panic!("terminal children must remain an array")
+        };
+        let CoreValue::Nullable(Some(child)) = &children[0] else {
+            panic!("first terminal child must remain present")
+        };
+        let CoreValue::Record(child) = child.as_ref() else {
+            panic!("first terminal child must remain a record")
+        };
+        let child_values = child.to_values().expect("decode public terminal child");
+        assert_eq!(child_values[1], CoreValue::U64(physical_ms + 1));
+        assert_eq!(child_values[2], CoreValue::U64(42));
+        assert_eq!(child_values[3], CoreValue::U64(child_updated.0));
+        assert_eq!(children[1], CoreValue::Nullable(None));
     }
 
     #[test]
