@@ -17,34 +17,62 @@ function isPlainRecord(value: object): value is Record<string, unknown> {
   return prototype === Object.prototype || prototype === null;
 }
 
-function canonicalizeConfigValue(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map(canonicalizeConfigValue);
+function encodeString(value: string): string {
+  return `${value.length}:${value}`;
+}
+
+function canonicalizeConfigValue(value: unknown, active: WeakSet<object>): string | undefined {
+  if (value === null) return "N";
+  if (typeof value === "string") return `S${encodeString(value)}`;
+  if (typeof value === "boolean") return value ? "T" : "F";
+  if (typeof value === "number") {
+    // Match JSON's treatment of non-finite numbers and negative zero.
+    return Number.isFinite(value) ? `D${JSON.stringify(value)};` : "N";
   }
-  if (value === null || (typeof value !== "object" && typeof value !== "function")) {
-    return value;
+  if (typeof value === "undefined" || typeof value === "symbol") return undefined;
+  if (typeof value === "bigint") {
+    throw new TypeError("BigInt values are not supported in client configuration");
   }
   // Date is JSON-compatible, so preserve its JSON representation rather than
   // treating it as an opaque object with no enumerable properties.
   if (value instanceof Date) {
-    return value.toJSON();
+    const jsonValue = value.toJSON();
+    return jsonValue === null ? "N" : `S${encodeString(jsonValue)}`;
   }
-  if (!isPlainRecord(value)) {
+  if (!Array.isArray(value) && !isPlainRecord(value)) {
     // Runtime sources can contain values such as WebAssembly.Module,
     // MessagePort, ArrayBuffer, or other opaque objects. Their enumerable
     // shape does not describe their identity, so only the same reference may
     // share a client configuration.
-    return { $jazzOpaqueValue: opaqueValueId(value) };
+    return `X${opaqueValueId(value)};`;
   }
 
-  const canonical: Record<string, unknown> = {};
-  for (const key of Object.keys(value).sort()) {
-    canonical[key] = canonicalizeConfigValue(value[key]);
+  if (active.has(value)) {
+    throw new TypeError("Cyclic values are not supported in client configuration");
   }
-  return canonical;
+  active.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const items = value.map((item) => canonicalizeConfigValue(item, active) ?? "N");
+      return `A${items.length}:[${items.join("")}]`;
+    }
+
+    const entries: string[] = [];
+    for (const key of Object.keys(value).sort()) {
+      const encodedValue = canonicalizeConfigValue(value[key], active);
+      // Match JSON object semantics: undefined and symbol-valued properties
+      // do not contribute to structural identity.
+      if (encodedValue !== undefined) {
+        entries.push(`K${encodeString(key)}${encodedValue}`);
+      }
+    }
+    return `O${entries.length}:{${entries.join("")}}`;
+  } finally {
+    active.delete(value);
+  }
 }
 
 /** Stable structural identity for registry and framework config comparisons. */
 export function serializeClientConfig(config: DbConfig): string {
-  return JSON.stringify(canonicalizeConfigValue(config));
+  return canonicalizeConfigValue(config, new WeakSet())!;
 }

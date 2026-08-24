@@ -43,6 +43,23 @@ describe("serializeClientConfig", () => {
     );
   });
 
+  it("cannot collide opaque identity with a plain JSON value", () => {
+    class OpaqueRuntimeSource {}
+    const opaque = new OpaqueRuntimeSource();
+
+    expect(
+      serializeClientConfig({
+        appId: "app",
+        runtimeSources: { wasmModule: opaque as never },
+      }),
+    ).not.toBe(
+      serializeClientConfig({
+        appId: "app",
+        runtimeSources: { wasmModule: { $jazzOpaqueValue: 0 } as never },
+      }),
+    );
+  });
+
   it("keeps opaque objects and functions reference-safe", () => {
     class OpaqueRuntimeSource {}
     const first = new OpaqueRuntimeSource();
@@ -69,5 +86,14 @@ describe("serializeClientConfig", () => {
     expect(
       serializeClientConfig({ appId: "app", runtimeSources: { wasmModule: fn as never } }),
     ).not.toBe(firstKey);
+  });
+
+  it("rejects cyclic plain configuration with a deliberate error", () => {
+    const runtimeSources: Record<string, unknown> = {};
+    runtimeSources.self = runtimeSources;
+
+    expect(() =>
+      serializeClientConfig({ appId: "app", runtimeSources: runtimeSources as never }),
+    ).toThrow(new TypeError("Cyclic values are not supported in client configuration"));
   });
 });
