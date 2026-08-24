@@ -574,7 +574,10 @@ where
                 expected @ (groove::large_values::LargeValueKind::String
                 | groove::large_values::LargeValueKind::Json),
             ) if inferred_kind == groove::large_values::LargeValueKind::String => expected,
-            Some(_) if inferred_kind == groove::large_values::LargeValueKind::Bytes => {
+            Some(
+                groove::large_values::LargeValueKind::String
+                | groove::large_values::LargeValueKind::Json,
+            ) if inferred_kind == groove::large_values::LargeValueKind::Bytes => {
                 return Err(Error::InvalidMergeableCommit(
                     "oversized scalar value does not match its logical column",
                 ));
