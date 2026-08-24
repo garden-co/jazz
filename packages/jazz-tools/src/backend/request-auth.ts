@@ -12,6 +12,7 @@ import {
   LOCAL_FIRST_JWT_ISSUER,
   SYSTEM_SESSION_ISSUER,
   parseJwtPayload,
+  sessionFromVerifiedReservedJwtPayload,
   sessionFromJwtPayload,
   type JwtPayload,
 } from "../runtime/client-session.js";
@@ -373,7 +374,6 @@ export async function resolveRequestSession(
 ): Promise<Session> {
   const token = readBearerToken(request);
   const payload = requireJwtPayload(token);
-  const session = requireJwtSession(payload);
   const allowLocalFirstAuth = config.allowLocalFirstAuth ?? true;
 
   if (payload.iss === LOCAL_FIRST_JWT_ISSUER) {
@@ -384,12 +384,17 @@ export async function resolveRequestSession(
     }
 
     const verifiedUserId = await verifyLocalFirstIdentityProof(token, config.appId);
+    const session = sessionFromVerifiedReservedJwtPayload(payload, "local-first");
+    if (!session) {
+      throw new Error("Invalid JWT payload");
+    }
     if (session.user_id !== verifiedUserId) {
       throw new Error("Invalid local-first identity proof");
     }
     return session;
   }
 
+  const session = requireJwtSession(payload);
   rejectReservedExternalJwtIssuer(session);
   await verifyExternalJwt(token, config);
   return session;

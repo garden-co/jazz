@@ -11,8 +11,7 @@ function makeJwt(payload: Record<string, unknown>): string {
   return `${toBase64Url(header)}.${toBase64Url(payload)}.signature`;
 }
 
-const validJwt = makeJwt({ sub: "alice", iss: "urn:jazz:local-first" });
-const anonymousJwt = makeJwt({ sub: "anon-user", iss: "urn:jazz:anonymous" });
+const validJwt = makeJwt({ sub: "alice", iss: "https://issuer.example" });
 
 describe("auth-state", () => {
   it("keeps the last session while unauthenticated", () => {
@@ -87,7 +86,7 @@ describe("AuthState — flattened shape", () => {
   it("authenticated state has authMode + session, no error", () => {
     const store = createAuthStateStore({ appId: "a", jwtToken: validJwt });
     const state = store.getState();
-    expect(state.session?.authMode).toBe("local-first"); // match fixture's iss
+    expect(state.session?.authMode).toBe("external");
     expect(state.error).toBeUndefined();
     // @ts-expect-error — status has been removed
     state.status;
@@ -111,8 +110,8 @@ describe("AuthState — flattened shape", () => {
     expect(store.getState().error).toBeUndefined();
   });
 
-  it("exposes authMode from JWT issuer at construction", () => {
-    const store = createAuthStateStore({ appId: "a", jwtToken: anonymousJwt });
-    expect(store.getState().authMode).toBe("anonymous");
+  it("exposes external authMode from generic JWTs at construction", () => {
+    const store = createAuthStateStore({ appId: "a", jwtToken: validJwt });
+    expect(store.getState().authMode).toBe("external");
   });
 });
