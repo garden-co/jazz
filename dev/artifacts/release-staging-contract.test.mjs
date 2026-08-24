@@ -8,6 +8,7 @@ import { stageNapiLoader } from "./stage-napi-loader.mjs";
 import { stageNativeFingerprints } from "./stage-native-fingerprints.mjs";
 
 const fingerprint = "a".repeat(64);
+const wasmFiles = ["jazz_wasm_bg.wasm", "jazz_wasm_bg.wasm.d.ts", "jazz_wasm.d.ts", "jazz_wasm.js"];
 
 function releaseFixture() {
   const root = mkdtempSync(join(tmpdir(), "jazz-release-staging-"));
@@ -19,6 +20,31 @@ function releaseFixture() {
   ])
     mkdirSync(join(root, path), { recursive: true });
   return root;
+}
+
+function writeWasmRelease(root, { artifacts = undefined } = {}) {
+  const wasmDir = join(root, "crates/jazz-wasm/pkg");
+  const generated = wasmFiles.map((file) => {
+    const bytes = `expected ${file}`;
+    writeFileSync(join(wasmDir, file), bytes);
+    return { file, sha256: createHash("sha256").update(bytes).digest("hex") };
+  });
+  writeFileSync(
+    join(wasmDir, ".jazz-artifact-manifest.json"),
+    JSON.stringify({
+      kind: "wasm",
+      profile: "release",
+      nativeArtifactFingerprint: fingerprint,
+      artifacts: artifacts ?? generated,
+    }),
+  );
+}
+
+function writeReleaseNapiManifest(root) {
+  writeFileSync(
+    join(root, "crates/jazz-napi/provenance/jazz-napi.linux-x64-gnu.manifest.json"),
+    JSON.stringify({ kind: "napi", profile: "release", nativeArtifactFingerprint: fingerprint }),
+  );
 }
 
 test("release NAPI staging rejects a valid sealed manifest whose fingerprint disagrees with the pointer", () => {
@@ -50,25 +76,8 @@ test("release fingerprint staging verifies downloaded WASM bytes before deriving
   const root = releaseFixture();
   const wasmDir = join(root, "crates/jazz-wasm/pkg");
   const wasm = join(wasmDir, "jazz_wasm_bg.wasm");
-  writeFileSync(wasm, "expected bytes");
-  writeFileSync(
-    join(wasmDir, ".jazz-artifact-manifest.json"),
-    JSON.stringify({
-      kind: "wasm",
-      profile: "release",
-      nativeArtifactFingerprint: fingerprint,
-      artifacts: [
-        {
-          file: "jazz_wasm_bg.wasm",
-          sha256: createHash("sha256").update("expected bytes").digest("hex"),
-        },
-      ],
-    }),
-  );
-  writeFileSync(
-    join(root, "crates/jazz-napi/provenance/jazz-napi.linux-x64-gnu.manifest.json"),
-    JSON.stringify({ kind: "napi", profile: "release", nativeArtifactFingerprint: fingerprint }),
-  );
+  writeWasmRelease(root);
+  writeReleaseNapiManifest(root);
 
   stageNativeFingerprints(root);
   assert.match(
@@ -80,4 +89,34 @@ test("release fingerprint staging verifies downloaded WASM bytes before deriving
   );
   writeFileSync(wasm, "tampered bytes");
   assert.throws(() => stageNativeFingerprints(root), /downloaded WASM artifact hash mismatch/);
+});
+
+test("release fingerprint staging rejects omitted, duplicate, empty, and malformed WASM artifact entries", () => {
+  const cases = [
+    { name: "omitted", artifacts: [], expected: /list each generated artifact exactly once/ },
+    {
+      name: "duplicate",
+      artifacts: wasmFiles.map((file, index) => ({
+        file: index === 3 ? wasmFiles[0] : file,
+        sha256: "a".repeat(64),
+      })),
+      expected: /list each generated artifact exactly once/,
+    },
+    {
+      name: "empty",
+      artifacts: wasmFiles.map((file) => ({ file, sha256: "" })),
+      expected: /artifact hash mismatch/,
+    },
+    {
+      name: "malformed",
+      artifacts: wasmFiles.map((file) => ({ file, sha256: "not-a-hash" })),
+      expected: /artifact hash mismatch/,
+    },
+  ];
+  for (const { name, artifacts, expected } of cases) {
+    const root = releaseFixture();
+    writeWasmRelease(root, { artifacts });
+    writeReleaseNapiManifest(root);
+    assert.throws(() => stageNativeFingerprints(root), expected, name);
+  }
 });
