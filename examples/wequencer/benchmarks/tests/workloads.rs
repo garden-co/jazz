@@ -18,8 +18,10 @@ fn ordered_track_window_is_complete_and_stable() {
 #[test]
 fn app_session_queries_keep_their_order_and_cardinality_contracts() {
     let fixture = Fixture::new();
-    let (track_positions, membership_count, presence_count) = fixture.session_browser_shape();
+    let (session_titles, track_positions, membership_count, presence_count) =
+        fixture.session_browser_shape();
 
+    assert_eq!(session_titles, ["Soundcheck", "Weekend set"]);
     assert_eq!(track_positions, (0..16).collect::<Vec<_>>());
     assert_eq!(membership_count, 1);
     assert_eq!(presence_count, 1);

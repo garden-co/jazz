@@ -21,10 +21,12 @@ type BenchDb = Db<MemoryStorage>;
 
 pub struct Fixture {
     db: BenchDb,
+    session_table: TableSchema,
     member_table: TableSchema,
     track_table: TableSchema,
     step_table: TableSchema,
     transport_table: TableSchema,
+    session_list: PreparedQuery,
     session_tracks: PreparedQuery,
     own_membership: PreparedQuery,
     session_presence: PreparedQuery,
@@ -40,7 +42,7 @@ impl Default for Fixture {
 
 impl Fixture {
     pub fn new() -> Self {
-        let (db, member_table, track_table, step_table, transport_table) = open_db();
+        let (db, session_table, member_table, track_table, step_table, transport_table) = open_db();
         let session_id = row_id(1, 0);
         let profile_id = row_id(2, 0);
         insert(
@@ -111,11 +113,7 @@ impl Fixture {
                 ("heartbeat_at".into(), Value::U64(0)),
             ]),
         );
-        // `useAll(app.sessions.orderBy("$createdAt", "desc"))` is prepared
-        // here too. The native Db's direct-read facade cannot materialize a
-        // provenance ordering key, but preparation validates the exact public
-        // query shape; ordered materialization is covered below by tracks.
-        let _session_list = db
+        let session_list = db
             .prepare_query(&Query::from("sessions").order_by("$createdAt", OrderDirection::Desc))
             .expect("prepare Wequencer session-browser query");
         let session_tracks = db
@@ -153,10 +151,12 @@ impl Fixture {
             .expect("prepare Wequencer transport receipt query");
         Self {
             db,
+            session_table,
             member_table,
             track_table,
             step_table,
             transport_table,
+            session_list,
             session_tracks,
             own_membership,
             session_presence,
@@ -167,7 +167,17 @@ impl Fixture {
 
     /// Reads the parent-scoped browser query shapes. The values make their
     /// index, ordering, and cardinality contracts observable in the fixture.
-    pub fn session_browser_shape(&self) -> (Vec<u64>, usize, usize) {
+    pub fn session_browser_shape(&self) -> (Vec<String>, Vec<u64>, usize, usize) {
+        let session_titles = self
+            .db
+            .read(&self.session_list)
+            .expect("read Wequencer session-browser query")
+            .into_iter()
+            .map(|row| match row.cell(&self.session_table, "title") {
+                Some(Value::String(title)) => title,
+                value => panic!("unexpected session title: {value:?}"),
+            })
+            .collect();
         let track_positions = self
             .db
             .read(&self.session_tracks)
@@ -190,7 +200,12 @@ impl Fixture {
             .read(&self.session_presence)
             .expect("read Wequencer presence query")
             .len();
-        (track_positions, membership_count, presence_count)
+        (
+            session_titles,
+            track_positions,
+            membership_count,
+            presence_count,
+        )
     }
 
     pub fn track_steps(&self) -> Vec<(u64, bool)> {
@@ -390,7 +405,14 @@ fn schema() -> JazzSchema {
     JazzSchema::new(&source).expect("Wequencer schema compiles")
 }
 
-fn open_db() -> (BenchDb, TableSchema, TableSchema, TableSchema, TableSchema) {
+fn open_db() -> (
+    BenchDb,
+    TableSchema,
+    TableSchema,
+    TableSchema,
+    TableSchema,
+    TableSchema,
+) {
     let schema = schema();
     let table = |name| {
         schema
@@ -400,6 +422,7 @@ fn open_db() -> (BenchDb, TableSchema, TableSchema, TableSchema, TableSchema) {
             .unwrap_or_else(|| panic!("{name} table"))
             .clone()
     };
+    let session_table = table("sessions");
     let member_table = table("session_members");
     let track_table = table("tracks");
     let step_table = table("steps");
@@ -425,7 +448,24 @@ fn open_db() -> (BenchDb, TableSchema, TableSchema, TableSchema, TableSchema) {
             ("loop_steps".into(), Value::I32(STEPS as i32)),
         ]),
     );
-    (db, member_table, track_table, step_table, transport_table)
+    insert(
+        &db,
+        "sessions",
+        row_id(1, 1),
+        BTreeMap::from([
+            ("title".into(), Value::String("Soundcheck".into())),
+            ("tempo_bpm".into(), Value::I32(120)),
+            ("loop_steps".into(), Value::I32(STEPS as i32)),
+        ]),
+    );
+    (
+        db,
+        session_table,
+        member_table,
+        track_table,
+        step_table,
+        transport_table,
+    )
 }
 
 fn insert(db: &BenchDb, table: &str, id: RowUuid, cells: BTreeMap<String, Value>) {
