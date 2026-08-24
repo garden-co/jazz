@@ -1987,6 +1987,23 @@ fn lower_relation_key_ref(
             {
                 return Ok(field);
             }
+            if let Some(LinearStep::Project(columns)) = linear.steps.last()
+                && let NormalizedValueRef::RowId(RowIdRef::Source(value_source)) = value
+                && linear.root.source() == Some(value_source)
+                && let Some(column) = columns.iter().find(|column| {
+                    matches!(
+                        &column.value,
+                        NormalizedValueRef::RowId(RowIdRef::Source(column_source))
+                            if column_source == value_source
+                    )
+                })
+            {
+                // Relation-backed policy expressions commonly project their
+                // source row ID as public `id`. Subsequent outer joins must
+                // consume that projected private proof field, rather than
+                // asking the graph for the pre-projection `row_uuid` name.
+                return Ok(column.output.name.clone());
+            }
             if let Some(source) = &output.root_source {
                 if let Some(source_id) = linear.root.source() {
                     if let Ok(key) = lower_join_key_ref(value, source_id, source, request) {

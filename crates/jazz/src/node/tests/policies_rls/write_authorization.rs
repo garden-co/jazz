@@ -1,6 +1,12 @@
 // Write attribution, ownership, joins, rejection, and cleanup.
 
 use crate::query::{Include, JoinMode, OrderDirection};
+use crate::tools::public_api::relation_ir::{
+    ColumnRef as PublicRelColumnRef, JoinCondition as PublicRelJoinCondition,
+    JoinKind as PublicRelJoinKind, PredicateCmpOp as PublicRelPredicateCmpOp,
+    PredicateExpr as PublicRelPredicateExpr, RelExpr as PublicRelExpr,
+    ValueRef as PublicRelValueRef,
+};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -914,6 +920,194 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
 /// assignment's tenant-correlated existence checks: an eligible owner is
 /// accepted while that same owner cannot attach a foreign membership. The
 /// compiler-plan regression separately asserts occurrence-carrier suppression.
+/// A relation-backed `exists` must prove both the denormalized workspace and
+/// the referenced block together.  The same owner is deliberately a member of
+/// both workspaces, so authorizing the block reference without its workspace
+/// correlation would accept the cross-workspace write.
+#[test]
+fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_and_update() {
+    let owner = user(0xa1);
+    let workspace_a = row(0xb1);
+    let workspace_b = row(0xb2);
+    let owner_membership_a = row(0xc1);
+    let owner_membership_b = row(0xc2);
+    let block_a = row(0xd1);
+    let block_b = row(0xd2);
+    let accepted_task = row(0xe1);
+    let rejected_task = row(0xe2);
+
+    let column = |scope: &str, name: &str| PublicRelColumnRef {
+        scope: Some(scope.to_owned()),
+        column: name.to_owned(),
+    };
+    let outer = |scope: &str, name: &str, outer_name: &str| PublicRelPredicateExpr::Cmp {
+        left: column(scope, name),
+        op: PublicRelPredicateCmpOp::Eq,
+        right: PublicRelValueRef::OuterColumn(PublicRelColumnRef::unscoped(outer_name)),
+    };
+    let task_policy = PublicPolicyExpr::ExistsRel {
+        rel: PublicRelExpr::Filter {
+            input: Box::new(PublicRelExpr::Join {
+                left: Box::new(PublicRelExpr::TableScan {
+                    table: "blocks".into(),
+                    alias: Some("blocks".to_owned()),
+                }),
+                right: Box::new(PublicRelExpr::Filter {
+                    input: Box::new(PublicRelExpr::TableScan {
+                        table: "members".into(),
+                        alias: Some("members".to_owned()),
+                    }),
+                    predicate: PublicRelPredicateExpr::And(vec![
+                        outer("members", "workspace", "workspace"),
+                        PublicRelPredicateExpr::Cmp {
+                            left: column("members", "subject"),
+                            op: PublicRelPredicateCmpOp::Eq,
+                            right: PublicRelValueRef::SessionRef(vec![
+                                "claims".to_owned(),
+                                "sub".to_owned(),
+                            ]),
+                        },
+                    ]),
+                }),
+                on: vec![PublicRelJoinCondition {
+                    left: column("blocks", "workspace"),
+                    right: column("members", "workspace"),
+                }],
+                join_kind: PublicRelJoinKind::Inner,
+            }),
+            // The FK correlation is separate from the nested membership
+            // conjunction, mirroring `allOf([exists, workspaceId + FK])`.
+            predicate: PublicRelPredicateExpr::And(vec![outer("blocks", "id", "block")]),
+        },
+    };
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("workspaces")
+                    .column("name", PublicColumnType::Text),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("members")
+                    .fk_column("workspace", "workspaces")
+                    .column("subject", PublicColumnType::Uuid),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("blocks")
+                    .fk_column("workspace", "workspaces"),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("tasks")
+                    .fk_column("workspace", "workspaces")
+                    .fk_column("block", "blocks")
+                    .column("title", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_insert(task_policy.clone())
+                            .with_update(Some(task_policy.clone()), task_policy),
+                    ),
+            ),
+    );
+    let (_core_dir, mut core) = open_node_with_schema(node(0x9a), schema);
+    for (table, row_uuid, time, cells) in [
+        (
+            "workspaces",
+            workspace_a,
+            1,
+            BTreeMap::from([("name".to_owned(), Value::String("A".to_owned()))]),
+        ),
+        (
+            "workspaces",
+            workspace_b,
+            2,
+            BTreeMap::from([("name".to_owned(), Value::String("B".to_owned()))]),
+        ),
+        (
+            "members",
+            owner_membership_a,
+            3,
+            BTreeMap::from([
+                ("workspace".to_owned(), Value::Uuid(workspace_a.0)),
+                ("subject".to_owned(), Value::Uuid(owner.0)),
+            ]),
+        ),
+        (
+            "members",
+            owner_membership_b,
+            4,
+            BTreeMap::from([
+                ("workspace".to_owned(), Value::Uuid(workspace_b.0)),
+                ("subject".to_owned(), Value::Uuid(owner.0)),
+            ]),
+        ),
+        (
+            "blocks",
+            block_a,
+            5,
+            BTreeMap::from([("workspace".to_owned(), Value::Uuid(workspace_a.0))]),
+        ),
+        (
+            "blocks",
+            block_b,
+            6,
+            BTreeMap::from([("workspace".to_owned(), Value::Uuid(workspace_b.0))]),
+        ),
+    ] {
+        accept_global(&mut core, MergeableCommit::new(table, row_uuid, time).cells(cells));
+    }
+    core.set_session_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.0))]));
+
+    let accepted = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("tasks", accepted_task, 7)
+                .made_by(owner)
+                .cells(BTreeMap::from([
+                    ("workspace".to_owned(), Value::Uuid(workspace_a.0)),
+                    ("block".to_owned(), Value::Uuid(block_a.0)),
+                    ("title".to_owned(), Value::String("same workspace".to_owned())),
+                ])),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit_settled(accepted).unwrap();
+    assert!(matches!(
+        core.transaction_state_settled(accepted),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+
+    let denied_insert = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("tasks", rejected_task, 8)
+                .made_by(owner)
+                .cells(BTreeMap::from([
+                    ("workspace".to_owned(), Value::Uuid(workspace_a.0)),
+                    ("block".to_owned(), Value::Uuid(block_b.0)),
+                    ("title".to_owned(), Value::String("cross workspace".to_owned())),
+                ])),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit_settled(denied_insert).unwrap();
+    assert!(matches!(
+        core.transaction_state_settled(denied_insert),
+        Some((Fate::Rejected(RejectionReason::AuthorizationDenied), None, DurabilityTier::Local))
+    ));
+
+    let denied_update = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("tasks", accepted_task, 9)
+                .made_by(owner)
+                .cells(BTreeMap::from([
+                    ("workspace".to_owned(), Value::Uuid(workspace_a.0)),
+                    ("block".to_owned(), Value::Uuid(block_b.0)),
+                    ("title".to_owned(), Value::String("foreign replacement".to_owned())),
+                ])),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit_settled(denied_update).unwrap();
+    assert!(matches!(
+        core.transaction_state_settled(denied_update),
+        Some((Fate::Rejected(RejectionReason::AuthorizationDenied), None, DurabilityTier::Local))
+    ));
+}
+
 #[test]
 fn correlated_inherited_insert_policy_accepts_owner_and_denies_cross_tenant_membership() {
     let owner = user(0xa1);
