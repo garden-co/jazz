@@ -39,12 +39,18 @@ describe("BandChat admission and authorship boundary", () => {
     const guestMembership = await expectAcceptedAtEdge(
       owner.insert(app.roomMembers, { roomId: room.id, userId: guestId }),
     );
-    await expectAcceptedAtEdge(
+    const guestMessage = await expectAcceptedAtEdge(
       guest.insert(app.messages, {
         roomId: room.id,
         senderId: guestProfile.id,
         text: "legit",
       }),
+    );
+    await expectAcceptedAtEdge(
+      guest.insert(app.reactions, { messageId: guestMessage.id, userId: guestId, emoji: "🎸" }),
+    );
+    await guest.expectDenied((db) =>
+      db.insert(app.reactions, { messageId: guestMessage.id, userId: ownerId, emoji: "forged" }),
     );
     await guest.expectDenied((db) =>
       db.insert(app.messages, {
@@ -59,6 +65,13 @@ describe("BandChat admission and authorship boundary", () => {
         roomId: room.id,
         senderId: guestProfile.id,
         text: "after removal",
+      }),
+    );
+    await guest.expectDenied((db) =>
+      db.insert(app.reactions, {
+        messageId: guestMessage.id,
+        userId: guestId,
+        emoji: "after removal",
       }),
     );
   });

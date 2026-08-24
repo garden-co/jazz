@@ -56,4 +56,11 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
   policy.messages.allowDelete.where((message) =>
     policy.profiles.exists.where({ id: message.senderId, userId: session.user_id }),
   );
+
+  policy.reactions.allowRead.where(allowedTo.read("messageId"));
+  policy.reactions.allowInsert.where(
+    allOf([allowedTo.insert("messageId"), { userId: session.user_id }]),
+  );
+  policy.reactions.allowUpdate.never();
+  policy.reactions.allowDelete.where({ userId: session.user_id });
 });

@@ -33,3 +33,12 @@ pnpm --filter band-chat-nextjs-betterauth build
 ```
 
 The deployed permission receipt proves legitimate owner creation/invite/send, rejects foreign self-admission and forged authorship, and exercises `$createdBy` at the edge. Browser coverage proves offline IndexedDB retention, reconnect, and delivery to a fresh persistent reader through the canonical Jazz test server.
+
+`tests/browser/topology.e2e.test.ts` is the adopter-owned public-API receipt for
+client → edge → core → peer-edge: it verifies concurrent messages, reactions,
+ordinary inline attachment bytes, idempotent mutation waits, offline replay, and
+ordered subscription convergence. Its scenario declares deterministic fault and
+soak inputs for the shared topology harness. The focused expected-failure test is
+intentionally linked to #1844 (reproducing PRs #1830 and #1838): indirect
+Text/Bytea peer-edge materialization remains a known red regression and must not
+be replaced with an inline-only fixture.
