@@ -142,12 +142,12 @@ describe.runIf(modes.includes(fixture as (typeof modes)[number]))(
         }
         if (fixture === "direct-wasm-bytes") {
           await expect(
-            runtime.readValueRange("blobs", residentWrite.value.id, "data", 0, largeText.length),
+            runtime.readValueRange!("blobs", residentWrite.value.id, "data", 0, largeText.length),
           ).resolves.toEqual(new TextEncoder().encode(largeText));
         }
         if (fixture === "direct-wasm-json") {
           await expect(
-            runtime.readJsonPointer(
+            runtime.readJsonPointer!(
               "documents",
               residentWrite.value.id,
               "body",
@@ -159,7 +159,7 @@ describe.runIf(modes.includes(fixture as (typeof modes)[number]))(
         console.error(`phase:${fixture}:local`);
         if (fixture?.endsWith("-json")) {
           await expect(
-            runtime.readJsonPointer(
+            runtime.readJsonPointer!(
               "documents",
               residentWrite.value.id,
               "body",
@@ -168,7 +168,7 @@ describe.runIf(modes.includes(fixture as (typeof modes)[number]))(
           ).resolves.toBe(42);
         }
       } finally {
-        await runtime.close();
+        await runtime.close!();
       }
     });
   },
