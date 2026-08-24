@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PRESENCE_HEARTBEAT_INTERVAL_MS, schedulePresenceHeartbeat } from "./presence-heartbeat";
+import { schedulePresenceHeartbeat } from "./presence-heartbeat";
+
+const EXPECTED_HEARTBEAT_INTERVAL_MS = 5_000;
 
 describe("schedulePresenceHeartbeat", () => {
   afterEach(() => vi.useRealTimers());
@@ -12,11 +14,11 @@ describe("schedulePresenceHeartbeat", () => {
     expect(publish).not.toHaveBeenCalled();
     vi.advanceTimersByTime(0);
     expect(publish).toHaveBeenCalledTimes(1);
-    vi.advanceTimersByTime(PRESENCE_HEARTBEAT_INTERVAL_MS - 1);
+    vi.advanceTimersByTime(EXPECTED_HEARTBEAT_INTERVAL_MS - 1);
     expect(publish).toHaveBeenCalledTimes(1);
     vi.advanceTimersByTime(1);
     expect(publish).toHaveBeenCalledTimes(2);
-    vi.advanceTimersByTime(PRESENCE_HEARTBEAT_INTERVAL_MS * 2);
+    vi.advanceTimersByTime(EXPECTED_HEARTBEAT_INTERVAL_MS * 2);
     expect(publish).toHaveBeenCalledTimes(4);
 
     stop();
@@ -36,12 +38,12 @@ describe("schedulePresenceHeartbeat", () => {
     // not itself a reason to publish another row.
     presence = "acknowledged";
     expect(publish).toHaveBeenCalledTimes(1);
-    vi.advanceTimersByTime(PRESENCE_HEARTBEAT_INTERVAL_MS);
+    vi.advanceTimersByTime(EXPECTED_HEARTBEAT_INTERVAL_MS);
     expect(publish).toHaveBeenCalledTimes(2);
     expect(publish).toHaveReturnedWith("acknowledged");
 
     stop();
-    vi.advanceTimersByTime(PRESENCE_HEARTBEAT_INTERVAL_MS * 2);
+    vi.advanceTimersByTime(EXPECTED_HEARTBEAT_INTERVAL_MS * 2);
     expect(publish).toHaveBeenCalledTimes(2);
   });
 
@@ -54,7 +56,7 @@ describe("schedulePresenceHeartbeat", () => {
 
     vi.advanceTimersByTime(0);
     expect(publish).toHaveBeenCalledTimes(1);
-    vi.advanceTimersByTime(PRESENCE_HEARTBEAT_INTERVAL_MS);
+    vi.advanceTimersByTime(EXPECTED_HEARTBEAT_INTERVAL_MS);
     expect(publish).toHaveBeenCalledTimes(2);
 
     stopCommitted();
