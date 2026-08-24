@@ -2922,21 +2922,12 @@ fn lower_not_predicate_inner(
             source,
             request,
         )?,
-        PredicateExpr::In { value, options } => GroovePredicateExpr::Or(vec![
-            // Jazz comparisons are two-valued: a nullable field differs from
-            // every non-null membership option. Groove's primitive comparison
-            // operators deliberately use SQL-null semantics, so preserve the
-            // public contract explicitly when lowering Not(In(...)).
-            lower_null_test(value, true, source_id, source, request)?,
-            GroovePredicateExpr::And(
-                options
-                    .iter()
-                    .map(|option| {
-                        lower_compare(value, ComparisonOp::Ne, option, source_id, source, request)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
-        ]),
+        PredicateExpr::In { value, options } => GroovePredicateExpr::And(
+            options
+                .iter()
+                .map(|option| lower_two_valued_ne(value, option, source_id, source, request))
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
         PredicateExpr::ArrayContains { .. } | PredicateExpr::TextContains { .. } => {
             return Err(UnsupportedReason::Operator(
                 "negated containment predicates are not lowered yet".to_owned(),
@@ -2965,6 +2956,30 @@ fn lower_not_predicate_inner(
             ));
         }
     })
+}
+
+fn lower_two_valued_ne(
+    left: &NormalizedValueRef,
+    right: &NormalizedValueRef,
+    source_id: &SourceId,
+    source: &ResolvedSource,
+    request: &QueryProgramRequest,
+) -> Result<GroovePredicateExpr, UnsupportedReason> {
+    // Groove comparisons deliberately use SQL-null semantics. Jazz comparison
+    // predicates are two-valued, so unequal means either exactly one operand is
+    // null or both are non-null and Groove reports inequality.
+    Ok(GroovePredicateExpr::Or(vec![
+        GroovePredicateExpr::And(vec![
+            lower_null_test(left, true, source_id, source, request)?,
+            lower_null_test(right, false, source_id, source, request)?,
+        ]),
+        GroovePredicateExpr::And(vec![
+            lower_null_test(left, false, source_id, source, request)?,
+            lower_null_test(right, true, source_id, source, request)?,
+        ]),
+        lower_compare(left, ComparisonOp::Ne, right, source_id, source, request)?,
+    ])
+    .canonicalize())
 }
 
 fn invert_comparison(op: ComparisonOp) -> ComparisonOp {
