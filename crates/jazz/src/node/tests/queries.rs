@@ -2288,6 +2288,7 @@ fn maintained_nested_collector_keeps_two_route_keys_internal_across_sibling_arra
     let schema = routed_nested_collector_schema();
     let (_temp_dir, mut node) = open_node_with_schema(node(0x47), schema.clone());
     let alice = user(0xa1);
+    install_test_uuid_sub_claim(&mut node, alice);
     let parent = row(0xa1);
     let todo_row = row(0x11);
     let comment = row(0x21);
