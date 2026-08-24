@@ -1735,6 +1735,44 @@ where
         .await
     }
 
+    /// Upsert while admitting the write as this trusted Db's identity and
+    /// stamping `made_by` as provenance.  This is the core half of backend
+    /// attribution; client-facing facades remain unable to select it.
+    pub async fn upsert_attributed(
+        &self,
+        made_by: AuthorSubject,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.check_attribution_allowed(made_by)?;
+        self.ensure_row_not_deleted(table, row).await?;
+        let (cells, parents, authored_columns) = if self
+            .upsert_target_for_trusted_identity(table, row, self.identity.author)
+            .await?
+            .is_some()
+        {
+            let (cells, parent, authored_columns) = self
+                .merge_existing_cells_for_identity(table, row, cells, self.identity.author)
+                .await?;
+            (cells, parent.into_iter().collect(), Some(authored_columns))
+        } else {
+            (cells, Vec::new(), None)
+        };
+        self.write_mergeable_at_ms_with_authorship(
+            made_by,
+            Some(self.identity.author),
+            table,
+            row,
+            cells,
+            parents,
+            None,
+            authored_columns,
+            self.next_now_ms(),
+        )
+        .await
+    }
+
     /// Soft-delete a row locally.
     ///
     /// ```rust
@@ -2392,6 +2430,45 @@ where
                     MergeableCommit::new(table, row, self.next_now_ms())
                         .made_by(identity)
                         .permission_subject(identity)
+                        .parents(deletion_parents)
+                        .cells(BTreeMap::<String, Value>::new())
+                        .deletion(DeletionEvent::Restored),
+                ],
+            )
+            .await?;
+        self.finish_published_write(row, published).await
+    }
+
+    /// Restore while admitting the two restore commits as this trusted Db and
+    /// retaining `made_by` as their user-visible provenance.
+    pub async fn restore_attributed(
+        &self,
+        made_by: AuthorSubject,
+        table: &str,
+        row: RowUuid,
+        cells: RowCells,
+    ) -> Result<WriteHandle<S>, Error> {
+        self.check_attribution_allowed(made_by)?;
+        let cells = self.apply_insert_defaults(table, cells)?;
+        self.ensure_row_deleted(table, row, self.identity.author)
+            .await?;
+        let (content_parents, deletion_parents) = self.row_layer_parents(table, row).await?;
+        let published = self
+            .node
+            .node
+            .lock()
+            .await
+            .commit_mergeable_many_in_schema(
+                self.schema_version_id,
+                vec![
+                    MergeableCommit::new(table, row, self.next_now_ms())
+                        .made_by(made_by)
+                        .permission_subject(self.identity.author)
+                        .parents(content_parents)
+                        .cells(cells),
+                    MergeableCommit::new(table, row, self.next_now_ms())
+                        .made_by(made_by)
+                        .permission_subject(self.identity.author)
                         .parents(deletion_parents)
                         .cells(BTreeMap::<String, Value>::new())
                         .deletion(DeletionEvent::Restored),
