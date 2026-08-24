@@ -40,7 +40,7 @@ import {
   sessionFromVerifiedReservedJwtPayload,
   trustedReservedSessionToken,
 } from "../client-session.js";
-import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
+import { SYSTEM_AUTHOR_ID, SYSTEM_READ_SESSION } from "../system-identity.js";
 
 type NativeDbForTest = ReturnType<
   NonNullable<ConstructorParameters<typeof NativeRuntimeAdapter>[0]>["openMemory"]
@@ -4918,6 +4918,58 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     expect(author instanceof Uint8Array ? new TextDecoder().decode(author) : undefined).toBe(
       '["urn:jazz:local-first","verified-writer"]',
     );
+  });
+
+  it("keeps backend policy admission separate from attributed provenance", () => {
+    const insertWithIdEncodedAttributed = vi.fn(() => fakeWrite());
+    const updateEncodedAttributed = vi.fn(() => fakeWrite());
+    const deleteAttributed = vi.fn(() => fakeWrite());
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            insertWithIdEncodedAttributed,
+            updateEncodedAttributed,
+            deleteAttributed,
+            tick: () => undefined,
+          }),
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new TextEncoder().encode(JSON.stringify(["urn:jazz:test", "backend-owner"])),
+      1,
+      true,
+      { backendCredential: "backend-only-test-capability" },
+    );
+    const context = JSON.stringify({
+      session: {
+        ...SYSTEM_READ_SESSION,
+        [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: trustedReservedSessionToken(SYSTEM_READ_SESSION),
+      },
+      attribution: JSON.stringify(["https://issuer.example", "attributed-user"]),
+    });
+    const id = "00000000-0000-0000-0000-000000000123";
+
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "attributed" }, done: false },
+      context,
+      id,
+    );
+    runtime.update("todos", id, { title: { type: "Text", value: "updated" } }, context);
+    runtime.delete("todos", id, context);
+
+    const expected = JSON.stringify(["https://issuer.example", "attributed-user"]);
+    for (const call of [
+      insertWithIdEncodedAttributed.mock.calls[0],
+      updateEncodedAttributed.mock.calls[0],
+      deleteAttributed.mock.calls[0],
+    ]) {
+      const author = call?.at(-1);
+      expect(author instanceof Uint8Array ? new TextDecoder().decode(author) : undefined).toBe(
+        expected,
+      );
+    }
   });
 
   it("aborts the native upload when the producer fails", async () => {
