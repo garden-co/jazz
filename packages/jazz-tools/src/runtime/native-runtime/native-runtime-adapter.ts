@@ -1548,13 +1548,14 @@ export class NativeRuntimeAdapter implements Runtime {
         );
       }
       const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
+      const projectedColumns = subscriptionOutputColumns(coreQueryJson, this.schema).rootColumns;
       let rows = this.readPlainRows(query, opts, session ?? undefined, pendingTx);
-      let rowStates = rowsFromBatches(readRowBatches(rows), this.schema);
+      let rowStates = rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
       if (!pendingTx && (tier === "edge" || tier === "global") && rowStates.length > 0) {
         await this.refreshRowsFromEdge(session, rowStates);
         if (this.closed) return [];
         rows = this.readPlainRows(query, opts, session ?? undefined, pendingTx);
-        rowStates = rowsFromBatches(readRowBatches(rows), this.schema);
+        rowStates = rowsFromBatches(readRowBatches(rows), this.schema, projectedColumns);
       }
       return rowStates;
     } finally {
@@ -4663,6 +4664,9 @@ function nativeRowFieldPlans(
 
   const columns = projectedColumns ?? schema[batch.table]?.columns ?? [];
   const columnsByName = new Map(columns.map((column) => [column.name, column]));
+  const projectedNames = projectedColumns
+    ? new Set(projectedColumns.map((column) => column.name))
+    : null;
   const plans: NativeRowFieldPlan[] = [];
 
   for (let index = 0; index < batch.descriptor.length; index += 1) {
@@ -4670,16 +4674,15 @@ function nativeRowFieldPlans(
     if (!fieldName || isInternalField(fieldName) || isCurrentRowPhysicalField(fieldName)) continue;
 
     const name = publicFieldName(fieldName);
-    const type =
-      name === "$createdBy" || name === "$updatedBy"
-        ? ({ type: "Uuid" } as const)
-        : (magicColumnType(name) ?? columnsByName.get(name)?.column_type);
+    const type = magicColumnType(name) ?? columnsByName.get(name)?.column_type;
     plans.push({
       name,
       index,
       type,
       storageType: batch.descriptor[index]!.valueType,
-      includeInValues: !isHiddenIncludeColumn(name) && !isProvenanceMagicColumn(name),
+      includeInValues:
+        !isHiddenIncludeColumn(name) &&
+        (!isProvenanceMagicColumn(name) || projectedNames?.has(name) === true),
     });
   }
 
@@ -5038,6 +5041,14 @@ function decodeBytes(
     case "Text":
     case "Json":
     case "Enum":
+      if (
+        fieldName !== undefined &&
+        isProvenanceMagicColumn(fieldName) &&
+        type.type === "Text" &&
+        storageType?.tag === 8
+      ) {
+        return { type: "Text", value: textDecoder.decode(bytes) };
+      }
       if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
       return { type: "Text", value: textDecoder.decode(bytes.subarray(1)) };
     case "EnumPayload":
@@ -5724,12 +5735,7 @@ function valuesForNativeFrame(row: RowState, columns: readonly ColumnDescriptor[
     const value =
       row.valuesByColumn.get(column.name) ??
       (column.column_type.type === "Array" ? { type: "Array", value: [] } : { type: "Null" });
-    values[index] =
-      (column.name === "$createdBy" || column.name === "$updatedBy") &&
-      column.column_type.type === "Text" &&
-      value.type === "Uuid"
-        ? { type: "Text", value: value.value }
-        : value;
+    values[index] = value;
   }
   return values;
 }

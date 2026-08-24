@@ -335,6 +335,59 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
     globalThis.WebSocket = previousWebSocket;
   });
 
+  it("selects and filters public provenance authors as canonical text", async () => {
+    const { NapiDb } = await loadNapiModule();
+    const authorSeed = "jazz-napi-public-provenance:author";
+    const author = JSON.stringify(["urn:jazz:test", authorSeed]);
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+      TEST_SCHEMA,
+      deterministicBytes("jazz-napi-public-provenance:node"),
+      testAuthorBytes(authorSeed),
+      1,
+      true,
+    );
+    runtimes.push(runtime);
+    const inserted = runtime.insert("todos", {
+      title: { type: "Text", value: "created by canonical author" },
+      done: { type: "Boolean", value: false },
+    });
+    await runtime.waitForTransaction(await committedBatchId(inserted), "local");
+
+    await expect(
+      runtime.query(
+        JSON.stringify({
+          table: "todos",
+          select_columns: ["title", "$createdBy", "$updatedBy"],
+          relation_ir: {
+            Filter: {
+              input: { TableScan: { table: "todos" } },
+              predicate: {
+                Cmp: {
+                  left: { column: "$createdBy" },
+                  op: "Eq",
+                  right: { Literal: { type: "Text", value: author } },
+                },
+              },
+            },
+          },
+        }),
+        null,
+        "local",
+      ),
+    ).resolves.toEqual([
+      {
+        table: "todos",
+        id: inserted.id,
+        values: [
+          { type: "Text", value: "created by canonical author" },
+          { type: "Text", value: author },
+          { type: "Text", value: author },
+        ],
+      },
+    ]);
+  });
+
   it("compiles the policy graph perf source fixture through NAPI", async () => {
     const { NapiDb } = await loadNapiModule();
     const source = JSON.parse(

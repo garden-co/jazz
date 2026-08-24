@@ -179,10 +179,11 @@ is covered by `schema::storage_lowering_declares_system_columns_by_shape`.
 
 **Identity encoding.** `TxTime` packs physical milliseconds in the high 48 bits
 and a logical counter in the low 16; construction rejects values outside those
-ranges (`INV-DATA-4`). `AuthorSubject::SYSTEM` is
-`Uuid::new_v5(&NAMESPACE_OID, b"jazz:system-author")` (`= 93c209ee-…-c0bbcf6a`).
-Node-local aliases live in `jazz_nodes` / `jazz_schema_versions` and are rebuilt
-from those tables on recovery.
+ranges (`INV-DATA-4`). UUID object identities retain their newtype encodings;
+`AuthorSubject::SYSTEM` is the canonical JSON string
+`["urn:jazz:system","system"]`, and authenticated author subjects are exact
+canonical `[iss,sub]` JSON strings. Node-local aliases live in `jazz_nodes` /
+`jazz_schema_versions` and are rebuilt from those tables on recovery.
 
 **Lowered tables.** `lower_to_groove()` produces:
 

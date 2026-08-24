@@ -3992,7 +3992,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.close();
   });
 
-  it("coerces UUID provenance authors into public text subscription frames", () => {
+  it("passes canonical text provenance authors through public text subscription frames", () => {
     const schema = {
       notes: {
         columns: [
@@ -4028,7 +4028,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(change.row.values).toEqual([
       { type: "Text", value: "public title" },
       { type: "Text", value: "public note" },
-      { type: "Text", value: "00000000-0000-0000-0000-0000000000aa" },
+      { type: "Text", value: JSON.stringify(["https://issuer.example", "user-1"]) },
       { type: "Timestamp", value: 123_000 },
     ]);
   });
@@ -5457,7 +5457,7 @@ function encodeUserWrappedSubscriptionDelta(row: {
     { name: "row_uuid", valueType: { tag: 10 } },
     { name: "user_title", valueType: { tag: 14, inner: { tag: 8 } } },
     { name: "user_note", valueType: { tag: 14, inner: { tag: 14, inner: { tag: 8 } } } },
-    { name: "$createdBy", valueType: { tag: 10 } },
+    { name: "$createdBy", valueType: { tag: 8 } },
     { name: "$createdAt", valueType: { tag: 3 } },
   ];
   const delta = new PostcardWriter();
@@ -5472,7 +5472,7 @@ function encodeUserWrappedSubscriptionDelta(row: {
           row.rowId,
           presentBytes(inlineScalar(row.title)),
           presentBytes(presentBytes(inlineScalar(row.note))),
-          uuidBytes("00000000-0000-0000-0000-0000000000aa"),
+          new TextEncoder().encode(JSON.stringify(["https://issuer.example", "user-1"])),
           u64Bytes(123),
         ]),
       );
@@ -5497,9 +5497,9 @@ function encodeTeamGatherSubscriptionDelta(delta: {
     { name: "user_name", valueType: { tag: 14, inner: { tag: 8 } } },
     { name: "user_org_id", valueType: { tag: 14, inner: { tag: 10 } } },
     { name: "user_parent_id", valueType: { tag: 14, inner: { tag: 10 } } },
-    { name: "$createdBy", valueType: { tag: 10 } },
+    { name: "$createdBy", valueType: { tag: 8 } },
     { name: "$createdAt", valueType: { tag: 3 } },
-    { name: "$updatedBy", valueType: { tag: 10 } },
+    { name: "$updatedBy", valueType: { tag: 8 } },
     { name: "$updatedAt", valueType: { tag: 3 } },
   ];
   const added = delta.added ?? [];
@@ -5539,9 +5539,9 @@ function writeTeamGatherBatches(
               : presentBytes(inlineScalar(source.name)),
             encodeNativeNullValue(descriptor[2]!.valueType),
             encodeNativeNullValue(descriptor[3]!.valueType),
-            uuidBytes("00000000-0000-0000-0000-0000000000aa"),
+            new TextEncoder().encode(JSON.stringify(["https://issuer.example", "user-1"])),
             u64Bytes(123),
-            uuidBytes("00000000-0000-0000-0000-0000000000aa"),
+            new TextEncoder().encode(JSON.stringify(["https://issuer.example", "user-1"])),
             u64Bytes(123),
           ]),
         );

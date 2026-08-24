@@ -23,7 +23,12 @@ describe("canonical author subjects", () => {
 
   it("preserves opaque spelling and rejects only ASCII-blank components", () => {
     expect(isUsableSubject(" opaque ")).toBe(true);
+    expect(isUsableSubject("\u0085")).toBe(true);
+    expect(isUsableSubject("\uFEFF")).toBe(true);
     expect(canonicalAuthorSubject("issuer", " User ")).toBe('["issuer"," User "]');
+    expect(canonicalAuthorSubject(" issuer ", "\u0085")).toBe(
+      JSON.stringify([" issuer ", "\u0085"]),
+    );
     for (const blank of ["", " ", "\t\n\r"])
       expect(() => canonicalAuthorSubject("issuer", blank)).toThrow(/nonempty/);
   });
