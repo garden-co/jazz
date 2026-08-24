@@ -203,7 +203,7 @@ function validateRegistry(value) {
     if (!Array.isArray(scenario.topology) || scenario.topology.length === 0) {
       usage(`scenario ${scenario.id} requires at least one topology`);
     }
-    const topologyKinds = new Set(["core", "edge", "browser", "native", "fixture"]);
+    const topologyKinds = new Set(["core", "edge", "peer-edge", "browser", "native", "fixture"]);
     if (scenario.topology.some((kind) => !topologyKinds.has(kind))) {
       usage(`scenario ${scenario.id} has an unknown topology`);
     }

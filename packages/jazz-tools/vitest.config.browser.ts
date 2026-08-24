@@ -9,6 +9,8 @@ import {
   blockJazzServerNetwork,
   jazzServerInfo,
   jazzServerJwtForUser,
+  jazzServerTopologyInfo,
+  restartJazzServerTopologyEdge,
   unblockJazzServerNetwork,
 } from "./tests/browser/testing-server-node.js";
 import {
@@ -31,6 +33,7 @@ const realisticBrowserRunId = process.env.JAZZ_REALISTIC_BROWSER_RUN_ID ?? "";
 const realisticBrowserLimitOverrides =
   process.env.JAZZ_REALISTIC_BROWSER_LIMIT_OVERRIDES_JSON ?? "";
 const abstractBench = process.env.JAZZ_ABSTRACT_BENCH ?? "";
+const exampleTopologySeed = process.env.JAZZ_EXAMPLE_TOPOLOGY_SEED ?? "1844";
 const browserName = process.env.JAZZ_BROWSER ?? "chromium";
 if (!(["chromium", "firefox", "webkit"] as const).includes(browserName as never)) {
   throw new Error(`Unsupported JAZZ_BROWSER=${browserName}`);
@@ -45,6 +48,7 @@ export default defineConfig({
     __JAZZ_REALISTIC_BROWSER_SCENARIOS__: JSON.stringify(realisticBrowserScenarios),
     __JAZZ_REALISTIC_BROWSER_RUN_ID__: JSON.stringify(realisticBrowserRunId),
     __JAZZ_REALISTIC_BROWSER_LIMIT_OVERRIDES_JSON__: JSON.stringify(realisticBrowserLimitOverrides),
+    __JAZZ_EXAMPLE_TOPOLOGY_SEED__: JSON.stringify(exampleTopologySeed),
   },
   plugins: [wasm(), topLevelAwait(), svelte()],
   server: {
@@ -101,6 +105,10 @@ export default defineConfig({
           console.info(`[jazz-browser-topology] ${status} ${label} (${elapsedMs}ms)`);
         },
         jazzServerInfo: async (_context, appId, schema) => jazzServerInfo(appId, schema),
+        jazzServerTopologyInfo: async (_context, appId, schema) =>
+          jazzServerTopologyInfo(appId, schema),
+        jazzServerTopologyRestartEdge: async (_context, topologyId, edgeName) =>
+          restartJazzServerTopologyEdge(topologyId, edgeName),
         jazzServerBlockNetwork: async ({ context }, serverUrl) =>
           blockJazzServerNetwork(context, serverUrl),
         jazzServerUnblockNetwork: async ({ context }, serverUrl) =>

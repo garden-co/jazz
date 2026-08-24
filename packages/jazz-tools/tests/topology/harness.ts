@@ -1,4 +1,4 @@
-export type TopologyKind = "core" | "edge" | "browser" | "native" | "fixture";
+export type TopologyKind = "core" | "edge" | "peer-edge" | "browser" | "native" | "fixture";
 
 export type TopologyFaultKind = "disconnect" | "reconnect" | "restart" | "failure";
 
