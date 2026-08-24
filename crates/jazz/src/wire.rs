@@ -698,10 +698,10 @@ mod tests {
     use crate::ids::SchemaVersionId;
     use crate::ids::{NodeUuid, RowUuid};
     use crate::protocol::{
-        AuthorizationScopePurpose, PermissionAdviceAction, RegisterShapeOptions, ResultRowEntry,
-        ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, VersionBundle,
-        VersionBundleRun, VersionBundleRunError, VersionCarrier, VersionRecord,
-        build_version_bundle_runs_from_singletons,
+        AuthorizationScopePurpose, ChunkRequestBatch, ChunkRequestEntry, PermissionAdviceAction,
+        RegisterShapeOptions, ResultRowEntry, ShapeAst, Subscribe, SubscribeRejectReason,
+        SubscriptionKey, VersionBundle, VersionBundleRun, VersionBundleRunError, VersionCarrier,
+        VersionRecord, build_version_bundle_runs_from_singletons,
     };
     use crate::protocol_limits::MAX_WIRE_FRAME_BYTES;
     use crate::query::{BindingId, Query, ShapeId};
@@ -854,6 +854,27 @@ mod tests {
         let decoded = decode_sync_message(&encoded).unwrap();
 
         assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn oversized_chunk_request_batches_are_rejected_during_decode() {
+        const EXPECTED_MAX_CHUNK_REQUESTS: usize = 4;
+        let message = SyncMessage::ChunkRequestBatch(ChunkRequestBatch {
+            requests: (0..=EXPECTED_MAX_CHUNK_REQUESTS)
+                .map(|request_id| ChunkRequestEntry {
+                    request_id: request_id as u64,
+                    locator: vec![0x11],
+                    expected_hash: [0x22; 32],
+                    remaining_hops: 1,
+                })
+                .collect(),
+        });
+        let encoded = encode_sync_message(&message).expect("encode oversized request fixture");
+
+        assert!(
+            decode_sync_message(&encoded).is_err(),
+            "remote request cardinality must be bounded before storage work"
+        );
     }
 
     #[test]
