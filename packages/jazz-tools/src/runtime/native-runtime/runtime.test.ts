@@ -3001,9 +3001,9 @@ describe("NativeRuntimeAdapter server transport", () => {
     });
   });
 
-  it("preserves raw provenance timestamps from native rows without Date.now fallbacks", async () => {
-    const createdAtMs = 42;
-    const updatedAtMs = 43;
+  it("preserves physical provenance timestamps as public microseconds", async () => {
+    const createdAtMs = 1_777_777_777_777;
+    const updatedAtMs = createdAtMs + 1;
     const rowId = "00000000-0000-0000-0000-000000000001";
     const runtime = new NativeRuntimeAdapter(
       {
@@ -3969,7 +3969,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.close();
   });
 
-  it("coerces UUID provenance authors into public text subscription frames", () => {
+  it("preserves physical provenance timestamps as public subscription microseconds", () => {
     const schema = {
       notes: {
         columns: [

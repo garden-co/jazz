@@ -51,6 +51,7 @@ import { WebSocketCarrier, type WebSocketNegotiation, wireAuthFailureReason } fr
 import {
   createNativeRowValueEncoder,
   createRecord,
+  decodeNativeTimestamp,
   createRecordValueDecoder,
   decodeNativeRowValues,
   encodeNativeColumnValue,
@@ -4782,9 +4783,7 @@ function decodeBytes(
     case "Timestamp":
       return {
         type: "Timestamp",
-        value:
-          Number(view.getBigUint64(0, true)) *
-          (fieldName && isProvenanceMagicColumn(fieldName) ? 1_000 : 1),
+        value: decodeNativeTimestamp(bytes, fieldName),
       };
     case "Text":
     case "Json":

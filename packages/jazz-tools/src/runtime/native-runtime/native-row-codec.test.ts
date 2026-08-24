@@ -8,6 +8,7 @@ import {
   createRecord,
   decodeNativeTerminalRow,
   decodeNativeRowValues,
+  decodeNativeRowObject,
   decodeRecordValue,
   encodeNativeRowValues,
   assertTerminalRootDescriptorCompatible,
@@ -222,6 +223,26 @@ describe("native row codec", () => {
     expect(bytesToHex(cells)).toMatchInlineSnapshot(
       `"06010661637469766507010663686f6963650801066c6162656c730d0801066e65737465640901046e6f74650e0801067370617273650e04480001070000001c0000002c00000047000000007075626c6973686564020000000c000000006f6e650074776f010000000000004000800000000000000106000000006368696c6400"`,
     );
+  });
+
+  it("decodes provenance and ordinary timestamps without changing their physical time", () => {
+    const physicalMs = 1_777_777_777_777;
+    const columns: ColumnDescriptor[] = [
+      { name: "$createdAt", column_type: { type: "Timestamp" }, nullable: false },
+      { name: "publishedAt", column_type: { type: "Timestamp" }, nullable: false },
+    ];
+    const raw = createRecord(
+      columns.map((column) => ({
+        name: column.name,
+        valueType: storageColumnValueType(column),
+      })),
+      [u64Bytes(physicalMs), u64Bytes(physicalMs)],
+    );
+
+    expect(decodeNativeRowObject(undefined, columns, raw)).toEqual({
+      $createdAt: new Date(physicalMs),
+      publishedAt: new Date(physicalMs),
+    });
   });
 
   it.each([
@@ -615,4 +636,10 @@ function uuidBytes(id: string): Uint8Array {
       .match(/../g)!
       .map((hex) => Number.parseInt(hex, 16)),
   );
+}
+
+function u64Bytes(value: number): Uint8Array {
+  const bytes = new Uint8Array(8);
+  new DataView(bytes.buffer).setBigUint64(0, BigInt(value), true);
+  return bytes;
 }

@@ -1253,7 +1253,7 @@ describe("SubscriptionManager", () => {
     );
 
     expect(result.all?.[0]?.values).toEqual([
-      { type: "Timestamp", value: 42 },
+      { type: "Timestamp", value: 42_000 },
       { type: "Text", value: author },
     ]);
   });

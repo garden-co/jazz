@@ -738,7 +738,7 @@ function decodeTerminalColumnBytes(
   ) {
     return { type: "Text", value: formatUuid(bytes) };
   }
-  return decodeTerminalBytes(column.column_type, bytes);
+  return decodeTerminalBytes(column.column_type, bytes, column.name);
 }
 
 function isKnownValueType(valueType: ValueType): boolean {
@@ -812,12 +812,14 @@ function decodeNativeTerminalRowValues(
   return columns.map((column, index) => {
     const bytes = decodeRecordValue(descriptor, raw, index);
     if (bytes == null) return { type: "Null" };
-    return decodeTerminalBytes(column.column_type, bytes);
+    return decodeTerminalColumnBytes(column, bytes, descriptor[index]?.valueType);
   });
 }
 
-function decodeTerminalBytes(type: ColumnType, bytes: Uint8Array): Value {
+function decodeTerminalBytes(type: ColumnType, bytes: Uint8Array, columnName?: string): Value {
   switch (type.type) {
+    case "Timestamp":
+      return { type: "Timestamp", value: decodeNativeTimestamp(bytes, columnName) };
     case "Array":
       return { type: "Array", value: decodeTerminalArray(type.element, bytes) };
     case "Row": {
@@ -1321,7 +1323,7 @@ function decodePlainValue(type: ColumnType, bytes: Uint8Array, columnName?: stri
   const value = decodeBytes(type, bytes);
   switch (type.type) {
     case "Timestamp":
-      return value.type === "Timestamp" ? timestampToDate(value.value, columnName) : null;
+      return timestampToDate(decodeNativeTimestamp(bytes, columnName), columnName);
     case "Json":
       return value.type === "Text" ? JSON.parse(value.value) : null;
     case "Array":
@@ -1389,6 +1391,11 @@ function decodeArrayElements<T>(
     values.push(decodeElement(bytes.subarray(start, end)));
   }
   return values;
+}
+
+export function decodeNativeTimestamp(bytes: Uint8Array, columnName?: string): number {
+  const raw = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getBigUint64(0, true);
+  return Number(raw) * (columnName && isProvenanceMagicTimestampColumn(columnName) ? 1_000 : 1);
 }
 
 function timestampToDate(value: number, columnName?: string): Date {
