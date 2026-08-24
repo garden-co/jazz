@@ -235,6 +235,70 @@ fn five_concurrent_chunk_demands_are_delivered_in_two_decodable_batches() {
 }
 
 #[test]
+fn retryable_chunk_response_preserves_retry_delay_and_allows_a_later_fulfillment() {
+    crate::db::block_on(async {
+        let resolver = PeerChunkResolver::default();
+        let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
+        let database = groove::db::Database::new(
+            schema,
+            groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF]),
+        )
+        .await
+        .unwrap();
+        let upstream = PeerIoPump::new(
+            resolver.clone(),
+            database.local_chunk_reader(),
+            41,
+            PeerIoPumpRole::Upstream,
+        );
+        let request = groove::chunks::ChunkRequest {
+            object_hash: [0x41; 32],
+            locator: groove::large_values::Locator::random(),
+        };
+
+        let first = resolver.resolve(request.clone());
+        let first_id = match upstream.take_outbound(1).unwrap() {
+            SyncMessage::ChunkRequestBatch(batch) => batch.requests[0].request_id,
+            _ => unreachable!(),
+        };
+        upstream
+            .route_incoming(SyncMessage::ChunkResponseBatch(ChunkResponseBatch {
+                responses: vec![ChunkResponseEntry {
+                    request_id: first_id,
+                    result: ChunkResponse::Retryable {
+                        retry_after_ms: 10_000,
+                    },
+                }],
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            first.await,
+            Err(groove::chunks::ChunkError::Retryable {
+                retry_after_ms: 10_000
+            }),
+            "the binding must distinguish a retry instruction from permanent unavailability"
+        );
+
+        let second = resolver.resolve(request);
+        let second_id = match upstream.take_outbound(1).unwrap() {
+            SyncMessage::ChunkRequestBatch(batch) => batch.requests[0].request_id,
+            _ => unreachable!(),
+        };
+        upstream
+            .route_incoming(SyncMessage::ChunkResponseBatch(ChunkResponseBatch {
+                responses: vec![ChunkResponseEntry {
+                    request_id: second_id,
+                    result: ChunkResponse::Found(vec![0x99]),
+                }],
+            }))
+            .await
+            .unwrap();
+        assert_eq!(second.await.unwrap().as_ref(), &[0x99]);
+    });
+}
+
+#[test]
 fn a_late_response_from_a_disconnected_upstream_cannot_complete_reassigned_demand() {
     crate::db::block_on(async {
         let resolver = PeerChunkResolver::default();

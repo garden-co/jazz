@@ -1,11 +1,15 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::task::{Context, Poll, Waker};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use futures_util::future::{AbortHandle, Abortable};
 use futures_util::lock::Mutex as LocalMutex;
+use futures_util::stream;
 use futures_util::{Stream, StreamExt};
 #[cfg(target_arch = "wasm32")]
 use idb_tree::IndexedDbPageStore;
@@ -419,6 +423,36 @@ impl WasmDbInner {
             #[cfg(target_arch = "wasm32")]
             (Self::Browser(left), Self::Browser(right)) => left.shares_runtime_with(right),
             _ => false,
+        }
+    }
+
+    async fn hydrate_relation_snapshot_for_binding(
+        &self,
+        snapshot: &mut jazz::node::RelationSnapshot,
+    ) -> Result<(), jazz::db::Error> {
+        match self {
+            Self::Memory(db) => db.hydrate_relation_snapshot_for_binding(snapshot).await,
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => db.hydrate_relation_snapshot_for_binding(snapshot).await,
+            Self::Closed => panic!("WasmDb is closed"),
+        }
+    }
+
+    async fn hydrate_subscription_event_for_binding(
+        &self,
+        event: &mut SubscriptionEvent,
+    ) -> Result<(), jazz::db::BindingHydrationError> {
+        match self {
+            Self::Memory(db) => {
+                db.hydrate_subscription_event_for_binding_outcome(event)
+                    .await
+            }
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => {
+                db.hydrate_subscription_event_for_binding_outcome(event)
+                    .await
+            }
+            Self::Closed => panic!("WasmDb is closed"),
         }
     }
 }
@@ -1201,7 +1235,7 @@ impl WasmDb {
     pub fn all(&self, query: &WasmPreparedQuery, opts: JsValue) -> Result<Vec<u8>, JsValue> {
         let opts = read_opts_from_js(opts)?;
         let rows = self.inner.all(&query.inner, opts).map_err(to_js_error)?;
-        encode_rows(&rows).map_err(to_js_error)
+        encode_synchronous_rows(&rows)
     }
 
     #[wasm_bindgen(js_name = one)]
@@ -1209,7 +1243,7 @@ impl WasmDb {
         let opts = read_opts_from_js(opts)?;
         let mut rows = self.inner.all(&query.inner, opts).map_err(to_js_error)?;
         rows.truncate(1);
-        encode_rows(&rows).map_err(to_js_error)
+        encode_synchronous_rows(&rows)
     }
 
     #[wasm_bindgen(js_name = allInTransaction)]
@@ -1227,7 +1261,7 @@ impl WasmDb {
             WasmTxKind::Exclusive => self.inner.exclusive_all(tx_id, &query.inner, opts),
         }
         .map_err(to_js_error)?;
-        encode_rows(&rows).map_err(to_js_error)
+        encode_synchronous_rows(&rows)
     }
 
     #[wasm_bindgen(js_name = allInTransactionForIdentity)]
@@ -1253,7 +1287,7 @@ impl WasmDb {
             }
         }
         .map_err(to_js_error)?;
-        encode_rows(&rows).map_err(to_js_error)
+        encode_synchronous_rows(&rows)
     }
 
     #[wasm_bindgen(js_name = oneInTransaction)]
@@ -1265,7 +1299,7 @@ impl WasmDb {
     ) -> Result<Vec<u8>, JsValue> {
         let mut rows = read_rows_for_transaction(&self.inner, query, tx, None, opts)?;
         rows.truncate(1);
-        encode_rows(&rows).map_err(to_js_error)
+        encode_synchronous_rows(&rows)
     }
 
     #[wasm_bindgen(js_name = oneInTransactionForIdentity)]
@@ -1279,7 +1313,7 @@ impl WasmDb {
         let author = author_id_from_bytes(&author)?;
         let mut rows = read_rows_for_transaction(&self.inner, query, tx, Some(author), opts)?;
         rows.truncate(1);
-        encode_rows(&rows).map_err(to_js_error)
+        encode_synchronous_rows(&rows)
     }
 
     #[wasm_bindgen(js_name = setIdentityClaims)]
@@ -1303,7 +1337,7 @@ impl WasmDb {
             .inner
             .all_for_identity(&query.inner, opts, author)
             .map_err(to_js_error)?;
-        encode_rows(&rows).map_err(to_js_error)
+        encode_synchronous_rows(&rows)
     }
 
     #[wasm_bindgen(js_name = allRelationQuery)]
@@ -1316,8 +1350,12 @@ impl WasmDb {
         let opts = read_opts_from_js(opts)?;
         let query = relation_query_from_json(&query_json)?;
         Ok(future_to_promise(async move {
-            let snapshot = inner
+            let mut snapshot = inner
                 .all_relation_query(&query, opts)
+                .await
+                .map_err(to_js_error)?;
+            inner
+                .hydrate_relation_snapshot_for_binding(&mut snapshot)
                 .await
                 .map_err(to_js_error)?;
             bytes_to_js(encode_rows(&snapshot.rows).map_err(to_js_error)?)
@@ -1336,8 +1374,12 @@ impl WasmDb {
         let author = author_id_from_bytes(&author)?;
         let query = relation_query_from_json(&query_json)?;
         Ok(future_to_promise(async move {
-            let snapshot = inner
+            let mut snapshot = inner
                 .all_relation_query_for_identity(&query, opts, author)
+                .await
+                .map_err(to_js_error)?;
+            inner
+                .hydrate_relation_snapshot_for_binding(&mut snapshot)
                 .await
                 .map_err(to_js_error)?;
             bytes_to_js(encode_rows(&snapshot.rows).map_err(to_js_error)?)
@@ -1354,8 +1396,12 @@ impl WasmDb {
         let opts = read_opts_from_js(opts)?;
         let query = query.inner.clone();
         Ok(future_to_promise(async move {
-            let snapshot = inner
+            let mut snapshot = inner
                 .all_relation_snapshot(&query, opts)
+                .await
+                .map_err(to_js_error)?;
+            inner
+                .hydrate_relation_snapshot_for_binding(&mut snapshot)
                 .await
                 .map_err(to_js_error)?;
             bytes_to_js(encode_relation_snapshot(&snapshot).map_err(to_js_error)?)
@@ -1374,8 +1420,12 @@ impl WasmDb {
         let author = author_id_from_bytes(&author)?;
         let query = query.inner.clone();
         Ok(future_to_promise(async move {
-            let snapshot = inner
+            let mut snapshot = inner
                 .all_relation_snapshot_for_identity(&query, opts, author)
+                .await
+                .map_err(to_js_error)?;
+            inner
+                .hydrate_relation_snapshot_for_binding(&mut snapshot)
                 .await
                 .map_err(to_js_error)?;
             bytes_to_js(encode_relation_snapshot(&snapshot).map_err(to_js_error)?)
@@ -1389,7 +1439,7 @@ impl WasmDb {
             .inner
             .subscribe(&query.inner, opts)
             .map_err(to_js_error)?;
-        subscription_stream_to_js(stream)
+        subscription_stream_to_js(self.inner.clone(), stream)
     }
 
     #[wasm_bindgen(js_name = subscribeForIdentity)]
@@ -1405,7 +1455,7 @@ impl WasmDb {
             .inner
             .subscribe_for_identity(&query.inner, opts, author)
             .map_err(to_js_error)?;
-        subscription_stream_to_js(stream)
+        subscription_stream_to_js(self.inner.clone(), stream)
     }
 
     #[wasm_bindgen(js_name = subscribeRelationQuery)]
@@ -1420,7 +1470,7 @@ impl WasmDb {
             .inner
             .subscribe_relation_query(&query, opts)
             .map_err(to_js_error)?;
-        subscription_stream_to_js(stream)
+        subscription_stream_to_js(self.inner.clone(), stream)
     }
 
     #[wasm_bindgen(js_name = subscribeRelationQueryForIdentity)]
@@ -1437,7 +1487,7 @@ impl WasmDb {
             .inner
             .subscribe_relation_query_for_identity(&query, opts, author)
             .map_err(to_js_error)?;
-        subscription_stream_to_js(stream)
+        subscription_stream_to_js(self.inner.clone(), stream)
     }
 
     #[wasm_bindgen(js_name = attachQuery)]
@@ -2865,6 +2915,31 @@ fn encode_rows(rows: &[jazz::node::CurrentRow]) -> Result<Vec<u8>, postcard::Err
     jazz::binding_codec::encode_rows(rows)
 }
 
+/// Synchronous WASM reads cannot suspend for a missing immutable chunk. Until
+/// their API is made asynchronous, fail at the binding boundary instead of
+/// handing a physical `Value::Large` tag to JavaScript's logical row decoder.
+/// Relation reads and subscriptions already use the async materialization path.
+fn encode_synchronous_rows(rows: &[jazz::node::CurrentRow]) -> Result<Vec<u8>, JsValue> {
+    for row in rows {
+        let (descriptor, raw) = row.encoded_record();
+        let values = descriptor.bind(raw).to_values().map_err(to_js_error)?;
+        if values.iter().any(value_contains_indirect_scalar) {
+            return Err(JsValue::from_str(
+                "synchronous WASM all/transaction reads cannot materialize a large value; use an async relation read or subscription instead",
+            ));
+        }
+    }
+    encode_rows(rows).map_err(to_js_error)
+}
+
+fn value_contains_indirect_scalar(value: &Value) -> bool {
+    match value {
+        Value::Large(_) => true,
+        Value::Nullable(Some(value)) => value_contains_indirect_scalar(value),
+        _ => false,
+    }
+}
+
 fn encode_relation_snapshot(
     snapshot: &jazz::node::RelationSnapshot,
 ) -> Result<Vec<u8>, postcard::Error> {
@@ -2880,11 +2955,173 @@ fn encode_subscription_delta<'a>(
 }
 
 fn subscription_stream_to_js(
+    db: WasmDbInner,
     stream: impl Stream<Item = SubscriptionEvent> + 'static,
 ) -> Result<JsValue, JsValue> {
-    readable_stream_from_stream(stream.scan(HashSet::new(), |layouts, event| {
-        std::future::ready(Some(subscription_chunk_to_js(event, layouts)))
-    }))
+    let state = (
+        db,
+        Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>,
+        HashSet::<String>::new(),
+    );
+    readable_stream_from_stream(stream::unfold(
+        state,
+        |(db, mut source, layouts)| async move {
+            let mut event = match source.next().await {
+                Some(event) => event,
+                None => return None,
+            };
+            let mut retry_attempt = 0;
+            loop {
+                match db.hydrate_subscription_event_for_binding(&mut event).await {
+                    Ok(()) => break,
+                    Err(jazz::db::BindingHydrationError::RetryableChunkUnavailable {
+                        retry_after_ms,
+                    }) => {
+                        // Keep this event ahead of the source stream. A fulfilled
+                        // ReadableStream pull without enqueueing does not cause a
+                        // new pull at HWM 0, so wait for a real delayed wake before
+                        // retrying rather than returning an empty chunk or spinning.
+                        let delay_ms = subscription_retry_delay_ms(retry_attempt, retry_after_ms);
+                        if let Err(error) = wait_for_subscription_retry(delay_ms).await {
+                            return Some((Err(error), (db, source, layouts)));
+                        }
+                        retry_attempt = retry_attempt.saturating_add(1);
+                    }
+                    Err(jazz::db::BindingHydrationError::Error(error)) => {
+                        // Do not retain a fatal event: surfacing the stream error
+                        // drops SubscriptionStream and runs its cleanup guard.
+                        return Some((Err(to_js_error(error)), (db, source, layouts)));
+                    }
+                }
+            }
+            let mut prospective_layouts = layouts.clone();
+            match subscription_chunk_to_js(event, &mut prospective_layouts) {
+                Ok(chunk) => Some((Ok(chunk), (db, source, prospective_layouts))),
+                Err(error) => Some((Err(error), (db, source, layouts))),
+            }
+        },
+    ))
+}
+
+const INITIAL_SUBSCRIPTION_RETRY_MS: u32 = 25;
+const MAX_SUBSCRIPTION_RETRY_MS: u32 = 1_000;
+// Browsers and Node clamp a `setTimeout` delay above signed i32::MAX down to
+// a near-immediate timer. Keep each segment below that host ceiling so an
+// untrusted peer cannot turn a long retry instruction into a hot loop.
+const MAX_JS_TIMEOUT_MS: u32 = i32::MAX as u32;
+
+fn local_retry_delay_ms(attempt: u8) -> u32 {
+    INITIAL_SUBSCRIPTION_RETRY_MS
+        .saturating_mul(1_u32 << attempt.min(6))
+        .min(MAX_SUBSCRIPTION_RETRY_MS)
+}
+
+/// The peer's retry hint is a minimum, not a suggestion to cap. Local backoff
+/// only protects against immediate repeated failures when the peer supplies a
+/// shorter delay (or zero).
+fn subscription_retry_delay_ms(attempt: u8, peer_retry_after_ms: u32) -> u32 {
+    local_retry_delay_ms(attempt).max(peer_retry_after_ms)
+}
+
+async fn wait_for_subscription_retry(delay_ms: u32) -> Result<(), JsValue> {
+    for segment_ms in subscription_retry_timer_segments(delay_ms) {
+        SubscriptionRetryTimer::new(segment_ms)?.await;
+    }
+    Ok(())
+}
+
+fn subscription_retry_timer_segments(mut delay_ms: u32) -> Vec<u32> {
+    let mut segments = Vec::new();
+    while delay_ms > 0 {
+        let segment_ms = delay_ms.min(MAX_JS_TIMEOUT_MS);
+        segments.push(segment_ms);
+        delay_ms -= segment_ms;
+    }
+    segments
+}
+
+struct SubscriptionRetryTimerState {
+    fired: std::cell::Cell<bool>,
+    waker: RefCell<Option<Waker>>,
+}
+
+/// One host timer whose lifetime is owned by the Rust future. Dropping an
+/// in-flight subscription pull clears the JavaScript timer immediately instead
+/// of leaving a callback live until its (possibly multi-day) deadline.
+struct SubscriptionRetryTimer {
+    state: Rc<SubscriptionRetryTimerState>,
+    timer_global: JsValue,
+    clear_timeout: js_sys::Function,
+    timeout_handle: JsValue,
+    _callback: Closure<dyn FnMut()>,
+}
+
+impl SubscriptionRetryTimer {
+    fn new(delay_ms: u32) -> Result<Self, JsValue> {
+        let timer_global = js_sys::global();
+        let set_timeout = js_sys::Reflect::get(&timer_global, &JsValue::from_str("setTimeout"))
+            .and_then(|value| value.dyn_into::<js_sys::Function>())?;
+        let clear_timeout = js_sys::Reflect::get(&timer_global, &JsValue::from_str("clearTimeout"))
+            .and_then(|value| value.dyn_into::<js_sys::Function>())?;
+        Self::with_functions(delay_ms, timer_global.into(), set_timeout, clear_timeout)
+    }
+
+    fn with_functions(
+        delay_ms: u32,
+        timer_global: JsValue,
+        set_timeout: js_sys::Function,
+        clear_timeout: js_sys::Function,
+    ) -> Result<Self, JsValue> {
+        let state = Rc::new(SubscriptionRetryTimerState {
+            fired: std::cell::Cell::new(false),
+            waker: RefCell::new(None),
+        });
+        let callback_state = Rc::clone(&state);
+        let callback = Closure::<dyn FnMut()>::new(move || {
+            callback_state.fired.set(true);
+            if let Some(waker) = callback_state.waker.borrow_mut().take() {
+                waker.wake();
+            }
+        });
+        let timeout_handle = set_timeout.call2(
+            &timer_global,
+            callback.as_ref(),
+            &JsValue::from_f64(f64::from(delay_ms)),
+        )?;
+        Ok(Self {
+            state,
+            timer_global,
+            clear_timeout,
+            timeout_handle,
+            _callback: callback,
+        })
+    }
+}
+
+impl Future for SubscriptionRetryTimer {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<()> {
+        if self.state.fired.get() {
+            return Poll::Ready(());
+        }
+        *self.state.waker.borrow_mut() = Some(context.waker().clone());
+        if self.state.fired.get() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+impl Drop for SubscriptionRetryTimer {
+    fn drop(&mut self) {
+        if !self.state.fired.get() {
+            let _ = self
+                .clear_timeout
+                .call1(&self.timer_global, &self.timeout_handle);
+        }
+    }
 }
 
 fn subscription_chunk_to_js(
@@ -3042,18 +3279,36 @@ where
 {
     let stream: Pin<Box<JsResultStream>> = Box::pin(stream);
     let state = std::rc::Rc::new(std::cell::RefCell::new(Some(stream)));
+    let cancelled = std::rc::Rc::new(std::cell::Cell::new(false));
+    let active_abort = std::rc::Rc::new(std::cell::RefCell::new(None::<AbortHandle>));
     let source = js_sys::Object::new();
 
     let pull_state = std::rc::Rc::clone(&state);
+    let pull_cancelled = std::rc::Rc::clone(&cancelled);
+    let pull_abort = std::rc::Rc::clone(&active_abort);
     let pull = Closure::<dyn FnMut(JsValue) -> js_sys::Promise>::new(move |controller| {
         let pull_state = std::rc::Rc::clone(&pull_state);
+        let pull_cancelled = std::rc::Rc::clone(&pull_cancelled);
+        let pull_abort = std::rc::Rc::clone(&pull_abort);
         future_to_promise(async move {
+            if pull_cancelled.get() {
+                return Ok(JsValue::undefined());
+            }
             let Some(mut stream) = pull_state.borrow_mut().take() else {
                 return Err(JsValue::from_str(
                     "subscription stream pull already in progress",
                 ));
             };
-            let next = stream.next().await;
+            let (abort_handle, abort_registration) = AbortHandle::new_pair();
+            *pull_abort.borrow_mut() = Some(abort_handle);
+            let next = Abortable::new(stream.next(), abort_registration).await;
+            pull_abort.borrow_mut().take();
+            if pull_cancelled.get() {
+                // Do not restore the stream after cancellation: dropping it
+                // runs the subscription cleanup guard even during a retry wait.
+                return Ok(JsValue::undefined());
+            }
+            let next = next.map_err(|_| JsValue::from_str("subscription pull was aborted"))?;
             match next {
                 Some(Ok(chunk)) => {
                     *pull_state.borrow_mut() = Some(stream);
@@ -3074,7 +3329,13 @@ where
     pull.forget();
 
     let cancel_state = std::rc::Rc::clone(&state);
+    let cancel_flag = std::rc::Rc::clone(&cancelled);
+    let cancel_abort = std::rc::Rc::clone(&active_abort);
     let cancel = Closure::<dyn FnMut()>::new(move || {
+        cancel_flag.set(true);
+        if let Some(handle) = cancel_abort.borrow_mut().take() {
+            handle.abort();
+        }
         cancel_state.borrow_mut().take();
     });
     js_sys::Reflect::set(&source, &JsValue::from_str("cancel"), cancel.as_ref())?;
@@ -3128,6 +3389,132 @@ mod dynamic_schema_view_tests {
     use jazz::tools::public_schema::{
         ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema,
     };
+
+    #[test]
+    fn subscription_chunk_retry_uses_a_bounded_nonzero_backoff() {
+        assert_eq!(local_retry_delay_ms(0), 25);
+        assert_eq!(local_retry_delay_ms(1), 50);
+        assert_eq!(local_retry_delay_ms(5), 800);
+        assert_eq!(local_retry_delay_ms(u8::MAX), 1_000);
+        assert_eq!(
+            subscription_retry_delay_ms(0, 10_000),
+            10_000,
+            "a peer retry minimum must never be capped downward"
+        );
+    }
+
+    #[test]
+    fn subscription_retry_timer_segments_cover_the_full_u32_delay() {
+        assert_eq!(
+            subscription_retry_timer_segments(u32::MAX),
+            vec![MAX_JS_TIMEOUT_MS, MAX_JS_TIMEOUT_MS, 1],
+            "every host timer segment stays safe while the total delay is exact"
+        );
+    }
+
+    #[test]
+    fn canceling_a_pending_subscription_retry_drops_it_without_waiting() {
+        let (abort, registration) = AbortHandle::new_pair();
+        let wait = Abortable::new(futures_util::future::pending::<()>(), registration);
+        abort.abort();
+        assert!(matches!(block_on(wait), Err(_)));
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn canceling_an_actual_maximum_subscription_timer_drops_it_without_waiting() {
+        let (abort, registration) = AbortHandle::new_pair();
+        let mut wait = Box::pin(Abortable::new(
+            wait_for_subscription_retry(u32::MAX),
+            registration,
+        ));
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(wait.as_mut().poll(&mut context), Poll::Pending));
+        abort.abort();
+        assert!(matches!(
+            wait.as_mut().poll(&mut context),
+            Poll::Ready(Err(_))
+        ));
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn subscription_retry_timer_clears_live_handles_and_skips_fired_ones() {
+        fn timer_functions(
+            callback: Rc<RefCell<Option<js_sys::Function>>>,
+            clears: Rc<std::cell::Cell<u32>>,
+        ) -> (
+            Closure<dyn FnMut(JsValue, JsValue) -> JsValue>,
+            Closure<dyn FnMut(JsValue)>,
+        ) {
+            let set_timeout = Closure::<dyn FnMut(JsValue, JsValue) -> JsValue>::new(
+                move |callback_value: JsValue, _delay: JsValue| {
+                    *callback.borrow_mut() = Some(callback_value.unchecked_into());
+                    JsValue::from_f64(91.0)
+                },
+            );
+            let clear_timeout = Closure::<dyn FnMut(JsValue)>::new(move |handle: JsValue| {
+                assert_eq!(handle.as_f64(), Some(91.0));
+                clears.set(clears.get() + 1);
+            });
+            (set_timeout, clear_timeout)
+        }
+
+        let callback = Rc::new(RefCell::new(None));
+        let clears = Rc::new(std::cell::Cell::new(0));
+        let (set_timeout, clear_timeout) =
+            timer_functions(Rc::clone(&callback), Rc::clone(&clears));
+        let timer = SubscriptionRetryTimer::with_functions(
+            MAX_JS_TIMEOUT_MS,
+            JsValue::UNDEFINED,
+            set_timeout
+                .as_ref()
+                .unchecked_ref::<js_sys::Function>()
+                .clone(),
+            clear_timeout
+                .as_ref()
+                .unchecked_ref::<js_sys::Function>()
+                .clone(),
+        )
+        .unwrap();
+        drop(timer);
+        assert_eq!(
+            clears.get(),
+            1,
+            "cancelling the retry clears its host timer"
+        );
+
+        let callback = Rc::new(RefCell::new(None));
+        let clears = Rc::new(std::cell::Cell::new(0));
+        let (set_timeout, clear_timeout) =
+            timer_functions(Rc::clone(&callback), Rc::clone(&clears));
+        let mut timer = Box::pin(
+            SubscriptionRetryTimer::with_functions(
+                1,
+                JsValue::UNDEFINED,
+                set_timeout
+                    .as_ref()
+                    .unchecked_ref::<js_sys::Function>()
+                    .clone(),
+                clear_timeout
+                    .as_ref()
+                    .unchecked_ref::<js_sys::Function>()
+                    .clone(),
+            )
+            .unwrap(),
+        );
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(timer.as_mut().poll(&mut context), Poll::Pending));
+        callback
+            .borrow()
+            .as_ref()
+            .expect("setTimeout captured its callback")
+            .call0(&JsValue::UNDEFINED)
+            .unwrap();
+        assert!(matches!(timer.as_mut().poll(&mut context), Poll::Ready(())));
+        drop(timer);
+        assert_eq!(clears.get(), 0, "a fired timer has no live handle to clear");
+    }
 
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test::wasm_bindgen_test]

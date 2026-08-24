@@ -598,6 +598,8 @@ where
 pub enum ChunkError {
     #[error("chunk is unavailable")]
     Unavailable,
+    #[error("chunk retrieval is retryable after {retry_after_ms}ms")]
+    Retryable { retry_after_ms: u32 },
     #[error("chunk retrieval failed: {0}")]
     Backend(String),
     #[error("chunk bytes do not match the requested object hash")]

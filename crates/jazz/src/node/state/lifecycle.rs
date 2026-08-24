@@ -1111,25 +1111,11 @@ where
         &self,
         cells: &mut BTreeMap<String, Value>,
     ) -> Result<(), Error> {
-        self.hydrate_large_value_values(cells.values_mut()).await
-    }
-
-    pub(crate) async fn hydrate_current_rows(&self, rows: &mut [CurrentRow]) -> Result<(), Error> {
-        for row in rows {
-            let descriptor = row.record.descriptor().clone();
-            let mut values = row.record.to_values()?;
-            self.hydrate_large_value_values(values.iter_mut()).await?;
-            row.record =
-                std::sync::Arc::new(OwnedRecord::new(descriptor.create(&values)?, descriptor));
-        }
-        Ok(())
-    }
-
-    async fn hydrate_large_value_values<'a>(
-        &self,
-        values: impl IntoIterator<Item = &'a mut Value>,
-    ) -> Result<(), Error> {
-        for value in values {
+        // Transaction cells are application scalars today; their schema is
+        // not carried through this internal helper. Binding records, which may
+        // contain collected nested records, use the descriptor-directed walker
+        // below instead.
+        for value in cells.values_mut() {
             let target = match value {
                 Value::Nullable(Some(inner)) => inner.as_mut(),
                 value => value,
@@ -1137,21 +1123,202 @@ where
             let Value::Large(value_ref) = target else {
                 continue;
             };
-            let bytes = self
-                .database
-                .read_large_value_range(value_ref, 0..value_ref.byte_length)
-                .await?;
-            let logical = match value_ref.kind {
-                groove::large_values::LargeValueKind::Bytes => Value::Bytes(bytes),
-                groove::large_values::LargeValueKind::String
-                | groove::large_values::LargeValueKind::Json => Value::String(
-                    String::from_utf8(bytes)
-                        .map_err(|_| Error::InvalidStoredValue("large text is not valid UTF-8"))?,
-                ),
-            };
-            *target = logical;
+            *target = self.materialize_large_value(value_ref).await?;
         }
         Ok(())
+    }
+
+    pub(crate) async fn hydrate_current_rows(&self, rows: &mut [CurrentRow]) -> Result<(), Error> {
+        for row in rows {
+            let descriptor = row.record.descriptor().clone();
+            let mut values = row.record.to_values()?;
+            self.hydrate_record_values(&mut values, &descriptor).await?;
+            row.record =
+                std::sync::Arc::new(OwnedRecord::new(descriptor.create(&values)?, descriptor));
+        }
+        Ok(())
+    }
+
+    /// Materialize physical indirect scalars in one encoded record before a
+    /// language binding exposes that record outside Jazz.
+    pub(crate) async fn hydrate_encoded_record(
+        &self,
+        descriptor: &groove::records::RecordDescriptor,
+        raw: &mut Vec<u8>,
+    ) -> Result<(), Error> {
+        let mut values = descriptor.bind(raw).to_values()?;
+        self.hydrate_record_values(&mut values, descriptor).await?;
+        *raw = descriptor.create(&values)?;
+        Ok(())
+    }
+
+    /// Hydrate every physical indirect scalar in a descriptor-owned record.
+    ///
+    /// Values are decoded into a temporary tree and re-encoded only after the
+    /// full walk succeeds. In particular, a retryable missing chunk leaves the
+    /// retained subscription event byte-identical for the next attempt.
+    async fn hydrate_record_values(
+        &self,
+        values: &mut [Value],
+        descriptor: &records::RecordDescriptor,
+    ) -> Result<(), Error> {
+        if values.len() != descriptor.fields().len() {
+            return Err(Error::InvalidStoredValue(
+                "binding record has a descriptor/value arity mismatch",
+            ));
+        }
+        for (value, field) in values.iter_mut().zip(descriptor.fields()) {
+            self.hydrate_value_for_binding(value, &field.value_type).await?;
+        }
+        Ok(())
+    }
+
+    fn hydrate_value_for_binding<'a>(
+        &'a self,
+        value: &'a mut Value,
+        value_type: &'a records::ValueType,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + 'a>> {
+        use records::ValueType;
+
+        Box::pin(async move {
+            match value_type {
+                ValueType::String => match value {
+                    Value::String(_) => Ok(()),
+                    Value::Large(value_ref)
+                        if matches!(
+                            value_ref.kind,
+                            groove::large_values::LargeValueKind::String
+                                | groove::large_values::LargeValueKind::Json
+                        ) => {
+                        *value = self.materialize_large_value(value_ref).await?;
+                        Ok(())
+                    }
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding string value does not match its descriptor",
+                    )),
+                },
+                ValueType::Bytes => match value {
+                    Value::Bytes(_) => Ok(()),
+                    Value::Large(value_ref)
+                        if value_ref.kind == groove::large_values::LargeValueKind::Bytes =>
+                    {
+                        *value = self.materialize_large_value(value_ref).await?;
+                        Ok(())
+                    }
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding bytes value does not match its descriptor",
+                    )),
+                },
+                ValueType::Nullable(inner) => match value {
+                    Value::Nullable(None) => Ok(()),
+                    Value::Nullable(Some(value)) => {
+                        self.hydrate_value_for_binding(value, inner).await
+                    }
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding nullable value does not match its descriptor",
+                    )),
+                },
+                ValueType::Array(element_type) => match value {
+                    Value::Array(values) => {
+                        for value in values {
+                            self.hydrate_value_for_binding(value, element_type).await?;
+                        }
+                        Ok(())
+                    }
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding array value does not match its descriptor",
+                    )),
+                },
+                ValueType::Tuple(member_types) => match value {
+                    Value::Tuple(values) if values.len() == member_types.len() => {
+                        for (value, member_type) in values.iter_mut().zip(member_types) {
+                            self.hydrate_value_for_binding(value, member_type).await?;
+                        }
+                        Ok(())
+                    }
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding tuple value does not match its descriptor",
+                    )),
+                },
+                ValueType::Record(descriptor) => match value {
+                    Value::Record(record) if record.descriptor() == descriptor.as_ref() => {
+                        let mut values = record.to_values()?;
+                        self.hydrate_record_values(&mut values, descriptor).await?;
+                        *record = OwnedRecord::new(descriptor.create(&values)?, **descriptor);
+                        Ok(())
+                    }
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding nested record does not match its descriptor",
+                    )),
+                },
+                ValueType::Enum(schema) => match value {
+                    Value::Enum(enum_value) => {
+                        let tag = enum_value.tag();
+                        let case = schema.case(tag)?;
+                        if enum_value.record().descriptor() != &case.payload {
+                            return Err(Error::InvalidStoredValue(
+                                "binding enum payload does not match its descriptor",
+                            ));
+                        }
+                        let mut values = enum_value.record().to_values()?;
+                        self.hydrate_record_values(&mut values, &case.payload).await?;
+                        *enum_value = records::EnumValue::new(
+                            tag,
+                            OwnedRecord::new(
+                                case.payload.create(&values)?,
+                                case.payload,
+                            ),
+                        );
+                        Ok(())
+                    }
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding enum value does not match its descriptor",
+                    )),
+                },
+                ValueType::U8 if matches!(value, Value::U8(_)) => Ok(()),
+                ValueType::U16 if matches!(value, Value::U16(_)) => Ok(()),
+                ValueType::U32 if matches!(value, Value::U32(_)) => Ok(()),
+                ValueType::U64 if matches!(value, Value::U64(_)) => Ok(()),
+                ValueType::I32 if matches!(value, Value::I32(_)) => Ok(()),
+                ValueType::I64 if matches!(value, Value::I64(_)) => Ok(()),
+                ValueType::Bool if matches!(value, Value::Bool(_)) => Ok(()),
+                ValueType::Uuid if matches!(value, Value::Uuid(_)) => Ok(()),
+                ValueType::F64 => match value {
+                    Value::F64(value) if !value.is_nan() => Ok(()),
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding float value does not match its descriptor",
+                    )),
+                },
+                ValueType::EnumTag(schema) => match value {
+                    Value::EnumTag(value) => schema.variant(*value).map(|_| ()).map_err(Into::into),
+                    Value::String(value) => schema.discriminant(value).map(|_| ()).map_err(Into::into),
+                    _ => Err(Error::InvalidStoredValue(
+                        "binding enum tag value does not match its descriptor",
+                    )),
+                },
+                _ => Err(Error::InvalidStoredValue(
+                    "binding value does not match its descriptor",
+                )),
+            }
+        })
+    }
+
+    async fn materialize_large_value(
+        &self,
+        value_ref: &groove::large_values::LargeValueRef,
+    ) -> Result<Value, Error> {
+        let bytes = self
+            .database
+            .read_large_value_range(value_ref, 0..value_ref.byte_length)
+            .await?;
+        match value_ref.kind {
+            groove::large_values::LargeValueKind::Bytes => Ok(Value::Bytes(bytes)),
+            groove::large_values::LargeValueKind::String
+            | groove::large_values::LargeValueKind::Json => Ok(Value::String(
+                String::from_utf8(bytes)
+                    .map_err(|_| Error::InvalidStoredValue("large text is not valid UTF-8"))?,
+            )),
+        }
     }
 
     async fn rebuild_database_slot(&mut self) -> Result<(), Error> {
