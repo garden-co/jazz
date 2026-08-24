@@ -658,7 +658,7 @@ function openMemoryDb(
   );
 }
 
-const NATIVE_TRUSTED_BACKEND_MODE_MARKER = "jazz:trusted-backend-host";
+const NATIVE_BACKEND_RUNTIME_MARKER = "jazz:backend-runtime";
 
 export class NativeRuntimeAdapter implements Runtime {
   private readonly db: NativeDb;
@@ -666,7 +666,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly configBytes: Uint8Array;
   private readonly peerIdentity: Uint8Array;
   private readonly schemaHash: string;
-  private readonly trustedBackend: boolean;
+  private readonly isBackend: boolean;
   private readonly preparedQueries = new Map<string, PreparedQuery>();
   private readonly transactionOwner: TransactionOwnerState;
   private readonly pendingTxs: Map<string, PendingTx>;
@@ -726,7 +726,7 @@ export class NativeRuntimeAdapter implements Runtime {
     return new NativeRuntimeAdapter(null, schema, this.node, this.peerIdentity, 1, true, {
       db: this.db.registerSchema(encodeSchema(schema)),
       owner: this,
-      trustedBackendHost: this.trustedBackend,
+      isBackend: this.isBackend,
     });
   }
 
@@ -743,8 +743,13 @@ export class NativeRuntimeAdapter implements Runtime {
       initialSyncFlushEvery?: number;
       selfSignedClientProof?: NativeSelfSignedClientProof;
       readAuthorizationHost?: ReadAuthorizationHost;
-      /** Internal server-host authority; never derived from a public session. */
-      trustedBackendHost?: boolean;
+      /**
+       * Internal application-backend capability. This identifies an
+       * application-controlled trusted runtime that may perform backend/SYSTEM
+       * operations and evaluate request-scoped identities. It is not upstream
+       * connection state, a credential, or edge/core fate authority.
+       */
+      isBackend?: boolean;
       owner?: NativeRuntimeAdapter;
     },
   ) {
@@ -760,21 +765,18 @@ export class NativeRuntimeAdapter implements Runtime {
     this.completedTxs = this.transactionOwner.completedTxs;
     this.writes = this.transactionOwner.writes;
     this.schemaBytes = encodeSchema(schema);
-    this.trustedBackend = opts?.owner?.trustedBackend ?? opts?.trustedBackendHost ?? false;
-    // The current native ABI selects its trusted open path by presence of a
-    // credential. Keep that mode marker private to this adapter: callers use
-    // the explicit host-authority option; actual upstream credentials never
-    // cross this storage boundary.
-    const nativeBackendCredential = this.trustedBackend
-      ? NATIVE_TRUSTED_BACKEND_MODE_MARKER
-      : undefined;
+    this.isBackend = opts?.owner?.isBackend ?? opts?.isBackend ?? false;
+    // The current native ABI selects this application-runtime capability via
+    // its credential-shaped slot. Pass only the private marker: backendSecret
+    // authenticates upstream transport and must never confer local authority.
+    const nativeBackendMarker = this.isBackend ? NATIVE_BACKEND_RUNTIME_MARKER : undefined;
     this.configBytes = openConfig(
       node,
       author,
       sourceId,
       historyComplete,
       opts?.initialSyncFlushEvery,
-      nativeBackendCredential,
+      nativeBackendMarker,
     );
     this.peerIdentity = author;
     this.schemaHash = serializeRuntimeSchema(schema);
@@ -2205,8 +2207,7 @@ export class NativeRuntimeAdapter implements Runtime {
    * point, with a request session supplying its subject when present.
    */
   private readRowsForHost(query: PreparedQuery, opts: unknown, identity?: Uint8Array): Uint8Array {
-    if (this.trustedBackend && identity && isSystemIdentity(identity))
-      return this.db.all(query, opts);
+    if (this.isBackend && identity && isSystemIdentity(identity)) return this.db.all(query, opts);
     return this.readAuthorizationHost === "trusted-serving"
       ? this.db.allForIdentity(query, identity ?? this.peerIdentity, opts)
       : this.db.all(query, opts);
@@ -2217,17 +2218,17 @@ export class NativeRuntimeAdapter implements Runtime {
    * an ordinary client mutation into a policy-enforcing local admission.
    */
   private trustedWriteIdentity(session: RuntimeSession | null | undefined): Uint8Array | undefined {
-    if (this.trustedBackend && session && isSystemIdentity(session.identity)) return undefined;
+    if (this.isBackend && session && isSystemIdentity(session.identity)) return undefined;
     return this.readAuthorizationHost === "trusted-serving"
       ? (session?.identity ?? this.peerIdentity)
       : undefined;
   }
 
   /**
-   * A backend credential admits the write as SYSTEM; the public canonical
-   * attribution is provenance only.  Keep those two identities separate so
-   * an attributed backend write cannot accidentally become a user-authorized
-   * write (or vice versa).
+   * An application-controlled backend runtime may admit the write as SYSTEM;
+   * the public canonical attribution is provenance only. Keep local backend
+   * capability separate from upstream credentials so an attributed backend
+   * write cannot accidentally become a user-authorized write (or vice versa).
    */
   private backendAttribution(
     writeContext: string | null | undefined,
@@ -2245,7 +2246,7 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private isBackendSystemSession(session: RuntimeSession | null | undefined): boolean {
-    return this.trustedBackend && !!session && isSystemIdentity(session.identity);
+    return this.isBackend && !!session && isSystemIdentity(session.identity);
   }
 
   private stagedRowForWriteMerge(
@@ -2401,7 +2402,7 @@ export class NativeRuntimeAdapter implements Runtime {
     ) {
       return;
     }
-    if (this.trustedBackend && isSystemIdentity(session.identity)) return;
+    if (this.isBackend && isSystemIdentity(session.identity)) return;
     this.db.setIdentityClaims(session.identity, session.claims);
   }
 

@@ -1341,7 +1341,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       1,
       true,
       {
-        trustedBackendHost: true,
+        isBackend: true,
         readAuthorizationHost: "trusted-serving",
       },
     );
@@ -5062,7 +5062,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       new TextEncoder().encode(JSON.stringify(["urn:jazz:test", "backend-owner"])),
       1,
       true,
-      { trustedBackendHost: true },
+      { isBackend: true },
     );
     const context = JSON.stringify({
       session: {
@@ -5131,7 +5131,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       new TextEncoder().encode(JSON.stringify(["urn:jazz:test", "backend-owner"])),
       1,
       true,
-      { trustedBackendHost: true },
+      { isBackend: true },
     );
     const batch = createOpenBatchId();
     const context = (attribution?: string) =>
@@ -5173,7 +5173,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       new TextEncoder().encode(JSON.stringify(["urn:jazz:test", "backend-owner"])),
       1,
       true,
-      { trustedBackendHost: true },
+      { isBackend: true },
     );
     const context = JSON.stringify({
       session: {

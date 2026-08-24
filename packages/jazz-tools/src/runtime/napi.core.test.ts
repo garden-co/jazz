@@ -257,7 +257,7 @@ it("runs every supported backend-attributed mutation family through real NAPI pr
     testAuthorBytes("napi-attribution:matrix-owner"),
     1,
     true,
-    { trustedBackendHost: true },
+    { isBackend: true },
   );
   const provenance = JSON.stringify(["https://issuer.example", "matrix-author"]);
   const context = (attribution: string | null = provenance, batchId?: string) =>
@@ -374,7 +374,7 @@ it("retains trusted-process attribution when a real NAPI schema view is register
     testAuthorBytes("napi-attribution:view-owner"),
     1,
     true,
-    { trustedBackendHost: true },
+    { isBackend: true },
   );
   const view = runtime.registerSchemaView(TEST_SCHEMA);
   const provenance = JSON.stringify(["https://issuer.example", "view-author"]);

@@ -3464,9 +3464,10 @@ where
     if config.history_complete {
         let db = if trusted_backend {
             // SAFETY: `trusted_backend` is true only after this NAPI open
-            // configuration carried a non-empty backend credential. This is
-            // the binding's intentionally narrow trusted in-process boundary;
-            // it is not inferred from SYSTEM or a caller-supplied author.
+            // configuration carried the binding's private backend-runtime
+            // marker. This is the intentionally narrow trusted in-process
+            // boundary; it is not inferred from an upstream credential,
+            // SYSTEM identity, or a caller-supplied author.
             unsafe {
                 core_block_on(CoreDb::open_history_complete_with_backend_attribution(
                     db_config,
@@ -3481,8 +3482,8 @@ where
         Ok(db)
     } else {
         let db = if trusted_backend {
-            // SAFETY: see the history-complete branch above. The credential
-            // gate is checked before this unsafe core opt-in.
+            // SAFETY: see the history-complete branch above. The private
+            // backend-runtime marker is checked before this unsafe core opt-in.
             unsafe { core_block_on(CoreDb::open_with_backend_attribution(db_config)) }
         } else {
             core_block_on(CoreDb::open(db_config))

@@ -221,6 +221,7 @@ describe("backend/create-jazz-context", () => {
       {
         persistentPath: "/tmp/jazz.db",
         readAuthorizationHost: "trusted-serving",
+        isBackend: true,
       },
     );
   });
@@ -357,15 +358,18 @@ describe("backend/create-jazz-context", () => {
     expect(mocks.clients[0]!.asBackend).toHaveBeenCalledTimes(6);
     expect(mocks.connectWithRuntime).toHaveBeenCalledTimes(1);
     expect(mocks.nativeRuntimeCtor.mock.calls[0]?.[6]).toMatchObject({
-      trustedBackendHost: true,
+      isBackend: true,
     });
+    // Local backend authority is an application-runtime capability. The
+    // upstream transport secret is forwarded only to the connected client and
+    // never used as the native capability marker.
     expect(mocks.nativeRuntimeCtor.mock.calls[0]?.[6]).not.toHaveProperty("backendCredential");
     expect(mocks.connectWithRuntime.mock.calls[0]?.[1]).toMatchObject({
       backendSecret: "secret",
     });
   });
 
-  it("BC-U03: request/session/attribution helpers work locally without backend sync config", async () => {
+  it("BC-U03: disconnected backend runtime keeps request/session authority without credentials", async () => {
     const context = createJazzContext({
       appId: "server-app",
       app: { wasmSchema: SCHEMA_A },
@@ -624,7 +628,7 @@ describe("backend/create-jazz-context", () => {
       expect.any(Uint8Array),
       1,
       true,
-      { readAuthorizationHost: "trusted-serving" },
+      { readAuthorizationHost: "trusted-serving", isBackend: true },
     );
   });
 

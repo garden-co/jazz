@@ -124,11 +124,11 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
         ? {
             persistentPath: this.config.driver.dataPath,
             readAuthorizationHost: "trusted-serving",
-            trustedBackendHost: true,
+            isBackend: true,
           }
         : {
             readAuthorizationHost: "trusted-serving",
-            trustedBackendHost: true,
+            isBackend: true,
           },
     );
 
