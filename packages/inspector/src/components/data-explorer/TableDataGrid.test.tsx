@@ -12,6 +12,7 @@ const mockInsertWait = vi.fn();
 const mockDeleteWait = vi.fn();
 let currentRows: Array<Record<string, unknown>>;
 let currentReferenceRowsByTable: Record<string, Array<Record<string, unknown>>>;
+let currentTable: string;
 
 function getContainingCell(element: HTMLElement | null): HTMLElement | null {
   return element?.closest('[role="gridcell"], td') ?? null;
@@ -105,7 +106,7 @@ vi.mock("react-router", async () => {
   const actual = await vi.importActual<typeof import("react-router")>("react-router");
   return {
     ...actual,
-    useParams: () => ({ table: "todos" }),
+    useParams: () => ({ table: currentTable }),
   };
 });
 
@@ -117,6 +118,7 @@ describe("TableDataGrid", () => {
 
   beforeEach(() => {
     localStorage.clear();
+    currentTable = "todos";
     currentRows = [
       {
         id: "row-2",
@@ -772,6 +774,24 @@ describe("TableDataGrid", () => {
     });
 
     expect(screen.queryByText("row-2")).toBeNull();
+  });
+
+  it("clears staged mutations when the routed table changes", async () => {
+    const { rerender } = renderGrid();
+    fireEvent.click(screen.getByRole("button", { name: "Insert row" }));
+    expect(screen.getByText("1 staged insert")).not.toBeNull();
+
+    currentTable = "users";
+    currentRows = [];
+    rerender(renderGridUi());
+
+    await waitFor(() => {
+      expect(screen.queryByText("1 staged insert")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Save changes" })).toBeNull();
+    });
+    expect(mockInsert).not.toHaveBeenCalled();
+    expect(mockUpdate).not.toHaveBeenCalled();
+    expect(mockDelete).not.toHaveBeenCalled();
   });
 
   it("appends a staged insert row and inserts it from the banner", async () => {
