@@ -273,6 +273,61 @@ async fn resident_large_value_is_visible_before_its_journaled_promotion() {
 }
 
 #[futures_test::test]
+async fn failed_resident_blob_stage_eagerly_retracts_row_and_upload_journal() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(Rc::new(crate::chunks::ManagedChunkStorage::new(Rc::new(
+        CrashAfterChunkPut::new(Some(0)),
+    ))));
+    let stage = database
+        .prepare_resident_large_value(
+            crate::large_values::LargeValueKind::Bytes,
+            &vec![4; crate::large_values::INLINE_VALUE_MAX_BYTES + 1],
+        )
+        .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "objects",
+        vec![Value::U64(1), Value::Large(stage.value_ref().clone())],
+    );
+    batch.accept_resident_large_value(stage);
+    let applied = database.apply_batch(batch).await.unwrap();
+    let persistence = applied.persist().await;
+    assert!(matches!(
+        database.retract_failed_persistence(persistence).await,
+        Err(Error::Storage(_))
+    ));
+    assert!(
+        database
+            .primary_key_scan("objects", &[Value::U64(1)])
+            .await
+            .unwrap()
+            .is_empty(),
+        "the failed direct upload must retract its immediately-visible row"
+    );
+    assert!(
+        database
+            .pending_large_value_uploads()
+            .await
+            .unwrap()
+            .is_empty(),
+        "a failed blob put must eagerly release the durable upload journal"
+    );
+
+    let mut retry = database.open_batch();
+    retry.insert("objects", vec![Value::U64(1), Value::Bytes(vec![1])]);
+    database.commit_batch(retry).await.unwrap();
+}
+
+#[futures_test::test]
 async fn idempotent_restaging_reports_incoming_bytes_for_each_upload() {
     let schema = DatabaseSchema::new([TableSchema::new(
         "objects",

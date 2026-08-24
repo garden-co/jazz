@@ -955,6 +955,11 @@ export class NativeRuntimeAdapter implements Runtime {
     const branchView = branchViewFromWriteContext(_writeContext);
     const tx = this.currentTx(_writeContext, "Insert");
     if (tx) {
+      if (rowContainsOversizedScalar(this.table(table), values)) {
+        throw new Error(
+          "Oversized values cannot be inserted inside a synchronous transaction; use insertStreaming outside the transaction",
+        );
+      }
       const nativeTx = this.txForWrite(tx, writeIdentity);
       if (branchView) {
         requireBranchMethod(
@@ -2946,6 +2951,26 @@ export class NativeRuntimeAdapter implements Runtime {
       if (waiter.active) waiter.resolve();
     }
   }
+}
+
+const LARGE_VALUE_INLINE_BYTES = 64 * 1024;
+
+function rowContainsOversizedScalar(
+  definition: { columns: ColumnDescriptor[] },
+  values: InsertValues,
+): boolean {
+  return definition.columns.some((column) => {
+    const value = values[column.name];
+    if (!value || value.type === "Null") return false;
+    if (column.column_type.type === "Bytea") {
+      return value.type === "Bytea" && value.value.byteLength > LARGE_VALUE_INLINE_BYTES;
+    }
+    return (
+      (column.column_type.type === "Text" || column.column_type.type === "Json") &&
+      value.type === "Text" &&
+      new TextEncoder().encode(value.value).byteLength > LARGE_VALUE_INLINE_BYTES
+    );
+  });
 }
 
 function closeSubscriptionSourceState(subscription: SubscriptionState): void {
