@@ -1644,6 +1644,41 @@ describe("NAPI integration", () => {
     }
   }, 30_000);
 
+  it("allows local backend writes without an upstream secret but rejects public SYSTEM forgery", async () => {
+    const { createJazzContext } = await import("../backend/create-jazz-context.js");
+    const dataRoot = await createTempDir("jazz-napi-local-backend-");
+    const context = createJazzContext({
+      appId: randomUUID(),
+      app: { wasmSchema: TEST_SCHEMA },
+      permissions: {},
+      driver: { type: "persistent", dataPath: join(dataRoot, "runtime.db") },
+    });
+
+    try {
+      const created = await context
+        .asBackend()
+        .insert(simpleTodosTable, { title: "trusted-local-backend", done: false })
+        .wait({ tier: "local" });
+      expect(created).toMatchObject({ title: "trusted-local-backend", done: false });
+
+      const forgedSystemSession = context.forSession({
+        issuer: "urn:jazz:system",
+        user_id: "system",
+        claims: {},
+        authMode: "external",
+      });
+      expect(() =>
+        forgedSystemSession.insert(simpleTodosTable, {
+          title: "forged-system",
+          done: false,
+        }),
+      ).toThrow(/reserved issuer/);
+    } finally {
+      await context.shutdown();
+      await rm(dataRoot, { recursive: true, force: true });
+    }
+  });
+
   it("accepts modern epoch-millisecond timestamps from the TS value converter on backend durable writes", async () => {
     const dataRoot = await createTempDir("jazz-napi-timestamp-");
     const dataPath = join(dataRoot, "runtime.db");
