@@ -237,6 +237,8 @@ fn maintained_view_retained_claim_param_equality_matches_literal_recompute() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let author = user(0xa1);
     let other = user(0xb2);
+    install_test_uuid_sub_claim(&mut core, author);
+    install_test_uuid_sub_claim(&mut core, other);
 
     accept_global(
         &mut core,
@@ -295,6 +297,8 @@ fn maintained_view_join_policy_retained_claim_param_matches_query_engine_result(
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let author = user(0xa1);
     let other = user(0xb2);
+    install_test_uuid_sub_claim(&mut core, author);
+    install_test_uuid_sub_claim(&mut core, other);
 
     accept_global(
         &mut core,
