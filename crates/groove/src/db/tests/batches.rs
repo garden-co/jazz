@@ -25,6 +25,10 @@ impl CrashAfterChunkPut {
     fn len(&self) -> usize {
         self.storage.len()
     }
+
+    fn resume(&self) {
+        self.fail_after_successes.set(None);
+    }
 }
 
 impl crate::chunks::ChunkKvStorage for CrashAfterChunkPut {
@@ -284,9 +288,10 @@ async fn failed_resident_blob_stage_eagerly_retracts_row_and_upload_journal() {
     .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
     let storage = MemoryStorage::new(&schema.column_families());
     let mut database = Database::new(schema, storage).await.unwrap();
-    database.set_chunk_storage(Rc::new(crate::chunks::ManagedChunkStorage::new(Rc::new(
-        CrashAfterChunkPut::new(Some(0)),
-    ))));
+    let chunks = Rc::new(CrashAfterChunkPut::new(Some(0)));
+    database.set_chunk_storage(Rc::new(crate::chunks::ManagedChunkStorage::new(
+        chunks.clone(),
+    )));
     let stage = database
         .prepare_resident_large_value(
             crate::large_values::LargeValueKind::Bytes,
@@ -303,7 +308,9 @@ async fn failed_resident_blob_stage_eagerly_retracts_row_and_upload_journal() {
     let persistence = applied.persist().await;
     assert!(matches!(
         database.retract_failed_persistence(persistence).await,
-        Err(Error::Storage(_))
+        Err(Error::IvmRuntime(crate::ivm::runtime::IvmRuntimeError::Chunk(
+            crate::chunks::ChunkError::Backend(message)
+        ))) if message.contains("injected crash after durable chunk put")
     ));
     assert!(
         database
@@ -321,10 +328,41 @@ async fn failed_resident_blob_stage_eagerly_retracts_row_and_upload_journal() {
             .is_empty(),
         "a failed blob put must eagerly release the durable upload journal"
     );
+    assert_eq!(
+        chunks.len(),
+        0,
+        "a failed first chunk put must not retain a durable chunk"
+    );
 
+    chunks.resume();
+    let retry_bytes = vec![5; crate::large_values::INLINE_VALUE_MAX_BYTES + 1];
+    let retry_stage = database
+        .prepare_resident_large_value(crate::large_values::LargeValueKind::Bytes, &retry_bytes)
+        .unwrap();
     let mut retry = database.open_batch();
-    retry.insert("objects", vec![Value::U64(1), Value::Bytes(vec![1])]);
-    database.commit_batch(retry).await.unwrap();
+    retry.insert(
+        "objects",
+        vec![Value::U64(1), Value::Large(retry_stage.value_ref().clone())],
+    );
+    retry.accept_resident_large_value(retry_stage.clone());
+    let retry_persistence = database.apply_batch(retry).await.unwrap().persist().await;
+    database.finish_persistence(retry_persistence).unwrap();
+    assert_eq!(
+        database
+            .read_large_value_range(retry_stage.value_ref(), 0..retry_bytes.len() as u64)
+            .await
+            .unwrap(),
+        retry_bytes,
+        "a retried resident upload must not inherit failed-stage state"
+    );
+    assert!(
+        database
+            .pending_large_value_uploads()
+            .await
+            .unwrap()
+            .is_empty(),
+        "the successful retry must also consume its upload journal"
+    );
 }
 
 #[futures_test::test]
