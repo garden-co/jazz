@@ -245,7 +245,12 @@ impl PeerChunkResolver {
 
     fn take_outbound(&self, limit: usize) -> Vec<ChunkRequestEntry> {
         let mut state = self.state.borrow_mut();
-        let count = limit.min(state.outbound.len());
+        // The wire decoder rejects batches above this cardinality, so never let
+        // an eager host-side drain construct a message that another Jazz peer
+        // would reject.
+        let count = limit
+            .min(crate::protocol_limits::MAX_CHUNK_REQUEST_BATCH_ENTRIES)
+            .min(state.outbound.len());
         state.outbound.drain(..count).collect()
     }
 

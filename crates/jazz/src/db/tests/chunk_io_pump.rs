@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll};
 
-use groove::chunks::{ChunkProvider, ChunkStorage, MissingChunkResolver};
+use groove::chunks::{ChunkKvStorage, ChunkProvider, ChunkStorage, MissingChunkResolver};
 
 use super::super::*;
 
@@ -142,6 +142,97 @@ fn dropping_the_last_suspended_consumer_cancels_unsent_chunk_demand() {
     ));
     drop(pending);
     assert!(pump.take_outbound(64).is_none());
+}
+
+// This stays at the auxiliary-pump boundary because the batch split is a
+// hop-local wire-protocol contract, not a user-visible database operation.
+#[test]
+fn five_concurrent_chunk_demands_are_delivered_in_two_decodable_batches() {
+    crate::db::block_on(async {
+        let source = Rc::new(groove::chunks::MemoryChunkStorage::new());
+        let destination = Rc::new(groove::chunks::MemoryChunkStorage::new());
+        let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
+        let mut source_database = groove::db::Database::new(
+            schema.clone(),
+            groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF]),
+        )
+        .await
+        .unwrap();
+        source_database.set_chunk_storage(source.clone());
+        let mut destination_database = groove::db::Database::new(
+            schema,
+            groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF]),
+        )
+        .await
+        .unwrap();
+        destination_database.set_chunk_storage(destination.clone());
+
+        let requests = (0_u8..5)
+            .map(|index| groove::chunks::ChunkRequest {
+                object_hash: groove::large_values::object_hash(&[index]).0,
+                locator: vec![index; 16],
+            })
+            .collect::<Vec<_>>();
+        for (index, request) in requests.iter().enumerate() {
+            source
+                .put_if_absent(
+                    request.locator.clone(),
+                    groove::large_values::ContentHash(request.object_hash),
+                    bytes::Bytes::from(vec![index as u8]),
+                )
+                .await
+                .unwrap();
+        }
+
+        let resolver = PeerChunkResolver::default();
+        let downstream = PeerIoPump::new(
+            resolver.clone(),
+            destination_database.local_chunk_reader(),
+            1,
+            PeerIoPumpRole::Upstream,
+        );
+        let upstream = PeerIoPump::new(
+            resolver.clone(),
+            source_database.local_chunk_reader(),
+            2,
+            PeerIoPumpRole::Subscriber,
+        );
+        let provider =
+            groove::chunks::StorageChunkProvider::with_resolver(destination, Rc::new(resolver));
+        let mut reads = requests
+            .iter()
+            .cloned()
+            .map(|request| provider.get(request))
+            .collect::<Vec<_>>();
+        let waker = futures::task::noop_waker();
+        let mut context = Context::from_waker(&waker);
+        for read in &mut reads {
+            assert!(matches!(Pin::new(read).poll(&mut context), Poll::Pending));
+        }
+
+        for expected_batch_len in [4, 1] {
+            let request_batch = downstream.take_outbound(64).unwrap();
+            let SyncMessage::ChunkRequestBatch(batch) = request_batch else {
+                unreachable!();
+            };
+            assert_eq!(batch.requests.len(), expected_batch_len);
+            let encoded =
+                crate::wire::encode_sync_message(&SyncMessage::ChunkRequestBatch(batch.clone()))
+                    .unwrap();
+            assert!(crate::wire::decode_sync_message(&encoded).is_ok());
+            upstream
+                .route_incoming(SyncMessage::ChunkRequestBatch(batch))
+                .await
+                .unwrap();
+            let response_batch = upstream.take_outbound(64).unwrap();
+            downstream.route_incoming(response_batch).await.unwrap();
+        }
+        assert!(downstream.take_outbound(64).is_none());
+
+        for (index, read) in reads.into_iter().enumerate() {
+            assert_eq!(read.await.unwrap().as_ref(), &[index as u8]);
+        }
+    });
 }
 
 #[test]
