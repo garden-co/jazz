@@ -722,7 +722,7 @@ fn view_update_is_not_empty_when_it_only_carries_program_facts() {
         binding_id: crate::query::BindingId(uuid::Uuid::from_bytes([0x22; 16])),
         read_view: Default::default(),
     };
-    let empty = SyncMessage::ViewUpdate {
+    let empty = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through: crate::time::GlobalTime(0),
         reset_result_set: false,
@@ -734,10 +734,10 @@ fn view_update_is_not_empty_when_it_only_carries_program_facts() {
         terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
-    };
+    });
     assert!(view_update_is_empty(&empty));
 
-    let fact_only = SyncMessage::ViewUpdate {
+    let fact_only = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription,
         settled_through: crate::time::GlobalTime(0),
         reset_result_set: false,
@@ -757,6 +757,6 @@ fn view_update_is_not_empty_when_it_only_carries_program_facts() {
             },
         )],
         program_fact_removes: Vec::new(),
-    };
+    });
     assert!(!view_update_is_empty(&fact_only));
 }

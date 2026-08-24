@@ -212,7 +212,9 @@ fn subscriber_connection_serves_default_ordered_window_alongside_unbounded_shape
     let subscriptions = drive_subscriber_until_payloads(&subscriber, client_transport.as_mut(), 2)
         .into_iter()
         .map(|message| match message {
-            SyncMessage::ViewUpdate { subscription, .. } => subscription,
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+                subscription, ..
+            }) => subscription,
             other => panic!("expected ViewUpdate, got {other:?}"),
         })
         .collect::<BTreeSet<_>>();
@@ -761,11 +763,11 @@ fn subscriber_connection_accepts_relation_register_shape_for_serving_subscriptio
         }))
         .unwrap();
 
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: served,
         result_member_adds,
         ..
-    } = drive_subscriber_until_payload(&subscriber, client_transport.as_mut())
+    }) = drive_subscriber_until_payload(&subscriber, client_transport.as_mut())
     else {
         panic!("expected relation facade subscription view update");
     };
