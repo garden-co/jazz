@@ -16,6 +16,7 @@ import {
   uniqueDbName,
   waitForCondition,
   waitForQuery,
+  withTimeout,
 } from "../../../../packages/jazz-tools/tests/browser/support.js";
 import {
   blockJazzServerNetwork,
@@ -29,10 +30,39 @@ import { assertWorldTourTopologyContract } from "./topology-contract.js";
 import { TOPOLOGY_SEED } from "./topology-seed.js";
 
 const ctx = new TestCleanup();
-afterEach(async () => ctx.cleanup());
+const PHASE_TIMEOUT_MS = 25_000;
+const FAULT_TIMEOUT_MS = 15_000;
+const PHASE_COUNT = 6;
+const FAULT_COUNT = 7;
+const TEST_TIMEOUT_MS =
+  PHASE_COUNT * PHASE_TIMEOUT_MS + FAULT_COUNT * FAULT_TIMEOUT_MS + FAULT_TIMEOUT_MS + 10_000;
+let unblockNetworkAfterTest: (() => Promise<void>) | undefined;
+
+function topologyTest(name: string, run: () => Promise<void>): void {
+  it(name, run, TEST_TIMEOUT_MS);
+}
+
+afterEach(async () => {
+  let networkCleanupError: unknown;
+  try {
+    if (unblockNetworkAfterTest) {
+      await withTimeout(
+        unblockNetworkAfterTest(),
+        FAULT_TIMEOUT_MS,
+        "WorldTour afterEach network unblock timed out",
+      );
+    }
+  } catch (error) {
+    networkCleanupError = error;
+  } finally {
+    unblockNetworkAfterTest = undefined;
+    await ctx.cleanup();
+  }
+  if (networkCleanupError) throw networkCleanupError;
+});
 
 describe("WorldTour cross-topology itinerary recovery", () => {
-  it("keeps the ordered venue window convergent across concurrent and offline edits", async () => {
+  topologyTest("keeps the bounded itinerary convergent through topology faults", async () => {
     // Validate the complete runtime command adapter before this scenario can
     // create a client. This turns stale browser artifacts into a useful
     // immediate error rather than a mid-receipt timeout.
@@ -53,6 +83,15 @@ describe("WorldTour cross-topology itinerary recovery", () => {
     let networkBlocked = false;
     const aliceDbName = uniqueDbName("world-tour-alice");
 
+    const ensureServerNetworkUnblocked = async () => {
+      if (!networkBlocked || !server) return;
+      await unblockJazzServerNetwork(server.serverUrl);
+      networkBlocked = false;
+    };
+    // The scenario cleanup is the primary path. afterEach invokes this same
+    // idempotent closure again if that bounded cleanup failed or timed out.
+    unblockNetworkAfterTest = ensureServerNetworkUnblocked;
+
     const itineraryQuery = (bandId: string) =>
       app.stops
         .where({
@@ -68,8 +107,8 @@ describe("WorldTour cross-topology itinerary recovery", () => {
         id: "world-tour.topology.itinerary-recovery",
         topology: ["browser", "edge", "core"],
         seed,
-        phaseTimeoutMs: 25_000,
-        faultTimeoutMs: 15_000,
+        phaseTimeoutMs: PHASE_TIMEOUT_MS,
+        faultTimeoutMs: FAULT_TIMEOUT_MS,
         replay: `JAZZ_EXAMPLE_TOPOLOGY_SEED=${seed} pnpm --dir examples/world-tour test`,
         targets: {
           alice: {
@@ -87,13 +126,13 @@ describe("WorldTour cross-topology itinerary recovery", () => {
           },
           serverNetwork: {
             disconnect: async () => {
-              await blockJazzServerNetwork(server!.serverUrl);
+              // Mark the cleanup obligation before invoking the command: a
+              // partially applied route block must still be undone if the
+              // command rejects after installing it.
               networkBlocked = true;
+              await blockJazzServerNetwork(server!.serverUrl);
             },
-            reconnect: async () => {
-              await unblockJazzServerNetwork(server!.serverUrl);
-              networkBlocked = false;
-            },
+            reconnect: ensureServerNetworkUnblocked,
           },
           authorization: {
             failure: async () => {
@@ -125,12 +164,7 @@ describe("WorldTour cross-topology itinerary recovery", () => {
             },
           },
         },
-        cleanup: async () => {
-          if (networkBlocked) {
-            await unblockJazzServerNetwork(server!.serverUrl);
-            networkBlocked = false;
-          }
-        },
+        cleanup: ensureServerNetworkUnblocked,
         phases: [
           {
             name: "edge bootstrap and itinerary query shape",
@@ -256,7 +290,9 @@ describe("WorldTour cross-topology itinerary recovery", () => {
                   .update(app.stops, firstStop!.id, { status: "tentative" })
                   .wait({ tier: "local" }),
                 bob!
-                  .update(app.stops, firstStop!.id, { publicDescription: "peer-confirmed detail" })
+                  .update(app.stops, firstStop!.id, {
+                    publicDescription: "peer-confirmed detail",
+                  })
                   .wait({ tier: "local" }),
               ]);
               await waitForCondition(
@@ -349,14 +385,17 @@ describe("WorldTour cross-topology itinerary recovery", () => {
                 20_000,
                 "edge",
               );
+              const expectedObservedWindow = rows.map(
+                (stop) => `${stop.date.toISOString()}:${stop.venue?.name}`,
+              );
               await waitForCondition(
-                async () => observedWindow.length === 2,
+                async () =>
+                  observedWindow.length === expectedObservedWindow.length &&
+                  observedWindow.every((entry, index) => entry === expectedObservedWindow[index]),
                 10_000,
-                "ordered itinerary subscription converges",
+                "ordered itinerary subscription publishes the recovered exact window",
               );
-              expect(observedWindow).toEqual(
-                rows.map((stop) => `${stop.date.toISOString()}:${stop.venue?.name}`),
-              );
+              expect(observedWindow).toEqual(expectedObservedWindow);
               expect(rows.map((stop) => stop.id)).toEqual([firstStop!.id, offlineStop!.id]);
               expect(rows.map((stop) => stop.id)).not.toContain(protectedStop!.id);
               expect(rows.map((stop) => stop.venue?.name)).toEqual(["London Hall", "London Hall"]);
@@ -386,9 +425,9 @@ describe("WorldTour cross-topology itinerary recovery", () => {
               expect(rows.map((stop) => stop.venue?.name)).toEqual(["London Hall", "London Hall"]);
 
               // These are the two immutable projections consumed by
-              // TourCalendar and MapController. Keeping the assertions on the
-              // bounded query result catches both accidental over-fetch and a
-              // missing relation include after an offline IndexedDB reopen.
+              // TourCalendar and MapController. Their exact values prove that
+              // the relation was rehydrated after an offline IndexedDB reopen;
+              // the exact two-row ID assertions above separately prove bounds.
               expect(
                 rows.map((stop) => ({
                   id: stop.id,
@@ -452,11 +491,11 @@ describe("WorldTour cross-topology itinerary recovery", () => {
       ["reconnect", "completed"],
       ["reconnect", "completed"],
     ]);
-  }, 90_000);
+  });
 });
 
 async function openClient(
-  server: { appId: string; serverUrl: string; adminSecret: string },
+  server: { appId: string; serverUrl: string },
   label: string,
   userId: string,
   dbName = uniqueDbName(`world-tour-${label}`),
@@ -465,7 +504,6 @@ async function openClient(
     await createDb({
       appId: server.appId,
       serverUrl: server.serverUrl,
-      adminSecret: server.adminSecret,
       jwtToken: await getJazzServerJwtForUser(userId, undefined, server.appId),
       driver: { type: "persistent", dbName },
     }),
