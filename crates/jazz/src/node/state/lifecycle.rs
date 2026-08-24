@@ -999,8 +999,6 @@ where
         kind: groove::large_values::LargeValueKind,
         chunks: Vec<groove::large_values::StagedChunk>,
     ) -> Result<(), Error> {
-        self.require_pending_large_value_upload_current(upload_id)
-            .await?;
         let encoded_bytes = chunks.iter().try_fold(0_u64, |total, chunk| {
             total.checked_add(u64::try_from(chunk.encoded.len()).map_err(|_| {
                 Error::InvalidStoredValue("large-value chunk size exceeds u64")
@@ -1013,10 +1011,32 @@ where
             self.database.evict_staged_large_value(upload_id).await?;
             return Err(Error::LargeValueIngressRateLimited);
         }
-        Ok(self
+        let staged = self
             .database
-            .stage_large_value_chunk_batch(upload_id, kind, chunks)
-            .await?)
+            .stage_large_value_chunk_batch_if_current(
+                upload_id,
+                kind,
+                chunks,
+                self.large_value_staging_policy.max_age_ms,
+            )
+            .await?;
+        if !staged {
+            return Err(Error::LargeValueStageExpired);
+        }
+        Ok(())
+    }
+
+    /// Establish the one pending journal that later local stream operations
+    /// must continue. Only this initialization path may create it.
+    pub(crate) async fn begin_streaming_large_value_upload(
+        &self,
+        upload_id: groove::large_values::StagedLargeValueId,
+        kind: groove::large_values::LargeValueKind,
+    ) -> Result<(), Error> {
+        self.database
+            .stage_large_value_chunk_batch(upload_id, kind, Vec::new())
+            .await?;
+        Ok(())
     }
 
     pub(crate) async fn evict_pending_large_value_upload(
@@ -1037,39 +1057,22 @@ where
         // A pending upload's creation time is the admission clock. Do not let
         // finalization stamp a new staged receipt after that finite window has
         // elapsed: maintenance is retention-only, never acceptance safety.
-        self.require_pending_large_value_upload_current(upload_id)
-            .await?;
-        let staged = self
+        let Some(staged) = self
             .database
-            .finalize_large_value_upload(upload_id, value_ref)
-            .await?;
+            .finalize_large_value_upload_if_current(
+                upload_id,
+                value_ref,
+                self.large_value_staging_policy.max_age_ms,
+            )
+            .await?
+        else {
+            return Err(Error::LargeValueStageExpired);
+        };
         // Push uploads were charged batch-by-batch before persistence. Do not
         // charge the completed tree a second time at root registration.
         self.evict_expired_large_value_stages_except(staged.id)
             .await?;
         Ok(staged)
-    }
-
-    /// Reject an expired resumable upload at every admission boundary. A new
-    /// `ChunkUploadStart` may create a fresh journal after this eviction, but a
-    /// delayed continuation/finalizer cannot refresh the old journal's age.
-    pub(crate) async fn require_pending_large_value_upload_current(
-        &self,
-        upload_id: groove::large_values::StagedLargeValueId,
-    ) -> Result<(), Error> {
-        let now_ms = large_value_now_ms();
-        let pending = self.database.pending_large_value_uploads().await?;
-        let Some(upload) = pending.into_iter().find(|upload| upload.id == upload_id) else {
-            return Ok(());
-        };
-        if now_ms.saturating_sub(upload.created_at_ms) > self.large_value_staging_policy.max_age_ms
-        {
-            self.database
-                .evict_pending_large_value_upload(upload_id)
-                .await?;
-            return Err(Error::LargeValueStageExpired);
-        }
-        Ok(())
     }
 
     /// Stage one Groove-owned preparation and attach its physical descriptor
@@ -1745,13 +1748,4 @@ where
         })?;
         Ok(())
     }
-}
-
-fn large_value_now_ms() -> u64 {
-    web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
 }

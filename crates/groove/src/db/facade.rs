@@ -14,6 +14,15 @@ fn is_retryable_upload_error(error: &Error) -> bool {
     )
 }
 
+fn large_value_now_ms() -> u64 {
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 impl Database {
     /// Open a schema-aware database over an ordered key/value store.
     ///
@@ -248,6 +257,32 @@ impl Database {
         kind: crate::large_values::LargeValueKind,
         chunks: Vec<crate::large_values::StagedChunk>,
     ) -> Result<(), Error> {
+        self.stage_large_value_chunk_batch_with_deadline(upload_id, kind, chunks, None)
+            .await?;
+        Ok(())
+    }
+
+    /// Install a batch only while the exact pending journal remains live.
+    /// The admission check and durable write share the lifecycle lock, so
+    /// expiry cannot race a continuation into recreating the journal.
+    pub async fn stage_large_value_chunk_batch_if_current(
+        &self,
+        upload_id: crate::large_values::StagedLargeValueId,
+        kind: crate::large_values::LargeValueKind,
+        chunks: Vec<crate::large_values::StagedChunk>,
+        max_age_ms: u64,
+    ) -> Result<bool, Error> {
+        self.stage_large_value_chunk_batch_with_deadline(upload_id, kind, chunks, Some(max_age_ms))
+            .await
+    }
+
+    async fn stage_large_value_chunk_batch_with_deadline(
+        &self,
+        upload_id: crate::large_values::StagedLargeValueId,
+        kind: crate::large_values::LargeValueKind,
+        chunks: Vec<crate::large_values::StagedChunk>,
+        max_age_ms: Option<u64>,
+    ) -> Result<bool, Error> {
         let _lifecycle = self.large_value_lifecycle.lock().await;
         // This must precede both chunk staging and metadata mutation. In
         // particular, a valid first child followed by a malformed second child
@@ -260,12 +295,23 @@ impl Database {
             .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
             .await?
         {
-            postcard::from_bytes(&encoded).map_err(|error| {
-                Error::InvalidLargeValueMetadata(format!(
-                    "cannot decode pending large-value upload: {error}"
-                ))
-            })?
+            let upload: crate::large_values::PendingLargeValueUpload =
+                postcard::from_bytes(&encoded).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot decode pending large-value upload: {error}"
+                    ))
+                })?;
+            if let Some(max_age_ms) = max_age_ms
+                && large_value_now_ms().saturating_sub(upload.created_at_ms) > max_age_ms
+            {
+                self.release_pending_large_value_upload(key, upload).await?;
+                return Ok(false);
+            }
+            upload
         } else {
+            if max_age_ms.is_some() {
+                return Ok(false);
+            }
             crate::large_values::PendingLargeValueUpload {
                 id: upload_id,
                 descriptor: None,
@@ -370,7 +416,7 @@ impl Database {
             .map_err(crate::chunks::ChunkError::from)
             .map_err(crate::ivm::runtime::IvmRuntimeError::from)
             .map_err(Error::from)?;
-        Ok(())
+        Ok(true)
     }
 
     fn descriptor_upload_id(
@@ -395,7 +441,9 @@ impl Database {
             .await?;
         self.bind_pending_upload_descriptor(upload_id, &value_ref)
             .await?;
-        self.large_value_upload_progress(upload_id, value_ref).await
+        self.large_value_upload_progress(upload_id, value_ref, None)
+            .await?
+            .ok_or_else(|| Error::InvalidLargeValueMetadata("pending upload is missing".to_owned()))
     }
 
     /// Bind a descriptor-keyed peer upload before the first authenticated
@@ -450,6 +498,29 @@ impl Database {
         value_ref: crate::large_values::LargeValueRef,
         chunks: Vec<crate::large_values::StagedChunk>,
     ) -> Result<crate::large_values::LargeValueUploadProgress, Error> {
+        self.continue_large_value_upload_with_deadline(value_ref, chunks, None)
+            .await?
+            .ok_or_else(|| Error::InvalidLargeValueMetadata("pending upload is missing".to_owned()))
+    }
+
+    /// Continue a descriptor-bound upload only while its original pending
+    /// journal remains within the caller's admission window.
+    pub async fn continue_large_value_upload_if_current(
+        &self,
+        value_ref: crate::large_values::LargeValueRef,
+        chunks: Vec<crate::large_values::StagedChunk>,
+        max_age_ms: u64,
+    ) -> Result<Option<crate::large_values::LargeValueUploadProgress>, Error> {
+        self.continue_large_value_upload_with_deadline(value_ref, chunks, Some(max_age_ms))
+            .await
+    }
+
+    async fn continue_large_value_upload_with_deadline(
+        &self,
+        value_ref: crate::large_values::LargeValueRef,
+        chunks: Vec<crate::large_values::StagedChunk>,
+        max_age_ms: Option<u64>,
+    ) -> Result<Option<crate::large_values::LargeValueUploadProgress>, Error> {
         const FRONTIER_LIMIT: usize = 64;
         let upload_id = Self::descriptor_upload_id(&value_ref)?;
         let requested = match crate::large_values::missing_upload_frontier(
@@ -530,25 +601,42 @@ impl Database {
                 )
                 .await;
         }
-        if let Err(error) = self
-            .stage_large_value_chunk_batch(upload_id, value_ref.kind, new_chunks)
-            .await
-        {
+        let staged = match max_age_ms {
+            Some(max_age_ms) => {
+                self.stage_large_value_chunk_batch_if_current(
+                    upload_id,
+                    value_ref.kind,
+                    new_chunks,
+                    max_age_ms,
+                )
+                .await
+            }
+            None => self
+                .stage_large_value_chunk_batch(upload_id, value_ref.kind, new_chunks)
+                .await
+                .map(|()| true),
+        };
+        if let Err(error) = staged {
             if !is_retryable_upload_error(&error) {
                 return self.reject_large_value_upload(upload_id, error).await;
             }
             return Err(error);
         }
+        if !staged? {
+            return Ok(None);
+        }
         self.bind_pending_upload_descriptor(upload_id, &value_ref)
             .await?;
-        self.large_value_upload_progress(upload_id, value_ref).await
+        self.large_value_upload_progress(upload_id, value_ref, max_age_ms)
+            .await
     }
 
     async fn large_value_upload_progress(
         &self,
         upload_id: crate::large_values::StagedLargeValueId,
         value_ref: crate::large_values::LargeValueRef,
-    ) -> Result<crate::large_values::LargeValueUploadProgress, Error> {
+        max_age_ms: Option<u64>,
+    ) -> Result<Option<crate::large_values::LargeValueUploadProgress>, Error> {
         let missing = match crate::large_values::missing_upload_frontier(
             &value_ref,
             self.local_chunk_reader(),
@@ -574,8 +662,8 @@ impl Database {
             }
         };
         if !missing.is_empty() {
-            return Ok(crate::large_values::LargeValueUploadProgress::Missing(
-                missing,
+            return Ok(Some(
+                crate::large_values::LargeValueUploadProgress::Missing(missing),
             ));
         }
         if let Err(error) = self.validate_completed_large_value(&value_ref).await {
@@ -584,14 +672,25 @@ impl Database {
             }
             return Err(error);
         }
-        let staged = match self.finalize_large_value_upload(upload_id, value_ref).await {
-            Ok(staged) => staged,
+        let finalized = match max_age_ms {
+            Some(max_age_ms) => {
+                self.finalize_large_value_upload_if_current(upload_id, value_ref, max_age_ms)
+                    .await
+            }
+            None => self
+                .finalize_large_value_upload(upload_id, value_ref)
+                .await
+                .map(Some),
+        };
+        let staged = match finalized {
+            Ok(Some(staged)) => staged,
+            Ok(None) => return Ok(None),
             Err(error) if is_retryable_upload_error(&error) => return Err(error),
             Err(error) => return self.reject_large_value_upload(upload_id, error).await,
         };
-        Ok(crate::large_values::LargeValueUploadProgress::Staged(
+        Ok(Some(crate::large_values::LargeValueUploadProgress::Staged(
             staged,
-        ))
+        )))
     }
 
     async fn reject_large_value_upload<T>(
@@ -637,21 +736,50 @@ impl Database {
         upload_id: crate::large_values::StagedLargeValueId,
         value_ref: crate::large_values::LargeValueRef,
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
+        self.finalize_large_value_upload_with_deadline(upload_id, value_ref, None)
+            .await?
+            .ok_or_else(|| Error::InvalidLargeValueMetadata("pending upload is missing".to_owned()))
+    }
+
+    /// Finalize only while the exact pending journal remains live. Expiry and
+    /// receipt registration are serialized by the same lifecycle lock.
+    pub async fn finalize_large_value_upload_if_current(
+        &self,
+        upload_id: crate::large_values::StagedLargeValueId,
+        value_ref: crate::large_values::LargeValueRef,
+        max_age_ms: u64,
+    ) -> Result<Option<crate::large_values::StagedLargeValue>, Error> {
+        self.finalize_large_value_upload_with_deadline(upload_id, value_ref, Some(max_age_ms))
+            .await
+    }
+
+    async fn finalize_large_value_upload_with_deadline(
+        &self,
+        upload_id: crate::large_values::StagedLargeValueId,
+        value_ref: crate::large_values::LargeValueRef,
+        max_age_ms: Option<u64>,
+    ) -> Result<Option<crate::large_values::StagedLargeValue>, Error> {
         let _lifecycle = self.large_value_lifecycle.lock().await;
         let key = pending_large_value_upload_key(upload_id);
-        let encoded = self
+        let Some(encoded) = self
             .storage
             .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
             .await?
-            .ok_or_else(|| {
-                Error::InvalidLargeValueMetadata("pending upload is missing".to_owned())
-            })?;
+        else {
+            return Ok(None);
+        };
         let upload: crate::large_values::PendingLargeValueUpload = postcard::from_bytes(&encoded)
             .map_err(|error| {
             Error::InvalidLargeValueMetadata(format!(
                 "cannot decode pending large-value upload: {error}"
             ))
         })?;
+        if let Some(max_age_ms) = max_age_ms
+            && large_value_now_ms().saturating_sub(upload.created_at_ms) > max_age_ms
+        {
+            self.release_pending_large_value_upload(key, upload).await?;
+            return Ok(None);
+        }
         if let Some(bound) = &upload.descriptor
             && bound != &value_ref
         {
@@ -703,7 +831,7 @@ impl Database {
             .register_staged_large_value_with_id(receipt_id, value_ref, upload.accounting)
             .await?;
         self.release_pending_large_value_upload(key, upload).await?;
-        Ok(staged)
+        Ok(Some(staged))
     }
 
     async fn release_pending_large_value_upload(

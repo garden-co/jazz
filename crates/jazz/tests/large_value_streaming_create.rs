@@ -8,7 +8,7 @@ use jazz::db::{Db, DbConfig, DbIdentity, StreamingMutationKind};
 use jazz::groove::large_values::{INLINE_VALUE_MAX_BYTES, LEAF_MAX_BYTES, LargeValueKind};
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
-use jazz::ids::{AuthorId, NodeUuid};
+use jazz::ids::{AuthorId, NodeUuid, RowUuid};
 use jazz::node::LargeValueStagingPolicy;
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnDescriptor, ColumnType, RowDescriptor, Schema, TableName, TableSchema};
@@ -207,13 +207,78 @@ fn push_streaming_stops_at_the_ingress_limit_and_closes_the_upload() {
     assert!(db.read(&query).expect("read rows").is_empty());
 }
 
+/// Two local streams establish pending journals, maintenance expires them,
+/// and neither stale handle may recreate its journal through push or finish.
+///
+/// ```text
+/// begin/push ──► pending ──expiry maintenance──► absent
+/// stale push/finish ──► LargeValueStageExpired; remains absent
+/// ```
+#[test]
+fn expired_local_stream_handles_cannot_recreate_pending_uploads() {
+    let db = open_db();
+    let cells = BTreeMap::from([("done".to_owned(), Value::Bool(false))]);
+    let mut push_upload = db
+        .begin_streaming_value_upload("todos", &cells, "title", LargeValueKind::String)
+        .expect("begin push upload");
+    let mut finish_upload = db
+        .begin_streaming_value_upload("todos", &cells, "title", LargeValueKind::String)
+        .expect("begin finish upload");
+    jazz::block_on(db.push_streaming_value_upload(&mut push_upload, b"first"))
+        .expect("initialize push upload journal");
+    jazz::block_on(db.push_streaming_value_upload(&mut finish_upload, b"second"))
+        .expect("initialize finish upload journal");
+
+    db.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: u64::MAX,
+        window_ms: 60_000,
+        max_age_ms: 0,
+    });
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert_eq!(
+        jazz::block_on(db.evict_expired_staged_large_values()).expect("expiry pass"),
+        2
+    );
+
+    let push_error = jazz::block_on(db.push_streaming_value_upload(&mut push_upload, b"stale"))
+        .expect_err("an evicted stream cannot push");
+    assert!(push_error.to_string().contains("expired"));
+
+    let finish_result = jazz::block_on(db.finish_streaming_value_upload(
+        finish_upload,
+        StreamingMutationKind::Insert,
+        "todos",
+        RowUuid::from_bytes([0x77; 16]),
+        cells,
+        "title",
+        None,
+        None,
+        None,
+        None,
+    ));
+    let finish_error = match finish_result {
+        Ok(_) => panic!("an evicted stream cannot finish"),
+        Err(error) => error,
+    };
+    assert!(finish_error.to_string().contains("expired"));
+    assert_eq!(
+        jazz::block_on(db.evict_expired_staged_large_values()).expect("second expiry pass"),
+        0,
+        "stale operations must not recreate pending journals"
+    );
+    let query = db.prepare_query(&db.table("todos")).expect("prepare query");
+    assert!(db.read(&query).expect("read rows").is_empty());
+}
+
 #[test]
 fn native_reader_streaming_uses_the_managed_ingress_and_cleanup_path() {
     let db = open_db();
     db.set_large_value_staging_policy(LargeValueStagingPolicy {
         incoming_bytes_per_window: 1,
         window_ms: 60_000,
-        max_age_ms: 0,
+        // Keep this test isolated to ingress admission; expiry behavior is
+        // exercised independently below.
+        max_age_ms: 10 * 60 * 1_000,
     });
 
     let result = jazz::block_on(db.insert_streaming_value(
@@ -229,7 +294,6 @@ fn native_reader_streaming_uses_the_managed_ingress_and_cleanup_path() {
     };
     assert!(error.to_string().contains("rate limit"));
 
-    std::thread::sleep(std::time::Duration::from_millis(2));
     assert_eq!(
         jazz::block_on(db.evict_expired_staged_large_values()).expect("expiry pass"),
         0,
