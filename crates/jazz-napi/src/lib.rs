@@ -4538,18 +4538,67 @@ mod tests {
     use std::collections::{BTreeMap, HashSet};
     use std::rc::Rc;
 
+    use super::{
+        PendingNativeRead, PendingNativeSubscriptionBatch, PendingSubscriptionBatchCompletion,
+    };
     use crate::{
         NapiDb, NapiDbInnerStorage, NapiTxKind, PreparedQuery, Tx, authority_epoch_from_bigint,
         core_block_on, core_claim_value_from_json, core_read_opts_from_json,
         core_subscription_event_to_napi, encode_core_subscription_delta, terminal_bytes_to_numbers,
         unknown_transaction_kind_message,
     };
+    use futures::channel::oneshot;
 
     #[test]
     fn transaction_binding_diagnostics_use_transaction_vocabulary() {
         assert_eq!(
             unknown_transaction_kind_message("invalid"),
             "unknown transaction kind invalid"
+        );
+    }
+
+    #[test]
+    fn pending_native_read_preserves_one_suspended_future_until_the_next_js_poll() {
+        let (sender, receiver) = oneshot::channel::<Uint8Array>();
+        let pending = PendingNativeRead::new(Box::pin(async move {
+            receiver
+                .await
+                .map_err(|_| napi::Error::from_reason("planned sender drop"))
+        }));
+        assert!(
+            pending.poll_once().unwrap().is_none(),
+            "first JS turn only registers demand"
+        );
+        assert!(sender.send(Uint8Array::new(vec![7])).is_ok());
+        assert_eq!(pending.poll_once().unwrap().unwrap().to_vec(), vec![7]);
+        assert!(
+            pending.poll_once().is_err(),
+            "completed reads cannot replay their result"
+        );
+    }
+
+    #[test]
+    fn pending_native_subscription_batch_preserves_one_future_until_completion() {
+        let (sender, receiver) = oneshot::channel::<PendingSubscriptionBatchCompletion>();
+        let pending = PendingNativeSubscriptionBatch::new(Box::pin(async move {
+            receiver
+                .await
+                .map_err(|_| napi::Error::from_reason("planned sender drop"))
+        }));
+        assert!(pending.poll_once().unwrap().is_none());
+        assert!(
+            sender
+                .send(PendingSubscriptionBatchCompletion {
+                    events: Vec::new(),
+                    layouts: HashSet::new(),
+                })
+                .is_ok()
+        );
+        let completed = pending.poll_once().unwrap().unwrap();
+        assert!(completed.events.is_empty());
+        assert!(
+            pending.poll_once().is_err(),
+            "completed batch cannot replay"
         );
     }
     use jazz::db::{
