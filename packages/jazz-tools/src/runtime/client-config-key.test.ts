@@ -44,7 +44,8 @@ describe("serializeClientConfig", () => {
   });
 
   it("treats sparse array holes like undefined and null", () => {
-    const sparse = new Array(1);
+    const sparse: unknown[] = [];
+    sparse.length = 1;
 
     const serializeSource = (wasmSource: unknown) =>
       serializeClientConfig({
