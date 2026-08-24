@@ -698,9 +698,10 @@ mod tests {
     use crate::ids::SchemaVersionId;
     use crate::ids::{NodeUuid, RowUuid};
     use crate::protocol::{
-        AuthorizationScopePurpose, PermissionAdviceAction, RegisterShapeOptions, ResultRowEntry,
-        ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, VersionBundle,
-        VersionBundleRun, VersionBundleRunError, VersionCarrier, VersionRecord,
+        AuthorizationScopePurpose, AuthorizationSupportScopeKey, PermissionAdviceAction,
+        PermissionAdviceRequestId, RegisterShapeOptions, ResultRowEntry, ShapeAst, Subscribe,
+        SubscribeRejectReason, SubscriptionKey, VersionBundle, VersionBundleRun,
+        VersionBundleRunError, VersionCarrier, VersionRecord,
         build_version_bundle_runs_from_singletons,
     };
     use crate::protocol_limits::MAX_WIRE_FRAME_BYTES;
@@ -854,6 +855,31 @@ mod tests {
         let decoded = decode_sync_message(&encoded).unwrap();
 
         assert_eq!(decoded, message);
+    }
+
+    #[test]
+    fn deeply_nested_authorization_scope_views_are_rejected() {
+        let mut message = view_update_with_carriers(Vec::new());
+        for _ in 0..32 {
+            message = SyncMessage::AuthorizationScopeView {
+                request_id: PermissionAdviceRequestId([0x11; 16]),
+                key: AuthorizationSupportScopeKey {
+                    support_shape_digest: [0x22; 32],
+                    subject: AuthorId::from_bytes([0x33; 16]),
+                    claims_digest: [0x44; 32],
+                    policy_digest: [0x55; 32],
+                },
+                clause_index: 0,
+                clause_count: 1,
+                view: Box::new(message),
+            };
+        }
+        let encoded = encode_sync_message(&message).expect("encode nested fixture");
+
+        assert!(
+            decode_sync_message(&encoded).is_err(),
+            "remote recursive messages must be rejected under a bounded decode depth"
+        );
     }
 
     #[test]
