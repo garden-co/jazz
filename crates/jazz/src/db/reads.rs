@@ -447,13 +447,23 @@ where
             // binding. Do not fetch discarded rows just because the internal
             // event happened to retain them for its own reconciliation.
             for operation in terminal_operations {
+                if matches!(
+                    &operation.edit,
+                    groove::ivm::TerminalEdit::Remove { .. }
+                        | groove::ivm::TerminalEdit::Move { .. }
+                ) {
+                    continue;
+                }
+                let descriptor = terminal_operation_value_descriptor(operation)?;
                 let value = match &mut operation.edit {
                     groove::ivm::TerminalEdit::Insert { value, .. }
                     | groove::ivm::TerminalEdit::Update { value, .. } => value,
                     groove::ivm::TerminalEdit::Remove { .. }
-                    | groove::ivm::TerminalEdit::Move { .. } => continue,
+                    | groove::ivm::TerminalEdit::Move { .. } => unreachable!(
+                        "terminal operation payload shape changed after classification"
+                    ),
                 };
-                node.hydrate_encoded_record(&operation.root_descriptor, value)
+                node.hydrate_encoded_record(&descriptor, value)
                     .await
                     .map_err(binding_hydration_error)?;
             }
@@ -599,4 +609,65 @@ where
             edges: Vec::new(),
         })
     }
+}
+
+/// The descriptor on a terminal operation describes its root record. Nested
+/// insertions and updates carry only their child record bytes, so follow the
+/// operation path to find the descriptor which actually owns `edit.value`.
+///
+/// Terminal paths deliberately omit a child key for insertions: the edit owns
+/// that key. A key segment therefore validates the path shape but does not
+/// change the descriptor.
+fn terminal_operation_value_descriptor(
+    operation: &groove::ivm::TerminalOperation,
+) -> Result<RecordDescriptor, BindingHydrationError> {
+    use groove::ivm::TerminalPathSegment;
+    use groove::records::ValueType;
+
+    let mut descriptor = operation.root_descriptor;
+    let mut expect_collection = true;
+    for segment in &operation.path {
+        match (expect_collection, segment) {
+            (true, TerminalPathSegment::Collection(name)) => {
+                let Some(field) = descriptor
+                    .fields()
+                    .iter()
+                    .find(|field| field.name.as_deref() == Some(name))
+                else {
+                    return Err(BindingHydrationError::Error(Error::new(
+                        ErrorCode::Protocol,
+                        "terminal operation references an unknown collection field",
+                    )));
+                };
+                let ValueType::Array(element) = &field.value_type else {
+                    return Err(BindingHydrationError::Error(Error::new(
+                        ErrorCode::Protocol,
+                        "terminal operation collection field is not an array",
+                    )));
+                };
+                let ValueType::Record(child) = element.as_ref() else {
+                    return Err(BindingHydrationError::Error(Error::new(
+                        ErrorCode::Protocol,
+                        "terminal operation collection does not contain records",
+                    )));
+                };
+                descriptor = **child;
+                expect_collection = false;
+            }
+            (false, TerminalPathSegment::Key(_)) => expect_collection = true,
+            (true, TerminalPathSegment::Key(_)) => {
+                return Err(BindingHydrationError::Error(Error::new(
+                    ErrorCode::Protocol,
+                    "terminal operation path starts with a key",
+                )));
+            }
+            (false, TerminalPathSegment::Collection(_)) => {
+                return Err(BindingHydrationError::Error(Error::new(
+                    ErrorCode::Protocol,
+                    "terminal operation path is missing a child key",
+                )));
+            }
+        }
+    }
+    Ok(descriptor)
 }

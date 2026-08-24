@@ -325,7 +325,7 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
         path: Vec::new(),
         edit: groove::ivm::TerminalEdit::Update {
             key: Vec::new(),
-            value: terminal_value,
+            value: terminal_value.clone(),
         },
     });
     // A locally absent chunk with no peer retry instruction is terminal. The
@@ -362,6 +362,7 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
         "the subscription binding boundary must materialize the indirect text scalar"
     );
     block_on(db.hydrate_subscription_event_for_binding(&mut event)).unwrap();
+    let mut nested_event = event.clone();
     let SubscriptionEvent::Delta {
         added: terminal_added,
         terminal_operations,
@@ -388,6 +389,58 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
                     if matches!(value.as_ref(), Value::String(value) if value == &title)
             ),
         "structured terminal operations must not encode physical indirect scalars for bindings"
+    );
+
+    // A nested terminal operation keeps the root descriptor for layout
+    // discovery, but its payload is a child record. Hydrating it as the root
+    // record corrupts the raw bytes and only becomes visible when the binding
+    // later decodes the operation.
+    let nested_root_descriptor = RecordDescriptor::new([(
+        "children",
+        groove::records::ValueType::Array(Box::new(groove::records::ValueType::Record(Box::new(
+            descriptor,
+        )))),
+    )]);
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = &mut nested_event
+    else {
+        unreachable!("expected terminal subscription delta");
+    };
+    terminal_operations.clear();
+    terminal_operations.push(groove::ivm::TerminalOperation {
+        root_descriptor: nested_root_descriptor,
+        root_key: Vec::new(),
+        path: vec![groove::ivm::TerminalPathSegment::Collection(
+            "children".to_owned(),
+        )],
+        edit: groove::ivm::TerminalEdit::Insert {
+            index: 0,
+            key: Vec::new(),
+            value: terminal_value,
+        },
+    });
+    block_on(db.hydrate_subscription_event_for_binding(&mut nested_event)).unwrap();
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = nested_event
+    else {
+        unreachable!("expected terminal subscription delta");
+    };
+    let groove::ivm::TerminalEdit::Insert { value, .. } = &terminal_operations[0].edit else {
+        unreachable!("expected nested terminal insertion");
+    };
+    let nested_values = descriptor.bind(value).to_values().unwrap();
+    assert!(
+        matches!(&nested_values[title_index], Value::String(value) if value == &title)
+            || matches!(
+                &nested_values[title_index],
+                Value::Nullable(Some(value))
+                    if matches!(value.as_ref(), Value::String(value) if value == &title)
+            ),
+        "nested terminal payloads must use their child descriptor when hydrating large values"
     );
 
     let mut snapshot = RelationSnapshot {
