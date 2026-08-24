@@ -548,6 +548,24 @@ fn convert_table(
         "policies.select.using",
         table.policies.select.using.as_ref(),
     )?;
+    let update_using = convert_optional_policy(
+        schema,
+        table,
+        name,
+        "policies.update.using",
+        table.policies.update.using.as_ref(),
+    )?;
+    let delete_using = if table.policies.delete.using.is_some() {
+        convert_optional_policy(
+            schema,
+            table,
+            name,
+            "policies.delete.using",
+            table.policies.delete.using.as_ref(),
+        )?
+    } else {
+        update_using.clone()
+    };
     converted.write_policies = WritePolicies {
         insert_check: convert_optional_policy(
             schema,
@@ -556,13 +574,7 @@ fn convert_table(
             "policies.insert.with_check",
             table.policies.insert.with_check.as_ref(),
         )?,
-        update_using: convert_optional_policy(
-            schema,
-            table,
-            name,
-            "policies.update.using",
-            table.policies.update.using.as_ref(),
-        )?,
+        update_using,
         update_check: convert_optional_policy(
             schema,
             table,
@@ -570,13 +582,7 @@ fn convert_table(
             "policies.update.with_check",
             table.policies.update.with_check.as_ref(),
         )?,
-        delete_using: convert_optional_policy(
-            schema,
-            table,
-            name,
-            "policies.delete.using",
-            table.policies.delete.using.as_ref(),
-        )?,
+        delete_using,
     };
     Ok(converted)
 }
@@ -3889,6 +3895,15 @@ mod tests {
                         TablePolicies::new().with_update(Some(owner_policy), PolicyExpr::True),
                     ),
             )
+            .table(
+                TableSchemaBuilder::new("attachments")
+                    .fk_column("document_id", "documents")
+                    .policies(TablePolicies::new().with_insert(PolicyExpr::Inherits {
+                        operation: Operation::Delete,
+                        via_column: "document_id".to_owned(),
+                        max_depth: None,
+                    })),
+            )
             .build();
 
         let converted = convert_public_schema(&schema).unwrap();
@@ -3900,6 +3915,21 @@ mod tests {
         assert_eq!(
             documents.write_policies.delete_using, documents.write_policies.update_using,
             "DELETE must inherit UPDATE USING when no explicit DELETE USING is declared"
+        );
+        let attachments = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "attachments")
+            .unwrap();
+        assert_eq!(
+            attachments
+                .write_policies
+                .insert_check
+                .as_ref()
+                .unwrap()
+                .inherits[0]
+                .operation,
+            InheritsOperation::Delete
         );
     }
 
