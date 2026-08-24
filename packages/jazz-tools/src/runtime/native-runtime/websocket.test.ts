@@ -17,6 +17,7 @@ import {
   encodeWebSocketFrameBatch,
   isWireHello,
   isWireMessage,
+  peerIdentityForWebSocketAuth,
 } from "./websocket.js";
 
 function authorBytes(issuer: string, subject: string): Uint8Array {
@@ -118,6 +119,120 @@ describe("websocket frame carrier", () => {
       sub: "user-123",
       jwt_token: token,
     });
+  });
+
+  it("derives websocket peer identity from the full canonical session author", () => {
+    const jwt = (issuer: string) =>
+      `header.${btoa(JSON.stringify({ iss: issuer, sub: "same-provider-subject" }))}.signature`;
+    const fallback = new TextEncoder().encode('["urn:jazz:runtime-host","cache"]');
+
+    const issuerA = new TextDecoder().decode(
+      peerIdentityForWebSocketAuth(
+        JSON.stringify({ jwt_token: jwt("https://issuer-a.example") }),
+        fallback,
+      ),
+    );
+    const issuerB = new TextDecoder().decode(
+      peerIdentityForWebSocketAuth(
+        JSON.stringify({ jwt_token: jwt("https://issuer-b.example") }),
+        fallback,
+      ),
+    );
+
+    expect(issuerA).toBe('["https://issuer-a.example","same-provider-subject"]');
+    expect(issuerB).toBe('["https://issuer-b.example","same-provider-subject"]');
+    expect(issuerA).not.toBe(issuerB);
+  });
+
+  it("matches verified external JWT issuer normalization while preserving the provider subject", () => {
+    const fallback = new TextEncoder().encode('["urn:jazz:runtime-host","cache"]');
+    const jwt = (iss: string) =>
+      `header.${btoa(JSON.stringify({ iss, sub: " provider-subject " }))}.signature`;
+
+    const normalized = new TextDecoder().decode(
+      peerIdentityForWebSocketAuth(
+        JSON.stringify({ jwt_token: jwt(" https://issuer.example ") }),
+        fallback,
+      ),
+    );
+    expect(normalized).toBe('["https://issuer.example"," provider-subject "]');
+
+    // The server rejects a verified external token whose issuer is blank after
+    // normalization. Keep the client sessionless instead of fabricating an
+    // author that would only self-reject at WebSocket admission.
+    expect(peerIdentityForWebSocketAuth(JSON.stringify({ jwt_token: jwt(" \t ") }), fallback)).toBe(
+      fallback,
+    );
+  });
+
+  it("derives impersonated websocket peer identity from the complete backend session", () => {
+    const fallback = new TextEncoder().encode('["urn:jazz:runtime-host","cache"]');
+    const actual = new TextDecoder().decode(
+      peerIdentityForWebSocketAuth(
+        JSON.stringify({
+          backend_secret: "not inspected by the client",
+          backend_session: {
+            issuer: "https://issuer.example",
+            user_id: "provider-subject",
+          },
+        }),
+        fallback,
+      ),
+    );
+
+    expect(actual).toBe('["https://issuer.example","provider-subject"]');
+  });
+
+  it("matches the server's backend-session precedence over a simultaneous bearer token", () => {
+    const fallback = new TextEncoder().encode('["urn:jazz:runtime-host","cache"]');
+    const jwt = `header.${btoa(
+      JSON.stringify({ iss: "https://bearer.example", sub: "bearer-subject" }),
+    )}.signature`;
+    const actual = new TextDecoder().decode(
+      peerIdentityForWebSocketAuth(
+        JSON.stringify({
+          jwt_token: jwt,
+          backend_secret: "not inspected by the client",
+          backend_session: {
+            issuer: "https://backend.example",
+            user_id: "backend-subject",
+          },
+        }),
+        fallback,
+      ),
+    );
+
+    expect(actual).toBe('["https://backend.example","backend-subject"]');
+  });
+
+  it("keeps admin websocket links sessionless despite accompanying bearer payloads", () => {
+    const fallback = new TextEncoder().encode('["urn:jazz:runtime-host","admin-cache"]');
+    const validJwt = `header.${btoa(
+      JSON.stringify({ iss: "https://issuer.example", sub: "provider-subject" }),
+    )}.signature`;
+
+    for (const jwt_token of [validJwt, "forged.token.payload", "malformed-token"]) {
+      expect(
+        peerIdentityForWebSocketAuth(
+          JSON.stringify({ admin_secret: "not inspected by the client", jwt_token }),
+          fallback,
+        ),
+      ).toBe(fallback);
+    }
+
+    expect(
+      peerIdentityForWebSocketAuth(
+        JSON.stringify({
+          admin_secret: "not inspected by the client",
+          backend_secret: "not inspected by the client",
+          backend_session: {
+            issuer: "https://backend.example",
+            user_id: "backend-subject",
+          },
+        }),
+        fallback,
+      ),
+    ).toBe(fallback);
   });
 
   it("uses validated fallback subjects over whitespace raw auth subjects in both handshake shapes", () => {

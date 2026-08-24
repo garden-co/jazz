@@ -364,7 +364,7 @@ fn ws_validate_session_identity(
         .author_subject()
         .map_err(|error| error.to_string())?;
     if session_identity != peer_identity {
-        return Err("websocket peer_identity must match authenticated session user_id".to_owned());
+        return Err("websocket peer_identity must match authenticated session author".to_owned());
     }
     Ok(())
 }
@@ -1111,11 +1111,22 @@ mod tests {
         assert!(ws_validate_session_identity(&external_session, external_peer).is_ok());
         assert!(ws_validate_session_identity(&external_session, peer).is_err());
         assert!(ws_validate_session_identity(&external_session, AuthorSubject::SYSTEM).is_err());
+        let same_subject_other_issuer =
+            AuthorSubject::authenticated("https://other-auth.example", external_subject).unwrap();
+        assert!(
+            ws_validate_session_identity(&external_session, same_subject_other_issuer).is_err(),
+            "a shared provider subject must not bridge issuer domains"
+        );
         let local_first = Session::new(AuthorSubject::LOCAL_FIRST_ISSUER, "local-user")
             .with_auth_mode(AuthMode::LocalFirst);
         let local_first_peer =
             AuthorSubject::from_canonical(r#"["urn:jazz:local-first","local-user"]"#).unwrap();
         assert!(ws_validate_session_identity(&local_first, local_first_peer).is_ok());
+        let anonymous = Session::new(AuthorSubject::ANONYMOUS_ISSUER, "anonymous-user")
+            .with_auth_mode(AuthMode::Anonymous);
+        let anonymous_peer =
+            AuthorSubject::from_canonical(r#"["urn:jazz:anonymous","anonymous-user"]"#).unwrap();
+        assert!(ws_validate_session_identity(&anonymous, anonymous_peer).is_ok());
     }
 
     #[test]
@@ -1328,7 +1339,7 @@ mod tests {
             .expect_err("mismatched authenticated session and peer_identity must be rejected");
 
         assert!(
-            error.contains("peer_identity must match authenticated session user_id"),
+            error.contains("peer_identity must match authenticated session author"),
             "unexpected websocket admission error: {error}"
         );
     }
