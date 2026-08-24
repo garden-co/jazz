@@ -1,9 +1,10 @@
 # WorldTour benchmark variant
 
-This native package duplicates the WorldTour schema and deterministic fixture.
-It measures the two high-frequency browse paths: a bounded, ordered calendar
-window and a latitude-bounded map viewport. It deliberately does not import a
-frontend runtime or share fixture code with the app.
+This native package duplicates the WorldTour schema subset used by its
+deterministic fixture. It measures the two high-frequency browse paths: the Vue app's bounded,
+date-ordered three-week itinerary window (limited to 12 rows), and a
+latitude-bounded map viewport. It deliberately does not import a frontend
+runtime or share fixture code with the app.
 
 ```sh
 cargo test -p jazz-example-world-tour-benchmark

@@ -1,7 +1,8 @@
 //! Self-contained WorldTour fixture and representative itinerary workloads.
 //!
-//! The benchmark intentionally duplicates the app's schema and query shapes;
-//! it does not depend on a frontend runtime or app fixture helper.
+//! The benchmark intentionally duplicates the app schema subset required by
+//! its query shapes; it does not depend on a frontend runtime or app fixture
+//! helper.
 
 use std::collections::BTreeMap;
 
@@ -9,25 +10,37 @@ use jazz::db::{Db, DbConfig, DbIdentity, PreparedQuery, block_on};
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
-use jazz::query::{OrderDirection, Query, col, eq, gte, lit, lte};
-use jazz::schema::JazzSchema;
+use jazz::query::{OrderDirection, Query, col, gte, lit, lte};
+use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::DurabilityTier;
 
 type BenchDb = Db<MemoryStorage>;
 
+const DAY_SECONDS: u64 = 86_400;
+const WINDOW_START: u64 = 1_700_000_000;
+const WINDOW_DAYS: u64 = 21;
+const WINDOW_LIMIT: usize = 12;
+
 /// A deterministic, in-memory WorldTour workload fixture.
 pub struct Fixture {
     db: BenchDb,
+    stops_table: TableSchema,
     calendar_window: PreparedQuery,
     map_viewport: PreparedQuery,
 }
 
 impl Fixture {
-    /// Seed `leg_count` dated itinerary legs across a predictable map grid.
-    pub fn new(leg_count: usize) -> Self {
-        assert!(leg_count >= 32, "fixture needs a useful itinerary window");
+    /// Seed `stop_count` dated itinerary stops across a predictable map grid.
+    pub fn new(stop_count: usize) -> Self {
+        assert!(stop_count >= 32, "fixture needs a useful itinerary window");
         let schema = schema();
+        let stops_table = schema
+            .tables()
+            .iter()
+            .find(|table| table.name == "stops")
+            .expect("WorldTour benchmark schema has stops")
+            .clone();
         let families = schema.column_families();
         let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
         let db = block_on(Db::open(DbConfig::new(
@@ -40,73 +53,74 @@ impl Fixture {
         )))
         .expect("open WorldTour benchmark database");
 
-        let tour = row_id(1, 0);
+        let band = row_id(1, 0);
         insert(
             &db,
-            "tours",
-            tour,
+            "bands",
+            band,
             BTreeMap::from([("name".into(), Value::String("Summer world tour".into()))]),
         );
-        for leg in 0..leg_count {
-            let venue = row_id(2, leg);
+        // Insert in reverse chronological order so the workload receipt proves
+        // that `order_by`, rather than insertion order, determines the result.
+        for stop in (0..stop_count).rev() {
+            let venue = row_id(2, stop);
             insert(
                 &db,
                 "venues",
                 venue,
                 BTreeMap::from([
-                    ("name".into(), Value::String(format!("Venue {leg:05}"))),
-                    (
-                        "latitude".into(),
-                        Value::F64(35.0 + (leg % 20) as f64 / 10.0),
-                    ),
-                    (
-                        "longitude".into(),
-                        Value::F64(-120.0 + (leg % 30) as f64 / 10.0),
-                    ),
-                    (
-                        "time_zone".into(),
-                        Value::String("America/Los_Angeles".into()),
-                    ),
+                    ("name".into(), Value::String(format!("Venue {stop:05}"))),
+                    ("city".into(), Value::String("Los Angeles".into())),
+                    ("country".into(), Value::String("US".into())),
+                    ("lat".into(), Value::F64(35.0 + (stop % 20) as f64 / 10.0)),
+                    ("lng".into(), Value::F64(-120.0 + (stop % 30) as f64 / 10.0)),
                 ]),
             );
             insert(
                 &db,
-                "legs",
-                row_id(3, leg),
+                "stops",
+                row_id(3, stop),
                 BTreeMap::from([
-                    ("tour".into(), Value::Uuid(tour.0)),
-                    ("venue".into(), Value::Uuid(venue.0)),
+                    ("bandId".into(), Value::Uuid(band.0)),
+                    ("venueId".into(), Value::Uuid(venue.0)),
                     (
-                        "starts_at".into(),
-                        Value::U64(1_700_000_000 + leg as u64 * 86_400),
+                        "date".into(),
+                        Value::U64(WINDOW_START - DAY_SECONDS + stop as u64 * DAY_SECONDS),
                     ),
                     ("status".into(), Value::String("confirmed".into())),
+                    (
+                        "publicDescription".into(),
+                        Value::String(format!("Stop {stop:05}")),
+                    ),
                 ]),
             );
         }
 
         let calendar_window = db
             .prepare_query(
-                &Query::from("legs")
-                    .filter(eq(col("tour"), lit(tour.0)))
-                    .filter(gte(col("starts_at"), lit(1_700_000_000_u64)))
-                    .filter(lte(col("starts_at"), lit(1_700_000_000_u64 + 90 * 86_400)))
-                    .order_by("starts_at", OrderDirection::Asc)
-                    .offset(5)
-                    .limit(10),
+                &Query::from("stops")
+                    .filter(gte(col("date"), lit(WINDOW_START)))
+                    .filter(lte(
+                        col("date"),
+                        lit(WINDOW_START + WINDOW_DAYS * DAY_SECONDS),
+                    ))
+                    .include("venueId")
+                    .order_by("date", OrderDirection::Asc)
+                    .limit(WINDOW_LIMIT),
             )
             .expect("prepare calendar window");
         let map_viewport = db
             .prepare_query(
                 &Query::from("venues")
-                    .filter(gte(col("latitude"), lit(35.5_f64)))
-                    .filter(lte(col("latitude"), lit(36.0_f64)))
+                    .filter(gte(col("lat"), lit(35.5_f64)))
+                    .filter(lte(col("lat"), lit(36.0_f64)))
                     .order_by("name", OrderDirection::Asc)
                     .limit(100),
             )
             .expect("prepare map viewport");
         Self {
             db,
+            stops_table,
             calendar_window,
             map_viewport,
         }
@@ -118,6 +132,19 @@ impl Fixture {
             .read(&self.calendar_window)
             .expect("read calendar window")
             .len()
+    }
+
+    /// Ordered start times returned by the Vue app's three-week itinerary query.
+    pub fn calendar_window_start_times(&self) -> Vec<u64> {
+        self.db
+            .read(&self.calendar_window)
+            .expect("read calendar window")
+            .into_iter()
+            .map(|row| match row.cell(&self.stops_table, "date") {
+                Some(Value::U64(value)) => value,
+                other => panic!("unexpected date value: {other:?}"),
+            })
+            .collect()
     }
 
     /// Latitude-bounded map viewport query.
@@ -132,22 +159,24 @@ impl Fixture {
 fn schema() -> JazzSchema {
     JazzSchema::new(
         &SchemaBuilder::new()
-            .table(TableSchemaBuilder::new("tours").column("name", ColumnType::Text))
+            .table(TableSchemaBuilder::new("bands").column("name", ColumnType::Text))
             .table(
                 TableSchemaBuilder::new("venues")
                     .column("name", ColumnType::Text)
-                    .column("latitude", ColumnType::Double)
-                    .column("longitude", ColumnType::Double)
-                    .column("time_zone", ColumnType::Text)
-                    .index_only(["latitude", "longitude", "name"]),
+                    .column("city", ColumnType::Text)
+                    .column("country", ColumnType::Text)
+                    .column("lat", ColumnType::Double)
+                    .column("lng", ColumnType::Double)
+                    .index_only(["lat", "lng", "name"]),
             )
             .table(
-                TableSchemaBuilder::new("legs")
-                    .fk_column("tour", "tours")
-                    .fk_column("venue", "venues")
-                    .column("starts_at", ColumnType::Timestamp)
+                TableSchemaBuilder::new("stops")
+                    .fk_column("bandId", "bands")
+                    .fk_column("venueId", "venues")
+                    .column("date", ColumnType::Timestamp)
                     .column("status", ColumnType::Text)
-                    .index_only(["tour", "starts_at", "status"]),
+                    .column("publicDescription", ColumnType::Text)
+                    .index_only(["bandId", "date", "status"]),
             )
             .build(),
     )
