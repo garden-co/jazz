@@ -95,6 +95,26 @@ describe("BrowserWorkerTransportPump", () => {
     pump.close();
   });
 
+  it("publishes an auxiliary chunk request while semantic evaluation is suspended", async () => {
+    const request = Uint8Array.from([9, 4]);
+    const sendFrames = vi.fn();
+    let resolveAuxiliaryReady!: () => void;
+    let auxiliaryFrames: Uint8Array[] = [];
+    const peer = transport({
+      tick: () => new Promise<number>(() => undefined),
+      recvAuxiliaryWireFrames: () => auxiliaryFrames.splice(0),
+      auxiliaryOutboundReady: () =>
+        new Promise<void>((resolve) => (resolveAuxiliaryReady = resolve)),
+    });
+    const pump = new BrowserWorkerTransportPump(runtime(peer), peer, sendFrames, vi.fn());
+
+    auxiliaryFrames = [request];
+    resolveAuxiliaryReady();
+
+    await vi.waitFor(() => expect(sendFrames).toHaveBeenCalledWith([request]));
+    pump.close();
+  });
+
   it("publishes an already-produced peer request before awaiting suspended evaluation", async () => {
     let release!: () => void;
     const request = Uint8Array.from([9, 3]);

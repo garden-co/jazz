@@ -32,6 +32,9 @@ export class BrowserWorkerTransportPump {
     // must not recursively request another identical pass.
     this.removeWorkListener = runtime.onPeerTransportWork(() => this.schedule(false));
     this.transport.setOutboundScheduler?.(() => this.scheduleOutboundDrain());
+    void this.watchAuxiliaryOutbound().catch((error) => {
+      if (!this.closed) this.onError(error);
+    });
     this.schedule(true);
   }
 
@@ -82,6 +85,10 @@ export class BrowserWorkerTransportPump {
     if (this.closed) return;
     const frames = normalizeTransportFrames(this.transport.recvWireFrames());
     if (frames.length > 0) this.sendFrames(frames);
+    const auxiliary = this.transport.recvAuxiliaryWireFrames;
+    if (!auxiliary) return;
+    const auxiliaryFrames = normalizeTransportFrames(auxiliary.call(this.transport));
+    if (auxiliaryFrames.length > 0) this.sendFrames(auxiliaryFrames);
   }
 
   private scheduleOutboundDrain(): void {
@@ -140,6 +147,18 @@ export class BrowserWorkerTransportPump {
     // they can be the response that resumes a blocked query evaluation.
     this.runtime.notifyPeerTransportActivity?.();
     this.schedule();
+  }
+
+  private async watchAuxiliaryOutbound(): Promise<void> {
+    while (!this.closed) {
+      const readiness = this.transport.auxiliaryOutboundReady?.();
+      if (!readiness || typeof readiness === "boolean") return;
+      await readiness;
+      if (this.closed) return;
+      // This path is deliberately independent of progressPeerTransport(): a
+      // root evaluator may be suspended on this very chunk request.
+      this.drainOutboundFrames();
+    }
   }
 }
 
