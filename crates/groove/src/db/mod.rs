@@ -330,6 +330,7 @@ impl AppliedBatch {
         let result = match turn {
             Ok(()) => {
                 let mut staging_error = None;
+                let mut finalized_stages = Vec::new();
                 for stage in &self.resident_large_values {
                     if let Err(error) = self
                         .large_value_stager
@@ -339,13 +340,27 @@ impl AppliedBatch {
                         staging_error = Some(error);
                         break;
                     }
+                    finalized_stages.push(stage.id());
                 }
                 match staging_error {
                     Some(error) => Err(crate::storage::Error::Backend {
                         backend: "resident large-value staging",
                         message: error.to_string(),
                     }),
-                    None => self.storage.write_many(self.operations.clone()).await,
+                    None => {
+                        let result = self.storage.write_many(self.operations.clone()).await;
+                        if result.is_err() {
+                            // A receipt only becomes durable because this row
+                            // write was about to consume it.  When that write
+                            // fails, reverse the receipt immediately instead
+                            // of leaving an orphan for TTL. The resident IVM
+                            // publication itself is retracted by the caller.
+                            for id in finalized_stages {
+                                let _ = self.large_value_stager.evict_unconsumed_stage(id).await;
+                            }
+                        }
+                        result
+                    }
                 }
             }
             Err(error) => Err(error),

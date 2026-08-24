@@ -155,6 +155,121 @@ impl LargeValueStager {
         Ok(())
     }
 
+    /// Eagerly reverse a completed but unconsumed staging receipt after the
+    /// atomic owner-row write failed.  This is the same reference transition
+    /// as normal staged-root expiry; blob bytes are only deleted later by the
+    /// existing safe reclaimer once no immutable references remain.
+    pub(crate) async fn evict_unconsumed_stage(
+        &self,
+        id: crate::large_values::StagedLargeValueId,
+    ) -> Result<bool, Error> {
+        let _lifecycle = self.lifecycle.lock().await;
+        let staged_key = staged_large_value_key(id);
+        let Some(encoded) = self
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), staged_key.clone())
+            .await?
+        else {
+            return Ok(false);
+        };
+        let staged: crate::large_values::StagedLargeValue = postcard::from_bytes(&encoded)
+            .map_err(|error| {
+                Error::InvalidLargeValueMetadata(format!(
+                    "cannot decode staged root for failed-promotion cleanup: {error}"
+                ))
+            })?;
+        let root_key = large_value_root_key(&staged.value_ref.root)?;
+        let encoded = self
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), root_key.clone())
+            .await?
+            .ok_or_else(|| {
+                Error::InvalidLargeValueMetadata(
+                    "staged root count is missing during failed-promotion cleanup".to_owned(),
+                )
+            })?;
+        let mut root: LargeValueRootReferences =
+            postcard::from_bytes(&encoded).map_err(|error| {
+                Error::InvalidLargeValueMetadata(format!(
+                    "cannot decode staged root references: {error}"
+                ))
+            })?;
+        root.staged = root.staged.checked_sub(1).ok_or_else(|| {
+            Error::InvalidLargeValueMetadata("staged root count underflow".to_owned())
+        })?;
+        let deactivate_root = root.staged == 0 && root.durable == 0 && root.node_active;
+        if deactivate_root {
+            root.node_active = false;
+        }
+        let mut operations = vec![
+            OwnedWriteOperation::Delete {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: staged_key,
+            },
+            OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: root_key,
+                value: postcard::to_allocvec(&root).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot encode root references: {error}"
+                    ))
+                })?,
+            },
+        ];
+        let mut pending = if deactivate_root {
+            vec![staged.value_ref.root]
+        } else {
+            Vec::new()
+        };
+        while let Some(node_ref) = pending.pop() {
+            let key = large_value_node_key(&node_ref)?;
+            let encoded = self
+                .storage
+                .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
+                .await?
+                .ok_or_else(|| {
+                    Error::InvalidLargeValueMetadata(
+                        "active node metadata is missing during failed-promotion cleanup"
+                            .to_owned(),
+                    )
+                })?;
+            let mut metadata: LargeValueNodeReferences =
+                postcard::from_bytes(&encoded).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot decode node references: {error}"
+                    ))
+                })?;
+            metadata.references = metadata.references.checked_sub(1).ok_or_else(|| {
+                Error::InvalidLargeValueMetadata("node reference count underflow".to_owned())
+            })?;
+            if metadata.references == 0 {
+                pending.extend(metadata.children.iter().cloned());
+                if metadata.upload_references == 0 {
+                    operations.push(OwnedWriteOperation::Set {
+                        cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                        key: large_value_reclaim_key(&node_ref)?,
+                        value: postcard::to_allocvec(&node_ref).map_err(|error| {
+                            Error::InvalidLargeValueMetadata(format!(
+                                "cannot encode reclaim entry: {error}"
+                            ))
+                        })?,
+                    });
+                }
+            }
+            operations.push(OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key,
+                value: postcard::to_allocvec(&metadata).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot encode node references: {error}"
+                    ))
+                })?,
+            });
+        }
+        self.storage.write_many(operations).await?;
+        Ok(true)
+    }
+
     /// The shared upload journal path.  Metadata intent commits before a
     /// separate blob put, so recovery/expiry can find every possible blob.
     async fn stage_chunk_batch(
@@ -1631,109 +1746,7 @@ impl Database {
         &self,
         id: crate::large_values::StagedLargeValueId,
     ) -> Result<bool, Error> {
-        let _lifecycle = self.large_value_lifecycle.lock().await;
-        let staged_key = staged_large_value_key(id);
-        let Some(encoded) = self
-            .storage
-            .get(LARGE_VALUE_METADATA_CF.to_owned(), staged_key.clone())
-            .await?
-        else {
-            return Ok(false);
-        };
-        let staged: crate::large_values::StagedLargeValue = postcard::from_bytes(&encoded)
-            .map_err(|error| {
-                Error::InvalidLargeValueMetadata(format!(
-                    "cannot decode staged root for eviction: {error}"
-                ))
-            })?;
-        let root_key = large_value_root_key(&staged.value_ref.root)?;
-        let encoded = self
-            .storage
-            .get(LARGE_VALUE_METADATA_CF.to_owned(), root_key.clone())
-            .await?
-            .ok_or_else(|| {
-                Error::InvalidLargeValueMetadata("staged root count is missing".to_owned())
-            })?;
-        let mut references: LargeValueRootReferences =
-            postcard::from_bytes(&encoded).map_err(|error| {
-                Error::InvalidLargeValueMetadata(format!(
-                    "cannot decode staged root references: {error}"
-                ))
-            })?;
-        references.staged = references.staged.checked_sub(1).ok_or_else(|| {
-            Error::InvalidLargeValueMetadata("staged root count underflow".to_owned())
-        })?;
-        let deactivate_root =
-            references.staged == 0 && references.durable == 0 && references.node_active;
-        if deactivate_root {
-            references.node_active = false;
-        }
-        let mut operations = vec![
-            OwnedWriteOperation::Delete {
-                cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                key: staged_key,
-            },
-            OwnedWriteOperation::Set {
-                cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                key: root_key,
-                value: postcard::to_allocvec(&references).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot encode staged root references: {error}"
-                    ))
-                })?,
-            },
-        ];
-        let mut pending = if deactivate_root {
-            vec![staged.value_ref.root.clone()]
-        } else {
-            Vec::new()
-        };
-        while let Some(node_ref) = pending.pop() {
-            let key = large_value_node_key(&node_ref)?;
-            let encoded = self
-                .storage
-                .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
-                .await?
-                .ok_or_else(|| {
-                    Error::InvalidLargeValueMetadata(
-                        "reachable node reference metadata is missing".to_owned(),
-                    )
-                })?;
-            let mut metadata: LargeValueNodeReferences =
-                postcard::from_bytes(&encoded).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot decode node references: {error}"
-                    ))
-                })?;
-            metadata.references = metadata.references.checked_sub(1).ok_or_else(|| {
-                Error::InvalidLargeValueMetadata("node reference count underflow".to_owned())
-            })?;
-            if metadata.references == 0 {
-                pending.extend(metadata.children.iter().cloned());
-            }
-            operations.push(OwnedWriteOperation::Set {
-                cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                key,
-                value: postcard::to_allocvec(&metadata).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot encode node references: {error}"
-                    ))
-                })?,
-            });
-            if metadata.references == 0 {
-                operations.push(OwnedWriteOperation::Set {
-                    cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                    key: large_value_reclaim_key(&node_ref)?,
-                    value: postcard::to_allocvec(&node_ref).map_err(|error| {
-                        Error::InvalidLargeValueMetadata(format!(
-                            "cannot encode reclaim entry: {error}"
-                        ))
-                    })?,
-                });
-            }
-        }
-        self.storage.write_many(operations).await?;
-        Ok(true)
+        self.large_value_stager().evict_unconsumed_stage(id).await
     }
 
     /// Drain persisted orphan work without walking row history. Each entry was

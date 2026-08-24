@@ -328,6 +328,229 @@ async fn failed_resident_blob_stage_eagerly_retracts_row_and_upload_journal() {
 }
 
 #[futures_test::test]
+async fn resident_journal_and_receipt_failures_eagerly_release_each_pre_promotion_phase() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+
+    for (write_in_stage, flushed_blobs) in [(1, false), (2, true)] {
+        let (storage, control) = TestStorage::controlled(&schema.column_families());
+        let mut database = Database::new(schema.clone(), storage).await.unwrap();
+        let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+        database.set_chunk_storage(chunks.clone());
+        let stage = database
+            .prepare_resident_large_value(
+                crate::large_values::LargeValueKind::Bytes,
+                &vec![5; crate::large_values::INLINE_VALUE_MAX_BYTES + 1],
+            )
+            .unwrap();
+        let mut batch = database.open_batch();
+        batch.insert(
+            "objects",
+            vec![Value::U64(1), Value::Large(stage.value_ref().clone())],
+        );
+        batch.accept_resident_large_value(stage);
+        let applied = database.apply_batch(batch).await.unwrap();
+        let prior_writes = control
+            .observed()
+            .into_iter()
+            .filter(|operation| *operation == TestStorageOperation::WriteMany)
+            .count();
+        control.fail_on_occurrence(
+            TestStorageOperation::WriteMany,
+            prior_writes + write_in_stage,
+        );
+
+        let persistence = applied.persist().await;
+        assert!(matches!(
+            database.retract_failed_persistence(persistence).await,
+            Err(Error::Storage(_))
+        ));
+        assert!(
+            database
+                .primary_key_scan("objects", &[Value::U64(1)])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            database
+                .pending_large_value_uploads()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(database.staged_large_values().await.unwrap().is_empty());
+        if flushed_blobs {
+            assert!(
+                database
+                    .reclaim_orphaned_large_value_chunks(usize::MAX)
+                    .await
+                    .unwrap()
+                    > 0,
+                "a failed receipt must release blobs flushed after its journal"
+            );
+        }
+        assert_eq!(chunks.len(), 0);
+
+        let mut retry = database.open_batch();
+        retry.insert("objects", vec![Value::U64(1), Value::Bytes(vec![1])]);
+        database.commit_batch(retry).await.unwrap();
+    }
+}
+
+#[futures_test::test]
+async fn completed_receipt_survives_a_crash_for_ttl_without_becoming_a_row() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema.clone(), storage.clone())
+        .await
+        .unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let staged = database
+        .prepare_and_stage_large_value(
+            crate::large_values::LargeValueKind::Bytes,
+            &vec![8; crate::large_values::INLINE_VALUE_MAX_BYTES + 1],
+        )
+        .await
+        .unwrap();
+    drop(database);
+
+    let mut reopened = Database::new(schema, storage).await.unwrap();
+    reopened.set_chunk_storage(chunks.clone());
+    assert!(
+        reopened
+            .primary_key_scan("objects", &[Value::U64(1)])
+            .await
+            .unwrap()
+            .is_empty(),
+        "a receipt recovered after a process crash is not an accepted owner row"
+    );
+    assert!(
+        reopened
+            .staged_large_values()
+            .await
+            .unwrap()
+            .contains(&staged),
+        "only a crash-window receipt remains for Jazz's normal TTL policy"
+    );
+    assert!(reopened.evict_staged_large_value(staged.id).await.unwrap());
+    assert!(
+        reopened
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap()
+            > 0
+    );
+    assert_eq!(chunks.len(), 0);
+}
+
+#[futures_test::test]
+async fn failed_resident_acceptance_eagerly_retracts_receipt_chunks_and_visibility() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let (storage, control) = TestStorage::controlled(&schema.column_families());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    database.set_chunk_storage(chunks.clone());
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("objects"))
+        .await
+        .unwrap();
+    assert!(
+        database
+            .next_subscription(&subscription)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let stage = database
+        .prepare_resident_large_value(
+            crate::large_values::LargeValueKind::Bytes,
+            &vec![6; crate::large_values::INLINE_VALUE_MAX_BYTES + 1],
+        )
+        .unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "objects",
+        vec![Value::U64(1), Value::Large(stage.value_ref().clone())],
+    );
+    batch.accept_resident_large_value(stage);
+    let applied = database.apply_batch(batch).await.unwrap();
+    assert_eq!(subscription.recv().unwrap().deltas.len(), 1);
+
+    let prior_writes = control
+        .observed()
+        .into_iter()
+        .filter(|operation| *operation == TestStorageOperation::WriteMany)
+        .count();
+    // The direct stage must write an intent journal, then a receipt, then the
+    // atomic owner row/root metadata write. Fail only that final acceptance
+    // after bytes have reached the chunk backend.
+    control.fail_on_occurrence(TestStorageOperation::WriteMany, prior_writes + 3);
+    let persistence = applied.persist().await;
+    assert!(matches!(
+        database.retract_failed_persistence(persistence).await,
+        Err(Error::Storage(_))
+    ));
+    assert!(
+        database
+            .primary_key_scan("objects", &[Value::U64(1)])
+            .await
+            .unwrap()
+            .is_empty(),
+        "failed acceptance must release the resident uniqueness claim"
+    );
+    let rollback = subscription.recv().unwrap();
+    assert_eq!(rollback.deltas.len(), 1);
+    assert_eq!(rollback.deltas[0].weight, -1);
+    assert!(
+        database.staged_large_values().await.unwrap().is_empty(),
+        "a known failed acceptance must not retain a receipt for TTL eviction"
+    );
+    assert!(
+        database
+            .pending_large_value_uploads()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap()
+            > 0,
+        "receipt cleanup must make the flushed blobs reclaimable immediately"
+    );
+    assert_eq!(chunks.len(), 0);
+
+    let mut retry = database.open_batch();
+    retry.insert("objects", vec![Value::U64(1), Value::Bytes(vec![1])]);
+    database.commit_batch(retry).await.unwrap();
+}
+
+#[futures_test::test]
 async fn idempotent_restaging_reports_incoming_bytes_for_each_upload() {
     let schema = DatabaseSchema::new([TableSchema::new(
         "objects",

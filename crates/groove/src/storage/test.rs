@@ -177,6 +177,7 @@ struct ControlState {
     observed: Vec<TestStorageOperation>,
     waiters: Vec<Waker>,
     failures: BTreeMap<TestStorageOperation, VecDeque<Error>>,
+    failures_on_occurrence: BTreeMap<TestStorageOperation, VecDeque<usize>>,
 }
 
 impl Default for ControlState {
@@ -189,6 +190,7 @@ impl Default for ControlState {
             observed: Vec::new(),
             waiters: Vec::new(),
             failures: BTreeMap::new(),
+            failures_on_occurrence: BTreeMap::new(),
         }
     }
 }
@@ -211,6 +213,22 @@ impl TestStorageControl {
                 backend: "test",
                 message: format!("injected {operation:?} failure"),
             });
+    }
+
+    /// Fail a particular observed occurrence of an operation. This lets a
+    /// receipt/staging test target the final atomic write without making its
+    /// earlier journal writes fail first.
+    pub fn fail_on_occurrence(&self, operation: TestStorageOperation, occurrence: usize) {
+        assert!(
+            occurrence > 0,
+            "storage operation occurrences are one-based"
+        );
+        self.state
+            .borrow_mut()
+            .failures_on_occurrence
+            .entry(operation)
+            .or_default()
+            .push_back(occurrence);
     }
 
     /// Make subsequent storage progress require explicit permits.
@@ -305,9 +323,28 @@ impl TestStorageControl {
             Poll::Pending
         })
         .await;
-        match self
-            .state
-            .borrow_mut()
+        let mut state = self.state.borrow_mut();
+        let occurrence = state
+            .observed
+            .iter()
+            .filter(|observed| **observed == operation)
+            .count();
+        if state
+            .failures_on_occurrence
+            .get_mut(&operation)
+            .is_some_and(|occurrences| {
+                occurrences
+                    .front()
+                    .is_some_and(|target| *target == occurrence)
+                    && occurrences.pop_front().is_some()
+            })
+        {
+            return Err(Error::Backend {
+                backend: "test",
+                message: format!("injected {operation:?} occurrence {occurrence} failure"),
+            });
+        }
+        match state
             .failures
             .get_mut(&operation)
             .and_then(VecDeque::pop_front)
