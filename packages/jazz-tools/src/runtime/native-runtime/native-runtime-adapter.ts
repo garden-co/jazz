@@ -2123,7 +2123,21 @@ export class NativeRuntimeAdapter implements Runtime {
   }
 
   private applySessionClaims(session: RuntimeSession | null | undefined): void {
-    if (!session || !this.db.setIdentityClaims) return;
+    // Client runtimes only evaluate their already-settled local replica. They
+    // never select the policy-enforcing native entry points, so there is no
+    // reason to serialize a session subject into the public native ABI here.
+    // In particular, local-first and anonymous subjects are admitted by the
+    // first-party TypeScript flow, while raw native identity ingress must keep
+    // rejecting their reserved issuers. Claims are required only by the
+    // explicitly selected trusted-serving host, where every identity call is
+    // part of that serving boundary.
+    if (
+      !session ||
+      this.readAuthorizationHost !== "trusted-serving" ||
+      !this.db.setIdentityClaims
+    ) {
+      return;
+    }
     this.db.setIdentityClaims(session.identity, session.claims);
   }
 

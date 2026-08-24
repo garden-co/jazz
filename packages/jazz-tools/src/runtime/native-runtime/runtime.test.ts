@@ -1003,6 +1003,9 @@ describe("NativeRuntimeAdapter server transport", () => {
 
   it("uses trusted serving only when the host explicitly selects it", async () => {
     const authors: string[] = [];
+    const claimUpdates: Array<{ author: string; claims: Record<string, unknown> }> = [];
+    const externalIssuer = "https://issuer.example";
+    const externalUserId = "00000000-0000-0000-0000-0000000000a1";
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
@@ -1019,6 +1022,9 @@ describe("NativeRuntimeAdapter server transport", () => {
                   title: "trusted serving",
                 },
               ]);
+            },
+            setIdentityClaims: (author: Uint8Array, claims: Record<string, unknown>) => {
+              claimUpdates.push({ author: new TextDecoder().decode(author), claims });
             },
             prepareQuery: () => ({}),
             tick: () => undefined,
@@ -1039,9 +1045,9 @@ describe("NativeRuntimeAdapter server transport", () => {
       runtime.query(
         JSON.stringify({ table: "todos" }),
         JSON.stringify({
-          user_id: "00000000-0000-0000-0000-0000000000a1",
-          claims: {},
-          issuer: "https://issuer.example",
+          user_id: externalUserId,
+          claims: { role: "reader", subject: "application-owned-subject" },
+          issuer: externalIssuer,
           authMode: "external",
         }),
         "local",
@@ -1053,7 +1059,24 @@ describe("NativeRuntimeAdapter server transport", () => {
         values: [{ type: "Text", value: "trusted serving" }],
       },
     ]);
-    expect(authors).toEqual(['["https://issuer.example","00000000-0000-0000-0000-0000000000a1"]']);
+    expect(authors).toEqual([`["${externalIssuer}","${externalUserId}"]`]);
+    expect(claimUpdates).toEqual([
+      {
+        author: `["${externalIssuer}","${externalUserId}"]`,
+        claims: {
+          role: "reader",
+          subject: "application-owned-subject",
+          iss: externalIssuer,
+          issuer: externalIssuer,
+          sub: externalUserId,
+          user_id: externalUserId,
+          userId: externalUserId,
+          author: `["${externalIssuer}","${externalUserId}"]`,
+          authMode: "external",
+          auth_mode: "external",
+        },
+      },
+    ]);
   });
 
   it("rejects reserved issuers in public read sessions but preserves private trusted identity", async () => {
@@ -1172,6 +1195,80 @@ describe("NativeRuntimeAdapter server transport", () => {
       },
     ]);
     expect(authors).toEqual(['["urn:jazz:local-first","verified-user"]']);
+  });
+
+  it("keeps first-party reserved browser sessions out of public native identity ingress", async () => {
+    const setIdentityClaims = vi.fn(() => {
+      // This represents the raw NAPI/WASM identity ABI. It deliberately
+      // rejects reserved canonical subjects, just as the real binding does.
+      throw new Error("author issuer is reserved");
+    });
+    const all = vi.fn(() =>
+      encodeRows([
+        {
+          table: "todos",
+          rowId: new Uint8Array(16),
+          title: "local replica",
+        },
+      ]),
+    );
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all,
+            prepareQuery: () => ({}),
+            setIdentityClaims,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    for (const [issuer, authMode] of [
+      [LOCAL_FIRST_JWT_ISSUER, "local-first"],
+      [ANONYMOUS_JWT_ISSUER, "anonymous"],
+    ] as const) {
+      const trustedSession = sessionFromVerifiedReservedJwtPayload(
+        { iss: issuer, sub: `${authMode}-browser-user` },
+        authMode,
+      )!;
+      await expect(
+        runtime.query(
+          JSON.stringify({ table: "todos" }),
+          JSON.stringify({
+            ...trustedSession,
+            [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: trustedReservedSessionToken(trustedSession),
+          }),
+          "local",
+        ),
+      ).resolves.toHaveLength(1);
+    }
+
+    // A serialized lookalike has no in-process capability and must still be
+    // rejected before it can reach either the local replica or the native ABI.
+    await expect(
+      runtime.query(
+        JSON.stringify({ table: "todos" }),
+        JSON.stringify({
+          issuer: LOCAL_FIRST_JWT_ISSUER,
+          user_id: "forged-browser-user",
+          claims: {},
+          authMode: "local-first",
+        }),
+        "local",
+      ),
+    ).rejects.toThrow("reserved issuer");
+
+    expect(all).toHaveBeenCalledTimes(2);
+    expect(setIdentityClaims).not.toHaveBeenCalled();
   });
 
   it("decodes fixed-width array columns from native row batches", async () => {
