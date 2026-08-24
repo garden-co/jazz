@@ -3,6 +3,7 @@ use jazz_server::JazzServer;
 use serde_json::{Value, json};
 
 const ADMIN_SECRET: &str = "secret";
+const MAX_ADMIN_REQUEST_BODY_BYTES: usize = 8 << 20;
 
 async fn start_server() -> JazzServer {
     JazzServer::builder()
@@ -62,6 +63,22 @@ async fn admin_schema_api_requires_secret_and_rejects_permissions() {
         .await
         .unwrap();
     assert_eq!(rejected.status(), 400);
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn admin_schema_api_rejects_oversized_bodies_before_the_handler_runs() {
+    let server = start_server().await;
+    let client = reqwest::Client::new();
+    let response = admin_request(client.post(app_url(&server, "/admin/schemas")))
+        .header("content-type", "application/json")
+        .body(vec![b' '; MAX_ADMIN_REQUEST_BODY_BYTES + 1])
+        .send()
+        .await
+        .expect("send oversized schema request");
+
+    assert_eq!(response.status(), 413);
 
     server.shutdown().await;
 }
