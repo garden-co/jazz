@@ -105,6 +105,7 @@ struct CoreOpenDbConfig {
     row_id_seed: Option<u64>,
     history_complete: bool,
     initial_sync_flush_every: Option<u32>,
+    backend_credential: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -3074,7 +3075,19 @@ fn open_core_db<S>(
 where
     S: CoreOrderedKvStorage + CoreReopenableStorage + 'static,
 {
-    let mut db_config = CoreDbConfig::new(schema, storage, config.identity.into());
+    let identity = if config
+        .backend_credential
+        .as_deref()
+        .is_some_and(|credential| !credential.is_empty())
+    {
+        CoreDbIdentity {
+            node: config.identity.node,
+            author: CoreAuthorSubject::SYSTEM,
+        }
+    } else {
+        config.identity.into()
+    };
+    let mut db_config = CoreDbConfig::new(schema, storage, identity);
     if let Some(seed) = config.row_id_seed {
         db_config = db_config.with_id_source(CoreSeededRowIdSource::new(seed));
     }
@@ -4199,6 +4212,7 @@ mod tests {
             row_id_seed: Option<u64>,
             history_complete: bool,
             initial_sync_flush_every: Option<u32>,
+            backend_credential: Option<String>,
         }
         let encode_config = |author| {
             postcard::to_allocvec(&EncodedConfig {
@@ -4209,6 +4223,7 @@ mod tests {
                 row_id_seed: None,
                 history_complete: false,
                 initial_sync_flush_every: None,
+                backend_credential: None,
             })
             .unwrap()
         };
