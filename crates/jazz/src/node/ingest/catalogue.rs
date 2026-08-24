@@ -113,6 +113,20 @@ where
                     ]))
                 }
                 SyncMessage::ChunkUploadNodes(batch) => {
+                    let upload_exists = self
+                        .database
+                        .pending_large_value_uploads()
+                        .await?
+                        .into_iter()
+                        .any(|upload| upload.descriptor.as_ref() == Some(&batch.value_ref));
+                    if !upload_exists {
+                        return Ok(PublicationOutcome::settled(vec![
+                            SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                                value_ref: batch.value_ref,
+                                status: crate::protocol::ChunkUploadStatus::Rejected,
+                            }),
+                        ]));
+                    }
                     let accounting = batch.chunks.iter().try_fold(
                         groove::large_values::StagedLargeValueAccounting::default(),
                         |mut total, chunk| {
@@ -140,10 +154,23 @@ where
                     }
                     let progress = match self
                         .database
-                        .continue_large_value_upload(batch.value_ref.clone(), batch.chunks)
+                        .continue_large_value_upload_if_current(
+                            batch.value_ref.clone(),
+                            batch.chunks,
+                        )
                         .await
                     {
-                        Ok(progress) => progress,
+                        Ok(Some(progress)) => progress,
+                        Ok(None) => {
+                            return Ok(PublicationOutcome::settled(vec![
+                                SyncMessage::ChunkUploadResult(
+                                    crate::protocol::ChunkUploadResult {
+                                        value_ref: batch.value_ref,
+                                        status: crate::protocol::ChunkUploadStatus::Rejected,
+                                    },
+                                ),
+                            ]));
+                        }
                         Err(error) if large_value_upload_is_rejected(&error) => {
                             return Ok(PublicationOutcome::settled(vec![
                                 SyncMessage::ChunkUploadResult(

@@ -24,6 +24,7 @@ type PushPreparation = groove::large_values::PushStreamingPreparation<
 pub struct StreamingValueUpload {
     id: groove::large_values::StagedLargeValueId,
     kind: groove::large_values::LargeValueKind,
+    initialized: bool,
     preparation: Option<PushPreparation>,
     emitted: Rc<RefCell<Vec<groove::large_values::StagedChunk>>>,
 }
@@ -614,6 +615,7 @@ where
         Ok(StreamingValueUpload {
             id: groove::large_values::StagedLargeValueId(*uuid::Uuid::new_v4().as_bytes()),
             kind,
+            initialized: false,
             preparation: Some(preparation),
             emitted,
         })
@@ -625,6 +627,16 @@ where
         upload: &mut StreamingValueUpload,
         bytes: &[u8],
     ) -> Result<(), Error> {
+        let initialized_now = !upload.initialized;
+        if !upload.initialized {
+            self.node
+                .node
+                .lock()
+                .await
+                .begin_streaming_large_value_upload(upload.id, upload.kind)
+                .await?;
+            upload.initialized = true;
+        }
         let push_result = upload
             .preparation
             .as_mut()
@@ -641,6 +653,12 @@ where
             return Err(crate::node::Error::from(error).into());
         }
         let chunks = std::mem::take(&mut *upload.emitted.borrow_mut());
+        // The begin operation already persisted the journal under the same
+        // node lock. Avoid immediately re-admitting an empty first flush;
+        // every subsequent push, including an empty one, proves liveness.
+        if initialized_now && chunks.is_empty() {
+            return Ok(());
+        }
         let stage_result = {
             let node = self.node.node.lock().await;
             node.stage_large_value_chunk_batch(upload.id, upload.kind, chunks)
@@ -690,6 +708,15 @@ where
         head: Option<BranchSelector>,
         base: Option<BranchViewBase>,
     ) -> Result<WriteHandle<S>, Error> {
+        if !upload.initialized {
+            self.node
+                .node
+                .lock()
+                .await
+                .begin_streaming_large_value_upload(upload.id, upload.kind)
+                .await?;
+            upload.initialized = true;
+        }
         let preparation = upload
             .preparation
             .take()
