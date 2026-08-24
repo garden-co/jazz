@@ -1086,6 +1086,9 @@ export class NativeRuntimeAdapter implements Runtime {
     const attribution = this.backendAttribution(_writeContext, writeSession);
     const updatedAtMs = effectiveUpdatedAtMs(_writeContext);
     const branchView = branchViewFromWriteContext(_writeContext);
+    if (attribution && branchView) {
+      throw new Error("Backend-attributed branch mutations are not supported yet");
+    }
     const tx = this.currentTx(_writeContext, "Insert");
     if (tx) {
       if (rowContainsOversizedScalar(this.table(table), values)) {
@@ -1093,7 +1096,7 @@ export class NativeRuntimeAdapter implements Runtime {
           "Oversized values cannot be inserted inside a synchronous transaction; use insertStreaming outside the transaction",
         );
       }
-      const nativeTx = this.txForWrite(tx, writeIdentity);
+      const nativeTx = this.txForWrite(tx, writeIdentity, attribution);
       if (branchView) {
         requireBranchMethod(
           nativeTx.insertWithIdEncodedInBranch,
@@ -1263,9 +1266,12 @@ export class NativeRuntimeAdapter implements Runtime {
     const attribution = this.backendAttribution(writeContext, writeSession);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
+    if (attribution && branchView) {
+      throw new Error("Backend-attributed branch mutations are not supported yet");
+    }
     const tx = this.currentTx(writeContext, "Restore");
     if (tx) {
-      const nativeTx = this.txForWrite(tx, writeIdentity);
+      const nativeTx = this.txForWrite(tx, writeIdentity, attribution);
       if (branchView) {
         requireBranchMethod(nativeTx.restoreEncodedInBranch, "transaction branch restores").call(
           nativeTx,
@@ -1326,9 +1332,12 @@ export class NativeRuntimeAdapter implements Runtime {
     const attribution = this.backendAttribution(writeContext, writeSession);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
+    if (attribution && branchView) {
+      throw new Error("Backend-attributed branch mutations are not supported yet");
+    }
     const tx = this.currentTx(writeContext, "Update");
     if (tx) {
-      const nativeTx = this.txForWrite(tx, writeIdentity);
+      const nativeTx = this.txForWrite(tx, writeIdentity, attribution);
       if (branchView) {
         requireBranchMethod(nativeTx.updateEncodedInBranchView, "transaction branch updates").call(
           nativeTx,
@@ -1409,7 +1418,12 @@ export class NativeRuntimeAdapter implements Runtime {
       throw writeError("Upsert", normalizeWriteSetupMessage(errorMessage(error)));
     }
     if (tx) {
-      this.txForWrite(tx, writeIdentity).upsertEncoded(table, rowId, cells, updatedAtMs);
+      this.txForWrite(tx, writeIdentity, attribution).upsertEncoded(
+        table,
+        rowId,
+        cells,
+        updatedAtMs,
+      );
       tx.writes.push({
         table,
         rowId,
@@ -1441,9 +1455,12 @@ export class NativeRuntimeAdapter implements Runtime {
     const attribution = this.backendAttribution(writeContext, writeSession);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const branchView = branchViewFromWriteContext(writeContext);
+    if (attribution && branchView) {
+      throw new Error("Backend-attributed branch mutations are not supported yet");
+    }
     const tx = this.currentTx(writeContext, "Delete");
     if (tx) {
-      const nativeTx = this.txForWrite(tx, writeIdentity);
+      const nativeTx = this.txForWrite(tx, writeIdentity, attribution);
       if (branchView) {
         requireBranchMethod(nativeTx.deleteInBranchView, "transaction branch deletes").call(
           nativeTx,
@@ -2438,7 +2455,14 @@ export class NativeRuntimeAdapter implements Runtime {
     throw new Error(`${operation} failed: WriteError("${txStateMessage(id, this.completedTxs)}")`);
   }
 
-  private txForWrite(pending: PendingTx, identity: Uint8Array | undefined): Tx {
+  private txForWrite(
+    pending: PendingTx,
+    identity: Uint8Array | undefined,
+    attribution?: Uint8Array,
+  ): Tx {
+    if (!sameOptionalBytes(pending.attribution, attribution)) {
+      throw new Error("Native runtime transaction cannot mix provenance attributions");
+    }
     if (pending.kind === "exclusive") {
       if (pending.identity && (!identity || !sameBytes(pending.identity, identity))) {
         throw new Error("Native runtime exclusive transaction cannot mix write identities");
@@ -6216,6 +6240,10 @@ function bytesKey(bytes: Uint8Array): string {
 
 function sameBytes(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
+}
+
+function sameOptionalBytes(left: Uint8Array | undefined, right: Uint8Array | undefined): boolean {
+  return left === undefined || right === undefined ? left === right : sameBytes(left, right);
 }
 
 function concatBytes(chunks: Uint8Array[]): Uint8Array {

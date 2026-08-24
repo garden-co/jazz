@@ -709,6 +709,9 @@ where
         base: Option<BranchViewBase>,
         attribution: Option<AuthorSubject>,
     ) -> Result<WriteHandle<S>, Error> {
+        if let Some(made_by) = attribution {
+            self.check_attribution_allowed(made_by)?;
+        }
         if !upload.initialized {
             self.node
                 .node
@@ -2849,7 +2852,7 @@ where
     }
 
     pub(super) fn check_attribution_allowed(&self, made_by: AuthorSubject) -> Result<(), Error> {
-        if made_by == self.identity.author {
+        if made_by == self.identity.author || self.backend_attribution {
             return Ok(());
         }
         Err(Error::new(
