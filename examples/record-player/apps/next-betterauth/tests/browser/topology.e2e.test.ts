@@ -43,6 +43,43 @@ const recipientPermissions = s.definePermissions(recipientApp, ({ policy, sessio
   policy.invitations.allowInsert.always();
 });
 
+// This adds exactly the branch which distinguishes RecordPlayer from the
+// scalar control: a correlated owner path through a referenced playlist.
+const relationalRecipientApp = s.defineApp({
+  playlists: s.table({ name: s.string() }),
+  invitations: s.table({
+    playlist_id: s.ref("playlists"),
+    subject: s.string(),
+    label: s.string(),
+    status: s.enum("pending", "accepted"),
+  }),
+});
+const relationalRecipientPermissions = s.definePermissions(
+  relationalRecipientApp,
+  ({ policy, session, anyOf }) => {
+    policy.playlists.allowRead.where((playlist) =>
+      anyOf([
+        { $createdBy: session.author },
+        policy.invitations.exists.where({
+          playlist_id: playlist.id,
+          subject: session.user_id,
+          status: "accepted",
+        }),
+      ]),
+    );
+    policy.playlists.allowInsert.always();
+    policy.invitations.allowRead.where((invite) =>
+      anyOf([
+        { subject: session.user_id },
+        policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.author }),
+      ]),
+    );
+    policy.invitations.allowInsert.where((invite) =>
+      policy.playlists.exists.where({ id: invite.playlist_id, $createdBy: session.author }),
+    );
+  },
+);
+
 describe("RecordPlayer authenticated playlist topology", () => {
   it("settles an identical one-table write at edge", async () => {
     const server = await getJazzServerInfo(uniqueDbName("record-player-ack-probe"));
@@ -115,6 +152,45 @@ describe("RecordPlayer authenticated playlist topology", () => {
         label: "recipient routing receipt",
       },
     ]);
+  }, 30_000);
+
+  it("delivers a scalar recipient grant alongside a correlated playlist-owner branch", async () => {
+    const server = await getJazzServerInfo(uniqueDbName("record-player-recipient-relation"));
+    await deploy({
+      appId: server.appId,
+      serverUrl: server.serverUrl,
+      adminSecret: server.adminSecret,
+      schema: relationalRecipientApp,
+      permissions: relationalRecipientPermissions,
+    });
+    const [ownerToken, recipientToken] = await Promise.all([
+      getJazzServerJwtForUser("record-player-relation-owner", undefined, server.appId),
+      getJazzServerJwtForUser("record-player-relation-recipient", undefined, server.appId),
+    ]);
+    const owner = await openClient(server, "relation-owner", ownerToken);
+    const recipient = await openClient(server, "relation-recipient", recipientToken);
+    const playlist = await owner
+      .insert(relationalRecipientApp.playlists, { name: "recipient relation receipt" })
+      .wait({ tier: "edge" });
+    const invite = await owner
+      .insert(relationalRecipientApp.invitations, {
+        playlist_id: playlist.id,
+        subject: "record-player-relation-recipient",
+        label: "recipient relation receipt",
+        status: "pending",
+      })
+      .wait({ tier: "edge" });
+
+    await expect(
+      waitForQuery(
+        recipient,
+        relationalRecipientApp.invitations.where({ subject: "record-player-relation-recipient" }),
+        (rows) => rows.length === 1 && rows[0]?.id === invite.id,
+        "external-JWT recipient receives scalar grant with correlated owner branch",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toHaveLength(1);
   }, 30_000);
 
   it("rejects forged acceptance and converges two offline playlist editors exactly", async () => {
