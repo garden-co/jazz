@@ -39,6 +39,19 @@ describe("BandBinder workspace roles", () => {
       .insert(app.members, { workspaceId: workspace.id, subject: "member", role: "member" })
       .wait({ tier: "edge" });
 
+    // The app discovers a grant first, then resolves the workspace through
+    // the correlated membership EXISTS arm. Keep that authorization shape
+    // explicit here: the browser topology receipt additionally proves its
+    // transport/maintained path.
+    expect(
+      await manager.all(app.members.where({ id: managerMembership.id, subject: "manager" }), {
+        tier: "edge",
+      }),
+    ).toEqual([managerMembership]);
+    expect(await manager.all(app.workspaces.where({ id: workspace.id }), { tier: "edge" })).toEqual(
+      [workspace],
+    );
+
     const page = await manager
       .insert(app.pages, { workspaceId: workspace.id, title: "Berlin" })
       .wait({ tier: "edge" });
