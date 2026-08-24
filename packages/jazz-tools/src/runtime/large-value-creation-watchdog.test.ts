@@ -114,6 +114,8 @@ describe.runIf(modes.includes(fixture as (typeof modes)[number]))(
                   "title",
                   oneChunk(largeText),
                 );
+        expect(write, `fixture ${fixture} must create a write`).toBeDefined();
+        const residentWrite = write!;
         console.error(`phase:${fixture}:returned`);
         if (fixture === "direct-wasm-text") {
           expect(() =>
@@ -123,14 +125,14 @@ describe.runIf(modes.includes(fixture as (typeof modes)[number]))(
                 title: { type: "Text", value: largeText },
                 done: { type: "Boolean", value: false },
               },
-              { id: write.value.id },
+              { id: residentWrite.value.id },
             ),
           ).toThrow(/already exists/i);
-          const updated = client.update("todos", write.value.id, {
+          const updated = client.update("todos", residentWrite.value.id, {
             done: { type: "Boolean", value: true },
           });
-          const deleted = client.delete("todos", write.value.id);
-          const restored = client.restore("todos", write.value.id, {
+          const deleted = client.delete("todos", residentWrite.value.id);
+          const restored = client.restore("todos", residentWrite.value.id, {
             title: { type: "Text", value: largeText },
             done: { type: "Boolean", value: true },
           });
@@ -140,19 +142,29 @@ describe.runIf(modes.includes(fixture as (typeof modes)[number]))(
         }
         if (fixture === "direct-wasm-bytes") {
           await expect(
-            runtime.readValueRange("blobs", write.value.id, "data", 0, largeText.length),
+            runtime.readValueRange("blobs", residentWrite.value.id, "data", 0, largeText.length),
           ).resolves.toEqual(new TextEncoder().encode(largeText));
         }
         if (fixture === "direct-wasm-json") {
           await expect(
-            runtime.readJsonPointer("documents", write.value.id, "body", "/selected/answer"),
+            runtime.readJsonPointer(
+              "documents",
+              residentWrite.value.id,
+              "body",
+              "/selected/answer",
+            ),
           ).resolves.toBe(42);
         }
-        await write.wait({ tier: "local" });
+        await residentWrite.wait({ tier: "local" });
         console.error(`phase:${fixture}:local`);
         if (fixture?.endsWith("-json")) {
           await expect(
-            runtime.readJsonPointer("documents", write.value.id, "body", "/selected/answer"),
+            runtime.readJsonPointer(
+              "documents",
+              residentWrite.value.id,
+              "body",
+              "/selected/answer",
+            ),
           ).resolves.toBe(42);
         }
       } finally {

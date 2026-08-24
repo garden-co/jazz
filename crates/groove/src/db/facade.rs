@@ -859,12 +859,20 @@ impl Database {
         bytes: &[u8],
     ) -> Result<crate::large_values::ResidentLargeValueStage, Error> {
         let node_refs = Rc::new(RefCell::new(Vec::new()));
+        let encoded_bytes = Rc::new(Cell::new(0_u64));
         let node_refs_for_stage = Rc::clone(&node_refs);
+        let encoded_bytes_for_stage = Rc::clone(&encoded_bytes);
         let resident_chunks = self.resident_chunks.clone();
         let mut preparation = crate::large_values::PushStreamingPreparation::new(
             kind,
             Self::fresh_chunk_locator,
             move |chunk| {
+                encoded_bytes_for_stage.set(
+                    encoded_bytes_for_stage
+                        .get()
+                        .checked_add(chunk.encoded.len() as u64)
+                        .ok_or(crate::large_values::Error::MetricOverflow)?,
+                );
                 node_refs_for_stage
                     .borrow_mut()
                     .push(chunk.node_ref.clone());
@@ -883,7 +891,17 @@ impl Database {
             crate::large_values::StagedLargeValueId(*uuid::Uuid::new_v4().as_bytes()),
             value_ref,
             std::mem::take(&mut *node_refs.borrow_mut()),
+            encoded_bytes.get(),
         ))
+    }
+
+    /// Discard a direct value that was built in the resident chunk layer but
+    /// rejected before it was attached to a resident publication.
+    pub fn discard_resident_large_value(
+        &self,
+        stage: &crate::large_values::ResidentLargeValueStage,
+    ) {
+        self.resident_chunks.release(stage.node_refs());
     }
 
     /// Prepare and stage a complete logical value entirely inside Groove.

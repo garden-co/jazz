@@ -563,7 +563,7 @@ impl Database {
                     .discard_deferred_notifications(persistence.publication);
             }
             self.poisoned = true;
-            return Err(Error::from(error));
+            return Err(error.into_database_error());
         }
         if !self
             .resident_publications
@@ -673,7 +673,7 @@ impl Database {
             advance_cancelled_publications(&mut order);
         }
         self.advance_durable_frontier();
-        Err(Error::from(failure))
+        Err(failure.into_database_error())
     }
 
     fn advance_durable_frontier(&mut self) {

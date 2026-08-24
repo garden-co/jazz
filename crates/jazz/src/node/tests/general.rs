@@ -204,6 +204,12 @@ fn failed_large_scalar_staging_publishes_no_row() {
         .current_rows("todos", DurabilityTier::Local)
         .unwrap()
         .is_empty());
+    assert!(
+        crate::db::block_on(node.database.staged_large_values())
+            .unwrap()
+            .is_empty(),
+        "a failed resident finalization must clean up its staging root",
+    );
 }
 
 #[test]
@@ -227,6 +233,12 @@ fn jazz_incoming_data_rate_limit_evicts_the_rejected_root_and_publishes_no_row()
         .current_rows("todos", DurabilityTier::Local)
         .unwrap()
         .is_empty());
+    assert!(
+        crate::db::block_on(node.database.staged_large_values())
+            .unwrap()
+            .is_empty(),
+        "a rate-limited resident value must not leave a staging root behind",
+    );
 }
 
 #[test]
