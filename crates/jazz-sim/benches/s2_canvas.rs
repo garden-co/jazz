@@ -1640,9 +1640,9 @@ fn observed_shape_tx_ids(update: &SyncMessage, read_tier: DurabilityTier) -> Vec
         return Vec::new();
     }
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             result_member_adds, ..
-        } => result_member_adds
+        }) => result_member_adds
             .iter()
             .filter_map(|entry| entry.as_row())
             .filter_map(|(table, _, tx_id)| (table.as_ref() == SHAPES).then_some(tx_id))
@@ -1656,9 +1656,9 @@ fn observed_at_read_tier(update: &SyncMessage, tier: DurabilityTier) -> bool {
         return true;
     }
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_bundles, ..
-        } => version_bundles
+        }) => version_bundles
             .iter()
             .any(|bundle| bundle.durability >= tier && matches!(bundle.fate, Fate::Accepted)),
         SyncMessage::FateUpdate { durability, .. } => durability.is_some_and(|seen| seen >= tier),
@@ -2597,9 +2597,9 @@ fn is_ancestor(
 
 fn result_output_count(update: &SyncMessage, table: &str) -> usize {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             result_member_adds, ..
-        } => result_member_adds
+        }) => result_member_adds
             .iter()
             .filter_map(|entry| entry.as_row())
             .filter(|entry| entry.0.as_ref() == table)

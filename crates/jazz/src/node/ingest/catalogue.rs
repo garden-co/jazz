@@ -219,7 +219,7 @@ where
                         .await?;
                     self.drain_parked_commit_units().await
                 }
-                SyncMessage::ViewUpdate {
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through,
                     reset_result_set,
@@ -231,7 +231,7 @@ where
                     terminal_operations,
                     program_fact_adds,
                     program_fact_removes,
-                } => {
+                }) => {
                     self.apply_view_update(ViewUpdateParts {
                         subscription,
                         settled_through,

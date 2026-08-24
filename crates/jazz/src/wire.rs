@@ -859,9 +859,9 @@ mod tests {
 
     #[test]
     fn authorization_scope_view_has_a_nonrecursive_view_update_payload() {
-        let view = crate::protocol::AuthorizationScopeViewPayload::from_view_update(
-            view_update_with_carriers(Vec::new()),
-        )
+        let view = crate::protocol::ViewUpdatePayload::from_view_update(view_update_with_carriers(
+            Vec::new(),
+        ))
         .expect("fixture is a view update");
         let message = SyncMessage::AuthorizationScopeView {
             request_id: PermissionAdviceRequestId([0x11; 16]),
@@ -880,6 +880,65 @@ mod tests {
             decode_sync_message(&encoded).expect("decode scope view fixture"),
             message,
             "the scope wrapper admits only its dedicated, non-recursive payload"
+        );
+    }
+
+    #[test]
+    fn shared_view_update_payload_preserves_postcard_shape() {
+        #[allow(dead_code)]
+        #[derive(serde::Serialize)]
+        enum LegacySyncMessage {
+            V0,
+            V1,
+            V2,
+            V3,
+            V4,
+            V5,
+            V6,
+            V7,
+            V8,
+            V9,
+            V10,
+            V11,
+            V12,
+            V13,
+            ViewUpdate {
+                subscription: SubscriptionKey,
+                settled_through: GlobalTime,
+                reset_result_set: bool,
+                version_carriers: Vec<VersionCarrier>,
+                version_bundles: Vec<VersionBundle>,
+                peer_payload_inventory: crate::protocol::PeerPayloadInventory,
+                result_member_adds: Vec<crate::protocol::ResultMemberEntry>,
+                result_member_removes: Vec<crate::protocol::ResultMemberEntry>,
+                terminal_operations: Vec<groove::ivm::TerminalOperation>,
+                program_fact_adds: Vec<crate::protocol::ProgramFactEntry>,
+                program_fact_removes: Vec<crate::protocol::ProgramFactEntry>,
+            },
+        }
+
+        let SyncMessage::ViewUpdate(payload) = view_update_with_carriers(Vec::new()) else {
+            unreachable!()
+        };
+        let legacy = LegacySyncMessage::ViewUpdate {
+            subscription: payload.subscription,
+            settled_through: payload.settled_through,
+            reset_result_set: payload.reset_result_set,
+            version_carriers: payload.version_carriers.clone(),
+            version_bundles: payload.version_bundles.clone(),
+            peer_payload_inventory: payload.peer_payload_inventory.clone(),
+            result_member_adds: payload.result_member_adds.clone(),
+            result_member_removes: payload.result_member_removes.clone(),
+            terminal_operations: payload.terminal_operations.clone(),
+            program_fact_adds: payload.program_fact_adds.clone(),
+            program_fact_removes: payload.program_fact_removes.clone(),
+        };
+        let current = SyncMessage::ViewUpdate(payload);
+
+        assert_eq!(
+            encode_sync_message(&current).unwrap(),
+            postcard::to_allocvec(&legacy).unwrap(),
+            "a newtype struct is postcard-transparent relative to the former struct variant"
         );
     }
 
@@ -903,11 +962,11 @@ mod tests {
 
         assert_eq!(decode_sync_message_for_receive(&encoded).unwrap(), message);
         let expanded = message.expand_version_carriers_for_receive().unwrap();
-        let SyncMessage::ViewUpdate {
+        let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             version_carriers,
             version_bundles,
             ..
-        } = expanded
+        }) = expanded
         else {
             panic!("expected view update");
         };
@@ -926,9 +985,9 @@ mod tests {
 
         assert_eq!(decode_sync_message_for_receive(&encoded).unwrap(), message);
         let expanded = message.expand_version_carriers_for_receive().unwrap();
-        let SyncMessage::ViewUpdate {
+        let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             version_bundles, ..
-        } = expanded
+        }) = expanded
         else {
             panic!("expected view update");
         };
@@ -970,9 +1029,9 @@ mod tests {
             },
             clause_index: 0,
             clause_count: 1,
-            view: crate::protocol::AuthorizationScopeViewPayload::from_view_update(
-                view_update_with_carriers(vec![VersionCarrier::Run(run)]),
-            )
+            view: crate::protocol::ViewUpdatePayload::from_view_update(view_update_with_carriers(
+                vec![VersionCarrier::Run(run)],
+            ))
             .expect("fixture is a view update"),
         };
 
@@ -1031,7 +1090,7 @@ mod tests {
     }
 
     fn view_update_with_carriers(version_carriers: Vec<VersionCarrier>) -> SyncMessage {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription: SubscriptionKey {
                 shape_id: ShapeId(uuid::Uuid::from_bytes([0x22; 16])),
                 binding_id: BindingId(uuid::Uuid::from_bytes([0x33; 16])),
@@ -1047,7 +1106,7 @@ mod tests {
             terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
-        }
+        })
     }
 
     fn version_bundles(count: usize) -> Vec<VersionBundle> {
@@ -1219,7 +1278,7 @@ mod tests {
                         batch: Some(tx),
                         settle_position: Some(GlobalTime(10_000 + i)),
                     });
-                SyncMessage::ViewUpdate {
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through: GlobalTime(10_000 + i),
                     reset_result_set: false,
@@ -1231,7 +1290,7 @@ mod tests {
                     program_fact_adds: Vec::new(),
                     program_fact_removes: Vec::new(),
                     terminal_operations: Vec::new(),
-                }
+                })
             })
             .collect::<Vec<_>>();
         let mut raw = 0_u64;
@@ -1307,7 +1366,7 @@ mod tests {
                     code: crate::protocol::SubscribeServerFailureCode::TableNotFound,
                 },
             },
-            SyncMessage::ViewUpdate {
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through: GlobalTime(7),
                 reset_result_set: true,
@@ -1323,7 +1382,7 @@ mod tests {
                 terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
-            },
+            }),
             SyncMessage::CommitUnit {
                 tx: Transaction {
                     tx_id,
@@ -1380,7 +1439,7 @@ mod tests {
         let row = RowUuid::from_bytes([0x22; 16]);
         let tx_id = TxId::new(TxTime(21), NodeUuid::from_bytes([0x33; 16]));
         let entry: ResultRowEntry = (Intern::new("todos".to_owned()), row, tx_id);
-        let message = SyncMessage::ViewUpdate {
+        let message = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription: SubscriptionKey {
                 shape_id: ShapeId(uuid::Uuid::from_bytes([0x44; 16])),
                 binding_id: BindingId(uuid::Uuid::from_bytes([0x55; 16])),
@@ -1400,7 +1459,7 @@ mod tests {
             terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
-        };
+        });
 
         let encoded = encode_sync_message(&message).unwrap();
         let decoded = decode_sync_message(&encoded).unwrap();

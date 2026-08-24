@@ -1160,13 +1160,13 @@ fn commit_unit_bytes(update: &SyncMessage) -> u64 {
 
 fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             ..
-        } => {
+        }) => {
             version_bundles
                 .iter()
                 .flat_map(|bundle| bundle.versions.iter())
@@ -1181,11 +1181,11 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
 
 fn result_row_count(update: &SyncMessage) -> usize {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             result_member_adds,
             result_member_removes,
             ..
-        } => result_member_adds.len() + result_member_removes.len(),
+        }) => result_member_adds.len() + result_member_removes.len(),
         _ => 0,
     }
 }

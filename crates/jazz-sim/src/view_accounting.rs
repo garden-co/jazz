@@ -1,20 +1,20 @@
 //! Shared simulation accounting for sync-message row delivery payloads.
 
 use jazz::protocol::{
-    AuthorizationScopeViewPayload, ResultMemberEntry, SyncMessage, VersionBundle, VersionRecord,
+    ResultMemberEntry, SyncMessage, VersionBundle, VersionRecord, ViewUpdatePayload,
 };
 use jazz::tx::Transaction;
 
 /// Estimate row-delivery bytes carried by a sync message.
 pub fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(ViewUpdatePayload {
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             ..
-        } => {
+        }) => {
             version_bundles
                 .iter()
                 .map(version_bundle_bytes)
@@ -62,9 +62,9 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
 /// Estimate the irreducible row-version payload bytes carried by a sync message.
 pub fn bytes_floor(update: &SyncMessage) -> u64 {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(ViewUpdatePayload {
             version_bundles, ..
-        } => version_bundles
+        }) => version_bundles
             .iter()
             .flat_map(|bundle| &bundle.versions)
             .map(version_record_bytes)
@@ -74,7 +74,7 @@ pub fn bytes_floor(update: &SyncMessage) -> u64 {
     }
 }
 
-fn scope_view_update_bytes(view: &AuthorizationScopeViewPayload) -> u64 {
+fn scope_view_update_bytes(view: &ViewUpdatePayload) -> u64 {
     view.version_bundles
         .iter()
         .map(version_bundle_bytes)
@@ -84,7 +84,7 @@ fn scope_view_update_bytes(view: &AuthorizationScopeViewPayload) -> u64 {
         + result_rows_bytes(&view.result_member_removes)
 }
 
-fn scope_view_bytes_floor(view: &AuthorizationScopeViewPayload) -> u64 {
+fn scope_view_bytes_floor(view: &ViewUpdatePayload) -> u64 {
     view.version_bundles
         .iter()
         .flat_map(|bundle| &bundle.versions)
@@ -166,7 +166,7 @@ mod tests {
             None,
         )
         .expect("valid test wire record");
-        let nested = SyncMessage::ViewUpdate {
+        let nested = SyncMessage::ViewUpdate(ViewUpdatePayload {
             subscription: SubscriptionKey {
                 shape_id: ShapeId(uuid::Uuid::nil()),
                 binding_id: BindingId(uuid::Uuid::nil()),
@@ -201,7 +201,7 @@ mod tests {
             terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
-        };
+        });
         let nested_bytes = view_update_bytes(&nested);
         let nested_floor = bytes_floor(&nested);
         assert!(nested_bytes > 0);
@@ -217,7 +217,7 @@ mod tests {
             },
             clause_index: 0,
             clause_count: 1,
-            view: jazz::protocol::AuthorizationScopeViewPayload::from_view_update(nested)
+            view: jazz::protocol::ViewUpdatePayload::from_view_update(nested)
                 .expect("fixture is a view update"),
         };
 

@@ -1159,11 +1159,11 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
         .unwrap();
 
     let message = drive_subscriber_until_payload(&subscriber, client_transport.as_mut());
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: served,
         result_member_adds,
         ..
-    } = message
+    }) = message
     else {
         panic!("expected include subscription view update, got {message:?}");
     };
@@ -1188,11 +1188,11 @@ fn maintained_subscription_with_two_reference_includes_opens_with_source_coverag
         .unwrap();
 
     let message = drive_subscriber_until_payload(&subscriber, client_transport.as_mut());
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: served,
         result_member_adds,
         ..
-    } = message
+    }) = message
     else {
         panic!("expected reopened include subscription view update, got {message:?}");
     };
