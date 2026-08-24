@@ -124,8 +124,12 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
         ? {
             persistentPath: this.config.driver.dataPath,
             readAuthorizationHost: "trusted-serving",
+            backendCredential: this.config.backendSecret,
           }
-        : { readAuthorizationHost: "trusted-serving" },
+        : {
+            readAuthorizationHost: "trusted-serving",
+            backendCredential: this.config.backendSecret,
+          },
     );
 
     this.client = JazzClient.connectWithRuntime(
@@ -349,7 +353,7 @@ export class JazzContext {
   asBackend(source?: BackendSchemaInput): Db {
     const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, schema, SYSTEM_READ_SESSION, undefined, true, true);
+    return this.wrapDb(client, schema, undefined, undefined, true, false);
   }
 
   /**

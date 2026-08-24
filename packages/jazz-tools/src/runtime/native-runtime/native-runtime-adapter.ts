@@ -562,6 +562,7 @@ export class NativeRuntimeAdapter implements Runtime {
   private readonly configBytes: Uint8Array;
   private readonly peerIdentity: Uint8Array;
   private readonly schemaHash: string;
+  private readonly trustedBackend: boolean;
   private readonly preparedQueries = new Map<string, PreparedQuery>();
   private readonly transactionOwner: TransactionOwnerState;
   private readonly pendingTxs: Map<string, PendingTx>;
@@ -636,6 +637,7 @@ export class NativeRuntimeAdapter implements Runtime {
       db?: NativeDb;
       initialSyncFlushEvery?: number;
       readAuthorizationHost?: ReadAuthorizationHost;
+      backendCredential?: string;
       owner?: NativeRuntimeAdapter;
     },
   ) {
@@ -651,12 +653,14 @@ export class NativeRuntimeAdapter implements Runtime {
     this.completedTxs = this.transactionOwner.completedTxs;
     this.writes = this.transactionOwner.writes;
     this.schemaBytes = encodeSchema(schema);
+    this.trustedBackend = opts?.backendCredential !== undefined;
     this.configBytes = openConfig(
       node,
       author,
       sourceId,
       historyComplete,
       opts?.initialSyncFlushEvery,
+      opts?.backendCredential,
     );
     this.peerIdentity = author;
     this.schemaHash = serializeRuntimeSchema(schema);
@@ -1979,6 +1983,7 @@ export class NativeRuntimeAdapter implements Runtime {
    * point, with a request session supplying its subject when present.
    */
   private readRowsForHost(query: PreparedQuery, opts: unknown, identity?: Uint8Array): Uint8Array {
+    if (this.trustedBackend && identity === undefined) return this.db.all(query, opts);
     return this.readAuthorizationHost === "trusted-serving"
       ? this.db.allForIdentity(query, identity ?? this.peerIdentity, opts)
       : this.db.all(query, opts);
@@ -1989,6 +1994,7 @@ export class NativeRuntimeAdapter implements Runtime {
    * an ordinary client mutation into a policy-enforcing local admission.
    */
   private trustedWriteIdentity(session: RuntimeSession | null | undefined): Uint8Array | undefined {
+    if (this.trustedBackend && !session) return undefined;
     return this.readAuthorizationHost === "trusted-serving"
       ? (session?.identity ?? this.peerIdentity)
       : undefined;
