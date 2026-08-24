@@ -1519,19 +1519,10 @@ where
                                     drop_peer_request(&self.node);
                                     continue;
                                 };
-                                let SyncMessage::ViewUpdate {
-                                    subscription,
-                                    settled_through,
-                                    peer_payload_inventory,
-                                    ..
-                                } = view.as_ref()
-                                else {
-                                    drop_peer_request(&self.node);
-                                    continue;
-                                };
-                                let subscription = *subscription;
-                                let settled_through = *settled_through;
-                                let authorization_progress = peer_payload_inventory
+                                let subscription = view.subscription;
+                                let settled_through = view.settled_through;
+                                let authorization_progress = view
+                                    .peer_payload_inventory
                                     .authorization_progress
                                     .unwrap_or_default();
                                 if clause_count == 0
@@ -1601,7 +1592,7 @@ where
                                 // receipt can be accepted.
                                 push_view_update_message_for_receiver(
                                     &mut pending_view_updates,
-                                    *view,
+                                    view.into_view_update(),
                                     authority_receipt_eligible,
                                 )?;
                                 scope_view_cuts.insert(subscription, settled_through);
@@ -3475,7 +3466,10 @@ where
                     key: scope.key.clone(),
                     clause_index: index as u16,
                     clause_count,
-                    view: Box::new(clause.view.clone()),
+                    view: crate::protocol::AuthorizationScopeViewPayload::from_view_update(
+                        clause.view.clone(),
+                    )
+                    .expect("authority scope clauses are view updates"),
                 })
                 .map_err(transport_error)?;
         }
@@ -3592,7 +3586,10 @@ where
                 key: scope.key.clone(),
                 clause_index: index as u16,
                 clause_count,
-                view: Box::new(update.clone()),
+                view: crate::protocol::AuthorizationScopeViewPayload::from_view_update(
+                    update.clone(),
+                )
+                .expect("scope hydration produces view updates"),
             })
             .map_err(transport_error)?;
         support_subscriptions.push(subscription);

@@ -229,8 +229,11 @@ pub enum SyncMessage {
         /// Total number of authority clauses in this hydration.
         clause_count: u16,
         /// Ordinary settlement-bearing `ViewUpdate` payload.
-        #[serde(deserialize_with = "deserialize_authorization_scope_view")]
-        view: Box<SyncMessage>,
+        ///
+        /// This deliberately is not a `SyncMessage`: an authority scope view
+        /// has exactly one wrapper around a view update, never another scope
+        /// wrapper.
+        view: AuthorizationScopeViewPayload,
     },
     /// Aggregate proof for every clause sent in an authority scope view set.
     AuthorizationScopeAggregateReceipt {
@@ -262,43 +265,100 @@ pub enum SyncMessage {
     ChunkUploadResult(ChunkUploadResult),
 }
 
-thread_local! {
-    static AUTHORIZATION_SCOPE_VIEW_DEPTH: std::cell::Cell<usize> = const {
-        std::cell::Cell::new(0)
-    };
+/// The payload permitted inside [`SyncMessage::AuthorizationScopeView`].
+///
+/// Keeping this separate from `SyncMessage` makes recursive authorization
+/// scope wrappers impossible to construct and decode.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct AuthorizationScopeViewPayload {
+    /// Target subscription whose result set this update changes.
+    pub subscription: SubscriptionKey,
+    /// Authority cut through which this view has settled.
+    pub settled_through: GlobalTime,
+    /// Whether the receiver must replace its current result membership.
+    pub reset_result_set: bool,
+    /// Compact carriers for versions referenced by this update.
+    pub version_carriers: Vec<VersionCarrier>,
+    /// Explicit version bundles required by this update.
+    pub version_bundles: Vec<VersionBundle>,
+    /// Per-peer payload coverage and authorization progress.
+    pub peer_payload_inventory: PeerPayloadInventory,
+    /// Result members added by the update.
+    pub result_member_adds: Vec<ResultMemberEntry>,
+    /// Result members removed by the update.
+    pub result_member_removes: Vec<ResultMemberEntry>,
+    /// Terminal-owned structural result edits.
+    pub terminal_operations: Vec<groove::ivm::TerminalOperation>,
+    /// Program facts added by this update.
+    pub program_fact_adds: Vec<ProgramFactEntry>,
+    /// Program facts removed by this update.
+    pub program_fact_removes: Vec<ProgramFactEntry>,
 }
 
-struct AuthorizationScopeViewDepthGuard;
-
-impl Drop for AuthorizationScopeViewDepthGuard {
-    fn drop(&mut self) {
-        AUTHORIZATION_SCOPE_VIEW_DEPTH.with(|depth| {
-            depth.set(depth.get().saturating_sub(1));
-        });
+impl AuthorizationScopeViewPayload {
+    /// Splits an ordinary view update into the only payload valid inside an
+    /// authorization scope wrapper.
+    pub fn from_view_update(message: SyncMessage) -> Option<Self> {
+        let SyncMessage::ViewUpdate {
+            subscription,
+            settled_through,
+            reset_result_set,
+            version_carriers,
+            version_bundles,
+            peer_payload_inventory,
+            result_member_adds,
+            result_member_removes,
+            terminal_operations,
+            program_fact_adds,
+            program_fact_removes,
+        } = message
+        else {
+            return None;
+        };
+        Some(Self {
+            subscription,
+            settled_through,
+            reset_result_set,
+            version_carriers,
+            version_bundles,
+            peer_payload_inventory,
+            result_member_adds,
+            result_member_removes,
+            terminal_operations,
+            program_fact_adds,
+            program_fact_removes,
+        })
     }
-}
 
-fn deserialize_authorization_scope_view<'de, D>(
-    deserializer: D,
-) -> Result<Box<SyncMessage>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let admitted = AUTHORIZATION_SCOPE_VIEW_DEPTH.with(|depth| {
-        let current = depth.get();
-        if current >= crate::protocol_limits::MAX_SYNC_MESSAGE_NESTING_DEPTH {
-            return false;
+    /// Restores this payload to the ordinary view-update pipeline.
+    pub fn into_view_update(self) -> SyncMessage {
+        let Self {
+            subscription,
+            settled_through,
+            reset_result_set,
+            version_carriers,
+            version_bundles,
+            peer_payload_inventory,
+            result_member_adds,
+            result_member_removes,
+            terminal_operations,
+            program_fact_adds,
+            program_fact_removes,
+        } = self;
+        SyncMessage::ViewUpdate {
+            subscription,
+            settled_through,
+            reset_result_set,
+            version_carriers,
+            version_bundles,
+            peer_payload_inventory,
+            result_member_adds,
+            result_member_removes,
+            terminal_operations,
+            program_fact_adds,
+            program_fact_removes,
         }
-        depth.set(current + 1);
-        true
-    });
-    if !admitted {
-        return Err(<D::Error as serde::de::Error>::custom(
-            "sync message nesting depth exceeds limit",
-        ));
     }
-    let _guard = AuthorizationScopeViewDepthGuard;
-    <Box<SyncMessage> as serde::Deserialize>::deserialize(deserializer)
 }
 
 /// Bounded batch of exact immutable-chunk requests on one peer link.

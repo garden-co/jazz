@@ -1,6 +1,8 @@
 //! Shared simulation accounting for sync-message row delivery payloads.
 
-use jazz::protocol::{ResultMemberEntry, SyncMessage, VersionBundle, VersionRecord};
+use jazz::protocol::{
+    AuthorizationScopeViewPayload, ResultMemberEntry, SyncMessage, VersionBundle, VersionRecord,
+};
 use jazz::tx::Transaction;
 
 /// Estimate row-delivery bytes carried by a sync message.
@@ -27,7 +29,7 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
         SyncMessage::FateUpdate { .. } => tx_id_wire_bytes() + 16,
         // An authority scope view carries an ordinary settlement-bearing view
         // update. Its row payload is part of the simulated delivery cost.
-        SyncMessage::AuthorizationScopeView { view, .. } => view_update_bytes(view),
+        SyncMessage::AuthorizationScopeView { view, .. } => scope_view_update_bytes(view),
         SyncMessage::RegisterShape { .. }
         | SyncMessage::ChunkRequestBatch(_)
         | SyncMessage::ChunkResponseBatch(_)
@@ -67,9 +69,27 @@ pub fn bytes_floor(update: &SyncMessage) -> u64 {
             .flat_map(|bundle| &bundle.versions)
             .map(version_record_bytes)
             .sum(),
-        SyncMessage::AuthorizationScopeView { view, .. } => bytes_floor(view),
+        SyncMessage::AuthorizationScopeView { view, .. } => scope_view_bytes_floor(view),
         _ => 0,
     }
+}
+
+fn scope_view_update_bytes(view: &AuthorizationScopeViewPayload) -> u64 {
+    view.version_bundles
+        .iter()
+        .map(version_bundle_bytes)
+        .sum::<u64>()
+        + (view.peer_payload_inventory.complete_tx_payloads.len() as u64 * tx_id_wire_bytes())
+        + result_rows_bytes(&view.result_member_adds)
+        + result_rows_bytes(&view.result_member_removes)
+}
+
+fn scope_view_bytes_floor(view: &AuthorizationScopeViewPayload) -> u64 {
+    view.version_bundles
+        .iter()
+        .flat_map(|bundle| &bundle.versions)
+        .map(version_record_bytes)
+        .sum()
 }
 
 fn version_bundle_bytes(bundle: &VersionBundle) -> u64 {
@@ -197,7 +217,8 @@ mod tests {
             },
             clause_index: 0,
             clause_count: 1,
-            view: Box::new(nested),
+            view: jazz::protocol::AuthorizationScopeViewPayload::from_view_update(nested)
+                .expect("fixture is a view update"),
         };
 
         assert_eq!(view_update_bytes(&wrapped), nested_bytes);

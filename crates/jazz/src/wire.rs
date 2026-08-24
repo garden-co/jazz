@@ -704,7 +704,7 @@ mod tests {
         VersionBundleRunError, VersionCarrier, VersionRecord,
         build_version_bundle_runs_from_singletons,
     };
-    use crate::protocol_limits::{MAX_SYNC_MESSAGE_NESTING_DEPTH, MAX_WIRE_FRAME_BYTES};
+    use crate::protocol_limits::MAX_WIRE_FRAME_BYTES;
     use crate::query::{BindingId, Query, ShapeId};
     use crate::schema::{ColumnSchema, TableSchema};
     use crate::time::{GlobalTime, TxTime};
@@ -858,29 +858,12 @@ mod tests {
     }
 
     #[test]
-    fn deeply_nested_authorization_scope_views_are_rejected() {
-        let mut message = view_update_with_carriers(Vec::new());
-        for _ in 0..MAX_SYNC_MESSAGE_NESTING_DEPTH {
-            message = SyncMessage::AuthorizationScopeView {
-                request_id: PermissionAdviceRequestId([0x11; 16]),
-                key: AuthorizationSupportScopeKey {
-                    support_shape_digest: [0x22; 32],
-                    subject: AuthorId::from_bytes([0x33; 16]),
-                    claims_digest: [0x44; 32],
-                    policy_digest: [0x55; 32],
-                },
-                clause_index: 0,
-                clause_count: 1,
-                view: Box::new(message),
-            };
-        }
-        let encoded = encode_sync_message(&message).expect("encode limit-depth fixture");
-        assert_eq!(
-            decode_sync_message(&encoded).expect("limit-depth fixture remains valid"),
-            message
-        );
-
-        let over_limit = SyncMessage::AuthorizationScopeView {
+    fn authorization_scope_view_has_a_nonrecursive_view_update_payload() {
+        let view = crate::protocol::AuthorizationScopeViewPayload::from_view_update(
+            view_update_with_carriers(Vec::new()),
+        )
+        .expect("fixture is a view update");
+        let message = SyncMessage::AuthorizationScopeView {
             request_id: PermissionAdviceRequestId([0x11; 16]),
             key: AuthorizationSupportScopeKey {
                 support_shape_digest: [0x22; 32],
@@ -890,12 +873,13 @@ mod tests {
             },
             clause_index: 0,
             clause_count: 1,
-            view: Box::new(message),
+            view,
         };
-        let encoded = encode_sync_message(&over_limit).expect("encode over-limit fixture");
-        assert!(
-            decode_sync_message(&encoded).is_err(),
-            "remote recursive messages must be rejected above the bounded decode depth"
+        let encoded = encode_sync_message(&message).expect("encode scope view fixture");
+        assert_eq!(
+            decode_sync_message(&encoded).expect("decode scope view fixture"),
+            message,
+            "the scope wrapper admits only its dedicated, non-recursive payload"
         );
     }
 
