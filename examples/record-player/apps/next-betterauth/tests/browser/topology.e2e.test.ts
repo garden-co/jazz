@@ -53,10 +53,11 @@ const relationalRecipientApp = s.defineApp({
     label: s.string(),
     status: s.enum("pending", "accepted"),
   }),
+  playlist_entries: s.table({ playlist_id: s.ref("playlists"), label: s.string() }),
 });
 const relationalRecipientPermissions = s.definePermissions(
   relationalRecipientApp,
-  ({ policy, session, anyOf }) => {
+  ({ policy, session, anyOf, allowedTo }) => {
     policy.playlists.allowRead.where((playlist) =>
       anyOf([
         { $createdBy: session.author },
@@ -68,6 +69,7 @@ const relationalRecipientPermissions = s.definePermissions(
       ]),
     );
     policy.playlists.allowInsert.always();
+    policy.playlist_entries.allowRead.where(allowedTo.read("playlist_id"));
     policy.invitations.allowRead.where((invite) =>
       anyOf([
         { subject: session.user_id },
