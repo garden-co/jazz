@@ -415,6 +415,18 @@ impl WasmDbInner {
             _ => false,
         }
     }
+
+    async fn hydrate_relation_snapshot_for_binding(
+        &self,
+        snapshot: &mut jazz::node::RelationSnapshot,
+    ) -> Result<(), jazz::db::Error> {
+        match self {
+            Self::Memory(db) => db.hydrate_relation_snapshot_for_binding(snapshot).await,
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => db.hydrate_relation_snapshot_for_binding(snapshot).await,
+            Self::Closed => panic!("WasmDb is closed"),
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -2025,8 +2037,12 @@ impl WasmDb {
         let opts = read_opts_from_js(opts)?;
         let query = query.inner.clone();
         Ok(future_to_promise(async move {
-            let snapshot = inner
+            let mut snapshot = inner
                 .all_relation_snapshot(&query, opts)
+                .await
+                .map_err(to_js_error)?;
+            inner
+                .hydrate_relation_snapshot_for_binding(&mut snapshot)
                 .await
                 .map_err(to_js_error)?;
             bytes_to_js(encode_relation_snapshot(&snapshot).map_err(to_js_error)?)
@@ -2045,8 +2061,12 @@ impl WasmDb {
         let author = author_id_from_bytes(&author)?;
         let query = query.inner.clone();
         Ok(future_to_promise(async move {
-            let snapshot = inner
+            let mut snapshot = inner
                 .all_relation_snapshot_for_identity(&query, opts, author)
+                .await
+                .map_err(to_js_error)?;
+            inner
+                .hydrate_relation_snapshot_for_binding(&mut snapshot)
                 .await
                 .map_err(to_js_error)?;
             bytes_to_js(encode_relation_snapshot(&snapshot).map_err(to_js_error)?)
