@@ -773,6 +773,8 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
     let (_invited_dir, mut invited_reader) = open_node_with_schema(node(3), schema.clone());
     let (_uninvited_dir, mut uninvited_reader) = open_node_with_schema(node(4), schema);
+    install_test_uuid_sub_claim(&mut core, invited);
+    install_test_uuid_sub_claim(&mut core, uninvited);
 
     let denied_tx = uninvited_writer
         .commit_mergeable_unit_settled(
