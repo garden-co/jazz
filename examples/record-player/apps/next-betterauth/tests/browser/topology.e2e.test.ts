@@ -154,26 +154,44 @@ describe("RecordPlayer authenticated playlist topology", () => {
               } finally {
                 stopMutationErrors();
               }
-              editorInvite = (
-                await owner
-                  .insert(app.invitations, {
-                    playlist_id: playlist.id,
-                    subject: "record-player-editor",
-                    role: "editor",
-                    status: "pending",
-                  })
-                  .wait({ tier: "edge" })
-              ).value;
-              listenerInvite = (
-                await owner
-                  .insert(app.invitations, {
-                    playlist_id: playlist.id,
-                    subject: "record-player-listener",
-                    role: "listener",
-                    status: "pending",
-                  })
-                  .wait({ tier: "edge" })
-              ).value;
+              editorInvite = await owner
+                .insert(app.invitations, {
+                  playlist_id: playlist.id,
+                  subject: "record-player-editor",
+                  role: "editor",
+                  status: "pending",
+                })
+                .wait({ tier: "edge" });
+              listenerInvite = await owner
+                .insert(app.invitations, {
+                  playlist_id: playlist.id,
+                  subject: "record-player-listener",
+                  role: "listener",
+                  status: "pending",
+                })
+                .wait({ tier: "edge" });
+              // Edge settlement acknowledges the owner's write; it does not
+              // imply either recipient has received the row yet. A recipient
+              // accepts an invitation only after its normal read path observes
+              // the pending row.
+              await Promise.all([
+                waitForQuery(
+                  editor,
+                  app.invitations.where({ subject: "record-player-editor" }),
+                  (rows) => rows[0]?.id === editorInvite.id && rows[0]?.status === "pending",
+                  "editor observes pending invitation",
+                  15_000,
+                  "edge",
+                ),
+                waitForQuery(
+                  listener,
+                  app.invitations.where({ subject: "record-player-listener" }),
+                  (rows) => rows[0]?.id === listenerInvite.id && rows[0]?.status === "pending",
+                  "listener observes pending invitation",
+                  15_000,
+                  "edge",
+                ),
+              ]);
               await Promise.all([
                 editor
                   .update(app.invitations, editorInvite.id, { status: "accepted" })
@@ -191,7 +209,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   await owner
                     .insert(app.albums, { title: "A streamed record", artist: "Jazz" })
                     .wait({ tier: "edge" })
-                ).value.id,
+                ).id,
                 title: "Streaming receipt",
                 ordinal: 0,
                 duration_ms: 2,
@@ -209,23 +227,19 @@ describe("RecordPlayer authenticated playlist topology", () => {
           {
             name: "exercise metadata and window queries used by the rendered screens",
             run: async () => {
-              const windowAlbum = (
-                await owner
-                  .insert(app.albums, { title: "Window catalogue", artist: "Jazz" })
-                  .wait({ tier: "edge" })
-              ).value;
+              const windowAlbum = await owner
+                .insert(app.albums, { title: "Window catalogue", artist: "Jazz" })
+                .wait({ tier: "edge" });
               const windowTracks: Array<{ id: string }> = [];
               for (let position = 0; position < PLAYLIST_WINDOW_OFFSET + 2; position += 1) {
-                const track = (
-                  await owner
-                    .insert(app.tracks, {
-                      album_id: windowAlbum.id,
-                      title: `Window ${position}`,
-                      ordinal: position,
-                      duration_ms: position + 1,
-                    })
-                    .wait({ tier: "edge" })
-                ).value;
+                const track = await owner
+                  .insert(app.tracks, {
+                    album_id: windowAlbum.id,
+                    title: `Window ${position}`,
+                    ordinal: position,
+                    duration_ms: position + 1,
+                  })
+                  .wait({ tier: "edge" });
                 await owner
                   .insert(app.playlist_entries, {
                     playlist_id: playlist.id,
@@ -306,20 +320,18 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   })
                   .wait({ tier: "edge" }),
               ).rejects.toThrow(/AuthorizationDenied|Write rejected/);
-              const track = (
-                await owner
-                  .insert(app.tracks, {
-                    album_id: (
-                      await owner
-                        .insert(app.albums, { title: "Receipt", artist: "Jazz" })
-                        .wait({ tier: "edge" })
-                    ).value.id,
-                    title: "Boundary",
-                    ordinal: 0,
-                    duration_ms: 1,
-                  })
-                  .wait({ tier: "edge" })
-              ).value;
+              const track = await owner
+                .insert(app.tracks, {
+                  album_id: (
+                    await owner
+                      .insert(app.albums, { title: "Receipt", artist: "Jazz" })
+                      .wait({ tier: "edge" })
+                  ).id,
+                  title: "Boundary",
+                  ordinal: 0,
+                  duration_ms: 1,
+                })
+                .wait({ tier: "edge" });
               await expect(
                 listener
                   .insert(app.playlist_entries, {
@@ -346,31 +358,25 @@ describe("RecordPlayer authenticated playlist topology", () => {
           {
             name: "queue independent ordered entries offline",
             run: async () => {
-              const album = (
-                await owner
-                  .insert(app.albums, { title: "Offline", artist: "Jazz" })
-                  .wait({ tier: "local" })
-              ).value;
-              const ownerTrack = (
-                await owner
-                  .insert(app.tracks, {
-                    album_id: album.id,
-                    title: "Owner",
-                    ordinal: 1,
-                    duration_ms: 1,
-                  })
-                  .wait({ tier: "local" })
-              ).value;
-              const editorTrack = (
-                await editor
-                  .insert(app.tracks, {
-                    album_id: album.id,
-                    title: "Editor",
-                    ordinal: 2,
-                    duration_ms: 1,
-                  })
-                  .wait({ tier: "local" })
-              ).value;
+              const album = await owner
+                .insert(app.albums, { title: "Offline", artist: "Jazz" })
+                .wait({ tier: "local" });
+              const ownerTrack = await owner
+                .insert(app.tracks, {
+                  album_id: album.id,
+                  title: "Owner",
+                  ordinal: 1,
+                  duration_ms: 1,
+                })
+                .wait({ tier: "local" });
+              const editorTrack = await editor
+                .insert(app.tracks, {
+                  album_id: album.id,
+                  title: "Editor",
+                  ordinal: 2,
+                  duration_ms: 1,
+                })
+                .wait({ tier: "local" });
               await Promise.all([
                 owner
                   .insert(app.playlist_entries, {
