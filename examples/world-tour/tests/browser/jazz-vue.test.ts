@@ -240,6 +240,77 @@ describe("world-tour Jazz + Vue integration", () => {
     );
   });
 
+  it("keeps the app's upcoming itinerary window bounded to twelve stops", async () => {
+    const s = scope("upcoming-window");
+    const now = new Date();
+    now.setHours(0, 0, 0, 0);
+    const threeWeeks = new Date(now.getTime() + 21 * 24 * 60 * 60 * 1000);
+    const UpcomingStops = defineComponent({
+      setup() {
+        // Deliberately mirror App.vue rather than a narrowed test-only query:
+        // this receipt must fail if its bounded app window is widened.
+        const { data: stops } = useAll(
+          app.stops
+            .where({ date: { gte: now, lte: threeWeeks } })
+            .include({ venue: true })
+            .orderBy("date", "asc")
+            .limit(12),
+        );
+        return () =>
+          h(
+            "ul",
+            { id: "upcoming-stops" },
+            stops.value?.map((stop) => h("li", { "data-id": stop.id }, stop.publicDescription)) ??
+              [],
+          );
+      },
+    });
+
+    const { el, client } = await mount(UpcomingStops);
+    const userId = client.session?.user_id;
+    if (!userId) throw new Error("test session is missing user_id");
+    const band = await inserted(client.db.insert(app.bands, { name: `${s.marker}-band` }));
+    await inserted(client.db.insert(app.members, { bandId: band.id, userId }));
+    const venue = await inserted(
+      client.db.insert(app.venues, {
+        name: `${s.marker}-venue`,
+        city: "London",
+        country: "UK",
+        lat: 51.5159,
+        lng: -0.1311,
+      }),
+    );
+
+    // Thirteen in-window rows make `.limit(12)` observable. The previous
+    // fixture had exactly twelve matching rows, so widening the bound passed.
+    const expectedIds: string[] = [];
+    for (let offset = 0; offset < 13; offset += 1) {
+      const date = new Date(now.getTime() + offset * 24 * 60 * 60 * 1000);
+      const stop = await inserted(
+        client.db.insert(
+          app.stops,
+          s.tag({
+            bandId: band.id,
+            venueId: venue.id,
+            date,
+            status: "confirmed",
+            publicDescription: "",
+          }),
+        ),
+      );
+      expectedIds.push(stop.id);
+    }
+
+    await waitFor(
+      () => el.querySelectorAll("#upcoming-stops li").length === 12,
+      10_000,
+      "upcoming itinerary should retain exactly its twelve-row bound",
+    );
+    expect(
+      [...el.querySelectorAll<HTMLLIElement>("#upcoming-stops li")].map((row) => row.dataset.id),
+    ).toEqual(expectedIds.slice(0, 12));
+  });
+
   it("useSession exposes the JazzProvider's session to descendants", async () => {
     const SessionProbe = defineComponent({
       setup() {

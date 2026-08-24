@@ -23,14 +23,19 @@ import {
 } from "../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
+import { assertWorldTourTopologyContract } from "./topology-contract.js";
+import { TOPOLOGY_SEED } from "./topology-seed.js";
 
 const ctx = new TestCleanup();
 afterEach(async () => ctx.cleanup());
 
 describe("WorldTour cross-topology itinerary recovery", () => {
   it("keeps the ordered venue window convergent across concurrent and offline edits", async () => {
-    const suppliedSeed = Number(process.env.JAZZ_EXAMPLE_TOPOLOGY_SEED ?? 29);
-    const seed = Number.isSafeInteger(suppliedSeed) ? suppliedSeed : 29;
+    // Validate the complete runtime command adapter before this scenario can
+    // create a client. This turns stale browser artifacts into a useful
+    // immediate error rather than a mid-receipt timeout.
+    assertWorldTourTopologyContract();
+    const seed = TOPOLOGY_SEED;
     let server: Awaited<ReturnType<typeof getJazzServerInfo>> | undefined;
     let alice: Db | undefined;
     let bob: Db | undefined;
