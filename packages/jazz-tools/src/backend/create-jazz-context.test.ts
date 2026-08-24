@@ -287,6 +287,19 @@ describe("backend/create-jazz-context", () => {
     ).toThrow(/jwksUrl.*jwtPublicKey|jwtPublicKey.*jwksUrl/i);
   });
 
+  it("BC-U01c: rejects an empty upstream backend secret", () => {
+    expect(() =>
+      createJazzContext({
+        appId: "server-app",
+        app: { wasmSchema: SCHEMA_A },
+        permissions: {},
+        driver: { type: "persistent", dataPath: "/tmp/jazz.db" },
+        serverUrl: "http://localhost:1625",
+        backendSecret: "  ",
+      }),
+    ).toThrow("backendSecret must be non-empty when provided");
+  });
+
   it("BC-U02: supports high-level db/backend/request/session/attribution helpers", async () => {
     const context = createJazzContext({
       appId: "server-app",
@@ -343,6 +356,13 @@ describe("backend/create-jazz-context", () => {
     expect(mocks.clients).toHaveLength(1);
     expect(mocks.clients[0]!.asBackend).toHaveBeenCalledTimes(6);
     expect(mocks.connectWithRuntime).toHaveBeenCalledTimes(1);
+    expect(mocks.nativeRuntimeCtor.mock.calls[0]?.[6]).toMatchObject({
+      trustedBackendHost: true,
+    });
+    expect(mocks.nativeRuntimeCtor.mock.calls[0]?.[6]).not.toHaveProperty("backendCredential");
+    expect(mocks.connectWithRuntime.mock.calls[0]?.[1]).toMatchObject({
+      backendSecret: "secret",
+    });
   });
 
   it("BC-U03: request/session/attribution helpers work locally without backend sync config", async () => {

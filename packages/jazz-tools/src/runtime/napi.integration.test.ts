@@ -1661,6 +1661,27 @@ describe("NAPI integration", () => {
         .wait({ tier: "local" });
       expect(created).toMatchObject({ title: "trusted-local-backend", done: false });
 
+      const authoredQuery: QueryBuilder<SimpleTodo & { $createdBy: string }> = {
+        _table: "todos",
+        _schema: TEST_SCHEMA,
+        _rowType: undefined as unknown as SimpleTodo & { $createdBy: string },
+        _build: () =>
+          JSON.stringify({
+            table: "todos",
+            conditions: [{ column: "id", op: "eq", value: created.id }],
+            select: ["title", "$createdBy"],
+            includes: {},
+            orderBy: [],
+            offset: 0,
+          }),
+      };
+      await expect(
+        context.asBackend().one(authoredQuery, { tier: "local" }),
+      ).resolves.toMatchObject({
+        title: "trusted-local-backend",
+        $createdBy: JSON.stringify(["urn:jazz:system", "system"]),
+      });
+
       const forgedSystemSession = context.forSession({
         issuer: "urn:jazz:system",
         user_id: "system",

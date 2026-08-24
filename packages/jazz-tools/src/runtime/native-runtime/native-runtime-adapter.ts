@@ -745,7 +745,6 @@ export class NativeRuntimeAdapter implements Runtime {
       readAuthorizationHost?: ReadAuthorizationHost;
       /** Internal server-host authority; never derived from a public session. */
       trustedBackendHost?: boolean;
-      backendCredential?: string;
       owner?: NativeRuntimeAdapter;
     },
   ) {
@@ -761,17 +760,14 @@ export class NativeRuntimeAdapter implements Runtime {
     this.completedTxs = this.transactionOwner.completedTxs;
     this.writes = this.transactionOwner.writes;
     this.schemaBytes = encodeSchema(schema);
-    this.trustedBackend =
-      opts?.owner?.trustedBackend ??
-      opts?.trustedBackendHost ??
-      opts?.backendCredential !== undefined;
+    this.trustedBackend = opts?.owner?.trustedBackend ?? opts?.trustedBackendHost ?? false;
     // The current native ABI selects its trusted open path by presence of a
     // credential. Keep that mode marker private to this adapter: callers use
-    // the explicit host-authority option, while backendCredential remains the
-    // real optional upstream credential.
-    const nativeBackendCredential =
-      opts?.backendCredential ??
-      (this.trustedBackend ? NATIVE_TRUSTED_BACKEND_MODE_MARKER : undefined);
+    // the explicit host-authority option; actual upstream credentials never
+    // cross this storage boundary.
+    const nativeBackendCredential = this.trustedBackend
+      ? NATIVE_TRUSTED_BACKEND_MODE_MARKER
+      : undefined;
     this.configBytes = openConfig(
       node,
       author,
