@@ -24,25 +24,7 @@ import permissions from "../../permissions.js";
 import { app, type Step } from "../../schema.js";
 
 const ctx = new TestCleanup();
-let pendingServerUnblock: string | undefined;
-
-async function restoreNetworkAndCleanup(): Promise<void> {
-  let networkError: unknown;
-  if (pendingServerUnblock) {
-    try {
-      await unblockJazzServerNetwork(pendingServerUnblock);
-      pendingServerUnblock = undefined;
-    } catch (error) {
-      networkError = error;
-    }
-  }
-  await ctx.cleanup();
-  if (networkError) {
-    throw new Error("failed to restore Wequencer test network", { cause: networkError });
-  }
-}
-
-afterEach(restoreNetworkAndCleanup);
+afterEach(async () => ctx.cleanup());
 
 const trackNames = ["Kick", "Snare", "Closed hat", "Bass"];
 const stepsPerTrack = 16;
@@ -83,6 +65,7 @@ describe("Wequencer cross-topology recovery", () => {
     let subscribedOwnerStepId: string;
     let transport: { id: string } | undefined;
     let subscribedTrackSteps: Step[] = [];
+    let restoreEditorNetwork: (() => Promise<void>) | undefined;
 
     const receipt = await runTopologyScenario(
       {
@@ -104,10 +87,19 @@ describe("Wequencer cross-topology recovery", () => {
             },
           },
           editor: {
-            restart: async () => {
+            restart: async ({ defer }) => {
               // Prevent the replacement client from cold-refetching before
               // the next phase can prove what survived in IndexedDB.
-              pendingServerUnblock = server.serverUrl;
+              let networkNeedsRestore = true;
+              const restoreNetwork = async () => {
+                if (!networkNeedsRestore) return;
+                await unblockJazzServerNetwork(server.serverUrl);
+                networkNeedsRestore = false;
+              };
+              // Register before acquiring the route block so partial failure
+              // is compensated by the topology runner as well.
+              defer("restore Wequencer editor network", async () => restoreNetwork());
+              restoreEditorNetwork = restoreNetwork;
               await blockJazzServerNetwork(server.serverUrl);
               await editor.disconnect();
               await editor.shutdown();
@@ -479,8 +471,8 @@ describe("Wequencer cross-topology recovery", () => {
                 enabled: true,
               });
 
-              await unblockJazzServerNetwork(server.serverUrl);
-              pendingServerUnblock = undefined;
+              await restoreEditorNetwork?.();
+              restoreEditorNetwork = undefined;
               await editor.reconnect();
               const settledProjectedWindow = await waitForQuery(
                 editor,
@@ -509,7 +501,7 @@ describe("Wequencer cross-topology recovery", () => {
             },
           },
         ],
-        cleanup: restoreNetworkAndCleanup,
+        cleanup: async () => ctx.cleanup(),
         cleanupTimeoutMs: 10_000,
       },
       browserTopologyReporter,
