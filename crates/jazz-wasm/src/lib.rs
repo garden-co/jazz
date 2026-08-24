@@ -6,6 +6,7 @@ use std::rc::Rc;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use futures_util::lock::Mutex as LocalMutex;
+use futures_util::stream;
 use futures_util::{Stream, StreamExt};
 #[cfg(target_arch = "wasm32")]
 use idb_tree::IndexedDbPageStore;
@@ -424,6 +425,18 @@ impl WasmDbInner {
             Self::Memory(db) => db.hydrate_relation_snapshot_for_binding(snapshot).await,
             #[cfg(target_arch = "wasm32")]
             Self::Browser(db) => db.hydrate_relation_snapshot_for_binding(snapshot).await,
+            Self::Closed => panic!("WasmDb is closed"),
+        }
+    }
+
+    async fn hydrate_subscription_event_for_binding(
+        &self,
+        event: &mut SubscriptionEvent,
+    ) -> Result<(), jazz::db::Error> {
+        match self {
+            Self::Memory(db) => db.hydrate_subscription_event_for_binding(event).await,
+            #[cfg(target_arch = "wasm32")]
+            Self::Browser(db) => db.hydrate_subscription_event_for_binding(event).await,
             Self::Closed => panic!("WasmDb is closed"),
         }
     }
@@ -2080,7 +2093,7 @@ impl WasmDb {
             .inner
             .subscribe(&query.inner, opts)
             .map_err(to_js_error)?;
-        subscription_stream_to_js(stream)
+        subscription_stream_to_js(self.inner.clone(), stream)
     }
 
     #[wasm_bindgen(js_name = subscribeForIdentity)]
@@ -2096,7 +2109,7 @@ impl WasmDb {
             .inner
             .subscribe_for_identity(&query.inner, opts, author)
             .map_err(to_js_error)?;
-        subscription_stream_to_js(stream)
+        subscription_stream_to_js(self.inner.clone(), stream)
     }
 
     #[wasm_bindgen(js_name = subscribeRelationQuery)]
@@ -2111,7 +2124,7 @@ impl WasmDb {
             .inner
             .subscribe_relation_query(&query, opts)
             .map_err(to_js_error)?;
-        subscription_stream_to_js(stream)
+        subscription_stream_to_js(self.inner.clone(), stream)
     }
 
     #[wasm_bindgen(js_name = subscribeRelationQueryForIdentity)]
@@ -2128,7 +2141,7 @@ impl WasmDb {
             .inner
             .subscribe_relation_query_for_identity(&query, opts, author)
             .map_err(to_js_error)?;
-        subscription_stream_to_js(stream)
+        subscription_stream_to_js(self.inner.clone(), stream)
     }
 
     #[wasm_bindgen(js_name = attachQuery)]
@@ -3987,11 +4000,39 @@ fn encode_subscription_delta<'a>(
 }
 
 fn subscription_stream_to_js(
+    db: WasmDbInner,
     stream: impl Stream<Item = SubscriptionEvent> + 'static,
 ) -> Result<JsValue, JsValue> {
-    readable_stream_from_stream(stream.scan(HashSet::new(), |layouts, event| {
-        std::future::ready(Some(subscription_chunk_to_js(event, layouts)))
-    }))
+    let state = (
+        db,
+        Box::pin(stream) as Pin<Box<dyn Stream<Item = SubscriptionEvent>>>,
+        None::<SubscriptionEvent>,
+        HashSet::<String>::new(),
+    );
+    readable_stream_from_stream(stream::unfold(
+        state,
+        |(db, mut source, pending, layouts)| async move {
+            let mut event = match pending {
+                Some(event) => event,
+                None => match source.next().await {
+                    Some(event) => event,
+                    None => return None,
+                },
+            };
+            if db
+                .hydrate_subscription_event_for_binding(&mut event)
+                .await
+                .is_err()
+            {
+                return Some((Ok(None), (db, source, Some(event), layouts)));
+            }
+            let mut prospective_layouts = layouts.clone();
+            match subscription_chunk_to_js(event, &mut prospective_layouts) {
+                Ok(chunk) => Some((Ok(Some(chunk)), (db, source, None, prospective_layouts))),
+                Err(error) => Some((Err(error), (db, source, None, layouts))),
+            }
+        },
+    ))
 }
 
 fn subscription_chunk_to_js(
@@ -4141,11 +4182,11 @@ fn set_prop(object: &js_sys::Object, name: &str, value: JsValue) -> Result<(), J
     js_sys::Reflect::set(object, &JsValue::from_str(name), &value).map(|_| ())
 }
 
-type JsResultStream = dyn Stream<Item = Result<JsValue, JsValue>>;
+type JsResultStream = dyn Stream<Item = Result<Option<JsValue>, JsValue>>;
 
 fn readable_stream_from_stream<St>(stream: St) -> Result<JsValue, JsValue>
 where
-    St: Stream<Item = Result<JsValue, JsValue>> + 'static,
+    St: Stream<Item = Result<Option<JsValue>, JsValue>> + 'static,
 {
     let stream: Pin<Box<JsResultStream>> = Box::pin(stream);
     let state = std::rc::Rc::new(std::cell::RefCell::new(Some(stream)));
@@ -4162,9 +4203,12 @@ where
             };
             let next = stream.next().await;
             match next {
-                Some(Ok(chunk)) => {
+                Some(Ok(Some(chunk))) => {
                     *pull_state.borrow_mut() = Some(stream);
                     call_controller_method(&controller, "enqueue", Some(&chunk))?;
+                }
+                Some(Ok(None)) => {
+                    *pull_state.borrow_mut() = Some(stream);
                 }
                 Some(Err(error)) => {
                     call_controller_method(&controller, "error", Some(&error))?;
