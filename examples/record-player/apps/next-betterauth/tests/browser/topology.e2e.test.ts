@@ -779,14 +779,24 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 .insert(app.albums, { title: "A streamed record", artist: "Jazz" })
                 .wait({ tier: "edge" });
               streamedTrackAlbumId = streamedTrackAlbum.id;
-              console.info("[record-player-topology] create streamed track");
+              // The stream is consumed and committed locally while its peer is
+              // deliberately disconnected. Reconnecting may retry transport,
+              // but must not duplicate the row or lose/split its byte payload.
+              console.info("[record-player-topology] create streamed track offline");
+              await owner.disconnect();
               const streamedTrack = await owner.insertStreaming(app.tracks, {
                 album_id: streamedTrackAlbum.id,
                 title: "Streaming receipt",
                 ordinal: 0,
                 duration_ms: 2,
-                audio_bytes: audioStream([0x52, 0x50, 0x2d, 0x31]),
+                audio_bytes: audioStream([0x52, 0x50, 0x2d, 0x31, 0x2d, 0x32]),
               });
+              await withTimeout(
+                streamedTrack.wait({ tier: "local" }),
+                15_000,
+                "offline streamed audio track did not settle locally",
+              );
+              await owner.reconnect();
               streamedTrackId = (
                 await withTimeout(
                   streamedTrack.wait({ tier: "edge" }),
@@ -828,6 +838,32 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 ...additionalMetadata,
               ];
               console.info("[record-player-topology] streamed track settled");
+
+              // Source failure is intentionally tested at the app boundary:
+              // a stream that has yielded bytes but then errors must not
+              // publish a partly populated track locally or after reconnect.
+              const failedTrackId = "00000000-0000-0000-0000-000000000091";
+              await expect(
+                owner.insertStreaming(
+                  app.tracks,
+                  {
+                    album_id: streamedTrackAlbum.id,
+                    title: "Must not publish",
+                    ordinal: 9_999,
+                    duration_ms: 1,
+                    audio_bytes: failingAudioStream(),
+                  },
+                  { id: failedTrackId },
+                ),
+              ).rejects.toThrow("record-player injected audio source failure");
+              await waitForQuery(
+                owner,
+                app.tracks.where({ id: failedTrackId }),
+                (rows) => rows.length === 0,
+                "failed streamed track is absent locally",
+                15_000,
+                "local",
+              );
             },
           },
           {
@@ -915,6 +951,25 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 15_000,
                 "edge",
               );
+
+              // Playback is the exceptional path that explicitly asks for
+              // the bytes. It proves that the offline-created, multi-chunk
+              // value arrives intact after reconnect, while the query above
+              // proves normal browsing never asks for it.
+              const playbackTrack = await waitForQuery(
+                listener,
+                app.tracks.where({ id: streamedTrackId }),
+                (rows) =>
+                  rows[0]?.id === streamedTrackId &&
+                  rows[0]?.audio_bytes instanceof Uint8Array &&
+                  Array.from(rows[0].audio_bytes).join(",") === "82,80,45,49,45,50",
+                "listener receives intact streamed audio after owner reconnect",
+                15_000,
+                "edge",
+              );
+              expect(Array.from(playbackTrack[0]!.audio_bytes!)).toEqual([
+                0x52, 0x50, 0x2d, 0x31, 0x2d, 0x32,
+              ]);
 
               // The page itself deliberately returns only the bounded prefix,
               // but wait until the extra record has replicated before asking
@@ -1218,6 +1273,15 @@ function audioStream(bytes: readonly number[]): ReadableStream<Uint8Array> {
       controller.enqueue(new Uint8Array(bytes.slice(0, 2)));
       controller.enqueue(new Uint8Array(bytes.slice(2)));
       controller.close();
+    },
+  });
+}
+
+function failingAudioStream(): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array([0x70, 0x61, 0x72, 0x74]));
+      controller.error(new Error("record-player injected audio source failure"));
     },
   });
 }
