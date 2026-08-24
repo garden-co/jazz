@@ -612,6 +612,9 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
   assert.match(rustShadowLauncher, /RUST_MIN_STACK.*4 \* 1024 \* 1024/);
   assert.match(rustShadowLauncher, /"--workspace",\s*"--lib",\s*"--bins",\s*"--tests"/);
   assert.match(rustShadowLauncher, /"--kill-after=30s",\s*"60s",\s*"env",\s*"JAZZ_SEED=11"/);
+  const exactM3Invocation =
+    /m3_maintained_one_shot_differential_oracle",\s*"--",\s*"--exact",\s*"--ignored"/;
+  assert.match(rustShadowLauncher, exactM3Invocation);
   assert.match(rustShadowLauncher, /m3\.length !== 1.*shard\.index !== 1/);
   assert.match(rustShadowLauncher, /test belongs to more than one shard/);
   assert.match(rustShadowLauncher, /hash shards do not cover the exact executable inventory/);
@@ -633,6 +636,14 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
         /--require-nextest/,
       ),
     /require-nextest/,
+  );
+  assert.throws(
+    () =>
+      assert.match(
+        rustShadowLauncher.replace('"--",\n            "--exact"', '"--exact"'),
+        exactM3Invocation,
+      ),
+    /m3_maintained_one_shot_differential_oracle/,
   );
 
   const source = {
@@ -713,6 +724,23 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
   };
   const rustShadowLauncherPath = path.join(root, "dev/gates/rust-shadow-matrix.mjs");
   assert.equal(runAggregate().status, 0);
+  {
+    const directory = path.join(os.tmpdir(), `jazz-shadow-missing-${crypto.randomUUID()}`);
+    const aggregatePath = path.join(directory, "aggregate.json");
+    const result = spawnSync(
+      "node",
+      [rustShadowLauncherPath, "aggregate", directory, "2", aggregatePath, source.commit],
+      { encoding: "utf8" },
+    );
+    assert.notEqual(result.status, 0, "missing downloaded shard receipts must fail closed");
+    assert.match(result.stderr, /expected 2 shard receipts, found 0/);
+    const missing = JSON.parse(fs.readFileSync(aggregatePath, "utf8"));
+    assert.equal(missing.status, "failed");
+    assert.equal(missing.shardCount, 2);
+    assert.equal(missing.expectedCommit, source.commit);
+    assert.match(missing.error, /expected 2 shard receipts, found 0/);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
   for (const [name, mutate, message] of [
     ["runner", (shards) => (shards[0].testReceipt.runner = "cargo-fallback"), /Nextest shard/],
     [

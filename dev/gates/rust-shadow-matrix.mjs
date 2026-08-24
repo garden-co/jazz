@@ -187,6 +187,7 @@ function shard(argv) {
             "--features",
             "testing,transport-compression-zstd",
             "node::tests::harness::m3_maintained_one_shot_differential_oracle",
+            "--",
             "--exact",
             "--ignored",
           ],
@@ -226,101 +227,119 @@ function aggregate(argv) {
     !/^[0-9a-f]{40}$/.test(expectedCommit)
   )
     fail("usage: aggregate DIRECTORY COUNT RECEIPT EXPECTED_COMMIT");
-  const files = fs
-    .readdirSync(directory, { recursive: true })
-    .filter((file) => file.endsWith(".json") && !file.endsWith(".test.json"));
-  const shards = files.map((file) =>
-    JSON.parse(fs.readFileSync(path.join(directory, file), "utf8")),
-  );
-  if (shards.length !== count) fail(`expected ${count} shard receipts, found ${shards.length}`);
-  const seenIndexes = new Set();
-  const selected = new Set();
-  let all;
-  const expectedNextestCommand = (index) => [
-    "cargo",
-    "nextest",
-    "run",
-    "--profile",
-    "jazz-ci",
-    "--no-fail-fast",
-    "--partition",
-    `hash:${index}/${count}`,
-    ...testArgs,
-  ];
-  const sourceFields = ["commit", "headTree", "indexTree", "unstaged", "untracked", "fingerprint"];
-  let source;
-  for (const shardReceipt of shards) {
-    if (shardReceipt?.kind !== "rust-shadow-shard-receipt" || shardReceipt.status !== "passed")
-      fail("shard receipt is missing or failed");
-    const { index, count: receiptCount, partition } = shardReceipt.shard ?? {};
-    if (
-      receiptCount !== count ||
-      partition !== `hash:${index}/${count}` ||
-      !Number.isInteger(index) ||
-      index < 1 ||
-      index > count ||
-      seenIndexes.has(index)
-    )
-      fail("invalid or duplicate shard receipt");
-    seenIndexes.add(index);
-    if (
-      !Array.isArray(shardReceipt.inventory?.all) ||
-      !Array.isArray(shardReceipt.inventory?.selected)
-    )
-      fail("shard receipt has no exact inventory");
-    const candidateAll = JSON.stringify(shardReceipt.inventory.all);
-    if (all === undefined) all = candidateAll;
-    else if (all !== candidateAll) fail("shards disagree on the exact inventory");
-    for (const test of shardReceipt.inventory.selected) {
-      if (selected.has(test)) fail(`test belongs to more than one shard: ${test}`);
-      selected.add(test);
-    }
-    const ran = shardReceipt.testReceipt;
-    if (
-      ran?.status !== "passed" ||
-      ran?.runner !== "cargo-nextest" ||
-      ran?.nextestProfile !== "jazz-ci" ||
-      ran?.shard?.index !== index ||
-      ran?.shard?.count !== count
-    )
-      fail("partition test receipt does not prove the Nextest shard ran");
-    if (JSON.stringify(ran.command) !== JSON.stringify(expectedNextestCommand(index)))
-      fail("partition test receipt command does not match the exact shard selector");
-    if (JSON.stringify(shardReceipt.testArgs) !== JSON.stringify(testArgs))
-      fail("shard receipt test arguments do not match the canonical inventory");
-    for (const field of sourceFields)
-      if (
-        typeof shardReceipt.source?.[field] !== "string" ||
-        shardReceipt.source[field] !== ran.source?.[field]
-      )
-        fail(`partition test receipt source ${field} does not match its inventory receipt`);
-    if (!validSourceIdentity(shardReceipt.source) || !validSourceIdentity(ran.source))
-      fail("partition receipts must contain a clean checked-out source fingerprint");
-    if (shardReceipt.source.commit !== expectedCommit)
-      fail("shard source commit does not match the workflow event commit");
-    if (source === undefined) source = shardReceipt.source;
-    else if (sourceFields.some((field) => shardReceipt.source[field] !== source[field]))
-      // This detects accidental checkout or worktree drift between matrix
-      // runners; it is measurement integrity, not an adversarial attestation.
-      fail("shards disagree on the checked-out source identity");
-    if (ran.environment?.rustMinStack !== String(4 * 1024 * 1024))
-      fail("partition test receipt did not preserve the 4 MiB Rust stack");
-  }
-  const expected = JSON.parse(all);
-  if (selected.size !== expected.length || expected.some((test) => !selected.has(test)))
-    fail("hash shards do not cover the exact executable inventory");
-  const m3 = shards.filter((item) => item.m3?.seed === 11 && item.m3?.status === "passed");
-  if (m3.length !== 1 || m3[0].shard.index !== 1)
-    fail("maintained M3 seed 11 was not folded into shard 1 exactly once");
-  writeJson(receipt, {
+  fs.mkdirSync(directory, { recursive: true });
+  const aggregateReceipt = {
     schemaVersion: 1,
     kind: "rust-shadow-aggregate-receipt",
-    status: "passed",
+    status: "failed",
     shardCount: count,
-    executableTestCount: expected.length,
-    m3Shard: 1,
-    shards: [...seenIndexes].sort(),
-  });
+    expectedCommit,
+  };
+  try {
+    const files = fs
+      .readdirSync(directory, { recursive: true })
+      .filter((file) => /^shard-\d+\.json$/.test(path.basename(file)));
+    const shards = files.map((file) =>
+      JSON.parse(fs.readFileSync(path.join(directory, file), "utf8")),
+    );
+    if (shards.length !== count) fail(`expected ${count} shard receipts, found ${shards.length}`);
+    const seenIndexes = new Set();
+    const selected = new Set();
+    let all;
+    const expectedNextestCommand = (index) => [
+      "cargo",
+      "nextest",
+      "run",
+      "--profile",
+      "jazz-ci",
+      "--no-fail-fast",
+      "--partition",
+      `hash:${index}/${count}`,
+      ...testArgs,
+    ];
+    const sourceFields = [
+      "commit",
+      "headTree",
+      "indexTree",
+      "unstaged",
+      "untracked",
+      "fingerprint",
+    ];
+    let source;
+    for (const shardReceipt of shards) {
+      if (shardReceipt?.kind !== "rust-shadow-shard-receipt" || shardReceipt.status !== "passed")
+        fail("shard receipt is missing or failed");
+      const { index, count: receiptCount, partition } = shardReceipt.shard ?? {};
+      if (
+        receiptCount !== count ||
+        partition !== `hash:${index}/${count}` ||
+        !Number.isInteger(index) ||
+        index < 1 ||
+        index > count ||
+        seenIndexes.has(index)
+      )
+        fail("invalid or duplicate shard receipt");
+      seenIndexes.add(index);
+      if (
+        !Array.isArray(shardReceipt.inventory?.all) ||
+        !Array.isArray(shardReceipt.inventory?.selected)
+      )
+        fail("shard receipt has no exact inventory");
+      const candidateAll = JSON.stringify(shardReceipt.inventory.all);
+      if (all === undefined) all = candidateAll;
+      else if (all !== candidateAll) fail("shards disagree on the exact inventory");
+      for (const test of shardReceipt.inventory.selected) {
+        if (selected.has(test)) fail(`test belongs to more than one shard: ${test}`);
+        selected.add(test);
+      }
+      const ran = shardReceipt.testReceipt;
+      if (
+        ran?.status !== "passed" ||
+        ran?.runner !== "cargo-nextest" ||
+        ran?.nextestProfile !== "jazz-ci" ||
+        ran?.shard?.index !== index ||
+        ran?.shard?.count !== count
+      )
+        fail("partition test receipt does not prove the Nextest shard ran");
+      if (JSON.stringify(ran.command) !== JSON.stringify(expectedNextestCommand(index)))
+        fail("partition test receipt command does not match the exact shard selector");
+      if (JSON.stringify(shardReceipt.testArgs) !== JSON.stringify(testArgs))
+        fail("shard receipt test arguments do not match the canonical inventory");
+      for (const field of sourceFields)
+        if (
+          typeof shardReceipt.source?.[field] !== "string" ||
+          shardReceipt.source[field] !== ran.source?.[field]
+        )
+          fail(`partition test receipt source ${field} does not match its inventory receipt`);
+      if (!validSourceIdentity(shardReceipt.source) || !validSourceIdentity(ran.source))
+        fail("partition receipts must contain a clean checked-out source fingerprint");
+      if (shardReceipt.source.commit !== expectedCommit)
+        fail("shard source commit does not match the workflow event commit");
+      if (source === undefined) source = shardReceipt.source;
+      else if (sourceFields.some((field) => shardReceipt.source[field] !== source[field]))
+        // This detects accidental checkout or worktree drift between matrix
+        // runners; it is measurement integrity, not an adversarial attestation.
+        fail("shards disagree on the checked-out source identity");
+      if (ran.environment?.rustMinStack !== String(4 * 1024 * 1024))
+        fail("partition test receipt did not preserve the 4 MiB Rust stack");
+    }
+    const expected = JSON.parse(all);
+    if (selected.size !== expected.length || expected.some((test) => !selected.has(test)))
+      fail("hash shards do not cover the exact executable inventory");
+    const m3 = shards.filter((item) => item.m3?.seed === 11 && item.m3?.status === "passed");
+    if (m3.length !== 1 || m3[0].shard.index !== 1)
+      fail("maintained M3 seed 11 was not folded into shard 1 exactly once");
+    Object.assign(aggregateReceipt, {
+      status: "passed",
+      executableTestCount: expected.length,
+      m3Shard: 1,
+      shards: [...seenIndexes].sort(),
+    });
+  } catch (error) {
+    aggregateReceipt.error = String(error);
+  }
+  writeJson(receipt, aggregateReceipt);
+  if (aggregateReceipt.status !== "passed") fail(aggregateReceipt.error);
 }
 
 const [command, ...argv] = process.argv.slice(2);
