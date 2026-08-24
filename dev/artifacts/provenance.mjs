@@ -173,7 +173,9 @@ function artifactHashes(root, kind, options = {}) {
             "jazz_wasm_bg.wasm.d.ts",
           ),
         ]
-      : (options.napiBindings ?? activeNapiBindings(root) ?? readdirSync(join(root, "crates/jazz-napi"), { withFileTypes: true })
+      : (options.napiBindings ??
+        activeNapiBindings(root) ??
+        readdirSync(join(root, "crates/jazz-napi"), { withFileTypes: true })
           .filter((entry) => entry.isFile() && entry.name.endsWith(".node"))
           .map((entry) => join(root, "crates/jazz-napi", entry.name)));
   return paths
@@ -186,7 +188,9 @@ function activeNapiBindings(root) {
   const packageDir = join(root, "crates", "jazz-napi");
   const pointer = join(packageDir, "native-binding.cjs");
   if (!existsSync(pointer)) return undefined;
-  const match = /\.native-artifacts\/(generation-[A-Za-z0-9.-]+)\/index\.js/.exec(readFileSync(pointer, "utf8"));
+  const match = /\.native-artifacts\/(generation-[A-Za-z0-9.-]+)\/index\.js/.exec(
+    readFileSync(pointer, "utf8"),
+  );
   if (!match) return undefined;
   const generation = join(packageDir, ".native-artifacts", match[1]);
   if (!existsSync(generation) || !statSync(generation).isDirectory()) return undefined;
@@ -275,22 +279,33 @@ export function nativeArtifactFingerprint(root, kind, profile, targetOverride) {
   return sha256(`${manifest.packageInputs}\0${surfaceHash.digest("hex")}`);
 }
 
-export const manifestPath = (root, kind) =>
-  join(
-    root,
-    kind === "wasm"
-      ? "crates/jazz-wasm/pkg/.jazz-artifact-manifest.json"
-      : "crates/jazz-napi/.jazz-artifact-manifest.json",
-  );
+export const manifestPath = (root, kind) => {
+  if (kind === "wasm") return join(root, "crates/jazz-wasm/pkg/.jazz-artifact-manifest.json");
+  const packageDir = join(root, "crates/jazz-napi");
+  const pointer = join(packageDir, "native-binding.cjs");
+  if (existsSync(pointer)) {
+    const generation = /\.native-artifacts\/(generation-[A-Za-z0-9.-]+)\/index\.js/.exec(
+      readFileSync(pointer, "utf8"),
+    )?.[1];
+    if (generation)
+      return join(packageDir, ".native-artifacts", generation, ".jazz-artifact-manifest.json");
+  }
+  return join(packageDir, ".jazz-artifact-manifest.json");
+};
 
 export function writeManifest(root, kind, profile, targetOverride, options = {}) {
-  const path = options.wasmPackageDir || options.napiManifestDir
-    ? join(options.wasmPackageDir ?? options.napiManifestDir, ".jazz-artifact-manifest.json")
-    : manifestPath(root, kind);
-  writeFileSync(
-    path,
-    `${JSON.stringify(expectedManifest(root, kind, profile, targetOverride, options), null, 2)}\n`,
+  const path =
+    options.wasmPackageDir || options.napiManifestDir
+      ? join(options.wasmPackageDir ?? options.napiManifestDir, ".jazz-artifact-manifest.json")
+      : manifestPath(root, kind);
+  const manifest = expectedManifest(root, kind, profile, targetOverride, options);
+  manifest.nativeArtifactFingerprint = nativeArtifactFingerprint(
+    root,
+    kind,
+    profile,
+    targetOverride,
   );
+  writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
 export function verifyManifest(root, kind, profile, targetOverride) {
