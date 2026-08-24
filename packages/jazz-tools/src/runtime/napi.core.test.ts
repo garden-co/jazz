@@ -617,7 +617,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
       deterministicBytes("jazz-napi-native-runtime:uuidv7-node"),
-      deterministicBytes("jazz-napi-native-runtime:uuidv7-author"),
+      testAuthorBytes("jazz-napi-native-runtime:uuidv7-author"),
       1,
       true,
     );

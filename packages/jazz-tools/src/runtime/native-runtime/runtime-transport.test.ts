@@ -14,6 +14,7 @@ import { NativeRuntimeAdapter, type Transport } from "./native-runtime-adapter.j
 import { type BatchId, type WriteReceipt } from "../client.js";
 
 const previousWebSocket = globalThis.WebSocket;
+const TEST_RUNTIME_AUTHOR = new TextEncoder().encode('["urn:jazz:test","runtime"]');
 
 async function waitForServerPumpTimer(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 20));
@@ -160,7 +161,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -238,7 +239,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -303,7 +304,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -359,7 +360,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -406,7 +407,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -449,7 +450,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -488,7 +489,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -524,7 +525,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -571,7 +572,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -617,7 +618,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -662,7 +663,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );

@@ -52,6 +52,7 @@ async function committedBatchId(receipt: WriteReceipt): Promise<BatchId> {
 }
 
 const previousWebSocket = globalThis.WebSocket;
+const TEST_RUNTIME_AUTHOR = new TextEncoder().encode('["urn:jazz:test","runtime"]');
 const RESERVED_TEST_ISSUERS = [
   SYSTEM_SESSION_ISSUER,
   LOCAL_FIRST_JWT_ISSUER,
@@ -130,7 +131,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       { openMemory: () => fakeDb({ close }) },
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -162,7 +163,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -198,7 +199,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -229,7 +230,7 @@ describe("NativeRuntimeAdapter server transport", () => {
           } as never,
           testSchema,
           new Uint8Array(16),
-          new Uint8Array(16),
+          TEST_RUNTIME_AUTHOR,
           1,
           true,
         ),
@@ -258,7 +259,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -307,7 +308,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -361,7 +362,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -412,7 +413,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -471,7 +472,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -528,7 +529,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -576,7 +577,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         },
       },
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -628,7 +629,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -680,7 +681,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -764,7 +765,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -835,7 +836,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -883,7 +884,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -913,7 +914,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -953,7 +954,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -985,7 +986,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
       { readAuthorizationHost: "trusted-serving" },
@@ -1039,7 +1040,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
       { readAuthorizationHost: "trusted-serving" },
@@ -1183,7 +1184,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
       { readAuthorizationHost: "trusted-serving" },
@@ -1231,7 +1232,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -1290,7 +1291,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       arraySchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -1338,7 +1339,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -1403,7 +1404,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -1485,7 +1486,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         },
       },
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -1561,7 +1562,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -1664,7 +1665,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -1699,7 +1700,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -1743,7 +1744,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         },
       },
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -1813,7 +1814,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -1864,7 +1865,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         },
       },
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2019,7 +2020,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       relationSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2130,7 +2131,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       relationSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2220,7 +2221,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2280,7 +2281,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2340,7 +2341,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2381,7 +2382,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2428,7 +2429,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2514,7 +2515,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2559,7 +2560,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         } as never,
         testSchema,
         new Uint8Array(16),
-        new Uint8Array(16),
+        TEST_RUNTIME_AUTHOR,
         1,
         true,
       );
@@ -2622,7 +2623,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2669,7 +2670,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2724,7 +2725,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2762,7 +2763,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2800,7 +2801,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2846,7 +2847,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2881,7 +2882,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2936,7 +2937,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -2966,7 +2967,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -3070,7 +3071,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -3224,7 +3225,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -3298,7 +3299,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -3363,7 +3364,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       schema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -3396,7 +3397,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -3440,7 +3441,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -3495,7 +3496,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         },
       } satisfies WasmSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -3593,7 +3594,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         },
       } satisfies WasmSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -3674,7 +3675,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -4399,7 +4400,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -4464,7 +4465,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -4523,7 +4524,7 @@ describe("NativeRuntimeAdapter server transport", () => {
         },
       },
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -4621,7 +4622,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       } as never,
       schema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -4662,7 +4663,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
       { readAuthorizationHost: "trusted-serving" },
@@ -4918,7 +4919,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
       1,
       true,
     );
@@ -5035,7 +5036,7 @@ function emptyNativeRuntime(): NativeRuntimeAdapter {
     } as never,
     testSchema,
     new Uint8Array(16),
-    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
     1,
     true,
   );
@@ -5063,7 +5064,7 @@ function runtimeWithNativeSubscriptionChunk(
     } as never,
     schema,
     new Uint8Array(16),
-    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
     1,
     true,
   );
@@ -5089,7 +5090,7 @@ function runtimeWithNativeRelationSubscriptionChunks(
     } as never,
     schema,
     new Uint8Array(16),
-    new Uint8Array(16),
+    TEST_RUNTIME_AUTHOR,
     1,
     true,
   );
