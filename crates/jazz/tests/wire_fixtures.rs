@@ -170,12 +170,23 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         Vec::<String>::new(),
         Vec::<String>::new(),
     );
-    let large_value = groove::large_values::prepare(
+    let mut large_value = groove::large_values::prepare(
         groove::large_values::LargeValueKind::Bytes,
         &vec![0x5a; groove::large_values::INLINE_VALUE_MAX_BYTES + 1],
-        |hash| groove::large_values::Locator(hash.0[..16].to_vec()),
     )
     .expect("large-value wire fixture prepares");
+    assert_eq!(
+        large_value.staged_chunks.len(),
+        1,
+        "fixture stays a single leaf so replacing its retrieval capability cannot alter encoded nodes"
+    );
+    let locator_bytes = large_value.value_ref.root.object_hash.0.to_vec();
+    let locator: groove::large_values::Locator = postcard::from_bytes(
+        &postcard::to_allocvec(&locator_bytes).expect("encode deterministic fixture locator"),
+    )
+    .expect("decode deterministic fixture locator through the public wire contract");
+    large_value.value_ref.root.locator = locator;
+    large_value.staged_chunks[0].node_ref.locator = locator;
     let root_chunk = large_value
         .staged_chunks
         .iter()

@@ -698,13 +698,13 @@ mod tests {
     use crate::ids::SchemaVersionId;
     use crate::ids::{NodeUuid, RowUuid};
     use crate::protocol::{
-        AuthorizationScopePurpose, AuthorizationSupportScopeKey, PermissionAdviceAction,
-        PermissionAdviceRequestId, RegisterShapeOptions, ResultRowEntry, ShapeAst, Subscribe,
-        SubscribeRejectReason, SubscriptionKey, VersionBundle, VersionBundleRun,
-        VersionBundleRunError, VersionCarrier, VersionRecord,
+        AuthorizationScopePurpose, AuthorizationSupportScopeKey, ChunkRequestBatch,
+        ChunkRequestEntry, PermissionAdviceAction, PermissionAdviceRequestId, RegisterShapeOptions,
+        ResultRowEntry, ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, VersionBundle,
+        VersionBundleRun, VersionBundleRunError, VersionCarrier, VersionRecord,
         build_version_bundle_runs_from_singletons,
     };
-    use crate::protocol_limits::MAX_WIRE_FRAME_BYTES;
+    use crate::protocol_limits::{MAX_CHUNK_REQUEST_BATCH_ENTRIES, MAX_WIRE_FRAME_BYTES};
     use crate::query::{BindingId, Query, ShapeId};
     use crate::schema::{ColumnSchema, TableSchema};
     use crate::time::{GlobalTime, TxTime};
@@ -858,6 +858,37 @@ mod tests {
     }
 
     #[test]
+    fn oversized_chunk_request_batches_are_rejected_during_decode() {
+        let request = |request_id| ChunkRequestEntry {
+            request_id,
+            locator: groove::large_values::Locator::random(),
+            expected_hash: [0x22; 32],
+            remaining_hops: 1,
+        };
+        let at_limit = SyncMessage::ChunkRequestBatch(ChunkRequestBatch {
+            requests: (0..MAX_CHUNK_REQUEST_BATCH_ENTRIES as u64)
+                .map(request)
+                .collect(),
+        });
+        let encoded = encode_sync_message(&at_limit).expect("encode limit request fixture");
+        assert_eq!(
+            decode_sync_message(&encoded).expect("limit request fixture remains valid"),
+            at_limit
+        );
+
+        let mut requests = (0..MAX_CHUNK_REQUEST_BATCH_ENTRIES as u64)
+            .map(request)
+            .collect::<Vec<_>>();
+        requests.push(request(MAX_CHUNK_REQUEST_BATCH_ENTRIES as u64));
+        let over_limit = SyncMessage::ChunkRequestBatch(ChunkRequestBatch { requests });
+        let encoded = encode_sync_message(&over_limit).expect("encode oversized request fixture");
+        assert!(
+            decode_sync_message(&encoded).is_err(),
+            "remote request cardinality must be bounded before storage work"
+        );
+    }
+
+    #[test]
     fn authorization_scope_view_has_a_nonrecursive_view_update_payload() {
         let view = crate::protocol::ViewUpdatePayload::from_view_update(view_update_with_carriers(
             Vec::new(),
@@ -881,6 +912,43 @@ mod tests {
             message,
             "the scope wrapper admits only its dedicated, non-recursive payload"
         );
+    }
+
+    #[test]
+    fn chunk_request_locator_decode_requires_exactly_256_bits() {
+        #[derive(serde::Serialize)]
+        struct RawChunkRequestBatch {
+            requests: Vec<RawChunkRequestEntry>,
+        }
+        #[derive(serde::Serialize)]
+        struct RawChunkRequestEntry {
+            request_id: u64,
+            locator: Vec<u8>,
+            expected_hash: [u8; 32],
+            remaining_hops: u8,
+        }
+
+        for length in [31, 32, 33] {
+            let encoded = postcard::to_allocvec(&RawChunkRequestBatch {
+                requests: vec![RawChunkRequestEntry {
+                    request_id: 1,
+                    locator: vec![0x11; length],
+                    expected_hash: [0x22; 32],
+                    remaining_hops: 1,
+                }],
+            })
+            .unwrap();
+            assert_eq!(
+                postcard::from_bytes::<ChunkRequestBatch>(&encoded).is_ok(),
+                length == groove::large_values::LOCATOR_BYTES,
+                "locator length {length} must {}decode",
+                if length == groove::large_values::LOCATOR_BYTES {
+                    ""
+                } else {
+                    "not "
+                }
+            );
+        }
     }
 
     #[test]
