@@ -149,6 +149,8 @@ export function acquireArtifactBuildLock(lockPath = artifactLockPath()) {
   console.log(`test-artifacts: acquired shared artifact lock (pid ${owner.pid})`);
   let released = false;
   return {
+    lockPath,
+    token: owner.token,
     release() {
       if (released) return;
       released = true;
@@ -163,6 +165,22 @@ export function acquireArtifactBuildLock(lockPath = artifactLockPath()) {
       console.log("test-artifacts: released shared artifact lock");
     },
   };
+}
+
+/** Environment inherited by a direct artifact producer owned by this lock. */
+export function artifactBuildLease(lock) {
+  return {
+    JAZZ_ARTIFACT_BUILD_LEASE: lock.token,
+    JAZZ_ARTIFACT_BUILD_LOCK_PATH: lock.lockPath,
+  };
+}
+
+/** Reject forged/nested leases instead of silently racing the aggregate builder. */
+export function verifyArtifactBuildLease({ token, lockPath }) {
+  const owner = readLockOwner(lockPath);
+  if (!owner || owner.token !== token)
+    throw new Error("test-artifacts: inherited artifact lease is missing or no longer owned.");
+  return { token, lockPath };
 }
 
 export function unlockArtifactBuildLock(lockPath = artifactLockPath()) {
@@ -226,7 +244,7 @@ export async function withArtifactBuildLock(run, lockPath = artifactLockPath()) 
   process.once("SIGINT", onSigint);
   process.once("SIGTERM", onSigterm);
   try {
-    return await run(scope);
+    return await run(scope, artifactBuildLease(lock));
   } finally {
     process.removeListener("SIGINT", onSigint);
     process.removeListener("SIGTERM", onSigterm);
@@ -321,10 +339,10 @@ export function command(command, args, label = [command, ...args].join(" "), opt
   });
 }
 
-export async function buildTestArtifacts(run = command, scope = createBuildScope()) {
+export async function buildTestArtifacts(run = command, scope = createBuildScope(), lease = undefined) {
   let firstBuildError;
   const guardedRun = (command, args, label, env) =>
-    scope.track(run(command, args, label, { env, signal: scope.signal })).catch((error) => {
+    scope.track(run(command, args, label, { env: { ...env, ...lease }, signal: scope.signal })).catch((error) => {
       if (!firstBuildError) {
         firstBuildError = error;
         scope.abort(error);
@@ -425,7 +443,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.error("test-artifacts: expected no argument or `unlock`");
     process.exitCode = 1;
   } else
-    withArtifactBuildLock((scope) => buildTestArtifacts(command, scope)).catch((error) => {
+    withArtifactBuildLock((scope, lease) => buildTestArtifacts(command, scope, lease)).catch((error) => {
       console.error(`test-artifacts: ${error.message}`);
       process.exitCode = 1;
     });
