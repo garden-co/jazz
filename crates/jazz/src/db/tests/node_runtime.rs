@@ -1027,6 +1027,17 @@ fn membership_grant_then_parent_query_keeps_disjunctive_read_proof(indexed: bool
             break;
         }
     }
+    if indexed {
+        assert_eq!(
+            server
+                .node()
+                .borrow()
+                .query_engine_read_metrics()
+                .source_index_probes,
+            0,
+            "the disjunctive policy must retain a complete source path",
+        );
+    }
     assert_eq!(
         prepared_all(&client, &grant_query, edge_subscribe_opts()).len(),
         1
