@@ -39,6 +39,7 @@ describe("PosterShop cross-topology recovery", () => {
     let editor: Db;
     let ownerToken: string;
     let ownerDbName: string;
+    let serverUrlForCleanup: string | undefined;
     let canvas: { id: string };
     let layer: { id: string };
     let ownerShape: { id: string };
@@ -92,6 +93,7 @@ describe("PosterShop cross-topology recovery", () => {
             name: "owner bootstrap and editor admission",
             run: async () => {
               server = await getJazzServerInfo(uniqueDbName("poster-shop-topology"));
+              serverUrlForCleanup = server.serverUrl;
               await deploy({
                 appId: server.appId,
                 serverUrl: server.serverUrl,
@@ -324,7 +326,17 @@ describe("PosterShop cross-topology recovery", () => {
             },
           },
         ],
-        cleanup: async () => ctx.cleanup(),
+        cleanup: async () => {
+          // Route blocking belongs to the BrowserContext, not the Db. Always
+          // release it before shutting clients down, including when a phase
+          // fails before the explicit reconnect fault. `unblock` is
+          // idempotent, and cleanup must preserve the scenario's primary
+          // failure rather than replacing it with a best-effort route error.
+          if (serverUrlForCleanup) {
+            await unblockJazzServerNetwork(serverUrlForCleanup).catch(() => undefined);
+          }
+          await ctx.cleanup();
+        },
         cleanupTimeoutMs: 10_000,
       },
       browserTopologyReporter,
