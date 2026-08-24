@@ -424,12 +424,19 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 schema: relationalRecipientApp,
                 permissions: relationalRecipientPermissions,
               });
-              const [ownerToken, recipientToken] = await Promise.all([
+              const [ownerToken, recipientToken, listenerToken] = await Promise.all([
                 getJazzServerJwtForUser("record-player-phase-owner", undefined, server.appId),
                 getJazzServerJwtForUser("record-player-phase-recipient", undefined, server.appId),
+                getJazzServerJwtForUser("record-player-phase-listener", undefined, server.appId),
               ]);
               const owner = await openClient(server, "phase-owner", ownerToken);
-              const recipient = await openClient(server, "phase-recipient", recipientToken);
+              const recipient = await openClient(
+                server,
+                "phase-recipient",
+                recipientToken,
+                uniqueDbName("record-player-phase-recipient-persistent"),
+              );
+              await openClient(server, "phase-listener", listenerToken);
               const playlistWrite = owner.insert(relationalRecipientApp.playlists, {
                 name: "phase relation receipt",
                 owner_subject: "record-player-phase-owner",
