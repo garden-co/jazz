@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -24,6 +25,16 @@ for (const [name, manifest] of [
 ])
   if (!/^[a-f0-9]{64}$/.test(manifest.nativeArtifactFingerprint ?? ""))
     throw new Error(`${name} manifest lacks a native fingerprint`);
+const local = process.argv.includes("--local");
+if (wasm.kind !== "wasm" || wasm.profile !== (local ? "fast" : "release"))
+  throw new Error("downloaded WASM manifest has the wrong kind/profile");
+for (const artifact of wasm.artifacts ?? []) {
+  const path = join(root, "crates/jazz-wasm/pkg", artifact.file);
+  const hash = existsSync(path) && createHash("sha256").update(readFileSync(path)).digest("hex");
+  if (hash !== artifact.sha256) throw new Error(`downloaded WASM artifact hash mismatch: ${artifact.file}`);
+}
+if (napi.kind !== "napi" || napi.profile !== "release")
+  throw new Error("downloaded NAPI manifest has the wrong kind/profile");
 const runtime = join(root, "packages/jazz-tools/src/runtime");
 writeFileSync(
   join(runtime, "native-artifact-fingerprint-napi.ts"),
