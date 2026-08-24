@@ -1415,7 +1415,7 @@ function resolveQualifiedRelationFilterScope(
 
   state.joins.forEach((join, index) => {
     if (join.table === qualifiedTable) {
-      scopes.add(relationJoinAlias(state.kind, join, index));
+      scopes.add(relationJoinScope(state, join, index));
     }
   });
 

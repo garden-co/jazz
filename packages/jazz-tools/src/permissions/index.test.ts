@@ -852,6 +852,31 @@ describe("permissions DSL", () => {
     expect(rel.input.right.type).toBe("Filter");
   });
 
+  it("binds qualified filters after a filtered RHS to that relation's real scope", () => {
+    const compiled = definePermissions(socialApp, ({ policy, session }) => [
+      policy.profiles.allowRead.where((profile) =>
+        policy.exists(
+          policy.people
+            .where({ profileId: profile.id })
+            .join(policy.friendships.where({ personAId: session.personId }), {
+              left: "id",
+              right: "personAId",
+            })
+            .where({ "friendships.personBId": session.personId }),
+        ),
+      ),
+    ]);
+
+    const using = compiled.profiles!.select?.using;
+    expect(using?.type).toBe("ExistsRel");
+    if (!using || using.type !== "ExistsRel") {
+      throw new Error("Expected filtered join policy to compile to ExistsRel.");
+    }
+    const relation = JSON.stringify(toAssertionRelExprForTest(using.rel));
+    expect(relation).toContain('"scope":"friendships","column":"personBId"');
+    expect(relation).not.toContain('"scope":"__join_0","column":"personBId"');
+  });
+
   it("rejects filtered join RHS shapes the relation lowering cannot alias safely", () => {
     expect(() =>
       definePermissions(socialApp, ({ policy }) => [
