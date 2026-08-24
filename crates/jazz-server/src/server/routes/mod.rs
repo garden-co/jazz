@@ -134,6 +134,7 @@ mod tests {
     use axum::body;
     use axum::routing::{get, post};
     use futures::{SinkExt as _, StreamExt as _};
+    use jazz::ids::AuthorSubject;
     use jazz::tools::public_schema::{ColumnType, Schema, SchemaBuilder, TableSchema};
     use serde_json::Value;
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
@@ -2172,9 +2173,17 @@ mod tests {
         let ws_url = format!("ws://{addr}{}", test_app_route("/ws"));
         let (mut ws, _) = connect_async(&ws_url).await.expect("connect ws");
         ws.send(WsMessage::Binary(
-            br#"{"peer_identity":"0102030405060708090a0b0c0d0e0f10","auth":{"admin_secret":"admin-secret"}}"#
-                .to_vec()
-                .into(),
+            serde_json::json!({
+                "peer_identity": AuthorSubject::for_test_bytes([
+                    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
+                ]).canonical(),
+                "auth": {
+                    "admin_secret": "admin-secret",
+                },
+            })
+            .to_string()
+            .into_bytes()
+            .into(),
         ))
         .await
         .expect("send ws auth prelude");

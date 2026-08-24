@@ -515,7 +515,7 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
       { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
       TEST_SCHEMA,
       deterministicBytes("jazz-napi-streaming-insert:node"),
-      deterministicBytes("jazz-napi-streaming-insert:author"),
+      testAuthorBytes("jazz-napi-streaming-insert:author"),
       1,
       true,
       { readAuthorizationHost: "trusted-serving" },
@@ -557,7 +557,11 @@ describe.skipIf(!hasJazzNapiBuild())("jazz-napi native runtime memory DB", () =>
         yield "streamed update";
       })(),
       JSON.stringify({
-        session: { user_id: ALICE_ID, claims: { role: "editor" } },
+        session: {
+          issuer: "https://issuer.example",
+          user_id: ALICE_ID,
+          claims: { role: "editor" },
+        },
         updated_at: 42_000,
       }),
       inserted.id,

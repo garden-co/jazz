@@ -5080,7 +5080,7 @@ function decodeBytes(
         type.type === "Text" &&
         storageType?.tag === 8
       ) {
-        return { type: "Text", value: textDecoder.decode(bytes) };
+        return { type: "Text", value: decodeProvenanceText(bytes) };
       }
       if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
       return { type: "Text", value: textDecoder.decode(bytes.subarray(1)) };
@@ -5112,6 +5112,13 @@ function decodeBytes(
         ),
       };
   }
+}
+
+function decodeProvenanceText(bytes: Uint8Array): string {
+  // NAPI CurrentRow batches retain Groove's stored-scalar String wrapper while
+  // WASM public query rows arrive as already-unwrapped logical Text. Canonical
+  // AuthorSubject JSON begins with `[`, so a leading NUL is only the scalar tag.
+  return textDecoder.decode(bytes[0] === 0 ? bytes.subarray(1) : bytes);
 }
 
 function decodePayloadEnumBytes(

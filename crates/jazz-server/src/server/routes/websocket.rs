@@ -1575,10 +1575,13 @@ mod tests {
     }
 
     fn ws_prelude(identity: AuthorSubject) -> Vec<u8> {
-        format!(
-            r#"{{"peer_identity":"{}","auth":{{"admin_secret":"admin-secret"}}}}"#,
-            identity.canonical().to_owned()
-        )
+        serde_json::json!({
+            "peer_identity": identity.canonical(),
+            "auth": {
+                "admin_secret": "admin-secret",
+            },
+        })
+        .to_string()
         .into_bytes()
     }
 
@@ -1707,9 +1710,9 @@ mod tests {
         let frames: Vec<Vec<u8>> =
             postcard::from_bytes(&response).expect("decode websocket response batch");
         assert_eq!(frames.len(), 1);
-        let WireFrame::Hello(server_hello) = decode_frame(&frames[0]).expect("decode server hello")
-        else {
-            panic!("expected server hello");
+        let frame = decode_frame(&frames[0]).expect("decode server hello");
+        let WireFrame::Hello(server_hello) = frame else {
+            panic!("expected server hello, got {frame:?}");
         };
         assert_eq!(server_hello.role, WirePeerRole::Core);
         assert!(

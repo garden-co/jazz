@@ -125,7 +125,13 @@ describe("websocket frame carrier", () => {
     const cases = [
       { auth: { sub: " \t ", jwt_token: jwt }, expected: "jwt-user" },
       {
-        auth: { sub: " \t ", backend_session: { user_id: "backend-user" } },
+        auth: {
+          sub: " \t ",
+          backend_session: {
+            issuer: "https://issuer.example",
+            user_id: "backend-user",
+          },
+        },
         expected: "backend-user",
       },
     ];
