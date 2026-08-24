@@ -1,7 +1,9 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
+use std::task::{Context, Poll, Waker};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -35,7 +37,7 @@ use serde::{Deserialize, Serialize};
 type BrowserStorage = IdbStorage<IndexedDbPageStore>;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use wasm_bindgen_futures::{future_to_promise, JsFuture};
+use wasm_bindgen_futures::future_to_promise;
 
 mod identity;
 
@@ -3023,7 +3025,7 @@ fn subscription_retry_delay_ms(attempt: u8, peer_retry_after_ms: u32) -> u32 {
 
 async fn wait_for_subscription_retry(delay_ms: u32) -> Result<(), JsValue> {
     for segment_ms in subscription_retry_timer_segments(delay_ms) {
-        wait_for_subscription_retry_segment(segment_ms).await?;
+        SubscriptionRetryTimer::new(segment_ms)?.await;
     }
     Ok(())
 }
@@ -3038,25 +3040,88 @@ fn subscription_retry_timer_segments(mut delay_ms: u32) -> Vec<u32> {
     segments
 }
 
-async fn wait_for_subscription_retry_segment(delay_ms: u32) -> Result<(), JsValue> {
-    let promise = js_sys::Promise::new(&mut |resolve, reject| {
-        let global = js_sys::global();
-        let timeout = match js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
-            .and_then(|value| value.dyn_into::<js_sys::Function>())
-        {
-            Ok(timeout) => timeout,
-            Err(error) => {
-                let _ = reject.call1(&JsValue::UNDEFINED, &error);
-                return;
+struct SubscriptionRetryTimerState {
+    fired: std::cell::Cell<bool>,
+    waker: RefCell<Option<Waker>>,
+}
+
+/// One host timer whose lifetime is owned by the Rust future. Dropping an
+/// in-flight subscription pull clears the JavaScript timer immediately instead
+/// of leaving a callback live until its (possibly multi-day) deadline.
+struct SubscriptionRetryTimer {
+    state: Rc<SubscriptionRetryTimerState>,
+    timer_global: JsValue,
+    clear_timeout: js_sys::Function,
+    timeout_handle: JsValue,
+    _callback: Closure<dyn FnMut()>,
+}
+
+impl SubscriptionRetryTimer {
+    fn new(delay_ms: u32) -> Result<Self, JsValue> {
+        let timer_global = js_sys::global();
+        let set_timeout = js_sys::Reflect::get(&timer_global, &JsValue::from_str("setTimeout"))
+            .and_then(|value| value.dyn_into::<js_sys::Function>())?;
+        let clear_timeout = js_sys::Reflect::get(&timer_global, &JsValue::from_str("clearTimeout"))
+            .and_then(|value| value.dyn_into::<js_sys::Function>())?;
+        Self::with_functions(delay_ms, timer_global.into(), set_timeout, clear_timeout)
+    }
+
+    fn with_functions(
+        delay_ms: u32,
+        timer_global: JsValue,
+        set_timeout: js_sys::Function,
+        clear_timeout: js_sys::Function,
+    ) -> Result<Self, JsValue> {
+        let state = Rc::new(SubscriptionRetryTimerState {
+            fired: std::cell::Cell::new(false),
+            waker: RefCell::new(None),
+        });
+        let callback_state = Rc::clone(&state);
+        let callback = Closure::<dyn FnMut()>::new(move || {
+            callback_state.fired.set(true);
+            if let Some(waker) = callback_state.waker.borrow_mut().take() {
+                waker.wake();
             }
-        };
-        if let Err(error) =
-            timeout.call2(&global, &resolve, &JsValue::from_f64(f64::from(delay_ms)))
-        {
-            let _ = reject.call1(&JsValue::UNDEFINED, &error);
+        });
+        let timeout_handle = set_timeout.call2(
+            &timer_global,
+            callback.as_ref(),
+            &JsValue::from_f64(f64::from(delay_ms)),
+        )?;
+        Ok(Self {
+            state,
+            timer_global,
+            clear_timeout,
+            timeout_handle,
+            _callback: callback,
+        })
+    }
+}
+
+impl Future for SubscriptionRetryTimer {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<()> {
+        if self.state.fired.get() {
+            return Poll::Ready(());
         }
-    });
-    JsFuture::from(promise).await.map(|_| ())
+        *self.state.waker.borrow_mut() = Some(context.waker().clone());
+        if self.state.fired.get() {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+impl Drop for SubscriptionRetryTimer {
+    fn drop(&mut self) {
+        if !self.state.fired.get() {
+            let _ = self
+                .clear_timeout
+                .call1(&self.timer_global, &self.timeout_handle);
+        }
+    }
 }
 
 fn subscription_chunk_to_js(
@@ -3358,9 +3423,6 @@ mod dynamic_schema_view_tests {
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test::wasm_bindgen_test]
     fn canceling_an_actual_maximum_subscription_timer_drops_it_without_waiting() {
-        use std::future::Future;
-        use std::task::{Context, Poll};
-
         let (abort, registration) = AbortHandle::new_pair();
         let mut wait = Box::pin(Abortable::new(
             wait_for_subscription_retry(u32::MAX),
@@ -3373,6 +3435,85 @@ mod dynamic_schema_view_tests {
             wait.as_mut().poll(&mut context),
             Poll::Ready(Err(_))
         ));
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn subscription_retry_timer_clears_live_handles_and_skips_fired_ones() {
+        fn timer_functions(
+            callback: Rc<RefCell<Option<js_sys::Function>>>,
+            clears: Rc<std::cell::Cell<u32>>,
+        ) -> (
+            Closure<dyn FnMut(JsValue, JsValue) -> JsValue>,
+            Closure<dyn FnMut(JsValue)>,
+        ) {
+            let set_timeout = Closure::<dyn FnMut(JsValue, JsValue) -> JsValue>::new(
+                move |callback_value: JsValue, _delay: JsValue| {
+                    *callback.borrow_mut() = Some(callback_value.unchecked_into());
+                    JsValue::from_f64(91.0)
+                },
+            );
+            let clear_timeout = Closure::<dyn FnMut(JsValue)>::new(move |handle: JsValue| {
+                assert_eq!(handle.as_f64(), Some(91.0));
+                clears.set(clears.get() + 1);
+            });
+            (set_timeout, clear_timeout)
+        }
+
+        let callback = Rc::new(RefCell::new(None));
+        let clears = Rc::new(std::cell::Cell::new(0));
+        let (set_timeout, clear_timeout) =
+            timer_functions(Rc::clone(&callback), Rc::clone(&clears));
+        let timer = SubscriptionRetryTimer::with_functions(
+            MAX_JS_TIMEOUT_MS,
+            JsValue::UNDEFINED,
+            set_timeout
+                .as_ref()
+                .unchecked_ref::<js_sys::Function>()
+                .clone(),
+            clear_timeout
+                .as_ref()
+                .unchecked_ref::<js_sys::Function>()
+                .clone(),
+        )
+        .unwrap();
+        drop(timer);
+        assert_eq!(
+            clears.get(),
+            1,
+            "cancelling the retry clears its host timer"
+        );
+
+        let callback = Rc::new(RefCell::new(None));
+        let clears = Rc::new(std::cell::Cell::new(0));
+        let (set_timeout, clear_timeout) =
+            timer_functions(Rc::clone(&callback), Rc::clone(&clears));
+        let mut timer = Box::pin(
+            SubscriptionRetryTimer::with_functions(
+                1,
+                JsValue::UNDEFINED,
+                set_timeout
+                    .as_ref()
+                    .unchecked_ref::<js_sys::Function>()
+                    .clone(),
+                clear_timeout
+                    .as_ref()
+                    .unchecked_ref::<js_sys::Function>()
+                    .clone(),
+            )
+            .unwrap(),
+        );
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(timer.as_mut().poll(&mut context), Poll::Pending));
+        callback
+            .borrow()
+            .as_ref()
+            .expect("setTimeout captured its callback")
+            .call0(&JsValue::UNDEFINED)
+            .unwrap();
+        assert!(matches!(timer.as_mut().poll(&mut context), Poll::Ready(())));
+        drop(timer);
+        assert_eq!(clears.get(), 0, "a fired timer has no live handle to clear");
     }
 
     #[cfg(target_arch = "wasm32")]
