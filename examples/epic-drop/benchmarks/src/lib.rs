@@ -78,7 +78,10 @@ impl Fixture {
                     "content_type".to_owned(),
                     Value::String("audio/wav".to_owned()),
                 ),
-                ("size_bytes".to_owned(), Value::U64(file_bytes as u64)),
+                (
+                    "size_bytes".to_owned(),
+                    Value::I32(i32::try_from(file_bytes).expect("benchmark file size fits an int")),
+                ),
                 (
                     "owner_id".to_owned(),
                     Value::String("demo-owner".to_owned()),
@@ -127,7 +130,7 @@ fn schema() -> JazzSchema {
                 .fk_column("folder_id", "folders")
                 .column("name", ColumnType::Text)
                 .column("content_type", ColumnType::Text)
-                .column("size_bytes", ColumnType::Timestamp)
+                .column("size_bytes", ColumnType::Integer)
                 .column("owner_id", ColumnType::Text)
                 .column("contents", ColumnType::Bytea)
                 .index_only(["folder_id"]),
