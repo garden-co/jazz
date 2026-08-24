@@ -1,4 +1,6 @@
 import { describe, expect, test } from "vitest";
+import { translateQuery } from "../../../../../packages/jazz-tools/src/runtime/query-adapter.js";
+import { app } from "../schema.js";
 import {
   ALBUM_TRACK_LIMIT,
   JazzRecordPlayerStore,
@@ -40,5 +42,71 @@ describe("RecordPlayer scenario receipt", () => {
     expect(ALBUM_TRACK_LIMIT).toBe(32);
     expect(PLAYLIST_WINDOW_OFFSET).toBe(8);
     expect(PLAYLIST_WINDOW_LIMIT).toBe(16);
+  });
+
+  test("lowers metadata browsing without selecting streamed audio", async () => {
+    let capturedQuery: { _build(): string } | undefined;
+    const db = {
+      all: async (query: { _build(): string }) => {
+        capturedQuery = query;
+        return [
+          {
+            id: "track-1",
+            album_id: "album-1",
+            title: "Metadata only",
+            ordinal: 0,
+            duration_ms: 1,
+          },
+        ];
+      },
+    };
+
+    await expect(new JazzRecordPlayerStore(db as never).tracksForAlbum("album-1")).resolves.toEqual(
+      [
+        {
+          id: "track-1",
+          albumId: "album-1",
+          title: "Metadata only",
+          ordinal: 0,
+          durationMs: 1,
+        },
+      ],
+    );
+
+    const runtimeQuery = JSON.parse(translateQuery(capturedQuery!._build(), app.wasmSchema));
+    expect(runtimeQuery.table).toBe("tracks");
+    // `id` is an implicit row key in the runtime query contract, so only
+    // ordinary metadata columns appear in `select_columns`.
+    expect(runtimeQuery.select_columns).toEqual(["album_id", "title", "ordinal", "duration_ms"]);
+    expect(runtimeQuery.select_columns).not.toContain("audio_bytes");
+    expect(runtimeQuery.order_by).toEqual([{ column: "ordinal", direction: "Asc" }]);
+    expect(runtimeQuery.limit).toBe(ALBUM_TRACK_LIMIT);
+  });
+
+  test("lowers playlist browsing to the requested bounded window", async () => {
+    let capturedQuery: { _build(): string } | undefined;
+    const db = {
+      all: async (query: { _build(): string }) => {
+        capturedQuery = query;
+        return [];
+      },
+    };
+
+    await expect(
+      new JazzRecordPlayerStore(db as never).playlistWindow(
+        "playlist-1",
+        PLAYLIST_WINDOW_OFFSET,
+        2,
+      ),
+    ).resolves.toEqual([]);
+
+    const runtimeQuery = JSON.parse(translateQuery(capturedQuery!._build(), app.wasmSchema));
+    expect(runtimeQuery.table).toBe("playlist_entries");
+    expect(runtimeQuery.conditions).toEqual([
+      { column: "playlist_id", op: "eq", value: "playlist-1" },
+    ]);
+    expect(runtimeQuery.order_by).toEqual([{ column: "position", direction: "Asc" }]);
+    expect(runtimeQuery.offset).toBe(PLAYLIST_WINDOW_OFFSET);
+    expect(runtimeQuery.limit).toBe(2);
   });
 });
