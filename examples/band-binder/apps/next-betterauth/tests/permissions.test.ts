@@ -132,10 +132,6 @@ describe("BandBinder workspace roles", () => {
         payload: {},
       })
       .wait({ tier: "edge" });
-    await owner.expectDenied((db) => db.update(app.blocks, blockA.id, { pageId: pageB.id }));
-    await owner.expectDenied((db) =>
-      db.update(app.blocks, blockA.id, { parentBlockId: blockB.id }),
-    );
     const blockB = await owner
       .insert(app.blocks, {
         workspaceId: workspaceB.id,
@@ -145,6 +141,10 @@ describe("BandBinder workspace roles", () => {
         payload: {},
       })
       .wait({ tier: "edge" });
+    await owner.expectDenied((db) => db.update(app.blocks, blockA.id, { pageId: pageB.id }));
+    await owner.expectDenied((db) =>
+      db.update(app.blocks, blockA.id, { parentBlockId: blockB.id }),
+    );
     await owner.expectDenied((db) =>
       db.insert(app.blocks, {
         workspaceId: workspaceA.id,

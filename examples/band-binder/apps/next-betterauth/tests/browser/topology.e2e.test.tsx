@@ -4,6 +4,7 @@ import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.
 import {
   TestCleanup,
   uniqueDbName,
+  waitForCondition,
   waitForQuery,
 } from "../../../../../../packages/jazz-tools/tests/browser/support.js";
 import {
@@ -16,6 +17,8 @@ import {
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
+
+const PAGE_SIZE = 12;
 
 const cleanup = new TestCleanup();
 afterEach(async () => cleanup.cleanup());
@@ -153,6 +156,21 @@ describe("BandBinder cross-topology recovery", () => {
                 })
                 .wait({ tier: "edge" });
               nestedPageId = nestedPage.id;
+              // PageNavigation owns this exact bounded, ordered child-page
+              // query.  Seed one more row than the page so the receipt proves
+              // both the ordering and the bound rather than merely eventual
+              // delivery of a single child.
+              await Promise.all(
+                Array.from({ length: PAGE_SIZE }, (_, index) =>
+                  manager!
+                    .insert(app.pages, {
+                      workspaceId,
+                      parentPageId: pageId,
+                      title: `Child page ${String(index).padStart(2, "0")}`,
+                    })
+                    .wait({ tier: "edge" }),
+                ),
+              );
               const [ownerBlock, managerBlock] = await Promise.all([
                 owner!
                   .insert(app.blocks, {
@@ -176,6 +194,19 @@ describe("BandBinder cross-topology recovery", () => {
               expectedBlockIds.add(ownerBlock.id);
               expectedBlockIds.add(managerBlock.id);
               taskBlockId = managerBlock.id;
+              await Promise.all(
+                Array.from({ length: PAGE_SIZE - 1 }, (_, index) =>
+                  manager!
+                    .insert(app.blocks, {
+                      workspaceId,
+                      pageId,
+                      position: 30 + index * 10,
+                      kind: "text",
+                      payload: { text: `Checklist ${index}` },
+                    })
+                    .wait({ tier: "edge" }),
+                ),
+              );
               const nestedParent = await manager!
                 .insert(app.blocks, {
                   workspaceId,
@@ -205,6 +236,15 @@ describe("BandBinder cross-topology recovery", () => {
                     key: "D",
                   })
                   .wait({ tier: "edge" }),
+                ...Array.from({ length: PAGE_SIZE }, (_, index) =>
+                  manager!
+                    .insert(app.songs, {
+                      workspaceId,
+                      blockId: ownerBlock.id,
+                      title: `Song ${String(index).padStart(2, "0")}`,
+                    })
+                    .wait({ tier: "edge" }),
+                ),
                 manager!
                   .insert(app.calendarEvents, {
                     workspaceId,
@@ -214,6 +254,17 @@ describe("BandBinder cross-topology recovery", () => {
                     endsAt: new Date("2030-04-01T15:00:00Z"),
                   })
                   .wait({ tier: "edge" }),
+                ...Array.from({ length: PAGE_SIZE }, (_, index) =>
+                  manager!
+                    .insert(app.calendarEvents, {
+                      workspaceId,
+                      blockId: managerBlock.id,
+                      title: `Soundcheck ${String(index).padStart(2, "0")}`,
+                      startsAt: new Date(`2030-04-${String(index + 2).padStart(2, "0")}T14:00:00Z`),
+                      endsAt: new Date(`2030-04-${String(index + 2).padStart(2, "0")}T15:00:00Z`),
+                    })
+                    .wait({ tier: "edge" }),
+                ),
                 manager!
                   .insert(app.attachments, {
                     workspaceId,
@@ -223,38 +274,69 @@ describe("BandBinder cross-topology recovery", () => {
                     bytes: new TextEncoder().encode("channels 1-16"),
                   })
                   .wait({ tier: "edge" }),
+                ...Array.from({ length: PAGE_SIZE }, (_, index) =>
+                  manager!
+                    .insert(app.attachments, {
+                      workspaceId,
+                      blockId: nestedBlockId,
+                      name: `asset-${String(index).padStart(2, "0")}.txt`,
+                      mediaType: "text/plain",
+                      bytes: new TextEncoder().encode(`asset ${index}`),
+                    })
+                    .wait({ tier: "edge" }),
+                ),
               ]);
               const blocks = await waitForQuery(
                 owner!,
-                app.blocks.where({ workspaceId, pageId }).orderBy("position", "asc").limit(12),
-                (rows) => rows.length === 2,
+                app.blocks
+                  .where({ workspaceId, pageId })
+                  .orderBy("position", "asc")
+                  .offset(0)
+                  .limit(PAGE_SIZE),
+                (rows) => rows.length === PAGE_SIZE,
                 "ordered blocks converge",
                 15_000,
                 "edge",
               );
-              expect(blocks.map((block) => block.position)).toEqual([10, 20]);
-              expect(new Set(blocks.map((block) => block.id))).toEqual(expectedBlockIds);
+              expect(blocks.map((block) => block.position)).toEqual(
+                Array.from({ length: PAGE_SIZE }, (_, index) => 10 + index * 10),
+              );
+              expect(new Set(blocks.slice(0, 2).map((block) => block.id))).toEqual(
+                expectedBlockIds,
+              );
               const managerBlocks = await waitForQuery(
                 manager!,
-                app.blocks.where({ workspaceId, pageId }).orderBy("position", "asc").limit(12),
-                (rows) => rows.length === 2,
+                app.blocks
+                  .where({ workspaceId, pageId })
+                  .orderBy("position", "asc")
+                  .offset(1)
+                  .limit(PAGE_SIZE),
+                (rows) => rows.length === PAGE_SIZE,
                 "manager receives the exact ordered block window",
                 15_000,
                 "edge",
               );
-              expect(managerBlocks.map((block) => [block.id, block.position])).toEqual(
-                blocks.map((block) => [block.id, block.position]),
+              expect(managerBlocks.map((block) => block.position)).toEqual(
+                Array.from({ length: PAGE_SIZE }, (_, index) => 20 + index * 10),
               );
               expect(
                 await waitForQuery(
                   owner!,
-                  app.pages.where({ workspaceId, parentPageId: pageId }),
-                  (rows) => rows.length === 1 && rows[0]?.id === nestedPageId,
-                  "nested page follows its parent permission witness",
+                  app.pages
+                    .where({ workspaceId, parentPageId: pageId })
+                    .orderBy("title", "asc")
+                    .offset(1)
+                    .limit(PAGE_SIZE),
+                  (rows) =>
+                    rows.length === PAGE_SIZE &&
+                    rows.every(
+                      (row, index) => row.title === `Child page ${String(index).padStart(2, "0")}`,
+                    ),
+                  "bounded child-page navigation follows its parent permission witness",
                   15_000,
                   "edge",
                 ),
-              ).toHaveLength(1);
+              ).toHaveLength(PAGE_SIZE);
               const nestedBlocks = await waitForQuery(
                 owner!,
                 app.blocks.where({ workspaceId, pageId: nestedPageId }).orderBy("position", "asc"),
@@ -269,33 +351,55 @@ describe("BandBinder cross-topology recovery", () => {
               expect(
                 await waitForQuery(
                   owner!,
-                  app.attachments.where({ workspaceId, blockId: nestedBlockId }),
-                  (rows) => rows.length === 1 && rows[0]?.name === "stage-plot.txt",
-                  "attachment follows its nested block permission witness",
+                  app.attachments
+                    .where({ workspaceId, blockId: nestedBlockId })
+                    .orderBy("name", "asc")
+                    .limit(PAGE_SIZE),
+                  (rows) =>
+                    rows.length === PAGE_SIZE &&
+                    rows.every(
+                      (row, index) => row.name === `asset-${String(index).padStart(2, "0")}.txt`,
+                    ),
+                  "bounded attachment list follows its nested block permission witness",
                   15_000,
                   "edge",
                 ),
-              ).toHaveLength(1);
+              ).toHaveLength(PAGE_SIZE);
               const [songs, events] = await Promise.all([
                 waitForQuery(
                   owner!,
-                  app.songs.where({ workspaceId, blockId: ownerBlock.id }),
-                  (rows) => rows.length === 1 && rows[0]?.title === "Encore",
-                  "song converges through the workspace permission",
+                  app.songs.where({ workspaceId }).orderBy("title", "asc").limit(PAGE_SIZE),
+                  (rows) => rows.length === PAGE_SIZE && rows[0]?.title === "Encore",
+                  "bounded song index converges through the workspace permission",
                   15_000,
                   "edge",
                 ),
                 waitForQuery(
                   owner!,
-                  app.calendarEvents.where({ workspaceId, blockId: managerBlock.id }),
-                  (rows) => rows.length === 1 && rows[0]?.title === "Load in",
-                  "calendar event converges through the workspace permission",
+                  app.calendarEvents
+                    .where({ workspaceId })
+                    .orderBy("startsAt", "asc")
+                    .limit(PAGE_SIZE),
+                  (rows) => rows.length === PAGE_SIZE && rows[0]?.title === "Load in",
+                  "bounded calendar converges through the workspace permission",
                   15_000,
                   "edge",
                 ),
               ]);
-              expect(songs).toHaveLength(1);
-              expect(events).toHaveLength(1);
+              expect(songs.map((song) => song.title)).toEqual([
+                "Encore",
+                ...Array.from(
+                  { length: PAGE_SIZE - 1 },
+                  (_, index) => `Song ${String(index).padStart(2, "0")}`,
+                ),
+              ]);
+              expect(events.map((event) => event.title)).toEqual([
+                "Load in",
+                ...Array.from(
+                  { length: PAGE_SIZE - 1 },
+                  (_, index) => `Soundcheck ${String(index).padStart(2, "0")}`,
+                ),
+              ]);
               cleanup.trackSubscription(
                 owner!.subscribeAll(app.tasks.where({ workspaceId }), (delta) => {
                   taskSubscriptionSnapshots.push(delta.all.map((task) => task.id).sort());
@@ -332,8 +436,10 @@ describe("BandBinder cross-topology recovery", () => {
                 "edge",
               );
               expect(tasks.map((task) => task.id)).toEqual([offlineTaskId]);
-              expect(taskSubscriptionSnapshots.some((ids) => ids.includes(offlineTaskId))).toBe(
-                true,
+              await waitForCondition(
+                async () => taskSubscriptionSnapshots.some((ids) => ids.includes(offlineTaskId)),
+                15_000,
+                "owner task subscription publishes the converged offline task",
               );
             },
             faultsAfter: [{ kind: "restart", target: "manager" }],
