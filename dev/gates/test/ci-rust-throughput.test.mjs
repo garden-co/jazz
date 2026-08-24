@@ -599,6 +599,19 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
   assert.equal(shard["runs-on"], "blacksmith-8vcpu-ubuntu-2404");
   assert.equal(aggregate.needs[0], "shard");
   assert.match(aggregate.if, /always/);
+  assert.equal(
+    aggregate.steps[0].uses,
+    "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+    "aggregate checkout must precede artifact download because checkout cleans the worktree",
+  );
+  assert.equal(
+    aggregate.steps[1].uses,
+    "actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0",
+  );
+  assert.match(
+    aggregate.steps[2].run,
+    /node dev\/gates\/rust-shadow-matrix\.mjs aggregate rust-shadow-receipts 2/,
+  );
   assert.match(
     rustShadowWorkflow,
     /node dev\/gates\/rust-shadow-matrix\.mjs shard \$\{\{ matrix\.index \}\} 2/,
