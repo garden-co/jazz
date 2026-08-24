@@ -100,23 +100,27 @@ describe("BigLabel browser edge/core topology", () => {
         })
         .wait({ tier: "edge" });
     });
-    const reader = await openDb({
-      appId,
-      serverUrl,
-      jwtToken: editorToken,
-      label: "big-label-reader",
-    });
-    await Promise.all([
-      writer
+    const reader = await browserTopologyPhase("open authenticated editor edge", () =>
+      openDb({
+        appId,
+        serverUrl,
+        jwtToken: editorToken,
+        label: "big-label-reader",
+      }),
+    );
+    await browserTopologyPhase("writer seeds initial artist", async () => {
+      await writer
         .insert(app.artists, {
           organizationId: org.id,
           name: "Aster",
           genre: "ambient",
           status: "active",
         })
-        .wait({ tier: "edge" }),
+        .wait({ tier: "edge" });
+    });
+    await browserTopologyPhase("editor reads admitted organization roster", () =>
       reader.all(app.artists.where({ organizationId: org.id }), { tier: "edge" }),
-    ]);
+    );
     const snapshots: string[][] = [];
     ctx.trackSubscription(
       reader.subscribeAll(
