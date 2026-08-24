@@ -86,6 +86,7 @@ test("registry keeps the BandChat topology invocation focused to its receipt", (
     readFileSync(resolve(root, "dev/example-topology-scenarios.json"), "utf8"),
   );
   const scenario = registry.scenarios.find(({ id }) => id === "band-chat.topology.room-recovery");
+  assert.deepEqual(scenario?.topology, ["browser", "core"]);
   assert.deepEqual(scenario?.argv, [
     "pnpm",
     "--dir",

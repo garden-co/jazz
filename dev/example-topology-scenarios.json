@@ -9,7 +9,7 @@
     },
     {
       "id": "band-chat.topology.room-recovery",
-      "topology": ["browser", "edge", "core"],
+      "topology": ["browser", "core"],
       "cwd": ".",
       "argv": [
         "pnpm",

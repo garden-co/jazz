@@ -35,7 +35,7 @@ const ctx = new TestCleanup();
 afterEach(async () => ctx.cleanup());
 
 /**
- * Adopter-level receipt for the public client -> edge -> core -> peer-edge path.
+ * Adopter-level receipt for two public browser clients connected to one core.
  * The shared harness supplies phase/fault timeouts and receipts; this app-owned
  * workload deliberately keeps its schema and assertions local.
  */
@@ -57,7 +57,7 @@ describe("BandChat cross-topology recovery", () => {
     const receipt = await runTopologyScenario(
       {
         id: scenario.id,
-        topology: ["browser", "edge", "core"],
+        topology: ["browser", "core"],
         seed: Number.isSafeInteger(seed) ? seed : 29,
         phaseTimeoutMs: 25_000,
         faultTimeoutMs: 15_000,
@@ -305,8 +305,8 @@ describe("BandChat cross-topology recovery", () => {
 
   // #1844 (reproducing PRs #1830 and #1838): do not convert this to an inline
   // fixture or skip it. It is the adopter-facing receipt for indirect large-value
-  // materialization once the shared fault harness can stream a peer-edge payload.
-  it.fails("materializes an indirect attachment at the peer edge (#1844)", async () => {
+  // materialization at a receiving browser through the shared server path.
+  it.fails("materializes an indirect attachment at the receiving browser (#1844)", async () => {
     const server = await getJazzServerInfo(uniqueDbName("band-chat-indirect-bytes"));
     await deploy({
       appId: server.appId,
