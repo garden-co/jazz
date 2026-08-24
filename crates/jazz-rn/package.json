@@ -9,15 +9,15 @@
     "native",
     "react-native"
   ],
-  "homepage": "https://github.com/antoniomuso/jazz-rn#readme",
+  "homepage": "https://github.com/garden-co/jazz/tree/main/crates/jazz-rn#readme",
   "bugs": {
-    "url": "https://github.com/antoniomuso/jazz-rn/issues"
+    "url": "https://github.com/garden-co/jazz/issues"
   },
   "license": "MIT",
   "author": "Antonio Musolino <antoniomusolino007@gmail.com> (https://github.com/antoniomuso)",
   "repository": {
     "type": "git",
-    "url": "git+https://https://github.com/garden-co/jazz.git"
+    "url": "git+https://github.com/garden-co/jazz.git"
   },
   "files": [
     "src",

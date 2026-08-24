@@ -22,6 +22,12 @@ test("jazz-rn publishes an Expo config plugin for a New Architecture development
   assert.equal(packageJson.files.includes("app.plugin.js"), true);
   assert.equal(packageJson.files.includes("scripts"), true);
   assert.equal(packageJson.peerDependencies.expo, ">=54");
+  assert.equal(
+    packageJson.repository.url,
+    "git+https://github.com/garden-co/jazz.git",
+    "the published package must point install users at its maintained source repository",
+  );
+  assert.equal(packageJson.bugs.url, "https://github.com/garden-co/jazz/issues");
 });
 
 test("the canonical Expo scaffold really prebuilds both relay-only platforms", () => {
@@ -108,6 +114,8 @@ test("jazz-rn autolinks a New-Architecture relay host without legacy artifacts",
     ]);
 
   assert.match(podspec, /JazzNativeRelay\.xcframework/);
+  assert.match(podspec, /https:\/\/github\.com\/garden-co\/jazz\.git/);
+  assert.doesNotMatch(podspec, /https:\/\/https:\/\//);
   assert.doesNotMatch(podspec, /uniffi-bindgen-react-native/);
   assert.match(podspec, /requires the React Native New Architecture/);
   assert.match(androidBuild, /relayNativeArtifactsPresent/);
