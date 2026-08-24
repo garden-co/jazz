@@ -663,6 +663,45 @@ describe.each(readModes)("TS Query API (%s reads)", (readMode: ReadMode) => {
       unsubscribe();
     });
 
+    it("updates a live reverse include as a notIn filter changes from excluded to included", async () => {
+      const project = insertProject(db, "Announcements");
+      const todo = insertTodo(db, { projectId: project.id, title: "Blocked" });
+      const current: Array<{ id: string; todosViaProject: Array<{ id: string }> }> = [];
+      let unsubscribe = () => {};
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      let resolveInitial: (() => void) | undefined;
+      let rejectInitial: ((error: Error) => void) | undefined;
+      const initial = new Promise<void>((resolve, reject) => {
+        resolveInitial = resolve;
+        rejectInitial = reject;
+      });
+      const included = new Promise<void>((resolve, reject) => {
+        timeout = setTimeout(() => {
+          unsubscribe();
+          const error = new Error("Timed out waiting for included notIn-filter update");
+          rejectInitial?.(error);
+          reject(error);
+        }, 10_000);
+        unsubscribe = db.subscribeAll(
+          app.projects.where({ id: { eq: project.id } }).include({
+            todosViaProject: app.todos.where({ title: { notIn: ["Blocked"] } }).select("id"),
+          }),
+          (delta) => {
+            const next = applySubscriptionDelta(current, delta as any);
+            current.splice(0, current.length, ...next);
+            if (current[0]?.todosViaProject.length === 0) resolveInitial?.();
+            if (current[0]?.todosViaProject.map((child) => child.id).includes(todo.id)) resolve();
+          },
+        );
+      });
+
+      await initial;
+      db.update(app.todos, todo.id, { title: "Published" });
+      await included;
+      if (timeout) clearTimeout(timeout);
+      unsubscribe();
+    });
+
     it("include returns the related entity", async () => {
       const { id: projectId } = insertProject(db, "Announcements");
       const { id: ownerId } = insertUser(db);

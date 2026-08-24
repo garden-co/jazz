@@ -3062,17 +3062,7 @@ function queryContainsPermissionIntrospection(queryJson: string): boolean {
 }
 
 function relationIrContainsPermissionPredicate(value: unknown): boolean {
-  if (!value || typeof value !== "object") return false;
-  if (Array.isArray(value)) return value.some(relationIrContainsPermissionPredicate);
-  const record = value as Record<string, unknown>;
-  const column =
-    readMagicPredicateColumn(record.Cmp) ??
-    readMagicPredicateColumn(record.In) ??
-    readMagicPredicateColumn(record.IsNull) ??
-    readMagicPredicateColumn(record.IsNotNull) ??
-    readMagicPredicateColumn(record.Contains);
-  if (column && isPermissionIntrospectionColumn(column)) return true;
-  return Object.values(record).some(relationIrContainsPermissionPredicate);
+  return predicateIrContainsPermissionIntrospection(value);
 }
 
 function relationIrContainsPermissionProjection(value: unknown): boolean {
@@ -3118,11 +3108,7 @@ function selectedColumnsContainPermissionIntrospection(value: unknown): boolean 
 
 function flatConditionsContainPermissionIntrospection(value: unknown): boolean {
   if (!Array.isArray(value)) return false;
-  return value.some((entry) => {
-    if (!entry || typeof entry !== "object") return false;
-    const column = (entry as { column?: unknown }).column;
-    return typeof column === "string" && isPermissionIntrospectionColumn(unqualifiedColumn(column));
-  });
+  return value.some(predicateIrContainsPermissionIntrospection);
 }
 
 function arraySubqueriesContainPermissionIntrospection(value: unknown): boolean {
@@ -3145,22 +3131,48 @@ function arraySubqueriesContainPermissionIntrospection(value: unknown): boolean 
 
 function arrayFiltersContainPermissionIntrospection(value: unknown): boolean {
   if (!Array.isArray(value)) return false;
-  return value.some((entry) => {
-    if (!entry || typeof entry !== "object") return false;
-    const record = entry as Record<string, unknown>;
-    for (const key of ["Eq", "Ne", "Gt", "Ge", "Lt", "Le", "IsNull", "IsNotNull", "Contains"]) {
-      const predicate = record[key];
-      if (!predicate || typeof predicate !== "object") continue;
-      const column = (predicate as { column?: unknown }).column;
-      if (
-        typeof column === "string" &&
-        isPermissionIntrospectionColumn(unqualifiedColumn(column))
-      ) {
-        return true;
-      }
+  return value.some(predicateIrContainsPermissionIntrospection);
+}
+
+function predicateIrContainsPermissionIntrospection(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some(predicateIrContainsPermissionIntrospection);
+  const record = value as Record<string, unknown>;
+
+  // Preserve support for the legacy flat/array predicate envelopes while the
+  // query adapter emits canonical predicate IR for all new queries.
+  if (
+    typeof record.op === "string" &&
+    typeof record.column === "string" &&
+    isPermissionIntrospectionColumn(unqualifiedColumn(record.column))
+  ) {
+    return true;
+  }
+
+  for (const key of ["Eq", "Ne", "Gt", "Ge", "Lt", "Le", "IsNull", "IsNotNull", "Contains"]) {
+    const legacyPredicate = record[key];
+    if (!legacyPredicate || typeof legacyPredicate !== "object") continue;
+    const column = (legacyPredicate as { column?: unknown }).column;
+    if (typeof column === "string" && isPermissionIntrospectionColumn(unqualifiedColumn(column))) {
+      return true;
     }
-    return false;
-  });
+  }
+
+  const canonicalColumn =
+    readMagicPredicateColumn(record.Cmp) ??
+    readMagicPredicateColumn(record.In) ??
+    readMagicPredicateColumn(record.IsNull) ??
+    readMagicPredicateColumn(record.IsNotNull) ??
+    readMagicPredicateColumn(record.Contains);
+  if (canonicalColumn && isPermissionIntrospectionColumn(unqualifiedColumn(canonicalColumn))) {
+    return true;
+  }
+
+  // This recursive walk deliberately includes And/Or/Not and nested array
+  // filters. A forbidden column must be rejected regardless of predicate shape.
+  return Object.entries(record).some(
+    ([key, child]) => key !== "Literal" && predicateIrContainsPermissionIntrospection(child),
+  );
 }
 
 function unqualifiedColumn(column: string): string {
