@@ -1003,7 +1003,8 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
                     .policies(
                         PublicTablePolicies::new()
                             .with_insert(task_policy.clone())
-                            .with_update(Some(task_policy.clone()), task_policy),
+                            .with_update(Some(task_policy.clone()), task_policy.clone())
+                            .with_delete(task_policy),
                     ),
             ),
     );
@@ -1106,6 +1107,163 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
         core.transaction_state_settled(denied_update),
         Some((Fate::Rejected(RejectionReason::AuthorizationDenied), None, DurabilityTier::Local))
     ));
+
+    // DELETE evaluates the persisted old row through USING, rather than a
+    // candidate payload. The rejected UPDATE above must not replace that old
+    // same-workspace authority.
+    let accepted_delete = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("tasks", accepted_task, 10)
+                .made_by(owner)
+                .deletion(DeletionEvent::Deleted),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit_settled(accepted_delete)
+        .unwrap();
+    assert!(matches!(
+        core.transaction_state_settled(accepted_delete),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+}
+
+#[test]
+fn exists_rel_rejects_nested_outer_correlation_off_the_join_key() {
+    let column = |scope: &str, name: &str| PublicRelColumnRef {
+        scope: Some(scope.to_owned()),
+        column: name.to_owned(),
+    };
+    let policy = PublicPolicyExpr::ExistsRel {
+        rel: PublicRelExpr::Filter {
+            input: Box::new(PublicRelExpr::Join {
+                left: Box::new(PublicRelExpr::TableScan {
+                    table: "blocks".into(),
+                    alias: Some("blocks".to_owned()),
+                }),
+                right: Box::new(PublicRelExpr::Filter {
+                    input: Box::new(PublicRelExpr::TableScan {
+                        table: "members".into(),
+                        alias: Some("members".to_owned()),
+                    }),
+                    predicate: PublicRelPredicateExpr::Cmp {
+                        // `subject` is not the blocks-members equality key;
+                        // accepting this would silently retarget the proof.
+                        left: column("members", "subject"),
+                        op: PublicRelPredicateCmpOp::Eq,
+                        right: PublicRelValueRef::OuterColumn(PublicRelColumnRef::unscoped(
+                            "workspace",
+                        )),
+                    },
+                }),
+                on: vec![PublicRelJoinCondition {
+                    left: column("blocks", "workspace"),
+                    right: column("members", "workspace"),
+                }],
+                join_kind: PublicRelJoinKind::Inner,
+            }),
+            predicate: PublicRelPredicateExpr::Cmp {
+                left: column("blocks", "id"),
+                op: PublicRelPredicateCmpOp::Eq,
+                right: PublicRelValueRef::OuterColumn(PublicRelColumnRef::unscoped("block")),
+            },
+        },
+    };
+    let public = PublicSchemaBuilder::new()
+        .table(PublicTableSchemaBuilder::new("workspaces"))
+        .table(
+            PublicTableSchemaBuilder::new("members")
+                .fk_column("workspace", "workspaces")
+                .column("subject", PublicColumnType::Uuid),
+        )
+        .table(
+            PublicTableSchemaBuilder::new("blocks").fk_column("workspace", "workspaces"),
+        )
+        .table(
+            PublicTableSchemaBuilder::new("tasks")
+                .fk_column("workspace", "workspaces")
+                .fk_column("block", "blocks")
+                .policies(PublicTablePolicies::new().with_insert(policy)),
+        )
+        .build();
+    let error = crate::schema::JazzSchema::new(&public)
+        .expect_err("mismatched nested correlation must fail closed");
+    assert!(error
+        .to_string()
+        .contains("nested outer correlation must use its join key"));
+}
+
+#[test]
+fn exists_rel_fails_closed_for_outer_correlation_beyond_one_nested_join() {
+    let column = |scope: &str, name: &str| PublicRelColumnRef {
+        scope: Some(scope.to_owned()),
+        column: name.to_owned(),
+    };
+    let policy = PublicPolicyExpr::ExistsRel {
+        rel: PublicRelExpr::Filter {
+            input: Box::new(PublicRelExpr::Join {
+                left: Box::new(PublicRelExpr::TableScan {
+                    table: "blocks".into(),
+                    alias: Some("blocks".to_owned()),
+                }),
+                right: Box::new(PublicRelExpr::Join {
+                    left: Box::new(PublicRelExpr::TableScan {
+                        table: "members".into(),
+                        alias: Some("members".to_owned()),
+                    }),
+                    right: Box::new(PublicRelExpr::Filter {
+                        input: Box::new(PublicRelExpr::TableScan {
+                            table: "grants".into(),
+                            alias: Some("grants".to_owned()),
+                        }),
+                        predicate: PublicRelPredicateExpr::Cmp {
+                            left: column("grants", "workspace"),
+                            op: PublicRelPredicateCmpOp::Eq,
+                            right: PublicRelValueRef::OuterColumn(PublicRelColumnRef::unscoped(
+                                "workspace",
+                            )),
+                        },
+                    }),
+                    on: vec![PublicRelJoinCondition {
+                        left: column("members", "workspace"),
+                        right: column("grants", "workspace"),
+                    }],
+                    join_kind: PublicRelJoinKind::Inner,
+                }),
+                on: vec![PublicRelJoinCondition {
+                    left: column("blocks", "workspace"),
+                    right: column("members", "workspace"),
+                }],
+                join_kind: PublicRelJoinKind::Inner,
+            }),
+            predicate: PublicRelPredicateExpr::Cmp {
+                left: column("blocks", "id"),
+                op: PublicRelPredicateCmpOp::Eq,
+                right: PublicRelValueRef::OuterColumn(PublicRelColumnRef::unscoped("block")),
+            },
+        },
+    };
+    let public = PublicSchemaBuilder::new()
+        .table(PublicTableSchemaBuilder::new("workspaces"))
+        .table(
+            PublicTableSchemaBuilder::new("blocks").fk_column("workspace", "workspaces"),
+        )
+        .table(
+            PublicTableSchemaBuilder::new("members").fk_column("workspace", "workspaces"),
+        )
+        .table(
+            PublicTableSchemaBuilder::new("grants").fk_column("workspace", "workspaces"),
+        )
+        .table(
+            PublicTableSchemaBuilder::new("tasks")
+                .fk_column("workspace", "workspaces")
+                .fk_column("block", "blocks")
+                .policies(PublicTablePolicies::new().with_insert(policy)),
+        )
+        .build();
+    let error = crate::schema::JazzSchema::new(&public)
+        .expect_err("deep outer correlation must fail closed until its scope is retained");
+    assert!(error
+        .to_string()
+        .contains("does not yet support outer correlations beyond one nested join"));
 }
 
 #[test]
