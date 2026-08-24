@@ -1271,6 +1271,7 @@ impl TickEvaluator<'_> {
                 graph_node
                     .descriptor
                     .output
+                    .records()
                     .fields()
                     .iter()
                     .any(|candidate| candidate.name.as_deref() == Some(field))
