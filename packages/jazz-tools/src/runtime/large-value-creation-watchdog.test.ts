@@ -24,15 +24,30 @@ const schema: WasmSchema = {
       { name: "done", column_type: { type: "Boolean" }, nullable: false },
     ],
   },
+  blobs: {
+    columns: [{ name: "data", column_type: { type: "Bytea" }, nullable: false }],
+  },
+  documents: {
+    columns: [{ name: "body", column_type: { type: "Json" }, nullable: false }],
+  },
 };
 
-const modes = ["direct-napi", "streaming-napi", "direct-wasm", "streaming-wasm"] as const;
+const modes = [
+  "direct-napi-text",
+  "streaming-napi-text",
+  "direct-wasm-text",
+  "streaming-wasm-text",
+  "direct-wasm-bytes",
+  "streaming-wasm-bytes",
+  "direct-wasm-json",
+  "streaming-wasm-json",
+] as const;
 
 describe.runIf(!fixture && hasJazzNapiBuild() && hasJazzWasmBuild())(
   "bounded large-value creation regressions",
   () => {
     it.each(modes)(
-      "%s Text creation completes",
+      "%s creation completes",
       async (mode) => {
         try {
           await execFileAsync(
@@ -62,7 +77,7 @@ describe.runIf(modes.includes(fixture as (typeof modes)[number]))(
   "large-value creation child fixture",
   () => {
     it(`runs ${fixture} creation`, async () => {
-      const runtime = fixture?.endsWith("-wasm")
+      const runtime = fixture?.includes("-wasm-")
         ? await createWasmRuntime(schema, { appId: `large-value-${fixture}` })
         : await createNapiRuntime();
       const client = JazzClient.connectWithRuntime(runtime, {
@@ -71,28 +86,52 @@ describe.runIf(modes.includes(fixture as (typeof modes)[number]))(
       });
       try {
         console.error(`phase:${fixture}:start`);
+        const largeText = "x".repeat(256 * 1024 + 1);
+        const largeJson = JSON.stringify({ selected: { answer: 42 }, padding: largeText });
         const write = fixture?.startsWith("direct-")
-          ? client.insert("todos", {
-              title: { type: "Text", value: "x".repeat(256 * 1024 + 1) },
-              done: { type: "Boolean", value: false },
-            })
-          : await client.insertStreaming(
-              "todos",
-              { done: { type: "Boolean", value: false } },
-              "title",
-              (async function* () {
-                yield "x".repeat(256 * 1024 + 1);
-              })(),
-            );
+          ? fixture.endsWith("-bytes")
+            ? client.insert("blobs", {
+                data: { type: "Bytea", value: new TextEncoder().encode(largeText) },
+              })
+            : fixture.endsWith("-json")
+              ? client.insert("documents", { body: { type: "Text", value: largeJson } })
+              : client.insert("todos", {
+                  title: { type: "Text", value: "x".repeat(256 * 1024 + 1) },
+                  done: { type: "Boolean", value: false },
+                })
+          : fixture?.endsWith("-bytes")
+            ? await client.insertStreaming(
+                "blobs",
+                {},
+                "data",
+                oneChunk(new TextEncoder().encode(largeText)),
+              )
+            : fixture?.endsWith("-json")
+              ? await client.insertStreaming("documents", {}, "body", oneChunk(largeJson))
+              : await client.insertStreaming(
+                  "todos",
+                  { done: { type: "Boolean", value: false } },
+                  "title",
+                  oneChunk(largeText),
+                );
         console.error(`phase:${fixture}:returned`);
         await write.wait({ tier: "local" });
         console.error(`phase:${fixture}:local`);
+        if (fixture?.endsWith("-json")) {
+          await expect(
+            runtime.readJsonPointer("documents", write.value.id, "body", "/selected/answer"),
+          ).resolves.toBe(42);
+        }
       } finally {
         await runtime.close();
       }
     });
   },
 );
+
+async function* oneChunk(chunk: string | Uint8Array) {
+  yield chunk;
+}
 
 async function createNapiRuntime(): Promise<NativeRuntimeAdapter> {
   const { NapiDb } = await loadNapiModule();

@@ -1614,6 +1614,21 @@ fn value_contains_indirect_descriptor(value: &Value) -> bool {
     }
 }
 
+fn large_value_kind_matches(
+    value: &Value,
+    expected: Option<groove::large_values::LargeValueKind>,
+) -> bool {
+    let Some(expected) = expected else {
+        // Internal runtime-only schemas predate retained public type metadata.
+        return true;
+    };
+    match value {
+        Value::Large(value_ref) => value_ref.kind == expected,
+        Value::Nullable(Some(value)) => large_value_kind_matches(value, Some(expected)),
+        _ => true,
+    }
+}
+
 fn collect_indirect_descriptors(
     value: &Value,
     descriptors: &mut Vec<groove::large_values::LargeValueRef>,
