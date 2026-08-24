@@ -1,6 +1,7 @@
 "use client";
 
 import { useAll, useDb } from "jazz-tools/react";
+import { useState } from "react";
 import { app } from "@/schema";
 
 export function TrackLane({
@@ -16,6 +17,19 @@ export function TrackLane({
   const { data: steps = [] } = useAll(
     app.steps.where({ track_id: trackId }).orderBy("position", "asc"),
   );
+  const [writeError, setWriteError] = useState<string | null>(null);
+
+  async function toggle(step: (typeof steps)[number]) {
+    setWriteError(null);
+    try {
+      await db.update(app.steps, step.id, { enabled: !step.enabled }).wait({ tier: "edge" });
+    } catch {
+      // Local visibility remains optimistic. The receipt makes a server-side
+      // permission rejection observable instead of silently looking like a
+      // conflicting edit.
+      setWriteError("Pad update was rejected by session permissions.");
+    }
+  }
 
   return (
     <div className="track-lane">
@@ -27,7 +41,7 @@ export function TrackLane({
             aria-pressed={step.enabled}
             className={step.enabled ? "pad pad-on" : "pad"}
             key={step.id}
-            onClick={() => db.update(app.steps, step.id, { enabled: !step.enabled })}
+            onClick={() => void toggle(step)}
             style={step.enabled ? { background: color } : undefined}
             type="button"
           >
@@ -35,6 +49,7 @@ export function TrackLane({
           </button>
         ))}
       </div>
+      {writeError ? <p role="status">{writeError}</p> : null}
     </div>
   );
 }

@@ -31,3 +31,8 @@ fn subscribed_step_edit_delivers_a_public_subscription_event() {
 fn one_write_reaches_every_subscribed_pattern_listener() {
     assert_eq!(Fixture::new().subscribed_step_fanout(8), 8);
 }
+
+#[test]
+fn playback_receipt_is_available_through_the_ordered_session_query() {
+    assert_eq!(Fixture::new().playback_receipt(), (false, 0));
+}

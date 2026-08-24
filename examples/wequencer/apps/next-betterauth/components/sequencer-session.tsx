@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useAll, useDb } from "jazz-tools/react";
 import { app } from "@/schema";
 import { TrackLane } from "@/components/track-lane";
@@ -23,10 +23,16 @@ export function SequencerSession({
     app.transport_observations.where({ session_id: sessionId }).orderBy("observed_at", "desc"),
   );
   const { data: presence = [] } = useAll(app.presence.where({ session_id: sessionId }));
+  const { data: ownMembership = [] } = useAll(
+    app.session_members.where({ session_id: sessionId, user_id: userId }),
+  );
   const transport = observations[0];
   const session = sessions[0];
   const playhead = transport?.bar ?? 0;
   const title = session?.title ?? "Loading session…";
+  const isOwner = ownMembership.some((membership) => membership.role === "owner");
+  const [memberUserId, setMemberUserId] = useState("");
+  const [memberRole, setMemberRole] = useState<"editor" | "viewer">("editor");
 
   const observableTransport = useMemo(
     () => ({ playing: transport?.playing ?? false, bar: playhead }),
@@ -60,6 +66,17 @@ export function SequencerSession({
     });
   }
 
+  function addMember() {
+    const invitedUserId = memberUserId.trim();
+    if (!invitedUserId) return;
+    db.insert(app.session_members, {
+      session_id: sessionId,
+      user_id: invitedUserId,
+      role: memberRole,
+    });
+    setMemberUserId("");
+  }
+
   return (
     <section className="sequencer">
       <header className="sequencer-toolbar">
@@ -84,6 +101,28 @@ export function SequencerSession({
         distributed clock sync. {presence.length} collaborator
         {presence.length === 1 ? "" : "s"} present. Your id: {userId}
       </p>
+      <p className="member-id">Your member ID: {userId}</p>
+      {isOwner ? (
+        <div className="member-controls">
+          <label>
+            Collaborator user ID
+            <input value={memberUserId} onChange={(event) => setMemberUserId(event.target.value)} />
+          </label>
+          <label>
+            Role
+            <select
+              value={memberRole}
+              onChange={(event) => setMemberRole(event.target.value as typeof memberRole)}
+            >
+              <option value="editor">Editor</option>
+              <option value="viewer">Viewer</option>
+            </select>
+          </label>
+          <button type="button" onClick={addMember}>
+            Add collaborator
+          </button>
+        </div>
+      ) : null}
       <div className="step-ruler" aria-hidden="true">
         {Array.from({ length: session?.loop_steps ?? 16 }, (_, index) => (
           <span className={index === playhead ? "active" : ""} key={index}>
