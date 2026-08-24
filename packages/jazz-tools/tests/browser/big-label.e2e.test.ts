@@ -177,6 +177,17 @@ describe("BigLabel browser edge/core topology", () => {
                   status: "active",
                 })
                 .wait({ tier: "edge" });
+              // A third row proves the subscriber keeps the query's actual
+              // ordered window rather than merely eventually receiving all
+              // authorized artists after reconnect.
+              await writer
+                .insert(app.artists, {
+                  organizationId: org.id,
+                  name: "Zither",
+                  genre: "folk",
+                  status: "active",
+                })
+                .wait({ tier: "edge" });
               const release = await writer
                 .insert(app.releases, {
                   organizationId: org.id,
@@ -209,9 +220,12 @@ describe("BigLabel browser edge/core topology", () => {
             name: "editor subscription converges after reconnect",
             async run() {
               await waitForCondition(
-                async () => snapshots.some((rows) => rows.includes("Blue Hour")),
+                async () =>
+                  snapshots.some(
+                    (rows) => rows.length === 2 && rows[0] === "Aster" && rows[1] === "Blue Hour",
+                  ),
                 15_000,
-                "reader did not receive BigLabel artist after reconnect",
+                "reader did not retain the ordered bounded BigLabel roster after reconnect",
               );
             },
           },
@@ -230,6 +244,7 @@ describe("BigLabel browser edge/core topology", () => {
                 { name: "Aster" },
                 { name: "Blue Hour" },
               ]);
+              await expect(reader.all(roster, { tier: "local" })).resolves.toHaveLength(2);
             },
           },
           {
