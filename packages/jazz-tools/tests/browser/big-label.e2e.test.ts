@@ -22,8 +22,20 @@ import {
 const ctx = new TestCleanup();
 afterEach(async () => ctx.cleanup());
 
+const BIG_LABEL_PHASE_TIMEOUT_MS = 20_000;
+const BIG_LABEL_FAULT_TIMEOUT_MS = 10_000;
+const BIG_LABEL_SETUP_AND_CLEANUP_BUDGET_MS = 80_000;
+const BIG_LABEL_OUTER_TIMEOUT_MS =
+  8 * BIG_LABEL_PHASE_TIMEOUT_MS +
+  6 * BIG_LABEL_FAULT_TIMEOUT_MS +
+  BIG_LABEL_SETUP_AND_CLEANUP_BUDGET_MS;
+
+function bigLabelTopologyTest(name: string, run: () => Promise<void>): void {
+  it(name, run, BIG_LABEL_OUTER_TIMEOUT_MS);
+}
+
 describe("BigLabel browser edge/core topology", () => {
-  it("converges an ordered artist-release roster through two authenticated peer edges", async () => {
+  bigLabelTopologyTest("converges the BigLabel roster across authenticated edges", async () => {
     const [{ app }, permissions] = await browserTopologyPhase("load BigLabel adopter modules", () =>
       Promise.all([
         import("../../../../examples/big-label/schema.js"),
@@ -228,14 +240,17 @@ describe("BigLabel browser edge/core topology", () => {
         id: "big-label.admin-roster.reconnect-reopen-revocation",
         topology: ["browser", "edge", "core"],
         seed: 1719,
-        phaseTimeoutMs: 20_000,
-        faultTimeoutMs: 10_000,
+        phaseTimeoutMs: BIG_LABEL_PHASE_TIMEOUT_MS,
+        faultTimeoutMs: BIG_LABEL_FAULT_TIMEOUT_MS,
         replay: "pnpm --filter jazz-tools test:browser -- big-label.e2e.test.ts",
         targets: {
           "browser-edge": {
             async disconnect() {
-              await blockJazzServerNetwork(serverUrl);
+              // Record the healing obligation before awaiting the command: a
+              // command which installs the route and then rejects must still
+              // be paired with a best-effort unblock during cleanup.
               serverNetworkBlocked = true;
+              await blockJazzServerNetwork(serverUrl);
               // Route blocking applies only to future WebSocket connections.
               // Close the live reader connection so this phase exercises the
               // actual offline cache path rather than a still-open socket.
@@ -258,8 +273,10 @@ describe("BigLabel browser edge/core topology", () => {
                 expect.objectContaining({ name: "Aster", organizationId: org.id }),
               ]);
               ctx.trackSubscription(
-                reader.subscribeAll(roster, (delta) =>
-                  snapshots.push(delta.all.map((artist) => artist.name)),
+                reader.subscribeAll(
+                  roster,
+                  (delta) => snapshots.push(delta.all.map((artist) => artist.name)),
+                  { tier: "edge" },
                 ),
               );
             },
@@ -332,12 +349,12 @@ describe("BigLabel browser edge/core topology", () => {
             name: "editor subscription and bounded release include converge after reconnect",
             async run() {
               await waitForCondition(
-                async () =>
-                  snapshots.some(
-                    (rows) => rows.length === 2 && rows[0] === "Aster" && rows[1] === "Blue Hour",
-                  ),
+                async () => {
+                  const latest = snapshots.at(-1);
+                  return latest?.length === 2 && latest[0] === "Aster" && latest[1] === "Blue Hour";
+                },
                 15_000,
-                "reader did not retain the ordered bounded BigLabel roster after reconnect",
+                "reader's latest edge-settled snapshot was not the exact bounded roster",
               );
               await expect(reader.all(releasePipeline, { tier: "edge" })).resolves.toMatchObject([
                 {
@@ -347,6 +364,16 @@ describe("BigLabel browser edge/core topology", () => {
                 },
               ]);
               await expect(reader.all(releasePipeline, { tier: "edge" })).resolves.toHaveLength(1);
+
+              const outsiderToken = await getJazzServerJwtForUser("outsider", {}, appId);
+              const outsider = await openDb({
+                appId,
+                serverUrl,
+                jwtToken: outsiderToken,
+                label: "big-label-outsider",
+              });
+              await expect(outsider.all(roster, { tier: "edge" })).resolves.toEqual([]);
+              await expect(outsider.all(releasePipeline, { tier: "edge" })).resolves.toEqual([]);
             },
             faultsAfter: [{ kind: "disconnect", target: "browser-edge" }],
           },
@@ -381,20 +408,6 @@ describe("BigLabel browser edge/core topology", () => {
               await expect(reader.all(releasePipeline, { tier: "local" })).resolves.toHaveLength(1);
             },
             faultsAfter: [{ kind: "reconnect", target: "browser-edge" }],
-          },
-          {
-            name: "unaffiliated external edge cannot read either tenant query shape",
-            async run() {
-              const outsiderToken = await getJazzServerJwtForUser("outsider", {}, appId);
-              const outsider = await openDb({
-                appId,
-                serverUrl,
-                jwtToken: outsiderToken,
-                label: "big-label-outsider",
-              });
-              await expect(outsider.all(roster, { tier: "edge" })).resolves.toEqual([]);
-              await expect(outsider.all(releasePipeline, { tier: "edge" })).resolves.toEqual([]);
-            },
           },
           {
             name: "revoking editor membership removes bounded tenant queries and includes",
@@ -467,16 +480,14 @@ describe("BigLabel browser edge/core topology", () => {
       },
       browserTopologyReporter,
     );
-    expect(snapshots.at(-1)).toContain("Blue Hour");
-  }, 60_000);
+    expect(snapshots.at(-1)).toEqual(["Aster", "Blue Hour"]);
+  });
 });
 
 async function openDb(input: {
   appId: string;
   serverUrl: string;
-  adminSecret?: string;
-  secret?: string;
-  jwtToken?: string;
+  jwtToken: string;
   label: string;
   dbName?: string;
 }): Promise<Db> {
@@ -484,9 +495,7 @@ async function openDb(input: {
     await createDb({
       appId: input.appId,
       serverUrl: input.serverUrl,
-      ...(input.adminSecret
-        ? { adminSecret: input.adminSecret, secret: input.secret! }
-        : { jwtToken: input.jwtToken! }),
+      jwtToken: input.jwtToken,
       driver: { type: "persistent", dbName: input.dbName ?? uniqueDbName(input.label) },
     }),
   );
