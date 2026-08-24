@@ -53,6 +53,11 @@ export interface TopologyScenario {
   targets: Readonly<Record<string, TopologyFaultTarget>>;
   phases: readonly TopologyPhase[];
   replay: string;
+  /**
+   * Test-only transport schedulers owned by this scenario. The runner closes
+   * them after app cleanup so a held packet cannot leak into a later test.
+   */
+  envelopeSchedulers?: readonly TopologyEnvelopeScheduler[];
   cleanup?: (context: TopologyCleanupContext) => Promise<void>;
   cleanupTimeoutMs?: number;
 }
@@ -75,6 +80,7 @@ export interface TopologyReceipt {
   phases: Array<TopologyActivityReceipt & { name: string }>;
   faults: Array<TopologyActivityReceipt & { kind: TopologyFaultKind; target: string }>;
   compensations: Array<TopologyActivityReceipt & { name: string }>;
+  envelopes: TopologyEnvelopeSchedulerReceipt[];
   cleanup?: TopologyActivityReceipt;
   replay: string;
   error?: string;
@@ -101,6 +107,7 @@ export async function runTopologyScenario(
     phases: [],
     faults: [],
     compensations: [],
+    envelopes: scenario.envelopeSchedulers?.map((scheduler) => scheduler.receipt()) ?? [],
     replay: scenario.replay,
   };
   const scenarioStarted = now();
@@ -249,10 +256,294 @@ export async function runTopologyScenario(
         scenarioError ??= cleanupError;
       }
     }
+    for (const scheduler of scenario.envelopeSchedulers ?? []) {
+      try {
+        scheduler.close();
+      } catch (closeError) {
+        const message = `envelope scheduler cleanup failed: ${errorMessage(closeError)}`;
+        receipt.status = "failed";
+        receipt.error = receipt.error ? `${receipt.error}; ${message}` : message;
+        scenarioError ??= closeError;
+      }
+    }
+    receipt.envelopes = scenario.envelopeSchedulers?.map((scheduler) => scheduler.receipt()) ?? [];
     receipt.elapsedMs = elapsed(scenarioStarted);
   }
   if (receipt.status === "failed") throw new TopologyScenarioError(receipt, scenarioError);
   return receipt;
+}
+
+/** A small, app-owned description of a message at a test transport boundary. */
+export interface TopologyTransportEnvelope {
+  from: string;
+  to: string;
+  /** Stable test-only label; never inspect production payloads just to fault them. */
+  label?: string;
+}
+
+export interface TopologyEnvelopeDeliveryContext {
+  attempt: number;
+  tick: number;
+  sequence: number;
+}
+
+export type TopologyEnvelopeDelivery<T> = (
+  value: T,
+  context: TopologyEnvelopeDeliveryContext,
+) => Promise<void> | void;
+
+export type TopologyEnvelopeAction =
+  | "queued"
+  | "delivered"
+  | "duplicated"
+  | "delayed"
+  | "reordered"
+  | "dropped"
+  | "retried"
+  | "partitioned"
+  | "healed"
+  | "discarded";
+
+export interface TopologyEnvelopeActivity {
+  action: TopologyEnvelopeAction;
+  sequence?: number;
+  from?: string;
+  to?: string;
+  label?: string;
+  tick: number;
+  attempt?: number;
+}
+
+export interface TopologyEnvelopeSchedulerReceipt {
+  seed: number;
+  tick: number;
+  closed: boolean;
+  pending: number;
+  activities: readonly TopologyEnvelopeActivity[];
+}
+
+interface PendingEnvelope<T> {
+  sequence: number;
+  envelope: TopologyTransportEnvelope;
+  value: T;
+  deliver: TopologyEnvelopeDelivery<T>;
+  dueTick: number;
+  attempt: number;
+}
+
+interface NextEnvelopeFault {
+  duplicate: number;
+  delayTicks: number;
+  reorder: boolean;
+  dropThenRetryTicks: number | undefined;
+}
+
+/**
+ * Deterministic, virtual-time transport envelope scheduler for example E2Es.
+ *
+ * Wrap only an app test transport's delivery callback with `intercept`; no
+ * Jazz runtime transport is altered. Normal envelopes deliver immediately.
+ * Faults are armed before the next matching envelope, then `advance`/`heal`
+ * releases held work in a deterministic order. Its receipt is intentionally
+ * payload-free, making it safe to include in scenario reports and replays.
+ */
+export class TopologyEnvelopeScheduler {
+  readonly seed: number;
+  #tick = 0;
+  #sequence = 0;
+  #closed = false;
+  #pending: PendingEnvelope<unknown>[] = [];
+  #heldForReorder: PendingEnvelope<unknown> | undefined;
+  #partitions = new Set<string>();
+  #next: NextEnvelopeFault = {
+    duplicate: 0,
+    delayTicks: 0,
+    reorder: false,
+    dropThenRetryTicks: undefined,
+  };
+  #activities: TopologyEnvelopeActivity[] = [];
+
+  constructor(seed: number) {
+    this.seed = seed;
+  }
+
+  /** Deliver the next matching envelope more than once (one duplicate by default). */
+  duplicateNext(copies = 1): void {
+    this.assertOpen();
+    if (!Number.isInteger(copies) || copies < 1)
+      throw new Error("duplicate copies must be a positive integer");
+    this.#next.duplicate += copies;
+  }
+
+  /** Hold the next matching envelope for virtual `ticks`; `advance` releases it. */
+  delayNext(ticks = 1): void {
+    this.assertOpen();
+    if (!Number.isInteger(ticks) || ticks < 1)
+      throw new Error("delay ticks must be a positive integer");
+    this.#next.delayTicks = Math.max(this.#next.delayTicks, ticks);
+  }
+
+  /** Reverse the next pair of envelopes, retaining the first until the second arrives. */
+  reorderNext(): void {
+    this.assertOpen();
+    this.#next.reorder = true;
+  }
+
+  /** Drop the next envelope, then make exactly one retry available after virtual `ticks`. */
+  dropNextThenRetry(ticks = 1): void {
+    this.assertOpen();
+    if (!Number.isInteger(ticks) || ticks < 1)
+      throw new Error("retry ticks must be a positive integer");
+    this.#next.dropThenRetryTicks = ticks;
+  }
+
+  /** Block both directions between two named endpoints until `heal` is called. */
+  partition(first: string, second: string): void {
+    this.assertOpen();
+    this.#partitions.add(linkKey(first, second));
+    this.record({ action: "partitioned", from: first, to: second });
+  }
+
+  /** Heal one link (or all links) and immediately deliver every now-ready envelope. */
+  async heal(first?: string, second?: string): Promise<void> {
+    this.assertOpen();
+    if ((first === undefined) !== (second === undefined)) {
+      throw new Error("heal requires both endpoints or neither");
+    }
+    if (first === undefined) this.#partitions.clear();
+    else this.#partitions.delete(linkKey(first, second!));
+    this.record({ action: "healed", from: first, to: second });
+    await this.pump();
+  }
+
+  /** Advance deterministic virtual time and release due, non-partitioned envelopes. */
+  async advance(ticks = 1): Promise<void> {
+    this.assertOpen();
+    if (!Number.isInteger(ticks) || ticks < 1)
+      throw new Error("advance ticks must be a positive integer");
+    this.#tick += ticks;
+    await this.pump();
+  }
+
+  /**
+   * Intercept one transport-envelope delivery. The caller retains ownership of
+   * transport connection/retry semantics; this models only message delivery.
+   */
+  async intercept<T>(
+    envelope: TopologyTransportEnvelope,
+    value: T,
+    deliver: TopologyEnvelopeDelivery<T>,
+  ): Promise<void> {
+    this.assertOpen();
+    const pending: PendingEnvelope<T> = {
+      sequence: ++this.#sequence,
+      envelope,
+      value,
+      deliver,
+      dueTick: this.#tick,
+      attempt: 1,
+    };
+    this.recordPending("queued", pending);
+    const fault = this.takeNextFault();
+    if (fault.dropThenRetryTicks !== undefined) {
+      this.recordPending("dropped", pending);
+      pending.attempt = 2;
+      pending.dueTick += fault.dropThenRetryTicks;
+      this.recordPending("retried", pending);
+      this.#pending.push(pending as PendingEnvelope<unknown>);
+    } else if (this.#heldForReorder || fault.reorder) {
+      if (!this.#heldForReorder) {
+        this.#heldForReorder = pending as PendingEnvelope<unknown>;
+        this.recordPending("reordered", pending);
+      } else {
+        this.recordPending("reordered", pending);
+        this.#pending.push(pending as PendingEnvelope<unknown>, this.#heldForReorder);
+        this.#heldForReorder = undefined;
+      }
+    } else {
+      pending.dueTick += fault.delayTicks;
+      if (fault.delayTicks) this.recordPending("delayed", pending);
+      this.#pending.push(pending as PendingEnvelope<unknown>);
+      for (let copy = 0; copy < fault.duplicate; copy++) {
+        const duplicate = { ...pending, sequence: ++this.#sequence, attempt: copy + 2 };
+        this.recordPending("duplicated", duplicate);
+        this.#pending.push(duplicate as PendingEnvelope<unknown>);
+      }
+    }
+    await this.pump();
+  }
+
+  /** Discard undelivered envelopes, including an incomplete reorder pair. Idempotent. */
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    for (const pending of [
+      ...this.#pending,
+      ...(this.#heldForReorder ? [this.#heldForReorder] : []),
+    ]) {
+      this.recordPending("discarded", pending);
+    }
+    this.#pending = [];
+    this.#heldForReorder = undefined;
+    this.#partitions.clear();
+  }
+
+  receipt(): TopologyEnvelopeSchedulerReceipt {
+    return {
+      seed: this.seed,
+      tick: this.#tick,
+      closed: this.#closed,
+      pending: this.#pending.length + Number(this.#heldForReorder !== undefined),
+      activities: this.#activities.map((activity) => ({ ...activity })),
+    };
+  }
+
+  private takeNextFault(): NextEnvelopeFault {
+    const next = this.#next;
+    this.#next = { duplicate: 0, delayTicks: 0, reorder: false, dropThenRetryTicks: undefined };
+    return next;
+  }
+
+  private async pump(): Promise<void> {
+    while (true) {
+      const index = this.#pending.findIndex(
+        (pending) => pending.dueTick <= this.#tick && !this.isPartitioned(pending.envelope),
+      );
+      if (index === -1) return;
+      const [pending] = this.#pending.splice(index, 1);
+      await pending.deliver(pending.value, {
+        attempt: pending.attempt,
+        tick: this.#tick,
+        sequence: pending.sequence,
+      });
+      this.recordPending("delivered", pending);
+    }
+  }
+
+  private isPartitioned(envelope: TopologyTransportEnvelope): boolean {
+    return this.#partitions.has(linkKey(envelope.from, envelope.to));
+  }
+
+  private recordPending(action: TopologyEnvelopeAction, pending: PendingEnvelope<unknown>): void {
+    this.record({
+      action,
+      sequence: pending.sequence,
+      attempt: pending.attempt,
+      ...pending.envelope,
+    });
+  }
+
+  private record(activity: Omit<TopologyEnvelopeActivity, "tick">): void {
+    this.#activities.push({ ...activity, tick: this.#tick });
+  }
+
+  private assertOpen(): void {
+    if (this.#closed) throw new Error("topology envelope scheduler is closed");
+  }
+}
+
+function linkKey(first: string, second: string): string {
+  return first < second ? `${first}\u0000${second}` : `${second}\u0000${first}`;
 }
 
 export class TopologyScenarioError extends Error {

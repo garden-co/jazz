@@ -5,6 +5,38 @@ bounded named phases, disconnect/reconnect/restart/failure callbacks, receipts,
 and replay commands. App scenarios continue to own schemas, fixtures,
 operations, and assertions.
 
+## Envelope faults
+
+The same module also provides `TopologyEnvelopeScheduler`, a test-only virtual
+time boundary around an app test transport's _delivery callback_. It does not
+instrument, patch, or otherwise change Jazz's runtime transport. Give messages
+stable endpoint names and non-sensitive test labels, then wrap delivery:
+
+```ts
+const envelopes = new TopologyEnvelopeScheduler(seed);
+await envelopes.intercept(
+  { from: "browser", to: "edge", label: "write" },
+  encodedMessage,
+  (message) => testTransport.deliver(message),
+);
+```
+
+Arm faults before the next intercepted envelope with
+`duplicateNext`, `delayNext(ticks)`, `reorderNext`, or
+`dropNextThenRetry(ticks)`. `partition(a, b)` holds traffic in both directions;
+`heal(a, b)` releases ready traffic. `advance(ticks)` moves only virtual time,
+so tests never need wall-clock sleeps to reproduce a schedule. Delivery order,
+attempt number, virtual tick, endpoint names, labels, and every fault action
+are retained in the payload-free scheduler receipt. Pass each scheduler through
+`envelopeSchedulers` on `runTopologyScenario`; the runner closes it after app
+cleanup and records discarded held envelopes, preventing a test fault from
+leaking into another scenario.
+
+The scheduler deliberately models message delivery only. Connection lifecycle,
+real transport retry policy, and application assertions remain app-owned. An
+app should use an explicit test transport seam (or its existing simulation
+link), rather than adding app-specific production hooks just for topology tests.
+
 Register a scenario in `dev/example-topology-scenarios.json` with a stable id,
 topology labels, working directory, and an argv array. Run the bounded smoke
 locally with:
