@@ -7,7 +7,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test:browser": "vitest run --config vitest.config.browser.ts"
+    "test:browser": "vitest run --config vitest.config.browser.ts",
+    "typecheck:browser-config": "tsc --project tsconfig.browser.json"
   },
   "dependencies": {
     "better-auth": "1.6.24",
@@ -17,6 +18,7 @@
     "react-dom": "19.2.4"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
     "@types/node": "catalog:default",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
@@ -24,6 +26,7 @@
     "@vitest/browser": "catalog:default",
     "@vitest/browser-playwright": "catalog:default",
     "typescript": "catalog:default",
+    "vite": "catalog:default",
     "vite-plugin-top-level-await": "catalog:default",
     "vite-plugin-wasm": "catalog:default",
     "vitest": "catalog:default"
