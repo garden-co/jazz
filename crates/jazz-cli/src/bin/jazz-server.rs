@@ -11,8 +11,8 @@ use jazz::serving::{
     StorageConfig, StorageKind,
     auth_admission::{AuthAdmissionConfig, JwtVerifierConfig},
 };
-use jazz_server::loopback::http::load_latest_admin_schema_for_app;
 use jazz_server::loopback::websocket::{LoopbackWebSocketServer, LoopbackWebSocketServerConfig};
+use jazz_server::server::load_latest_admin_schema_for_app;
 
 fn empty_runtime_schema() -> JazzSchema {
     let source = jazz::tools::public_schema::SchemaBuilder::new().build();
@@ -208,7 +208,7 @@ fn run_server_app(app_id: &str, args: Vec<String>, program: &str) -> ExitCode {
     println!("runtime_schema_loading={runtime_schema_loading}");
     println!("admin_schema_api=not_started");
     println!("admin_schema_store={admin_schema_store}");
-    println!("admin_schema_owner=loopback_http_only");
+    println!("admin_schema_owner=legacy_store_compat_loader");
     println!("ws_url=ws://{}{}", server.local_addr(), websocket_path);
     let _ = io::stdout().flush();
 
@@ -436,7 +436,7 @@ fn print_report(report: &DryRunReport) {
     );
     println!("admin_schema_api=not_started");
     println!("admin_schema_store=not_opened");
-    println!("admin_schema_owner=loopback_http_only");
+    println!("admin_schema_owner=legacy_store_compat_loader");
     println!("sockets_bound=false");
     println!("storage_opened=false");
     println!("runtime_started=false");

@@ -669,7 +669,7 @@ fn server_command_reports_wired_loopback_shape() {
     assert!(lines.contains(&"runtime_schema_loading=static_empty_schema".to_owned()));
     assert!(lines.contains(&"admin_schema_api=not_started".to_owned()));
     assert!(lines.contains(&"admin_schema_store=not_opened".to_owned()));
-    assert!(lines.contains(&"admin_schema_owner=loopback_http_only".to_owned()));
+    assert!(lines.contains(&"admin_schema_owner=legacy_store_compat_loader".to_owned()));
     assert!(!lines.iter().any(|line| line.contains("unimplemented")));
     assert!(
         lines
@@ -753,7 +753,7 @@ fn server_command_defaults_to_data_dir_and_accepts_aliases() {
     assert!(lines.contains(&format!("data_dir={}", data_dir.display())));
     assert!(lines.contains(&"admin_schema_api=not_started".to_owned()));
     assert!(lines.contains(&"admin_schema_store=not_opened".to_owned()));
-    assert!(lines.contains(&"admin_schema_owner=loopback_http_only".to_owned()));
+    assert!(lines.contains(&"admin_schema_owner=legacy_store_compat_loader".to_owned()));
     assert!(lines.contains(&"auth.mode=static-bearer".to_owned()));
     assert!(
         lines
@@ -1105,7 +1105,7 @@ fn dry_run_prints_stable_report() {
     assert!(lines.contains(&"metrics.rejected_sessions=0"));
     assert!(lines.contains(&"admin_schema_api=not_started"));
     assert!(lines.contains(&"admin_schema_store=not_opened"));
-    assert!(lines.contains(&"admin_schema_owner=loopback_http_only"));
+    assert!(lines.contains(&"admin_schema_owner=legacy_store_compat_loader"));
     assert!(lines.contains(&"sockets_bound=false"));
     assert!(lines.contains(&"storage_opened=false"));
     assert!(lines.contains(&"runtime_started=false"));
@@ -1147,7 +1147,7 @@ fn dry_run_accepts_alpha_cli_flags_without_opening_storage() {
     assert!(lines.contains(&"runtime_plan.storage_kind=rocksdb"));
     assert!(lines.contains(&"admin_schema_api=not_started"));
     assert!(lines.contains(&"admin_schema_store=not_opened"));
-    assert!(lines.contains(&"admin_schema_owner=loopback_http_only"));
+    assert!(lines.contains(&"admin_schema_owner=legacy_store_compat_loader"));
     assert!(lines.contains(&"storage_opened=false"));
     assert!(lines.contains(&"auth.mode=static-bearer"));
     assert!(lines.contains(&"auth.allow_local_first_auth=false"));

@@ -7,6 +7,7 @@ use crate::middleware::auth::JwtVerifier;
 use jazz::serving::StorageConfig;
 use jazz::tools::AppId;
 
+mod admin_schema_store;
 mod builder;
 mod catalogue;
 mod catalogue_entry;
@@ -19,6 +20,7 @@ mod shutdown;
 #[cfg(feature = "embedded-server")]
 mod testing;
 
+pub use admin_schema_store::load_latest_admin_schema_for_app;
 pub use builder::{BuiltServer, ServerBuilder, StorageBackend};
 pub(crate) use catalogue::{PermissionsHeadSummary, ServerCatalogue, StoredCatalogue};
 #[cfg(test)]
