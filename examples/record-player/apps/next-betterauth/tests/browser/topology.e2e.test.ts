@@ -138,13 +138,16 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 id: playlistWrite.value.id,
               });
               try {
-                playlist = (
-                  await withTimeout(
-                    playlistWrite.wait({ tier: "edge" }),
-                    10_000,
-                    `playlist edge settlement mutationErrors=${JSON.stringify(mutationErrors)}`,
-                  )
-                ).value;
+                const settledPlaylist = await withTimeout(
+                  playlistWrite.wait({ tier: "edge" }),
+                  10_000,
+                  `playlist edge settlement mutationErrors=${JSON.stringify(mutationErrors)}`,
+                );
+                // A WriteResult's durability wait must retain its insert
+                // result. In particular, application code can await edge
+                // durability before it uses a generated id in a child row.
+                expect(settledPlaylist).toEqual(playlistWrite.value);
+                playlist = settledPlaylist;
               } finally {
                 stopMutationErrors();
               }
