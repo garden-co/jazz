@@ -13,7 +13,8 @@ export interface TopologyOperationContext {
   /**
    * Register a named, idempotent inverse for external state acquired by this
    * phase or fault. Remaining compensations run in reverse registration order
-   * before scenario cleanup, even when a later operation fails.
+   * before scenario cleanup, even when a later operation fails. Registration
+   * is valid only while this operation is running.
    */
   defer(name: string, cleanup: TopologyCompensation): void;
 }
@@ -31,11 +32,9 @@ export interface TopologyFault {
   timeoutMs?: number;
 }
 
-export interface TopologyPhaseContext {
+export interface TopologyPhaseContext extends TopologyOperationContext {
   seed: number;
   random: () => number;
-  signal: AbortSignal;
-  defer(name: string, cleanup: TopologyCompensation): void;
 }
 
 export interface TopologyPhase {
@@ -60,7 +59,7 @@ export interface TopologyScenario {
    */
   envelopeSchedulers?: readonly TopologyEnvelopeScheduler[];
   envelopeCleanupTimeoutMs?: number;
-  cleanup?: (context: TopologyOperationContext) => Promise<void>;
+  cleanup?: (context: TopologyCleanupContext) => Promise<void>;
   cleanupTimeoutMs?: number;
 }
 
@@ -117,7 +116,7 @@ export async function runTopologyScenario(
   let scenarioError: unknown;
   let compensationsClosed = false;
   const compensations: Array<{ name: string; cleanup: TopologyCompensation }> = [];
-  const defer = (name: string, cleanup: TopologyCompensation): void => {
+  const registerCompensation = (name: string, cleanup: TopologyCompensation): void => {
     if (compensationsClosed) {
       throw new Error(`topology compensation registered after cleanup: ${name}`);
     }
@@ -140,11 +139,16 @@ export async function runTopologyScenario(
       receipt.phases.push(activity);
       reporter.phase("start", phase.name, 0);
       try {
-        await withTopologyTimeout(
-          (signal) => phase.run({ seed: scenario.seed, random, signal, defer }),
-          phase.timeoutMs ?? scenario.phaseTimeoutMs,
-          `topology phase timed out: ${phase.name}`,
-        );
+        const registrar = createOperationRegistrar(`phase ${phase.name}`, registerCompensation);
+        try {
+          await withTopologyTimeout(
+            (signal) => phase.run({ seed: scenario.seed, random, signal, defer: registrar.defer }),
+            phase.timeoutMs ?? scenario.phaseTimeoutMs,
+            `topology phase timed out: ${phase.name}`,
+          );
+        } finally {
+          registrar.close();
+        }
         const elapsedMs = elapsed(started);
         Object.assign(activity, { status: "completed", elapsedMs });
         reporter.phase("complete", phase.name, elapsedMs);
@@ -171,11 +175,19 @@ export async function runTopologyScenario(
           if (!operation) {
             throw new Error(`topology target ${fault.target} does not support ${fault.kind}`);
           }
-          await withTopologyTimeout(
-            (signal) => operation({ signal, defer }),
-            fault.timeoutMs ?? scenario.faultTimeoutMs,
-            `topology fault timed out: ${fault.kind} ${fault.target}`,
+          const registrar = createOperationRegistrar(
+            `fault ${fault.kind} ${fault.target}`,
+            registerCompensation,
           );
+          try {
+            await withTopologyTimeout(
+              (signal) => operation({ signal, defer: registrar.defer }),
+              fault.timeoutMs ?? scenario.faultTimeoutMs,
+              `topology fault timed out: ${fault.kind} ${fault.target}`,
+            );
+          } finally {
+            registrar.close();
+          }
           Object.assign(activity, { status: "completed", elapsedMs: elapsed(started) });
         } catch (error) {
           Object.assign(activity, {
@@ -202,7 +214,7 @@ export async function runTopologyScenario(
       };
       receipt.compensations.push(activity);
       try {
-        await withTopologyTimeout(
+        await withTopologyCompensationTimeout(
           (signal) => compensation.cleanup({ signal }),
           scenario.cleanupTimeoutMs ?? scenario.faultTimeoutMs,
           `topology compensation timed out: ${compensation.name}`,
@@ -225,7 +237,9 @@ export async function runTopologyScenario(
       const activity: TopologyActivityReceipt = { status: "attempted", elapsedMs: 0 };
       receipt.cleanup = activity;
       try {
-        await withTopologyTimeout(
+        // Scenario cleanup can also release external state. Do not return to
+        // the next scenario while an abort-ignoring cleanup can still mutate.
+        await withTopologyCompensationTimeout(
           (signal) => scenario.cleanup!({ signal }),
           scenario.cleanupTimeoutMs ?? scenario.faultTimeoutMs,
           "topology scenario cleanup timed out",
@@ -918,6 +932,61 @@ export async function withTopologyTimeout<T>(
         }, timeoutMs);
       }),
     ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function createOperationRegistrar(
+  operation: string,
+  register: (name: string, cleanup: TopologyCompensation) => void,
+): { defer: TopologyOperationContext["defer"]; close(): void } {
+  let closed = false;
+  return {
+    defer(name, cleanup) {
+      if (closed) throw new Error(`topology ${operation} is no longer active`);
+      register(name, cleanup);
+    },
+    close() {
+      closed = true;
+    },
+  };
+}
+
+/**
+ * A compensation may take longer than its diagnostic budget, but it must not
+ * outlive the scenario: after aborting at the budget, wait for it to settle
+ * before running an earlier inverse or returning to the next scenario. An
+ * inverse that ignores abort forever therefore intentionally keeps the runner
+ * pending; bounded return and no leaked external mutation are incompatible.
+ */
+async function withTopologyCompensationTimeout<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const controller = new AbortController();
+  const pending = Promise.resolve().then(() => operation(controller.signal));
+  const timeoutError = new Error(`${label} after ${timeoutMs}ms`);
+  let timedOut = false;
+  try {
+    return await Promise.race([
+      pending,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          controller.abort(timeoutError);
+          reject(timeoutError);
+        }, timeoutMs);
+      }),
+    ]);
+  } catch (error) {
+    if (!timedOut) throw error;
+    // The timeout is a diagnostic boundary, not permission to abandon an
+    // inverse that may still mutate the next scenario's external state.
+    await pending.catch(() => undefined);
+    throw timeoutError;
   } finally {
     if (timer) clearTimeout(timer);
   }
