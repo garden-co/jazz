@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -14,6 +14,7 @@ const wrapper = readFileSync(
 const packageRoot = new URL("../../crates/jazz-napi/", import.meta.url);
 const indexCjs = readFileSync(new URL("index.cjs", packageRoot), "utf8");
 const indexMjs = readFileSync(new URL("index.mjs", packageRoot), "utf8");
+const bootstrap = readFileSync(new URL("native-binding.cjs", packageRoot), "utf8");
 
 function fixture() {
   const root = join(tmpdir(), `jazz-napi-artifact-${process.pid}-${Date.now()}-${Math.random()}`);
@@ -21,6 +22,7 @@ function fixture() {
   writeFileSync(join(root, "package.json"), '{"main":"index.cjs"}\n');
   writeFileSync(join(root, "index.cjs"), indexCjs);
   writeFileSync(join(root, "index.mjs"), indexMjs);
+  writeFileSync(join(root, "native-binding.cjs"), bootstrap);
   return root;
 }
 function stage(root, name, fingerprint, { complete = true, actual = fingerprint } = {}) {
@@ -84,7 +86,7 @@ test("missing, stale, mismatch, and partial staged generations fail closed witho
   try {
     const good = "good";
     publishNapiGeneration(stage(root, ".napi-stage-good", good), root, good);
-    const prior = readFileSync(join(root, "native-binding.cjs"), "utf8");
+    const prior = readFileSync(join(root, "native-binding.pointer.cjs"), "utf8");
     assert.throws(
       () =>
         publishNapiGeneration(
@@ -94,7 +96,7 @@ test("missing, stale, mismatch, and partial staged generations fail closed witho
         ),
       /missing its generated loader, declarations, or sealed manifest/,
     );
-    assert.equal(readFileSync(join(root, "native-binding.cjs"), "utf8"), prior);
+    assert.equal(readFileSync(join(root, "native-binding.pointer.cjs"), "utf8"), prior);
     const stale = receipt(root, "require(process.argv[1]);");
     assert.equal(stale.status, 0, stale.stderr);
     const mismatchStage = stage(root, ".napi-stage-mismatch", "expected", { actual: "old" });
@@ -102,7 +104,7 @@ test("missing, stale, mismatch, and partial staged generations fail closed witho
     const mismatch = receipt(root, "require(process.argv[1]);");
     assert.notEqual(mismatch.status, 0);
     assert.match(mismatch.stderr, /ABI mismatch/);
-    rmSync(join(root, "native-binding.cjs"));
+    rmSync(join(root, "native-binding.pointer.cjs"));
     const missing = receipt(root, "require(process.argv[1]);");
     assert.notEqual(missing.status, 0);
   } finally {
@@ -115,7 +117,8 @@ test("a planted final-pointer failure leaves readers and sealed metadata unchang
   const prior = "prior";
   try {
     publishNapiGeneration(stage(root, ".napi-stage-good", prior), root, prior);
-    const pointer = readFileSync(join(root, "native-binding.cjs"), "utf8");
+    const pointer = readFileSync(join(root, "native-binding.pointer.cjs"), "utf8");
+    const generations = readdirSync(join(root, ".native-artifacts")).sort();
     const marker = "marker";
     const manifest = "manifest";
     writeFileSync(join(root, "marker"), marker);
@@ -125,7 +128,8 @@ test("a planted final-pointer failure leaves readers and sealed metadata unchang
       () => publishNapiGeneration(stage(root, ".napi-stage-next", "next"), root, "next"),
       /final-pointer failure/,
     );
-    assert.equal(readFileSync(join(root, "native-binding.cjs"), "utf8"), pointer);
+    assert.equal(readFileSync(join(root, "native-binding.pointer.cjs"), "utf8"), pointer);
+    assert.deepEqual(readdirSync(join(root, ".native-artifacts")).sort(), generations);
     assert.equal(readFileSync(join(root, "marker"), "utf8"), marker);
     assert.equal(readFileSync(join(root, "manifest"), "utf8"), manifest);
   } finally {
@@ -151,7 +155,7 @@ test("a newly generated public export absent from the stable package declaration
         }),
       /generated declarations that differ from the public package type surface/,
     );
-    assert.equal(existsSync(join(root, "native-binding.cjs")), false);
+    assert.equal(existsSync(join(root, "native-binding.pointer.cjs")), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -160,11 +164,11 @@ test("a newly generated public export absent from the stable package declaration
 test("Turbo keys the tracked package wrappers that define the native ABI contract", () => {
   const turbo = JSON.parse(readFileSync(new URL("../../turbo.json", import.meta.url), "utf8"));
   const inputs = turbo.tasks["jazz-napi#build"].inputs;
-  for (const path of ["index.cjs", "index.mjs", "index.d.ts"])
+  for (const path of ["index.cjs", "index.mjs", "index.d.ts", "native-binding.cjs"])
     assert.ok(inputs.includes(`$TURBO_ROOT$/crates/jazz-napi/${path}`), path);
   const outputs = turbo.tasks["jazz-napi#build"].outputs;
   for (const output of [
-    "native-binding.cjs",
+    "native-binding.pointer.cjs",
     "native-artifact-fingerprint.cjs",
     ".native-artifacts/**",
   ])
