@@ -341,6 +341,9 @@ fn rls_policy_under_lenses_evaluates_translated_data_against_pinned_policy() {
     let (_core_dir, mut core) = open_node_with_schema(node(0x47), pinned.clone());
     let author = user(0xa1);
     let other = user(0xb2);
+    install_test_uuid_sub_claim(&mut writer, author);
+    install_test_uuid_sub_claim(&mut core, author);
+    install_test_uuid_sub_claim(&mut core, other);
     publish_schema_lineage(
         &mut core,
         evolved_payload.clone(),
