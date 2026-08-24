@@ -459,7 +459,7 @@ where
         .await
     }
 
-    /// Stream one large scalar into a newly inserted row without retaining the
+    /// Stream one large value into a newly inserted row without retaining the
     /// complete logical value in Jazz memory.
     ///
     /// `cells` contains the other row fields; `column` is inserted from
@@ -487,7 +487,7 @@ where
             .await
     }
 
-    /// Stream one large scalar into a newly inserted row with an explicit row
+    /// Stream one large value into a newly inserted row with an explicit row
     /// id. Binding adapters use this to choose the public id before consuming
     /// an asynchronous host stream.
     #[cfg(not(target_family = "wasm"))]

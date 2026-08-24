@@ -9,7 +9,7 @@ use crate::protocol::{KnownStateDeclaration, RowVersionRef, ShapeAst, VersionRec
 /// Maximum encoded `WireFrame` bytes accepted before postcard decode.
 ///
 /// Source: twice the 1 MiB scalar-byte payload budget called out by the
-/// unbounded-payload issue, leaving room for one legitimate large scalar row and
+/// unbounded-payload issue, leaving room for one legitimate large-value row and
 /// envelope overhead while forcing large batches to split by bytes.
 pub const MAX_WIRE_FRAME_BYTES: usize = 2 * 1024 * 1024;
 

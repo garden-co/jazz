@@ -1533,7 +1533,7 @@ impl MergeableCommit {
         self
     }
 
-    /// Attach Jazz-private provenance for a Groove-staged large scalar. This
+    /// Attach Jazz-private provenance for a Groove-staged large value. This
     /// remains crate-private so public callers cannot bless handcrafted
     /// descriptors.
     pub(crate) fn staged_large_cell(
