@@ -1002,7 +1002,7 @@ fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer
         )
         .unwrap();
     let update = peer.current_rows_update(&mut core, "todos").unwrap();
-    assert!(matches!(update, SyncMessage::ViewUpdate { .. }));
+    assert!(matches!(update, SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. })));
 
     let mut reopened = core.reopen_in_place().unwrap();
     assert_eq!(
@@ -1024,7 +1024,7 @@ fn reopen_in_place_recovers_history_watermarks_pending_edges_and_rehydrates_peer
     );
 
     let rehydrated = peer.rehydrate_current_rows(&mut reopened, "todos").unwrap();
-    assert!(matches!(rehydrated, SyncMessage::ViewUpdate { .. }));
+    assert!(matches!(rehydrated, SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. })));
 }
 #[test]
 fn empty_string_cells_and_absent_cells_survive_restart() {

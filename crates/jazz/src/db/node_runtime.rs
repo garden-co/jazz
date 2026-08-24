@@ -2659,6 +2659,14 @@ pub(super) fn unregister_upstream_subscription_owner(
     }
 }
 
+pub(super) fn register_shape_rejection_matches(
+    subscription: SubscriptionKey,
+    shape: &ValidatedQuery,
+    opts: &RegisterShapeOptions,
+) -> bool {
+    shape.shape_id() == subscription.shape_id && opts.read_view_key() == subscription.read_view
+}
+
 pub(super) fn route_upstream_subscription_rejection(
     subscriptions: &SubscriptionList,
     owners: &UpstreamSubscriptionOwners,
@@ -2687,13 +2695,12 @@ pub(super) fn route_upstream_subscription_rejection(
             continue;
         }
         let SubscriptionKind::Prepared { shape, binding, .. } = &state_ref.kind;
-        let read_view = RegisterShapeOptions {
+        let opts = RegisterShapeOptions {
             tier: state_ref.remote_read_tier.unwrap_or(state_ref.read_tier),
             read_view: state_ref.read_view.clone(),
             propagate_upstream: state_ref.remote_propagate_upstream,
-        }
-        .read_view_key();
-        if shape.shape_id() != subscription.shape_id || read_view != subscription.read_view {
+        };
+        if !register_shape_rejection_matches(subscription, shape, &opts) {
             continue;
         }
         if subscription.binding_id != BindingId(uuid::Uuid::nil())

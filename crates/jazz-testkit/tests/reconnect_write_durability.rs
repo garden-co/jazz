@@ -166,6 +166,7 @@ fn detaching_the_upstream_resolves_pending_global_wait() {
             "title".to_owned(),
             Value::String("pending for a silent upstream".to_owned()),
         )]),
+        Default::default(),
     ))
     .expect("insert local document");
     let tx_id = write.mergeable_tx_id();

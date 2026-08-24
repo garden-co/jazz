@@ -40,7 +40,7 @@ pub(super) fn lowered_terminals(
         .filter(|field| root_route_fields.contains(*field))
         .cloned()
         .collect::<BTreeSet<_>>();
-    let root_occurrence_fields = root_join_occurrence_fields(plan, resolved_sources)?
+    let root_occurrence_fields = root_join_occurrence_fields(plan, resolved_sources, request)?
         .into_iter()
         .map(|(name, _)| name)
         .filter(|name| available_fields.contains(name))
@@ -213,6 +213,7 @@ pub(super) fn lowered_terminals(
                 plan,
                 source,
                 resolved_sources,
+                request,
                 routing_param_fields.clone(),
             )?;
             // Closure membership is a root-row projection: it may discard
@@ -269,6 +270,7 @@ pub(super) fn lowered_terminals(
                         plan,
                         resolved_source,
                         resolved_sources,
+                        request,
                         claim_route_fields.clone(),
                     )?;
                     let graph = fact_terminal_graph(
@@ -305,6 +307,7 @@ pub(super) fn lowered_terminals(
                         plan,
                         resolved_source,
                         resolved_sources,
+                        request,
                         claim_route_fields.clone(),
                     )?;
                     let contribution_graph = join_contribution_membership_graph(
@@ -340,6 +343,7 @@ pub(super) fn lowered_terminals(
                     plan,
                     resolved_source,
                     resolved_sources,
+                    request,
                     BTreeSet::new(),
                 )?;
                 terminals.push(LoweredTerminal {
@@ -356,6 +360,7 @@ pub(super) fn lowered_terminals(
                     plan,
                     resolved_source,
                     resolved_sources,
+                    request,
                     BTreeSet::new(),
                 )?;
                 terminals.push(LoweredTerminal {
@@ -375,6 +380,7 @@ pub(super) fn lowered_terminals(
                     plan,
                     resolved_source,
                     resolved_sources,
+                    request,
                     BTreeSet::new(),
                 )?;
                 terminals.push(LoweredTerminal {
@@ -391,6 +397,7 @@ pub(super) fn lowered_terminals(
                     plan,
                     resolved_source,
                     resolved_sources,
+                    request,
                     BTreeSet::new(),
                 )?;
                 terminals.push(LoweredTerminal {
@@ -413,6 +420,7 @@ pub(super) fn lowered_terminals(
                 plan,
                 source,
                 resolved_sources,
+                request,
                 terminal_route_fields.clone(),
             )?;
             let terminal_graph =
@@ -945,7 +953,19 @@ fn collect_slot_input_for_value(
 pub(super) fn root_join_occurrence_fields(
     plan: &AnalyzedQueryPlan,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
 ) -> CapabilityResult<Vec<(String, ValueType)>> {
+    // Authorization subplans are decision programs, not public row sets. Their
+    // joins prove policy predicates and cannot contribute to a result address.
+    if matches!(request.policy, PolicyContext::AuthorizationSubplan { .. })
+        || request
+            .output
+            .app_rows
+            .as_ref()
+            .is_some_and(|output| !output.public_terminal)
+    {
+        return Ok(Vec::new());
+    }
     let Some(steps) = root_linear_steps(plan) else {
         return Ok(Vec::new());
     };
@@ -1081,6 +1101,7 @@ fn lowered_aggregate_terminals(
                 plan,
                 source,
                 &BTreeMap::new(),
+                request,
                 root_route_fields.clone(),
             )?;
             let graph = fact_terminal_graph(
@@ -1192,6 +1213,7 @@ fn fact_output(
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
     routing_param_fields: BTreeSet<String>,
 ) -> CapabilityResult<ProgramFactOutput> {
     fact_output_with_terminal(
@@ -1200,6 +1222,7 @@ fn fact_output(
         plan,
         source,
         resolved_sources,
+        request,
         routing_param_fields,
     )
 }
@@ -1210,6 +1233,7 @@ fn fact_output_with_terminal(
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
     routing_param_fields: BTreeSet<String>,
 ) -> CapabilityResult<ProgramFactOutput> {
     let schema = match key {
@@ -1230,9 +1254,10 @@ fn fact_output_with_terminal(
                 });
             }
             let version = version_witness_fields(&source.row_shape)?;
-            let occurrence_id_fields = result_occurrence_id_fields(plan, source, resolved_sources)?;
+            let occurrence_id_fields =
+                result_occurrence_id_fields(plan, source, resolved_sources, request)?;
             let occurrence_union_arm_fields =
-                result_occurrence_union_arm_fields(plan, source, resolved_sources)?;
+                result_occurrence_union_arm_fields(plan, source, resolved_sources, request)?;
             let flat_join_payload = flat_join_payload_fields(plan);
             let payload_fields = result_payload_fields(plan, source);
             let settle_position_field = flat_join_payload
@@ -1318,6 +1343,7 @@ fn result_occurrence_id_fields(
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
 ) -> CapabilityResult<Vec<String>> {
     let mut fields = vec![source.row_shape.row_uuid_field.clone()];
     if &source.row_shape.source != plan.root_source() {
@@ -1335,7 +1361,7 @@ fn result_occurrence_id_fields(
         }));
     } else {
         fields.extend(
-            root_join_occurrence_fields(plan, resolved_sources)?
+            root_join_occurrence_fields(plan, resolved_sources, request)?
                 .into_iter()
                 .filter_map(|(name, value_type)| (value_type == ValueType::Uuid).then_some(name)),
         );
@@ -1347,11 +1373,12 @@ fn result_occurrence_union_arm_fields(
     plan: &AnalyzedQueryPlan,
     source: &ResolvedSource,
     resolved_sources: &BTreeMap<SourceId, ResolvedSource>,
+    request: &QueryProgramRequest,
 ) -> CapabilityResult<BTreeMap<usize, String>> {
     if &source.row_shape.source != plan.root_source() {
         return Ok(BTreeMap::new());
     }
-    let fields = root_join_occurrence_fields(plan, resolved_sources)?;
+    let fields = root_join_occurrence_fields(plan, resolved_sources, request)?;
     let mut joined_position = 0usize;
     let mut pending_arm = None;
     let mut arms = BTreeMap::new();
@@ -1569,9 +1596,10 @@ fn fact_terminal_graph(
                 )?));
             }
             let mut occurrence_fields =
-                result_occurrence_id_fields(plan, source, resolved_sources)?;
+                result_occurrence_id_fields(plan, source, resolved_sources, request)?;
             occurrence_fields.extend(
-                result_occurrence_union_arm_fields(plan, source, resolved_sources)?.into_values(),
+                result_occurrence_union_arm_fields(plan, source, resolved_sources, request)?
+                    .into_values(),
             );
             let flat_join_payload = flat_join_payload_fields(plan);
             Ok(graph.project_fields(result_membership_fields(

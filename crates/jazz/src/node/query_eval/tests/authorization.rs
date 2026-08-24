@@ -627,9 +627,9 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     let normal_versions = normal_update
         .expand_version_carriers_for_receive()
         .expect("expand normal-member message include/order payloads");
-    if let SyncMessage::ViewUpdate {
+    if let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         version_bundles, ..
-    } = &normal_versions
+    }) = &normal_versions
     {
         let (profile_bundle, profile_version) = version_bundles
             .iter()
@@ -1015,11 +1015,11 @@ fn missing_policy_seed_claim_denies_authorization_support_rehydration() {
     let update = peer
         .rehydrate_authorization_support_query(&mut node, &shape, &binding, options)
         .expect("missing policy seed claim must hydrate as an empty authorization proof");
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = update
+    }) = update
     else {
         panic!("authorization support must return a settled view update");
     };
