@@ -3003,6 +3003,10 @@ fn subscription_stream_to_js(
 
 const INITIAL_SUBSCRIPTION_RETRY_MS: u32 = 25;
 const MAX_SUBSCRIPTION_RETRY_MS: u32 = 1_000;
+// Browsers and Node clamp a `setTimeout` delay above signed i32::MAX down to
+// a near-immediate timer. Keep each segment below that host ceiling so an
+// untrusted peer cannot turn a long retry instruction into a hot loop.
+const MAX_JS_TIMEOUT_MS: u32 = i32::MAX as u32;
 
 fn local_retry_delay_ms(attempt: u8) -> u32 {
     INITIAL_SUBSCRIPTION_RETRY_MS
@@ -3018,6 +3022,23 @@ fn subscription_retry_delay_ms(attempt: u8, peer_retry_after_ms: u32) -> u32 {
 }
 
 async fn wait_for_subscription_retry(delay_ms: u32) -> Result<(), JsValue> {
+    for segment_ms in subscription_retry_timer_segments(delay_ms) {
+        wait_for_subscription_retry_segment(segment_ms).await?;
+    }
+    Ok(())
+}
+
+fn subscription_retry_timer_segments(mut delay_ms: u32) -> Vec<u32> {
+    let mut segments = Vec::new();
+    while delay_ms > 0 {
+        let segment_ms = delay_ms.min(MAX_JS_TIMEOUT_MS);
+        segments.push(segment_ms);
+        delay_ms -= segment_ms;
+    }
+    segments
+}
+
+async fn wait_for_subscription_retry_segment(delay_ms: u32) -> Result<(), JsValue> {
     let promise = js_sys::Promise::new(&mut |resolve, reject| {
         let global = js_sys::global();
         let timeout = match js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
@@ -3318,11 +3339,40 @@ mod dynamic_schema_view_tests {
     }
 
     #[test]
+    fn subscription_retry_timer_segments_cover_the_full_u32_delay() {
+        assert_eq!(
+            subscription_retry_timer_segments(u32::MAX),
+            vec![MAX_JS_TIMEOUT_MS, MAX_JS_TIMEOUT_MS, 1],
+            "every host timer segment stays safe while the total delay is exact"
+        );
+    }
+
+    #[test]
     fn canceling_a_pending_subscription_retry_drops_it_without_waiting() {
         let (abort, registration) = AbortHandle::new_pair();
         let wait = Abortable::new(futures_util::future::pending::<()>(), registration);
         abort.abort();
         assert!(matches!(block_on(wait), Err(_)));
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn canceling_an_actual_maximum_subscription_timer_drops_it_without_waiting() {
+        use std::future::Future;
+        use std::task::{Context, Poll};
+
+        let (abort, registration) = AbortHandle::new_pair();
+        let mut wait = Box::pin(Abortable::new(
+            wait_for_subscription_retry(u32::MAX),
+            registration,
+        ));
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(wait.as_mut().poll(&mut context), Poll::Pending));
+        abort.abort();
+        assert!(matches!(
+            wait.as_mut().poll(&mut context),
+            Poll::Ready(Err(_))
+        ));
     }
 
     #[cfg(target_arch = "wasm32")]
