@@ -157,6 +157,19 @@ describe("WorldTour cross-topology itinerary recovery", () => {
                   })
                   .wait({ tier: "edge" }),
               ]);
+              // Keep another stop for this band just outside the date window.
+              // It is deliberately earlier than the window: removing the date
+              // predicate would otherwise still satisfy the bounded result's
+              // expected IDs, despite no longer testing the app query.
+              await alice
+                .insert(app.stops, {
+                  bandId: createdTour.id,
+                  venueId: london.id,
+                  date: new Date("2026-07-31"),
+                  status: "confirmed",
+                  publicDescription: "prior-leg archive",
+                })
+                .wait({ tier: "edge" });
               firstStop = first;
               protectedStop = third;
               fallbackVenueId = london.id;
@@ -250,6 +263,20 @@ describe("WorldTour cross-topology itinerary recovery", () => {
                 .include({ venue: true })
                 .orderBy("date", "asc")
                 .limit(2);
+              const localWindow = await waitForQuery(
+                alice!,
+                itinerary,
+                (value) =>
+                  value.length === 2 &&
+                  value.map((stop) => stop.id).join(",") ===
+                    [firstStop!.id, offlineStop!.id].join(","),
+                "disconnected writer recomputes its bounded local itinerary",
+                10_000,
+                "local",
+              );
+              expect(localWindow.map((stop) => stop.id)).toEqual([firstStop!.id, offlineStop!.id]);
+              expect(localWindow.map((stop) => stop.id)).not.toContain(protectedStop!.id);
+
               // The real disconnect is a topology disruption: Bob's edge
               // window must not learn Alice's local insertion before reconnect.
               const beforeReconnect = await bob!.all(itinerary, { tier: "edge" });
