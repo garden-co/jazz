@@ -79,6 +79,35 @@ use super::peer_connection::{
     aggregate_authorization_scope_bounds, authorization_scope_receipt_matches_transport_context,
     authorization_scope_support_options_match, remove_scope_aggregate_member, view_update_is_empty,
 };
+
+#[test]
+fn retryable_chunk_response_keeps_the_original_waiter_until_the_scheduled_reissue() {
+    use groove::chunks::MissingChunkResolver;
+
+    let resolver = PeerChunkResolver::default();
+    resolver.register_connection(7, true);
+    let request = groove::chunks::ChunkRequest {
+        object_hash: [0x31; 32],
+        locator: b"retryable-binding-receipt".to_vec(),
+    };
+    let waiter = resolver.resolve(request.clone());
+    let response_id = resolver.take_outbound(1)[0].request_id;
+    resolver.complete(ChunkResponseEntry {
+        request_id: response_id,
+        result: ChunkResponse::Retryable { retry_after_ms: 1 },
+    });
+    assert!(resolver.take_outbound(1).is_empty(), "no eager reissue");
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert_eq!(resolver.promote_due_retries(), 1, "one scheduled reissue");
+    let retry = resolver.take_outbound(1);
+    assert_eq!(retry.len(), 1);
+    assert_eq!(retry[0].request_id, response_id, "same pending request id");
+    resolver.complete(ChunkResponseEntry {
+        request_id: response_id,
+        result: ChunkResponse::Found(vec![0x42]),
+    });
+    assert_eq!(crate::db::block_on(waiter).unwrap().as_ref(), &[0x42]);
+}
 use catalogue::assert_authority_rejects_staged_write;
 use support::block_on;
 use support::*;
