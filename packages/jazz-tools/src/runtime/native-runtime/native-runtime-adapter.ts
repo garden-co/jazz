@@ -5421,7 +5421,29 @@ function plainResetChunkCanStayPacked(
   const sourceRowKeysOnly = chunk.delta.addedOccurrenceKeys.every(
     (key) => key.length === 17 && key[0] === 1,
   );
-  const canStayPacked = reset && noUpdated && noRemoved && identityProjection && sourceRowKeysOnly;
+  // Packed resets bypass `rowsFromBatches`, so their raw records may only go
+  // straight to the public delta decoder when every producer descriptor is
+  // already the exact public logical frame. Relation queries can return a
+  // different table (for example a hop target) or a CurrentRow carrier; both
+  // need the normal decode/re-encode bridge before publication.
+  const directPublicFrames = chunk.delta.added.every((batch) => {
+    const columns = subscription.outputColumns
+      ? batch.table === subscription.outputColumns.rootTable
+        ? subscription.outputColumns.rootColumns
+        : undefined
+      : schema[batch.table]?.columns;
+    return (
+      columns !== undefined &&
+      nativeDescriptorMatchesColumns(batch.descriptor, logicalStorageColumns(columns))
+    );
+  });
+  const canStayPacked =
+    reset &&
+    noUpdated &&
+    noRemoved &&
+    identityProjection &&
+    sourceRowKeysOnly &&
+    directPublicFrames;
   return canStayPacked;
 }
 

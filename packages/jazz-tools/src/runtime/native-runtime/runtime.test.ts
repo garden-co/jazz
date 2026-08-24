@@ -3912,6 +3912,59 @@ describe("NativeRuntimeAdapter server transport", () => {
     runtime.close();
   });
 
+  it("normalizes CurrentRow carriers before publishing relation reset frames", () => {
+    const schema = {
+      notes: {
+        columns: [
+          { name: "title", column_type: { type: "Text" }, nullable: false },
+          { name: "note", column_type: { type: "Text" }, nullable: true },
+        ],
+      },
+    } satisfies WasmSchema;
+    const runtime = runtimeWithNativeRelationSubscriptionChunks(
+      [
+        {
+          type: "delta",
+          reset: true,
+          settled: true,
+          delta: encodeUserWrappedSubscriptionDelta({
+            table: "notes",
+            rowId: uuidBytes("00000000-0000-0000-0000-000000000322"),
+            title: "hop target title",
+            note: "hop target note",
+          }),
+        },
+      ],
+      schema,
+    );
+    const deltas: NativeRowDelta[] = [];
+    const handle = runtime.createSubscription(
+      JSON.stringify({ table: "notes", relation_ir: { Gather: {} } }),
+      null,
+      null,
+      null,
+    );
+
+    runtime.executeSubscription(handle, (delta: NativeRowDelta) => deltas.push(delta));
+
+    expect(deltas).toHaveLength(1);
+    expect(decodeNativeDelta(deltas[0]!, schema.notes.columns)).toEqual([
+      {
+        kind: 0,
+        id: "00000000-0000-0000-0000-000000000322",
+        index: 0,
+        row: {
+          id: "00000000-0000-0000-0000-000000000322",
+          values: [
+            { type: "Text", value: "hop target title" },
+            { type: "Text", value: "hop target note" },
+          ],
+        },
+      },
+    ]);
+    runtime.close();
+  });
+
   it("coerces UUID provenance authors into public text subscription frames", () => {
     const schema = {
       notes: {
