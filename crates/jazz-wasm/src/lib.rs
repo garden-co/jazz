@@ -3284,7 +3284,7 @@ impl WasmTransport {
         let pump = self.auxiliary_pump.clone();
         future_to_promise(async move {
             if let Some(delay) = pump.next_retry_delay() {
-                JsFuture::from(js_timeout(delay.as_millis() as i32)?).await?;
+                JsFuture::from(js_timeout(delay.as_millis() as f64)?).await?;
                 pump.tick();
             } else {
                 pump.outbound_ready().await;
@@ -3346,18 +3346,18 @@ impl WasmTransport {
     }
 }
 
-fn js_timeout(delay_ms: i32) -> Result<js_sys::Promise, JsValue> {
+fn js_timeout(delay_ms: f64) -> Result<js_sys::Promise, JsValue> {
     let set_timeout = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("setTimeout"))?
         .dyn_into::<js_sys::Function>()?;
-    Ok(js_sys::Promise::new(&mut |resolve, _reject| {
+    Ok(js_sys::Promise::new(&mut |resolve, reject| {
         let callback = Closure::once_into_js(move || {
             let _ = resolve.call0(&JsValue::UNDEFINED);
         });
-        let _ = set_timeout.call2(
-            &JsValue::UNDEFINED,
-            &callback,
-            &JsValue::from_f64(delay_ms as f64),
-        );
+        if let Err(error) =
+            set_timeout.call2(&JsValue::UNDEFINED, &callback, &JsValue::from_f64(delay_ms))
+        {
+            let _ = reject.call1(&JsValue::UNDEFINED, &error);
+        }
     }))
 }
 
