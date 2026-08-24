@@ -234,7 +234,6 @@ describe("BigLabel browser edge/core topology", () => {
       .limit(1)
       .include({ artist: true });
     const snapshots: string[][] = [];
-    let serverNetworkBlocked = false;
     await runTopologyScenario(
       {
         id: "big-label.admin-roster.reconnect-reopen-revocation",
@@ -245,11 +244,13 @@ describe("BigLabel browser edge/core topology", () => {
         replay: "pnpm --filter jazz-tools test:browser -- big-label.e2e.test.ts",
         targets: {
           "browser-edge": {
-            async disconnect() {
+            async disconnect({ defer }) {
               // Record the healing obligation before awaiting the command: a
               // command which installs the route and then rejects must still
-              // be paired with a best-effort unblock during cleanup.
-              serverNetworkBlocked = true;
+              // be paired with a bounded unblock by the topology harness.
+              defer("unblock BigLabel browser route", async () => {
+                await unblockJazzServerNetwork(serverUrl);
+              });
               await blockJazzServerNetwork(serverUrl);
               // Route blocking applies only to future WebSocket connections.
               // Close the live reader connection so this phase exercises the
@@ -259,7 +260,6 @@ describe("BigLabel browser edge/core topology", () => {
             },
             async reconnect() {
               await unblockJazzServerNetwork(serverUrl);
-              serverNetworkBlocked = false;
               await reader.reconnect();
               await sleep(100);
             },
@@ -460,22 +460,7 @@ describe("BigLabel browser edge/core topology", () => {
             },
           },
         ],
-        cleanup: async () => {
-          let unblockError: unknown;
-          if (serverNetworkBlocked) {
-            try {
-              await unblockJazzServerNetwork(serverUrl);
-              serverNetworkBlocked = false;
-            } catch (error) {
-              // Preserve this as a cleanup error after all Db resources have
-              // still been released. The harness retains an earlier scenario
-              // error and appends cleanup failure context rather than hiding it.
-              unblockError = error;
-            }
-          }
-          await ctx.cleanup();
-          if (unblockError) throw unblockError;
-        },
+        cleanup: async () => ctx.cleanup(),
         cleanupTimeoutMs: 10_000,
       },
       browserTopologyReporter,
