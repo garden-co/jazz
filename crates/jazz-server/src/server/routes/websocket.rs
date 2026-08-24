@@ -107,14 +107,22 @@ struct WebSocketAdmissionRegistry {
 }
 
 struct WebSocketAdmissionRegistration {
-    key: WebSocketAdmissionKey,
+    /// Present only for a public session. Trusted backend links are not part of
+    /// the per-session connection cap: one edge legitimately owns multiple
+    /// short-lived bootstrap and long-lived replication sockets under SYSTEM.
+    key: Option<WebSocketAdmissionKey>,
     id: u64,
     evict_rx: mpsc::UnboundedReceiver<WebSocketEviction>,
+    /// Keeps an unbounded registration's receiver pending without retaining a
+    /// global admission-registry entry.
+    _unbounded_keepalive: Option<mpsc::UnboundedSender<WebSocketEviction>>,
 }
 
 impl Drop for WebSocketAdmissionRegistration {
     fn drop(&mut self) {
-        ws_unregister_admission(self.key, self.id);
+        if let Some(key) = self.key {
+            ws_unregister_admission(key, self.id);
+        }
     }
 }
 
@@ -122,7 +130,19 @@ fn ws_admission_registry() -> &'static std::sync::Mutex<WebSocketAdmissionRegist
     WS_ADMISSIONS.get_or_init(Default::default)
 }
 
-fn ws_register_admission(key: WebSocketAdmissionKey) -> WebSocketAdmissionRegistration {
+fn ws_register_admission(
+    key: WebSocketAdmissionKey,
+    enforce_session_cap: bool,
+) -> WebSocketAdmissionRegistration {
+    if !enforce_session_cap {
+        let (keepalive, evict_rx) = mpsc::unbounded_channel();
+        return WebSocketAdmissionRegistration {
+            key: None,
+            id: 0,
+            evict_rx,
+            _unbounded_keepalive: Some(keepalive),
+        };
+    }
     let id = WS_NEXT_CONNECTION_ID.fetch_add(1, Ordering::Relaxed);
     let (evict_tx, evict_rx) = mpsc::unbounded_channel();
     let mut registry = ws_admission_registry().lock().unwrap();
@@ -135,7 +155,12 @@ fn ws_register_admission(key: WebSocketAdmissionKey) -> WebSocketAdmissionRegist
         }
     }
 
-    WebSocketAdmissionRegistration { key, id, evict_rx }
+    WebSocketAdmissionRegistration {
+        key: Some(key),
+        id,
+        evict_rx,
+        _unbounded_keepalive: None,
+    }
 }
 
 fn ws_unregister_admission(key: WebSocketAdmissionKey, id: u64) {
@@ -522,10 +547,19 @@ async fn handle_ws_connection(
             return;
         }
     };
-    let mut admission_registration = ws_register_admission(WebSocketAdmissionKey {
-        app_id: state.app_id,
-        identity: admission.identity,
-    });
+    // This cap is deliberately scoped to externally authenticated sessions,
+    // after credential verification.  It must not key off `SYSTEM` (or any
+    // other claimed subject): trusted edge/bootstrap links share SYSTEM and a
+    // single edge may transiently hold several such connections while
+    // reconnecting.  Reserved subjects are rejected by `ws_admission` before
+    // reaching this point.
+    let mut admission_registration = ws_register_admission(
+        WebSocketAdmissionKey {
+            app_id: state.app_id,
+            identity: admission.identity,
+        },
+        admission.credential == WebSocketCredential::Session,
+    );
 
     let Some(first) = read_ws_frame_batch(&mut socket, &mut shutdown_rx, &state).await else {
         return;
@@ -1076,6 +1110,7 @@ mod tests {
         assert!(ws_validate_session_identity(&mismatching, peer).is_err());
         assert!(ws_validate_session_identity(&external_session, external_peer).is_ok());
         assert!(ws_validate_session_identity(&external_session, peer).is_err());
+        assert!(ws_validate_session_identity(&external_session, AuthorSubject::SYSTEM).is_err());
         let local_first = Session::new(AuthorSubject::LOCAL_FIRST_ISSUER, "local-user")
             .with_auth_mode(AuthMode::LocalFirst);
         let local_first_peer =
@@ -2443,11 +2478,11 @@ mod tests {
 
         let mut sockets = Vec::new();
         for _ in 0..WS_PER_IDENTITY_CONNECTION_CAP {
-            sockets.push(open_negotiated_ws(addr, &state, identity).await);
+            sockets.push(open_negotiated_ws_session(addr, &state, identity).await);
         }
 
         let mut oldest = sockets.remove(0);
-        let _newest = open_negotiated_ws(addr, &state, identity).await;
+        let _newest = open_negotiated_ws_session(addr, &state, identity).await;
 
         let mut saw_backpressure = false;
         let mut saw_policy_close = false;
@@ -2490,6 +2525,29 @@ mod tests {
         assert_eq!(ws_live_admissions_for(key), WS_PER_IDENTITY_CONNECTION_CAP);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn trusted_links_do_not_consume_the_public_session_connection_cap() {
+        let state = make_ws_convergence_test_state().await;
+        let addr = start_ws_test_server(state.clone()).await;
+        let identity = AuthorSubject::SYSTEM;
+        let key = WebSocketAdmissionKey {
+            app_id: state.app_id,
+            identity,
+        };
+
+        let mut links = Vec::new();
+        for _ in 0..=WS_PER_IDENTITY_CONNECTION_CAP {
+            links.push(open_negotiated_ws(addr, &state, identity).await);
+        }
+
+        assert_eq!(
+            ws_live_admissions_for(key),
+            0,
+            "verified trusted links must not consume the untrusted per-session cap"
+        );
+        assert_eq!(links.len(), WS_PER_IDENTITY_CONNECTION_CAP + 1);
+    }
+
     // Internal route-boundary test: websocket peer admission is not
     // observable through the public JazzClient API yet, so this tests the
     // protocol boundary and its admission registry.
@@ -2505,7 +2563,7 @@ mod tests {
 
         let mut pending = FuturesUnordered::new();
         for _ in 0..WS_STORM_SIZE {
-            pending.push(open_negotiated_ws(addr, &state, identity));
+            pending.push(open_negotiated_ws_session(addr, &state, identity));
         }
 
         let mut sockets = Vec::with_capacity(WS_STORM_SIZE);
@@ -2545,7 +2603,7 @@ mod tests {
 
         let mut quiet_sockets = Vec::with_capacity(WS_PER_IDENTITY_CONNECTION_CAP);
         for _ in 0..WS_PER_IDENTITY_CONNECTION_CAP {
-            quiet_sockets.push(open_negotiated_ws(addr, &state, quiet_identity).await);
+            quiet_sockets.push(open_negotiated_ws_session(addr, &state, quiet_identity).await);
         }
         assert_eq!(
             ws_live_admissions_for(quiet_key),
@@ -2554,7 +2612,7 @@ mod tests {
 
         let mut pending = FuturesUnordered::new();
         for _ in 0..WS_STORM_SIZE {
-            pending.push(open_negotiated_ws(addr, &state, noisy_identity));
+            pending.push(open_negotiated_ws_session(addr, &state, noisy_identity));
         }
         let mut noisy_sockets = Vec::with_capacity(WS_STORM_SIZE);
         while let Some(ws) = pending.next().await {
@@ -2591,7 +2649,7 @@ mod tests {
 
         let mut sockets = Vec::new();
         for _ in 0..WS_PER_IDENTITY_CONNECTION_CAP {
-            sockets.push(open_negotiated_ws(addr, &state, identity).await);
+            sockets.push(open_negotiated_ws_session(addr, &state, identity).await);
         }
         assert_eq!(
             wait_for_ws_live_admissions(key, |count| { count == WS_PER_IDENTITY_CONNECTION_CAP })
@@ -2600,7 +2658,7 @@ mod tests {
         );
 
         for cycle in 0..(WS_PER_IDENTITY_CONNECTION_CAP * 3) {
-            sockets.push(open_negotiated_ws(addr, &state, identity).await);
+            sockets.push(open_negotiated_ws_session(addr, &state, identity).await);
             let live =
                 wait_for_ws_live_admissions(key, |count| count == WS_PER_IDENTITY_CONNECTION_CAP)
                     .await;
