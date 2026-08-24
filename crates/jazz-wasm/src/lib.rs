@@ -3158,6 +3158,135 @@ mod dynamic_schema_view_tests {
         assert_eq!(opts.propagation, Propagation::Full);
     }
 
+    /// The host-visible transport boundary must honor both parts of its
+    /// auxiliary drain budget. This lives here rather than in the core pump
+    /// receipts because wasm-bindgen's optional-number ABI is part of the
+    /// browser worker contract: a stale generated package can otherwise hide
+    /// the count/byte arguments behind TypeScript mocks.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    async fn wasm_auxiliary_drain_bounds_count_and_bytes_with_fifo_remainder() {
+        let schema = JazzSchema::new(&SchemaBuilder::new().build())
+            .expect("empty public schema compiles for transport receipt");
+        let refs = schema.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let db = Rc::new(
+            Db::open(DbConfig::new(
+                schema,
+                MemoryStorage::new(&refs),
+                DbIdentity {
+                    node: jazz::ids::NodeUuid::from_bytes([0x63; 16]),
+                    author: AuthorId::from_bytes([0xc3; 16]),
+                },
+            ))
+            .await
+            .expect("open memory-backed wasm transport"),
+        );
+        let binding = WasmDb {
+            inner: WasmDbInner::Memory(db),
+            owns_runtime: false,
+        };
+        let transport = binding
+            .accept_subscriber(vec![0x73; 16], JsValue::NULL)
+            .expect("accept a real wasm subscriber transport");
+
+        let features = jazz::wire::current_wire_features()
+            & !(jazz::wire::FEATURE_PAYLOAD_LZ4 | jazz::wire::FEATURE_PAYLOAD_ZSTD);
+        let request = |request_id| jazz::protocol::ChunkRequestEntry {
+            request_id,
+            locator: vec![request_id as u8; 16],
+            expected_hash: [request_id as u8; 32],
+            // A hop-exhausted request has a deterministic immediate result,
+            // so the receipt exercises the binding drain without another
+            // transport or a semantic tick.
+            remaining_hops: 0,
+        };
+        let incoming =
+            jazz::protocol::SyncMessage::ChunkRequestBatch(jazz::protocol::ChunkRequestBatch {
+                requests: (1..=5).map(request).collect(),
+            });
+        let payload = jazz::wire::encode_sync_message_for_features(&incoming, features)
+            .expect("encode auxiliary chunk request batch");
+        let incoming_frame = jazz::wire::encode_frame(&jazz::wire::WireFrame::Message(
+            jazz::wire::WireEnvelope::new(jazz::wire::WIRE_PROTOCOL_VERSION, features, payload),
+        ))
+        .expect("frame auxiliary chunk request batch");
+        wasm_bindgen_futures::JsFuture::from(transport.route_auxiliary_wire_frame(incoming_frame))
+            .await
+            .expect("route actual auxiliary request through wasm binding");
+
+        let one_response =
+            jazz::protocol::SyncMessage::ChunkResponseBatch(jazz::protocol::ChunkResponseBatch {
+                responses: vec![jazz::protocol::ChunkResponseEntry {
+                    request_id: 1,
+                    result: jazz::protocol::ChunkResponse::Unavailable,
+                }],
+            });
+        let one_response_bytes =
+            jazz::wire::encode_sync_message_for_features(&one_response, features)
+                .expect("encode expected auxiliary response");
+        let one_response_frame = jazz::wire::encode_frame(&jazz::wire::WireFrame::Message(
+            jazz::wire::WireEnvelope::new(
+                jazz::wire::WIRE_PROTOCOL_VERSION,
+                features,
+                one_response_bytes,
+            ),
+        ))
+        .expect("frame expected auxiliary response");
+        let byte_budget = one_response_frame.len() as u32;
+
+        let decode_ids = |frames: js_sys::Array| {
+            frames
+                .iter()
+                .map(|frame| {
+                    let bytes = js_sys::Uint8Array::new(&frame).to_vec();
+                    assert!(
+                        bytes.len() <= byte_budget as usize,
+                        "each actual WASM result stays within the requested byte budget"
+                    );
+                    let jazz::wire::WireFrame::Message(envelope) = jazz::wire::decode_frame(&bytes)
+                        .expect("decode actual wasm response frame")
+                    else {
+                        panic!("auxiliary output remains a complete message frame");
+                    };
+                    let response =
+                        jazz::wire::decode_sync_message_for_features(&envelope.payload, features)
+                            .expect("decode actual wasm auxiliary response");
+                    let jazz::protocol::SyncMessage::ChunkResponseBatch(batch) = response else {
+                        panic!("subscriber sends a chunk response on the auxiliary lane");
+                    };
+                    assert_eq!(batch.responses.len(), 1);
+                    batch.responses[0].request_id
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let first = transport
+            .recv_auxiliary_wire_frames(Some(8), Some(byte_budget))
+            .expect("drain byte-bounded real wasm response batch");
+        assert_eq!(first.length(), 1, "byte budget admits only one frame");
+        assert_eq!(decode_ids(first), vec![1]);
+
+        let second = transport
+            .recv_auxiliary_wire_frames(Some(2), Some(byte_budget * 2))
+            .expect("drain count-bounded real wasm response batch");
+        assert_eq!(second.length(), 2, "count budget admits exactly two frames");
+        assert_eq!(decode_ids(second), vec![2, 3]);
+
+        let tail = transport
+            .recv_auxiliary_wire_frames(Some(8), Some(byte_budget * 8))
+            .expect("drain retained real wasm response remainder");
+        assert_eq!(decode_ids(tail), vec![4, 5], "remainder stays FIFO");
+        assert_eq!(
+            transport
+                .recv_auxiliary_wire_frames(Some(1), Some(byte_budget))
+                .expect("empty auxiliary drain")
+                .length(),
+            0,
+            "all queued frames are eventually drained"
+        );
+    }
+
     #[test]
     fn transaction_binding_diagnostics_use_transaction_vocabulary() {
         assert_eq!(
