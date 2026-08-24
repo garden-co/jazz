@@ -26,11 +26,16 @@ describe("BandBinder cross-topology recovery", () => {
     let server: Awaited<ReturnType<typeof getJazzServerInfo>> | undefined;
     let owner: Db | undefined;
     let manager: Db | undefined;
+    let managerJwt = "";
+    let managerDbName = "";
     let workspaceId = "";
     let managerMembershipId = "";
     let pageId = "";
     let taskBlockId = "";
     let offlineTaskId = "";
+    let nestedPageId = "";
+    let nestedBlockId = "";
+    const taskSubscriptionSnapshots: string[][] = [];
     const expectedBlockIds = new Set<string>();
 
     const receipt = await runTopologyScenario(
@@ -45,6 +50,13 @@ describe("BandBinder cross-topology recovery", () => {
           manager: {
             disconnect: async () => manager!.disconnect(),
             reconnect: async () => manager!.reconnect(),
+            // A browser-runtime restart is deliberately distinct from a
+            // transport reconnect: this exercises IndexedDB rehydration.
+            restart: async () => {
+              cleanup.untrack(manager!);
+              await manager!.shutdown();
+              manager = await openClient(server!, "manager", managerJwt, managerDbName);
+            },
           },
           authorization: {
             failure: async () => {
@@ -78,8 +90,13 @@ describe("BandBinder cross-topology recovery", () => {
                 getJazzServerJwtForUser("band-binder-owner", undefined, server.appId),
                 getJazzServerJwtForUser("band-binder-manager", undefined, server.appId),
               ]);
+              managerJwt = managerToken;
+              managerDbName = uniqueDbName("band-binder-manager");
               owner = await openClient(server, "owner", ownerToken);
-              manager = await openClient(server, "manager", managerToken);
+              manager = await openClient(server, "manager", managerJwt, managerDbName);
+              // Bootstrap is an explicit grant, not an implicit initial read.
+              // A signed-in client starts with no workspace-visible state.
+              expect(await manager.all(app.workspaces.where({}), { tier: "edge" })).toEqual([]);
               const workspace = await owner
                 .insert(app.workspaces, {
                   name: "World tour",
@@ -128,6 +145,14 @@ describe("BandBinder cross-topology recovery", () => {
                 .insert(app.pages, { workspaceId, title: "Berlin" })
                 .wait({ tier: "edge" });
               pageId = page.id;
+              const nestedPage = await manager!
+                .insert(app.pages, {
+                  workspaceId,
+                  parentPageId: pageId,
+                  title: "Berlin / stage notes",
+                })
+                .wait({ tier: "edge" });
+              nestedPageId = nestedPage.id;
               const [ownerBlock, managerBlock] = await Promise.all([
                 owner!
                   .insert(app.blocks, {
@@ -151,6 +176,26 @@ describe("BandBinder cross-topology recovery", () => {
               expectedBlockIds.add(ownerBlock.id);
               expectedBlockIds.add(managerBlock.id);
               taskBlockId = managerBlock.id;
+              const nestedParent = await manager!
+                .insert(app.blocks, {
+                  workspaceId,
+                  pageId: nestedPageId,
+                  position: 10,
+                  kind: "text",
+                  payload: { text: "Venue notes" },
+                })
+                .wait({ tier: "edge" });
+              const nestedBlock = await manager!
+                .insert(app.blocks, {
+                  workspaceId,
+                  pageId: nestedPageId,
+                  parentBlockId: nestedParent.id,
+                  position: 20,
+                  kind: "attachment",
+                  payload: { caption: "Stage plot" },
+                })
+                .wait({ tier: "edge" });
+              nestedBlockId = nestedBlock.id;
               await Promise.all([
                 owner!
                   .insert(app.songs, {
@@ -167,6 +212,15 @@ describe("BandBinder cross-topology recovery", () => {
                     title: "Load in",
                     startsAt: new Date("2030-04-01T14:00:00Z"),
                     endsAt: new Date("2030-04-01T15:00:00Z"),
+                  })
+                  .wait({ tier: "edge" }),
+                manager!
+                  .insert(app.attachments, {
+                    workspaceId,
+                    blockId: nestedBlockId,
+                    name: "stage-plot.txt",
+                    mediaType: "text/plain",
+                    bytes: new TextEncoder().encode("channels 1-16"),
                   })
                   .wait({ tier: "edge" }),
               ]);
@@ -191,6 +245,62 @@ describe("BandBinder cross-topology recovery", () => {
               expect(managerBlocks.map((block) => [block.id, block.position])).toEqual(
                 blocks.map((block) => [block.id, block.position]),
               );
+              expect(
+                await waitForQuery(
+                  owner!,
+                  app.pages.where({ workspaceId, parentPageId: pageId }),
+                  (rows) => rows.length === 1 && rows[0]?.id === nestedPageId,
+                  "nested page follows its parent permission witness",
+                  15_000,
+                  "edge",
+                ),
+              ).toHaveLength(1);
+              const nestedBlocks = await waitForQuery(
+                owner!,
+                app.blocks.where({ workspaceId, pageId: nestedPageId }).orderBy("position", "asc"),
+                (rows) =>
+                  rows.length === 2 &&
+                  rows.some((block) => block.id === nestedBlockId && block.parentBlockId !== null),
+                "nested page and block tree converge",
+                15_000,
+                "edge",
+              );
+              expect(nestedBlocks.map((block) => block.id)).toContain(nestedBlockId);
+              expect(
+                await waitForQuery(
+                  owner!,
+                  app.attachments.where({ workspaceId, blockId: nestedBlockId }),
+                  (rows) => rows.length === 1 && rows[0]?.name === "stage-plot.txt",
+                  "attachment follows its nested block permission witness",
+                  15_000,
+                  "edge",
+                ),
+              ).toHaveLength(1);
+              const [songs, events] = await Promise.all([
+                waitForQuery(
+                  owner!,
+                  app.songs.where({ workspaceId, blockId: ownerBlock.id }),
+                  (rows) => rows.length === 1 && rows[0]?.title === "Encore",
+                  "song converges through the workspace permission",
+                  15_000,
+                  "edge",
+                ),
+                waitForQuery(
+                  owner!,
+                  app.calendarEvents.where({ workspaceId, blockId: managerBlock.id }),
+                  (rows) => rows.length === 1 && rows[0]?.title === "Load in",
+                  "calendar event converges through the workspace permission",
+                  15_000,
+                  "edge",
+                ),
+              ]);
+              expect(songs).toHaveLength(1);
+              expect(events).toHaveLength(1);
+              cleanup.trackSubscription(
+                owner!.subscribeAll(app.tasks.where({ workspaceId }), (delta) => {
+                  taskSubscriptionSnapshots.push(delta.all.map((task) => task.id).sort());
+                }),
+              );
             },
             faultsAfter: [{ kind: "disconnect", target: "manager" }],
           },
@@ -211,7 +321,7 @@ describe("BandBinder cross-topology recovery", () => {
             faultsAfter: [{ kind: "reconnect", target: "manager" }],
           },
           {
-            name: "offline work converges then membership revokes",
+            name: "offline work converges to the live owner subscription",
             run: async () => {
               const tasks = await waitForQuery(
                 owner!,
@@ -222,6 +332,24 @@ describe("BandBinder cross-topology recovery", () => {
                 "edge",
               );
               expect(tasks.map((task) => task.id)).toEqual([offlineTaskId]);
+              expect(taskSubscriptionSnapshots.some((ids) => ids.includes(offlineTaskId))).toBe(
+                true,
+              );
+            },
+            faultsAfter: [{ kind: "restart", target: "manager" }],
+          },
+          {
+            name: "persisted manager remount rehydrates then loses access on revocation",
+            run: async () => {
+              const persistedTasks = await waitForQuery(
+                manager!,
+                app.tasks.where({ workspaceId, id: offlineTaskId }),
+                (rows) => rows.length === 1,
+                "manager rehydrates accepted offline work after browser restart",
+                15_000,
+                "local",
+              );
+              expect(persistedTasks.map((task) => task.id)).toEqual([offlineTaskId]);
               await owner!.delete(app.members, managerMembershipId).wait({ tier: "edge" });
               const rejected = manager!.insert(app.pages, {
                 workspaceId,
@@ -242,6 +370,14 @@ describe("BandBinder cross-topology recovery", () => {
                   { tier: "edge" },
                 ),
               ).toEqual([]);
+              await waitForQuery(
+                manager!,
+                app.tasks.where({ workspaceId, id: offlineTaskId }),
+                (rows) => rows.length === 0,
+                "revocation removes persisted task from the manager read surface",
+                15_000,
+                "edge",
+              );
             },
           },
         ],
@@ -255,6 +391,7 @@ describe("BandBinder cross-topology recovery", () => {
       ["failure", "completed"],
       ["disconnect", "completed"],
       ["reconnect", "completed"],
+      ["restart", "completed"],
     ]);
   }, 90_000);
 });
@@ -263,13 +400,14 @@ async function openClient(
   server: { appId: string; serverUrl: string },
   label: string,
   jwtToken: string,
+  dbName = uniqueDbName(`band-binder-${label}`),
 ): Promise<Db> {
   return cleanup.track(
     await createDb({
       appId: server.appId,
       serverUrl: server.serverUrl,
       jwtToken,
-      driver: { type: "persistent", dbName: uniqueDbName(`band-binder-${label}`) },
+      driver: { type: "persistent", dbName },
     }),
   );
 }
