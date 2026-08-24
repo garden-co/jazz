@@ -57,12 +57,14 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 3
     steps:
+      # checkout cleans the worktree by default, so it must precede receipt
+      # download or the aggregate will observe an empty artifact directory.
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
         with:
           pattern: rust-shadow-shard-*
           path: rust-shadow-receipts
           merge-multiple: true
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Require exact partition receipts and folded M3 coverage
         # This catches accidental checkout/worktree drift across runners. It is
         # not intended to attest against a malicious artifact producer.
