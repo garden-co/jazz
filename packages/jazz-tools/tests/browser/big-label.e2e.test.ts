@@ -122,39 +122,47 @@ describe("BigLabel browser edge/core topology", () => {
       reader.all(app.artists.where({ organizationId: org.id }), { tier: "edge" }),
     );
     const snapshots: string[][] = [];
-    ctx.trackSubscription(
-      reader.subscribeAll(
-        app.artists.where({ organizationId: org.id }).orderBy("name", "asc"),
-        (delta) => {
-          snapshots.push(delta.all.map((artist) => artist.name));
-        },
-      ),
+    await browserTopologyPhase("start editor ordered-roster subscription", () => {
+      ctx.trackSubscription(
+        reader.subscribeAll(
+          app.artists.where({ organizationId: org.id }).orderBy("name", "asc"),
+          (delta) => {
+            snapshots.push(delta.all.map((artist) => artist.name));
+          },
+        ),
+      );
+    });
+    const artist = await browserTopologyPhase("writer adds convergent artist", () =>
+      writer
+        .insert(app.artists, {
+          organizationId: org.id,
+          name: "Blue Hour",
+          genre: "jazz",
+          status: "active",
+        })
+        .wait({ tier: "edge" }),
     );
-    const artist = await writer
-      .insert(app.artists, {
-        organizationId: org.id,
-        name: "Blue Hour",
-        genre: "jazz",
-        status: "active",
-      })
-      .wait({ tier: "edge" });
-    const release = await writer
-      .insert(app.releases, {
-        organizationId: org.id,
-        artistId: artist.id,
-        title: "First Light",
-        releaseDate: new Date("2026-01-01"),
-        status: "scheduled",
-      })
-      .wait({ tier: "edge" });
-    await writer
-      .insert(app.releaseAssignments, {
-        organizationId: org.id,
-        releaseId: release.id,
-        membershipId: adminMembership.id,
-        role: "owner",
-      })
-      .wait({ tier: "edge" });
+    const release = await browserTopologyPhase("writer adds artist release", () =>
+      writer
+        .insert(app.releases, {
+          organizationId: org.id,
+          artistId: artist.id,
+          title: "First Light",
+          releaseDate: new Date("2026-01-01"),
+          status: "scheduled",
+        })
+        .wait({ tier: "edge" }),
+    );
+    await browserTopologyPhase("writer assigns release owner", () =>
+      writer
+        .insert(app.releaseAssignments, {
+          organizationId: org.id,
+          releaseId: release.id,
+          membershipId: adminMembership.id,
+          role: "owner",
+        })
+        .wait({ tier: "edge" }),
+    );
     await browserTopologyPhase(
       "reader subscription converges ordered roster",
       () =>
