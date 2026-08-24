@@ -568,6 +568,153 @@ function toWriteRecordForOperation(
   }
 }
 
+type WireSplicePage = { kind: "bytes" | "text_utf16" | "text_utf8"; from: number; to: number };
+
+type WireLargeValueUpdate =
+  | {
+      kind: "splice";
+      column: string;
+      within: WireSplicePage;
+      splices: Array<{ at: number; delete: number; insert: number[] }>;
+    }
+  | {
+      kind: "json_set";
+      column: string;
+      edits: Array<{ at: string; value: unknown }>;
+    };
+
+function isPartialLargeValueUpdate(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && ("splices" in value || "edits" in value);
+}
+
+function requireRecord(value: unknown, message: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(message);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireNonNegativeCoordinate(value: unknown, label: string, column: string): number {
+  const coordinate = Number(value);
+  if (!Number.isSafeInteger(coordinate) || coordinate < 0) {
+    throw new Error(`${label} for "${column}" must be a non-negative safe integer.`);
+  }
+  return coordinate;
+}
+
+function requirePageRange(from: number, to: number, column: string): void {
+  if (from > to) {
+    throw new Error(`Large-value page for "${column}" must have from <= to.`);
+  }
+}
+
+function splitLargeValueUpdate(
+  data: Record<string, unknown>,
+  schema: WasmSchema,
+  table: string,
+): { ordinary: Record<string, unknown>; descriptors: WireLargeValueUpdate[] } {
+  const ordinary: Record<string, unknown> = {};
+  const descriptors: WireLargeValueUpdate[] = [];
+  const columns = schema[table]?.columns;
+  if (!columns) throw new Error(`Unknown table "${table}"`);
+  for (const [column, value] of Object.entries(data)) {
+    if (!isPartialLargeValueUpdate(value)) {
+      ordinary[column] = value;
+      continue;
+    }
+    const type = columns.find((candidate) => candidate.name === column)?.column_type;
+    if (!type) throw new Error(`Unknown column "${column}" in table "${table}"`);
+    if ("splices" in value && "within" in value) {
+      const within = requireRecord(
+        value.within,
+        `Large-value update "${column}" has an invalid page.`,
+      );
+      const splices = value.splices;
+      if (!Array.isArray(splices))
+        throw new Error(`Large-value update "${column}" has invalid splices.`);
+      let page: WireSplicePage;
+      if ("fromUtf8" in within || "toUtf8" in within) {
+        if (type.type !== "Text")
+          throw new Error(`UTF-8 splice requires a Text column, got "${column}".`);
+        const from = requireNonNegativeCoordinate(within.fromUtf8, "fromUtf8", column);
+        const to = requireNonNegativeCoordinate(within.toUtf8, "toUtf8", column);
+        requirePageRange(from, to, column);
+        page = { kind: "text_utf8", from, to };
+      } else if (type.type === "Bytea") {
+        const from = requireNonNegativeCoordinate(within.from, "from", column);
+        const to = requireNonNegativeCoordinate(within.to, "to", column);
+        requirePageRange(from, to, column);
+        page = { kind: "bytes", from, to };
+      } else if (type.type === "Text") {
+        const from = requireNonNegativeCoordinate(within.from, "from", column);
+        const to = requireNonNegativeCoordinate(within.to, "to", column);
+        requirePageRange(from, to, column);
+        page = { kind: "text_utf16", from, to };
+      } else {
+        throw new Error(`Splice requires a Text or Bytea column, got "${column}".`);
+      }
+      descriptors.push({
+        kind: "splice",
+        column,
+        within: page,
+        splices: splices.map((splice) => {
+          const item = requireRecord(splice, `Large-value splice for "${column}" is invalid.`);
+          const utf8 = page.kind === "text_utf8";
+          const at = requireNonNegativeCoordinate(utf8 ? item.atUtf8 : item.at, "at", column);
+          const deleted = requireNonNegativeCoordinate(
+            utf8 ? item.deleteUtf8 : item.delete,
+            "delete",
+            column,
+          );
+          const insert = item.insert;
+          let bytes: number[];
+          if (page.kind === "bytes") {
+            if (!(insert instanceof Uint8Array)) {
+              throw new Error(`Byte splice insert for "${column}" must be a Uint8Array.`);
+            }
+            bytes = [...insert];
+          } else {
+            if (typeof insert !== "string") {
+              throw new Error(`Text splice insert for "${column}" must be a string.`);
+            }
+            bytes = [...new TextEncoder().encode(insert)];
+          }
+          return { at, delete: deleted, insert: bytes };
+        }),
+      });
+      continue;
+    }
+    if ("edits" in value) {
+      if (type.type !== "Json")
+        throw new Error(`JSON set requires a JSON column, got "${column}".`);
+      if (!Array.isArray(value.edits))
+        throw new Error(`JSON update "${column}" has invalid edits.`);
+      descriptors.push({
+        kind: "json_set",
+        column,
+        edits: value.edits.map((edit) => {
+          const item = requireRecord(edit, `JSON update edit for "${column}" is invalid.`);
+          if (item.op !== "set" || typeof item.at !== "string") {
+            throw new Error(
+              `JSON update "${column}" supports only { op: "set", at, value } edits.`,
+            );
+          }
+          return { at: item.at, value: item.value };
+        }),
+      });
+      continue;
+    }
+    ordinary[column] = value;
+  }
+  return { ordinary, descriptors };
+}
+
+function rejectLargeValueDescriptorsInUpsert(descriptors: readonly WireLargeValueUpdate[]): void {
+  if (descriptors.length > 0) {
+    throw new Error("Large-value partial descriptors are only supported by update.");
+  }
+}
+
 function escapeWriteErrorReason(message: string): string {
   return message.replaceAll('"', '\\"');
 }
@@ -579,7 +726,13 @@ function escapeWriteErrorReason(message: string): string {
  * @typeParam T - The row type (e.g., `{ id: string; title: string; done: boolean }`)
  * @typeParam Init - The init type for inserts (e.g., `{ title: string; done: boolean }`)
  */
-export interface TableProxy<T, Init, StreamingInit = unknown, StreamingUpdate = unknown> {
+export interface TableProxy<
+  T,
+  Init,
+  StreamingInit = unknown,
+  StreamingUpdate = unknown,
+  LargeValueUpdate = unknown,
+> {
   /** Table name */
   readonly _table: string;
   /** Schema reference */
@@ -594,6 +747,8 @@ export interface TableProxy<T, Init, StreamingInit = unknown, StreamingUpdate = 
   readonly _streamingInitType?: StreamingInit;
   /** @internal Phantom brand — enables exact streaming update/upsert inference. */
   readonly _streamingUpdateType?: StreamingUpdate;
+  /** @internal Phantom — preserves typed page-edit descriptors on table handles. */
+  readonly _largeValueUpdateType?: LargeValueUpdate;
 }
 
 export interface ColumnTransform {
@@ -645,7 +800,7 @@ function transformOutputColumns(
 }
 
 function transformInputColumns(
-  table: TableProxy<unknown, unknown, unknown>,
+  table: TableProxy<any, any, any, any, any>,
   data: unknown,
 ): Record<string, unknown> {
   const record = data as Record<string, unknown>;
@@ -663,7 +818,7 @@ function transformInputColumns(
 }
 
 function splitStreamingMutation(
-  table: TableProxy<unknown, unknown, unknown>,
+  table: TableProxy<any, any, any, any, any>,
   data: unknown,
 ): {
   column: string;
@@ -845,7 +1000,9 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     if (ownerClient) this.bindOwnerClient(ownerClient);
   }
 
-  private bindTable<T, Init>(table: TableProxy<T, Init>): DbTransactionHandleBinding {
+  private bindTable<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>(
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>,
+  ): DbTransactionHandleBinding {
     const client = this.resolveClient(table._schema);
     if (!dbTxHandleBindings.has(this)) this.bindOwnerClient(client);
     return this.requireBinding("table operation");
@@ -975,7 +1132,13 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     options?: UpdateOptions,
   ): void {
     this.bindTable(table);
-    const transformedData = transformInputColumns(table, data);
+    const { ordinary, descriptors } = splitLargeValueUpdate(
+      data as Record<string, unknown>,
+      table._schema,
+      table._table,
+    );
+    rejectLargeValueDescriptorsInUpsert(descriptors);
+    const transformedData = transformInputColumns(table, ordinary);
     const values = toWriteRecordForOperation(
       "Upsert",
       transformedData,
@@ -1001,14 +1164,19 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
    * The update is scoped to this transaction, and will only be globally visible
    * once it's committed.
    */
-  update<T, Init>(
-    table: TableProxy<T, Init>,
+  update<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>(
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>,
     id: string,
-    data: Partial<Init>,
+    data: LargeValueUpdate,
     options?: UpdateOptions,
   ): void {
     this.bindTable(table);
-    const transformedData = transformInputColumns(table, data);
+    const { ordinary, descriptors } = splitLargeValueUpdate(
+      data as Record<string, unknown>,
+      table._schema,
+      table._table,
+    );
+    const transformedData = transformInputColumns(table, ordinary);
     const updates = toWriteRecordForOperation(
       "Update",
       transformedData,
@@ -1018,16 +1186,30 @@ export class Transaction<TKind extends TransactionKind = TransactionKind> {
     const client = this.resolveClient(table._schema);
     const { openBatchId, session, attribution } = this.requireBinding("update");
     const normalizedOptions = normalizeUpdateOptions(table._schema, table._table, options);
-    client.updateInternal(
-      table._table,
-      id,
-      updates,
-      normalizedOptions?.updatedAt,
-      session,
-      attribution,
-      openBatchId,
-      normalizedOptions?.branch,
-    );
+    if (descriptors.length > 0) {
+      client.updateLargeValuesInternal(
+        table._table,
+        id,
+        updates,
+        descriptors,
+        normalizedOptions?.updatedAt,
+        session,
+        attribution,
+        openBatchId,
+        normalizedOptions?.branch,
+      );
+    } else {
+      client.updateInternal(
+        table._table,
+        id,
+        updates,
+        normalizedOptions?.updatedAt,
+        session,
+        attribution,
+        openBatchId,
+        normalizedOptions?.branch,
+      );
+    }
   }
 
   /**
@@ -1687,7 +1869,13 @@ export class Db {
     options?: UpdateOptions,
   ): WriteHandle {
     const client = this.getClient(table._schema);
-    const transformedData = transformInputColumns(table, data);
+    const { ordinary, descriptors } = splitLargeValueUpdate(
+      data as Record<string, unknown>,
+      table._schema,
+      table._table,
+    );
+    rejectLargeValueDescriptorsInUpsert(descriptors);
+    const transformedData = transformInputColumns(table, ordinary);
     const values = toWriteRecordForOperation(
       "Upsert",
       transformedData,
@@ -1712,14 +1900,19 @@ export class Db {
    *
    * Use {@link WriteHandle.wait} to wait for durable confirmation.
    */
-  update<T, Init>(
-    table: TableProxy<T, Init>,
+  update<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>(
+    table: TableProxy<T, Init, StreamingInit, StreamingUpdate, LargeValueUpdate>,
     id: string,
-    data: Partial<Init>,
+    data: LargeValueUpdate,
     options?: UpdateOptions,
   ): WriteHandle {
     const client = this.getClient(table._schema);
-    const transformedData = transformInputColumns(table, data);
+    const { ordinary, descriptors } = splitLargeValueUpdate(
+      data as Record<string, unknown>,
+      table._schema,
+      table._table,
+    );
+    const transformedData = transformInputColumns(table, ordinary);
     const updates = toWriteRecordForOperation(
       "Update",
       transformedData,
@@ -1727,15 +1920,26 @@ export class Db {
       table._table,
     );
     const context = this.getRuntimeOperationContext();
+    const normalized = normalizeUpdateOptions(table._schema, table._table, options);
     return this.wrapWriteWait(
-      client.update(
-        table._table,
-        id,
-        updates,
-        normalizeUpdateOptions(table._schema, table._table, options),
-        context?.session,
-        context?.attribution,
-      ),
+      descriptors.length > 0
+        ? client.updateLargeValues(
+            table._table,
+            id,
+            updates,
+            descriptors,
+            normalized,
+            context?.session,
+            context?.attribution,
+          )
+        : client.update(
+            table._table,
+            id,
+            updates,
+            normalized,
+            context?.session,
+            context?.attribution,
+          ),
     );
   }
 

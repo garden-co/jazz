@@ -734,6 +734,65 @@ export interface JsonPointer {
 
 export type LargeValuePage = BytePage | TextPage | Utf8TextPage | JsonPointer;
 
+/** A sequential, page-relative byte splice for a BYTEA field. */
+export interface ByteValueSplice {
+  at: number;
+  delete: number;
+  insert: Uint8Array;
+}
+
+/** A sequential, page-relative UTF-16 splice for a TEXT field. */
+export interface TextValueSplice {
+  at: number;
+  delete: number;
+  insert: string;
+}
+
+/** A sequential, page-relative UTF-8 splice for a TEXT field. */
+export interface Utf8TextValueSplice {
+  atUtf8: number;
+  deleteUtf8: number;
+  insert: string;
+}
+
+export interface ByteValueUpdate {
+  within: BytePage;
+  splices: readonly ByteValueSplice[];
+}
+
+export interface TextValueUpdate {
+  within: TextPage;
+  splices: readonly TextValueSplice[];
+}
+
+export interface Utf8TextValueUpdate {
+  within: Utf8TextPage;
+  splices: readonly Utf8TextValueSplice[];
+}
+
+export interface JsonSetValueUpdate {
+  edits: readonly { op: "set"; at: string; value: unknown }[];
+}
+
+type LargeValueUpdateForBuilder<TBuilder extends AnyTypedColumnBuilder> =
+  ColumnBuilderSqlType<TBuilder> extends "BYTEA"
+    ? ByteValueUpdate
+    : ColumnBuilderSqlType<TBuilder> extends "TEXT"
+      ? TextValueUpdate | Utf8TextValueUpdate
+      : ColumnBuilderSqlType<TBuilder> extends { kind: "JSON" }
+        ? JsonSetValueUpdate
+        : never;
+
+/** Ordinary `Db.update` input augmented with typed partial large-value edits. */
+export type TableLargeValueUpdate<
+  TSchema extends SchemaLike,
+  TTable extends TableName<TSchema>,
+> = Simplify<{
+  [TColumn in ColumnName<TSchema, TTable>]?:
+    | InsertColumnValue<BuilderForColumn<TSchema, TTable, TColumn>>
+    | LargeValueUpdateForBuilder<BuilderForColumn<TSchema, TTable, TColumn>>;
+}>;
+
 type PageForValue<T> =
   NonNullable<T> extends Uint8Array
     ? BytePage
@@ -1269,7 +1328,13 @@ export interface Table<TTable extends string, TSchema extends SchemaLike> extend
   {},
   DefaultTableSelection<SchemaMeta<TTable, TSchema>>,
   TSchema
-> {}
+> {
+  /** @internal Phantom used by `Db.update` to retain column-specific edit shapes. */
+  readonly _largeValueUpdateType: TableLargeValueUpdate<
+    TSchema,
+    Extract<TTable, TableName<TSchema>>
+  >;
+}
 
 export type QueryHandle<
   TTable extends string,
@@ -1309,6 +1374,11 @@ export interface SliceableApp<TSchema extends SchemaLike> {
 
 export type RowOf<TTable> = TTable extends { readonly _rowType: infer TRow } ? TRow : never;
 export type InsertOf<TTable> = TTable extends { readonly _initType: infer TInit } ? TInit : never;
+export type LargeValueUpdateOf<TTable> = TTable extends {
+  readonly _largeValueUpdateType: infer TUpdate;
+}
+  ? TUpdate
+  : never;
 export type StreamingInsertOf<TTable> = TTable extends {
   readonly _streamingInitType: infer TStreamingInit;
 }

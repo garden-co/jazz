@@ -1551,6 +1551,18 @@ impl Database {
         }
     }
 
+    /// Resolve a final logical UTF-16 position to its byte position. This uses
+    /// the same edit-aware, chunk-demanding UTF-16 cursor as range reads, so
+    /// callers can lower a UTF-16 splice into the canonical byte edit tail.
+    pub async fn large_text_utf16_offset_to_byte(
+        &self,
+        value: &crate::large_values::LargeValueRef,
+        offset: u64,
+    ) -> Result<u64, Error> {
+        let prefix = self.read_large_text_utf16_range(value, 0..offset).await?;
+        Ok(prefix.len() as u64)
+    }
+
     /// Resolve a JSON Pointer against literal validated JSON source. The
     /// returned value is an ordinary owned JSON value; the physical tree and
     /// locators remain private.
