@@ -59,6 +59,13 @@ pub const MAX_FETCH_ROW_VERSIONS: usize = 1024;
 /// would silently overclaim.
 pub const MAX_KNOWN_STATE_EXACT_REFS: usize = MAX_FETCH_ROW_VERSIONS;
 
+/// Maximum immutable-chunk requests admitted from one auxiliary message.
+///
+/// Four maximum-size encoded nodes plus response envelopes remain below the
+/// ordinary wire-frame ceiling. Local producers currently send one request per
+/// frame; this headroom permits small peer-side coalescing without amplification.
+pub const MAX_CHUNK_REQUEST_BATCH_ENTRIES: usize = 4;
+
 /// Validate raw frame bytes before postcard can allocate from declared lengths.
 pub fn validate_wire_frame_len(len: usize) -> Result<(), String> {
     validate_len("wire frame", len, MAX_WIRE_FRAME_BYTES)

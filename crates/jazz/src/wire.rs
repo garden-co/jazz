@@ -703,7 +703,7 @@ mod tests {
         SubscriptionKey, VersionBundle, VersionBundleRun, VersionBundleRunError, VersionCarrier,
         VersionRecord, build_version_bundle_runs_from_singletons,
     };
-    use crate::protocol_limits::MAX_WIRE_FRAME_BYTES;
+    use crate::protocol_limits::{MAX_CHUNK_REQUEST_BATCH_ENTRIES, MAX_WIRE_FRAME_BYTES};
     use crate::query::{BindingId, Query, ShapeId};
     use crate::schema::{ColumnSchema, TableSchema};
     use crate::time::{GlobalTime, TxTime};
@@ -858,19 +858,29 @@ mod tests {
 
     #[test]
     fn oversized_chunk_request_batches_are_rejected_during_decode() {
-        const EXPECTED_MAX_CHUNK_REQUESTS: usize = 4;
-        let message = SyncMessage::ChunkRequestBatch(ChunkRequestBatch {
-            requests: (0..=EXPECTED_MAX_CHUNK_REQUESTS)
-                .map(|request_id| ChunkRequestEntry {
-                    request_id: request_id as u64,
-                    locator: vec![0x11],
-                    expected_hash: [0x22; 32],
-                    remaining_hops: 1,
-                })
+        let request = |request_id| ChunkRequestEntry {
+            request_id,
+            locator: vec![0x11],
+            expected_hash: [0x22; 32],
+            remaining_hops: 1,
+        };
+        let at_limit = SyncMessage::ChunkRequestBatch(ChunkRequestBatch {
+            requests: (0..MAX_CHUNK_REQUEST_BATCH_ENTRIES as u64)
+                .map(request)
                 .collect(),
         });
-        let encoded = encode_sync_message(&message).expect("encode oversized request fixture");
+        let encoded = encode_sync_message(&at_limit).expect("encode limit request fixture");
+        assert_eq!(
+            decode_sync_message(&encoded).expect("limit request fixture remains valid"),
+            at_limit
+        );
 
+        let mut requests = (0..MAX_CHUNK_REQUEST_BATCH_ENTRIES as u64)
+            .map(request)
+            .collect::<Vec<_>>();
+        requests.push(request(MAX_CHUNK_REQUEST_BATCH_ENTRIES as u64));
+        let over_limit = SyncMessage::ChunkRequestBatch(ChunkRequestBatch { requests });
+        let encoded = encode_sync_message(&over_limit).expect("encode oversized request fixture");
         assert!(
             decode_sync_message(&encoded).is_err(),
             "remote request cardinality must be bounded before storage work"

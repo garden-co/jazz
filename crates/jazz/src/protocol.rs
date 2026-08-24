@@ -265,7 +265,57 @@ pub enum SyncMessage {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ChunkRequestBatch {
     /// Exact requests coalesced for one transport frame.
+    #[serde(deserialize_with = "deserialize_chunk_requests")]
     pub requests: Vec<ChunkRequestEntry>,
+}
+
+fn deserialize_chunk_requests<'de, D>(deserializer: D) -> Result<Vec<ChunkRequestEntry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct ChunkRequestsVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for ChunkRequestsVisitor {
+        type Value = Vec<ChunkRequestEntry>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                formatter,
+                "at most {} chunk requests",
+                crate::protocol_limits::MAX_CHUNK_REQUEST_BATCH_ENTRIES
+            )
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            let declared = sequence.size_hint();
+            if declared.is_some_and(|count| {
+                count > crate::protocol_limits::MAX_CHUNK_REQUEST_BATCH_ENTRIES
+            }) {
+                return Err(<A::Error as serde::de::Error>::custom(
+                    "chunk request batch exceeds cardinality limit",
+                ));
+            }
+            let mut requests = Vec::with_capacity(
+                declared
+                    .unwrap_or_default()
+                    .min(crate::protocol_limits::MAX_CHUNK_REQUEST_BATCH_ENTRIES),
+            );
+            while let Some(request) = sequence.next_element()? {
+                if requests.len() >= crate::protocol_limits::MAX_CHUNK_REQUEST_BATCH_ENTRIES {
+                    return Err(<A::Error as serde::de::Error>::custom(
+                        "chunk request batch exceeds cardinality limit",
+                    ));
+                }
+                requests.push(request);
+            }
+            Ok(requests)
+        }
+    }
+
+    deserializer.deserialize_seq(ChunkRequestsVisitor)
 }
 
 /// One hop-local request. `remaining_hops` is decremented before forwarding.
