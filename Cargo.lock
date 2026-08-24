@@ -2155,6 +2155,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-example-wequencer-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+]
+
+[[package]]
 name = "jazz-napi"
 version = "0.1.0"
 dependencies = [
