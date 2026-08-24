@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use jazz::db::{Db, DbConfig, DbIdentity, PreparedQuery, block_on};
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, all_of, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -36,7 +36,7 @@ impl Fixture {
             MemoryStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([0xbb; 16]),
-                author: AuthorId::SYSTEM,
+                author: AuthorSubject::SYSTEM,
             },
         )))
         .expect("open BandBinder benchmark database");
