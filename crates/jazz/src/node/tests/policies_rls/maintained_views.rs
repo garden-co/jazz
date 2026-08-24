@@ -361,13 +361,20 @@ fn maintained_subscription_view_shared_todo_member_include_emits_relation_deltas
                     .column("userID", PublicColumnType::Uuid)
                     .policies(
                         PublicTablePolicies::new()
-                            .with_select(public_claim_eq("userID", "sub")),
+                            .with_select(PublicPolicyExpr::eq_session(
+                                "userID",
+                                vec!["user_id".to_owned()],
+                            )),
                     ),
             ),
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let reader = user(0xa1);
     let other = user(0xb2);
+    core.set_session_claims(
+        reader,
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(reader.test_uuid()))]),
+    );
     let member_row = row(0x71);
     let todo_row = row(0x72);
 
