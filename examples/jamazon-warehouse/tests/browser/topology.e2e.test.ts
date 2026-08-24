@@ -172,7 +172,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
             },
           },
           {
-            name: "duplicate a checkout request and make the retry idempotent",
+            name: "duplicate a checkout request and recover a dropped edge-to-core handoff",
             run: async () => {
               const receipts: PurchaseReceipt[] = [];
               scheduler.duplicateNext();
@@ -197,6 +197,37 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
               expect(receipts[0]).toEqual(receipts[1]);
               expect(receipts[0]).toMatchObject({ orderNumber: 17, totalCents: 7_500 });
 
+              // This is an app-owned checkout relay boundary, not an attempt to
+              // instrument Jazz's transport.  The first handoff is dropped and
+              // the retry reaches the same exclusive checkout with the same
+              // request key.  It models the important adopter-visible edge ↔
+              // core failure mode without coupling this example to runtime
+              // protocol details.
+              let recoveredReceipt: PurchaseReceipt | undefined;
+              scheduler.dropNextThenRetry();
+              await scheduler.intercept(
+                { from: "edge", to: "core", label: "checkout-authority-handoff" },
+                undefined,
+                async () => {
+                  const checkout = await purchase(publicDb(owner), {
+                    warehouseId: warehouse.id,
+                    districtId: district.id,
+                    customerId: customer.id,
+                    itemId: item.id,
+                    quantity: 1,
+                    idempotencyKey: "checkout-edge-core-loss",
+                  });
+                  recoveredReceipt = await withTimeout(
+                    checkout.wait(),
+                    15_000,
+                    "retried edge-to-core checkout did not settle",
+                  );
+                },
+              );
+              expect(recoveredReceipt).toBeUndefined();
+              await scheduler.advance();
+              expect(recoveredReceipt).toMatchObject({ orderNumber: 18, totalCents: 2_500 });
+
               const queries = warehouseQueries({
                 warehouseId: warehouse.id,
                 districtId: district.id,
@@ -204,14 +235,51 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
               const orders = await waitForQuery(
                 observer,
                 queries.pendingOrders,
-                (rows) => rows.length === 1 && rows[0]?.id === receipts[0]?.orderId,
-                "observer sees exactly one retried order",
+                (rows) =>
+                  rows.length === 2 &&
+                  rows.map((row) => row.id).join(",") ===
+                    [receipts[0]?.orderId, recoveredReceipt?.orderId].join(","),
+                "observer sees both completed checkout retries in order",
                 20_000,
                 "edge",
               );
               expect(orders.map((order) => [order.order_number, order.total_cents])).toEqual([
                 [17, 7_500],
+                [18, 2_500],
               ]);
+
+              // Fill one page plus one row through the public operational
+              // model. This makes the console query's order and `limit(20)`
+              // observable from a separate browser rather than merely
+              // inspecting its query-builder construction.
+              await Promise.all(
+                Array.from({ length: 19 }, (_, offset) =>
+                  owner
+                    .insert(app.orders, {
+                      warehouse_id: warehouse.id,
+                      district_id: district.id,
+                      customer_id: customer.id,
+                      order_number: 100 + offset,
+                      status: "pending",
+                      total_cents: 0,
+                      idempotency_key: `bounded-operational-order-${offset}`,
+                    })
+                    .wait({ tier: "edge" }),
+                ),
+              );
+              const boundedOrders = await waitForQuery(
+                observer,
+                queries.pendingOrders,
+                (rows) =>
+                  rows.length === 20 &&
+                  rows.map((row) => row.order_number).join(",") ===
+                    [17, 18, ...Array.from({ length: 18 }, (_, offset) => 100 + offset)].join(","),
+                "observer sees the first bounded pending-order page in order",
+                20_000,
+                "edge",
+              );
+              expect(boundedOrders.at(-1)?.order_number).toBe(117);
+              expect(boundedOrders.some((order) => order.order_number === 118)).toBe(false);
               expect(
                 await observer.all(app.order_lines.where({ order_id: receipts[0]!.orderId }), {
                   tier: "edge",
@@ -226,17 +294,17 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
               ]);
               expect(
                 await observer.all(app.stock.where({ id: stock.id }).limit(1), { tier: "edge" }),
-              ).toMatchObject([{ on_hand: 7 }]);
+              ).toMatchObject([{ on_hand: 6 }]);
               expect(
                 await observer.all(app.districts.where({ id: district.id }).limit(1), {
                   tier: "edge",
                 }),
-              ).toMatchObject([{ next_order_number: 18 }]);
+              ).toMatchObject([{ next_order_number: 19 }]);
               expect(
                 await observer.all(app.customers.where({ id: customer.id }).limit(1), {
                   tier: "edge",
                 }),
-              ).toMatchObject([{ balance_cents: -7_500 }]);
+              ).toMatchObject([{ balance_cents: -10_000 }]);
 
               await expect(
                 purchase(publicDb(owner), {
@@ -271,10 +339,10 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                   tier: "edge",
                 }),
               ]);
-              expect(ordersAfterRejectedCheckout).toHaveLength(1);
-              expect(stockAfterRejectedCheckout).toMatchObject([{ on_hand: 7 }]);
-              expect(districtAfterRejectedCheckout).toMatchObject([{ next_order_number: 18 }]);
-              expect(customerAfterRejectedCheckout).toMatchObject([{ balance_cents: -7_500 }]);
+              expect(ordersAfterRejectedCheckout).toHaveLength(21);
+              expect(stockAfterRejectedCheckout).toMatchObject([{ on_hand: 6 }]);
+              expect(districtAfterRejectedCheckout).toMatchObject([{ next_order_number: 19 }]);
+              expect(customerAfterRejectedCheckout).toMatchObject([{ balance_cents: -10_000 }]);
               expect(linesAfterRejectedCheckout).toHaveLength(1);
               expect(paymentsAfterRejectedCheckout).toHaveLength(1);
             },
@@ -322,15 +390,17 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
                 "edge",
               );
               expect(observed[0]?.operator_id).toBe("jamazon-owner");
-              expect(
-                await owner.all(
-                  warehouseQueries({ warehouseId: warehouse.id, districtId: district.id })
-                    .allOrders,
-                  {
-                    tier: "edge",
-                  },
-                ),
-              ).toMatchObject([{ order_number: 17, total_cents: 7_500 }]);
+              const allOrders = await owner.all(
+                warehouseQueries({ warehouseId: warehouse.id, districtId: district.id }).allOrders,
+                {
+                  tier: "edge",
+                },
+              );
+              expect(allOrders).toHaveLength(21);
+              expect(allOrders).toMatchObject([
+                { order_number: 17, total_cents: 7_500 },
+                { order_number: 18, total_cents: 2_500 },
+              ]);
             },
           },
           {
@@ -371,7 +441,7 @@ describe("Jamazon Warehouse browser, edge, and core workflow", () => {
       ["restart", "completed"],
     ]);
     expect(receipt.envelopes[0]?.activities.map(({ action }) => action)).toEqual(
-      expect.arrayContaining(["duplicated", "delivered"]),
+      expect.arrayContaining(["duplicated", "dropped", "retried", "delivered"]),
     );
   }, 90_000);
 });
