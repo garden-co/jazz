@@ -16,7 +16,10 @@ if (actual !== expectedNativeArtifactFingerprint) {
       "In this monorepo rebuild with pnpm --filter jazz-napi build:debug; for an installed package reinstall matching Jazz package versions.",
   );
 }
-if (typeof nativeBinding.NapiDb !== "function" || typeof nativeBinding.NapiDb.prototype.tick !== "function") {
+if (
+  typeof nativeBinding.NapiDb !== "function" ||
+  typeof nativeBinding.NapiDb.prototype.tick !== "function"
+) {
   throw new Error(
     "Jazz NAPI artifact is incomplete despite a matching fingerprint (missing NapiDb.tick). " +
       "Rebuild the monorepo binding or reinstall matching package versions.",
