@@ -12,8 +12,10 @@ import {
   runTopologyScenario,
 } from "../../../../../../packages/jazz-tools/tests/browser/topology-harness.js";
 import {
+  blockJazzServerNetwork,
   getJazzServerInfo,
   getJazzServerJwtForUser,
+  unblockJazzServerNetwork,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
@@ -317,7 +319,7 @@ describe("BandChat cross-topology recovery", () => {
       app.messages
         .where({ roomId: room!.id })
         .select("id", "text", "$createdAt")
-        .orderBy("$createdAt", "asc")
+        .orderBy("$createdAt", "desc")
         .limit(2);
     const receipt = await runTopologyScenario(
       {
@@ -329,8 +331,14 @@ describe("BandChat cross-topology recovery", () => {
         replay: `JAZZ_EXAMPLE_TOPOLOGY_SEED=${seed} pnpm --dir examples/band-chat/apps/nextjs-betterauth test:browser:focused -- tests/browser/topology.e2e.test.tsx`,
         targets: {
           member: {
-            disconnect: async () => peer!.disconnect(),
-            reconnect: async () => peer!.reconnect(),
+            disconnect: async () => {
+              await blockJazzServerNetwork(server!.serverUrl);
+              await peer!.disconnect();
+            },
+            reconnect: async () => {
+              await unblockJazzServerNetwork(server!.serverUrl);
+              await peer!.reconnect();
+            },
           },
         },
         phases: [
@@ -417,7 +425,7 @@ describe("BandChat cross-topology recovery", () => {
                 "edge",
               );
               expect(window.map((message) => message.text)).toEqual([
-                "first projected message",
+                "outside projected window",
                 "second projected message",
               ]);
               expect(window.every((message) => !("attachment" in message))).toBe(true);
@@ -427,6 +435,11 @@ describe("BandChat cross-topology recovery", () => {
           {
             name: "write while member is disconnected",
             run: async () => {
+              const beforeReplay = await peer!.all(projectedWindow(), { tier: "local" });
+              expect(beforeReplay.map((message) => message.text)).toEqual([
+                "outside projected window",
+                "second projected message",
+              ]);
               await owner!
                 .insert(app.messages, {
                   roomId: room!.id,
@@ -434,6 +447,11 @@ describe("BandChat cross-topology recovery", () => {
                   text: "after member disconnect",
                 })
                 .wait({ tier: "edge" });
+              const stillOffline = await peer!.all(projectedWindow(), { tier: "local" });
+              expect(stillOffline.map((message) => message.text)).toEqual([
+                "outside projected window",
+                "second projected message",
+              ]);
             },
             faultsAfter: [{ kind: "reconnect", target: "member" }],
           },
@@ -449,9 +467,15 @@ describe("BandChat cross-topology recovery", () => {
                 "edge",
               );
               expect(recovered.map((message) => message.text)).toEqual([
-                "first projected message",
-                "second projected message",
+                "after member disconnect",
+                "outside projected window",
               ]);
+            },
+            faultsAfter: [{ kind: "disconnect", target: "member" }],
+          },
+          {
+            name: "offline restart rehydrates the same persistent cache",
+            run: async () => {
               ctx.untrack(peer!);
               await peer!.shutdown();
               const peerToken = await getJazzServerJwtForUser(
@@ -464,13 +488,31 @@ describe("BandChat cross-topology recovery", () => {
                 peer,
                 projectedWindow(),
                 (rows) => rows.length === 2,
-                "restarted member rehydrates its bounded projection",
+                "offline restarted member rehydrates its bounded projection",
+                15_000,
+                "local",
+              );
+              expect(rehydrated.map((message) => message.text)).toEqual([
+                "after member disconnect",
+                "outside projected window",
+              ]);
+            },
+            faultsAfter: [{ kind: "reconnect", target: "member" }],
+          },
+          {
+            name: "reconnected restarted member retains its exact window",
+            run: async () => {
+              const online = await waitForQuery(
+                peer!,
+                projectedWindow(),
+                (rows) => rows.length === 2,
+                "restarted member reconnects with its bounded projection",
                 15_000,
                 "edge",
               );
-              expect(rehydrated.map((message) => message.text)).toEqual([
-                "first projected message",
-                "second projected message",
+              expect(online.map((message) => message.text)).toEqual([
+                "after member disconnect",
+                "outside projected window",
               ]);
             },
           },
@@ -497,6 +539,8 @@ describe("BandChat cross-topology recovery", () => {
     );
     expect(receipt.status).toBe("passed");
     expect(receipt.faults.map((fault) => [fault.kind, fault.status])).toEqual([
+      ["disconnect", "completed"],
+      ["reconnect", "completed"],
       ["disconnect", "completed"],
       ["reconnect", "completed"],
     ]);
