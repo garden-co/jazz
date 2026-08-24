@@ -11,10 +11,19 @@ release-time fields. The measured workloads are prepared, ordered Jazz reads for
 - a label's releases;
 - an artist's releases;
 - a catalogue's releases.
+- a 1,000-row import at batch sizes 1, 10, 100, and 1,000, plus 10k, 100k, and
+  1M-row imports at batch size 1,000 for performance thesis
+  [#1964](https://github.com/garden-co/jazz/issues/1964).
 
 Database opening, schema compilation, fixture insertion, local-durability waits,
 and query preparation happen before each measured closure. The returned row count
 is black-boxed so the read cannot be optimized away.
+
+The ingest benchmark measures release construction and insertion. Schema
+compilation, database opening, and dimension-row seeding are supplied as untimed
+per-iteration Divan inputs. Existing read fixtures retain their original
+one-transaction-per-release history shape so their CodSpeed series stays
+comparable.
 
 Run locally with:
 
