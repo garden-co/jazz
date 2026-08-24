@@ -750,4 +750,7 @@ pub(crate) struct LoweredTerminal {
     pub(crate) graph: GraphBuilder,
     /// Typed terminal output contract.
     pub(crate) output: OutputTerminalSchema,
+    /// Public large-value demand associated with this terminal. Fact terminals
+    /// use the default full demand.
+    pub(crate) demand: AppProjectionTree,
 }

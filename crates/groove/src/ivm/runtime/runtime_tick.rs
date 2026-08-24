@@ -20,6 +20,9 @@ struct EvaluationSession<'a> {
     relevant_nodes: HashSet<NodeId>,
     roots: HashSet<NodeId>,
     outputs: HashMap<NodeId, RecordDeltas>,
+    /// Per-root terminal demand for hydration. Ordinary internal hydration
+    /// leaves this empty and therefore retains full materialization.
+    output_demands: HashMap<NodeId, OutputDemand>,
     pending_outputs: HashMap<NodeId, RecordDeltas>,
     operator_states: HashMap<OperatorStateKey, OperatorState>,
     arrangement_states: HashMap<ArrangementKey, AsOf<ArrangementState, SubTick>>,
@@ -625,12 +628,10 @@ impl IncrementalEvaluation<'_> {
                         .insert(output.node, Arc::clone(&records));
                     records
                 };
-                let records = match evaluator.materialize_indirect_input(&physical_records) {
-                    Ok(records) => {
-                        self.pending_subscription_outputs
-                            .insert(output.node, Arc::clone(&records));
-                        records
-                    }
+                let records = match evaluator
+                    .materialize_indirect_output(&physical_records, &output.demand)
+                {
+                    Ok(records) => records,
                     Err(IvmRuntimeError::EvaluationBlocked) => {
                         self.terminal_deltas = std::mem::take(&mut evaluator.terminal_deltas);
                         self.root_ordering_windows =
@@ -898,6 +899,7 @@ impl<'a> EvaluationSession<'a> {
             relevant_nodes,
             roots: roots.into_iter().collect(),
             outputs: HashMap::default(),
+            output_demands: HashMap::default(),
             pending_outputs: HashMap::default(),
             operator_states,
             arrangement_states,
@@ -924,6 +926,18 @@ impl<'a> EvaluationSession<'a> {
         for node in &affected {
             let meta = self.node_meta.entry(*node).or_default();
             meta.input_generation = meta.input_generation.wrapping_add(1);
+        }
+    }
+
+    fn set_output_demands(&mut self, outputs: &BTreeMap<String, CompiledNode>) {
+        for output in outputs.values() {
+            self.output_demands
+                .entry(output.node)
+                // One shared graph can feed several terminal contracts. A
+                // conflicting read of the same field conservatively becomes
+                // full; independent field demands remain exact.
+                .and_modify(|existing| existing.merge_for_shared_output(&output.demand))
+                .or_insert_with(|| output.demand.clone());
         }
     }
 
@@ -992,9 +1006,13 @@ impl<'a> EvaluationSession<'a> {
                         let mut materialized = Vec::with_capacity(records.deltas.len());
                         let mut blocked = false;
                         for delta in &records.deltas {
-                            match crate::large_values::materialize_record_attempt(
+                            match crate::large_values::materialize_record_demand_attempt(
                                 &records.descriptor,
                                 delta.raw(),
+                                self.output_demands
+                                    .get(&node)
+                                    .map(OutputDemand::fields)
+                                    .unwrap_or(&BTreeMap::new()),
                                 &mut self.evaluation_inputs,
                             ) {
                                 Ok(record) => materialized.push(RecordDelta {
@@ -1137,6 +1155,7 @@ impl IvmRuntime {
             Ok::<_, IvmRuntimeError>(found || self.output_depends_on_aggregate(root)?)
         })?;
         let mut session = EvaluationSession::hydration(self, roots, storage)?;
+        session.set_output_demands(&outputs);
         if let Some(shape) = binding_frontier_advance {
             session.advance_binding_input(&self.graph, shape);
         }
@@ -1835,8 +1854,15 @@ impl IvmRuntime {
     where
         S: OrderedKvStorage,
     {
-        self.hydration_roots_owned(roots, OwnedStorage::new(Rc::new(storage)), mode, None, None)
-            .await
+        self.hydration_roots_owned(
+            roots,
+            OwnedStorage::new(Rc::new(storage)),
+            mode,
+            None,
+            None,
+            None,
+        )
+        .await
     }
 
     async fn hydration_roots_owned<'a>(
@@ -1846,6 +1872,7 @@ impl IvmRuntime {
         mode: HydrationMode,
         binding_snapshots: Option<HashMap<String, RecordDeltas>>,
         binding_frontier_advance: Option<&str>,
+        output_demands: Option<&BTreeMap<String, CompiledNode>>,
     ) -> Result<HashMap<NodeId, RecordDeltas>, IvmRuntimeError> {
         let roots = roots.into_iter().collect::<VecDeque<_>>();
         let binding_snapshots = binding_snapshots.unwrap_or_else(|| self.binding_snapshot_deltas());
@@ -1858,6 +1885,9 @@ impl IvmRuntime {
                 Ok::<_, IvmRuntimeError>(found || self.output_depends_on_aggregate(root)?)
             })?;
         let mut session = EvaluationSession::hydration(self, roots, owned_storage)?;
+        if let Some(outputs) = output_demands {
+            session.set_output_demands(outputs);
+        }
         if let Some(shape) = binding_frontier_advance {
             session.advance_binding_input(&self.graph, shape);
         }
@@ -1916,6 +1946,7 @@ impl IvmRuntime {
                 mode,
                 binding_snapshots,
                 binding_frontier_advance,
+                Some(outputs),
             )
             .await?;
         subscription_snapshot_from_hydrated(outputs, &hydrated)

@@ -80,6 +80,87 @@ pub struct PreparedShape {
     pub(super) id: PreparedShapeId,
 }
 
+/// Per-field logical value requirements at a subscription output boundary.
+///
+/// Fields absent from this map retain the historical full-materialization
+/// behavior. This keeps ordinary subscriptions source compatible while letting
+/// callers ask the chunk reader for only a logical range of a large scalar.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct OutputDemand {
+    fields: BTreeMap<String, crate::large_values::LargeValueDemand>,
+}
+
+impl OutputDemand {
+    pub fn new(
+        fields: impl IntoIterator<Item = (impl Into<String>, crate::large_values::LargeValueDemand)>,
+    ) -> Self {
+        Self {
+            fields: fields
+                .into_iter()
+                .map(|(field, demand)| (field.into(), demand))
+                .collect(),
+        }
+    }
+
+    pub fn field(&self, name: &str) -> crate::large_values::LargeValueDemand {
+        self.fields
+            .get(name)
+            .cloned()
+            .unwrap_or(crate::large_values::LargeValueDemand::Full)
+    }
+
+    pub fn fields(&self) -> &BTreeMap<String, crate::large_values::LargeValueDemand> {
+        &self.fields
+    }
+
+    pub(crate) fn merge_for_shared_output(&mut self, other: &Self) {
+        for (field, demand) in &other.fields {
+            match self.fields.get(field) {
+                Some(current) if current != demand => {
+                    self.fields
+                        .insert(field.clone(), crate::large_values::LargeValueDemand::Full);
+                }
+                Some(_) => {}
+                None => {
+                    self.fields.insert(field.clone(), demand.clone());
+                }
+            }
+        }
+    }
+}
+
+/// One direct multisink output and its terminal materialization requirements.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MultisinkTerminal {
+    pub sink: String,
+    pub graph: GraphBuilder,
+    pub demand: OutputDemand,
+}
+
+impl MultisinkTerminal {
+    pub fn new(sink: impl Into<String>, graph: GraphBuilder) -> Self {
+        Self {
+            sink: sink.into(),
+            graph,
+            demand: OutputDemand::default(),
+        }
+    }
+
+    pub fn with_output_demand(mut self, demand: OutputDemand) -> Self {
+        self.demand = demand;
+        self
+    }
+}
+
+impl<K> From<(K, GraphBuilder)> for MultisinkTerminal
+where
+    K: Into<String>,
+{
+    fn from((sink, graph): (K, GraphBuilder)) -> Self {
+        Self::new(sink, graph)
+    }
+}
+
 impl PreparedShape {
     pub fn id(&self) -> PreparedShapeId {
         self.id
@@ -99,6 +180,7 @@ pub struct RoutedMultisinkTerminal {
     /// Binding descriptor positions paired with `route_fields`.
     pub route_value_indices: Vec<usize>,
     pub public_fields: Vec<String>,
+    pub demand: OutputDemand,
 }
 
 impl RoutedMultisinkTerminal {
@@ -116,6 +198,7 @@ impl RoutedMultisinkTerminal {
             route_fields,
             route_value_indices,
             public_fields: public_fields.into_iter().map(Into::into).collect(),
+            demand: OutputDemand::default(),
         }
     }
 
@@ -125,6 +208,11 @@ impl RoutedMultisinkTerminal {
         route_value_indices: impl IntoIterator<Item = usize>,
     ) -> Self {
         self.route_value_indices = route_value_indices.into_iter().collect();
+        self
+    }
+
+    pub fn with_output_demand(mut self, demand: OutputDemand) -> Self {
+        self.demand = demand;
         self
     }
 }
@@ -730,6 +818,8 @@ pub(super) struct CompiledNode {
     /// ambiguous once a structured plan contains independently ordered nested
     /// collections.
     pub(super) root_ordering_node: Option<NodeId>,
+    /// Materialization contract owned by this particular terminal output.
+    pub(super) demand: OutputDemand,
 }
 
 /// Descriptor plus a batch of weighted encoded record changes.
@@ -1993,26 +2083,24 @@ impl IvmRuntime {
             };
             return self.bind_shape_one_sink(shape_id, &[plan.binding_value], storage);
         }
-        let multisink = self.subscribe_staged(vec![(DEFAULT_SINK.to_owned(), graph)], storage)?;
+        let multisink =
+            self.subscribe_staged(vec![MultisinkTerminal::new(DEFAULT_SINK, graph)], storage)?;
         let subscription = self.single_sink_subscription(multisink, DEFAULT_SINK)?;
         self.poll_ready_subscription_work_now()?;
         Ok(subscription)
     }
 
-    pub fn subscribe<I, K, S>(
+    pub fn subscribe<I, S>(
         &mut self,
         sinks: I,
         storage: &Rc<S>,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
-        I: IntoIterator<Item = (K, GraphBuilder)>,
-        K: Into<String>,
+        I: IntoIterator,
+        I::Item: Into<MultisinkTerminal>,
         S: OrderedKvStorage + 'static,
     {
-        let sinks = sinks
-            .into_iter()
-            .map(|(sink, graph)| (sink.into(), graph))
-            .collect::<Vec<_>>();
+        let sinks = sinks.into_iter().map(Into::into).collect::<Vec<_>>();
         let subscription = self.subscribe_staged(sinks, storage)?;
         self.poll_ready_subscription_work_now()?;
         Ok(subscription)
@@ -2031,7 +2119,7 @@ impl IvmRuntime {
 
     fn subscribe_staged<S>(
         &mut self,
-        sinks: Vec<(String, GraphBuilder)>,
+        sinks: Vec<MultisinkTerminal>,
         storage: &Rc<S>,
     ) -> Result<MultisinkSubscription, IvmRuntimeError>
     where
@@ -2041,16 +2129,20 @@ impl IvmRuntime {
             return Err(IvmRuntimeError::EmptyMultisinkSubscription);
         }
         let mut sink_names = HashSet::new();
-        for (sink, _) in &sinks {
-            if !sink_names.insert(sink.clone()) {
-                return Err(IvmRuntimeError::DuplicateMultisinkSink(sink.clone()));
+        for terminal in &sinks {
+            if !sink_names.insert(terminal.sink.clone()) {
+                return Err(IvmRuntimeError::DuplicateMultisinkSink(
+                    terminal.sink.clone(),
+                ));
             }
         }
-        if let Some((sink, _)) = sinks
+        if let Some(terminal) = sinks
             .iter()
-            .find(|(_, graph)| builder_contains_binding_source(graph))
+            .find(|terminal| builder_contains_binding_source(&terminal.graph))
         {
-            return Err(IvmRuntimeError::MultisinkSinkRequiresPrepare(sink.clone()));
+            return Err(IvmRuntimeError::MultisinkSinkRequiresPrepare(
+                terminal.sink.clone(),
+            ));
         }
         let subscription_id = self.next_subscription_id();
         let (sender, receiver) = mpsc::channel();
@@ -2071,12 +2163,13 @@ impl IvmRuntime {
             let runtime = install.runtime();
             runtime.logical_nodes_requested += sinks
                 .iter()
-                .map(|(_, graph)| count_builder_nodes(graph))
+                .map(|terminal| count_builder_nodes(&terminal.graph))
                 .sum::<usize>() as u64;
             let mut outputs = BTreeMap::new();
-            for (sink, graph) in sinks {
-                let compiled = runtime.add_dedup_graph(&graph)?;
-                outputs.insert(sink, compiled);
+            for terminal in sinks {
+                let mut compiled = runtime.add_dedup_graph(&terminal.graph)?;
+                compiled.demand = terminal.demand;
+                outputs.insert(terminal.sink, compiled);
             }
             for output in outputs.values() {
                 runtime.retain_as_subscription(subscription_id, output.node);
@@ -2186,7 +2279,8 @@ impl IvmRuntime {
         }
         let mut terminal_states = BTreeMap::new();
         for terminal in terminals {
-            let output = self.add_dedup_graph(&terminal.graph)?;
+            let mut output = self.add_dedup_graph(&terminal.graph)?;
+            output.demand = terminal.demand.clone();
             self.add_retainer(
                 output.node,
                 Retainer::PreparedShape(shape_id.retainer_key()),
@@ -2273,7 +2367,8 @@ impl IvmRuntime {
                     terminal.public_fields = fields.clone();
                 }
                 let graph = bound_routed_multisink_graph(&terminal, binding_values);
-                let output = runtime.add_dedup_graph(&graph)?;
+                let mut output = runtime.add_dedup_graph(&graph)?;
+                output.demand = terminal.demand.clone();
                 outputs.insert(sink.clone(), output);
             }
             let binding_shape = runtime.binding_source_shape_name(shape_id)?;

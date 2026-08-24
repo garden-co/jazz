@@ -43,6 +43,52 @@ fn app_row_terminal_schema(output: &ProgramOutputSchemas) -> Result<&AppRowSchem
         ))
 }
 
+fn groove_output_demand(
+    schema: &AppRowSchema,
+    demand_tree: &AppProjectionTree,
+) -> groove::ivm::OutputDemand {
+    groove::ivm::OutputDemand::new(schema.descriptor.fields().iter().filter_map(|field| {
+        let physical = field.name.as_deref()?;
+        let public = schema
+            .public_field_names
+            .get(physical)
+            .map(String::as_str)
+            .unwrap_or(physical);
+        let projection = demand_tree
+            .demands
+            .get(public)
+            .or_else(|| demand_tree.demands.get(physical))?;
+        let demand = match projection {
+            crate::query::SelectProjection::Full { .. } => {
+                groove::large_values::LargeValueDemand::Full
+            }
+            crate::query::SelectProjection::Bytes { from, to, .. } => {
+                groove::large_values::LargeValueDemand::Bytes(*from..*to)
+            }
+            crate::query::SelectProjection::TextUtf16 { from, to, .. } => {
+                groove::large_values::LargeValueDemand::TextUtf16(*from..*to)
+            }
+            crate::query::SelectProjection::TextUtf8 { from, to, .. } => {
+                groove::large_values::LargeValueDemand::TextUtf8(*from..*to)
+            }
+            crate::query::SelectProjection::JsonPointer { at, .. } => {
+                groove::large_values::LargeValueDemand::JsonPointer(at.clone())
+            }
+        };
+        Some((physical.to_owned(), demand))
+    }))
+}
+
+fn terminal_groove_output_demand(
+    output: &OutputTerminalSchema,
+    demand_tree: &AppProjectionTree,
+) -> groove::ivm::OutputDemand {
+    match output {
+        OutputTerminalSchema::AppRows(schema) => groove_output_demand(schema, demand_tree),
+        OutputTerminalSchema::Fact(_) => groove::ivm::OutputDemand::default(),
+    }
+}
+
 pub(super) fn lowered_terminal_graph(
     program: &QueryProgram,
     sink: &str,
@@ -94,12 +140,18 @@ pub(super) fn lowered_materialization_app_rows_graph(
         .unwrap_or_else(|| lowered_app_rows_graph(program))
 }
 
-pub(super) fn lowered_program_sinks(program: &QueryProgram) -> Vec<(String, GraphBuilder)> {
+pub(super) fn lowered_program_sinks(program: &QueryProgram) -> Vec<groove::ivm::MultisinkTerminal> {
     program
         .lowered
         .terminals
         .iter()
-        .map(|terminal| (terminal.sink.clone(), terminal.graph.clone()))
+        .map(|terminal| {
+            groove::ivm::MultisinkTerminal::new(terminal.sink.clone(), terminal.graph.clone())
+                .with_output_demand(terminal_groove_output_demand(
+                    &terminal.output,
+                    &terminal.demand,
+                ))
+        })
         .collect()
 }
 
@@ -521,6 +573,18 @@ where
         _binding: &Binding,
     ) -> Result<PreparedQueryPlan, Error> {
         let app_row_fields = app_row_terminal_fields(&program.lowered.output)?;
+        let app_row_demand = groove_output_demand(
+            app_row_terminal_schema(&program.lowered.output)?,
+            &program
+                .lowered
+                .terminals
+                .iter()
+                .find(|terminal| terminal.sink == JAZZ_APP_ROWS_SINK)
+                .ok_or(Error::InvalidStoredValue(
+                    "query program did not emit app row terminal",
+                ))?
+                .demand,
+        );
         let graph = lowered_materialization_app_rows_graph(&program)?;
         let params = prepared_params_from_domain(&program.lowered.parameters);
         let route_eligible_fields =
@@ -566,7 +630,8 @@ where
                         route_fields,
                         app_row_fields,
                     )
-                    .with_route_value_indices(route_value_indices)],
+                    .with_route_value_indices(route_value_indices)
+                    .with_output_demand(app_row_demand)],
                     binding_source_shape,
                     binding_descriptor,
                 )
@@ -588,11 +653,17 @@ where
         let params = prepared_params_from_domain(&program.lowered.parameters);
         let route_params = prepared_route_param_names(&program.lowered.parameters);
         if params.is_empty() {
-            let sinks: Vec<(String, GraphBuilder)> = program
+            let sinks: Vec<groove::ivm::MultisinkTerminal> = program
                 .lowered
                 .terminals
                 .into_iter()
-                .map(|terminal| (terminal.sink, terminal.graph))
+                .map(|terminal| {
+                    groove::ivm::MultisinkTerminal::new(terminal.sink, terminal.graph)
+                        .with_output_demand(terminal_groove_output_demand(
+                            &terminal.output,
+                            &terminal.demand,
+                        ))
+                })
                 .collect();
             return self.database.subscribe(sinks).map_err(Error::Groove);
         }
@@ -629,7 +700,11 @@ where
                     route_fields,
                     public_fields,
                 )
-                .with_route_value_indices(route_value_indices))
+                .with_route_value_indices(route_value_indices)
+                .with_output_demand(terminal_groove_output_demand(
+                    &terminal.output,
+                    &terminal.demand,
+                )))
             })
             .collect::<Result<Vec<_>, Error>>()?;
         let prepared = self

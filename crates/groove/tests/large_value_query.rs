@@ -8,9 +8,11 @@ use std::{
 use bytes::Bytes;
 use futures::task::noop_waker;
 use groove::chunks::{ChunkError, ChunkRequest, OwnedChunkProvider, TestChunkProvider};
-use groove::db::{Database, GraphBuilder, PredicateExpr};
+use groove::db::{Database, GraphBuilder, MultisinkTerminal, OutputDemand, PredicateExpr};
 use groove::ivm::{AggregateExpr, AggregateFunction, ProjectField};
-use groove::large_values::{LargeValueKind, Locator, TailAppendOutcome, append_tail, prepare};
+use groove::large_values::{
+    LargeValueDemand, LargeValueKind, Locator, TailAppendOutcome, append_tail, prepare,
+};
 use groove::records::{RecordDescriptor, Value, ValueType};
 use groove::schema::{
     ColumnSchema, ColumnType, DatabaseSchema, IntegerKeyType, PrimaryKey, TableSchema,
@@ -289,6 +291,261 @@ async fn subscription_materializes_large_insert_and_update_deltas_atomically() {
     assert_eq!(updated.len(), 2);
     assert!(updated.contains(&(vec![Value::U64(1), Value::String(first_text)], -1)));
     assert!(updated.contains(&(vec![Value::U64(1), Value::String(second_text)], 1)));
+}
+
+#[futures_test::test]
+async fn direct_subscription_range_demand_reads_only_the_intersecting_chunks() {
+    let logical = (0_u8..=255).cycle().take(800_000).collect::<Vec<_>>();
+    let prepared = prepare(LargeValueKind::Bytes, &logical, |hash| {
+        Locator(hash.0[..24].to_vec())
+    })
+    .unwrap();
+    // `prepare` stages leaves before their parent branches. Serving only the
+    // first leaf and root is a planted sensitivity check: full hydration would
+    // request a missing later leaf and fail this subscription.
+    let required = prepared
+        .staged_chunks
+        .iter()
+        .enumerate()
+        .filter(|(index, chunk)| *index == 0 || chunk.node_ref == prepared.value_ref.root)
+        .map(|(_, chunk)| {
+            (
+                ChunkRequest {
+                    object_hash: chunk.node_ref.object_hash.0,
+                    locator: chunk.node_ref.locator.0.clone(),
+                },
+                Bytes::copy_from_slice(&chunk.encoded),
+            )
+        })
+        .collect::<Vec<_>>();
+    let expected_requests = required
+        .iter()
+        .map(|(request, _)| request.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let (provider, control) = TestChunkProvider::controlled(required);
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "docs",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("body", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let column_families = schema
+        .column_families()
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let column_family_refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let mut database = Database::new(schema, MemoryStorage::new(&column_family_refs))
+        .await
+        .unwrap();
+    database.set_chunk_provider(Rc::new(provider));
+    let subscription = database
+        .subscribe([MultisinkTerminal::new("docs", GraphBuilder::table("docs"))
+            .with_output_demand(OutputDemand::new([(
+                "body",
+                LargeValueDemand::Bytes(13..29),
+            )]))])
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut batch = database.open_batch();
+    batch.insert(
+        "docs",
+        vec![Value::U64(1), Value::Large(prepared.value_ref)],
+    );
+    let publication = database.apply_batch(batch).await.unwrap();
+    database
+        .finish_persistence(publication.persist().await)
+        .unwrap();
+
+    let delivered = subscription.recv().unwrap();
+    let rows = delivered.sinks["docs"].to_values().unwrap();
+    assert_eq!(
+        rows,
+        vec![(
+            vec![Value::U64(1), Value::Bytes(logical[13..29].to_vec())],
+            1
+        )]
+    );
+    assert_eq!(
+        control
+            .observed()
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected_requests
+    );
+}
+
+#[futures_test::test]
+async fn one_shot_multisink_range_demand_uses_the_same_terminal_boundary() {
+    let logical = vec![0x5a; 800_000];
+    let prepared = prepare(LargeValueKind::Bytes, &logical, |hash| {
+        Locator(hash.0[..24].to_vec())
+    })
+    .unwrap();
+    let chunks = prepared
+        .staged_chunks
+        .iter()
+        .enumerate()
+        .filter(|(index, chunk)| *index == 0 || chunk.node_ref == prepared.value_ref.root)
+        .map(|(_, chunk)| {
+            (
+                ChunkRequest {
+                    object_hash: chunk.node_ref.object_hash.0,
+                    locator: chunk.node_ref.locator.0.clone(),
+                },
+                Bytes::copy_from_slice(&chunk.encoded),
+            )
+        })
+        .collect::<Vec<_>>();
+    let (provider, _) = TestChunkProvider::controlled(chunks);
+    let mut database = Database::new(DatabaseSchema::new([]), MemoryStorage::new(&[]))
+        .await
+        .unwrap();
+    database.set_chunk_provider(Rc::new(provider));
+    let descriptor = RecordDescriptor::new([("body", ValueType::Bytes)]);
+    let rows = database
+        .query_graphs([MultisinkTerminal::new(
+            "body",
+            GraphBuilder::values(descriptor, [vec![Value::Large(prepared.value_ref)]]).unwrap(),
+        )
+        .with_output_demand(OutputDemand::new([(
+            "body",
+            LargeValueDemand::Bytes(100..117),
+        )]))])
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.sinks["body"].to_values().unwrap(),
+        vec![(vec![Value::Bytes(logical[100..117].to_vec())], 1)]
+    );
+}
+
+#[futures_test::test]
+async fn prepared_multisink_terminal_demands_survive_initial_hydration() {
+    let first_bytes = vec![0x31; 800_000];
+    let second_bytes = vec![0x62; 800_000];
+    let first = prepare(LargeValueKind::Bytes, &first_bytes, |hash| {
+        let mut locator = b"first/".to_vec();
+        locator.extend_from_slice(&hash.0[..20]);
+        Locator(locator)
+    })
+    .unwrap();
+    let second = prepare(LargeValueKind::Bytes, &second_bytes, |hash| {
+        let mut locator = b"second/".to_vec();
+        locator.extend_from_slice(&hash.0[..20]);
+        Locator(locator)
+    })
+    .unwrap();
+    let chunks = [(&first, 0usize), (&second, 0usize)]
+        .into_iter()
+        .flat_map(|(prepared, first_leaf)| {
+            prepared
+                .staged_chunks
+                .iter()
+                .enumerate()
+                .filter(move |(index, chunk)| {
+                    *index == first_leaf || chunk.node_ref == prepared.value_ref.root
+                })
+                .map(|(_, chunk)| {
+                    (
+                        ChunkRequest {
+                            object_hash: chunk.node_ref.object_hash.0,
+                            locator: chunk.node_ref.locator.0.clone(),
+                        },
+                        Bytes::copy_from_slice(&chunk.encoded),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let (provider, _) = TestChunkProvider::controlled(chunks);
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "docs",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("first", ColumnType::Bytes),
+            ColumnSchema::new("second", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let column_families = schema
+        .column_families()
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let column_family_refs = column_families
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let mut database = Database::new(schema, MemoryStorage::new(&column_family_refs))
+        .await
+        .unwrap();
+    database.set_chunk_provider(Rc::new(provider));
+    let mut batch = database.open_batch();
+    batch.insert(
+        "docs",
+        vec![
+            Value::U64(1),
+            Value::Large(first.value_ref),
+            Value::Large(second.value_ref),
+        ],
+    );
+    let publication = database.apply_batch(batch).await.unwrap();
+    database
+        .finish_persistence(publication.persist().await)
+        .unwrap();
+
+    let shape = database
+        .prepare(
+            [
+                groove::db::RoutedMultisinkTerminal::new(
+                    "first",
+                    GraphBuilder::table("docs").project(["id", "first"]),
+                    std::iter::empty::<&str>(),
+                    ["id", "first"],
+                )
+                .with_output_demand(OutputDemand::new([(
+                    "first",
+                    LargeValueDemand::Bytes(4..11),
+                )])),
+                groove::db::RoutedMultisinkTerminal::new(
+                    "second",
+                    GraphBuilder::table("docs").project(["id", "second"]),
+                    std::iter::empty::<&str>(),
+                    ["id", "second"],
+                )
+                .with_output_demand(OutputDemand::new([(
+                    "second",
+                    LargeValueDemand::Bytes(9..16),
+                )])),
+            ],
+            "test/no-params",
+            RecordDescriptor::new(std::iter::empty::<(String, ValueType)>()),
+        )
+        .await
+        .unwrap();
+    let subscription = database.bind_shape(shape.id(), &[]).await.unwrap();
+    let initial = subscription.recv().unwrap();
+    assert_eq!(
+        initial.sinks["first"].to_values().unwrap(),
+        vec![(
+            vec![Value::U64(1), Value::Bytes(first_bytes[4..11].to_vec())],
+            1
+        )]
+    );
+    assert_eq!(
+        initial.sinks["second"].to_values().unwrap(),
+        vec![(
+            vec![Value::U64(1), Value::Bytes(second_bytes[9..16].to_vec())],
+            1
+        )]
+    );
 }
 
 #[futures_test::test]

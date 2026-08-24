@@ -756,42 +756,45 @@ impl IvmRuntime {
         Ok(records)
     }
 
-    pub async fn query_snapshots<I, K, S>(
+    pub async fn query_snapshots<I, S>(
         &mut self,
         sinks: I,
         storage: &S,
     ) -> Result<MultisinkDeltas, IvmRuntimeError>
     where
-        I: IntoIterator<Item = (K, GraphBuilder)>,
-        K: Into<String>,
+        I: IntoIterator,
+        I::Item: Into<MultisinkTerminal>,
         S: OrderedKvStorage,
     {
-        let sinks = sinks
-            .into_iter()
-            .map(|(sink, graph)| (sink.into(), graph))
-            .collect::<Vec<_>>();
+        let sinks = sinks.into_iter().map(Into::into).collect::<Vec<_>>();
         self.flush_pending_binding_retractions(storage).await?;
         if sinks.is_empty() {
             return Err(IvmRuntimeError::EmptyMultisinkSubscription);
         }
         let mut sink_names = HashSet::new();
-        for (sink, graph) in &sinks {
-            if !sink_names.insert(sink.clone()) {
-                return Err(IvmRuntimeError::DuplicateMultisinkSink(sink.clone()));
+        for terminal in &sinks {
+            if !sink_names.insert(terminal.sink.clone()) {
+                return Err(IvmRuntimeError::DuplicateMultisinkSink(
+                    terminal.sink.clone(),
+                ));
             }
-            if builder_contains_binding_source(graph) {
-                return Err(IvmRuntimeError::MultisinkSinkRequiresPrepare(sink.clone()));
+            if builder_contains_binding_source(&terminal.graph) {
+                return Err(IvmRuntimeError::MultisinkSinkRequiresPrepare(
+                    terminal.sink.clone(),
+                ));
             }
         }
         let mut query = super::graph_lifecycle::EphemeralGraphInstall::new(self);
         let runtime = query.runtime();
         runtime.logical_nodes_requested += sinks
             .iter()
-            .map(|(_, graph)| count_builder_nodes(graph))
+            .map(|terminal| count_builder_nodes(&terminal.graph))
             .sum::<usize>() as u64;
         let mut outputs = BTreeMap::new();
-        for (sink, graph) in sinks {
-            outputs.insert(sink, runtime.add_dedup_graph(&graph)?);
+        for terminal in sinks {
+            let mut output = runtime.add_dedup_graph(&terminal.graph)?;
+            output.demand = terminal.demand;
+            outputs.insert(terminal.sink, output);
         }
         runtime
             .hydration_snapshots(&outputs, storage, HydrationMode::Ordinary)

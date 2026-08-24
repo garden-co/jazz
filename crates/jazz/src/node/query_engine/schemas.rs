@@ -33,6 +33,9 @@ pub(crate) struct AppRowSchema {
     /// with `user_`, which is otherwise the physical CurrentRow source-cell
     /// namespace.
     pub(crate) public_field_names: BTreeMap<String, String>,
+    /// Root large-value requirements retained through lowering to the Groove
+    /// subscription boundary.
+    pub(crate) demand: AppProjectionTree,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -42,6 +42,16 @@ pub(crate) struct AppProjectionTree {
     pub(crate) paths: Vec<AppPathProjection>,
 }
 
+impl Default for AppProjectionTree {
+    fn default() -> Self {
+        Self {
+            fields: FieldProjection::All,
+            demands: BTreeMap::new(),
+            paths: Vec::new(),
+        }
+    }
+}
+
 /// Field projection for app rows.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum FieldProjection {

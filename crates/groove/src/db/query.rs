@@ -231,10 +231,10 @@ impl Database {
     ///
     /// The initial message includes every sink, even if that sink is empty.
     /// Later messages are sent only when at least one sink has deltas.
-    pub fn subscribe<I, K>(&mut self, sinks: I) -> Result<MultisinkSubscription, Error>
+    pub fn subscribe<I>(&mut self, sinks: I) -> Result<MultisinkSubscription, Error>
     where
-        I: IntoIterator<Item = (K, GraphBuilder)>,
-        K: Into<String>,
+        I: IntoIterator,
+        I::Item: Into<crate::ivm::MultisinkTerminal>,
     {
         self.ensure_not_poisoned()?;
         let overlay = Rc::new(StagedWriteOverlay::new_owned(
@@ -715,10 +715,10 @@ impl Database {
 
     /// Run several named graph outputs against the same current storage
     /// snapshot without registering a live subscription.
-    pub async fn query_graphs<I, K>(&mut self, sinks: I) -> Result<MultisinkDeltas, Error>
+    pub async fn query_graphs<I>(&mut self, sinks: I) -> Result<MultisinkDeltas, Error>
     where
-        I: IntoIterator<Item = (K, GraphBuilder)>,
-        K: Into<String>,
+        I: IntoIterator,
+        I::Item: Into<crate::ivm::MultisinkTerminal>,
     {
         self.ensure_not_poisoned()?;
         let overlay = StagedWriteOverlay::new(&self.storage, &self.resident_writes);

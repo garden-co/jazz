@@ -104,6 +104,7 @@ impl IvmRuntime {
                     output,
                     node,
                     root_ordering_node: None,
+                    demand: OutputDemand::default(),
                 })
             }
             GraphBuilder::InlineRecords { output, records } => {
@@ -125,6 +126,7 @@ impl IvmRuntime {
                     output: *output,
                     node,
                     root_ordering_node: None,
+                    demand: OutputDemand::default(),
                 })
             }
             GraphBuilder::Index {
@@ -156,6 +158,7 @@ impl IvmRuntime {
                     output,
                     node,
                     root_ordering_node: None,
+                    demand: OutputDemand::default(),
                 })
             }
             GraphBuilder::FrontierSource { binding, output } => {
@@ -174,6 +177,7 @@ impl IvmRuntime {
                     output: inferred_output,
                     node,
                     root_ordering_node: None,
+                    demand: OutputDemand::default(),
                 })
             }
             GraphBuilder::BindingSource { shape, output } => {
@@ -192,6 +196,7 @@ impl IvmRuntime {
                     output: inferred_output,
                     node,
                     root_ordering_node: None,
+                    demand: OutputDemand::default(),
                 })
             }
             GraphBuilder::Recursive {
@@ -236,6 +241,7 @@ impl IvmRuntime {
                     output,
                     node,
                     root_ordering_node: None,
+                    demand: OutputDemand::default(),
                 })
             }
             GraphBuilder::CollectBy { input, collect } => {
@@ -335,6 +341,7 @@ impl IvmRuntime {
                     output,
                     node,
                     root_ordering_node: compiled_input.root_ordering_node,
+                    demand: OutputDemand::default(),
                 })
             }
             GraphBuilder::ArgMinBy {
@@ -419,6 +426,7 @@ impl IvmRuntime {
                     output,
                     node,
                     root_ordering_node: compiled_input.root_ordering_node,
+                    demand: OutputDemand::default(),
                 })
             }
             GraphBuilder::TopBy {
@@ -502,6 +510,7 @@ impl IvmRuntime {
                     output,
                     node,
                     root_ordering_node: Some(node),
+                    demand: OutputDemand::default(),
                 })
             }
             _ => unreachable!("dispatcher routes only ordering graph builders here"),
@@ -560,6 +569,7 @@ impl IvmRuntime {
                     output,
                     node,
                     root_ordering_node: compiled_input.root_ordering_node,
+                    demand: OutputDemand::default(),
                 })
             }
             GraphBuilder::Filter {
@@ -586,6 +596,7 @@ impl IvmRuntime {
                     output,
                     node,
                     root_ordering_node: compiled_input.root_ordering_node,
+                    demand: OutputDemand::default(),
                 })
             }
             GraphBuilder::Project { input, fields } => {
@@ -627,6 +638,7 @@ impl IvmRuntime {
                     output,
                     node,
                     root_ordering_node: compiled_input.root_ordering_node,
+                    demand: OutputDemand::default(),
                 })
             }
             GraphBuilder::StreamingChecksum {
@@ -660,6 +672,7 @@ impl IvmRuntime {
                     output: inferred_output,
                     node,
                     root_ordering_node: compiled_input.root_ordering_node,
+                    demand: OutputDemand::default(),
                 })
             }
             GraphBuilder::UnwrapNullable { input, field } => {
@@ -684,6 +697,7 @@ impl IvmRuntime {
                     output,
                     node,
                     root_ordering_node: compiled_input.root_ordering_node,
+                    demand: OutputDemand::default(),
                 })
             }
             GraphBuilder::Unnest {
@@ -713,6 +727,7 @@ impl IvmRuntime {
                     output,
                     node,
                     root_ordering_node: compiled_input.root_ordering_node,
+                    demand: OutputDemand::default(),
                 })
             }
             GraphBuilder::VariantProject { input, field, case } => {
@@ -744,6 +759,7 @@ impl IvmRuntime {
                     output,
                     node,
                     root_ordering_node: compiled_input.root_ordering_node,
+                    demand: OutputDemand::default(),
                 })
             }
             GraphBuilder::Union { inputs } => {
@@ -774,6 +790,7 @@ impl IvmRuntime {
                     output,
                     node,
                     root_ordering_node: public_root_ordering,
+                    demand: OutputDemand::default(),
                 })
             }
             _ => unreachable!("dispatcher routes only unary graph builders here"),
@@ -846,6 +863,7 @@ impl IvmRuntime {
                     root_ordering_node: compiled_left
                         .root_ordering_node
                         .or(compiled_right.root_ordering_node),
+                    demand: OutputDemand::default(),
                 })
             }
             GraphBuilder::SemiJoin {
@@ -903,6 +921,7 @@ impl IvmRuntime {
                     root_ordering_node: compiled_left
                         .root_ordering_node
                         .or(compiled_right.root_ordering_node),
+                    demand: OutputDemand::default(),
                 })
             }
             GraphBuilder::AntiJoin {
@@ -960,6 +979,7 @@ impl IvmRuntime {
                     root_ordering_node: compiled_left
                         .root_ordering_node
                         .or(compiled_right.root_ordering_node),
+                    demand: OutputDemand::default(),
                 })
             }
             _ => unreachable!("dispatcher routes only join graph builders here"),
@@ -1085,6 +1105,7 @@ impl IvmRuntime {
                 output,
                 node,
                 root_ordering_node: compiled_input.root_ordering_node,
+                demand: OutputDemand::default(),
             });
         }
         let child_fields = collect_by_projections(&input_output, &collect.child_fields)?;
@@ -1212,6 +1233,7 @@ impl IvmRuntime {
             // CollectBy changes representation, not the identity/order of
             // public roots selected upstream.
             root_ordering_node: compiled_input.root_ordering_node,
+            demand: OutputDemand::default(),
         })
     }
 
@@ -1399,6 +1421,7 @@ impl IvmRuntime {
             output: index_descriptor,
             node,
             root_ordering_node: None,
+            demand: OutputDemand::default(),
         })
     }
 }

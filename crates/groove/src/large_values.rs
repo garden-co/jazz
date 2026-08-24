@@ -51,7 +51,7 @@ pub enum LargeValueKind {
 /// This deliberately lives beside the chunk reader so a terminal can suspend
 /// only on intersecting authenticated nodes instead of hydrating a whole
 /// value before projecting it.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum LargeValueDemand {
     Full,
     Bytes(std::ops::Range<u64>),
@@ -2295,6 +2295,37 @@ pub(crate) fn materialize_record_attempt(
     Ok(descriptor.create(&values)?)
 }
 
+/// Materialize a terminal record according to its per-field output contract.
+///
+/// The record descriptor remains unchanged: a range or pointer read simply
+/// replaces the indirect scalar in that field with the requested primitive.
+/// This is intentionally an output-boundary helper; operators continue to use
+/// their own full/field-specific reads to preserve relational semantics.
+pub(crate) fn materialize_record_demand_attempt(
+    descriptor: &RecordDescriptor,
+    raw: &[u8],
+    demands: &std::collections::BTreeMap<String, LargeValueDemand>,
+    inputs: &mut EvaluationInputs,
+) -> Result<Vec<u8>, IvmRuntimeError> {
+    let mut values = descriptor.bind(raw).to_values()?;
+    let mut blocked = false;
+    for (index, value) in values.iter_mut().enumerate() {
+        let field = descriptor
+            .fields()
+            .get(index)
+            .and_then(|field| field.name.as_deref());
+        let demand = field
+            .and_then(|field| demands.get(field))
+            .cloned()
+            .unwrap_or(LargeValueDemand::Full);
+        materialize_value_demand_attempt(value, &demand, inputs, &mut blocked)?;
+    }
+    if blocked {
+        return Err(IvmRuntimeError::EvaluationBlocked);
+    }
+    Ok(descriptor.create(&values)?)
+}
+
 /// Materialize only the logical fields an operator will inspect. Unselected
 /// indirect arms remain encoded as descriptors in the rebuilt record.
 pub(crate) fn materialize_record_fields_attempt(
@@ -2383,6 +2414,35 @@ fn materialize_value_attempt(
             Ok(())
         }
         _ => Ok(()),
+    }
+}
+
+fn materialize_value_demand_attempt(
+    value: &mut Value,
+    demand: &LargeValueDemand,
+    inputs: &mut EvaluationInputs,
+    blocked: &mut bool,
+) -> Result<(), IvmRuntimeError> {
+    match value {
+        Value::Large(large) => match materialize_demand_attempt(large, demand, inputs) {
+            Ok(bytes) => {
+                *value = match large.kind {
+                    LargeValueKind::Bytes => Value::Bytes(bytes),
+                    LargeValueKind::String | LargeValueKind::Json => {
+                        Value::String(String::from_utf8(bytes).map_err(|_| Error::InvalidUtf8)?)
+                    }
+                };
+                Ok(())
+            }
+            Err(IvmRuntimeError::EvaluationBlocked) => {
+                *blocked = true;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        },
+        // A terminal's named demand applies only to that scalar field. Nested
+        // values preserve historical full materialization semantics.
+        _ => materialize_value_attempt(value, inputs, blocked),
     }
 }
 
@@ -4341,5 +4401,89 @@ mod tests {
                 assert_eq!(mapped, logical[range]);
             }
         }
+    }
+
+    #[test]
+    fn terminal_demands_return_logical_subset_primitives() {
+        fn materialize(
+            kind: LargeValueKind,
+            logical: &[u8],
+            descriptor: RecordDescriptor,
+            demand: LargeValueDemand,
+        ) -> Value {
+            let prepared = prepare(kind, logical, deterministic_locator).unwrap();
+            let available = prepared
+                .staged_chunks
+                .iter()
+                .map(|chunk| {
+                    (
+                        ChunkRequest {
+                            object_hash: chunk.node_ref.object_hash.0,
+                            locator: chunk.node_ref.locator.0.clone(),
+                        },
+                        bytes::Bytes::copy_from_slice(&chunk.encoded),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>();
+            let raw = descriptor
+                .create(&[Value::Large(prepared.value_ref)])
+                .unwrap();
+            let mut inputs = EvaluationInputs::default();
+            loop {
+                match materialize_record_demand_attempt(
+                    &descriptor,
+                    &raw,
+                    &std::collections::BTreeMap::from([("body".to_owned(), demand.clone())]),
+                    &mut inputs,
+                ) {
+                    Ok(materialized) => {
+                        return descriptor.bind(&materialized).to_values().unwrap()[0].clone();
+                    }
+                    Err(IvmRuntimeError::EvaluationBlocked) => {
+                        for request in inputs.take_missing_chunks() {
+                            inputs.install_chunk(request.clone(), available[&request].clone());
+                        }
+                    }
+                    Err(error) => panic!("unexpected terminal materialization error: {error}"),
+                }
+            }
+        }
+
+        assert_eq!(
+            materialize(
+                LargeValueKind::Bytes,
+                b"abcdef",
+                RecordDescriptor::new([("body", crate::records::ValueType::Bytes)]),
+                LargeValueDemand::Bytes(1..4),
+            ),
+            Value::Bytes(b"bcd".to_vec())
+        );
+        assert_eq!(
+            materialize(
+                LargeValueKind::String,
+                "a😀bc".as_bytes(),
+                RecordDescriptor::new([("body", crate::records::ValueType::String)]),
+                LargeValueDemand::TextUtf16(1..3),
+            ),
+            Value::String("😀".to_owned())
+        );
+        assert_eq!(
+            materialize(
+                LargeValueKind::String,
+                "a😀bc".as_bytes(),
+                RecordDescriptor::new([("body", crate::records::ValueType::String)]),
+                LargeValueDemand::TextUtf8(1..5),
+            ),
+            Value::String("😀".to_owned())
+        );
+        assert_eq!(
+            materialize(
+                LargeValueKind::String,
+                br#"{"nested":{"value":7},"other":true}"#,
+                RecordDescriptor::new([("body", crate::records::ValueType::String)]),
+                LargeValueDemand::JsonPointer("/nested/value".to_owned()),
+            ),
+            Value::String("7".to_owned())
+        );
     }
 }

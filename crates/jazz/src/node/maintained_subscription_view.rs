@@ -2208,6 +2208,7 @@ mod tests {
                 ),
                 ("__jazz_include_project".to_owned(), "project".to_owned()),
             ]),
+            demand: crate::node::query_engine::AppProjectionTree::default(),
         };
         let layout = terminal_root_layout(&rows);
         assert_eq!(

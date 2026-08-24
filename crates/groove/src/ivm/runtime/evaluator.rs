@@ -2588,6 +2588,39 @@ impl TickEvaluator<'_> {
         }
     }
 
+    pub(super) fn materialize_indirect_output(
+        &mut self,
+        input: &Arc<RecordDeltas>,
+        demand: &OutputDemand,
+    ) -> Result<Arc<RecordDeltas>, IvmRuntimeError> {
+        let Some(evaluation_inputs) = self.evaluation_inputs.as_deref_mut() else {
+            return Ok(Arc::clone(input));
+        };
+        let mut deltas = Vec::with_capacity(input.deltas.len());
+        let mut changed = false;
+        for delta in &input.deltas {
+            let raw = crate::large_values::materialize_record_demand_attempt(
+                &input.descriptor,
+                delta.raw(),
+                demand.fields(),
+                evaluation_inputs,
+            )?;
+            changed |= raw.as_slice() != delta.raw();
+            deltas.push(RecordDelta {
+                record: raw.into(),
+                weight: delta.weight,
+            });
+        }
+        if changed {
+            Ok(Arc::new(RecordDeltas {
+                descriptor: input.descriptor,
+                deltas,
+            }))
+        } else {
+            Ok(Arc::clone(input))
+        }
+    }
+
     fn materialize_indirect_fields(
         &mut self,
         input: &Arc<RecordDeltas>,

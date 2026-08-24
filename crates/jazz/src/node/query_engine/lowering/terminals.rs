@@ -87,6 +87,10 @@ pub(super) fn lowered_terminals(
     // array queries on their existing fact-terminal path; the tree collector
     // cannot retain any routed binding fields yet.
     if let Some(app_rows) = &request.output.app_rows {
+        let terminal_demand = match &app_rows.projection {
+            PayloadProjection::Tree(tree) => tree.clone(),
+            PayloadProjection::ShapeDefault => AppProjectionTree::default(),
+        };
         let projected_output = projected_multisource_terminal(plan, source);
         let (graph, descriptor, hidden_fields, carrier, field_carriers, public_field_names) =
             match app_rows.projection.clone() {
@@ -203,7 +207,9 @@ pub(super) fn lowered_terminals(
                 carrier,
                 field_carriers,
                 public_field_names,
+                demand: terminal_demand.clone(),
             }),
+            demand: terminal_demand,
         });
     }
 
@@ -247,6 +253,7 @@ pub(super) fn lowered_terminals(
                 sink: fact_sink_name(fact),
                 graph: result_graph,
                 output: OutputTerminalSchema::Fact(output.clone()),
+                demand: AppProjectionTree::default(),
             });
             // A flat join's one wide primary terminal is its public output.
             // The ordinary closure terminals are source-only membership facts;
@@ -285,6 +292,7 @@ pub(super) fn lowered_terminals(
                         sink: scoped_fact_sink_name(fact, &source_id),
                         graph,
                         output: OutputTerminalSchema::Fact(output),
+                        demand: AppProjectionTree::default(),
                     });
                 }
             }
@@ -330,6 +338,7 @@ pub(super) fn lowered_terminals(
                         sink: scoped_fact_sink_name(fact, &contribution.source),
                         graph,
                         output: OutputTerminalSchema::Fact(output),
+                        demand: AppProjectionTree::default(),
                     });
                 }
             }
@@ -347,6 +356,7 @@ pub(super) fn lowered_terminals(
                     sink: scoped_fact_sink_name(fact, source_id),
                     graph: content_version_witness_graph(resolved_source, "version_content")?,
                     output: OutputTerminalSchema::Fact(content_output),
+                    demand: AppProjectionTree::default(),
                 });
                 if resolved_source.deletion_register.is_none() {
                     continue;
@@ -366,6 +376,7 @@ pub(super) fn lowered_terminals(
                         "version_deletion",
                     )?,
                     output: OutputTerminalSchema::Fact(deletion_output),
+                    demand: AppProjectionTree::default(),
                 });
             }
         } else if matches!(fact, ProgramFactKey::ReplacementWitnesses) {
@@ -382,6 +393,7 @@ pub(super) fn lowered_terminals(
                     sink: scoped_fact_sink_name(fact, source_id),
                     graph: content_version_witness_graph(resolved_source, "replacement_content")?,
                     output: OutputTerminalSchema::Fact(content_output),
+                    demand: AppProjectionTree::default(),
                 });
                 if resolved_source.deletion_register.is_none() {
                     continue;
@@ -401,6 +413,7 @@ pub(super) fn lowered_terminals(
                         "replacement_deletion",
                     )?,
                     output: OutputTerminalSchema::Fact(deletion_output),
+                    demand: AppProjectionTree::default(),
                 });
             }
         } else {
@@ -431,6 +444,7 @@ pub(super) fn lowered_terminals(
                 sink: fact_sink_name(fact),
                 graph,
                 output: OutputTerminalSchema::Fact(output),
+                demand: AppProjectionTree::default(),
             });
         }
     }
@@ -1063,6 +1077,15 @@ fn lowered_aggregate_terminals(
         )
     };
     if request.output.app_rows.is_some() {
+        let terminal_demand = request
+            .output
+            .app_rows
+            .as_ref()
+            .and_then(|rows| match &rows.projection {
+                PayloadProjection::Tree(tree) => Some(tree.clone()),
+                PayloadProjection::ShapeDefault => None,
+            })
+            .unwrap_or_default();
         terminals.push(LoweredTerminal {
             sink: "app_rows".to_owned(),
             graph: aggregate_graph.clone(),
@@ -1072,7 +1095,9 @@ fn lowered_aggregate_terminals(
                 carrier: AppRowCarrier::Logical,
                 field_carriers: BTreeMap::new(),
                 public_field_names: BTreeMap::new(),
+                demand: terminal_demand.clone(),
             }),
+            demand: terminal_demand,
         });
     }
     for fact in &request.output.facts {
@@ -1097,6 +1122,7 @@ fn lowered_aggregate_terminals(
                 sink: fact_sink_name(fact),
                 graph,
                 output: OutputTerminalSchema::Fact(output),
+                demand: AppProjectionTree::default(),
             });
         }
     }
