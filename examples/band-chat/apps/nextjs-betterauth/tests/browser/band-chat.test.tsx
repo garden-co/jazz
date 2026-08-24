@@ -203,6 +203,10 @@ describe("BandChat browser smoke", () => {
       { type: "persistent", dbName },
       { appId: server.appId, jwtToken, serverUrl: server.serverUrl },
     );
+    await waitFor(
+      () => offline.querySelector(".empty button") !== null,
+      "cached trusted profile should materialize before offline provisioning",
+    );
     await act(async () => clickDemo(offline));
     await waitFor(
       () => offline.textContent?.includes("Soundcheck at 19:00") ?? false,
