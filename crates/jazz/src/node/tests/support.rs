@@ -284,10 +284,12 @@ fn user(byte: u8) -> AuthorSubject {
 ///
 /// Authorship is deliberately separate: callers opt in at the exact fixture
 /// boundary instead of deriving a provider claim from `AuthorSubject` in core.
-pub(super) fn install_test_uuid_sub_claim(
-    node: &mut NodeState<RocksDbStorage>,
+pub(super) fn install_test_uuid_sub_claim<S>(
+    node: &mut NodeState<S>,
     identity: AuthorSubject,
-) {
+) where
+    S: OrderedKvStorage + ReopenableStorage,
+{
     if identity == AuthorSubject::SYSTEM {
         return;
     }
