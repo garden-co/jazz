@@ -1251,7 +1251,12 @@ fn lower_linear_plan_steps_cached(
                         &introduced_route_fields,
                     );
                     let mut occurrence_fields = BTreeSet::new();
-                    if *mode == JoinMode::Inner && !omits_public_occurrence_carriers(request) {
+                    if !omits_public_occurrence_carriers(request) {
+                        // A trailing semi-join filters the complete public
+                        // tuple but contributes no occurrence of its own.
+                        // Preserve the earlier inner-join row IDs from the
+                        // left input: terminals still use them to distinguish
+                        // public root occurrences.
                         for ((source_id, field), (output, _)) in &accumulated_join_fields {
                             let is_row_id = resolved_sources
                                 .get(source_id)
@@ -1264,6 +1269,8 @@ fn lower_linear_plan_steps_cached(
                                 occurrence_fields.insert(output.clone());
                             }
                         }
+                    }
+                    if *mode == JoinMode::Inner && !omits_public_occurrence_carriers(request) {
                         if let Some(right_source_id) = right.root_source() {
                             let right_source = resolved_sources.get(right_source_id).ok_or_else(|| {
                                 UnsupportedReason::Operator(format!(
