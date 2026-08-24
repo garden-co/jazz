@@ -3,8 +3,9 @@
 // not reliably discover and bundle its imports themselves.
 import { build } from "esbuild";
 import { existsSync } from "node:fs";
-import { copyFile, rm } from "node:fs/promises";
+import { copyFile, readFile, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { assertWasmGlueAbi } from "../../../dev/artifacts/wasm-glue-abi.mjs";
 
 const entry = fileURLToPath(new URL("../src/worker/jazz-broker-worker.ts", import.meta.url));
 const outfile = fileURLToPath(new URL("../dist/worker/jazz-broker-worker.js", import.meta.url));
@@ -22,6 +23,12 @@ await build({
   target: "es2022",
   legalComments: "none",
 });
+
+// `runtimeSources.wasmUrl` can deliberately point a worker at a package-level
+// asset. Refuse to publish a worker whose embedded wasm-bindgen glue cannot
+// instantiate the binary it is built alongside: the browser otherwise reports
+// an opaque missing-import error only after the SharedWorker has started.
+assertWasmGlueAbi(await readFile(wasmSource), await readFile(outfile, "utf8"));
 
 // The worker bundles wasm-bindgen's JS glue. Its default initializer resolves
 // `jazz_wasm_bg.wasm` relative to that glue, which esbuild places in this
