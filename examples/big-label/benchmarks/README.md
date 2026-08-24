@@ -11,9 +11,13 @@ release-time fields. The measured workloads are prepared, ordered Jazz reads for
 - a label's releases;
 - an artist's releases;
 - a catalogue's releases.
-- a 1,000-row import at batch sizes 1, 10, 100, and 1,000, plus 10k, 100k, and
-  1M-row imports at batch size 1,000 for performance thesis
+- a 1,000-row import at batch sizes 1, 10, 100, and 1,000, plus a 10k-row
+  import at batch size 1,000 for performance thesis
   [#1964](https://github.com/garden-co/jazz/issues/1964).
+
+The hosted simulation matrix currently stops at 10k rows. A first trial
+completed 10k but timed out during 100k; larger scales stay in local or
+wall-time experiments until they fit the hosted workflow budget.
 
 Database opening, schema compilation, fixture insertion, local-durability waits,
 and query preparation happen before each measured closure. The returned row count
