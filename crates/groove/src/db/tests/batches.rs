@@ -772,6 +772,52 @@ async fn root_first_upload_requests_only_authenticated_missing_frontier() {
     assert_ne!(first_claim.id, second_claim.id);
 }
 
+#[futures_test::test]
+async fn bounded_upload_start_caps_new_pending_metadata_and_allows_resume() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let database = Database::new(schema, storage).await.unwrap();
+    let value_refs = (0_u8..3)
+        .map(|seed| {
+            crate::large_values::prepare(
+                crate::large_values::LargeValueKind::Bytes,
+                &[seed],
+                |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
+            )
+            .unwrap()
+            .value_ref
+        })
+        .collect::<Vec<_>>();
+
+    for value_ref in &value_refs[..2] {
+        database
+            .begin_large_value_upload_with_pending_limit(value_ref.clone(), 2)
+            .await
+            .unwrap();
+    }
+    database
+        .begin_large_value_upload_with_pending_limit(value_refs[0].clone(), 2)
+        .await
+        .expect("an existing upload remains resumable at the limit");
+    assert!(matches!(
+        database
+            .begin_large_value_upload_with_pending_limit(value_refs[2].clone(), 2)
+            .await,
+        Err(Error::PendingLargeValueUploadLimitExceeded { limit: 2 })
+    ));
+    assert_eq!(
+        database.pending_large_value_uploads().await.unwrap().len(),
+        2
+    );
+}
+
 // This facade-level test is intentionally below Jazz's public mutation API:
 // only the peer upload protocol can carry an untrusted physical descriptor.
 // It proves that Groove rejects one before issuing a publishable staging claim.

@@ -455,6 +455,8 @@ pub enum Error {
     InvalidPersistedIndex(String),
     #[error("invalid persisted large-value metadata: {0}")]
     InvalidLargeValueMetadata(String),
+    #[error("pending large-value upload limit reached: {limit}")]
+    PendingLargeValueUploadLimitExceeded { limit: usize },
     #[error("index key arity mismatch for {index}: expected at most {expected}, got {actual}")]
     IndexKeyArity {
         index: String,
