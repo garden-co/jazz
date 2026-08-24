@@ -111,6 +111,7 @@ type Condition =
 
 interface RelationJoinSpec {
   table: string;
+  leftScope: string;
   left: string;
   right: string;
   viaHop?: boolean;
@@ -222,11 +223,13 @@ class PermissionRelationBuilder implements PermissionRelation {
       throw new Error("join(...) does not support union(...) relations in MVP.");
     }
     const table = relationJoinTargetToTable(target);
+    const leftScope = currentRelationScope(this.state);
     const joins = [
       ...this.state.joins,
       {
         table,
         left: on.left,
+        leftScope,
         right: on.right,
       },
     ];
@@ -269,16 +272,19 @@ class PermissionRelationBuilder implements PermissionRelation {
         throw new Error("hopTo(...) cannot be composed after select(...).");
       }
       const rel = resolveNamedRelation(this.relations, this.state.outputTable, relationName);
+      const leftScope = currentRelationScope(this.state);
       const join: RelationJoinSpec =
         rel.type === "forward"
           ? {
               table: rel.toTable,
+              leftScope,
               left: rel.fromColumn,
               right: "id",
               viaHop: true,
             }
           : {
               table: rel.toTable,
+              leftScope,
               left: "id",
               right: rel.toColumn,
               viaHop: true,
@@ -312,6 +318,7 @@ class PermissionRelationBuilder implements PermissionRelation {
         joins: [
           ...this.state.joins,
           {
+            leftScope: currentRelationScope(this.state),
             table: rel.toTable,
             left: "id",
             right: rel.toColumn,
@@ -410,10 +417,7 @@ class PermissionRelationBuilder implements PermissionRelation {
             },
             on: [
               {
-                left: {
-                  scope: stepState.initialScope,
-                  column: stripQualifier(stepJoin.left),
-                },
+                left: relationColumnRef(stepJoin.left, stepJoin.leftScope),
                 right: { scope: recursiveHopScope, column: "id" },
               },
             ],
@@ -1149,7 +1153,7 @@ function buildGatherSeedState(
 
     let scope = qualifiedScopeByPrefix.get(prefix);
     if (!scope) {
-      const join = relationToJoinSpec(relation);
+      const join = relationToJoinSpec(relation, baseScope);
       joins.push(join);
       scope = relationJoinAlias(state.kind, join, joins.length - 1);
       qualifiedScopeByPrefix.set(prefix, scope);
@@ -1225,16 +1229,18 @@ function resolveQualifiedRuleRelation(
   );
 }
 
-function relationToJoinSpec(relation: Relation): RelationJoinSpec {
+function relationToJoinSpec(relation: Relation, leftScope: string): RelationJoinSpec {
   if (relation.type === "forward") {
     return {
       table: relation.toTable,
+      leftScope,
       left: relation.fromColumn,
       right: "id",
     };
   }
   return {
     table: relation.toTable,
+    leftScope,
     left: "id",
     right: relation.toColumn,
   };
@@ -1607,13 +1613,9 @@ function applyRelFilter(input: RelExpr, predicates: RelPredicateExpr[]): RelExpr
   };
 }
 
-function joinConditionFromSpec(
-  join: RelationJoinSpec,
-  leftScope: string,
-  rightScope: string,
-): RelJoinCondition {
+function joinConditionFromSpec(join: RelationJoinSpec, rightScope: string): RelJoinCondition {
   return {
-    left: relationColumnRef(join.left, leftScope),
+    left: relationColumnRef(join.left, join.leftScope),
     right: relationColumnRef(join.right, rightScope),
   };
 }
@@ -1653,7 +1655,7 @@ function applyRelationTail(options: {
             alias: rightScope,
           },
         },
-        on: [joinConditionFromSpec(join, defaultScope, rightScope)],
+        on: [joinConditionFromSpec(join, rightScope)],
         join_kind: "Inner",
       },
     };
@@ -1948,7 +1950,7 @@ function analyzeQualifiedWhereObject(
 
     let scope = qualifiedScopeByPrefix.get(prefix);
     if (!scope) {
-      const join = relationToJoinSpec(relation);
+      const join = relationToJoinSpec(relation, table);
       joins.push(join);
       scope = relationJoinAlias("table", join, joins.length - 1);
       qualifiedScopeByPrefix.set(prefix, scope);
