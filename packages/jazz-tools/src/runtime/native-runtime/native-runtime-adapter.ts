@@ -98,7 +98,9 @@ type CoreTickWake = "immediate" | "deferred" | `after:${number}`;
 
 type NativeDbConstructor = {
   openMemory(schema: Uint8Array, config: Uint8Array): NativeDb;
+  openMemoryAsBackend?(schema: Uint8Array, config: Uint8Array): NativeDb;
   openPersistent?(dataPath: string, schema: Uint8Array, config: Uint8Array): NativeDb;
+  openPersistentAsBackend?(dataPath: string, schema: Uint8Array, config: Uint8Array): NativeDb;
   openMemoryWithSelfSignedProof?(
     schema: Uint8Array,
     config: Uint8Array,
@@ -469,7 +471,19 @@ function openPersistentDb(
   schema: Uint8Array,
   config: Uint8Array,
   selfSignedClientProof?: NativeSelfSignedClientProof,
+  backendMode = false,
 ): NativeDb {
+  if (selfSignedClientProof && backendMode) {
+    throw new Error("A native runtime cannot be both self-signed and backend-scoped");
+  }
+  if (backendMode) {
+    if (!Runtime.openPersistentAsBackend) {
+      throw new Error(
+        "Native runtime does not support explicit backend opens; rebuild the matching Jazz native artifact",
+      );
+    }
+    return Runtime.openPersistentAsBackend(dataPath, schema, config);
+  }
   if (selfSignedClientProof) {
     if (!Runtime.openPersistentWithSelfSignedProof) {
       throw new Error(
@@ -496,7 +510,19 @@ function openMemoryDb(
   schema: Uint8Array,
   config: Uint8Array,
   selfSignedClientProof?: NativeSelfSignedClientProof,
+  backendMode = false,
 ): NativeDb {
+  if (selfSignedClientProof && backendMode) {
+    throw new Error("A native runtime cannot be both self-signed and backend-scoped");
+  }
+  if (backendMode) {
+    if (!Runtime.openMemoryAsBackend) {
+      throw new Error(
+        "Native runtime does not support explicit backend opens; rebuild the matching Jazz native artifact",
+      );
+    }
+    return Runtime.openMemoryAsBackend(schema, config);
+  }
   if (!selfSignedClientProof) return Runtime.openMemory(schema, config);
   if (!Runtime.openMemoryWithSelfSignedProof) {
     throw new Error(
@@ -595,7 +621,7 @@ export class NativeRuntimeAdapter implements Runtime {
       initialSyncFlushEvery?: number;
       selfSignedClientProof?: NativeSelfSignedClientProof;
       readAuthorizationHost?: ReadAuthorizationHost;
-      backendCredential?: string;
+      backendMode?: boolean;
       owner?: NativeRuntimeAdapter;
     },
   ) {
@@ -611,7 +637,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.completedTxs = this.transactionOwner.completedTxs;
     this.writes = this.transactionOwner.writes;
     this.schemaBytes = encodeSchema(schema);
-    this.trustedBackend = opts?.backendCredential !== undefined;
+    this.trustedBackend = opts?.backendMode === true;
     this.configBytes = openConfig(
       node,
       author,
@@ -633,6 +659,7 @@ export class NativeRuntimeAdapter implements Runtime {
         this.schemaBytes,
         this.configBytes,
         opts?.selfSignedClientProof,
+        opts?.backendMode,
       );
     } else {
       if (!Runtime) {
@@ -643,6 +670,7 @@ export class NativeRuntimeAdapter implements Runtime {
         this.schemaBytes,
         this.configBytes,
         opts?.selfSignedClientProof,
+        opts?.backendMode,
       );
     }
     if (opts?.owner) return;

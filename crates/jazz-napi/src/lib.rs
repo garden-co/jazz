@@ -1259,6 +1259,21 @@ impl NapiDb {
         })
     }
 
+    /// Open a deliberate backend runtime. Unlike the public raw-open entrypoint,
+    /// this explicit ABI derives the canonical system author.
+    #[napi(factory, js_name = "openMemoryAsBackend")]
+    pub fn open_memory_as_backend(schema: Uint8Array, config: Uint8Array) -> napi::Result<Self> {
+        let (schema, config) = decode_core_open_args(&schema, &config)?;
+        let identity = core_open_backend_identity(&config)?;
+        let refs = schema.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let db = open_core_db(schema, CoreMemoryStorage::new(&refs), config, identity)?;
+        Ok(Self {
+            inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Memory(Rc::new(db))))),
+            owns_runtime: true,
+        })
+    }
+
     /// Open with a verified Jazz self-signed client identity. This is a
     /// separate ABI entrypoint deliberately: a new client cannot accidentally
     /// hand proof bytes to an old constructor, and an old client cannot enter
@@ -1295,6 +1310,29 @@ impl NapiDb {
     ) -> napi::Result<Self> {
         let (schema, config) = decode_core_open_args(&schema, &config)?;
         let identity = core_open_identity(&config, None)?;
+        let refs = schema.column_families();
+        let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
+        let storage = CoreRocksDbStorage::open(data_path, &refs)
+            .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let db = open_core_db(schema, storage, config, identity)?;
+        Ok(Self {
+            inner: Rc::new(RefCell::new(Some(NapiDbInnerStorage::Persistent(Rc::new(
+                db,
+            ))))),
+            owns_runtime: true,
+        })
+    }
+
+    /// Open a deliberate persistent backend runtime. This is intentionally a
+    /// distinct ABI from the public raw-open entrypoint.
+    #[napi(factory, js_name = "openPersistentAsBackend")]
+    pub fn open_persistent_as_backend(
+        data_path: String,
+        schema: Uint8Array,
+        config: Uint8Array,
+    ) -> napi::Result<Self> {
+        let (schema, config) = decode_core_open_args(&schema, &config)?;
+        let identity = core_open_backend_identity(&config)?;
         let refs = schema.column_families();
         let refs = refs.iter().map(String::as_str).collect::<Vec<_>>();
         let storage = CoreRocksDbStorage::open(data_path, &refs)
@@ -2539,6 +2577,17 @@ fn core_open_identity(
     })
 }
 
+fn core_open_backend_identity(config: &CoreOpenDbConfig) -> napi::Result<CoreDbIdentity> {
+    // Validate every caller-controlled raw field through the ordinary
+    // fail-closed ingress before this separate, intentional backend ABI picks
+    // the privileged system author.
+    core_open_identity(config, None)?;
+    Ok(CoreDbIdentity {
+        node: config.identity.node,
+        author: CoreAuthorSubject::SYSTEM,
+    })
+}
+
 fn configure_initial_sync_flush_cadence<S>(
     db: &CoreDb<S>,
     every: Option<u32>,
@@ -3684,9 +3733,9 @@ mod tests {
     use crate::{
         CoreOpenDbConfig, CoreSelfSignedClientProof, NapiDb, NapiDbInnerStorage, NapiTxKind,
         PreparedQuery, Tx, authority_epoch_from_bigint, core_author_id_from_bytes, core_block_on,
-        core_claim_value_from_json, core_open_identity, core_read_opts_from_json,
-        core_subscription_event_to_napi, encode_core_subscription_delta, terminal_bytes_to_numbers,
-        unknown_transaction_kind_message,
+        core_claim_value_from_json, core_open_backend_identity, core_open_identity,
+        core_read_opts_from_json, core_subscription_event_to_napi, encode_core_subscription_delta,
+        terminal_bytes_to_numbers, unknown_transaction_kind_message,
     };
 
     #[test]
@@ -3804,6 +3853,18 @@ mod tests {
             CoreAuthorSubject::SYSTEM,
             "the ordinary raw-open path cannot become SYSTEM"
         );
+        assert_eq!(
+            core_open_backend_identity(&external_config).unwrap().author,
+            CoreAuthorSubject::SYSTEM,
+            "only the separate backend-open path may intentionally derive SYSTEM"
+        );
+        NapiDb::open_memory_as_backend(
+            Uint8Array::from(br#"{"tables":{}}"#.to_vec()),
+            Uint8Array::from(encode_config(external_author, None)),
+        )
+        .expect(
+            "an explicit local backend open derives SYSTEM without requiring upstream verification",
+        );
 
         for credential in ["arbitrary-backend-secret", "malformed.backend.credential"] {
             let bytes = encode_config(external_author, Some(credential.to_owned()));
@@ -3811,6 +3872,10 @@ mod tests {
             assert!(
                 core_open_identity(&config, None).is_err(),
                 "ordinary raw config must reject {credential:?}, never promote it to SYSTEM"
+            );
+            assert!(
+                core_open_backend_identity(&config).is_err(),
+                "the explicit backend ABI must still reject legacy raw credential input"
             );
         }
 

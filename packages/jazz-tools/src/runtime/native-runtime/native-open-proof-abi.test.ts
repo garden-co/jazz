@@ -81,4 +81,25 @@ describe("self-signed native open ABI", () => {
     );
     void runtime.close();
   });
+
+  it("uses only the distinct backend entrypoint for an intentional backend runtime", () => {
+    const openMemory = vi.fn(() => fakeDb());
+    const openMemoryAsBackend = vi.fn(() => fakeDb());
+    const runtime = new NativeRuntimeAdapter(
+      { openMemory, openMemoryAsBackend },
+      schema,
+      node,
+      author,
+      1,
+      false,
+      { backendMode: true },
+    );
+
+    expect(openMemory).not.toHaveBeenCalled();
+    expect(openMemoryAsBackend).toHaveBeenCalledWith(
+      expect.any(Uint8Array),
+      expect.any(Uint8Array),
+    );
+    void runtime.close();
+  });
 });

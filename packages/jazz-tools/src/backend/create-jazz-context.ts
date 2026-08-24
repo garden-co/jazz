@@ -114,21 +114,18 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
       NapiDb,
       schema,
       deterministicBytes(`${this.config.appId}:${env}:${this.nodeIdentityScope}:node`),
-      authorBytesForSession({
-        issuer: "urn:jazz:runtime-host",
-        user_id: `${this.config.appId}:${env}:${this.nodeIdentityScope}`,
-      }),
+      authorBytesForSession({ issuer: "https://jazz.invalid", user_id: "backend-open" }),
       1,
       true,
       this.config.driver.type === "persistent"
         ? {
             persistentPath: this.config.driver.dataPath,
             readAuthorizationHost: "trusted-serving",
-            backendCredential: this.config.backendSecret,
+            backendMode: true,
           }
         : {
             readAuthorizationHost: "trusted-serving",
-            backendCredential: this.config.backendSecret,
+            backendMode: true,
           },
     );
 

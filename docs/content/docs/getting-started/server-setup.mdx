@@ -68,7 +68,7 @@ Every backend needs an app ID, typed schema, and usually a permissions bundle. I
 
 On the client side, queries automatically run as the logged-in user. On a server-connected backend, create the context once at startup, then choose whether work should run as the backend itself or as the caller.
 
-- `context.asBackend()` returns a `Db` that uses `backendSecret` for sync/auth when this process talks to a Jazz server. Writes from this handle are authored as `jazz:system` unless you add explicit attribution.
+- `context.asBackend()` returns a `Db` opened in explicit backend mode. Its writes are authored as `jazz:system` unless you add explicit attribution; when this process talks to a Jazz server, `backendSecret` additionally authenticates sync/auth.
 - `await context.forRequest(req)` returns a `Db` that runs queries as the authenticated user who made the request, so permission policies apply to them rather than the process itself. Writes are also attributed to that user.
 - `context.forSession(session)` is the same idea when you already have a resolved Jazz session.
 - `context.withAttribution(issuer, userId)` keeps backend permissions, but stamps new writes and updates as that exact issuer/user pair.

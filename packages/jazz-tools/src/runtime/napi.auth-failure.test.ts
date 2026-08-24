@@ -66,4 +66,38 @@ describe("NAPI on_auth_failure", () => {
       await server.stop();
     }
   }, 30_000);
+
+  it("rejects a wrong backend secret during remote admission", async () => {
+    const appId = randomUUID();
+    const server = await startLocalJazzServer({
+      appId,
+      backendSecret: "expected-backend-secret",
+      adminSecret: "napi-auth-failure-admin-secret",
+    });
+    const runtime = await createNapiNativeRuntimeAdapter(MINIMAL_SCHEMA, {
+      appId,
+      env: "test",
+    });
+
+    try {
+      const reasons: string[] = [];
+      (runtime as unknown as { onAuthFailure(cb: (reason: string) => void): void }).onAuthFailure(
+        (reason: string) => reasons.push(reason),
+      );
+      runtime.connect(
+        httpUrlToWs(server.url, appId),
+        JSON.stringify({ backend_secret: "wrong-backend-secret" }),
+      );
+
+      const deadline = Date.now() + 10_000;
+      while (reasons.length === 0 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      expect(reasons).not.toHaveLength(0);
+    } finally {
+      runtime.disconnect();
+      runtime.close?.();
+      await server.stop();
+    }
+  }, 30_000);
 });
