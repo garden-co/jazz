@@ -3,6 +3,7 @@ import { createDb, type Db } from "../../../../../../packages/jazz-tools/src/run
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
   TestCleanup,
+  waitForCondition,
   uniqueDbName,
   waitForQuery,
 } from "../../../../../../packages/jazz-tools/tests/browser/support.js";
@@ -41,6 +42,7 @@ describe("PosterShop cross-topology recovery", () => {
     let editorShape: { id: string };
     let offlineShape: { id: string };
     let editorMembership: { id: string };
+    const editorWindowSnapshots: Array<Array<{ id: string; zIndex: number }>> = [];
     const receipt = await runTopologyScenario(
       {
         id: workload.id,
@@ -126,6 +128,22 @@ describe("PosterShop cross-topology recovery", () => {
                 15_000,
                 "edge",
               );
+              ctx.trackSubscription(
+                editor.subscribeAll(
+                  canvasQueries(canvas.id).shapeWindow,
+                  (delta) => {
+                    editorWindowSnapshots.push(
+                      (delta.all ?? []).map((row) => ({ id: row.id, zIndex: row.zIndex })),
+                    );
+                  },
+                  { tier: "edge" },
+                ),
+              );
+              await waitForCondition(
+                async () => editorWindowSnapshots.length > 0,
+                10_000,
+                "editor shape window subscription did not produce an initial snapshot",
+              );
             },
             faultsAfter: [{ kind: "failure", target: "authorization" }],
           },
@@ -162,6 +180,7 @@ describe("PosterShop cross-topology recovery", () => {
                   name: "headline.svg",
                   mimeType: "image/svg+xml",
                   byteLength: 512,
+                  fileId: "content-addressed-headline-bytes",
                 })
                 .wait({ tier: "edge" });
               await owner
@@ -220,6 +239,25 @@ describe("PosterShop cross-topology recovery", () => {
                 [editorShape.id, 1],
                 [offlineShape.id, 2],
               ]);
+              // The canvas surface is intentionally unbounded, but consumers
+              // that render a viewport can subscribe to a stable operation
+              // window. The callback must receive the replay, not merely a
+              // later read after it has already converged.
+              await waitForCondition(
+                async () =>
+                  editorWindowSnapshots.some(
+                    (rows) =>
+                      rows.length === 2 &&
+                      rows[0]?.id === editorShape.id &&
+                      rows[1]?.id === offlineShape.id,
+                  ),
+                20_000,
+                "editor bounded shape window did not receive the offline replay",
+              );
+              expect(await editor.all(queries.shapeWindow, { tier: "edge" })).toMatchObject([
+                { id: editorShape.id, zIndex: 1 },
+                { id: offlineShape.id, zIndex: 2 },
+              ]);
               expect(
                 (await editor.all(queries.cursors, { tier: "edge" })).map((row) => [
                   row.userId,
@@ -230,9 +268,17 @@ describe("PosterShop cross-topology recovery", () => {
                 ["poster-editor", 17, 19],
                 ["poster-owner", 5, 6],
               ]);
-              expect(
-                (await editor.all(queries.assets, { tier: "edge" })).map((row) => row.name),
-              ).toEqual(["headline.svg"]);
+              const assets = await editor.all(queries.assets, { tier: "edge" });
+              expect(assets).toMatchObject([
+                {
+                  name: "headline.svg",
+                  mimeType: "image/svg+xml",
+                  byteLength: 512,
+                },
+              ]);
+              // Browsing the asset shelf carries only metadata. A future
+              // large-value locator must not become an accidental projection.
+              expect(Object.hasOwn(assets[0]!, "fileId")).toBe(false);
               expect(
                 (await editor.all(queries.checkpoints, { tier: "edge" })).map((row) => row.label),
               ).toEqual(["Approved"]);
@@ -285,7 +331,11 @@ function canvasQueries(canvasId: string) {
   return {
     layers: app.layers.where({ canvasId }).orderBy("zIndex", "asc"),
     shapes: app.shapes.where({ canvasId }).orderBy("zIndex", "asc"),
-    assets: app.assets.where({ canvasId }).orderBy("name", "asc"),
+    shapeWindow: app.shapes.where({ canvasId }).orderBy("zIndex", "asc").offset(1).limit(2),
+    assets: app.assets
+      .where({ canvasId })
+      .orderBy("name", "asc")
+      .select("id", "canvasId", "name", "mimeType", "byteLength"),
     cursors: app.cursors.where({ canvasId }).orderBy("userId", "asc"),
     checkpoints: app.checkpoints.where({ canvasId }).orderBy("label", "asc"),
   };
