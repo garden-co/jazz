@@ -1,31 +1,38 @@
-import { WIRE_PROTOCOL_VERSION } from "./native-runtime/websocket.js";
+import { EXPECTED_NATIVE_ARTIFACT_FINGERPRINTS } from "./native-artifact-fingerprints.js";
 
 type NativeArtifactModule = {
-  nativeArtifactProtocolVersion?: unknown;
+  nativeArtifactFingerprint?: unknown;
 };
 
 /**
  * Fail before a generated native artifact can expose a partial runtime API.
  *
- * The wire protocol is already the compatibility boundary shared by the JS,
- * NAPI, and WASM runtimes. A missing marker means current glue was paired with
- * an older generated artifact, not that the application made an invalid call.
+ * This is intentionally independent of the wire protocol: binding ABI can
+ * change without a transport frame change.
  */
-export function assertNativeArtifactProtocol(
+export function assertNativeArtifactCompatibility(
   artifact: NativeArtifactModule,
   kind: "NAPI" | "WASM",
+  requiredExports: readonly string[] = [],
 ): void {
-  if (typeof artifact.nativeArtifactProtocolVersion !== "function") {
+  const expected = EXPECTED_NATIVE_ARTIFACT_FINGERPRINTS[kind.toLowerCase() as "napi" | "wasm"];
+  if (typeof artifact.nativeArtifactFingerprint !== "function") {
     throw new Error(
-      `Jazz ${kind} artifact is stale or incompatible: it is missing the native protocol marker. ` +
-        "Rebuild generated bindings before starting the app or tests.",
+      `Jazz ${kind} artifact is stale or incompatible: missing nativeArtifactFingerprint (expected ${expected}). ` +
+        "In this monorepo rebuild generated bindings; for installed packages reinstall matching Jazz package versions.",
     );
   }
-  const actual = artifact.nativeArtifactProtocolVersion();
-  if (actual !== WIRE_PROTOCOL_VERSION) {
+  const actual = artifact.nativeArtifactFingerprint();
+  if (actual !== expected) {
     throw new Error(
-      `Jazz ${kind} artifact protocol mismatch: expected ${WIRE_PROTOCOL_VERSION}, got ${String(actual)}. ` +
-        "Rebuild generated bindings before starting the app or tests.",
+      `Jazz ${kind} artifact ABI mismatch: expected ${expected}, got ${String(actual)}. ` +
+        "In this monorepo rebuild generated bindings; for installed packages reinstall matching Jazz package versions.",
     );
+  }
+  for (const name of requiredExports) {
+    if (typeof (artifact as Record<string, unknown>)[name] !== "function")
+      throw new Error(
+        `Jazz ${kind} artifact is incomplete despite matching fingerprint: missing ${name}.`,
+      );
   }
 }
