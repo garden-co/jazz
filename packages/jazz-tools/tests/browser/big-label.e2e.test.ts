@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createDb, type Db } from "../../src/index.js";
+import { createDb, generateAuthSecret, type Db } from "../../src/index.js";
 import {
   fetchPermissionsHead,
   publishStoredPermissions,
@@ -39,7 +39,17 @@ describe("BigLabel browser edge/core topology", () => {
         expectedParentBundleObjectId: head?.bundleObjectId ?? null,
       });
     });
-    const core = await openDb({ appId, serverUrl, adminSecret, label: "big-label-core" });
+    // Backend provisioning still needs a concrete local identity so the
+    // browser worker can complete its authenticated transport bootstrap.
+    const core = await browserTopologyPhase("open authenticated provisioning edge", () =>
+      openDb({
+        appId,
+        serverUrl,
+        adminSecret,
+        secret: generateAuthSecret(),
+        label: "big-label-core",
+      }),
+    );
     const org = await core
       .insert(app.organizations, { name: "Night Shift", slug: "night-shift" })
       .wait({ tier: "edge" });
@@ -138,6 +148,7 @@ async function openDb(input: {
   appId: string;
   serverUrl: string;
   adminSecret?: string;
+  secret?: string;
   jwtToken?: string;
   label: string;
 }): Promise<Db> {
@@ -145,7 +156,9 @@ async function openDb(input: {
     await createDb({
       appId: input.appId,
       serverUrl: input.serverUrl,
-      ...(input.adminSecret ? { adminSecret: input.adminSecret } : { jwtToken: input.jwtToken! }),
+      ...(input.adminSecret
+        ? { adminSecret: input.adminSecret, secret: input.secret! }
+        : { jwtToken: input.jwtToken! }),
       driver: { type: "persistent", dbName: uniqueDbName(input.label) },
     }),
   );
