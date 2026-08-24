@@ -1266,3 +1266,46 @@ async fn persisted_indices_can_be_deleted_after_restart() {
         );
     }
 }
+
+#[futures_test::test]
+async fn live_index_registration_rejects_while_a_publication_is_resident() {
+    let storage = MemoryStorage::new(&["albums", "indices"]);
+    let mut database = Database::new(albums_schema(), storage).await.unwrap();
+    let mut batch = database.open_batch();
+    batch.insert(
+        "albums",
+        vec![Value::U64(7), Value::String("Blue Train".to_owned())],
+    );
+    let applied = database.apply_batch(batch).await.unwrap();
+    let index = IndexSchema::new("albums_by_title", ["title"]);
+
+    let error = database
+        .register_table_index("albums", index.clone())
+        .await
+        .expect_err("schema mutation must not race a resident publication");
+    assert!(matches!(
+        error,
+        Error::TableIndexRegistrationWhilePublicationsResident { table, index }
+            if table == "albums" && index == "albums_by_title"
+    ));
+
+    let persisted = applied.persist().await;
+    database.finish_persistence(persisted).unwrap();
+    database
+        .register_table_index("albums", index)
+        .await
+        .unwrap();
+    assert_eq!(
+        record_values(
+            database
+                .index_scan(
+                    "albums",
+                    "albums_by_title",
+                    &[Value::String("Blue Train".to_owned())],
+                )
+                .await
+                .unwrap()
+        ),
+        [vec![Value::U64(7), Value::String("Blue Train".to_owned())]]
+    );
+}
