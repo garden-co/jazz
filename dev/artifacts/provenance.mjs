@@ -154,7 +154,10 @@ function artifactHashes(root, kind, options = {}) {
           join(options.wasmPackageDir ?? join(root, "crates/jazz-wasm/pkg"), "jazz_wasm_bg.wasm"),
           join(options.wasmPackageDir ?? join(root, "crates/jazz-wasm/pkg"), "jazz_wasm.js"),
           join(options.wasmPackageDir ?? join(root, "crates/jazz-wasm/pkg"), "jazz_wasm.d.ts"),
-          join(options.wasmPackageDir ?? join(root, "crates/jazz-wasm/pkg"), "jazz_wasm_bg.wasm.d.ts"),
+          join(
+            options.wasmPackageDir ?? join(root, "crates/jazz-wasm/pkg"),
+            "jazz_wasm_bg.wasm.d.ts",
+          ),
         ]
       : readdirSync(join(root, "crates/jazz-napi"), { withFileTypes: true })
           .filter((entry) => entry.isFile() && entry.name.endsWith(".node"))

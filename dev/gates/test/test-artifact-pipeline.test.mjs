@@ -458,6 +458,11 @@ test("CI uses the correctness artifact path while package builds keep release WA
       new RegExp(`"exec", "turbo", "run", "${task.replace(":", "\\:")}"`),
       `${task} correctness artifact must run through Turbo`,
     );
+
+  const turbo = JSON.parse(readFileSync(new URL("../../../turbo.json", import.meta.url), "utf8"));
+  const expectedLease = ["JAZZ_ARTIFACT_BUILD_LEASE", "JAZZ_ARTIFACT_BUILD_LOCK_PATH"];
+  assert.deepEqual(turbo.tasks["jazz-wasm#build"].passThroughEnv, expectedLease);
+  assert.deepEqual(turbo.tasks["jazz-wasm#build:fast"].passThroughEnv, expectedLease);
 });
 
 test("Turbo invalidates each native artifact only for its Cargo closure", () => {
