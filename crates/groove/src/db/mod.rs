@@ -232,8 +232,9 @@ pub struct Database {
     storage_read_metrics: Rc<RefCell<StorageReadMetrics>>,
     next_publication_id: u64,
     durable_publication_frontier: Option<PublicationId>,
-    resident_publications: BTreeMap<PublicationId, Vec<OwnedWriteOperation>>,
+    resident_publications: BTreeMap<PublicationId, ResidentPublication>,
     persisted_publications: BTreeSet<PublicationId>,
+    retracted_publications: BTreeSet<PublicationId>,
     resident_writes: Rc<RefCell<StagedWriteState>>,
     publication_persistence: Rc<RefCell<PersistenceOrder>>,
     /// Serializes the durable upload journal, separate blob staging, expiry,
@@ -243,6 +244,19 @@ pub struct Database {
     large_value_lifecycle: Rc<AsyncMutex<()>>,
     abandoned_application: Rc<Cell<bool>>,
     poisoned: bool,
+}
+
+/// All state Grove must retain to undo one not-yet-durable resident
+/// publication through the same IVM runtime that made it visible.
+///
+/// This deliberately lives below Jazz: it is a general publication ownership
+/// primitive, not a large-value-specific overlay or evaluator.
+#[derive(Clone)]
+struct ResidentPublication {
+    operations: Vec<OwnedWriteOperation>,
+    inverse_table_deltas: Vec<TableDelta>,
+    notifications_deferred: bool,
+    retractable: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -266,6 +280,7 @@ pub struct AppliedBatch {
     storage_writes: StorageWriteMetrics,
     tick: TickMetrics,
     notifications_deferred: bool,
+    retractable: bool,
     lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
     abandoned_application: Rc<Cell<bool>>,
 }
@@ -273,6 +288,12 @@ pub struct AppliedBatch {
 impl AppliedBatch {
     pub fn publication(&self) -> PublicationId {
         self.publication
+    }
+
+    /// Whether a failed receipt must be settled through the reversible
+    /// resident-publication path.
+    pub fn is_retractable(&self) -> bool {
+        self.retractable
     }
 
     pub async fn persist(&self) -> PersistedBatch {
@@ -378,6 +399,18 @@ struct PersistenceOrder {
     next: u64,
     waiters: BTreeMap<u64, Waker>,
     failure: Option<String>,
+    /// Publication ids deliberately retracted before they reached storage.
+    /// They advance ordering without ever being written.
+    cancelled: BTreeSet<u64>,
+}
+
+fn advance_cancelled_publications(order: &mut PersistenceOrder) {
+    while order.cancelled.remove(&order.next) {
+        order.next = order.next.saturating_add(1);
+    }
+    if let Some(waiter) = order.waiters.remove(&order.next) {
+        waiter.wake();
+    }
 }
 
 /// Completion of one owned publication persistence operation.
@@ -437,6 +470,12 @@ pub enum Error {
     DatabasePoisoned,
     #[error("publication does not belong to this database: {0:?}")]
     PublicationNotFound(PublicationId),
+    #[error("resident publication was retracted after its durability attempt failed: {0:?}")]
+    PublicationRetracted(PublicationId),
+    #[error("publication is not marked retractable: {0:?}")]
+    NonRetractablePublication(PublicationId),
+    #[error("cannot safely retract resident publication: {0}")]
+    InvalidResidentRetraction(String),
     #[error("subscription ended")]
     SubscriptionEnded,
     #[error(transparent)]

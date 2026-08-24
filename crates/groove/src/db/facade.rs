@@ -125,11 +125,13 @@ impl Database {
             durable_publication_frontier: None,
             resident_publications: BTreeMap::new(),
             persisted_publications: BTreeSet::new(),
+            retracted_publications: BTreeSet::new(),
             resident_writes: Rc::new(RefCell::new(StagedWriteState::default())),
             publication_persistence: Rc::new(RefCell::new(PersistenceOrder {
                 next: 1,
                 waiters: BTreeMap::new(),
                 failure: None,
+                cancelled: BTreeSet::new(),
             })),
             large_value_lifecycle: Rc::new(futures::lock::Mutex::new(())),
             abandoned_application: Rc::new(Cell::new(false)),
