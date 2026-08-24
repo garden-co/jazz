@@ -114,6 +114,8 @@ interface RelationJoinSpec {
   leftScope: string;
   left: string;
   right: string;
+  /** A separately filtered relation used as the right side of this join. */
+  relation?: PermissionRelation;
   viaHop?: boolean;
 }
 
@@ -149,7 +151,7 @@ interface TableJoinTarget {
   readonly __jazzPermissionTable: string;
 }
 
-type RelationJoinTarget = string | TableJoinTarget;
+type RelationJoinTarget = string | TableJoinTarget | PermissionRelation;
 
 export interface PermissionRelation {
   where(input: unknown): PermissionRelation;
@@ -222,7 +224,10 @@ class PermissionRelationBuilder implements PermissionRelation {
     if (this.state.kind === "union") {
       throw new Error("join(...) does not support union(...) relations in MVP.");
     }
-    const table = relationJoinTargetToTable(target);
+    const relation = isPermissionRelation(target) ? target : undefined;
+    const table = relation
+      ? getRelationState(relation).outputTable
+      : relationJoinTargetToTable(target);
     const leftScope = currentRelationScope(this.state);
     const joins = [
       ...this.state.joins,
@@ -231,6 +236,7 @@ class PermissionRelationBuilder implements PermissionRelation {
         left: on.left,
         leftScope,
         right: on.right,
+        relation,
       },
     ];
     return new PermissionRelationBuilder(
@@ -1257,7 +1263,9 @@ function relationJoinTargetToTable(target: RelationJoinTarget): string {
   ) {
     return target.__jazzPermissionTable;
   }
-  throw new Error("join(...) expects a table builder (policy.<table>) or table name string.");
+  throw new Error(
+    "join(...) expects a table relation, table builder (policy.<table>), or table name string.",
+  );
 }
 
 function resolveNamedRelation(
@@ -1640,26 +1648,27 @@ function applyRelationTail(options: {
   joinAlias: (join: RelationJoinSpec, index: number) => string;
 }): RelExpr {
   let relation = options.base;
-  let defaultScope = options.initialScope;
   let hasHopJoin = false;
 
   for (let i = 0; i < options.joins.length; i += 1) {
     const join = options.joins[i]!;
-    const rightScope = options.joinAlias(join, i);
+    const rightState = join.relation ? getRelationState(join.relation) : undefined;
+    const rightScope = rightState ? currentRelationScope(rightState) : options.joinAlias(join, i);
     relation = {
       Join: {
         left: relation,
-        right: {
-          TableScan: {
-            table: join.table,
-            alias: rightScope,
-          },
-        },
+        right: rightState
+          ? relationStateToRelExpr(rightState)
+          : {
+              TableScan: {
+                table: join.table,
+                alias: rightScope,
+              },
+            },
         on: [joinConditionFromSpec(join, rightScope)],
         join_kind: "Inner",
       },
     };
-    defaultScope = rightScope;
     hasHopJoin ||= Boolean(join.viaHop);
   }
 
