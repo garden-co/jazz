@@ -30,7 +30,22 @@ attempt number, virtual tick, endpoint names, labels, and every fault action
 are retained in the payload-free scheduler receipt. Pass each scheduler through
 `envelopeSchedulers` on `runTopologyScenario`; the runner closes it after app
 cleanup and records discarded held envelopes, preventing a test fault from
-leaking into another scenario.
+leaking into another scenario. Delivery callbacks receive an `AbortSignal` and
+must stop work when it aborts: teardown awaits all in-flight callbacks up to
+the scenario's bounded fault timeout. A callback that ignores cancellation
+causes a visible cleanup-timeout receipt and scenario failure rather than a
+quiet cross-test leak.
+
+Envelope descriptors are deliberately narrow, immutable snapshots of
+`{ from, to, label? }`: endpoint names and labels are bounded, unknown metadata
+and NUL-containing endpoint names are rejected, and payloads are never recorded.
+Only one fault kind can be armed for an envelope (multiple duplicate copies are
+the sole composable case). The scheduler also bounds copies, virtual ticks, and
+outstanding work, partition links, and receipt activities to keep a bad randomized soak schedule finite. A logical
+envelope id remains stable across copies/retry while each actual delivery has a
+separate sequence and attempt; retry is recorded when the retry is delivered,
+not merely scheduled. A callback failure fail-stops the scheduler and records
+discarded remaining deliveries deterministically.
 
 The scheduler deliberately models message delivery only. Connection lifecycle,
 real transport retry policy, and application assertions remain app-owned. An
