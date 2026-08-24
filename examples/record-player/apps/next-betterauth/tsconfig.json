@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["dom", "dom.iterable", "es2022"],
+    "lib": ["dom", "dom.iterable", "esnext"],
     "strict": true,
     "noEmit": true,
     "esModuleInterop": true,
@@ -11,7 +11,13 @@
     "isolatedModules": true,
     "jsx": "react-jsx",
     "incremental": true,
-    "plugins": [{ "name": "next" }]
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "allowJs": true,
+    "skipLibCheck": true
   },
   "include": [
     "next-env.d.ts",
