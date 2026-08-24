@@ -1822,17 +1822,27 @@ fn run_db_surface(config: &Config, coalesced: bool) -> DbSurfaceSummary {
     let canvas = canvas_id();
     let (_dir, db) = open_db(node(70), participant_author(0), schema.clone());
 
-    let canvas_write =
-        block_on(db.insert_with_id(CANVASES, canvas, canvas_cells())).expect("db canvas insert");
+    let canvas_write = block_on(db.insert(
+        CANVASES,
+        canvas_cells(),
+        jazz::db::InsertOptions {
+            row_id: Some(canvas),
+            ..Default::default()
+        },
+    ))
+    .expect("db canvas insert");
     block_on(canvas_write.wait(DurabilityTier::Local)).expect("db canvas local wait");
     for idx in 0..(config.active + config.passive) {
-        let invite = block_on(db.insert_with_id(
+        let invite = block_on(db.insert(
             INVITES,
-            row(10_000 + idx),
             BTreeMap::from([
                 ("canvas".to_owned(), Value::Uuid(canvas.0)),
                 ("userID".to_owned(), Value::Uuid(participant_author(idx).0)),
             ]),
+            jazz::db::InsertOptions {
+                row_id: Some(row(10_000 + idx)),
+                ..Default::default()
+            },
         ))
         .expect("db invite insert");
         block_on(invite.wait(DurabilityTier::Local)).expect("db invite local wait");
@@ -1841,8 +1851,12 @@ fn run_db_surface(config: &Config, coalesced: bool) -> DbSurfaceSummary {
     let mut shape_rows = Vec::with_capacity(config.shapes);
     let mut expected = BTreeMap::new();
     for idx in 0..config.shapes {
-        let write = block_on(db.insert(SHAPES, shape_cells(canvas, idx, idx as f64, idx as f64)))
-            .expect("db shape insert");
+        let write = block_on(db.insert(
+            SHAPES,
+            shape_cells(canvas, idx, idx as f64, idx as f64),
+            Default::default(),
+        ))
+        .expect("db shape insert");
         let row_uuid = write.row_uuid();
         block_on(write.wait(DurabilityTier::Local)).expect("db shape local wait");
         shape_rows.push(row_uuid);
@@ -1896,7 +1910,8 @@ fn run_db_surface(config: &Config, coalesced: bool) -> DbSurfaceSummary {
                 ("y".to_owned(), Value::F64(y)),
             ]);
             let start = Instant::now();
-            let write = block_on(db.update(SHAPES, row_uuid, patch)).expect("db shape update");
+            let write = block_on(db.update(SHAPES, row_uuid, patch, Default::default()))
+                .expect("db shape update");
             block_on(write.wait(DurabilityTier::Local)).expect("db update local wait");
             write_latencies.push(start.elapsed().as_micros() as u64);
             expected.insert(row_uuid, (x.to_bits(), y.to_bits()));

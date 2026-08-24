@@ -238,9 +238,15 @@ pub fn db_surface_smoke() {
     assert!(subscription2_rows.is_empty());
 
     for commit in &fixture.commits {
-        let handle =
-            block_on(db.insert_with_id(&commit.table, commit.row_uuid, commit.cells.clone()))
-                .expect("db fixture insert");
+        let handle = block_on(db.insert(
+            &commit.table,
+            commit.cells.clone(),
+            jazz::db::InsertOptions {
+                row_id: Some(commit.row_uuid),
+                ..Default::default()
+            },
+        ))
+        .expect("db fixture insert");
         block_on(handle.wait(DurabilityTier::Local)).expect("fixture insert local wait");
         oracle.apply_insert(commit);
     }
@@ -283,7 +289,8 @@ pub fn db_surface_smoke() {
             Value::String("db-surface-state-transition".to_owned()),
         ),
     ]);
-    let handle = block_on(db.update(ISSUES, edited_issue, patch.clone())).expect("db issue update");
+    let handle = block_on(db.update(ISSUES, edited_issue, patch.clone(), Default::default()))
+        .expect("db issue update");
     block_on(handle.wait(DurabilityTier::Local)).expect("issue update local wait");
     oracle.apply_patch(ISSUES, edited_issue, patch);
 

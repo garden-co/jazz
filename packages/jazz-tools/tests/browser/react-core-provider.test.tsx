@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import {
   JazzClientProvider as JazzProvider,
+  JazzProvider as ConfiguredJazzProvider,
   useDb,
   useSession,
 } from "../../src/react-core/provider.js";
@@ -119,6 +120,52 @@ afterEach(() => {
 });
 
 describe("react-core provider/hooks browser coverage", () => {
+  it("acquires configured clients after browser mount and releases replacements", async () => {
+    const initialClient = makeClient({ db: { name: "initial-db" } });
+    initialClient.shutdown = vi.fn(async () => {});
+    const replacementClient = makeClient({ db: { name: "replacement-db" } });
+    replacementClient.shutdown = vi.fn(async () => {});
+    const createJazzClient = vi
+      .fn()
+      .mockResolvedValueOnce(initialClient)
+      .mockResolvedValueOnce(replacementClient);
+
+    render(
+      <ConfiguredJazzProvider
+        config={{ appId: "provider-browser-lifecycle", secret: "anonymous" }}
+        createJazzClient={createJazzClient}
+        fallback={<div data-testid="configured-provider">loading</div>}
+      >
+        <DbNameView />
+      </ConfiguredJazzProvider>,
+    );
+
+    await expectText("db-name", "initial-db");
+    expect(createJazzClient).toHaveBeenCalledTimes(1);
+
+    render(
+      <ConfiguredJazzProvider
+        config={{ appId: "provider-browser-lifecycle", jwtToken: "token" }}
+        createJazzClient={createJazzClient}
+        fallback={<div data-testid="configured-provider">loading</div>}
+      >
+        <DbNameView />
+      </ConfiguredJazzProvider>,
+    );
+
+    await expectText("db-name", "replacement-db");
+    expect(initialClient.shutdown).toHaveBeenCalledOnce();
+    expect(createJazzClient).toHaveBeenCalledTimes(2);
+
+    render(null);
+
+    await waitForCondition(
+      () => vi.mocked(replacementClient.shutdown).mock.calls.length === 1,
+      3000,
+      "Expected the replacement configured client to shut down after unmount",
+    );
+  });
+
   it("RCB-B01: provider accepts already-resolved client object", async () => {
     const client = makeClient({ db: { name: "resolved-db" } });
 

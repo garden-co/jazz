@@ -607,7 +607,7 @@ pub struct LargeValueStagingPolicy {
     pub incoming_bytes_per_window: u64,
     /// Fixed rate-limit window duration.
     pub window_ms: u64,
-    /// Maximum staging age; expired roots are evicted on policy checks.
+    /// Maximum staging age used by explicit maintenance eviction.
     pub max_age_ms: u64,
 }
 
@@ -1964,7 +1964,7 @@ pub enum Error {
     /// Jazz staging policy rejected an otherwise valid Groove preparation.
     #[error("large-value upload rate limit exceeded")]
     LargeValueIngressRateLimited,
-    /// The row write arrived after its Groove staging root expired.
+    /// Required staging state was removed by TTL maintenance before use.
     #[error("large-value staging root expired; upload again")]
     LargeValueStageExpired,
     /// Error returned by groove records.

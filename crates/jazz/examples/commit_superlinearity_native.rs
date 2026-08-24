@@ -82,7 +82,11 @@ fn run_case(max_rows: usize, subscribed: bool) -> Result<(), Box<dyn std::error:
         let tx = block_on(db.mergeable_tx())?;
         let stage_start = Instant::now();
         for row in rows_before..rows_after {
-            block_on(tx.insert("todos", todo_cells(format!("todo {row:06}"), false)))?;
+            block_on(tx.insert(
+                "todos",
+                todo_cells(format!("todo {row:06}"), false),
+                Default::default(),
+            ))?;
         }
         let stage_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 

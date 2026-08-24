@@ -434,7 +434,7 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
     let subscriber = server.accept_subscriber(server_transport, alice);
 
     let inserted = client
-        .insert("todos", cells("owned", false, alice))
+        .insert("todos", cells("owned", false, alice), Default::default())
         .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
@@ -447,6 +447,7 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
             "todos",
             inserted.row_uuid(),
             BTreeMap::from([("owner".to_owned(), Value::Uuid(bob.0))]),
+            Default::default(),
         )
         .unwrap();
     client.tick().unwrap();
@@ -457,7 +458,9 @@ fn terminal_core_write_fates_prove_exact_insert_update_and_delete_actions() {
         Fate::Rejected(_)
     ));
 
-    let deleted = client.delete("todos", inserted.row_uuid()).unwrap();
+    let deleted = client
+        .delete("todos", inserted.row_uuid(), Default::default())
+        .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
     client.tick().unwrap();
@@ -573,6 +576,7 @@ fn edge_route_capacity_rejects_instead_of_reporting_edge_acceptance() {
         .insert(
             "todos",
             BTreeMap::from([("title".to_owned(), Value::String("bounded".to_owned()))]),
+            Default::default(),
         )
         .unwrap();
     let queue = Rc::new(RefCell::new(Vec::new()));
@@ -642,6 +646,7 @@ fn admitted_edge_session_routes_selected_authority_fate_to_uploading_client() {
         .insert(
             "todos",
             BTreeMap::from([("title".to_owned(), Value::String("routed".to_owned()))]),
+            Default::default(),
         )
         .unwrap();
     let tx_id = write.mergeable_tx_id();
@@ -923,6 +928,7 @@ fn edge_fate_handoff_redrives_real_downstream_write_and_ignores_old_authority() 
         .insert(
             "todos",
             BTreeMap::from([("title".to_owned(), Value::String("handoff".to_owned()))]),
+            Default::default(),
         )
         .unwrap();
     client.tick().unwrap();
@@ -1068,6 +1074,7 @@ fn edge_parks_downstream_fate_until_a_later_authority_connects() {
         .insert(
             "todos",
             BTreeMap::from([("title".to_owned(), Value::String("parked".to_owned()))]),
+            Default::default(),
         )
         .unwrap();
     client.tick().unwrap();
@@ -1142,7 +1149,11 @@ fn edge_write_before_upstream_admission_binds_and_redrives_fate_route() {
     );
 
     let write = client
-        .insert("todos", cells("startup race", false, alice))
+        .insert(
+            "todos",
+            cells("startup race", false, alice),
+            Default::default(),
+        )
         .unwrap();
     let tx_id = write.mergeable_tx_id();
     client.tick().unwrap();
@@ -1253,6 +1264,7 @@ fn stale_same_authority_session_cannot_settle_or_forward_a_routed_fate() {
         .insert(
             "todos",
             BTreeMap::from([("title".to_owned(), Value::String("epoch".to_owned()))]),
+            Default::default(),
         )
         .unwrap();
     client.tick().unwrap();

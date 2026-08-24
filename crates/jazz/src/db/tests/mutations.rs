@@ -71,11 +71,14 @@ fn admitted_server_authorizes_branch_write_through_referenced_application_row() 
     let _outsider_subscriber = server.accept_subscriber(outsider_server_transport, outsider);
 
     let accepted = owner_client
-        .insert_with_id_in_branch(
+        .insert(
             "todos",
-            selector.clone(),
-            row(0x79),
             BTreeMap::from([("title".to_owned(), Value::String("allowed".to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(row(0x79)),
+                target: crate::db::ExactWriteTarget::Branch(selector.clone()),
+                ..Default::default()
+            },
         )
         .unwrap();
     owner_client.tick().unwrap();
@@ -87,11 +90,14 @@ fn admitted_server_authorizes_branch_write_through_referenced_application_row() 
     );
 
     let denied = outsider_client
-        .insert_with_id_in_branch(
+        .insert(
             "todos",
-            selector,
-            row(0x7a),
             BTreeMap::from([("title".to_owned(), Value::String("denied".to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(row(0x7a)),
+                target: crate::db::ExactWriteTarget::Branch(selector),
+                ..Default::default()
+            },
         )
         .unwrap();
     assert_authority_rejects_staged_write(&outsider_client, &server, &denied);
@@ -104,7 +110,11 @@ fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
     let table = &doctest_support::schema().tables[0];
 
     let write = db
-        .insert("todos", doctest_support::todo_cells("draft todo", false))
+        .insert(
+            "todos",
+            doctest_support::todo_cells("draft todo", false),
+            Default::default(),
+        )
         .unwrap();
     let todo = write.row_uuid();
     doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
@@ -122,6 +132,7 @@ fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
             "todos",
             todo,
             BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            Default::default(),
         )
         .unwrap();
     doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
@@ -134,7 +145,7 @@ fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
     );
     assert_eq!(rows[0].cell(table, "done"), Some(Value::Bool(true)));
 
-    let write = db.delete("todos", todo).unwrap();
+    let write = db.delete("todos", todo, Default::default()).unwrap();
     doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
     assert!(prepared_read(&db, &query).is_empty());
 
@@ -142,7 +153,8 @@ fn db_facade_mutation_lifecycle_writes_reads_deletes_and_restores() {
         .restore(
             "todos",
             todo,
-            doctest_support::todo_cells("restored todo", true),
+            Some(doctest_support::todo_cells("restored todo", true)),
+            Default::default(),
         )
         .unwrap();
     doctest_support::block_on(write.wait(DurabilityTier::Local)).unwrap();
@@ -162,7 +174,11 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
     let mut title = "a".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 257);
     title.push_str("🙂tail");
     let write = db
-        .insert("todos", doctest_support::todo_cells(&title, false))
+        .insert(
+            "todos",
+            doctest_support::todo_cells(&title, false),
+            Default::default(),
+        )
         .unwrap();
     let row = write.row_uuid();
     block_on(write.wait(DurabilityTier::Local)).unwrap();
@@ -184,6 +200,7 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
             "todos",
             row,
             BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            Default::default(),
         )
         .unwrap();
     block_on(unrelated.wait(DurabilityTier::Local)).unwrap();
@@ -250,7 +267,11 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
         "p".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES)
     );
     let json_row = db
-        .insert("todos", doctest_support::todo_cells(&json, false))
+        .insert(
+            "todos",
+            doctest_support::todo_cells(&json, false),
+            Default::default(),
+        )
         .unwrap()
         .row_uuid();
     assert_eq!(
@@ -282,19 +303,25 @@ fn high_level_large_value_reads_authorize_before_descriptor_lookup() {
     let db = open_db(0x4e, reader, &schema);
     let visible = row(0x4e);
     let hidden = row(0x4f);
-    db.insert_with_id(
+    db.insert(
         "documents",
-        visible,
         BTreeMap::from([("body".to_owned(), Value::String(allowed.clone()))]),
+        InsertOptions {
+            row_id: Some(visible),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "documents",
-        hidden,
         BTreeMap::from([(
             "body".to_owned(),
             Value::String(format!("{}x", &allowed[..allowed.len() - 1])),
         )]),
+        InsertOptions {
+            row_id: Some(hidden),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -314,13 +341,16 @@ fn nullable_large_text_uses_the_same_high_level_read_and_edit_surface() {
     let db = open_db(0x4d, AuthorId::SYSTEM, &schema);
     let row = row(0x4d);
     let body = "n".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 73);
-    db.insert_with_id(
+    db.insert(
         "notes",
-        row,
         BTreeMap::from([(
             "body".to_owned(),
             Value::Nullable(Some(Box::new(Value::String(body.clone())))),
         )]),
+        InsertOptions {
+            row_id: Some(row),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -361,7 +391,11 @@ fn db_facade_runs_saas_shaped_local_lane_end_to_end() {
 
     let query = Query::from("todos");
     let write = db
-        .insert("todos", cells("ship facade", false, owner))
+        .insert(
+            "todos",
+            cells("ship facade", false, owner),
+            Default::default(),
+        )
         .unwrap();
     let todo = write.row_uuid();
     let table = &schema.tables[0];
@@ -377,6 +411,7 @@ fn db_facade_runs_saas_shaped_local_lane_end_to_end() {
         "todos",
         todo,
         BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        Default::default(),
     )
     .unwrap();
     let updated = prepared_all(&db, &query, ReadOpts::default());
@@ -415,7 +450,11 @@ fn db_sync_surface_uploads_client_writes_for_authority_fate() {
 
     // A local client write is Local and queued for upload.
     let write = client
-        .insert("todos", cells("from client", false, author))
+        .insert(
+            "todos",
+            cells("from client", false, author),
+            Default::default(),
+        )
         .unwrap();
     let row = write.row_uuid();
 
@@ -448,7 +487,11 @@ fn byte_wire_uploads_client_writes_for_authority_fate() {
     let _subscriber = server.accept_subscriber(server_transport, author);
 
     let write = client
-        .insert("todos", cells("from client", false, author))
+        .insert(
+            "todos",
+            cells("from client", false, author),
+            Default::default(),
+        )
         .unwrap();
     let row = write.row_uuid();
 
@@ -479,7 +522,14 @@ fn db_sync_surface_uploads_client_exclusive_commit_for_global_fate() {
     let row = row(0xe1);
     let exclusive = client.exclusive_tx().unwrap();
     exclusive
-        .insert_with_id("todos", row, cells("exclusive", false, author))
+        .insert(
+            "todos",
+            cells("exclusive", false, author),
+            crate::db::InsertOptions {
+                row_id: Some(row),
+                ..Default::default()
+            },
+        )
         .unwrap();
     let tx_id = exclusive.commit().unwrap();
 
@@ -522,10 +572,24 @@ fn db_sync_surface_returns_exclusive_conflict_fate_to_client() {
     let first = client.exclusive_tx().unwrap();
     let second = client.exclusive_tx().unwrap();
     first
-        .insert_with_id("todos", row, cells("first", false, author))
+        .insert(
+            "todos",
+            cells("first", false, author),
+            crate::db::InsertOptions {
+                row_id: Some(row),
+                ..Default::default()
+            },
+        )
         .unwrap();
     second
-        .insert_with_id("todos", row, cells("second", false, author))
+        .insert(
+            "todos",
+            cells("second", false, author),
+            crate::db::InsertOptions {
+                row_id: Some(row),
+                ..Default::default()
+            },
+        )
         .unwrap();
     let first_tx = first.commit().unwrap();
     let second_error = second.commit().unwrap_err();
@@ -570,7 +634,11 @@ fn unhandled_rejection_is_delivered_as_mutation_error() {
     }));
 
     let write = client
-        .insert("todos", cells("rejected", false, author))
+        .insert(
+            "todos",
+            cells("rejected", false, author),
+            Default::default(),
+        )
         .unwrap();
     authority_transport
         .send(SyncMessage::FateUpdate {
@@ -619,7 +687,11 @@ fn waited_rejection_is_not_delivered_as_mutation_error() {
     }));
 
     let write = client
-        .insert("todos", cells("waited rejection", false, author))
+        .insert(
+            "todos",
+            cells("waited rejection", false, author),
+            Default::default(),
+        )
         .unwrap();
     let wait_result = Rc::new(RefCell::new(None));
     let callback_result = Rc::clone(&wait_result);
@@ -671,7 +743,11 @@ fn wait_after_rejection_suppresses_queued_mutation_error() {
     }));
 
     let write = client
-        .insert("todos", cells("late wait rejection", false, author))
+        .insert(
+            "todos",
+            cells("late wait rejection", false, author),
+            Default::default(),
+        )
         .unwrap();
     authority_transport
         .send(SyncMessage::FateUpdate {
@@ -731,7 +807,11 @@ fn undelivered_mutation_error_is_recovered_after_reopen() {
     let (client_transport, mut authority_transport) = duplex();
     let upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let write = client
-        .insert("todos", cells("rejected before reopen", false, author))
+        .insert(
+            "todos",
+            cells("rejected before reopen", false, author),
+            Default::default(),
+        )
         .unwrap();
     let tx_id = write.mergeable_tx_id();
     authority_transport
@@ -802,7 +882,11 @@ fn write_fate_and_durability_are_queryable_through_facade() {
     let _subscriber = server.accept_subscriber(server_transport, author);
 
     let write = client
-        .insert("todos", cells("facade state", false, author))
+        .insert(
+            "todos",
+            cells("facade state", false, author),
+            Default::default(),
+        )
         .unwrap();
     assert_eq!(
         write.write_state().unwrap(),
@@ -888,7 +972,11 @@ fn session_upload_uses_connection_identity_for_write_policy() {
     let _subscriber = server.accept_subscriber(server_transport, session_author);
 
     let write = client
-        .insert("todos", cells("honest", false, session_author))
+        .insert(
+            "todos",
+            cells("honest", false, session_author),
+            Default::default(),
+        )
         .unwrap();
     let row = write.row_uuid();
 
@@ -949,6 +1037,7 @@ fn admitted_server_prepared_write_policy_binds_text_user_id_claim() {
                     Value::String("alice-subject".to_owned()),
                 ),
             ]),
+            Default::default(),
         )
         .unwrap();
     alice_client.tick().unwrap();
@@ -961,10 +1050,8 @@ fn admitted_server_prepared_write_policy_binds_text_user_id_claim() {
     );
 
     let denied = bob_client
-        .insert_with_id_for_identity(
-            bob,
+        .insert(
             "messages",
-            row(0xb2),
             BTreeMap::from([
                 (
                     "body".to_owned(),
@@ -975,6 +1062,11 @@ fn admitted_server_prepared_write_policy_binds_text_user_id_claim() {
                     Value::String("alice-subject".to_owned()),
                 ),
             ]),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xb2)),
+                identity: crate::db::WriteIdentity::Session(bob),
+                ..Default::default()
+            },
         )
         .unwrap();
     assert_authority_rejects_staged_write(&bob_client, &server, &denied);
@@ -1015,6 +1107,7 @@ fn admitted_server_prepared_write_policy_coerces_string_user_id_to_uuid_column()
                 ),
                 ("owner_id".to_owned(), Value::Uuid(alice.0)),
             ]),
+            Default::default(),
         )
         .unwrap();
     alice_client.tick().unwrap();
@@ -1027,10 +1120,8 @@ fn admitted_server_prepared_write_policy_coerces_string_user_id_to_uuid_column()
     );
 
     let denied = bob_client
-        .insert_with_id_for_identity(
-            bob,
+        .insert(
             "messages",
-            row(0xb3),
             BTreeMap::from([
                 (
                     "body".to_owned(),
@@ -1038,6 +1129,11 @@ fn admitted_server_prepared_write_policy_coerces_string_user_id_to_uuid_column()
                 ),
                 ("owner_id".to_owned(), Value::Uuid(alice.0)),
             ]),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xb3)),
+                identity: crate::db::WriteIdentity::Session(bob),
+                ..Default::default()
+            },
         )
         .unwrap();
     assert_authority_rejects_staged_write(&bob_client, &server, &denied);
@@ -1068,6 +1164,7 @@ fn admitted_server_prepared_write_policy_fails_closed_for_wrong_user_id_type() {
                 ),
                 ("owner_id".to_owned(), Value::String("true".to_owned())),
             ]),
+            Default::default(),
         )
         .unwrap();
 
@@ -1097,7 +1194,11 @@ fn session_delete_uses_current_row_for_owner_write_policy() {
     let _subscriber = server.accept_subscriber(server_transport, session_author);
 
     let write = client
-        .insert("todos", cells("owned", false, session_author))
+        .insert(
+            "todos",
+            cells("owned", false, session_author),
+            Default::default(),
+        )
         .unwrap();
     let row = write.row_uuid();
     client.tick().unwrap();
@@ -1106,7 +1207,14 @@ fn session_delete_uses_current_row_for_owner_write_policy() {
     block_on(write.wait(DurabilityTier::Global)).unwrap();
 
     let bad_delete = client
-        .delete_for_identity(other_author, "todos", row)
+        .delete(
+            "todos",
+            row,
+            crate::db::DeleteOptions {
+                identity: crate::db::WriteIdentity::Session(other_author),
+                ..Default::default()
+            },
+        )
         .unwrap();
     assert_authority_rejects_staged_write(&client, &server, &bad_delete);
     let client_rows = prepared_read(&client, &Query::from("todos"));
@@ -1117,7 +1225,14 @@ fn session_delete_uses_current_row_for_owner_write_policy() {
     assert_eq!(rows[0].row_uuid(), row);
 
     let delete = client
-        .delete_for_identity(session_author, "todos", row)
+        .delete(
+            "todos",
+            row,
+            crate::db::DeleteOptions {
+                identity: crate::db::WriteIdentity::Session(session_author),
+                ..Default::default()
+            },
+        )
         .unwrap();
     client.tick().unwrap();
     server.tick().unwrap();
@@ -1199,11 +1314,14 @@ fn trusted_backend_upload_applies_session_claim_assertions_for_write_policy() {
         BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
     );
     let write = backend
-        .insert_with_id_for_identity(
-            editor_author,
+        .insert(
             "todos",
-            row(0xe1),
             cells("claim-backed", false, editor_author),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xe1)),
+                identity: crate::db::WriteIdentity::Session(editor_author),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -1236,11 +1354,14 @@ fn session_claim_assertions_require_trusted_backend_upload() {
         BTreeMap::from([("role".to_owned(), Value::String("editor".to_owned()))]),
     );
     let write = client
-        .insert_with_id_for_identity(
-            session_author,
+        .insert(
             "todos",
-            row(0xe2),
             cells("claim-backed", false, session_author),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xe2)),
+                identity: crate::db::WriteIdentity::Session(session_author),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -1270,11 +1391,14 @@ fn trusted_backend_delete_uses_permission_subject_parent_for_write_policy() {
     );
 
     let insert = backend
-        .insert_with_id_for_identity(
-            attributed_user,
+        .insert(
             "todos",
-            row(0xf3),
             cells("attributed", false, attributed_user),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xf3)),
+                identity: crate::db::WriteIdentity::Session(attributed_user),
+                ..Default::default()
+            },
         )
         .unwrap();
     backend.tick().unwrap();
@@ -1283,7 +1407,14 @@ fn trusted_backend_delete_uses_permission_subject_parent_for_write_policy() {
     block_on(insert.wait(DurabilityTier::Global)).unwrap();
 
     let delete = backend
-        .delete_for_identity(attributed_user, "todos", row(0xf3))
+        .delete(
+            "todos",
+            row(0xf3),
+            crate::db::DeleteOptions {
+                identity: crate::db::WriteIdentity::Session(attributed_user),
+                ..Default::default()
+            },
+        )
         .unwrap();
     backend.tick().unwrap();
     server.tick().unwrap();
@@ -1341,7 +1472,14 @@ fn client_delete_advice_is_unknown_without_mutating() {
     let other_db = open_db(0xb2, other, &schema);
     let row = row(1);
     let write = owner_db
-        .insert_with_id("todos", row, cells("owned", false, owner))
+        .insert(
+            "todos",
+            cells("owned", false, owner),
+            crate::db::InsertOptions {
+                row_id: Some(row),
+                ..Default::default()
+            },
+        )
         .unwrap();
     block_on(write.wait(DurabilityTier::Local)).unwrap();
     other_db
@@ -1417,10 +1555,13 @@ fn client_attributed_insert_to_different_user_is_rejected() {
     let client = open_db(0xc1, client_author, &schema);
 
     let err = match client
-        .insert_attributed(
-            attributed_user,
+        .insert(
             "todos",
             cells("forged", false, client_author),
+            crate::db::InsertOptions {
+                identity: crate::db::WriteIdentity::Attribution(attributed_user),
+                ..Default::default()
+            },
         )
         .resolve()
     {
@@ -1437,7 +1578,9 @@ fn default_insert_keeps_subject_and_made_by_equal() {
     let schema = owner_write_schema();
     let owner = AuthorId::from_bytes([0xa1; 16]);
     let db = open_db(0xa1, owner, &schema);
-    let write = db.insert("todos", cells("default", false, owner)).unwrap();
+    let write = db
+        .insert("todos", cells("default", false, owner), Default::default())
+        .unwrap();
     let unit = db
         .node
         .node

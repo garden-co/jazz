@@ -806,10 +806,13 @@ fn server_command_loads_published_schema_and_persists_ws_data_across_restart() {
         subject,
         identity_for_subject(0xc1, subject),
     );
-    let write = block_on(writer.db.insert_with_id(
+    let write = block_on(writer.db.insert(
         "todos",
-        RowUuid::from_bytes([0x41; 16]),
         todo_cells("durable cli row", true),
+        jazz::db::InsertOptions {
+            row_id: Some(RowUuid::from_bytes([0x41; 16])),
+            ..Default::default()
+        },
     ))
     .expect("write todo through client db");
     assert!(pump_websocket(&mut writer.socket, &writer.db, &writer.wire,));
@@ -868,15 +871,17 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
         subject,
         identity_for_subject(0xd1, subject),
     );
-    block_on(writer.db.insert_with_id(
+    block_on(writer.db.insert(
         "users",
-        RowUuid::from_bytes([0xa1; 16]),
         BTreeMap::from([("name".to_owned(), Value::String("owner".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(RowUuid::from_bytes([0xa1; 16])),
+            ..Default::default()
+        },
     ))
     .unwrap();
-    block_on(writer.db.insert_with_id(
+    block_on(writer.db.insert(
         "todos",
-        RowUuid::from_bytes([0xb1; 16]),
         BTreeMap::from([
             ("title".to_owned(), Value::String("first".to_owned())),
             (
@@ -884,6 +889,10 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
                 Value::Uuid(RowUuid::from_bytes([0xa1; 16]).0),
             ),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(RowUuid::from_bytes([0xb1; 16])),
+            ..Default::default()
+        },
     ))
     .unwrap();
     assert!(pump_websocket(&mut writer.socket, &writer.db, &writer.wire));
@@ -925,9 +934,8 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
     // and the same SubscriptionStream.
     drop(reader.socket);
 
-    block_on(writer.db.insert_with_id(
+    block_on(writer.db.insert(
         "todos",
-        RowUuid::from_bytes([0xb2; 16]),
         BTreeMap::from([
             ("title".to_owned(), Value::String("second".to_owned())),
             (
@@ -935,6 +943,10 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
                 Value::Uuid(RowUuid::from_bytes([0xa1; 16]).0),
             ),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(RowUuid::from_bytes([0xb2; 16])),
+            ..Default::default()
+        },
     ))
     .unwrap();
     assert!(pump_websocket(&mut writer.socket, &writer.db, &writer.wire));
@@ -989,9 +1001,8 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
     assert!(terminal_operations.is_empty());
     while subscription.next().now_or_never().flatten().is_some() {}
 
-    block_on(writer.db.insert_with_id(
+    block_on(writer.db.insert(
         "todos",
-        RowUuid::from_bytes([0xb3; 16]),
         BTreeMap::from([
             ("title".to_owned(), Value::String("third".to_owned())),
             (
@@ -999,6 +1010,10 @@ fn websocket_reconnect_resets_structured_terminal_before_live_patches() {
                 Value::Uuid(RowUuid::from_bytes([0xa1; 16]).0),
             ),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(RowUuid::from_bytes([0xb3; 16])),
+            ..Default::default()
+        },
     ))
     .unwrap();
     assert!(pump_websocket(&mut writer.socket, &writer.db, &writer.wire));

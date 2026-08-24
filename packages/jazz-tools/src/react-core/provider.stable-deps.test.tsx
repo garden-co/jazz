@@ -18,9 +18,9 @@ afterEach(() => {
 
 describe("JazzProvider — stable config deps", () => {
   /**
-   * Regression: passing a fresh config object with the same JSON shape must not
-   * trigger a cleanup→reacquire cycle. The useEffect must only re-fire when the
-   * configKey (JSON.stringify of config) or createJazzClient changes.
+   * Regression: passing a fresh, structurally equivalent config object must not
+   * trigger a cleanup→reacquire cycle, regardless of property insertion order.
+   * The useEffect must only re-fire when the canonical config key or factory changes.
    *
    * Before the fix, `config` was in the dep array. A new reference caused:
    *   cleanup → releaseClient (schedules setTimeout(0) to shut down the client)
@@ -32,7 +32,7 @@ describe("JazzProvider — stable config deps", () => {
    * setTimeout(0) to schedule the deferred shutdown. If the effect re-runs
    * unnecessarily, at least one setTimeout call will occur.
    */
-  it("does not trigger a release timer when config object is replaced by a structurally identical one", async () => {
+  it("does not release when an equivalent config is rebuilt in another property order", async () => {
     const alice = makeFakeClient({ authMode: "local-first", userId: "alice", claims: {} });
     const createJazzClient = vi.fn().mockResolvedValue(alice);
 
@@ -64,7 +64,7 @@ describe("JazzProvider — stable config deps", () => {
     setTimeoutSpy.mockClear();
 
     // Re-render with a freshly constructed config object: same shape, new reference.
-    const freshConfig: DbConfig = { appId: "app-1", serverUrl: "https://jazz.example.com" };
+    const freshConfig: DbConfig = { serverUrl: "https://jazz.example.com", appId: "app-1" };
     expect(freshConfig).not.toBe(initialConfig); // guard: references differ
 
     await act(async () => {

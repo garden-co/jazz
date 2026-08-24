@@ -20,6 +20,7 @@ fn large_write_pushes_staging_before_syncing_its_referencing_row() {
                 ("done".to_owned(), Value::Bool(false)),
                 ("owner".to_owned(), Value::Uuid(author.0)),
             ]),
+            Default::default(),
         )
         .unwrap();
 
@@ -71,6 +72,7 @@ fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_evictio
                 ("done".to_owned(), Value::Bool(false)),
                 ("owner".to_owned(), Value::Uuid(author.0)),
             ]),
+            Default::default(),
         )
         .unwrap();
 
@@ -227,6 +229,7 @@ fn rate_limited_push_waits_then_retries_the_exact_batch_without_rejecting_the_wr
                 ("done".to_owned(), Value::Bool(false)),
                 ("owner".to_owned(), Value::Uuid(author.0)),
             ]),
+            Default::default(),
         )
         .unwrap();
 
@@ -363,6 +366,7 @@ fn unauthenticated_reconnect_restarts_after_deadline_and_does_not_prevent_ttl_cl
                 ("done".to_owned(), Value::Bool(false)),
                 ("owner".to_owned(), Value::Uuid(author.0)),
             ]),
+            Default::default(),
         )
         .unwrap();
 
@@ -481,6 +485,7 @@ fn assert_different_authenticated_destination_restarts_upload(
                 ("done".to_owned(), Value::Bool(false)),
                 ("owner".to_owned(), Value::Uuid(author.0)),
             ]),
+            Default::default(),
         )
         .unwrap();
     writer.tick().unwrap();
@@ -610,7 +615,14 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
     let _alice_upstream = crate::db::block_on(alice_edge.connect_upstream(alice_transport));
     let _core_alice = core.accept_subscriber(core_alice_transport, alice);
     let write = alice_edge
-        .insert_with_id("todos", row(0xd5), cells("later row", false, alice))
+        .insert(
+            "todos",
+            cells("later row", false, alice),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xd5)),
+                ..Default::default()
+            },
+        )
         .unwrap();
 
     // One edge tick uploads Alice's local commit; one Core tick finalizes it
@@ -685,7 +697,14 @@ fn edge_later_client_upload_flushes_earlier_upstream_in_same_tick() {
     let _edge_client = edge.accept_subscriber(edge_client_transport, alice);
 
     let write = client
-        .insert_with_id("todos", row(0xd3), cells("later upload", false, alice))
+        .insert(
+            "todos",
+            cells("later upload", false, alice),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xd3)),
+                ..Default::default()
+            },
+        )
         .unwrap();
     client.tick().unwrap();
     edge.tick().unwrap();
@@ -736,7 +755,11 @@ fn write_state_waiter_resolves_on_remote_fate_update() {
     let _subscriber = server.accept_subscriber(server_transport, client_author);
 
     let write = client
-        .insert("todos", cells("wait for fate", false, owner))
+        .insert(
+            "todos",
+            cells("wait for fate", false, owner),
+            Default::default(),
+        )
         .unwrap();
     let tx_id = write.mergeable_tx_id();
     assert_eq!(
@@ -881,6 +904,7 @@ fn db_sync_surface_edge_session_read_policy_filters_private_table_query() {
                 ("body".to_owned(), Value::String("alice private".to_owned())),
                 ("owner_id".to_owned(), Value::String(alice.0.to_string())),
             ]),
+            Default::default(),
         )
         .unwrap();
     writer.tick().unwrap();
@@ -954,6 +978,7 @@ fn prepared_server_read_binds_text_session_user_id_per_session() {
                     Value::Nullable(Some(Box::new(Value::String(alice_subject.into())))),
                 ),
             ]),
+            Default::default(),
         )
         .expect("system seed must write the protected message");
     block_on(seeded.wait(DurabilityTier::Local)).expect("seed must settle locally");
@@ -1030,6 +1055,7 @@ fn db_sync_surface_edge_session_read_policy_filters_after_runtime_schema_publish
                 ("body".to_owned(), Value::String("alice private".to_owned())),
                 ("owner_id".to_owned(), Value::String(alice.0.to_string())),
             ]),
+            Default::default(),
         )
         .unwrap();
     writer.tick().unwrap();
