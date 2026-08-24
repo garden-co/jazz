@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { publishNapiGeneration } from "./build.mjs";
+import { publishNapiGeneration, validateNapiStage } from "./build.mjs";
 
 const build = readFileSync(new URL("./build.mjs", import.meta.url), "utf8");
 const wrapper = readFileSync(
@@ -140,6 +140,29 @@ test("a planted final-pointer failure leaves readers and sealed metadata unchang
     assert.equal(readFileSync(join(root, "manifest"), "utf8"), manifest);
   } finally {
     delete process.env.JAZZ_NAPI_BUILD_FAULT;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a newly generated public export absent from the stable package declaration fails before activation", () => {
+  const root = fixture();
+  try {
+    const staged = stage(root, ".napi-stage-new-export", "next");
+    const stableDeclarations = join(root, "index.d.ts");
+    writeFileSync(stableDeclarations, "export declare class NapiDb { tick(): void }\n");
+    writeFileSync(
+      join(staged, "index.d.ts"),
+      "export declare class NapiDb { tick(): void }\nexport declare function newlyGeneratedExport(): void\n",
+    );
+    assert.throws(
+      () =>
+        validateNapiStage(staged, "jazz-napi.linux-x64-gnu.node", "next", "cross-target", {
+          stableDeclarationsPath: stableDeclarations,
+        }),
+      /generated declarations that differ from the public package type surface/,
+    );
+    assert.equal(existsSync(join(root, "native-binding.cjs")), false);
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
