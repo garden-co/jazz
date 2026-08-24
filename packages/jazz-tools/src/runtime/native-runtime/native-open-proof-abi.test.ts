@@ -11,7 +11,38 @@ const proof = {
 };
 
 function fakeDb() {
-  return { setTickScheduler: vi.fn() };
+  // The constructor returns a full NativeDb even though this narrow ABI test
+  // only reaches the scheduler and close boundary. Keep the fixture structural
+  // so production native-runtime contracts remain checked by TypeScript.
+  const unused = (): never => {
+    throw new Error("unexpected native database operation in open ABI test");
+  };
+  return {
+    registerSchema: unused,
+    beginTransaction: unused,
+    commitTransaction: unused,
+    rollbackTransaction: unused,
+    attachMergeableTx: unused,
+    all: unused,
+    allForIdentity: unused,
+    prepareQuery: unused,
+    insertWithIdEncoded: unused,
+    insertWithIdEncodedForIdentity: unused,
+    restoreEncoded: unused,
+    restoreEncodedForIdentity: unused,
+    updateEncoded: unused,
+    updateEncodedForIdentity: unused,
+    upsertEncoded: unused,
+    upsertEncodedForIdentity: unused,
+    delete: unused,
+    deleteForIdentity: unused,
+    mergeableTx: unused,
+    setTickScheduler: vi.fn(),
+    onMutationError: unused,
+    connectUpstream: unused,
+    tick: unused,
+    close: vi.fn(),
+  };
 }
 
 describe("self-signed native open ABI", () => {
