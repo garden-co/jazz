@@ -5,6 +5,8 @@ import { InspectorLayout } from "./index";
 
 const mockUseStandaloneContext = vi.fn();
 const mockUseDevtoolsContext = vi.fn();
+const mockIsDetachedInspector = vi.fn();
+const mockRequestDetachOverlay = vi.fn();
 
 vi.mock("../../contexts/standalone-context.js", () => ({
   useStandaloneContext: () => mockUseStandaloneContext(),
@@ -14,10 +16,18 @@ vi.mock("../../contexts/devtools-context.js", () => ({
   useDevtoolsContext: () => mockUseDevtoolsContext(),
 }));
 
+vi.mock("../../utility/overlay-settings.js", () => ({
+  isDetachedInspector: () => mockIsDetachedInspector(),
+  requestCloseOverlay: vi.fn(),
+  requestDetachOverlay: (...args: unknown[]) => mockRequestDetachOverlay(...args),
+}));
+
 describe("InspectorLayout", () => {
   beforeEach(() => {
     mockUseStandaloneContext.mockReset();
     mockUseDevtoolsContext.mockReset();
+    mockIsDetachedInspector.mockReset();
+    mockIsDetachedInspector.mockReturnValue(false);
     mockUseDevtoolsContext.mockReturnValue({ runtime: "extension" });
   });
 
@@ -174,5 +184,35 @@ describe("InspectorLayout", () => {
 
     expect(screen.queryByRole("button", { name: "Connections" })).toBeNull();
     expect(screen.queryByRole("combobox")).toBeNull();
+  });
+
+  it("opens the active route in a separate window from overlay mode", () => {
+    mockUseStandaloneContext.mockReturnValue(null);
+    mockUseDevtoolsContext.mockReturnValue({ runtime: "overlay" });
+
+    render(
+      <MemoryRouter initialEntries={["/data-explorer/todos/data"]}>
+        <InspectorLayout />
+      </MemoryRouter>,
+    );
+
+    const detach = screen.getByRole("button", { name: "Open inspector in separate window" });
+    fireEvent.click(detach);
+    expect(mockRequestDetachOverlay).toHaveBeenCalledWith("/data-explorer/todos/data");
+  });
+
+  it("hides overlay window actions in a detached inspector", () => {
+    mockUseStandaloneContext.mockReturnValue(null);
+    mockUseDevtoolsContext.mockReturnValue({ runtime: "overlay" });
+    mockIsDetachedInspector.mockReturnValue(true);
+
+    render(
+      <MemoryRouter>
+        <InspectorLayout />
+      </MemoryRouter>,
+    );
+
+    expect(screen.queryByRole("button", { name: "Open inspector in separate window" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Close inspector" })).toBeNull();
   });
 });

@@ -5,7 +5,11 @@ import {
   formatSchemaHashOptionLabel,
   type SchemaHashInfo,
 } from "../../utility/schema-hash-display.js";
-import { requestCloseOverlay } from "../../utility/overlay-settings.js";
+import {
+  isDetachedInspector,
+  requestCloseOverlay,
+  requestDetachOverlay,
+} from "../../utility/overlay-settings.js";
 import { useLocalStorageState } from "../../utility/use-local-storage-state.js";
 import { Tooltip } from "../tooltip/Tooltip.js";
 import styles from "./index.module.css";
@@ -53,9 +57,32 @@ function CloseIcon() {
   );
 }
 
+function PictureInPictureIcon() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M2 10h6V4" />
+      <path d="m2 4 6 6" />
+      <path d="M21 10V7a2 2 0 0 0-2-2h-7" />
+      <path d="M3 14v2a2 2 0 0 0 2 2h3" />
+      <rect x="12" y="14" width="10" height="7" rx="1" />
+    </svg>
+  );
+}
+
 export function InspectorLayout() {
   const { runtime } = useDevtoolsContext();
   const isOverlay = runtime === "overlay";
+  const isDetached = isOverlay && isDetachedInspector();
   const standaloneContext = useStandaloneContext();
   const location = useLocation();
   const [isTablesPanelOpen, setIsTablesPanelOpen] = useLocalStorageState(
@@ -129,17 +156,29 @@ export function InspectorLayout() {
               </button>
             </>
           ) : null}
-          {isOverlay ? (
-            <Tooltip label="Close (Esc)">
-              <button
-                type="button"
-                onClick={requestCloseOverlay}
-                className={styles.iconButton}
-                aria-label="Close inspector"
-              >
-                <CloseIcon />
-              </button>
-            </Tooltip>
+          {isOverlay && !isDetached ? (
+            <>
+              <Tooltip label="Open in separate window">
+                <button
+                  type="button"
+                  onClick={() => requestDetachOverlay(`${location.pathname}${location.search}`)}
+                  className={styles.iconButton}
+                  aria-label="Open inspector in separate window"
+                >
+                  <PictureInPictureIcon />
+                </button>
+              </Tooltip>
+              <Tooltip label="Close (Esc)">
+                <button
+                  type="button"
+                  onClick={requestCloseOverlay}
+                  className={styles.iconButton}
+                  aria-label="Close inspector"
+                >
+                  <CloseIcon />
+                </button>
+              </Tooltip>
+            </>
           ) : null}
         </div>
       </header>
