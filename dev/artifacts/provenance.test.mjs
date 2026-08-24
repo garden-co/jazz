@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import test from "node:test";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -37,6 +38,28 @@ function fixture() {
   }))
     writeFileSync(join(root, path), content);
   return root;
+}
+
+function git(root, args) {
+  execFileSync("git", args, { cwd: root, stdio: "ignore" });
+}
+
+function withRepositoryGitProvenance(callback) {
+  const names = [
+    "JAZZ_ARTIFACT_GIT_HEAD",
+    "JAZZ_ARTIFACT_GIT_TREE",
+    "JAZZ_ARTIFACT_GIT_DIRTY_DIFF",
+  ];
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  for (const name of names) delete process.env[name];
+  try {
+    return callback();
+  } finally {
+    for (const name of names) {
+      if (previous[name] === undefined) delete process.env[name];
+      else process.env[name] = previous[name];
+    }
+  }
 }
 
 process.env.JAZZ_ARTIFACT_GIT_HEAD = "test-head";
@@ -88,6 +111,32 @@ test("dirty source changes invalidate the manifest", () => {
     /packageInputs differs|git.dirtyDiff differs/,
   );
 });
+
+test("WASM provenance ignores local generated fingerprints but not tracked source changes", () =>
+  withRepositoryGitProvenance(() => {
+    const root = fixture();
+    const runtime = join(root, "packages/jazz-tools/src/runtime");
+    mkdirSync(runtime, { recursive: true });
+    for (const file of [
+      "native-artifact-fingerprint-napi.ts",
+      "native-artifact-fingerprint-wasm.ts",
+    ])
+      writeFileSync(join(runtime, file), "// generated baseline\n");
+    git(root, ["init", "--quiet"]);
+    git(root, ["config", "user.email", "tests@example.invalid"]);
+    git(root, ["config", "user.name", "Jazz tests"]);
+    git(root, ["add", "."]);
+    git(root, ["commit", "--quiet", "-m", "fixture"]);
+
+    const clean = expectedManifest(root, "wasm", "fast").git.dirtyDiff;
+    writeFileSync(join(runtime, "native-artifact-fingerprint-napi.ts"), "// generated NAPI\n");
+    writeFileSync(join(runtime, "native-artifact-fingerprint-wasm.ts"), "// generated WASM\n");
+    assert.equal(expectedManifest(root, "wasm", "fast").git.dirtyDiff, clean);
+
+    writeFileSync(join(root, "crates/jazz-wasm/src/lib.rs"), "// real source change\n");
+    assert.notEqual(expectedManifest(root, "wasm", "fast").git.dirtyDiff, clean);
+    rmSync(root, { recursive: true, force: true });
+  }));
 
 test("NAPI provenance excludes only the wrapper's ephemeral staged binding", () => {
   const root = fixture();
