@@ -295,6 +295,70 @@ describe("RecordPlayer authenticated playlist topology", () => {
     expect(receipt.status).toBe("passed");
   }, 30_000);
 
+  it("delivers a relational recipient grant when authority setup is one topology phase", async () => {
+    const receipt = await runTopologyScenario(
+      {
+        id: "record-player.relational-recipient-full-phase-control",
+        topology: ["browser", "edge", "core"],
+        seed: 2,
+        phaseTimeoutMs: 25_000,
+        faultTimeoutMs: 15_000,
+        targets: {},
+        replay: "pnpm --filter record-player-next-betterauth test:browser -- topology.e2e.test.ts",
+        phases: [
+          {
+            name: "create authority and deliver recipient grant",
+            run: async () => {
+              const server = await getJazzServerInfo(
+                uniqueDbName("record-player-recipient-full-phase"),
+              );
+              await deploy({
+                appId: server.appId,
+                serverUrl: server.serverUrl,
+                adminSecret: server.adminSecret,
+                schema: relationalRecipientApp,
+                permissions: relationalRecipientPermissions,
+              });
+              const [ownerToken, recipientToken] = await Promise.all([
+                getJazzServerJwtForUser("record-player-phase-owner", undefined, server.appId),
+                getJazzServerJwtForUser("record-player-phase-recipient", undefined, server.appId),
+              ]);
+              const owner = await openClient(server, "phase-owner", ownerToken);
+              const recipient = await openClient(server, "phase-recipient", recipientToken);
+              const playlist = await owner
+                .insert(relationalRecipientApp.playlists, {
+                  name: "phase relation receipt",
+                  owner_subject: "record-player-phase-owner",
+                })
+                .wait({ tier: "edge" });
+              const invite = await owner
+                .insert(relationalRecipientApp.invitations, {
+                  playlist_id: playlist.id,
+                  subject: "record-player-phase-recipient",
+                  label: "phase relation receipt",
+                  role: "listener",
+                  status: "pending",
+                })
+                .wait({ tier: "edge" });
+              await waitForQuery(
+                recipient,
+                relationalRecipientApp.invitations.where({
+                  subject: "record-player-phase-recipient",
+                }),
+                (rows) => rows.length === 1 && rows[0]?.id === invite.id,
+                "full-phase external-JWT recipient receives scalar grant",
+                15_000,
+                "edge",
+              );
+            },
+          },
+        ],
+      },
+      browserTopologyReporter,
+    );
+    expect(receipt.status).toBe("passed");
+  }, 30_000);
+
   it("rejects forged acceptance and converges two offline playlist editors exactly", async () => {
     let server: Awaited<ReturnType<typeof getJazzServerInfo>>;
     let owner: Db;
