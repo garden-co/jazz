@@ -98,7 +98,11 @@ export class BrowserConnectionManager extends ConnectionManager {
     this.resolveReconnectWaiters();
   }
 
-  override updateAuth(auth: { jwtToken?: string; cookieSession?: Session }): void {
+  override updateAuth(auth: {
+    jwtToken?: string;
+    cookieSession?: Session;
+    trustedReservedSession?: Session;
+  }): void {
     super.updateAuth(auth);
     void this.connection?.updateAuth(
       JSON.stringify(runtimeAuth(this.host.config)),

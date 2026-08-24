@@ -8,7 +8,7 @@ import type { AppContext, Session } from "../runtime/context.js";
 import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
 import { Db, type DbConfig } from "../runtime/db.js";
 import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
-import { SYSTEM_AUTHOR_ID, SYSTEM_READ_SESSION } from "../runtime/system-identity.js";
+import { SYSTEM_READ_SESSION } from "../runtime/system-identity.js";
 import { canonicalAuthorSubject } from "../runtime/author-id.js";
 import { authorBytesForSession } from "../runtime/author-id.js";
 import type { AuthState } from "../runtime/auth-state.js";
@@ -346,7 +346,7 @@ export class JazzContext {
   asBackend(source?: BackendSchemaInput): Db {
     const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, schema, undefined, SYSTEM_AUTHOR_ID, true, true);
+    return this.wrapDb(client, schema, SYSTEM_READ_SESSION, undefined, true, true);
   }
 
   /**
