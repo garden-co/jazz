@@ -1,10 +1,16 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const read = (path) => JSON.parse(readFileSync(path, "utf8"));
+const wasmArtifactFiles = [
+  "jazz_wasm_bg.wasm",
+  "jazz_wasm_bg.wasm.d.ts",
+  "jazz_wasm.d.ts",
+  "jazz_wasm.js",
+];
 export function stageNativeFingerprints(root, { local = false } = {}) {
   const wasm = read(join(root, "crates/jazz-wasm/pkg/.jazz-artifact-manifest.json"));
   const napi = local
@@ -27,9 +33,25 @@ export function stageNativeFingerprints(root, { local = false } = {}) {
       throw new Error(`${name} manifest lacks a native fingerprint`);
   if (wasm.kind !== "wasm" || wasm.profile !== (local ? "fast" : "release"))
     throw new Error("downloaded WASM manifest has the wrong kind/profile");
-  for (const artifact of wasm.artifacts ?? []) {
+  const artifacts = wasm.artifacts;
+  if (!Array.isArray(artifacts) || artifacts.length !== wasmArtifactFiles.length)
+    throw new Error("downloaded WASM manifest must list each generated artifact exactly once");
+  const artifactNames = artifacts.map((artifact) => artifact?.file);
+  if (
+    new Set(artifactNames).size !== wasmArtifactFiles.length ||
+    wasmArtifactFiles.some((file) => !artifactNames.includes(file))
+  )
+    throw new Error("downloaded WASM manifest must list each generated artifact exactly once");
+  for (const artifact of artifacts) {
+    if (!artifact || typeof artifact.file !== "string")
+      throw new Error("downloaded WASM manifest has an invalid artifact entry");
     const path = join(root, "crates/jazz-wasm/pkg", artifact.file);
-    const hash = existsSync(path) && createHash("sha256").update(readFileSync(path)).digest("hex");
+    const hash =
+      existsSync(path) &&
+      lstatSync(path).isFile() &&
+      lstatSync(path).size > 0 &&
+      /^[a-f0-9]{64}$/.test(artifact.sha256 ?? "") &&
+      createHash("sha256").update(readFileSync(path)).digest("hex");
     if (hash !== artifact.sha256)
       throw new Error(`downloaded WASM artifact hash mismatch: ${artifact.file}`);
   }
