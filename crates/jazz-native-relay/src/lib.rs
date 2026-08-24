@@ -34,8 +34,9 @@ pub const NATIVE_RELAY_ABI_VERSION: u16 = 1;
 
 /// Codec-owned commands accepted by the native relay C ABI.
 ///
-/// This surface owns relay lifecycle only. JNI/Swift wrappers carry these
-/// postcard bytes unchanged; query, mutation, and row semantics remain absent.
+/// This surface owns relay lifecycle and ordinary peer-frame transport only.
+/// JNI/Swift wrappers carry these postcard bytes unchanged; query, mutation,
+/// and row semantics remain absent.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum RelayCommandRequest {
     Probe,
@@ -61,6 +62,31 @@ pub enum RelayCommandRequest {
     Pump {
         relay: u64,
     },
+    /// Give one complete canonical Jazz peer frame to an attached in-memory
+    /// UI client. The host never decodes rows or queries here.
+    SendClientFrame {
+        client: u64,
+        frame: Vec<u8>,
+    },
+    /// Drain frames destined for one attached in-memory UI client.
+    ReceiveClientFrames {
+        client: u64,
+    },
+    /// Give one complete canonical Jazz peer frame to the relay's upstream
+    /// transport.
+    SendRelayFrame {
+        relay: u64,
+        frame: Vec<u8>,
+    },
+    /// Drain frames destined for the relay's upstream transport.
+    ReceiveRelayFrames {
+        relay: u64,
+    },
+    /// Host-only lifecycle diagnostics. This deliberately exposes handles and
+    /// queue depths, never database rows, query state, or auth material.
+    Diagnostics {
+        relay: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
@@ -83,11 +109,27 @@ impl From<RelayScopeRequest> for RelayScope {
 /// Codec-owned response for [`RelayCommandRequest`].
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum RelayCommandResponse {
-    Probe { abi_version: u16 },
-    Opened { relay: u64 },
-    Attached { client: u64 },
-    Closed { closed: bool },
+    Probe {
+        abi_version: u16,
+    },
+    Opened {
+        relay: u64,
+    },
+    Attached {
+        client: u64,
+    },
+    Closed {
+        closed: bool,
+    },
     Pumped,
+    Frames {
+        frames: Vec<Vec<u8>>,
+    },
+    Diagnostics {
+        attached_clients: u64,
+        inbound_frames: u64,
+        outbound_frames: u64,
+    },
 }
 
 /// ABI-owned response buffer. On successful execution, `data` is allocated by
@@ -263,6 +305,69 @@ impl NativeRelayHost {
                     .pump()
                     .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
                 Ok(RelayCommandResponse::Pumped)
+            }
+            RelayCommandRequest::SendClientFrame { client, frame } => {
+                self.clients
+                    .get(&client)
+                    .ok_or(JazzNativeRelayStatus::InvalidHandle)?
+                    .1
+                    .wire()
+                    .push_inbound_encoded(&frame)
+                    .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+                Ok(RelayCommandResponse::Pumped)
+            }
+            RelayCommandRequest::ReceiveClientFrames { client } => {
+                Ok(RelayCommandResponse::Frames {
+                    frames: self
+                        .clients
+                        .get(&client)
+                        .ok_or(JazzNativeRelayStatus::InvalidHandle)?
+                        .1
+                        .wire()
+                        .take_outbound_encoded()
+                        .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?,
+                })
+            }
+            RelayCommandRequest::SendRelayFrame { relay, frame } => {
+                self.relays
+                    .get(&relay)
+                    .ok_or(JazzNativeRelayStatus::InvalidHandle)?
+                    .1
+                    .wire()
+                    .push_inbound_encoded(&frame)
+                    .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+                Ok(RelayCommandResponse::Pumped)
+            }
+            RelayCommandRequest::ReceiveRelayFrames { relay } => Ok(RelayCommandResponse::Frames {
+                frames: self
+                    .relays
+                    .get(&relay)
+                    .ok_or(JazzNativeRelayStatus::InvalidHandle)?
+                    .1
+                    .wire()
+                    .take_outbound_encoded()
+                    .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?,
+            }),
+            RelayCommandRequest::Diagnostics { relay } => {
+                let relay_handle = relay;
+                let relay = self
+                    .relays
+                    .get(&relay_handle)
+                    .ok_or(JazzNativeRelayStatus::InvalidHandle)?;
+                let (inbound_frames, outbound_frames) = relay
+                    .1
+                    .wire()
+                    .queue_depths()
+                    .map_err(|_| JazzNativeRelayStatus::LifecycleFailure)?;
+                Ok(RelayCommandResponse::Diagnostics {
+                    attached_clients: self
+                        .clients
+                        .iter()
+                        .filter(|(_, (owner, _))| *owner == relay_handle)
+                        .count() as u64,
+                    inbound_frames: inbound_frames as u64,
+                    outbound_frames: outbound_frames as u64,
+                })
             }
         }
     }
@@ -544,6 +649,7 @@ impl RelayOpenConfig {
 pub struct NativeRelayClient {
     relay: NativeRelay,
     id: u64,
+    wire: NativeRelayWire,
 }
 
 impl NativeRelayClient {
@@ -578,6 +684,10 @@ impl NativeRelayClient {
                 .map(|_| ())
                 .ok_or(RelayError::UnknownClient(id))
         })
+    }
+
+    pub fn wire(&self) -> NativeRelayWire {
+        self.wire.clone()
     }
 }
 
@@ -676,6 +786,20 @@ impl NativeRelayWire {
         outbound.clear();
         Ok(encoded)
     }
+
+    pub fn queue_depths(&self) -> Result<(usize, usize), RelayError> {
+        let inbound = self
+            .inbound
+            .lock()
+            .map_err(|_| RelayError::Poisoned("native relay inbound queue"))?
+            .len();
+        let outbound = self
+            .outbound
+            .lock()
+            .map_err(|_| RelayError::Poisoned("native relay outbound queue"))?
+            .len();
+        Ok((inbound, outbound))
+    }
 }
 
 fn validate_encoded_peer_message_len(len: usize) -> Result<(), RelayError> {
@@ -720,9 +844,13 @@ impl Transport for DuplexTransport {
     }
 }
 
-fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
+fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>, NativeRelayWire) {
     let left = Arc::new(Mutex::new(VecDeque::new()));
     let right = Arc::new(Mutex::new(VecDeque::new()));
+    let wire = NativeRelayWire {
+        inbound: Arc::clone(&left),
+        outbound: Arc::clone(&right),
+    };
     (
         Box::new(DuplexTransport {
             inbound: Arc::clone(&left),
@@ -732,11 +860,13 @@ fn duplex() -> (Box<dyn Transport>, Box<dyn Transport>) {
             inbound: right,
             outbound: left,
         }),
+        wire,
     )
 }
 
 struct ConnectedClient {
     db: Db<MemoryStorage>,
+    wire: NativeRelayWire,
     // The core stores weak references for lifecycle ownership; retaining both
     // endpoints is what keeps the normal peer protocol connection alive.
     _upstream: Rc<LocalMutex<PeerConnection<MemoryStorage>>>,
@@ -795,7 +925,7 @@ impl RelayWorker {
             id_source: None,
         }))
         .map_err(RelayError::Db)?;
-        let (client_transport, relay_transport) = duplex();
+        let (client_transport, relay_transport, wire) = duplex();
         let upstream = block_on(db.connect_upstream(client_transport));
         let served =
             self.persistent
@@ -809,6 +939,7 @@ impl RelayWorker {
             id,
             ConnectedClient {
                 db,
+                wire,
                 _upstream: upstream,
                 _served: served,
             },
@@ -918,6 +1049,13 @@ impl NativeRelay {
         Ok(NativeRelayClient {
             relay: self.clone(),
             id,
+            wire: self.run(move |worker| {
+                worker
+                    .clients
+                    .get(&id)
+                    .map(|client| client.wire.clone())
+                    .ok_or(RelayError::UnknownClient(id))
+            })?,
         })
     }
 
@@ -1266,6 +1404,33 @@ mod tests {
                 claims: BTreeMap::from([("role".to_owned(), Value::String("member".to_owned()))]),
             }
         );
+    }
+
+    #[test]
+    fn client_transport_keeps_the_wire_boundary_opaque_and_directional() {
+        let directory = tempfile::tempdir().unwrap();
+        let relay =
+            NativeRelay::spawn(config(directory.path().join("relay.sqlite"), Some("alice")))
+                .unwrap();
+        let client = relay
+            .attach_client(
+                DbIdentity {
+                    node: NodeUuid::from_bytes([0x91; 16]),
+                    author: AuthorId::from_bytes([0x92; 16]),
+                },
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let frame = encode_sync_message(&SyncMessage::SessionClaims {
+            identity: AuthorId::SYSTEM,
+            claims: BTreeMap::new(),
+        })
+        .unwrap();
+
+        client.wire().push_inbound_encoded(&frame).unwrap();
+        assert_eq!(client.wire().queue_depths().unwrap(), (1, 0));
+        relay.pump().unwrap();
+        assert_eq!(client.wire().queue_depths().unwrap().0, 0);
     }
 
     #[test]
