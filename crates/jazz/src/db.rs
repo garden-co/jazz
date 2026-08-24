@@ -555,9 +555,69 @@ impl PeerIoPump {
         negotiated_features: crate::wire::WireFeatures,
         session: Option<crate::wire::WireSession>,
     ) -> Result<Option<Vec<u8>>, String> {
-        let Some(message) = self.take_outbound(1) else {
-            return Ok(None);
-        };
+        let mut frames = self.take_outbound_wire_frames(
+            protocol_version,
+            negotiated_features,
+            session,
+            1,
+            crate::protocol_limits::MAX_WIRE_FRAME_BYTES,
+        )?;
+        Ok(frames.pop())
+    }
+
+    /// Drain a bounded FIFO prefix of the auxiliary lane into complete wire
+    /// frames. If the next complete frame would exceed `max_bytes`, it remains
+    /// queued for a later drain; no response is dropped merely because a host
+    /// transport chooses a smaller batch boundary.
+    pub fn take_outbound_wire_frames(
+        &self,
+        protocol_version: u16,
+        negotiated_features: crate::wire::WireFeatures,
+        session: Option<crate::wire::WireSession>,
+        max_frames: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        if max_frames == 0 || max_bytes == 0 {
+            return Ok(Vec::new());
+        }
+        let mut frames = Vec::new();
+        let mut total_bytes: usize = 0;
+        while frames.len() < max_frames {
+            let Some(message) = self.take_outbound(1) else {
+                break;
+            };
+            let frame = Self::encode_outbound_wire_frame(
+                message.clone(),
+                protocol_version,
+                negotiated_features,
+                session.clone(),
+            )?;
+            let Some(next_total) = total_bytes.checked_add(frame.len()) else {
+                self.restore_outbound(message);
+                break;
+            };
+            if next_total > max_bytes {
+                self.restore_outbound(message);
+                if frames.is_empty() {
+                    return Err(format!(
+                        "auxiliary wire frame exceeds bounded drain budget: frame={} budget={max_bytes}",
+                        frame.len()
+                    ));
+                }
+                break;
+            }
+            total_bytes = next_total;
+            frames.push(frame);
+        }
+        Ok(frames)
+    }
+
+    fn encode_outbound_wire_frame(
+        message: SyncMessage,
+        protocol_version: u16,
+        negotiated_features: crate::wire::WireFeatures,
+        session: Option<crate::wire::WireSession>,
+    ) -> Result<Vec<u8>, String> {
         let payload = crate::wire::encode_sync_message_for_features(&message, negotiated_features)
             .map_err(|error| format!("cannot encode auxiliary sync payload: {error:?}"))?;
         let active_features = negotiated_features
@@ -568,7 +628,6 @@ impl PeerIoPump {
             envelope = envelope.with_session(session);
         }
         crate::wire::encode_frame(&crate::wire::WireFrame::Message(envelope))
-            .map(Some)
             .map_err(|error| format!("cannot encode auxiliary wire frame: {error}"))
     }
 

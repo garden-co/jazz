@@ -179,6 +179,81 @@ fn subscriber_auxiliary_responses_are_bounded_to_one_chunk_per_wire_frame() {
 }
 
 #[test]
+fn bounded_auxiliary_drain_keeps_large_response_batches_fifo_and_within_bytes() {
+    let resolver = PeerChunkResolver::default();
+    let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());
+    let database = crate::db::block_on(groove::db::Database::new(
+        schema,
+        groove::storage::MemoryStorage::new(&[groove::db::LARGE_VALUE_METADATA_CF]),
+    ))
+    .unwrap();
+    let subscriber = PeerIoPump::new(
+        resolver.clone(),
+        database.local_chunk_reader(),
+        24,
+        PeerIoPumpRole::Subscriber,
+    );
+    let response_count = 32_u64;
+    let chunk_bytes = vec![0x3c; groove::large_values::LEAF_MAX_BYTES];
+    resolver.state.borrow_mut().relay_responses.insert(
+        24,
+        (0..response_count)
+            .map(|request_id| ChunkResponseEntry {
+                request_id,
+                result: ChunkResponse::Found(chunk_bytes.clone()),
+            })
+            .collect(),
+    );
+
+    let features = crate::wire::current_wire_features();
+    let byte_budget = groove::large_values::LEAF_MAX_BYTES * 4;
+    let mut observed_request_ids = Vec::new();
+    loop {
+        let frames = subscriber
+            .take_outbound_wire_frames(
+                crate::wire::WIRE_PROTOCOL_VERSION,
+                features,
+                None,
+                8,
+                byte_budget,
+            )
+            .unwrap();
+        if frames.is_empty() {
+            break;
+        }
+        assert!(
+            frames.len() <= 8,
+            "frame-count budget bounds every host batch"
+        );
+        assert!(
+            frames.iter().map(Vec::len).sum::<usize>() <= byte_budget,
+            "byte budget bounds every host batch"
+        );
+        for frame in frames {
+            let crate::wire::WireFrame::Message(envelope) =
+                crate::wire::decode_frame(&frame).unwrap()
+            else {
+                panic!("auxiliary output is a complete message frame");
+            };
+            let payload =
+                crate::wire::decompress_sync_payload(&envelope.payload, envelope.features).unwrap();
+            let SyncMessage::ChunkResponseBatch(batch) =
+                crate::wire::decode_sync_message_for_features(&payload, features).unwrap()
+            else {
+                panic!("subscriber emits chunk responses");
+            };
+            assert_eq!(batch.responses.len(), 1, "per-frame bound remains intact");
+            observed_request_ids.push(batch.responses[0].request_id);
+        }
+    }
+    assert_eq!(
+        observed_request_ids,
+        (0..response_count).collect::<Vec<_>>(),
+        "each bounded drain preserves the queued response order and reaches the tail"
+    );
+}
+
+#[test]
 fn dropping_the_last_suspended_consumer_cancels_unsent_chunk_demand() {
     let resolver = PeerChunkResolver::default();
     let schema = groove::schema::DatabaseSchema::new(Vec::<groove::schema::TableSchema>::new());

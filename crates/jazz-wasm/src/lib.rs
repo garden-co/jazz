@@ -2147,13 +2147,30 @@ impl WasmTransport {
         })
     }
 
-    /// Drain complete auxiliary wire frames independently of semantic ticks.
+    /// Drain a bounded FIFO batch of complete auxiliary wire frames
+    /// independently of semantic ticks. Browser bindings choose a small
+    /// MessagePort batch so a burst of legal chunk responses cannot become one
+    /// giant structured-clone allocation.
     #[wasm_bindgen(js_name = recvAuxiliaryWireFrames)]
-    pub fn recv_auxiliary_wire_frames(&self) -> Result<js_sys::Array, JsValue> {
+    pub fn recv_auxiliary_wire_frames(
+        &self,
+        max_frames: Option<u32>,
+        max_bytes: Option<u32>,
+    ) -> Result<js_sys::Array, JsValue> {
+        let max_frames = max_frames.unwrap_or(1).max(1) as usize;
+        let max_bytes = max_bytes
+            .unwrap_or(jazz::protocol_limits::MAX_WIRE_FRAME_BYTES as u32)
+            .max(1) as usize;
         let frames = js_sys::Array::new();
-        while let Some(frame) = self
+        for frame in self
             .auxiliary_pump
-            .take_outbound_wire_frame(self.protocol_version, self.features, None)
+            .take_outbound_wire_frames(
+                self.protocol_version,
+                self.features,
+                None,
+                max_frames,
+                max_bytes,
+            )
             .map_err(|error| JsValue::from_str(&error))?
         {
             frames.push(&js_sys::Uint8Array::from(frame.as_slice()).into());

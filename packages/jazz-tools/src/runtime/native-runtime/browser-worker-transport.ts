@@ -1,5 +1,11 @@
 import type { Transport } from "./native-runtime-adapter.js";
 
+// Keep auxiliary chunk traffic below a bounded structured-clone allocation.
+// A host may emit 256 KiB content-tree nodes, so this leaves room for several
+// complete frames without giving one MessagePort task an unbounded payload.
+export const MAX_AUXILIARY_FRAMES_PER_PORT_MESSAGE = 8;
+export const MAX_AUXILIARY_BYTES_PER_PORT_MESSAGE = 1024 * 1024;
+
 export interface PeerTransportRuntime {
   onPeerTransportWork(listener: () => void): () => void;
   notifyPeerTransportActivity?(): void;
@@ -81,14 +87,21 @@ export class BrowserWorkerTransportPump {
     await new Promise<void>((resolve) => this.flushWaiters.add({ target, resolve }));
   }
 
-  drainOutboundFrames(): void {
-    if (this.closed) return;
+  drainOutboundFrames(): boolean {
+    if (this.closed) return false;
     const frames = normalizeTransportFrames(this.transport.recvWireFrames());
     if (frames.length > 0) this.sendFrames(frames);
     const auxiliary = this.transport.recvAuxiliaryWireFrames;
-    if (!auxiliary) return;
-    const auxiliaryFrames = normalizeTransportFrames(auxiliary.call(this.transport));
+    if (!auxiliary) return false;
+    const auxiliaryFrames = normalizeTransportFrames(
+      auxiliary.call(
+        this.transport,
+        MAX_AUXILIARY_FRAMES_PER_PORT_MESSAGE,
+        MAX_AUXILIARY_BYTES_PER_PORT_MESSAGE,
+      ),
+    );
     if (auxiliaryFrames.length > 0) this.sendFrames(auxiliaryFrames);
+    return auxiliaryFrames.length > 0;
   }
 
   private scheduleOutboundDrain(): void {
@@ -157,7 +170,11 @@ export class BrowserWorkerTransportPump {
       if (this.closed) return;
       // This path is deliberately independent of progressPeerTransport(): a
       // root evaluator may be suspended on this very chunk request.
-      this.drainOutboundFrames();
+      const drainedAuxiliary = this.drainOutboundFrames();
+      // `auxiliaryOutboundReady()` remains immediately ready while a bounded
+      // drain leaves a remainder. Yield a browser task between batches so an
+      // upload burst cannot spin in microtasks or starve MessagePort input.
+      if (drainedAuxiliary) await yieldToBrowserTask();
     }
   }
 }
@@ -177,4 +194,8 @@ function normalizeTransportFrame(frame: unknown): Uint8Array {
     return new Uint8Array(frame.buffer, frame.byteOffset, frame.byteLength);
   }
   throw new Error("Browser worker transport received a non-binary wire frame");
+}
+
+function yieldToBrowserTask(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
