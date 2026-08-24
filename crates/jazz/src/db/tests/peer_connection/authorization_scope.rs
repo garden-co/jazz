@@ -845,6 +845,62 @@ fn subscriber_cannot_spoof_authority_view_updates() {
     assert!(!node.opening_pending_for_binding_view(binding_view));
 }
 
+// This stays internal because the admission ordering and retained peer registration
+// state are not exposed through the public client API.
+#[test]
+fn oversized_register_shape_read_view_is_rejected_before_key_derivation_or_retention() {
+    let schema = schema();
+    let server = open_core(0x5d, AuthorId::SYSTEM, &schema);
+    let shape = Query::from("todos").validate(&schema).unwrap();
+    let oversized_opts = RegisterShapeOptions {
+        read_view: ReadViewSpec {
+            source: ReadViewSourceSpec::Snapshot {
+                snapshot: SnapshotRef {
+                    owner: NodeUuid::from_bytes([0x98; 16]),
+                    global_base: GlobalTime(0),
+                    local_base: TxTime(0),
+                    dots: vec![
+                        TxId::new(TxTime(1), NodeUuid::from_bytes([0x97; 16]));
+                        MAX_SHAPE_AST_BYTES
+                    ],
+                },
+            },
+        },
+        ..RegisterShapeOptions::default()
+    };
+    let (mut client_transport, server_transport) = duplex();
+    let subscriber = server.accept_subscriber(server_transport, AuthorId::from_bytes([0x96; 16]));
+
+    client_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(&shape),
+            opts: oversized_opts,
+        })
+        .unwrap();
+    subscriber.borrow_mut().tick().unwrap();
+
+    assert_subscribe_rejected_unsupported_shape_capability_detail(
+        client_transport
+            .try_recv()
+            .expect("oversized registration must receive a rejection"),
+        SubscriptionKey {
+            shape_id: shape.shape_id(),
+            binding_id: BindingId(uuid::Uuid::nil()),
+            read_view: crate::protocol::ReadViewKey::default(),
+        },
+        "shape registration size",
+    );
+    let subscriber = subscriber.borrow();
+    let crate::db::peer_connection::ConnectionLink::Subscriber(state) = &subscriber.link else {
+        panic!("accepted subscriber must retain subscriber connection state");
+    };
+    assert!(
+        state.shape_registrations.is_empty(),
+        "oversized read-view options must not be retained"
+    );
+}
+
 #[test]
 fn oversized_register_shape_is_rejected_at_admission() {
     let schema = schema();
