@@ -1247,7 +1247,14 @@ export class Db {
         this.config.appId,
         ttlSeconds,
       );
-      this.updateAuthToken(newToken);
+      const trustedReservedSession = sessionFromVerifiedReservedJwtPayload(
+        parseJwtPayload(newToken) ?? {},
+        "local-first",
+      );
+      if (!trustedReservedSession) {
+        throw new Error("Minted local-first token is missing its reserved session identity");
+      }
+      this.applyAuthUpdate(newToken, trustedReservedSession);
       this.scheduleLocalFirstRefresh(ttlSeconds);
     } catch (e) {
       console.error("Failed to refresh local-first token:", e);
@@ -1267,11 +1274,11 @@ export class Db {
     this.authStateStore.markUnauthenticated(reason);
   }
 
-  protected applyAuthUpdate(token: string | null): boolean {
+  protected applyAuthUpdate(token: string | null, trustedReservedSession?: Session): boolean {
     const jwtToken = token ?? undefined;
     const previousToken = this.config.jwtToken;
     const previousState = this.authStateStore.getState();
-    const nextState = this.authStateStore.applyJwtToken(jwtToken);
+    const nextState = this.authStateStore.applyJwtToken(jwtToken, trustedReservedSession);
     const tokenChanged = previousToken !== jwtToken;
 
     if (!tokenChanged && nextState === previousState) {
@@ -1279,8 +1286,9 @@ export class Db {
     }
 
     this.config.jwtToken = jwtToken;
+    this.config.trustedReservedSession = trustedReservedSession;
 
-    this.connection.updateAuth({ jwtToken });
+    this.connection.updateAuth({ jwtToken, trustedReservedSession });
 
     return true;
   }

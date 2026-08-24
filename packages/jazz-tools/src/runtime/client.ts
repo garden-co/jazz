@@ -967,11 +967,20 @@ export class JazzClient {
 
   updateAuthToken(jwtToken?: string): void {
     this.context.jwtToken = jwtToken;
+    this.context.trustedReservedSession = undefined;
     this.resolvedSession = this.resolveSessionFromContext();
     // Push the refreshed credentials into the Rust transport.
     // Carry forward admin/backend secrets from context — omitting them here
     // would deserialise to None on the Rust side and silently erase any
     // privileged credentials the transport was connected with.
+    this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
+  }
+
+  /** @internal Update a token minted by a dedicated first-party reserved auth flow. */
+  updateTrustedAuthToken(jwtToken: string, session: Session): void {
+    this.context.jwtToken = jwtToken;
+    this.context.trustedReservedSession = session;
+    this.resolvedSession = this.resolveSessionFromContext();
     this.runtime.updateAuth(JSON.stringify(this.buildTransportAuthPayload()));
   }
 
