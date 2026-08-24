@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createDb, schema as s, type Db } from "jazz-tools";
+import type { RowRefValue } from "jazz-tools/permissions";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
   TestCleanup,
@@ -59,6 +60,16 @@ const relationalRecipientApp = s.defineApp({
 const relationalRecipientPermissions = s.definePermissions(
   relationalRecipientApp,
   ({ policy, session, anyOf, allowedTo }) => {
+    const canEditPlaylist = (playlistId: RowRefValue) =>
+      anyOf([
+        { $createdBy: session.author },
+        policy.invitations.exists.where({
+          playlist_id: playlistId,
+          subject: session.user_id,
+          role: "editor",
+          status: "accepted",
+        }),
+      ]);
     policy.playlists.allowRead.where((playlist) =>
       anyOf([
         { $createdBy: session.author },
@@ -71,6 +82,9 @@ const relationalRecipientPermissions = s.definePermissions(
     );
     policy.playlists.allowInsert.always();
     policy.playlist_entries.allowRead.where(allowedTo.read("playlist_id"));
+    policy.playlist_entries.allowInsert.where((entry) => canEditPlaylist(entry.playlist_id));
+    policy.playlist_entries.allowUpdate.where((entry) => canEditPlaylist(entry.playlist_id));
+    policy.playlist_entries.allowDelete.where((entry) => canEditPlaylist(entry.playlist_id));
     policy.invitations.allowRead.where((invite) =>
       anyOf([
         { subject: session.user_id },
