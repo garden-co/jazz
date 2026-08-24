@@ -103,7 +103,7 @@ describe("BrowserWorkerTransportPump", () => {
     const auxiliary = Uint8Array.from([7, 7]);
     const semantic = Uint8Array.from([8, 8]);
     const sendWireFrame = vi.fn();
-    let releaseAuxiliaryRoute!: () => void;
+    let releaseAuxiliaryRoute!: (value: undefined) => void;
     const routeAuxiliaryWireFrame = vi.fn((frame: Uint8Array) => {
       if (frame[0] === 7) {
         return new Promise<undefined>((resolve) => (releaseAuxiliaryRoute = resolve));
@@ -121,7 +121,7 @@ describe("BrowserWorkerTransportPump", () => {
     await Promise.resolve();
     expect(sendWireFrame).not.toHaveBeenCalled();
 
-    releaseAuxiliaryRoute();
+    releaseAuxiliaryRoute(undefined);
     await vi.waitFor(() => expect(sendWireFrame).toHaveBeenCalledWith(semantic));
     expect(routeAuxiliaryWireFrame.mock.calls.map(([frame]) => frame)).toEqual([
       auxiliary,
