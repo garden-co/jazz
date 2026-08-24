@@ -680,6 +680,7 @@ export class NativeRuntimeAdapter implements Runtime {
     return new NativeRuntimeAdapter(null, schema, this.node, this.peerIdentity, 1, true, {
       db: this.db.registerSchema(encodeSchema(schema)),
       owner: this,
+      backendCredential: this.trustedBackend ? "inherited-backend-capability" : undefined,
     });
   }
 
@@ -712,7 +713,7 @@ export class NativeRuntimeAdapter implements Runtime {
     this.completedTxs = this.transactionOwner.completedTxs;
     this.writes = this.transactionOwner.writes;
     this.schemaBytes = encodeSchema(schema);
-    this.trustedBackend = opts?.backendCredential !== undefined;
+    this.trustedBackend = opts?.owner?.trustedBackend ?? opts?.backendCredential !== undefined;
     this.configBytes = openConfig(
       node,
       author,
@@ -2054,7 +2055,8 @@ export class NativeRuntimeAdapter implements Runtime {
    * point, with a request session supplying its subject when present.
    */
   private readRowsForHost(query: PreparedQuery, opts: unknown, identity?: Uint8Array): Uint8Array {
-    if (this.trustedBackend && identity === undefined) return this.db.all(query, opts);
+    if (this.trustedBackend && identity && isSystemIdentity(identity))
+      return this.db.all(query, opts);
     return this.readAuthorizationHost === "trusted-serving"
       ? this.db.allForIdentity(query, identity ?? this.peerIdentity, opts)
       : this.db.all(query, opts);
@@ -2065,7 +2067,7 @@ export class NativeRuntimeAdapter implements Runtime {
    * an ordinary client mutation into a policy-enforcing local admission.
    */
   private trustedWriteIdentity(session: RuntimeSession | null | undefined): Uint8Array | undefined {
-    if (this.trustedBackend && !session) return undefined;
+    if (this.trustedBackend && session && isSystemIdentity(session.identity)) return undefined;
     return this.readAuthorizationHost === "trusted-serving"
       ? (session?.identity ?? this.peerIdentity)
       : undefined;
@@ -2222,6 +2224,7 @@ export class NativeRuntimeAdapter implements Runtime {
     ) {
       return;
     }
+    if (this.trustedBackend && isSystemIdentity(session.identity)) return;
     this.db.setIdentityClaims(session.identity, session.claims);
   }
 
@@ -3216,6 +3219,17 @@ function parsePublicCanonicalAuthor(value: string): { issuer: string; user_id: s
     throw new Error("Native runtime public session uses reserved issuer");
   }
   return parsed ? { issuer: parsed.issuer, user_id: parsed.user_id } : null;
+}
+
+function isSystemIdentity(identity: Uint8Array): boolean {
+  try {
+    return (
+      decodeCanonicalAuthorSubjectBytes(identity) ===
+      canonicalAuthorSubject("urn:jazz:system", SYSTEM_AUTHOR_ID)
+    );
+  } catch {
+    return false;
+  }
 }
 
 function assertPublicSessionIssuer(
