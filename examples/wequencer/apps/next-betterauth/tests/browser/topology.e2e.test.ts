@@ -42,6 +42,8 @@ describe("Wequencer cross-topology recovery", () => {
     let editor: Db;
     let ownerToken: string;
     let ownerDbName: string;
+    let editorToken: string;
+    let editorDbName: string;
     let session: { id: string };
     let ownerProfile: { id: string };
     let editorProfile: { id: string };
@@ -50,6 +52,7 @@ describe("Wequencer cross-topology recovery", () => {
     let editorMembership: { id: string };
     let tracks: Array<{ id: string }>;
     let offlineStep: { id: string };
+    let subscribedOwnerStepId: string;
     let transport: { id: string } | undefined;
     let subscribedTrackSteps: Step[] = [];
 
@@ -70,6 +73,13 @@ describe("Wequencer cross-topology recovery", () => {
               await owner.shutdown();
               ctx.untrack(owner);
               owner = await openClient(server, "owner", ownerToken, ownerDbName);
+            },
+          },
+          editor: {
+            restart: async () => {
+              await editor.shutdown();
+              ctx.untrack(editor);
+              editor = await openClient(server, "editor", editorToken, editorDbName);
             },
           },
           authorization: {
@@ -104,14 +114,16 @@ describe("Wequencer cross-topology recovery", () => {
                 schema: app,
                 permissions,
               });
-              const [issuedOwnerToken, editorToken] = await Promise.all([
+              const [issuedOwnerToken, issuedEditorToken] = await Promise.all([
                 getJazzServerJwtForUser("wequencer-owner", undefined, server.appId),
                 getJazzServerJwtForUser("wequencer-editor", undefined, server.appId),
               ]);
               ownerToken = issuedOwnerToken;
               ownerDbName = uniqueDbName("wequencer-owner");
+              editorToken = issuedEditorToken;
+              editorDbName = uniqueDbName("wequencer-editor");
               owner = await openClient(server, "owner", ownerToken, ownerDbName);
-              editor = await openClient(server, "editor", editorToken);
+              editor = await openClient(server, "editor", editorToken, editorDbName);
               ownerProfile = await owner
                 .insert(app.profiles, { user_id: "wequencer-owner", display_name: "Owner" })
                 .wait({ tier: "edge" });
@@ -186,6 +198,7 @@ describe("Wequencer cross-topology recovery", () => {
                 editor.all(trackSteps(tracks[1].id), { tier: "edge" }),
               ]);
               const ownerStepId = ownerSteps[1]!.id;
+              subscribedOwnerStepId = ownerStepId;
               // Subscribe before either writer commits. This is the exact
               // ordered TrackLane query rendered by a collaborator. Reduce
               // its stream exactly as a consumer does, so this receipt proves
@@ -334,6 +347,23 @@ describe("Wequencer cross-topology recovery", () => {
               );
               expect(replayedSteps).toHaveLength(stepsPerTrack);
               expect(subscribedTrackSteps).toHaveLength(stepsPerTrack);
+              // The collaborator's subscription was established before the
+              // owner's partition. A later update after reconnect *and*
+              // owner restart must still reach that same subscription rather
+              // than merely being visible to a fresh one-shot read.
+              await owner
+                .update(app.steps, subscribedOwnerStepId, { enabled: false })
+                .wait({ tier: "edge" });
+              await waitForCondition(
+                () =>
+                  Promise.resolve(
+                    subscribedTrackSteps.some(
+                      (step) => step.id === subscribedOwnerStepId && step.enabled === false,
+                    ),
+                  ),
+                20_000,
+                "existing TrackLane subscription receives owner update after recovery",
+              );
               expect(
                 await editor.all(sessionQueries(session.id).presence, { tier: "edge" }),
               ).toHaveLength(2);
@@ -370,6 +400,40 @@ describe("Wequencer cross-topology recovery", () => {
                 bar: 2,
               });
             },
+            faultsAfter: [{ kind: "restart", target: "editor" }],
+          },
+          {
+            name: "editor durable reopen keeps bounded projected session reads",
+            run: async () => {
+              const restoredTracks = await waitForQuery(
+                editor,
+                sessionQueries(session.id).tracks,
+                (rows) => rows.length === trackNames.length,
+                "persistent editor reopens session tracks",
+                20_000,
+                "edge",
+              );
+              expect(restoredTracks.map((track) => track.position)).toEqual([0, 1, 2, 3]);
+
+              // This is intentionally a separate read shape from the UI's
+              // full track list: it proves that a constrained, projected
+              // collaborator query remains bounded after durable reopen and
+              // does not accidentally materialize unrelated track fields.
+              const projectedWindow = await editor.all(
+                sessionQueries(session.id).tracks.limit(2).select("id", "position", "name"),
+                { tier: "edge" },
+              );
+              expect(projectedWindow.map((track) => track.position)).toEqual([0, 1]);
+              expect(projectedWindow).toHaveLength(2);
+              expect("color" in projectedWindow[0]!).toBe(false);
+
+              const restoredOfflineStep = await editor.all(trackSteps(tracks[2].id), {
+                tier: "edge",
+              });
+              expect(restoredOfflineStep.find((step) => step.id === offlineStep.id)).toMatchObject({
+                enabled: true,
+              });
+            },
           },
           {
             name: "membership revocation rejects former editor",
@@ -394,6 +458,7 @@ describe("Wequencer cross-topology recovery", () => {
       ["failure", "completed"],
       ["disconnect", "completed"],
       ["reconnect", "completed"],
+      ["restart", "completed"],
       ["restart", "completed"],
     ]);
     expect(receipt.envelopes[0].activities.map((activity) => activity.action)).toContain("retried");
