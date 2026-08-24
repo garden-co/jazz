@@ -27,6 +27,7 @@ use groove::storage::{OrderedKvStorage, ReopenableStorage};
 use thiserror::Error;
 #[cfg(feature = "cold-settle-attribution")]
 use web_time::Instant;
+use web_time::{Duration, Instant};
 
 use crate::authorization_scope::{
     AuthorityContext, AuthorityScopeAggregate, AuthorizationScopeAcquisition,
@@ -108,6 +109,7 @@ struct PendingChunkDemand {
     upstream_id: u64,
     remaining_hops: u8,
     waiters: Vec<ChunkDemandWaiter>,
+    retry_at: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -194,6 +196,7 @@ impl PeerChunkResolver {
                 upstream_id,
                 remaining_hops,
                 waiters: vec![waiter],
+                retry_at: None,
             },
         );
         if let Some(connection) = state.upstream_connection {
@@ -243,7 +246,33 @@ impl PeerChunkResolver {
         }
     }
 
+    fn promote_due_retries(&self) -> usize {
+        let now = Instant::now();
+        let mut state = self.state.borrow_mut();
+        let mut promoted = Vec::new();
+        for (request, pending) in &mut state.pending_by_chunk {
+            if pending.retry_at.is_some_and(|deadline| deadline <= now) {
+                pending.retry_at = None;
+                promoted.push(ChunkRequestEntry {
+                    request_id: pending.upstream_id,
+                    locator: request.locator.clone(),
+                    expected_hash: request.object_hash,
+                    remaining_hops: pending.remaining_hops,
+                });
+            }
+        }
+        let count = promoted.len();
+        state.outbound.extend(promoted);
+        if count > 0
+            && let Some(connection) = state.upstream_connection
+        {
+            Self::wake_connection(&mut state, connection);
+        }
+        count
+    }
+
     fn take_outbound(&self, limit: usize) -> Vec<ChunkRequestEntry> {
+        self.promote_due_retries();
         let mut state = self.state.borrow_mut();
         let count = limit.min(state.outbound.len());
         state.outbound.drain(..count).collect()
@@ -263,9 +292,21 @@ impl PeerChunkResolver {
 
     fn complete(&self, response: ChunkResponseEntry) {
         let mut state = self.state.borrow_mut();
-        let Some(request) = state.chunk_by_upstream_id.remove(&response.request_id) else {
+        let Some(request) = state
+            .chunk_by_upstream_id
+            .get(&response.request_id)
+            .cloned()
+        else {
             return;
         };
+        if let ChunkResponse::Retryable { retry_after_ms } = response.result {
+            if let Some(pending) = state.pending_by_chunk.get_mut(&request) {
+                pending.retry_at =
+                    Some(Instant::now() + Duration::from_millis(u64::from(retry_after_ms)));
+            }
+            return;
+        }
+        state.chunk_by_upstream_id.remove(&response.request_id);
         let Some(pending) = state.pending_by_chunk.remove(&request) else {
             return;
         };
@@ -276,10 +317,13 @@ impl PeerChunkResolver {
                 ChunkDemandWaiter::Local { sender, .. } => {
                     let result = match &response.result {
                         ChunkResponse::Found(bytes) => Ok(bytes::Bytes::copy_from_slice(bytes)),
-                        ChunkResponse::Unavailable => Err(groove::chunks::ChunkError::Unavailable),
-                        ChunkResponse::Retryable { .. } => {
-                            Err(groove::chunks::ChunkError::Unavailable)
-                        }
+                        // A peer explicitly answered this exact request. That
+                        // is terminal for this attempt; only Retryable keeps
+                        // the waiter alive for a scheduled requeue.
+                        ChunkResponse::Unavailable => Err(groove::chunks::ChunkError::Backend(
+                            "upstream reported requested chunk unavailable".to_owned(),
+                        )),
+                        ChunkResponse::Retryable { .. } => unreachable!("retry remains pending"),
                     };
                     let _ = sender.send(result);
                 }
@@ -581,6 +625,12 @@ impl PeerIoPump {
                 ))
             }
         }
+    }
+
+    /// Advance delayed auxiliary retry work. Hosts call this from their normal
+    /// link timer; unlike a binding pull it never re-evaluates a subscription.
+    pub fn tick(&self) -> usize {
+        self.resolver.promote_due_retries()
     }
 
     fn restore_outbound(&self, message: SyncMessage) {
