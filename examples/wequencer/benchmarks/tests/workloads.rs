@@ -30,7 +30,21 @@ fn app_session_queries_keep_their_order_and_cardinality_contracts() {
 #[test]
 fn editor_edit_burst_preserves_a_readable_pattern() {
     let fixture = Fixture::new();
-    assert!(fixture.editor_edit_burst(32) <= STEPS);
+    let _ = fixture.editor_edit_burst(32);
+
+    let steps = fixture.track_steps();
+    let expected = (0..STEPS as u64)
+        .map(|position| {
+            let enabled = if position < 32 {
+                position % 2 == 0
+            } else {
+                position % 3 == 0
+            };
+            (position, enabled)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(steps, expected);
+    assert_eq!(steps.iter().filter(|(_, enabled)| *enabled).count(), 27);
     assert_eq!(fixture.playhead_window(0, 1).len(), 1);
 }
 
