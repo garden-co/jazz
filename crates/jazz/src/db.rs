@@ -967,6 +967,18 @@ type ActiveAuthorityViewReceipts = Rc<RefCell<Option<AuthorityViewReceipts>>>;
 type UpstreamSubscriptionOwners =
     Rc<RefCell<BTreeMap<SubscriptionKey, Vec<Weak<RefCell<SubscriptionState>>>>>>;
 type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
+
+/// Authenticated logical destination for an upstream upload retry.
+///
+/// A transport epoch may change during reconnect, but replaying a receiver's
+/// missing-node frontier is only sound to the same remote authority under the
+/// same authenticated link identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct UpstreamUploadDestination {
+    remote_node: [u8; 16],
+    link_identity: [u8; 16],
+}
+
 pub(crate) trait UploadRetryClock {
     fn now_ms(&self) -> u64;
 }

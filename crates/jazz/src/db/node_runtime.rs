@@ -33,6 +33,12 @@ where
     pub(super) connections: RefCell<Vec<Rc<LocalMutex<PeerConnection<S>>>>>,
     pub(super) scheduler: SharedTickScheduler,
     pub(super) upload_retry_clock: SharedUploadRetryClock,
+    pub(super) detached_large_value_uploads: Rc<
+        RefCell<
+            BTreeMap<Option<UpstreamUploadDestination>, peer_connection::LargeValueUploadQueues>,
+        >,
+    >,
+    pub(super) large_value_upload_retry_deadlines: Rc<RefCell<BTreeMap<TxId, u64>>>,
     pub(super) write_state_waiters: WriteStateWaiters,
     pub(super) permission_advice_waiters: PermissionAdviceWaiters,
     pub(super) edge_fate_routes: EdgeFateRoutes,
@@ -92,6 +98,8 @@ where
             connections: RefCell::new(Vec::new()),
             scheduler: Rc::new(RefCell::new(None)),
             upload_retry_clock: Rc::new(RefCell::new(Rc::new(MonotonicUploadRetryClock::new()))),
+            detached_large_value_uploads: Rc::new(RefCell::new(BTreeMap::new())),
+            large_value_upload_retry_deadlines: Rc::new(RefCell::new(BTreeMap::new())),
             write_state_waiters: Rc::new(RefCell::new(BTreeMap::new())),
             mutation_errors: Rc::new(RefCell::new(MutationErrorState {
                 callback: None,
@@ -712,6 +720,16 @@ where
         let confirmation_floor = node.committed_global_time();
         drop(node);
         let session_context = transport.connection_session_context();
+        let upstream_upload_destination =
+            session_context.map(|context| UpstreamUploadDestination {
+                remote_node: *context.remote.node.as_bytes(),
+                link_identity: *context.link_identity.as_bytes(),
+            });
+        let transferred_large_value_uploads = self
+            .detached_large_value_uploads
+            .borrow_mut()
+            .remove(&upstream_upload_destination)
+            .unwrap_or_default();
         let connection_epoch = session_context
             .map(|context| context.local.epoch)
             .unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u64);
@@ -857,6 +875,8 @@ where
             active_authority_view_receipts: Rc::clone(&self.active_authority_view_receipts),
             scheduler: Rc::clone(&self.scheduler),
             upload_retry_clock: Rc::clone(&self.upload_retry_clock),
+            upstream_upload_destination,
+            large_value_upload_retry_deadlines: Rc::clone(&self.large_value_upload_retry_deadlines),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
             edge_fate_routes: Rc::clone(&self.edge_fate_routes),
@@ -877,7 +897,7 @@ where
                 sent_session_claim_revisions: BTreeMap::new(),
                 outbox: Rc::clone(&self.outbox),
                 uploaded: BTreeSet::new(),
-                large_value_uploads: BTreeMap::new(),
+                large_value_uploads: transferred_large_value_uploads,
                 awaiting_large_value_uploads: BTreeMap::new(),
                 failed_large_value_uploads: BTreeSet::new(),
                 pending_row_version_repairs: VecDeque::new(),
@@ -1082,6 +1102,8 @@ where
             active_authority_view_receipts: Rc::clone(&self.active_authority_view_receipts),
             scheduler: Rc::clone(&self.scheduler),
             upload_retry_clock: Rc::clone(&self.upload_retry_clock),
+            upstream_upload_destination: None,
+            large_value_upload_retry_deadlines: Rc::clone(&self.large_value_upload_retry_deadlines),
             write_state_waiters: Rc::clone(&self.write_state_waiters),
             permission_advice_waiters: Rc::clone(&self.permission_advice_waiters),
             edge_fate_routes: Rc::clone(&self.edge_fate_routes),
@@ -1128,23 +1150,47 @@ where
 
     /// Detach a previously attached peer connection from this node.
     pub fn detach_connection(&self, connection: &Rc<LocalMutex<PeerConnection<S>>>) -> bool {
-        let connection_ref = connection.borrow();
-        let (authority, upstream_epoch) = match &connection_ref.link {
+        if !self
+            .connections
+            .borrow()
+            .iter()
+            .any(|candidate| Rc::ptr_eq(candidate, connection))
+        {
+            return false;
+        }
+        let mut connection_ref = connection.borrow_mut();
+        let connection_epoch = connection_ref.connection_epoch;
+        let upstream_upload_destination = connection_ref.upstream_upload_destination;
+        let (authority, upstream_epoch, transferable_uploads) = match &mut connection_ref.link {
             ConnectionLink::Upstream(UpstreamConnectionState {
                 expected_scope_authority,
+                large_value_uploads,
+                awaiting_large_value_uploads,
                 ..
             }) => (
                 *expected_scope_authority,
-                Some(connection_ref.connection_epoch),
+                Some(connection_epoch),
+                Some(peer_connection::take_reconnectable_large_value_uploads(
+                    large_value_uploads,
+                    awaiting_large_value_uploads,
+                )),
             ),
-            ConnectionLink::Subscriber(_) => (None, None),
+            ConnectionLink::Subscriber(_) => (None, None, None),
         };
         drop(connection_ref);
         let mut connections = self.connections.borrow_mut();
-        let before = connections.len();
         connections.retain(|candidate| !Rc::ptr_eq(candidate, connection));
-        let detached = connections.len() != before;
         drop(connections);
+        let detached = true;
+        if let Some(uploads) = transferable_uploads
+            && !uploads.is_empty()
+        {
+            let mut detached_uploads = self.detached_large_value_uploads.borrow_mut();
+            let destination_uploads = detached_uploads
+                .entry(upstream_upload_destination)
+                .or_default();
+            peer_connection::merge_reconnectable_large_value_uploads(destination_uploads, uploads);
+        }
         if detached
             && let Some(epoch) = upstream_epoch
             && self
@@ -1330,13 +1376,33 @@ where
             return;
         }
         let mut node = self.node.borrow_mut();
+        let mut released_tx_ids = BTreeSet::new();
         outbox.retain(|pending| {
             let state = crate::db::block_on(node.transaction_state(pending.tx_id));
             let Some((fate, _, durability)) = state else {
                 return true;
             };
-            matches!(fate, Fate::Pending | Fate::Accepted) && durability < DurabilityTier::Global
+            let retain = matches!(fate, Fate::Pending | Fate::Accepted)
+                && durability < DurabilityTier::Global;
+            if !retain {
+                released_tx_ids.insert(pending.tx_id);
+            }
+            retain
         });
+        drop(node);
+        drop(outbox);
+        if released_tx_ids.is_empty() {
+            return;
+        }
+        self.large_value_upload_retry_deadlines
+            .borrow_mut()
+            .retain(|tx_id, _| !released_tx_ids.contains(tx_id));
+        self.detached_large_value_uploads
+            .borrow_mut()
+            .retain(|_, uploads| {
+                uploads.retain(|tx_id, _| !released_tx_ids.contains(tx_id));
+                !uploads.is_empty()
+            });
     }
 }
 

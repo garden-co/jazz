@@ -204,7 +204,7 @@ fn rate_limited_push_waits_then_retries_the_exact_batch_without_rejecting_the_wr
     let scheduler = Rc::new(RecordingScheduler::default());
     writer.set_tick_scheduler(Some(scheduler.clone()));
     let (writer_transport, core_transport, writer_outbound) = duplex_with_client_outbound_tap();
-    let _upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
+    let upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
     let _subscriber = core.accept_subscriber(core_transport, author);
     let write = writer
         .insert(
@@ -249,13 +249,22 @@ fn rate_limited_push_waits_then_retries_the_exact_batch_without_rejecting_the_wr
         "a rate-limited batch remains resumable"
     );
 
+    // Reconnect before the deadline. The old transport's queue-local upload
+    // state must transfer only to this same logical destination, while the
+    // node-scoped deadline also gates a fresh Start on any replacement link.
+    assert!(writer.detach_connection(&upstream));
+    let (reconnected_transport, reconnected_core_transport, reconnected_outbound) =
+        duplex_with_client_outbound_tap();
+    let _reconnected_upstream = crate::db::block_on(writer.connect_upstream(reconnected_transport));
+    let _reconnected_subscriber = core.accept_subscriber(reconnected_core_transport, author);
+
     // An unrelated immediate/manual host tick before the deadline must not
     // resend the batch. The paused clock makes this deterministic.
     for _ in 0..3 {
         writer.tick().unwrap();
         assert!(
-            writer_outbound.borrow().is_empty(),
-            "no chunk batch is resent before the scheduled admission deadline"
+            reconnected_outbound.borrow().is_empty(),
+            "reconnect sends neither Start nor chunk nodes before the admission deadline"
         );
     }
 
@@ -267,7 +276,14 @@ fn rate_limited_push_waits_then_retries_the_exact_batch_without_rejecting_the_wr
         .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy::default());
     clock.set(11_000);
     writer.tick().unwrap();
-    let retry_batch = writer_outbound
+    assert!(
+        !reconnected_outbound
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ChunkUploadStart(_))),
+        "same-destination reconnect resumes the retained frontier instead of restarting upload"
+    );
+    let retry_batch = reconnected_outbound
         .borrow()
         .iter()
         .find_map(|message| match message {
@@ -293,6 +309,98 @@ fn rate_limited_push_waits_then_retries_the_exact_batch_without_rejecting_the_wr
         "the delayed retry eventually publishes the original write"
     );
     assert_eq!(core.read(&core.table("todos")).unwrap().len(), 1);
+}
+
+/// A disconnected sender's resumable state does not keep the receiver's
+/// mandatory staging claim alive: ordinary host expiry reclaims it by TTL.
+#[test]
+fn detached_rate_limited_upload_does_not_prevent_receiver_ttl_cleanup() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xc8; 16]);
+    let core = open_core(0xc9, AuthorId::SYSTEM, &schema);
+    core.node()
+        .borrow_mut()
+        .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
+            incoming_bytes_per_window: 1,
+            window_ms: 60_000,
+            max_age_ms: 10 * 60 * 1_000,
+        });
+    let writer = open_db(0xc8, author, &schema);
+    let clock = Rc::new(Cell::new(20_000));
+    writer
+        .node
+        .set_upload_retry_clock_for_test(Rc::new(PausedUploadRetryClock(Rc::clone(&clock))));
+    let scheduler = Rc::new(RecordingScheduler::default());
+    writer.set_tick_scheduler(Some(scheduler.clone()));
+    let (writer_transport, core_transport, writer_outbound) = duplex_with_client_outbound_tap();
+    let upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
+    let _subscriber = core.accept_subscriber(core_transport, author);
+    let write = writer
+        .insert(
+            "todos",
+            BTreeMap::from([
+                (
+                    "title".to_owned(),
+                    Value::String("expired-rate-limited/".repeat(8_000)),
+                ),
+                ("done".to_owned(), Value::Bool(false)),
+                ("owner".to_owned(), Value::Uuid(author.0)),
+            ]),
+        )
+        .unwrap();
+
+    writer.tick().unwrap();
+    core.tick().unwrap();
+    writer.tick().unwrap();
+    assert!(
+        writer_outbound
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ChunkUploadNodes(_)))
+    );
+    assert!(
+        !writer_outbound
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::CommitUnit { .. })),
+        "the initial row commit remains behind the rate-limited upload"
+    );
+    core.tick().unwrap();
+    writer.tick().unwrap();
+    assert_eq!(scheduler.take_delays(), vec![1_000]);
+
+    assert!(writer.detach_connection(&upstream));
+    core.node()
+        .borrow_mut()
+        .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
+            incoming_bytes_per_window: u64::MAX,
+            window_ms: 60_000,
+            max_age_ms: 0,
+        });
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert_eq!(
+        crate::db::block_on(core.server.evict_expired_staged_large_values()).unwrap(),
+        1,
+        "the abandoned receiver-side staging claim expires"
+    );
+
+    assert!(
+        writer
+            .node
+            .detached_large_value_uploads
+            .borrow()
+            .values()
+            .any(|uploads| uploads.contains_key(&write.tx_id)),
+        "sender state remains resumable while the receiver independently reclaims abandoned staging"
+    );
+    assert!(
+        writer
+            .node
+            .large_value_upload_retry_deadlines
+            .borrow()
+            .contains_key(&write.tx_id),
+        "the sender retains only the bounded admission deadline, not receiver staging"
+    );
 }
 
 /// A Core immediately refreshes a peer-edge subscriber that was visited before

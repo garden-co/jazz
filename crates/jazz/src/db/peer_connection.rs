@@ -272,6 +272,8 @@ where
     pub(super) active_authority_view_receipts: ActiveAuthorityViewReceipts,
     pub(super) scheduler: SharedTickScheduler,
     pub(super) upload_retry_clock: SharedUploadRetryClock,
+    pub(super) upstream_upload_destination: Option<UpstreamUploadDestination>,
+    pub(super) large_value_upload_retry_deadlines: Rc<RefCell<BTreeMap<TxId, u64>>>,
     pub(super) write_state_waiters: WriteStateWaiters,
     pub(super) permission_advice_waiters: PermissionAdviceWaiters,
     pub(super) edge_fate_routes: EdgeFateRoutes,
@@ -303,7 +305,7 @@ pub(super) struct UpstreamConnectionState {
     pub(super) sent_session_claim_revisions: BTreeMap<AuthorId, u64>,
     pub(super) outbox: Outbox,
     pub(super) uploaded: BTreeSet<TxId>,
-    pub(super) large_value_uploads: BTreeMap<TxId, VecDeque<PendingLargeValueUpload>>,
+    pub(super) large_value_uploads: LargeValueUploadQueues,
     pub(super) awaiting_large_value_uploads: BTreeMap<TxId, groove::large_values::LargeValueRef>,
     pub(super) failed_large_value_uploads: BTreeSet<TxId>,
     pub(super) pending_row_version_repairs: VecDeque<PendingRowVersionRepair>,
@@ -321,6 +323,58 @@ pub(super) struct PendingLargeValueUpload {
     in_flight: VecDeque<groove::large_values::NodeRef>,
     retry_not_before_ms: Option<u64>,
     started: bool,
+}
+
+pub(super) type LargeValueUploadQueues = BTreeMap<TxId, VecDeque<PendingLargeValueUpload>>;
+
+/// Transfer one detached upstream's resumable upload state. A reply that was
+/// in flight is no longer tied to a live transport, so restore its exact batch
+/// to the requested frontier; a start awaiting its first frontier restarts
+/// only after the shared admission deadline.
+pub(super) fn take_reconnectable_large_value_uploads(
+    uploads: &mut LargeValueUploadQueues,
+    awaiting: &mut BTreeMap<TxId, groove::large_values::LargeValueRef>,
+) -> LargeValueUploadQueues {
+    let awaiting = std::mem::take(awaiting);
+    let mut uploads = std::mem::take(uploads);
+    for (tx_id, value_ref) in awaiting {
+        let Some(upload) = uploads.get_mut(&tx_id).and_then(|uploads| {
+            uploads
+                .iter_mut()
+                .find(|upload| upload.value_ref == value_ref)
+        }) else {
+            continue;
+        };
+        if upload.in_flight.is_empty() {
+            upload.started = false;
+        } else {
+            while let Some(node) = upload.in_flight.pop_back() {
+                upload.requested.push_front(node);
+            }
+        }
+    }
+    uploads
+}
+
+/// Merge independently detached links without duplicating a logical
+/// transaction/value upload. Parallel links can carry the same outbox entry;
+/// the first retained frontier is enough to resume that value once.
+pub(super) fn merge_reconnectable_large_value_uploads(
+    destination_uploads: &mut LargeValueUploadQueues,
+    uploads: LargeValueUploadQueues,
+) {
+    for (tx_id, uploads) in uploads {
+        let retained = destination_uploads.entry(tx_id).or_default();
+        for upload in uploads {
+            if retained
+                .iter()
+                .any(|existing| existing.value_ref == upload.value_ref)
+            {
+                continue;
+            }
+            retained.push_back(upload);
+        }
+    }
 }
 
 const RATE_LIMITED_UPLOAD_RETRY_DELAY_MS: u64 = 1_000;
@@ -1050,6 +1104,19 @@ where
                             {
                                 continue;
                             }
+                            let now_ms = self.upload_retry_clock.borrow().now_ms();
+                            if let Some(deadline) = self
+                                .large_value_upload_retry_deadlines
+                                .borrow()
+                                .get(&tx_id)
+                                .copied()
+                                && now_ms < deadline
+                            {
+                                continue;
+                            }
+                            self.large_value_upload_retry_deadlines
+                                .borrow_mut()
+                                .remove(&tx_id);
                             let staged = outbox
                                 .borrow()
                                 .iter()
@@ -1261,6 +1328,14 @@ where
                                                         RATE_LIMITED_UPLOAD_RETRY_DELAY_MS,
                                                     ),
                                                 );
+                                                self.large_value_upload_retry_deadlines
+                                                    .borrow_mut()
+                                                    .insert(
+                                                        tx_id,
+                                                        now_ms.saturating_add(
+                                                            RATE_LIMITED_UPLOAD_RETRY_DELAY_MS,
+                                                        ),
+                                                    );
                                                 if let Some(scheduler) = self.scheduler.borrow().as_ref() {
                                                     scheduler.schedule_tick_after(RATE_LIMITED_UPLOAD_RETRY_DELAY_MS);
                                                 }
@@ -1272,6 +1347,9 @@ where
                                             awaiting_large_value_uploads.remove(&tx_id);
                                             failed_large_value_uploads.insert(tx_id);
                                             large_value_uploads.remove(&tx_id);
+                                            self.large_value_upload_retry_deadlines
+                                                .borrow_mut()
+                                                .remove(&tx_id);
                                             outbox
                                                 .borrow_mut()
                                                 .retain(|pending| pending.tx_id != tx_id);
