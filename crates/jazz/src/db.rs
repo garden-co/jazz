@@ -271,6 +271,17 @@ impl PeerChunkResolver {
         count
     }
 
+    fn next_retry_delay(&self) -> Option<Duration> {
+        let now = Instant::now();
+        self.state
+            .borrow()
+            .pending_by_chunk
+            .values()
+            .filter_map(|pending| pending.retry_at)
+            .min()
+            .map(|deadline| deadline.saturating_duration_since(now))
+    }
+
     fn take_outbound(&self, limit: usize) -> Vec<ChunkRequestEntry> {
         self.promote_due_retries();
         let mut state = self.state.borrow_mut();
@@ -631,6 +642,12 @@ impl PeerIoPump {
     /// link timer; unlike a binding pull it never re-evaluates a subscription.
     pub fn tick(&self) -> usize {
         self.resolver.promote_due_retries()
+    }
+
+    /// Delay until the next retry becomes eligible. Hosts should install one
+    /// one-shot timer for this value, then call [`Self::tick`].
+    pub fn next_retry_delay(&self) -> Option<Duration> {
+        self.resolver.next_retry_delay()
     }
 
     fn restore_outbound(&self, message: SyncMessage) {
