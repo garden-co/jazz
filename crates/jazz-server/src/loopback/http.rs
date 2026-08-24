@@ -1006,6 +1006,31 @@ mod tests {
         assert_eq!(shell.runtime_write_schema_revision(), 0);
     }
 
+    #[test]
+    fn request_parser_rejects_oversized_content_length_before_reading_body() {
+        const EXPECTED_MAX_REQUEST_BODY_BYTES: usize = 8 << 20;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let address = listener.local_addr().expect("listener address");
+        let sender = thread::spawn(move || {
+            let mut stream = TcpStream::connect(address).expect("connect test client");
+            write!(
+                stream,
+                "POST /sessions/1/frames HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+                EXPECTED_MAX_REQUEST_BODY_BYTES + 1
+            )
+            .expect("write oversized request headers");
+            stream
+                .shutdown(std::net::Shutdown::Write)
+                .expect("finish test request");
+        });
+        let (mut stream, _) = listener.accept().expect("accept test connection");
+
+        let error = read_request(&mut stream).expect_err("oversized request must be rejected");
+
+        sender.join().expect("test client exits");
+        assert!(error.contains("body too large"), "{error}");
+    }
+
     fn response_status(response: &[u8]) -> u16 {
         std::str::from_utf8(response)
             .expect("response utf8")
