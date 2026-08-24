@@ -1675,4 +1675,13 @@ fn read_policy_branch_or_join_allows_public_or_membership_reads() {
             .collect::<BTreeSet<_>>(),
         BTreeSet::from([public_chat])
     );
+    // One-shot policy evaluation is not enough for an app client: this exact
+    // public-or-membership shape must seed the maintained link view with the
+    // same membership result.
+    assert_maintained_view_cold_snapshot_seed_matches_one_shot(
+        &mut core,
+        &shape,
+        &binding,
+        member,
+    );
 }

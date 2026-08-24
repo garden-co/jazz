@@ -1350,6 +1350,114 @@ fn edge_query_rehydrate_ships_public_chat_from_chat_policy_schema() {
     assert_view_update_only_ships_rows(&update, BTreeSet::from([public_chat]));
 }
 
+/// A member can discover its own grant before the parent resource is visible.
+/// The parent then becomes readable through the grant's correlated EXISTS arm.
+/// Keep the grant's `allowedTo.read(parent)` alternative too: this is the
+/// policy-cycle shape real apps use, and a maintained edge rehydrate must not
+/// lose the direct-grant proof while lowering the disjunction.
+#[test]
+fn edge_rehydrate_member_grant_unlocks_parent_through_disjunctive_policy() {
+    let manager = user(0xa1);
+    let owner = user(0xb2);
+    let workspace = row(0x18);
+    let grant = row(0x19);
+    let member_exists = public_outer_exists(
+        "members",
+        "workspace_id",
+        "id",
+        [public_claim_eq("subject", "user_id")],
+    );
+    let schema = build_public_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("workspaces")
+                    .column("owner_subject", PublicColumnType::Text)
+                    .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
+                        public_claim_eq("owner_subject", "user_id"),
+                        member_exists,
+                    ]))),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("members")
+                    .fk_column("workspace_id", "workspaces")
+                    .column("subject", PublicColumnType::Text)
+                    .policies(public_all_policies().with_select(PublicPolicyExpr::Or(vec![
+                        public_claim_eq("subject", "user_id"),
+                        PublicPolicyExpr::Inherits {
+                            operation: PublicOperation::Select,
+                            via_column: "workspace_id".to_owned(),
+                            max_depth: None,
+                        },
+                    ]))),
+            ),
+    );
+    let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    let workspace_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("workspaces", workspace, 10).cells(BTreeMap::from([(
+            "owner_subject".to_owned(),
+            Value::String(owner.0.to_string()),
+        )])),
+    );
+    let _grant_tx = accept_global(
+        &mut core,
+        MergeableCommit::new("members", grant, 11).cells(BTreeMap::from([
+            ("workspace_id".to_owned(), Value::Uuid(workspace.0)),
+            ("subject".to_owned(), Value::String(manager.0.to_string())),
+        ])),
+    );
+    let shape = Query::from("workspaces")
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let binding = shape.bind(BTreeMap::new()).unwrap();
+    assert_eq!(
+        core.query_rows_for_link(&shape, &binding, DurabilityTier::Edge, manager)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.row_uuid())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([workspace]),
+    );
+
+    let mut manager_peer = PeerState::edge_client(manager);
+    let grant_shape = Query::from("members")
+        .filter(eq(col("id"), lit(Value::Uuid(grant.0))))
+        .validate(&core.catalogue.schema)
+        .unwrap();
+    let grant_binding = grant_shape.bind(BTreeMap::new()).unwrap();
+    let grant_update = manager_peer
+        .rehydrate_query_with_opts(
+            &mut core,
+            &grant_shape,
+            &grant_binding,
+            RegisterShapeOptions {
+                tier: DurabilityTier::Edge,
+                ..RegisterShapeOptions::default()
+            },
+        )
+        .unwrap();
+    assert_view_update_only_references_rows(&grant_update, BTreeSet::from([workspace, grant]));
+    assert_view_update_only_ships_rows(&grant_update, BTreeSet::from([workspace, grant]));
+    let update = manager_peer
+        .rehydrate_query_with_opts(
+            &mut core,
+            &shape,
+            &binding,
+            RegisterShapeOptions {
+                tier: DurabilityTier::Edge,
+                ..RegisterShapeOptions::default()
+            },
+        )
+        .unwrap();
+    assert_view_update_only_references_rows(&update, BTreeSet::from([workspace]));
+    assert_view_update_only_ships_rows(&update, BTreeSet::from([workspace]));
+    assert!(matches!(
+        update,
+        SyncMessage::ViewUpdate { result_member_adds, .. }
+            if result_member_adds.iter().any(|entry| entry == &("workspaces".to_owned().into(), workspace, workspace_tx))
+    ));
+}
+
 /// A source-harness regression for row-scoped read policy plus query output
 /// projection. Two fresh edge-client links ask for the same readable chat via
 /// different public projections; both wire payloads must be the identical
