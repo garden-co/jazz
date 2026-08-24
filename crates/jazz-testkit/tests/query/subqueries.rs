@@ -230,7 +230,7 @@ local_tokio_test! {
 ///
 /// Actors: alice writes one user with no posts, bob subscribes to users with
 /// included posts and sees an empty array for that include.
-#[ignore = "maintained array subscriptions emit no add delta for a parent inserted after subscribe"]
+#[ignore = "#1765: maintained array subscriptions emit no add delta for a parent inserted after subscribe"]
 async fn array_subquery_subscription_adds_parent_with_empty_array() {
     let clients = Clients::start().await;
     let query = users_with_posts_query();
@@ -273,7 +273,7 @@ local_tokio_test! {
 ///
 /// Actors: alice writes one user, two posts, and comments on each post; bob
 /// reads the user with an array of joined post/comment tuples.
-#[ignore = "array relations reject joined subqueries as unsupported"]
+#[ignore = "#1765: array relations reject joined subqueries as unsupported"]
 async fn array_subquery_with_join_returns_joined_elements() {
     let clients = Clients::start().await;
 
@@ -477,7 +477,7 @@ local_tokio_test! {
 ///
 /// bob subscribes -> alice inserts Alice without posts -> bob sees empty array
 /// alice inserts post -> bob sees Alice unchanged with one included post
-#[ignore = "maintained array subscriptions emit no add delta for a parent inserted after subscribe"]
+#[ignore = "#1765: maintained array subscriptions emit no add delta for a parent inserted after subscribe"]
 async fn array_subquery_preserves_parent_columns_when_inner_row_arrives() {
     let clients = Clients::start().await;
 
@@ -551,7 +551,7 @@ local_tokio_test! {
 ///
 /// alice -> insert Bob's post -> server -> bob subscribes
 /// alice -> insert Bob -> server -> bob receives Bob with that post included
-#[ignore = "maintained array subscriptions emit no add delta for a late parent with existing children"]
+#[ignore = "#1765: maintained array subscriptions emit no add delta for a late parent with existing children"]
 async fn array_subquery_subscription_adds_parent_with_existing_inner_rows() {
     let clients = Clients::start().await;
 
@@ -770,7 +770,7 @@ local_tokio_test! {
 /// Verifies that an array subquery can limit ordered inner rows.
 ///
 /// Actors: alice writes five posts, bob reads only the first two ordered by id.
-#[ignore = "bounded array subqueries materialize an empty child array regardless of sort column"]
+#[ignore = "#1765: bounded array subqueries materialize an empty child array regardless of sort column"]
 async fn array_subquery_limits_ordered_inner_rows() {
     let clients = Clients::start().await;
 
@@ -887,7 +887,7 @@ local_tokio_test! {
 ///
 /// Actors: alice writes a user, posts, and comments; bob reads the user with
 /// posts, and each included post has its own comments array.
-#[ignore = "nested array subquery materialization hangs without settling the reader query"]
+#[ignore = "#1765: nested array subquery materialization hangs without settling the reader query"]
 async fn array_subquery_supports_nested_arrays() {
     let clients = Clients::start().await;
 
@@ -1052,7 +1052,7 @@ local_tokio_test! {
 ///
 /// Actors: alice writes file parts and a file, bob reads the file with resolved
 /// part rows.
-#[ignore = "UUID-array correlation deduplicates repeated references instead of preserving outer-array multiplicity"]
+#[ignore = "#1765: UUID-array correlation deduplicates repeated references instead of preserving outer-array multiplicity"]
 async fn array_subquery_materializes_uuid_array_refs_in_order_with_duplicates() {
     let clients = Clients::start().await;
 
@@ -1117,7 +1117,7 @@ local_tokio_test! {
 ///
 /// alice -> insert parts A/B and file [A, B, B] -> server -> bob sees both
 /// alice -> update file to [B] -> server -> bob sees only B linked to file
-#[ignore = "reverse UUID-array correlation fails query validation with operand type mismatch"]
+#[ignore = "#1765: reverse UUID-array correlation fails query validation with operand type mismatch"]
 async fn array_subquery_reverse_uuid_array_membership_updates_when_array_changes() {
     let clients = Clients::start().await;
 

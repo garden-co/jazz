@@ -92,6 +92,7 @@ afterEach(async () => {
 });
 
 describe("Moon Lander — Soak Test", () => {
+  // @jazz-ignore #1787: manual ten-minute cross-client synchronization soak
   it.skip(
     "two players synchronise continuously over 10 minutes",
     { timeout: 720_000 },

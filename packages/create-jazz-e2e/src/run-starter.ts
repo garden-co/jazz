@@ -159,6 +159,41 @@ function patchInstalledJazzNapi(appDir: string, repoRoot: string): void {
   }
 }
 
+/**
+ * The browser SharedWorker is a package-owned artifact: its wasm-bindgen glue
+ * resolves the binary beside itself. Check the installed tarball rather than
+ * the workspace source so the starter receipt catches an omitted package file
+ * before a release reaches adopters.
+ */
+function assertInstalledBrokerWorkerArtifacts(appDir: string): void {
+  const workerDir = path.join(appDir, "node_modules", "jazz-tools", "dist", "worker");
+  for (const filename of ["jazz-broker-worker.js", "jazz_wasm_bg.wasm"]) {
+    const artifact = path.join(workerDir, filename);
+    if (!fs.existsSync(artifact) || fs.statSync(artifact).size === 0) {
+      throw new Error(`Installed jazz-tools is missing browser worker artifact: ${artifact}`);
+    }
+  }
+}
+
+/**
+ * Keep the package boundary honest. A starter must never grow a copied
+ * `public/_jazz` binary as a side effect of a Next build; that used to mask a
+ * missing worker artifact in jazz-tools itself.
+ */
+function assertNoAppLocalJazzWasm(appDir: string): void {
+  const legacyAsset = path.join(appDir, "public", "_jazz", "jazz_wasm_bg.wasm");
+  if (fs.existsSync(legacyAsset)) {
+    throw new Error(`Starter generated an app-local Jazz WASM artifact: ${legacyAsset}`);
+  }
+}
+
+function removeStaleAppLocalJazzWasm(appDir: string): void {
+  // Starter sources can have an ignored build artifact left by a local Next
+  // invocation. Remove it before this fresh-package receipt so it cannot mask
+  // whether the current build regenerated the forbidden workaround.
+  fs.rmSync(path.join(appDir, "public", "_jazz"), { recursive: true, force: true });
+}
+
 function discoverPrebuiltTarballs(dir: string): Record<string, string> {
   if (!fs.existsSync(dir)) {
     throw new Error(`--tarball-dir ${dir} does not exist`);
@@ -315,6 +350,8 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
       );
     });
 
+    removeStaleAppLocalJazzWasm(appDir);
+    assertNoAppLocalJazzWasm(appDir);
     writeScaffoldedPnpmConfig(appDir, tarballs);
 
     await recordPhase("install", () =>
@@ -343,6 +380,7 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
     );
 
     patchInstalledJazzNapi(appDir, opts.repoRoot);
+    assertInstalledBrokerWorkerArtifacts(appDir);
 
     // Start the sync server before we write .env, so we can write the real
     // appId + serverUrl in one go and the build picks them up.
@@ -356,6 +394,9 @@ export async function runStarter(opts: RunStarterOptions): Promise<RunStarterRes
         description: `pnpm build ${opts.starter}`,
       }),
     );
+    // Check again after production build: a framework adapter must not hide a
+    // package artifact failure by copying the binary into the app.
+    assertNoAppLocalJazzWasm(appDir);
 
     if (!opts.skipE2E) {
       // Each scaffolded starter pins its own @playwright/test version, which

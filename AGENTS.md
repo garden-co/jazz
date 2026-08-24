@@ -11,6 +11,21 @@ in the `jazz-private` repo.
 
 ## Work style
 
+### Durable follow-up and WIP visibility
+
+GitHub Issues are the durable follow-up system. Before an orchestrator session
+or lane is retired, capture or link every finding, decision, deferred task,
+unresolved question, or adopter surprise that still needs follow-up in a GitHub
+Issue. Specs and local executable manifests may link to those issues, but must
+not duplicate a backlog. Do not issue-track ephemeral status or work that is
+already complete.
+
+An implementation lane reports its first coherent local commit immediately.
+The coordinator then pushes it and opens or updates a clearly marked draft PR
+as soon as work begins or that first commit exists; the PR may be red/WIP and
+must not wait for completion or review. Lanes remain local-only: they must not
+push, create or modify PRs, comment on GitHub, or merge.
+
 **Testing:** prefer black-boxed integration tests over unit tests or white-box tests.
 Do not use JSON-like schema/permissions/query definitions. Always use the public API to build them in the tests.
 Before writing any test in Rust crates, always read `crates/jazz/TESTING_GUIDELINES.md` in full and follow it.
@@ -48,6 +63,12 @@ For ordinary Rust/core work, the full gate set is:
   but does not fail — that is documented debt the registry deliberately keeps
   visible. Both registries escape literal `|` inside table cells as `\|`; an
   unescaped pipe silently shreds a row.
+- `node dev/gates/spec-open-questions.mjs` keeps every unresolved SPEC open
+  question linked to a GitHub Issue while remaining fully offline.
+- `node dev/gates/ignored-tests.mjs` validates the exact compiled Rust ignored
+  inventory and all TypeScript quarantine markers directly from source. Every
+  ignore annotation must state `#NNNN: reason`; there is no separate burndown
+  manifest.
 - `JAZZ_SEED_COUNT=300 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
   for maintained-vs-one-shot equivalence coverage (Anselm-approved 2026-07-08)
 - `cargo test -p jazz --test incremental_delivery_canary maintained_relation_include_single_row_changes_are_scale_independent -- --exact`
@@ -92,6 +113,16 @@ bench compilation two steps before the bench gate caught it.
 Wide maintained-vs-one-shot soaks use
 `JAZZ_SEED_COUNT=2000 cargo test -p jazz m3_maintained_one_shot_differential_oracle`
 alongside the existing m3 soak conventions.
+
+**Continuous simulation soak.** `.github/workflows/continuous-simulation-soak.yml`
+runs the deterministic M3 sync-convergence and maintained-vs-one-shot oracle
+nightly on the trusted `jazz-ci` runner, with individual seed receipts. Run the
+same driver locally with `dev/gates/run-continuous-simulation-soak.sh --sync-seeds
+2 --differential-seeds 2`; copy a failed case's replay command from
+`target/simulation-soak/summary.json`. The nightly default is sync 100×200
+commits and differential 50×20 steps at churn depths 10,1000. The 100000-depth
+churn is deliberately deferred from nightly: it is available through
+`--churn-depths 10,1000,100000` when a bounded weekly budget is established.
 
 **Don't rewrite existing tests without permission.** Existing tests encode decisions about what correct behaviour looks like. If the task explicitly involves changing behaviour, updating the tests to match is the right thing to do. But if a test is failing simply because the implementation diverges from what the test expects, rewriting the test to match the new behaviour is risky — the test may well be correct and the implementation wrong. Treat that as a human-in-the-loop decision: surface it to the user rather than resolving it unilaterally.
 

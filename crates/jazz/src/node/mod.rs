@@ -2029,6 +2029,9 @@ pub enum Error {
     /// A caller attempted to reuse an identity that still names live mutable work.
     #[error("duplicate open batch id: {0}")]
     DuplicateOpenBatch(OpenTransactionId),
+    /// A caller tried to use an open transaction as a different identity.
+    #[error("open transaction identity does not match its bound identity")]
+    OpenTransactionIdentityMismatch,
     /// Fate or global-current update was non-monotone.
     #[error("non-monotone state update: {0}")]
     NonMonotoneState(&'static str),

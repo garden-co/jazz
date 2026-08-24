@@ -406,6 +406,17 @@ impl Clone for WasmDbInner {
     }
 }
 
+impl WasmDbInner {
+    fn shares_runtime_with(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Memory(left), Self::Memory(right)) => left.shares_runtime_with(right),
+            #[cfg(target_arch = "wasm32")]
+            (Self::Browser(left), Self::Browser(right)) => left.shares_runtime_with(right),
+            _ => false,
+        }
+    }
+}
+
 #[wasm_bindgen]
 pub struct WasmTransport {
     inner: WasmTransportInner,
@@ -657,8 +668,15 @@ impl WasmDbInner {
         ))
     }
 
-    fn begin_exclusive(&self, id: OpenTransactionId) -> Result<(), jazz::db::Error> {
-        with_wasm_db!(self, |db| block_on(db.begin_exclusive(id)))
+    fn begin_exclusive(
+        &self,
+        id: OpenTransactionId,
+        author: Option<AuthorId>,
+    ) -> Result<(), jazz::db::Error> {
+        with_wasm_db!(self, |db| match author {
+            Some(author) => block_on(db.begin_exclusive_for_identity(id, author)),
+            None => block_on(db.begin_exclusive(id)),
+        })
     }
 
     fn begin_mergeable(
@@ -1786,13 +1804,10 @@ impl WasmDb {
                 .inner
                 .begin_mergeable(open_batch_id, author)
                 .map_err(to_js_error),
-            "exclusive" if author.is_none() => self
+            "exclusive" => self
                 .inner
-                .begin_exclusive(open_batch_id)
+                .begin_exclusive(open_batch_id, author)
                 .map_err(to_js_error),
-            "exclusive" => Err(JsValue::from_str(
-                "exclusive transactions do not accept an identity override",
-            )),
             _ => Err(JsValue::from_str(&unknown_transaction_kind_message(&kind))),
         }
     }
@@ -1875,6 +1890,7 @@ impl WasmDb {
         tx: &WasmTx,
         opts: JsValue,
     ) -> Result<Vec<u8>, JsValue> {
+        ensure_transaction_runtime(&self.inner, tx)?;
         let opts = read_opts_from_js(opts)?;
         let tx_id = tx.open_tx_for_read()?;
         let rows = match tx.kind {
@@ -1893,6 +1909,7 @@ impl WasmDb {
         author: Vec<u8>,
         opts: JsValue,
     ) -> Result<Vec<u8>, JsValue> {
+        ensure_transaction_runtime(&self.inner, tx)?;
         let opts = read_opts_from_js(opts)?;
         let author = author_id_from_bytes(&author)?;
         let tx_id = tx.open_tx_for_read()?;
@@ -3140,7 +3157,7 @@ impl WasmDb {
             .parse::<OpenTransactionId>()
             .map_err(|error| JsValue::from_str(&error))?;
         self.inner
-            .begin_exclusive(open_batch_id)
+            .begin_exclusive(open_batch_id, None)
             .map_err(to_js_error)?;
         Ok(WasmTx {
             db: self.inner.clone(),
@@ -3575,6 +3592,7 @@ fn read_rows_for_transaction(
     author: Option<AuthorId>,
     opts: JsValue,
 ) -> Result<Vec<jazz::node::CurrentRow>, JsValue> {
+    ensure_transaction_runtime(db, tx)?;
     let opts = read_opts_from_js(opts)?;
     let tx_id = tx.open_tx_for_read()?;
     match (tx.kind, author) {
@@ -3590,6 +3608,16 @@ fn read_rows_for_transaction(
         (WasmTxKind::Exclusive, None) => db
             .exclusive_all(tx_id, &query.inner, opts)
             .map_err(to_js_error),
+    }
+}
+
+fn ensure_transaction_runtime(db: &WasmDbInner, tx: &WasmTx) -> Result<(), JsValue> {
+    if db.shares_runtime_with(&tx.db) {
+        Ok(())
+    } else {
+        Err(JsValue::from_str(
+            "transaction belongs to a different database runtime",
+        ))
     }
 }
 
@@ -4285,7 +4313,8 @@ mod dynamic_schema_view_tests {
     }
     /// A short-lived WASM schema attachment must not abandon its owner's open
     /// batch when the JavaScript wrapper is collected.
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn attached_tx_drop_preserves_owner_batch() {
         let source = SchemaBuilder::new()
             .table(
@@ -4315,7 +4344,7 @@ mod dynamic_schema_view_tests {
             )))
             .unwrap(),
         );
-        let view = Rc::new(block_on(owner.register_schema_view(schema)).unwrap());
+        let view = Rc::new(block_on(owner.register_schema_view(schema.clone())).unwrap());
         let batch = OpenTransactionId::new();
         block_on(owner.begin_mergeable(batch)).unwrap();
         drop(WasmTx {
@@ -4355,5 +4384,147 @@ mod dynamic_schema_view_tests {
         ))
         .unwrap();
         block_on(owner.commit_exclusive_handle(exclusive)).unwrap();
+
+        // The public WASM batch surface binds Alice at begin. A later request
+        // cannot switch the transaction-local authorization subject to Bob.
+        // JsValue construction requires an actual wasm runtime.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let binding = WasmDb {
+                inner: WasmDbInner::Memory(Rc::clone(&owner)),
+                owns_runtime: false,
+            };
+            let alice = AuthorId::from_bytes([0xa7; 16]);
+            let bob = AuthorId::from_bytes([0xb7; 16]);
+            let bound = OpenTransactionId::new();
+            binding
+                .begin_transaction(
+                    bound.to_string(),
+                    "exclusive".to_owned(),
+                    Some(alice.0.as_bytes().to_vec()),
+                )
+                .unwrap();
+            let tx = binding.attach_exclusive_tx(bound.to_string()).unwrap();
+            let query = WasmPreparedQuery {
+                inner: owner.prepare_query(&owner.table("items")).unwrap(),
+            };
+            assert!(
+                binding
+                    .all_in_transaction_for_identity(
+                        &query,
+                        &tx,
+                        alice.0.as_bytes().to_vec(),
+                        JsValue::NULL
+                    )
+                    .is_ok(),
+                "planted positive: Alice retains the bound capability"
+            );
+            let view_binding = WasmDb {
+                inner: WasmDbInner::Memory(Rc::clone(&view)),
+                owns_runtime: false,
+            };
+            let view_query = WasmPreparedQuery {
+                inner: view.prepare_query(&view.table("items")).unwrap(),
+            };
+            assert!(view_binding
+                .all_in_transaction(&view_query, &tx, JsValue::NULL)
+                .is_ok());
+            assert!(view_binding
+                .all_in_transaction_for_identity(
+                    &view_query,
+                    &tx,
+                    alice.0.as_bytes().to_vec(),
+                    JsValue::NULL,
+                )
+                .is_ok());
+            assert!(view_binding
+                .one_in_transaction(&view_query, &tx, JsValue::NULL)
+                .is_ok());
+            assert!(
+                view_binding
+                    .one_in_transaction_for_identity(
+                        &view_query,
+                        &tx,
+                        alice.0.as_bytes().to_vec(),
+                        JsValue::NULL,
+                    )
+                    .is_ok(),
+                "registered schema facades share all owner transaction read overloads"
+            );
+
+            let other_owner = Rc::new(
+                block_on(Db::open(DbConfig::new(
+                    schema.clone(),
+                    MemoryStorage::new(&refs),
+                    DbIdentity {
+                        node: jazz::ids::NodeUuid::from_bytes([0x47; 16]),
+                        author: alice,
+                    },
+                )))
+                .unwrap(),
+            );
+            let other_binding = WasmDb {
+                inner: WasmDbInner::Memory(Rc::clone(&other_owner)),
+                owns_runtime: false,
+            };
+            other_binding
+                .begin_transaction(
+                    bound.to_string(),
+                    "exclusive".to_owned(),
+                    Some(alice.0.as_bytes().to_vec()),
+                )
+                .unwrap();
+            block_on(other_owner.exclusive_tx_ref(bound).insert_with_id(
+                "items",
+                RowUuid::from_bytes([3; 16]),
+                BTreeMap::from([(
+                    "label".to_owned(),
+                    Value::String("receiver-secret".to_owned()),
+                )]),
+            ))
+            .unwrap();
+            let other_query = WasmPreparedQuery {
+                inner: other_owner
+                    .prepare_query(&other_owner.table("items"))
+                    .unwrap(),
+            };
+            let assert_foreign = |result: Result<Vec<u8>, JsValue>| {
+                assert!(result
+                    .unwrap_err()
+                    .as_string()
+                    .is_some_and(|message| { message.contains("different database runtime") }));
+            };
+            assert_foreign(other_binding.all_in_transaction(&other_query, &tx, JsValue::NULL));
+            assert_foreign(other_binding.all_in_transaction_for_identity(
+                &other_query,
+                &tx,
+                alice.0.as_bytes().to_vec(),
+                JsValue::NULL,
+            ));
+            assert_foreign(other_binding.one_in_transaction(&other_query, &tx, JsValue::NULL));
+            assert_foreign(other_binding.one_in_transaction_for_identity(
+                &other_query,
+                &tx,
+                alice.0.as_bytes().to_vec(),
+                JsValue::NULL,
+            ));
+            let error = binding
+                .all_in_transaction_for_identity(
+                    &query,
+                    &tx,
+                    bob.0.as_bytes().to_vec(),
+                    JsValue::NULL,
+                )
+                .unwrap_err();
+            assert!(error
+                .as_string()
+                .is_some_and(|message| message.contains("bound identity")));
+            binding
+                .commit_transaction(bound.to_string(), Some("exclusive".to_owned()))
+                .unwrap();
+            other_binding
+                .rollback_transaction(bound.to_string())
+                .unwrap();
+        }
     }
 }

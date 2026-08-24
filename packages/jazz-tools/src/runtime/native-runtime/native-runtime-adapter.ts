@@ -274,12 +274,6 @@ type NativeDb = {
   mergeableTxForIdentity?(openBatchId: OpenBatchId, author: Uint8Array): Tx;
   exclusiveTx?(openBatchId: OpenBatchId): Tx;
   allInTransaction?(query: PreparedQuery, tx: Tx, opts: unknown): Uint8Array;
-  allInTransactionForIdentity?(
-    query: PreparedQuery,
-    tx: Tx,
-    author: Uint8Array,
-    opts: unknown,
-  ): Uint8Array;
   setTickScheduler(
     callback:
       | ((urgency: "immediate" | "deferred") => void)
@@ -1401,7 +1395,10 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     const session = sessionFromWriteContext(sessionJson);
     this.applySessionClaims(session);
-    const identity = kind === "mergeable" ? this.trustedWriteIdentity(session) : undefined;
+    // The native core binds an exclusive transaction's identity at begin. Keep
+    // the trusted-serving subject here so every staged operation and its
+    // commit are authorized as that one subject.
+    const identity = this.trustedWriteIdentity(session);
     this.db.beginTransaction(id, kind, identity);
     this.pendingTxs.set(id, { id, kind, identity, writes: [], txByView: new Map() });
     return id;
@@ -1943,17 +1940,6 @@ export class NativeRuntimeAdapter implements Runtime {
     pendingTx: PendingTx | undefined,
   ): Uint8Array {
     if (!pendingTx) return this.readRowsForHost(query, opts, session?.identity);
-    if (this.readAuthorizationHost === "trusted-serving") {
-      if (!this.db.allInTransactionForIdentity) {
-        throw new Error("Native runtime does not support trusted-serving transaction reads");
-      }
-      return this.db.allInTransactionForIdentity(
-        query,
-        this.txForRead(pendingTx),
-        session?.identity ?? this.peerIdentity,
-        opts,
-      );
-    }
     if (!this.db.allInTransaction) {
       throw new Error("Native runtime does not support transaction reads");
     }
@@ -2183,11 +2169,8 @@ export class NativeRuntimeAdapter implements Runtime {
 
   private txForWrite(pending: PendingTx, identity: Uint8Array | undefined): Tx {
     if (pending.kind === "exclusive") {
-      if (identity && schemaHasPolicies(this.schema)) {
-        throw new Error(
-          "Native runtime cannot perform session-scoped exclusive transaction writes: " +
-            "the native runtime exclusive transaction API has no identity-aware staging methods.",
-        );
+      if (pending.identity && (!identity || !sameBytes(pending.identity, identity))) {
+        throw new Error("Native runtime exclusive transaction cannot mix write identities");
       }
       return this.txForRead(pending);
     }
@@ -3555,10 +3538,6 @@ function errorMessage(error: unknown): string {
 function contextualError(context: string, error: unknown): Error {
   const cause = error instanceof Error ? error : new Error(errorMessage(error));
   return new Error(`${context}: ${cause.message}`, { cause });
-}
-
-function schemaHasPolicies(schema: WasmSchema): boolean {
-  return Object.values(schema).some((table) => table.policies !== undefined);
 }
 
 function rejectionCode(message: string): string {

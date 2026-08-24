@@ -178,11 +178,4 @@ without wedging authority progress.
 
 ## Open Questions
 
-### Open questions
-
-- 🔶 **External strategy surface.** What plugin or registry surface lets
-  applications provide merge strategies while preserving the deterministic,
-  non-wedging `MergeStrategy` contract?
-- 🔶 **Strategy versioning and schema movement.** Changing a merge strategy is a
-  schema-version change, but what compatibility rules govern old clients, lenses,
-  corrected strategies, and historical re-merge?
+- 🔶 [#1782](https://github.com/garden-co/jazz/issues/1782) — External merge strategies and schema-version movement.

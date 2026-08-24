@@ -13,7 +13,12 @@ where
 {
     /// Open an exclusive transaction over the current snapshot.
     pub async fn open_exclusive(&mut self, id: OpenTransactionId) -> Result<(), Error> {
-        self.open_exclusive_for_identity(id, AuthorId::SYSTEM).await
+        self.open_transaction(
+            id,
+            OpenTransactionKind::Exclusive { bound_author: None },
+            AuthorId::SYSTEM,
+        )
+        .await
     }
 
     pub(crate) async fn open_exclusive_for_identity(
@@ -21,8 +26,14 @@ where
         id: OpenTransactionId,
         made_by: AuthorId,
     ) -> Result<(), Error> {
-        self.open_transaction(id, OpenTransactionKind::Exclusive, made_by)
-            .await
+        self.open_transaction(
+            id,
+            OpenTransactionKind::Exclusive {
+                bound_author: Some(made_by),
+            },
+            made_by,
+        )
+        .await
     }
 
     /// Open a mergeable transaction over the current snapshot.
@@ -366,7 +377,10 @@ where
         deletion: Option<DeletionEvent>,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
-        if !matches!(self.open_tx(tx_id)?.kind, OpenTransactionKind::Exclusive) {
+        if !matches!(
+            self.open_tx(tx_id)?.kind,
+            OpenTransactionKind::Exclusive { .. }
+        ) {
             return Err(Error::InvalidMergeableCommit(
                 "open transaction is not exclusive",
             ));
@@ -675,11 +689,19 @@ where
     ) -> Result<(PublishedTransaction, SyncMessage), Error> {
         if !matches!(
             self.open_tx(open_batch_id)?.kind,
-            OpenTransactionKind::Exclusive
+            OpenTransactionKind::Exclusive { .. }
         ) {
             return Err(Error::InvalidMergeableCommit(
                 "open transaction is not exclusive",
             ));
+        }
+        if matches!(
+            self.open_tx(open_batch_id)?.kind,
+            OpenTransactionKind::Exclusive {
+                bound_author: Some(bound)
+            } if bound != made_by
+        ) {
+            return Err(Error::OpenTransactionIdentityMismatch);
         }
         if !self
             .open_exclusive_is_locally_serializable(open_batch_id)
@@ -784,6 +806,16 @@ where
         self.open_tx.open_transactions.remove(&open_batch_id);
         self.open_tx.closed_batches.insert(open_batch_id);
         Ok((publication, SyncMessage::CommitUnit { tx, versions }))
+    }
+
+    /// Commit an exclusive transaction using the identity bound when it opened.
+    pub async fn commit_exclusive_bound(
+        &mut self,
+        open_batch_id: OpenTransactionId,
+        now_ms: u64,
+    ) -> Result<(PublishedTransaction, SyncMessage), Error> {
+        let author = self.open_tx(open_batch_id)?.provisional_author;
+        self.commit_exclusive(open_batch_id, author, now_ms).await
     }
 
     async fn open_exclusive_is_locally_serializable(
@@ -1239,7 +1271,11 @@ where
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OpenTransactionKind {
-    Exclusive,
+    Exclusive {
+        /// Present only for identity-capability transactions opened by `Db`.
+        /// Low-level node transactions retain their historical commit-time author.
+        bound_author: Option<AuthorId>,
+    },
     Mergeable {
         made_by: AuthorId,
         permission_subject: Option<AuthorId>,

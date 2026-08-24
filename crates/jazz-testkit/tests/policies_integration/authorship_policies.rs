@@ -278,7 +278,7 @@ async fn created_by_policies_hide_server_generated_rows_without_attribution_inne
 /// bob query ──────────────────────────► sees only system row
 /// ```
 #[tokio::test]
-#[ignore = "server schema conversion rejects `$createdBy = \"jazz:system\"` with OperandTypeMismatch"]
+#[ignore = "#1758: server schema conversion rejects `$createdBy = \"jazz:system\"` with OperandTypeMismatch"]
 async fn created_by_policies_can_allow_reads_from_system_author() {
     tokio::task::LocalSet::new()
         .run_until(created_by_policies_can_allow_reads_from_system_author_inner())
@@ -377,7 +377,7 @@ async fn created_by_policies_can_allow_reads_from_system_author_inner() {
 /// bob query ──────────────────────────────────► sees nothing
 /// ```
 #[tokio::test]
-#[ignore = "trusted backend attribution is ignored by the Rust client, so an INSERT policy of never is rejected with authorization_denied"]
+#[ignore = "#1758: trusted backend attribution is ignored by the Rust client, so an INSERT policy of never is rejected with authorization_denied"]
 async fn created_by_policies_allow_backend_attribution_to_specific_user() {
     tokio::task::LocalSet::new()
         .run_until(created_by_policies_allow_backend_attribution_to_specific_user_inner())

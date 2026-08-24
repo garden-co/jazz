@@ -157,5 +157,9 @@ name = "async_open"
 required-features = ["testing"]
 
 [[test]]
+name = "legacy_benchmark_smoke"
+required-features = ["testing"]
+
+[[test]]
 name = "edge_fate_authority"
 required-features = ["runtime"]

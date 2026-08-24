@@ -298,6 +298,127 @@ it("uses identity-aware core txs only on an explicit trusted-serving host", () =
   expect(staged).toEqual(["todos"]);
 });
 
+it("binds a trusted-serving exclusive transaction to its opening identity", () => {
+  const alice = "00000000-0000-0000-0000-0000000000a1";
+  const beganAs: string[] = [];
+  const policySchema = {
+    todos: {
+      ...testSchema.todos,
+      policies: {},
+    },
+  } satisfies WasmSchema;
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () => {
+        const db = fakeDb({
+          all: () => encodeRows([]),
+          allForIdentity: () => encodeRows([]),
+          exclusiveTx: () => fakeTx(),
+          prepareQuery: () => ({}),
+          tick: () => undefined,
+        }) as unknown as {
+          beginTransaction(
+            openBatchId: string,
+            kind: "mergeable" | "exclusive",
+            author?: Uint8Array,
+          ): void;
+        };
+        const begin = db.beginTransaction.bind(db);
+        db.beginTransaction = (openBatchId, kind, author) => {
+          beganAs.push(author === undefined ? "none" : formatUuidForTest(author));
+          begin(openBatchId, kind, author);
+        };
+        return db;
+      },
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    policySchema,
+    new Uint8Array(16),
+    new Uint8Array(16),
+    1,
+    true,
+    { readAuthorizationHost: "trusted-serving" },
+  );
+
+  const tx = createOpenBatchId();
+  runtime.beginTransaction("exclusive", tx, JSON.stringify({ user_id: alice }));
+  runtime.insert(
+    "todos",
+    { title: { type: "Text", value: "session-scoped exclusive write" } },
+    JSON.stringify({ batch_id: tx, session: { user_id: alice } }),
+    "00000000-0000-0000-0000-000000000001",
+  );
+
+  expect(beganAs).toEqual([alice]);
+  expect(() =>
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "wrong subject" } },
+      JSON.stringify({
+        batch_id: tx,
+        session: { user_id: "00000000-0000-0000-0000-0000000000b2" },
+      }),
+      "00000000-0000-0000-0000-000000000002",
+    ),
+  ).toThrow("Native runtime exclusive transaction cannot mix write identities");
+});
+
+it("uses the opening identity for trusted-serving transaction reads", async () => {
+  const alice = "00000000-0000-0000-0000-0000000000a1";
+  const tx = fakeTx();
+  const runtime = new NativeRuntimeAdapter(
+    {
+      openMemory: () =>
+        fakeDb({
+          all: () => encodeRows([]),
+          allForIdentity: () => encodeRows([]),
+          allInTransaction: (_query: object, receivedTx: TxForTest) => {
+            expect(receivedTx).toBe(tx);
+            return encodeRows([
+              {
+                table: "todos",
+                rowId: uuidBytes("00000000-0000-0000-0000-000000000001"),
+                title: "Alice's pending row",
+              },
+            ]);
+          },
+          exclusiveTx: () => tx,
+          prepareQuery: () => ({}),
+          tick: () => undefined,
+        }),
+      openBrowser: async () => {
+        throw new Error("not used");
+      },
+    } as never,
+    testSchema,
+    new Uint8Array(16),
+    new Uint8Array(16),
+    1,
+    true,
+    { readAuthorizationHost: "trusted-serving" },
+  );
+
+  const transactionId = createOpenBatchId();
+  runtime.beginTransaction("exclusive", transactionId, JSON.stringify({ user_id: alice }));
+
+  await expect(
+    runtime.query(
+      JSON.stringify({ table: "todos" }),
+      JSON.stringify({ user_id: "00000000-0000-0000-0000-0000000000b2" }),
+      "local",
+      JSON.stringify({ transaction_batch_id: transactionId }),
+    ),
+  ).resolves.toEqual([
+    {
+      table: "todos",
+      id: "00000000-0000-0000-0000-000000000001",
+      values: [{ type: "Text", value: "Alice's pending row" }],
+    },
+  ]);
+});
+
 it("rejects a duplicate live OpenBatchId without replacing its staged transaction", () => {
   const stagedTransactions: string[][] = [];
   const runtime = new NativeRuntimeAdapter(

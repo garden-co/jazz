@@ -16,7 +16,7 @@ fn attributed_to(principal: &str) -> WriteContext {
 /// Verifies provenance magic columns for normal session writes, backend
 /// attribution, timestamps, query filters, and system-authored writes.
 #[tokio::test]
-#[ignore = "WriteContext attribution is not applied by the synced Rust client, so $updatedBy is not the requested principal"]
+#[ignore = "#1758: WriteContext attribution is not applied by the synced Rust client, so $updatedBy is not the requested principal"]
 async fn provenance_magic_columns_capture_insert_update_and_system_authors() {
     tokio::task::LocalSet::new()
         .run_until(provenance_magic_columns_capture_insert_update_and_system_authors_inner())
@@ -165,7 +165,7 @@ async fn provenance_magic_columns_capture_insert_update_and_system_authors_inner
 /// Verifies that write contexts can explicitly override `$updatedAt` while
 /// preserving the original creator and creation timestamp.
 #[tokio::test]
-#[ignore = "WriteContext attribution and updated_at overrides are not applied by the synced Rust client"]
+#[ignore = "#1758: WriteContext attribution and updated_at overrides are not applied by the synced Rust client"]
 async fn provenance_magic_columns_allow_explicit_updated_at_override() {
     tokio::task::LocalSet::new()
         .run_until(provenance_magic_columns_allow_explicit_updated_at_override_inner())
@@ -254,7 +254,7 @@ async fn provenance_magic_columns_allow_explicit_updated_at_override_inner() {
 /// Verifies `$createdBy`-based row policies: creators can read/update/delete
 /// their rows, backend-attributed rows behave as creator-owned, and system rows stay hidden.
 #[tokio::test]
-#[ignore = "trusted backend attribution is ignored by the synced Rust client, so backend-attributed rows are not creator-owned"]
+#[ignore = "#1758: trusted backend attribution is ignored by the synced Rust client, so backend-attributed rows are not creator-owned"]
 async fn created_by_permissions_allow_creators_and_hide_system_rows() {
     tokio::task::LocalSet::new()
         .run_until(created_by_permissions_allow_creators_and_hide_system_rows_inner())

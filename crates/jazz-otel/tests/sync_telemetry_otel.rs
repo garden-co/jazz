@@ -30,7 +30,7 @@ fn todo_values(title: &str, completed: bool) -> HashMap<String, Value> {
 }
 
 #[tokio::test]
-#[ignore = "manual telemetry receipt; stdout fallback executes, collector is only needed to inspect OTLP export"]
+#[ignore = "#1787: manual telemetry receipt; stdout fallback executes, collector is only needed to inspect OTLP export"]
 async fn sync_layers_emit_otel_spans() {
     tokio::task::LocalSet::new()
         .run_until(async {

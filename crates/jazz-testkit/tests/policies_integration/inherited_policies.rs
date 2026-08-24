@@ -902,7 +902,7 @@ async fn inherited_folder_access_extends_document_visibility_beyond_direct_owner
 /// alice ──insert owner=alice, folder=shared─────────► server ──► accepted
 /// ```
 #[tokio::test]
-#[ignore = "inherited write policies resolves on wrong branch"]
+#[ignore = "#1762: inherited write policies resolves on wrong branch"]
 async fn inherited_folder_insert_requires_folder_owner_when_fk_present() {
     tokio::task::LocalSet::new()
         .run_until(inherited_folder_insert_requires_folder_owner_when_fk_present_inner())
@@ -1145,7 +1145,7 @@ async fn inherited_folder_insert_requires_folder_owner_when_fk_present_inner() {
 /// alice ──delete folder────────────────────────────► server ──► persisted
 /// ```
 #[tokio::test]
-#[ignore = "folder-owner inherited DELETE leaves the folder-backed document present after an EdgeServer-tier read"]
+#[ignore = "#1764: folder-owner inherited DELETE leaves the folder-backed document present after an EdgeServer-tier read"]
 async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_documents() {
     tokio::task::LocalSet::new()
         .run_until(
@@ -1299,7 +1299,7 @@ async fn inherited_folder_delete_allows_folder_owner_to_delete_folder_and_docume
 /// bob ──delete charlie doc──────────────────────────► server ──✗ rejected
 /// ```
 #[tokio::test]
-#[ignore = "the document-owner/non-owner inherited DELETE scenario does not settle within 20 seconds"]
+#[ignore = "#1764: the document-owner/non-owner inherited DELETE scenario does not settle within 20 seconds"]
 async fn inherited_folder_delete_allows_document_owner_but_blocks_other_non_owners() {
     tokio::task::LocalSet::new()
         .run_until(
@@ -1683,7 +1683,7 @@ async fn inherited_multiple_folder_paths_compose_with_or_inner() {
 /// Verifies that folder ownership grants UPDATE access to a folder-backed
 /// document when the child row inherits `allowedTo.update(...)` from its parent.
 #[tokio::test]
-#[ignore = "the Rust client rejects the inherited-visible UPDATE with `read policy denied UPSERT on table documents`"]
+#[ignore = "#1762: the Rust client rejects the inherited-visible UPDATE with `read policy denied UPSERT on table documents`"]
 async fn inherited_folder_update_allows_folder_owner_and_blocks_other_users() {
     tokio::task::LocalSet::new()
         .run_until(inherited_folder_update_allows_folder_owner_and_blocks_other_users_inner())
@@ -1905,7 +1905,7 @@ async fn inherited_referencing_scalar_paths_grant_visibility_and_compose_with_or
 /// Verifies that reverse inheritance invalidates active subscriptions when
 /// referencing rows are created, deleted, or retargeted.
 #[tokio::test]
-#[ignore = "deleting the last reverse-inheritance reference does not emit the required target-row removal delta"]
+#[ignore = "#1764: deleting the last reverse-inheritance reference does not emit the required target-row removal delta"]
 async fn inherited_referencing_scalar_subscription_updates_follow_create_delete_and_retarget() {
     tokio::task::LocalSet::new().run_until(inherited_referencing_scalar_subscription_updates_follow_create_delete_and_retarget_inner()).await;
 }
@@ -2024,7 +2024,7 @@ async fn inherited_referencing_scalar_subscription_updates_follow_create_delete_
 /// Verifies that reverse inheritance over `UUID[] REFERENCES` grants access
 /// and that reordering or duplicating the array does not change semantics.
 #[tokio::test]
-#[ignore = "reordering a reverse-inherited UUID array emits spurious target-row update deltas despite unchanged set membership"]
+#[ignore = "#1764: reordering a reverse-inherited UUID array emits spurious target-row update deltas despite unchanged set membership"]
 async fn inherited_referencing_array_membership_preserves_set_semantics() {
     tokio::task::LocalSet::new()
         .run_until(inherited_referencing_array_membership_preserves_set_semantics_inner())
@@ -2591,7 +2591,7 @@ async fn inherited_child_fk_retarget_hidden_to_visible_parent_adds_child_to_subs
 /// does not declare a read policy, `allowedTo.read(folder_id)` must not infer
 /// access from permissive/default behavior.
 #[tokio::test]
-#[ignore = "server schema conversion rejects INHERITS when the referenced parent has no SELECT policy"]
+#[ignore = "#1761: server schema conversion rejects INHERITS when the referenced parent has no SELECT policy"]
 async fn inherits_select_denies_when_parent_operation_policy_is_missing() {
     tokio::task::LocalSet::new()
         .run_until(inherits_select_denies_when_parent_operation_policy_is_missing_inner())
@@ -2685,7 +2685,7 @@ async fn inherits_select_denies_when_parent_operation_policy_is_missing_inner() 
 /// where a missing parent operation policy is treated as allowed while
 /// evaluating `allowedTo.insert(folder_id)`.
 #[tokio::test]
-#[ignore = "permissive-local policy mode is no longer exposed by the Rust public API"]
+#[ignore = "#1762: permissive-local policy mode is no longer exposed by the Rust public API"]
 async fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permissive_local() {
     tokio::task::LocalSet::new().run_until(local_insert_with_inherits_policy_allows_missing_parent_policy_in_permissive_local_inner()).await;
 }
@@ -2756,7 +2756,7 @@ async fn local_insert_with_inherits_policy_allows_missing_parent_policy_in_permi
 /// covers the local-only branch where missing source-table UPDATE policy is
 /// treated as allowed for `allowedTo.updateReferencing(...)`.
 #[tokio::test]
-#[ignore = "permissive-local policy mode is no longer exposed by the Rust public API"]
+#[ignore = "#1762: permissive-local policy mode is no longer exposed by the Rust public API"]
 async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_permissive_local() {
     tokio::task::LocalSet::new().run_until(local_update_with_inherits_referencing_allows_missing_source_policy_in_permissive_local_inner()).await;
 }
@@ -2839,7 +2839,7 @@ async fn local_update_with_inherits_referencing_allows_missing_source_policy_in_
 /// folder, but Bob cannot update that root folder. The child's update must
 /// therefore fail the inherited `allowedTo.update(parent_id)` check.
 #[tokio::test]
-#[ignore = "the public client cannot observe the update-only child row before exercising inherited WITH CHECK"]
+#[ignore = "#1762: the public client cannot observe the update-only child row before exercising inherited WITH CHECK"]
 async fn local_update_with_check_inherits_denies_when_parent_is_not_updateable() {
     tokio::task::LocalSet::new()
         .run_until(local_update_with_check_inherits_denies_when_parent_is_not_updateable_inner())

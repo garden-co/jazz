@@ -926,6 +926,121 @@ fn exclusive_tx_ref_survives_handle_reconstruction_until_explicit_commit() {
     assert_eq!(current.cell(table, "done"), Some(Value::Bool(true)));
 }
 
+/// An exclusive transaction binds alice at begin: its staged read cannot be
+/// re-authorized as bob, while the handle commit consumes that bound identity.
+#[test]
+fn identity_bound_exclusive_transaction_rejects_cross_identity_reads_and_commits_as_bound_author() {
+    let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
+    let alice = AuthorId::from_bytes([0xc1; 16]);
+    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let open = OpenTransactionId::new();
+    let row = row(0xa1);
+    assert_ne!(alice, db.identity.author);
+    let prepared = db
+        .prepare_query(
+            &db.table("todos")
+                .select(["title", "$createdBy", "$updatedBy"]),
+        )
+        .unwrap();
+
+    db.begin_exclusive_for_identity(open, alice).unwrap();
+    db.exclusive_tx_ref(open)
+        .insert_with_id("todos", row, doctest_support::todo_cells("alice", false))
+        .unwrap();
+
+    // Planted positive: the bound identity can read the transaction overlay.
+    let staged = db
+        .exclusive_tx_ref(open)
+        .all_prepared_for_identity(&prepared, alice)
+        .unwrap();
+    assert_eq!(staged.len(), 1);
+    let staged_provenance = staged[0].provenance().unwrap().unwrap();
+    assert_eq!(staged_provenance.created_by, alice);
+    assert_eq!(staged_provenance.updated_by, alice);
+    assert!(matches!(
+        doctest_support::block_on(
+            db.exclusive_tx_ref(open)
+                .all_prepared_for_identity(&prepared, bob),
+        ),
+        Err(error) if error.code == ErrorCode::Protocol
+    ));
+
+    db.commit_exclusive_handle(open).unwrap();
+    let committed = prepared_one(
+        &db,
+        &db.table("todos")
+            .select(["title", "$createdBy", "$updatedBy"]),
+    )
+    .unwrap();
+    assert_eq!(committed.row_uuid(), row);
+    let committed_provenance = committed.provenance().unwrap().unwrap();
+    assert_eq!(committed_provenance.created_by, alice);
+    assert_eq!(committed_provenance.updated_by, alice);
+}
+
+/// Mergeable serving reads retain their existing per-call identity semantics.
+#[test]
+fn mergeable_transaction_identity_reads_are_not_forced_to_begin_author() {
+    let schema = owner_read_schema();
+    let db = open_db(0xd3, AuthorId::SYSTEM, &schema);
+    let alice = AuthorId::from_bytes([0xa3; 16]);
+    let bob = AuthorId::from_bytes([0xb3; 16]);
+    let open = OpenTransactionId::new();
+    let prepared = db
+        .prepare_query(&db.table("todos").filter(eq(col("owner"), claim("sub"))))
+        .unwrap();
+    db.set_identity_claims(
+        alice,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(alice.0))]),
+    );
+    db.set_identity_claims(
+        bob,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(bob.0))]),
+    );
+    let alice_row = row(0xa3);
+    let bob_row = row(0xb3);
+    db.insert_with_id("todos", alice_row, cells("alice", false, alice))
+        .unwrap();
+    db.insert_with_id("todos", bob_row, cells("bob", false, bob))
+        .unwrap();
+
+    assert_eq!(
+        block_on(db.all_for_identity(&prepared, ReadOpts::default(), alice))
+            .unwrap()
+            .iter()
+            .map(CurrentRow::row_uuid)
+            .collect::<Vec<_>>(),
+        vec![alice_row]
+    );
+
+    db.begin_mergeable_for_identity(open, alice).unwrap();
+    let alice_rows = doctest_support::block_on(
+        db.mergeable_tx_ref(open)
+            .all_prepared_for_identity(&prepared, alice),
+    )
+    .unwrap();
+    let bob_rows = doctest_support::block_on(
+        db.mergeable_tx_ref(open)
+            .all_prepared_for_identity(&prepared, bob),
+    )
+    .unwrap();
+    assert_eq!(
+        alice_rows
+            .iter()
+            .map(CurrentRow::row_uuid)
+            .collect::<Vec<_>>(),
+        vec![alice_row]
+    );
+    assert_eq!(
+        bob_rows
+            .iter()
+            .map(CurrentRow::row_uuid)
+            .collect::<Vec<_>>(),
+        vec![bob_row]
+    );
+    db.abandon_transaction_handle(open).unwrap();
+}
+
 #[test]
 fn exclusive_tx_rejects_conflicting_concurrent_update() {
     let schema = schema();

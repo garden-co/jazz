@@ -124,13 +124,20 @@ Restored}`) · **global-current overwrite table** — node-local derived current
   **branch view** · **live base** · **frozen base** ·
   **supplying branch-key provenance**.
 
+## Terminology under review
+
+These links track definitions that are intentionally not settled by this
+appendix: [Publication #1795](https://github.com/garden-co/jazz/issues/1795),
+[Cursor #1796](https://github.com/garden-co/jazz/issues/1796), [typed policy
+claim #1797](https://github.com/garden-co/jazz/issues/1797), [maintained
+witness #1798](https://github.com/garden-co/jazz/issues/1798), [padded
+projection #1799](https://github.com/garden-co/jazz/issues/1799), [projection
+#1800](https://github.com/garden-co/jazz/issues/1800), [route
+#1801](https://github.com/garden-co/jazz/issues/1801), [ArgMaxBy
+#1802](https://github.com/garden-co/jazz/issues/1802), and [`batch` facade
+spelling #1803](https://github.com/garden-co/jazz/issues/1803).
+
 ## Open Questions
 
-### Open questions
-
-- 🔶 **Flat index.** Keep this dependency-ordered grouping, or add a flat
-  alphabetical index for lookup as well?
-- 🔶 **Facade spelling.** The high-level facade spells mergeable transactions as
-  _batch_ and exclusive transactions as _transaction_. `Db::transaction` is
-  present; decide whether mergeable writes should expose the corresponding
-  `batch` spelling.
+- 🔶 [#1786](https://github.com/garden-co/jazz/issues/1786) — Whether the glossary needs a flat alphabetical index.
+- 🔶 [#1803](https://github.com/garden-co/jazz/issues/1803) — Mergeable-transaction `batch` facade spelling.

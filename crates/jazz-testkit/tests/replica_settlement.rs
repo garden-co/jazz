@@ -520,7 +520,7 @@ mod relay_topology {
     ///   ◄──exactly one local answer──┘
     /// ```
     #[test]
-    #[ignore = "detaching the upstream never releases a held authority-tier subscription: no local settlement is delivered and the read stays pending forever instead of settling from the local store exactly once"]
+    #[ignore = "#1766: detaching the upstream never releases a held authority-tier subscription: no local settlement is delivered and the read stays pending forever instead of settling from the local store exactly once"]
     fn detaching_the_upstream_settles_held_subscription_locally_exactly_once() {
         let alice = AuthorId::from_bytes([0xa8; 16]);
         let node = open_db(0x18, alice);

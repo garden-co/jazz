@@ -269,6 +269,43 @@ test("Rust CI uses pinned prebuilt tools without charging Rust-only jobs for was
     assert.match(source, /uses: \.\/\.github\/actions\/setup-blacksmith/);
 });
 
+test("continuous soak precompiles outside seed watchdogs and preserves failure artifacts", () => {
+  const source = fs.readFileSync(
+    path.join(root, ".github/workflows/continuous-simulation-soak.yml"),
+    "utf8",
+  );
+  const parsed = parse(source);
+  const steps = parsed.jobs.soak.steps;
+  const precompile = steps.find((step) => step.name === "Precompile exact Jazz soak test binary");
+  const assertPrecompileCommand = (run) => {
+    assert.match(run, /timeout --kill-after=30s "\$\{PRECOMPILE_TIMEOUT_SECONDS\}s"/);
+    assert.match(
+      run,
+      /cargo test -p jazz --lib --no-default-features \\\n\s+--features testing,transport-compression-zstd --no-run \\\n/,
+    );
+    assert.doesNotMatch(run, /--no-exec/);
+  };
+  assert.ok(precompile, "missing named cold precompile step");
+  assertPrecompileCommand(precompile.run);
+  assert.throws(
+    () => assertPrecompileCommand(precompile.run.replace("--no-run", "--no-exec")),
+    /does not match|match the regular expression/,
+    "contract must reject a planted precompile flag regression",
+  );
+  for (const id of ["shard_one", "shard_two"])
+    assert.equal(
+      steps.find((step) => step.id === id)?.if,
+      "steps.precompile.outcome == 'success'",
+      `${id} must require successful precompile`,
+    );
+  assert.equal(steps.find((step) => step.name === "Upload soak receipts")?.if, "always()");
+  assert.match(
+    steps.find((step) => step.name === "Fail job when a shard failed")?.if,
+    /steps\.precompile\.outcome == 'failure'/,
+  );
+  assert.match(precompile.run, /phase:\s*"precompile"/);
+});
+
 test("build setup scopes mutable pnpm and sccache state to the agent temp directory", () => {
   assert.match(setupBuildAction, /dest: \$\{\{ runner\.temp \}\}\/setup-pnpm/);
   assert.match(setupBuildAction, /sccache_dir="\$\{RUNNER_TEMP\}\/sccache"/);
@@ -460,7 +497,7 @@ test("Rust CI splits a bounded real differential-oracle smoke behind a stable ag
   assert.doesNotMatch(differential, /tracked red debt/);
   assert.match(
     m3Differential,
-    /#\[ignore = "manual randomized differential soak; bounded seed 11 runs in CI"\]\n(?:pub )?fn m3_maintained_one_shot_differential_oracle/,
+    /#\[ignore = "#\d+: manual randomized differential soak; bounded seed 11 runs in CI"\]\n(?:pub )?fn m3_maintained_one_shot_differential_oracle/,
   );
   assert.doesNotMatch(workspace, /m3_maintained_one_shot_differential_oracle/);
   assert.match(aggregate, /if: always\(\)/);
@@ -827,7 +864,7 @@ test("CI runs the workflow contract test through its package script", () => {
   const lint = job("lint");
   assert.equal(
     packageJson.scripts["test:ci-workflow"],
-    "node --test dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/ci-tool-bundle.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs && node dev/gates/test-burndown-ts.mjs",
+    "node --test dev/gates/test/ci-rust-throughput.test.mjs dev/gates/test/ci-tool-bundle.test.mjs dev/gates/test/test-artifact-pipeline.test.mjs dev/gates/test/release-gates.test.mjs && node dev/gates/ignored-tests.mjs --self-test",
   );
   assert.match(lint, /run: pnpm test:ci-workflow/);
 });
