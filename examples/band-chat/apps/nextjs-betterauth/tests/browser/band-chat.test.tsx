@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { act } from "react";
-import { commands } from "vitest/browser";
 import { createRoot, type Root } from "react-dom/client";
 import { App } from "../../src/App.js";
 import { createSmokeScenario } from "../../src/scenario.js";
@@ -15,6 +14,7 @@ import {
   getJazzServerJwtForUser,
   unblockJazzServerNetwork,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
+import { bandChatBrowserCommands } from "./browser-commands.js";
 
 // A valid local-first identity seed; fixed so the persistence receipt reopens
 // as the same member identity.
@@ -187,7 +187,11 @@ describe("BandChat browser smoke", () => {
       server.appId,
     );
     const dbName = `band-chat-offline-${crypto.randomUUID()}`;
-    await commands.jazzBandChatBootstrapProfile(server, bandChatFixtureUsers.owner, "Owner");
+    await bandChatBrowserCommands().jazzBandChatBootstrapProfile(
+      server,
+      bandChatFixtureUsers.owner,
+      "Owner",
+    );
     const primed = await mount(
       { type: "persistent", dbName },
       { appId: server.appId, jwtToken, serverUrl: server.serverUrl },

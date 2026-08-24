@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { commands } from "vitest/browser";
 import { createDb, type Db } from "jazz-tools";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
@@ -20,16 +19,7 @@ import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
 import { bandChatFixtureUsers } from "../../src/fixture.js";
 import { createSmokeScenario } from "../../src/scenario.js";
-
-declare module "vitest/internal/browser" {
-  interface BrowserCommands {
-    jazzBandChatBootstrapProfile: (
-      server: { appId: string; serverUrl: string },
-      userId: string,
-      displayName: string,
-    ) => Promise<void>;
-  }
-}
+import { bandChatBrowserCommands } from "./browser-commands.js";
 
 const ctx = new TestCleanup();
 afterEach(async () => ctx.cleanup());
@@ -116,12 +106,12 @@ describe("BandChat cross-topology recovery", () => {
                   })
                   .wait({ tier: "edge" }),
               ).rejects.toThrow(/permission_denied/i);
-              await commands.jazzBandChatBootstrapProfile(
+              await bandChatBrowserCommands().jazzBandChatBootstrapProfile(
                 server,
                 bandChatFixtureUsers.owner,
                 "Owner",
               );
-              await commands.jazzBandChatBootstrapProfile(
+              await bandChatBrowserCommands().jazzBandChatBootstrapProfile(
                 server,
                 bandChatFixtureUsers.peer,
                 "Peer",
@@ -322,7 +312,11 @@ describe("BandChat cross-topology recovery", () => {
     ]);
     const owner = await openClient(server, "large-owner", ownerToken);
     const peer = await openClient(server, "large-peer", peerToken);
-    await commands.jazzBandChatBootstrapProfile(server, bandChatFixtureUsers.largeOwner, "Owner");
+    await bandChatBrowserCommands().jazzBandChatBootstrapProfile(
+      server,
+      bandChatFixtureUsers.largeOwner,
+      "Owner",
+    );
     const profile = await owner.one(
       app.profiles.where({ userId: bandChatFixtureUsers.largeOwner }),
       { tier: "edge" },
