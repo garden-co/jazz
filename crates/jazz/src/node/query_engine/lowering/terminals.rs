@@ -787,6 +787,9 @@ fn align_collect_join_key_types(
         for step in &path.child.steps {
             match step {
                 LinearStep::OrderBy(keys) => {
+                    for key in keys {
+                        retain_collect_slot_value(slot, &key.value, child)?;
+                    }
                     slot.order_cols = keys
                         .iter()
                         .map(|key| {
@@ -804,6 +807,9 @@ fn align_collect_join_key_types(
                     tie_breaker,
                     ..
                 } => {
+                    for value in tie_breaker {
+                        retain_collect_slot_value(slot, value, child)?;
+                    }
                     slot.offset = u64::from(*offset);
                     slot.limit = limit
                         .map(|limit| TopByLimit::Finite(u64::from(limit)))
@@ -891,6 +897,69 @@ fn align_collect_root_window(
             layout.root_tie_cols.push(occurrence.clone());
         }
     }
+    Ok(())
+}
+
+/// Keep values used to order or slice a nested collector slot in its internal
+/// input row. They are deliberately not public payload fields: a path can
+/// order by provenance even when its projection selects only ordinary columns.
+fn retain_collect_slot_value(
+    slot: &mut CollectSlotLayout,
+    value: &NormalizedValueRef,
+    source: &ResolvedSource,
+) -> CapabilityResult<()> {
+    let Some(requested_field) = collect_source_field_for_value(value) else {
+        return Ok(());
+    };
+    let source_field = if source
+        .row_shape
+        .descriptor
+        .field_index(requested_field)
+        .is_some()
+    {
+        requested_field.to_owned()
+    } else {
+        user_column_field(requested_field)
+    };
+    if slot
+        .fields
+        .iter()
+        .any(|field| field.source_field.as_deref() == Some(source_field.as_str()))
+    {
+        return Ok(());
+    }
+    let source_value_type = source_field_type(source, &source_field)
+        .cloned()
+        .ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Operator(format!(
+                "collector child source {:?} does not provide window key {requested_field:?}",
+                source.row_shape.source
+            )))
+        })?;
+    let prefix = slot
+        .row_id_input
+        .strip_suffix(&format!("_{}", source.row_shape.row_uuid_field))
+        .ok_or_else(|| {
+            single_gap_report(UnsupportedReason::Runtime(format!(
+                "collector child row-id input {:?} does not match source row-id field {:?}",
+                slot.row_id_input, source.row_shape.row_uuid_field
+            )))
+        })?;
+    let value_type = if matches!(source_value_type, ValueType::Nullable(_)) {
+        source_value_type.clone()
+    } else {
+        ValueType::Nullable(Box::new(source_value_type.clone()))
+    };
+    slot.fields.push(CollectFlatField {
+        input: format!("{prefix}_{source_field}"),
+        output: source_field.clone(),
+        value_type,
+        output_value_type: source_value_type,
+        source_field: Some(source_field),
+        is_row_id: false,
+        is_presence: false,
+        is_output: false,
+    });
     Ok(())
 }
 

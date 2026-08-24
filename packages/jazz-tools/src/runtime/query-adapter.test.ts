@@ -53,12 +53,20 @@ describe("translateQuery", () => {
   });
 
   it("keeps provenance order keys internal unless the caller selects them", () => {
-    const hidden = JSON.parse(
-      translateQuery(
-        app.projects.orderBy("$createdAt", "asc").limit(4).offset(2)._build(),
-        app.wasmSchema,
-      ),
-    );
+    for (const column of ["$createdAt", "$createdBy", "$updatedAt", "$updatedBy"] as const) {
+      const hidden = JSON.parse(
+        translateQuery(
+          app.projects.orderBy(column, "asc").limit(4).offset(2)._build(),
+          app.wasmSchema,
+        ),
+      );
+      expect(hidden).toMatchObject({
+        order_by: [{ column, direction: "Asc" }],
+        limit: 4,
+        offset: 2,
+      });
+      expect(hidden.select_columns).toBeUndefined();
+    }
     const selected = JSON.parse(
       translateQuery(
         app.projects
@@ -71,12 +79,6 @@ describe("translateQuery", () => {
       ),
     );
 
-    expect(hidden).toMatchObject({
-      order_by: [{ column: "$createdAt", direction: "Asc" }],
-      limit: 4,
-      offset: 2,
-    });
-    expect(hidden.select_columns).toBeUndefined();
     expect(selected).toMatchObject({
       select_columns: ["name", "$createdAt"],
       order_by: [{ column: "$createdAt", direction: "Desc" }],
