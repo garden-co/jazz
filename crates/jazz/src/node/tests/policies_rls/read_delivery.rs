@@ -241,7 +241,7 @@ fn read_policy_compares_indirect_text_by_its_logical_value() {
             &direct,
             &direct_binding,
             DurabilityTier::Local,
-            AuthorId::SYSTEM,
+            AuthorSubject::SYSTEM,
         )
         .unwrap()
         .len(),

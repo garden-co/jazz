@@ -367,7 +367,7 @@ pub(super) fn duplex_with_admitted_session_context(
 /// tap. This keeps reconnect tests at the real session-context boundary while
 /// exposing only the wire frames they need to assert.
 pub(super) fn duplex_with_admitted_session_context_and_client_outbound_tap(
-    identity: AuthorId,
+    identity: AuthorSubject,
     client_node: NodeUuid,
     client_epoch: u64,
     server_node: NodeUuid,
