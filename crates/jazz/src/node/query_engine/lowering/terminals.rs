@@ -957,7 +957,13 @@ pub(super) fn root_join_occurrence_fields(
 ) -> CapabilityResult<Vec<(String, ValueType)>> {
     // Authorization subplans are decision programs, not public row sets. Their
     // joins prove policy predicates and cannot contribute to a result address.
-    if matches!(request.policy, PolicyContext::AuthorizationSubplan { .. }) {
+    if matches!(request.policy, PolicyContext::AuthorizationSubplan { .. })
+        || request
+            .output
+            .app_rows
+            .as_ref()
+            .is_some_and(|output| !output.public_terminal)
+    {
         return Ok(Vec::new());
     }
     let Some(steps) = root_linear_steps(plan) else {
