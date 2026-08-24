@@ -54,7 +54,10 @@ For ordinary Rust/core work, the full gate set is:
 - `cargo test -p jazz-otel` covers exporter/provider construction. Its ignored
   `sync_telemetry_otel` target is a manual receipt because it does not
   programmatically assert collector delivery.
-- `cargo check -p jazz-sim --benches` (always; it is cheap enough and catches bench API rot)
+- `cargo check -p jazz-sim --benches` on the realistic benchmark workflow
+  (same-repository PRs bearing `benchmark`, non-bot default-branch pushes,
+  manual runs, and nightly); it catches bench API rot without extending every
+  ordinary PR's critical path.
 - `dev/gates/ts-wire-codec.sh` for TypeScript/native-runtime wire-codec coverage
   (Anselm-approved 2026-07-07)
 - `dev/gates/invariant-registry.sh` parses both invariant registries and fails on
@@ -91,15 +94,19 @@ Benchmark work has three deliberately separate gates:
   `dev/gates/benchmark-smoke.sh <jazz|jazz-sim> <bench>`. This is a debug
   `cargo check`, not `cargo bench`; it avoids release-wide RocksDB rebuilds and
   timing noise.
-- CI runs `dev/gates/benchmark-smoke.sh --ci`: benchmark API compilation plus
-  deterministic core and jazz-sim scenario assertions. Keep correctness
-  assertions in tests, not in a timing receipt.
+- Ordinary PR CI runs `dev/gates/benchmark-smoke.sh --ci`: deterministic core
+  and jazz-sim scenario assertions. The realistic benchmark workflow runs
+  `dev/gates/benchmark-smoke.sh --compile-ci` to compile every maintained
+  benchmark API on same-repository benchmark-labeled PRs, non-bot
+  default-branch pushes, manual runs, and nightly. Keep correctness assertions
+  in tests, not in a timing receipt.
 - CodSpeed currently compares the example benchmark crates only. Apply the
   `benchmark` label when that coverage is relevant; it refreshes nightly on the
   default branch. Native `jazz` and `jazz-sim` timing remains in the
-  realistic benchmark workflow (labeled PRs plus scheduled/default-branch
-  runs) until those suites are ported to CodSpeed. Do not run a repository-wide
-  benchmark suite before push.
+  realistic benchmark workflow (same-repository benchmark-labeled PRs,
+  non-bot default-branch pushes, manual runs, and nightly) until those suites
+  are ported to CodSpeed. Do not run a repository-wide benchmark suite before
+  push.
 
 Any change to a public `jazz` type additionally gates the full workspace,
 including examples.
