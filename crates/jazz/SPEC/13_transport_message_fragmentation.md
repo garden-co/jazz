@@ -45,7 +45,8 @@ Transport-only limits to remove:
 Limits retained for semantic or adversarial-resource reasons:
 
 - `MAX_WIRE_FRAME_BYTES`: allocation bound before frame decode;
-- `MAX_SHAPE_AST_BYTES`: executable query/shape complexity admission;
+- `MAX_SHAPE_REGISTRATION_BYTES`: retained query/shape AST and read-view option
+  admission budget;
 - commit-version, repair-ref, branch-key-qualified repair, known-state-ref and structured
   result depth/width limits: CPU/fan-out/state bounds independent of framing;
 - receiver in-flight/aggregate/advertised-length budgets and WebSocket frame

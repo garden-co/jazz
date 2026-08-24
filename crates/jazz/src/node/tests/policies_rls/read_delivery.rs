@@ -398,10 +398,10 @@ fn camel_case_message_read_policy_incrementally_adds_member_message() {
     assert_view_update_only_ships_rows(&update, BTreeSet::from([bob_message, bob_profile]));
     assert!(matches!(
         update,
-            SyncMessage::ViewUpdate {
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 result_member_adds: ref adds,
                 ..
-        } if adds.iter().any(|entry| entry == &("messages".to_owned().into(), bob_message, bob_message_tx))
+        }) if adds.iter().any(|entry| entry == &("messages".to_owned().into(), bob_message, bob_message_tx))
     ));
     let _ = bob_membership_tx;
 }
@@ -676,10 +676,10 @@ fn edge_membership_insert_updates_previously_empty_private_message_query() {
         .unwrap();
     assert!(matches!(
         update,
-            SyncMessage::ViewUpdate {
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 result_member_adds: ref adds,
                 ..
-        } if adds.iter().any(|entry| entry == &("messages".to_owned().into(), seed_message, seed_tx))
+        }) if adds.iter().any(|entry| entry == &("messages".to_owned().into(), seed_message, seed_tx))
     ));
 }
 
@@ -738,11 +738,11 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
         .unwrap();
     assert!(matches!(
         initial,
-            SyncMessage::ViewUpdate {
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 result_member_adds: ref adds,
                 reset_result_set: true,
                 ..
-        } if adds.iter().any(|entry| entry == &("messages".to_owned().into(), seed_message, seed_tx))
+        }) if adds.iter().any(|entry| entry == &("messages".to_owned().into(), seed_message, seed_tx))
     ));
 
     let bob_membership_tx = core
@@ -775,11 +775,11 @@ fn edge_rehydrate_refreshes_previously_covered_private_message_query() {
     let rehydrated = alice_peer
         .rehydrate_query_with_opts(&mut core, &shape, &binding, opts)
         .unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         reset_result_set,
         ..
-    } = rehydrated
+    }) = rehydrated
     else {
         panic!("expected rehydrate view update");
     };
@@ -934,17 +934,17 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
         .unwrap();
     assert!(matches!(
         invited_initial,
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             result_member_adds: ref adds,
             ..
-        } if adds.is_empty()
+        }) if adds.is_empty()
     ));
     assert!(matches!(
         spy_initial,
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             result_member_adds: ref adds,
             ..
-        } if adds.is_empty()
+        }) if adds.is_empty()
     ));
     assert_eq!(
         core.query
@@ -975,11 +975,11 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     let grant_update = invited_link
         .query_update(&mut core, &shape, &binding)
         .unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = grant_update
+    }) = grant_update
     else {
         panic!("expected grant update");
     };
@@ -996,11 +996,11 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     let spy_update = spy_link.query_update(&mut core, &shape, &binding).unwrap();
     assert!(matches!(
         spy_update,
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             result_member_adds: ref adds,
             result_member_removes: ref removes,
             ..
-        } if adds.is_empty() && removes.is_empty()
+        }) if adds.is_empty() && removes.is_empty()
     ));
     assert_eq!(spy_link.metrics.result_adds_out, 0);
     assert_eq!(spy_link.metrics.version_bundles_out, 0);
@@ -1020,11 +1020,11 @@ fn composed_read_policy_grants_and_revokes_incrementally() {
     let revoke_update = invited_link
         .query_update(&mut core, &shape, &binding)
         .unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         result_member_removes,
         ..
-    } = revoke_update
+    }) = revoke_update
     else {
         panic!("expected revoke update");
     };
@@ -1513,12 +1513,12 @@ fn edge_query_rehydrate_resets_empty_result_for_denied_private_chat() {
         )
         .unwrap();
 
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         result_member_adds,
         version_bundles,
         ..
-    } = update
+    }) = update
     else {
         panic!("expected view update");
     };

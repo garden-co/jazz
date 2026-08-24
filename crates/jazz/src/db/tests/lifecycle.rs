@@ -9,6 +9,7 @@ fn db_facade_opens_writes_and_reads_todos_end_to_end() {
         .insert(
             "todos",
             doctest_support::todo_cells("learn the db facade", false),
+            Default::default(),
         )
         .unwrap();
     let todo = write.row_uuid();
@@ -40,8 +41,12 @@ fn db_facade_opens_writes_and_reads_todos_end_to_end() {
 #[test]
 fn db_close_is_idempotent() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
-    db.insert("todos", doctest_support::todo_cells("close me", false))
-        .unwrap();
+    db.insert(
+        "todos",
+        doctest_support::todo_cells("close me", false),
+        Default::default(),
+    )
+    .unwrap();
 
     doctest_support::block_on(db.close()).unwrap();
     doctest_support::block_on(db.close()).unwrap();

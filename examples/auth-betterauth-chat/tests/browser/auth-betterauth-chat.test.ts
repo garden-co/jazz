@@ -13,6 +13,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { type JazzClient, createJazzClient } from "jazz-tools/react";
 import { app } from "../../schema.js";
+import permissions from "../../permissions.js";
+import { schema as betterAuthSchema } from "../../schema-better-auth/schema.js";
 
 const clients: JazzClient[] = [];
 
@@ -44,6 +46,18 @@ async function send(client: JazzClient, chat_id: string, text: string): Promise<
 }
 
 describe("auth-betterauth-chat permissions", () => {
+  it("composes deny-all CRUD policies for every generated Better Auth table", () => {
+    for (const tableName of Object.keys(betterAuthSchema)) {
+      const tablePermissions = permissions[tableName]!;
+
+      expect(tablePermissions.select?.using).toEqual({ type: "False" });
+      expect(tablePermissions.insert?.with_check).toEqual({ type: "False" });
+      expect(tablePermissions.update?.using).toEqual({ type: "False" });
+      expect(tablePermissions.update?.with_check).toEqual({ type: "False" });
+      expect(tablePermissions.delete?.using).toEqual({ type: "False" });
+    }
+  });
+
   it("authenticated JWT can post to Announcements and General", async () => {
     const client = await makeClient(__USER_JWT__);
     await expect(send(client, __ANNOUNCEMENTS_CHAT_ID__, "user-ann")).resolves.toBeUndefined();

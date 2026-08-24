@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "scenarios": [
+    {
+      "id": "harness.fixture.cross-topology-faults",
+      "topology": ["fixture"],
+      "cwd": ".",
+      "argv": ["pnpm", "--filter", "jazz-tools", "test:topology-fixture"]
+    }
+  ]
+}

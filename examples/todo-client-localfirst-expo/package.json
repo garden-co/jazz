@@ -4,6 +4,7 @@
   "private": true,
   "main": "./index.js",
   "scripts": {
+    "test": "node --experimental-strip-types --test src/*.test.mjs",
     "start": "expo start --clear",
     "android": "expo run:android",
     "ios": "expo run:ios",

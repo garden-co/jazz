@@ -769,23 +769,25 @@ where
         }
         let version_carriers = build_version_carriers_from_singletons(version_bundles)
             .map_err(|_| Error::InvalidStoredValue("failed to build version-bundle run"))?;
-        Ok(SyncMessage::ViewUpdate {
-            subscription,
-            settled_through: self.clock.committed_global_time,
-            reset_result_set: false,
-            version_carriers,
-            version_bundles: Vec::new(),
-            peer_payload_inventory: PeerPayloadInventory {
-                complete_tx_payloads: peer_payload_inventory_refs,
-                authorization_progress: None,
-                opening_pending: false,
+        Ok(SyncMessage::ViewUpdate(
+            crate::protocol::ViewUpdatePayload {
+                subscription,
+                settled_through: self.clock.committed_global_time,
+                reset_result_set: false,
+                version_carriers,
+                version_bundles: Vec::new(),
+                peer_payload_inventory: PeerPayloadInventory {
+                    complete_tx_payloads: peer_payload_inventory_refs,
+                    authorization_progress: None,
+                    opening_pending: false,
+                },
+                result_member_adds: result_member_adds.into_iter().collect(),
+                result_member_removes: result_member_removes.into_iter().collect(),
+                terminal_operations: Vec::new(),
+                program_fact_adds,
+                program_fact_removes,
             },
-            result_member_adds: result_member_adds.into_iter().collect(),
-            result_member_removes: result_member_removes.into_iter().collect(),
-            terminal_operations: Vec::new(),
-            program_fact_adds,
-            program_fact_removes,
-        })
+        ))
     }
 
     /// Apply a downstream current-row view update.

@@ -119,14 +119,14 @@ impl PeerState {
     }
 
     fn record_outgoing_view_update_metadata(&mut self, update: &SyncMessage) {
-        let SyncMessage::ViewUpdate {
+        let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             version_carriers,
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             ..
-        } = update
+        }) = update
         else {
             return;
         };
@@ -214,9 +214,9 @@ impl PeerState {
                     .await;
                     self.role = previous_role;
                     self.permission_identity = previous_permission_identity;
-                    let SyncMessage::ViewUpdate {
+                    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                         settled_through, ..
-                    } = update?
+                    }) = update?
                     else {
                         return Err(Error::UnsupportedSyncMessage(
                             "terminal authority support hydration did not return a view",
@@ -325,9 +325,9 @@ impl PeerState {
                 self.role = previous_role;
                 self.permission_identity = previous_permission_identity;
                 let update = rehydrate?;
-                let SyncMessage::ViewUpdate {
+                let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     settled_through, ..
-                } = update
+                }) = update
                 else {
                     return Err(Error::UnsupportedSyncMessage(
                         "authority support hydration did not return a view",
@@ -442,7 +442,7 @@ impl PeerState {
     }
 
     fn apply_outgoing_view_update_result_set(&mut self, update: &SyncMessage) {
-        let SyncMessage::ViewUpdate {
+        let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             reset_result_set,
             result_member_adds,
@@ -450,7 +450,7 @@ impl PeerState {
             program_fact_adds,
             program_fact_removes,
             ..
-        } = update
+        }) = update
         else {
             return;
         };

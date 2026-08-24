@@ -440,8 +440,16 @@ test("CI uses the correctness artifact path while package builds keep release WA
   );
   assert.match(
     packageJson,
-    /"build:ci": "turbo run build:crates.*jazz-wasm.*jazz-napi.*jazz-tools/,
+    /"build:ci": "turbo run build:crates.*jazz-wasm.*provenance\.mjs write wasm release.*jazz-napi.*jazz-tools/,
   );
+  for (const script of ["build", "build:core", "build:ci"])
+    assert.match(
+      packageJson,
+      new RegExp(
+        `"${script.replace(":", "\\:")}": "turbo run build:crates.*jazz-wasm.*provenance\\.mjs write wasm release.*turbo run build`,
+      ),
+      `${script} must reseal cache-restored WASM provenance before consumers build`,
+    );
   assert.doesNotMatch(workflow, /CARGO_TARGET_DIR/);
   assert.doesNotMatch(pipeline, /target\/test-artifacts-(?:wasm|napi)/);
   for (const task of ["build", "build:crates", "build:fast"])

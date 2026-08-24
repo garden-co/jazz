@@ -24,7 +24,7 @@ on:
           - publish
           - dry-run
       version:
-        description: "Optional exact manual version override (for example 2.0.0-alpha.6)."
+        description: "Optional expected source version. It must match the checked-out release snapshot."
         required: false
         type: string
 
@@ -407,7 +407,7 @@ jobs:
       )
     permissions:
       actions: read
-      contents: read
+      contents: write
       id-token: write
     env:
       NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -546,35 +546,12 @@ jobs:
 
       - name: Resolve lock-stepped npm package versions
         run: |
-          set_pkg_version_if_needed() {
-            local pkg_dir="$1"
-            local current_version
-
-            current_version=$(node -p 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).version' "${pkg_dir}/package.json")
-
-            if [ "${current_version}" != "${VERSION}" ]; then
-              npm --prefix "${pkg_dir}" version "${VERSION}" --no-git-tag-version
-            fi
-          }
-
-          if [ "${RELEASE_MODE}" = "dry-run" ]; then
-            VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/jazz-tools/package.json","utf8")).version')
-          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ github.event.inputs.version || '' }}"
-            if [ -n "${VERSION}" ]; then
-              set_pkg_version_if_needed packages/jazz-tools
-              set_pkg_version_if_needed crates/jazz-wasm
-              set_pkg_version_if_needed crates/jazz-napi
-              set_pkg_version_if_needed packages/create-jazz
-            else
-              pnpm release:version
-              VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/jazz-tools/package.json","utf8")).version')
-              set_pkg_version_if_needed crates/jazz-wasm
-              set_pkg_version_if_needed crates/jazz-napi
-              set_pkg_version_if_needed packages/create-jazz
-            fi
-          else
-            VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/jazz-tools/package.json","utf8")).version')
+          VERSION=$(git show "${GITHUB_SHA}:packages/jazz-tools/package.json" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>console.log(JSON.parse(s).version))')
+          EXPECTED_VERSION="${{ github.event.inputs.version || '' }}"
+          if [ -n "${EXPECTED_VERSION}" ] && [ "${EXPECTED_VERSION}" != "${VERSION}" ]; then
+            echo "Manual version ${EXPECTED_VERSION} does not match checked-out source version ${VERSION}."
+            echo "Publish a committed release snapshot first; release workflows never rewrite versions in place."
+            exit 1
           fi
 
           echo "Resolved publish version: ${VERSION}"
@@ -597,6 +574,46 @@ jobs:
       - name: Guard alpha-only lock-stepped publish versions
         run: |
           EXPECTED_VERSION="${{ github.event.inputs.version || '' }}" node -e 'const fs=require("fs");const path=require("path");const expected=process.env.EXPECTED_VERSION;const alphaVersion=/^2\.0\.0-alpha\.[0-9A-Za-z.-]+$/;const tools=JSON.parse(fs.readFileSync("packages/jazz-tools/package.json","utf8"));const wasm=JSON.parse(fs.readFileSync("crates/jazz-wasm/package.json","utf8"));const napi=JSON.parse(fs.readFileSync("crates/jazz-napi/package.json","utf8"));const createJazz=JSON.parse(fs.readFileSync("packages/create-jazz/package.json","utf8"));if(expected){if(!alphaVersion.test(expected)){throw new Error(`Version override must match 2.0.0-alpha.*, got ${expected}`);}if(tools.version!==expected){throw new Error(`Version override mismatch: expected ${expected}, got ${tools.version}`);}}for(const pkg of [tools,wasm,napi,createJazz]){if(!alphaVersion.test(pkg.version)){throw new Error(`${pkg.name} version must match 2.0.0-alpha.*, got ${pkg.version}`);}const tag=pkg.publishConfig&&pkg.publishConfig.tag;if(tag&&tag!=="alpha"&&pkg.name!=="create-jazz"){throw new Error(`${pkg.name} publishConfig.tag must be alpha, got ${tag}`);}}if(!(tools.version===wasm.version&&tools.version===napi.version&&napi.version===createJazz.version)){throw new Error(`Versions diverged: tools=${tools.version} wasm=${wasm.version} napi=${napi.version} create-jazz=${createJazz.version}`);}for(const [name,version] of Object.entries(napi.optionalDependencies||{})){if(version!==napi.version){throw new Error(`napi optional dep ${name} is ${version}, expected ${napi.version}`);}}for(const entry of fs.readdirSync("crates/jazz-napi/npm",{withFileTypes:true})){if(!entry.isDirectory())continue;const pkgPath=path.join("crates/jazz-napi/npm",entry.name,"package.json");const pkg=JSON.parse(fs.readFileSync(pkgPath,"utf8"));if(!alphaVersion.test(pkg.version)){throw new Error(`${pkg.name} version must match 2.0.0-alpha.*, got ${pkg.version}`);}if(pkg.version!==napi.version){throw new Error(`${pkg.name} version ${pkg.version} must match jazz-napi ${napi.version}`);}}console.log(`Alpha-only publish guard passed at ${tools.version}`);'
+
+      - name: Verify immutable release source snapshot
+        run: |
+          PUBLISHED_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/create-jazz/package.json","utf8")).version')
+          for package_json in \
+            packages/create-jazz/package.json \
+            packages/jazz-tools/package.json \
+            crates/jazz-wasm/package.json \
+            crates/jazz-napi/package.json; do
+            SOURCE_VERSION=$(git show "${GITHUB_SHA}:${package_json}" | node -e 'let s="";process.stdin.on("data",d=>s+=d);process.stdin.on("end",()=>console.log(JSON.parse(s).version))')
+            if [ "${SOURCE_VERSION}" != "${PUBLISHED_VERSION}" ]; then
+              echo "${package_json} is ${SOURCE_VERSION} at ${GITHUB_SHA}, but this workflow would publish ${PUBLISHED_VERSION}."
+              echo "Publish a committed release snapshot first; source tags must exactly match the published packages."
+              exit 1
+            fi
+          done
+          echo "Source snapshot ${GITHUB_SHA} exactly matches ${PUBLISHED_VERSION}."
+
+      - name: Ensure release source tag
+        if: env.RELEASE_MODE == 'publish'
+        run: |
+          VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/create-jazz/package.json","utf8")).version')
+          TAG="v${VERSION}"
+          SOURCE_COMMIT=$(git rev-parse "${GITHUB_SHA}^{commit}")
+          EXISTING_TAG_TARGET=$(git ls-remote --tags origin "refs/tags/${TAG}" "refs/tags/${TAG}^{}" | awk -v tag="${TAG}" '
+            $2 == "refs/tags/" tag "^{}" { peeled = $1 }
+            $2 == "refs/tags/" tag { direct = $1 }
+            END { print peeled ? peeled : direct }
+          ')
+
+          if [ -n "${EXISTING_TAG_TARGET}" ]; then
+            if [ "${EXISTING_TAG_TARGET}" != "${SOURCE_COMMIT}" ]; then
+              echo "${TAG} already points to ${EXISTING_TAG_TARGET}, not the release source ${SOURCE_COMMIT}."
+              exit 1
+            fi
+            echo "${TAG} already points at the release source snapshot."
+          else
+            git tag "${TAG}" "${SOURCE_COMMIT}"
+            git push origin "refs/tags/${TAG}"
+          fi
 
       - name: Verify packed jazz-wasm payload
         run: |

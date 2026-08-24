@@ -548,6 +548,24 @@ fn convert_table(
         "policies.select.using",
         table.policies.select.using.as_ref(),
     )?;
+    let update_using = convert_optional_policy(
+        schema,
+        table,
+        name,
+        "policies.update.using",
+        table.policies.update.using.as_ref(),
+    )?;
+    let delete_using = if table.policies.delete.using.is_some() {
+        convert_optional_policy(
+            schema,
+            table,
+            name,
+            "policies.delete.using",
+            table.policies.delete.using.as_ref(),
+        )?
+    } else {
+        update_using.clone()
+    };
     converted.write_policies = WritePolicies {
         insert_check: convert_optional_policy(
             schema,
@@ -556,13 +574,7 @@ fn convert_table(
             "policies.insert.with_check",
             table.policies.insert.with_check.as_ref(),
         )?,
-        update_using: convert_optional_policy(
-            schema,
-            table,
-            name,
-            "policies.update.using",
-            table.policies.update.using.as_ref(),
-        )?,
+        update_using,
         update_check: convert_optional_policy(
             schema,
             table,
@@ -570,13 +582,7 @@ fn convert_table(
             "policies.update.with_check",
             table.policies.update.with_check.as_ref(),
         )?,
-        delete_using: convert_optional_policy(
-            schema,
-            table,
-            name,
-            "policies.delete.using",
-            table.policies.delete.using.as_ref(),
-        )?,
+        delete_using,
     };
     Ok(converted)
 }
@@ -2449,7 +2455,22 @@ fn convert_policy_literal(
         Value::Text(value) => Ok(GrooveValue::String(value.clone())),
         Value::Integer(value) => Ok(GrooveValue::I32(*value)),
         Value::BigInt(value) => Ok(GrooveValue::I64(*value)),
+        Value::Double(value) if value.is_finite() => Ok(GrooveValue::F64(*value)),
+        Value::Double(_) => Err(err(
+            format!("$.{}.{}", table.as_str(), path),
+            "core schema policy floating-point literals must be finite numbers",
+        )),
+        Value::Timestamp(value) => Ok(GrooveValue::U64(*value)),
         Value::Uuid(value) => Ok(GrooveValue::Uuid(*value.uuid())),
+        Value::Bytea(value) => Ok(GrooveValue::Bytes(value.clone())),
+        Value::Array(values) => values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                convert_policy_literal(table, &format!("{path}.Array[{index}]"), value)
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(GrooveValue::Array),
         other => Err(err(
             format!("$.{}.{}", table.as_str(), path),
             format!("core schema policies do not support {other:?} literals yet"),
@@ -3212,6 +3233,102 @@ mod tests {
     }
 
     #[test]
+    fn converts_runtime_comparable_policy_literal_categories() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("events")
+                    .column("occurred_at", ColumnType::Timestamp)
+                    .column("ratio", ColumnType::Double)
+                    .column("digest", ColumnType::Bytea)
+                    .column(
+                        "roles",
+                        ColumnType::Array {
+                            element: Box::new(ColumnType::Text),
+                        },
+                    )
+                    .policies(TablePolicies::new().with_select(PolicyExpr::And(vec![
+                        PolicyExpr::eq_literal("occurred_at", Value::Timestamp(1_767_323_045_000)),
+                        PolicyExpr::eq_literal("ratio", Value::Double(1.5)),
+                        PolicyExpr::eq_literal("digest", Value::Bytea(vec![1, 2, 3])),
+                        PolicyExpr::eq_literal(
+                            "roles",
+                            Value::Array(vec![
+                                Value::Text("owner".to_owned()),
+                                Value::Text("editor".to_owned()),
+                            ]),
+                        ),
+                    ]))),
+            )
+            .build();
+
+        let converted =
+            convert_public_schema(&schema).expect("runtime-comparable policy literals compile");
+        let events = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "events")
+            .unwrap();
+
+        assert_eq!(
+            events.read_policy.as_ref().unwrap().filters,
+            vec![
+                Predicate::Eq(
+                    Operand::Column("occurred_at".to_owned()),
+                    Operand::Literal(GrooveValue::U64(1_767_323_045_000)),
+                ),
+                Predicate::Eq(
+                    Operand::Column("ratio".to_owned()),
+                    Operand::Literal(GrooveValue::F64(1.5)),
+                ),
+                Predicate::Eq(
+                    Operand::Column("digest".to_owned()),
+                    Operand::Literal(GrooveValue::Bytes(vec![1, 2, 3])),
+                ),
+                Predicate::Eq(
+                    Operand::Column("roles".to_owned()),
+                    Operand::Literal(GrooveValue::Array(vec![
+                        GrooveValue::String("owner".to_owned()),
+                        GrooveValue::String("editor".to_owned()),
+                    ])),
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_non_finite_policy_doubles_at_the_literal_path() {
+        for (literal, path_suffix) in [
+            (Value::Double(f64::NAN), ""),
+            (
+                Value::Array(vec![Value::Double(f64::INFINITY)]),
+                ".Array[0]",
+            ),
+        ] {
+            let schema = SchemaBuilder::new()
+                .table(
+                    TableSchemaBuilder::new("events")
+                        .column("ratio", ColumnType::Double)
+                        .policies(
+                            TablePolicies::new()
+                                .with_select(PolicyExpr::eq_literal("ratio", literal)),
+                        ),
+                )
+                .build();
+
+            let error =
+                convert_public_schema(&schema).expect_err("non-finite double must not compile");
+            assert_eq!(
+                error.path,
+                format!("$.events.policies.select.using{path_suffix}")
+            );
+            assert_eq!(
+                error.message,
+                "core schema policy floating-point literals must be finite numbers"
+            );
+        }
+    }
+
+    #[test]
     fn converts_auth_mode_session_comparison_to_reserved_claim() {
         let schema = SchemaBuilder::new()
             .table(
@@ -3872,6 +3989,59 @@ mod tests {
         assert_eq!(lowered.user_column.as_deref(), Some("team_id"));
         assert_eq!(lowered.user_claim.as_deref(), Some(DIRECT_USER_ID_CLAIM));
         assert_eq!(lowered.team_column, "target");
+    }
+
+    #[test]
+    fn compiles_update_using_as_the_default_delete_policy() {
+        let owner_policy = PolicyExpr::Cmp {
+            column: "owner_id".to_owned(),
+            op: CmpOp::Eq,
+            value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+        };
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("documents")
+                    .column("owner_id", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new().with_update(Some(owner_policy), PolicyExpr::True),
+                    ),
+            )
+            .table(
+                TableSchemaBuilder::new("attachments")
+                    .fk_column("document_id", "documents")
+                    .policies(TablePolicies::new().with_insert(PolicyExpr::Inherits {
+                        operation: Operation::Delete,
+                        via_column: "document_id".to_owned(),
+                        max_depth: None,
+                    })),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).unwrap();
+        let documents = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "documents")
+            .unwrap();
+        assert_eq!(
+            documents.write_policies.delete_using, documents.write_policies.update_using,
+            "DELETE must inherit UPDATE USING when no explicit DELETE USING is declared"
+        );
+        let attachments = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "attachments")
+            .unwrap();
+        assert_eq!(
+            attachments
+                .write_policies
+                .insert_check
+                .as_ref()
+                .unwrap()
+                .inherits[0]
+                .operation,
+            InheritsOperation::Delete
+        );
     }
 
     #[test]

@@ -113,6 +113,20 @@ where
                     ]))
                 }
                 SyncMessage::ChunkUploadNodes(batch) => {
+                    let upload_exists = self
+                        .database
+                        .pending_large_value_uploads()
+                        .await?
+                        .into_iter()
+                        .any(|upload| upload.descriptor.as_ref() == Some(&batch.value_ref));
+                    if !upload_exists {
+                        return Ok(PublicationOutcome::settled(vec![
+                            SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                                value_ref: batch.value_ref,
+                                status: crate::protocol::ChunkUploadStatus::Rejected,
+                            }),
+                        ]));
+                    }
                     let accounting = batch.chunks.iter().try_fold(
                         groove::large_values::StagedLargeValueAccounting::default(),
                         |mut total, chunk| {
@@ -140,10 +154,23 @@ where
                     }
                     let progress = match self
                         .database
-                        .continue_large_value_upload(batch.value_ref.clone(), batch.chunks)
+                        .continue_large_value_upload_if_current(
+                            batch.value_ref.clone(),
+                            batch.chunks,
+                        )
                         .await
                     {
-                        Ok(progress) => progress,
+                        Ok(Some(progress)) => progress,
+                        Ok(None) => {
+                            return Ok(PublicationOutcome::settled(vec![
+                                SyncMessage::ChunkUploadResult(
+                                    crate::protocol::ChunkUploadResult {
+                                        value_ref: batch.value_ref,
+                                        status: crate::protocol::ChunkUploadStatus::Rejected,
+                                    },
+                                ),
+                            ]));
+                        }
                         Err(error) if large_value_upload_is_rejected(&error) => {
                             return Ok(PublicationOutcome::settled(vec![
                                 SyncMessage::ChunkUploadResult(
@@ -219,7 +246,7 @@ where
                         .await?;
                     self.drain_parked_commit_units().await
                 }
-                SyncMessage::ViewUpdate {
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     subscription,
                     settled_through,
                     reset_result_set,
@@ -231,7 +258,7 @@ where
                     terminal_operations,
                     program_fact_adds,
                     program_fact_removes,
-                } => {
+                }) => {
                     self.apply_view_update(ViewUpdateParts {
                         subscription,
                         settled_through,
@@ -254,10 +281,10 @@ where
                 SyncMessage::RegisterShape {
                     shape_id,
                     ast,
-                    opts: _,
+                    opts,
                 } => {
-                    validate_shape_ast_size(&ast).map_err(|_| {
-                        Error::UnsupportedSyncMessage("shape AST exceeds byte limit")
+                    validate_shape_registration_size(&ast, &opts).map_err(|_| {
+                        Error::UnsupportedSyncMessage("shape registration exceeds byte limit")
                     })?;
                     self.register_shape(shape_id, ast)?;
                     Ok(PublicationOutcome::settled(Vec::new()))
