@@ -520,6 +520,53 @@ impl GraphBuilder {
         }
     }
 
+    /// Return all builder fragments in child-before-parent order without
+    /// recursion. Runtime setup uses this for deeply nested valid query and
+    /// policy graphs, which must not consume the owner thread's call stack.
+    pub(crate) fn postorder(&self) -> Vec<&Self> {
+        let mut pending = vec![(self, false)];
+        let mut ordered = Vec::new();
+        while let Some((graph, visited)) = pending.pop() {
+            if visited {
+                ordered.push(graph);
+                continue;
+            }
+            pending.push((graph, true));
+            match graph {
+                Self::Filter { input, .. }
+                | Self::Project { input, .. }
+                | Self::StreamingChecksum { input, .. }
+                | Self::UnwrapNullable { input, .. }
+                | Self::Unnest { input, .. }
+                | Self::VariantProject { input, .. }
+                | Self::ArgMaxBy { input, .. }
+                | Self::ArgMinBy { input, .. }
+                | Self::TopBy { input, .. }
+                | Self::CollectBy { input, .. }
+                | Self::Aggregate { input, .. } => pending.push((input, false)),
+                Self::Union { inputs } => {
+                    pending.extend(inputs.iter().rev().map(|input| (input, false)));
+                }
+                Self::Join { left, right, .. }
+                | Self::SemiJoin { left, right, .. }
+                | Self::AntiJoin { left, right, .. } => {
+                    pending.push((right, false));
+                    pending.push((left, false));
+                }
+                Self::Recursive { seed, step, .. } => {
+                    pending.push((step, false));
+                    pending.push((seed, false));
+                }
+                Self::Table { .. }
+                | Self::InlineRecords { .. }
+                | Self::Index { .. }
+                | Self::FrontierSource { .. }
+                | Self::BindingSource { .. } => {}
+            }
+        }
+        ordered
+    }
+
     pub fn join(
         left: GraphBuilder,
         right: GraphBuilder,
