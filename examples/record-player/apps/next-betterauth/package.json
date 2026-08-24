@@ -7,7 +7,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "vitest run"
+    "test": "vitest run --exclude tests/browser/**",
+    "test:browser": "vitest run --config vitest.config.browser.ts"
   },
   "dependencies": {
     "better-auth": "1.6.24",
