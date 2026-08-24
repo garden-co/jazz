@@ -999,7 +999,7 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
             .table(
                 PublicTableSchemaBuilder::new("members")
                     .fk_column("workspace", "workspaces")
-                    .column("subject", PublicColumnType::Uuid),
+                    .column("subject", PublicColumnType::Text),
             )
             .table(
                 PublicTableSchemaBuilder::new("blocks")
@@ -1038,7 +1038,10 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
             3,
             BTreeMap::from([
                 ("workspace".to_owned(), Value::Uuid(workspace_a.0)),
-                ("subject".to_owned(), Value::Uuid(owner.0)),
+                (
+                    "subject".to_owned(),
+                    Value::String(owner.test_uuid().to_string()),
+                ),
             ]),
         ),
         (
@@ -1047,7 +1050,10 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
             4,
             BTreeMap::from([
                 ("workspace".to_owned(), Value::Uuid(workspace_b.0)),
-                ("subject".to_owned(), Value::Uuid(owner.0)),
+                (
+                    "subject".to_owned(),
+                    Value::String(owner.test_uuid().to_string()),
+                ),
             ]),
         ),
         (
@@ -1065,7 +1071,13 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
     ] {
         accept_global(&mut core, MergeableCommit::new(table, row_uuid, time).cells(cells));
     }
-    core.set_session_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.0))]));
+    core.set_session_claims(
+        owner,
+        BTreeMap::from([(
+            "sub".to_owned(),
+            Value::String(owner.test_uuid().to_string()),
+        )]),
+    );
 
     let accepted = core
         .commit_mergeable_settled(
