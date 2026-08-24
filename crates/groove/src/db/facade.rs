@@ -1,5 +1,19 @@
 use super::*;
 
+fn is_retryable_upload_error(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Storage(_)
+            | Error::IvmRuntime(
+                crate::ivm::runtime::IvmRuntimeError::Storage(_)
+                    | crate::ivm::runtime::IvmRuntimeError::Chunk(
+                        crate::chunks::ChunkError::Backend(_)
+                            | crate::chunks::ChunkError::Unavailable
+                    )
+            )
+    )
+}
+
 impl Database {
     /// Open a schema-aware database over an ordered key/value store.
     ///
@@ -235,8 +249,14 @@ impl Database {
     pub async fn stage_large_value_chunk_batch(
         &self,
         upload_id: crate::large_values::StagedLargeValueId,
+        kind: crate::large_values::LargeValueKind,
         chunks: Vec<crate::large_values::StagedChunk>,
     ) -> Result<(), Error> {
+        // This must precede both chunk staging and metadata mutation. In
+        // particular, a valid first child followed by a malformed second child
+        // cannot strand the first in durable chunk storage.
+        crate::large_values::validate_staged_chunk_batch(kind, &chunks)
+            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
         let key = pending_large_value_upload_key(upload_id);
         let mut upload: crate::large_values::PendingLargeValueUpload = if let Some(encoded) = self
             .storage
@@ -368,7 +388,7 @@ impl Database {
         value_ref: crate::large_values::LargeValueRef,
     ) -> Result<crate::large_values::LargeValueUploadProgress, Error> {
         let upload_id = Self::descriptor_upload_id(&value_ref)?;
-        self.stage_large_value_chunk_batch(upload_id, Vec::new())
+        self.stage_large_value_chunk_batch(upload_id, value_ref.kind, Vec::new())
             .await?;
         self.large_value_upload_progress(upload_id, value_ref).await
     }
@@ -381,24 +401,47 @@ impl Database {
     ) -> Result<crate::large_values::LargeValueUploadProgress, Error> {
         const FRONTIER_LIMIT: usize = 64;
         let upload_id = Self::descriptor_upload_id(&value_ref)?;
-        let requested = crate::large_values::missing_upload_frontier(
+        let requested = match crate::large_values::missing_upload_frontier(
             &value_ref,
             self.local_chunk_reader(),
             FRONTIER_LIMIT,
         )
         .await
-        .map_err(|error| match error {
-            crate::large_values::ReachabilityError::LargeValue(error) => {
-                crate::ivm::runtime::IvmRuntimeError::from(error)
+        {
+            Ok(requested) => requested,
+            Err(crate::large_values::ReachabilityError::LargeValue(error)) => {
+                return self
+                    .reject_large_value_upload(
+                        upload_id,
+                        crate::ivm::runtime::IvmRuntimeError::from(error).into(),
+                    )
+                    .await;
             }
-            crate::large_values::ReachabilityError::Chunk(error) => {
-                crate::ivm::runtime::IvmRuntimeError::from(error)
+            // A corrupt locally durable chunk is terminal for this upload;
+            // transport/backend availability remains retryable.
+            Err(crate::large_values::ReachabilityError::Chunk(
+                error @ crate::chunks::ChunkError::Integrity,
+            )) => {
+                return self
+                    .reject_large_value_upload(
+                        upload_id,
+                        crate::ivm::runtime::IvmRuntimeError::from(error).into(),
+                    )
+                    .await;
             }
-        })?;
+            Err(crate::large_values::ReachabilityError::Chunk(error)) => {
+                return Err(crate::ivm::runtime::IvmRuntimeError::from(error).into());
+            }
+        };
         if chunks.is_empty() && !requested.is_empty() {
-            return Err(Error::InvalidLargeValueMetadata(
-                "upload supplied no requested nodes".to_owned(),
-            ));
+            return self
+                .reject_large_value_upload(
+                    upload_id,
+                    Error::InvalidLargeValueMetadata(
+                        "upload supplied no requested nodes".to_owned(),
+                    ),
+                )
+                .await;
         }
         let mut new_chunks = Vec::with_capacity(chunks.len());
         for chunk in chunks {
@@ -415,13 +458,36 @@ impl Database {
                 .await
                 .is_ok_and(|encoded| encoded.as_ref() == chunk.encoded.as_slice());
             if !already_stored {
-                return Err(Error::InvalidLargeValueMetadata(
-                    "upload supplied a node outside the authenticated missing frontier".to_owned(),
-                ));
+                return self
+                    .reject_large_value_upload(
+                        upload_id,
+                        Error::InvalidLargeValueMetadata(
+                            "upload supplied a node outside the authenticated missing frontier"
+                                .to_owned(),
+                        ),
+                    )
+                    .await;
             }
         }
-        self.stage_large_value_chunk_batch(upload_id, new_chunks)
-            .await?;
+        if let Err(error) =
+            crate::large_values::validate_staged_chunk_batch(value_ref.kind, &new_chunks)
+        {
+            return self
+                .reject_large_value_upload(
+                    upload_id,
+                    crate::ivm::runtime::IvmRuntimeError::from(error).into(),
+                )
+                .await;
+        }
+        if let Err(error) = self
+            .stage_large_value_chunk_batch(upload_id, value_ref.kind, new_chunks)
+            .await
+        {
+            if !is_retryable_upload_error(&error) {
+                return self.reject_large_value_upload(upload_id, error).await;
+            }
+            return Err(error);
+        }
         self.large_value_upload_progress(upload_id, value_ref).await
     }
 
@@ -447,8 +513,11 @@ impl Database {
                         crate::ivm::runtime::IvmRuntimeError::from(error)
                     }
                 };
-                self.evict_pending_large_value_upload(upload_id).await?;
-                return Err(error.into());
+                let error: Error = error.into();
+                if !is_retryable_upload_error(&error) {
+                    return self.reject_large_value_upload(upload_id, error).await;
+                }
+                return Err(error);
             }
         };
         if !missing.is_empty() {
@@ -457,15 +526,28 @@ impl Database {
             ));
         }
         if let Err(error) = self.validate_completed_large_value(&value_ref).await {
-            self.evict_pending_large_value_upload(upload_id).await?;
+            if !is_retryable_upload_error(&error) {
+                return self.reject_large_value_upload(upload_id, error).await;
+            }
             return Err(error);
         }
-        let staged = self
-            .finalize_large_value_upload(upload_id, value_ref)
-            .await?;
+        let staged = match self.finalize_large_value_upload(upload_id, value_ref).await {
+            Ok(staged) => staged,
+            Err(error) if is_retryable_upload_error(&error) => return Err(error),
+            Err(error) => return self.reject_large_value_upload(upload_id, error).await,
+        };
         Ok(crate::large_values::LargeValueUploadProgress::Staged(
             staged,
         ))
+    }
+
+    async fn reject_large_value_upload<T>(
+        &self,
+        upload_id: crate::large_values::StagedLargeValueId,
+        error: Error,
+    ) -> Result<T, Error> {
+        self.evict_pending_large_value_upload(upload_id).await?;
+        Err(error)
     }
 
     /// Recheck the complete final logical scalar immediately before a remote

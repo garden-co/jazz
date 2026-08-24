@@ -48,6 +48,13 @@ pub trait ChunkKvStorage {
 }
 
 /// Groove-owned integrity and staging layer over a policy-blind byte KV.
+///
+/// Every batch's size and object hashes are mechanically prevalidated before
+/// its first backend put. A backend process crash can nevertheless occur after
+/// one immutable put and before later puts or upload metadata: those bytes are
+/// unreachable and have no metadata reclaimer entry. Closing that residual
+/// crash-only orphan window requires a backend transaction spanning chunk puts
+/// and metadata writes.
 pub struct ManagedChunkStorage {
     backend: Rc<dyn ChunkKvStorage>,
 }
@@ -81,14 +88,19 @@ impl ChunkStorage for ManagedChunkStorage {
     ) -> ChunkFuture<'_, Result<crate::large_values::StagedLargeValueAccounting, ChunkStorageError>>
     {
         Box::pin(async move {
-            let mut accounting = crate::large_values::StagedLargeValueAccounting::default();
-            for chunk in chunks {
+            // Check every mechanically-verifiable property before the first
+            // put. A later malformed member must not leave an earlier member
+            // durable without its upload metadata.
+            for chunk in &chunks {
                 if chunk.encoded.len() > crate::large_values::MAX_ENCODED_NODE_BYTES {
                     return Err(ChunkStorageError::Integrity);
                 }
                 if object_hash(&chunk.encoded) != chunk.node_ref.object_hash {
                     return Err(ChunkStorageError::Integrity);
                 }
+            }
+            let mut accounting = crate::large_values::StagedLargeValueAccounting::default();
+            for chunk in chunks {
                 let encoded_len = chunk.encoded.len() as u64;
                 let existing = self
                     .backend
@@ -130,7 +142,9 @@ pub trait ChunkStorage {
         expected_hash: ContentHash,
     ) -> ChunkFuture<'_, Result<Bytes, ChunkStorageError>>;
 
-    /// Atomically install immutable mappings. Equal restaging is idempotent.
+    /// Install immutable mappings. Equal restaging is idempotent. Callers must
+    /// prevalidate the complete batch before invoking this capability; generic
+    /// byte backends need not make the individual puts crash-atomic.
     fn stage(
         &self,
         chunks: Vec<StagedChunk>,

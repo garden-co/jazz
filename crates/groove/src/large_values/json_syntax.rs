@@ -207,10 +207,16 @@ impl StreamingJsonValidator {
     fn start_value(&mut self, byte: u8) -> Result<(), ()> {
         match byte {
             b'{' => {
+                if self.stack.len() >= super::MAX_JSON_NESTING_DEPTH {
+                    return Err(());
+                }
                 self.stack.push(Frame::Object(ObjectState::FirstKeyOrEnd));
                 Ok(())
             }
             b'[' => {
+                if self.stack.len() >= super::MAX_JSON_NESTING_DEPTH {
+                    return Err(());
+                }
                 self.stack.push(Frame::Array(ArrayState::FirstValueOrEnd));
                 Ok(())
             }
@@ -331,6 +337,7 @@ fn advance_number(state: &mut NumberState, byte: u8) -> Result<bool, ()> {
 #[cfg(test)]
 mod tests {
     use super::StreamingJsonValidator;
+    use crate::large_values::MAX_JSON_NESTING_DEPTH;
 
     fn validate_one_byte_at_a_time(json: &[u8]) -> Result<(), ()> {
         let mut validator = StreamingJsonValidator::new();
@@ -374,5 +381,20 @@ mod tests {
         ] {
             assert!(validate_one_byte_at_a_time(json).is_err(), "{json:?}");
         }
+    }
+
+    #[test]
+    fn accepts_json_at_the_explicit_nesting_bound() {
+        let mut json = vec![b'['; MAX_JSON_NESTING_DEPTH];
+        json.push(b'0');
+        json.extend(std::iter::repeat_n(b']', MAX_JSON_NESTING_DEPTH));
+        assert!(validate_one_byte_at_a_time(&json).is_ok());
+    }
+
+    #[test]
+    fn rejects_json_over_the_explicit_nesting_bound_without_retaining_frames() {
+        let mut validator = StreamingJsonValidator::new();
+        validator.push(&vec![b'['; MAX_JSON_NESTING_DEPTH]).unwrap();
+        assert!(validator.push(b"[").is_err());
     }
 }

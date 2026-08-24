@@ -130,7 +130,11 @@ async fn incomplete_push_upload_is_restart_persistent_and_reclaimable() {
     .unwrap();
     let upload_id = crate::large_values::StagedLargeValueId([0x55; 16]);
     database
-        .stage_large_value_chunk_batch(upload_id, prepared.staged_chunks)
+        .stage_large_value_chunk_batch(
+            upload_id,
+            crate::large_values::LargeValueKind::Bytes,
+            prepared.staged_chunks,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -491,6 +495,132 @@ async fn malformed_json_tail_upload_is_rejected_and_reclaimed_before_staging() {
             > 0
     );
     assert_eq!(chunks.len(), 0);
+}
+
+// This facade-level test uses a deliberately malformed physical child because
+// only the peer upload path receives untrusted pre-chunked bytes. The root
+// remains authenticated while one requested child is a hash-valid invalid
+// postcard, proving the whole supplied batch is checked before the first
+// durable chunk put.
+#[futures_test::test]
+async fn malformed_later_upload_child_has_no_durable_partial_write_after_reopen() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let backend = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let managed = Rc::new(crate::chunks::ManagedChunkStorage::new(backend.clone()));
+    let mut database = Database::new(schema.clone(), storage.clone())
+        .await
+        .unwrap();
+    database.set_chunk_storage(managed);
+    let mut prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![7; crate::large_values::INLINE_VALUE_MAX_BYTES * 8],
+        |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
+    )
+    .unwrap();
+    let root_index = prepared
+        .staged_chunks
+        .iter()
+        .position(|chunk| chunk.node_ref == prepared.value_ref.root)
+        .unwrap();
+    let malformed = vec![0xff, 0x00, 0xff];
+    let (root, mutated_children, valid_child_ref) = {
+        let root = &mut prepared.staged_chunks[root_index];
+        let crate::large_values::ChunkNode::Branch { children, .. } =
+            postcard::from_bytes(&root.encoded).unwrap()
+        else {
+            panic!("large fixture must have a branch root");
+        };
+        assert!(children.len() >= 2, "fixture needs two requested children");
+        let valid_child_ref = children[0].node_ref.clone();
+        let mut mutated_children = children;
+        mutated_children[1].node_ref = crate::large_values::NodeRef {
+            object_hash: crate::large_values::object_hash(&malformed),
+            locator: crate::large_values::Locator(vec![0xee; 16]),
+        };
+        root.encoded = postcard::to_allocvec(&crate::large_values::ChunkNode::Branch {
+            format: crate::large_values::FORMAT_VERSION,
+            children: mutated_children.clone(),
+        })
+        .unwrap();
+        root.node_ref.object_hash = crate::large_values::object_hash(&root.encoded);
+        (root.clone(), mutated_children, valid_child_ref)
+    };
+    prepared.value_ref.root = root.node_ref.clone();
+    let valid_child = prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == valid_child_ref)
+        .unwrap()
+        .clone();
+    let malformed_child = crate::large_values::StagedChunk {
+        node_ref: mutated_children[1].node_ref.clone(),
+        encoded: malformed,
+    };
+
+    assert!(matches!(
+        database
+            .begin_large_value_upload(prepared.value_ref.clone())
+            .await
+            .unwrap(),
+        crate::large_values::LargeValueUploadProgress::Missing(_)
+    ));
+    assert!(matches!(
+        database
+            .continue_large_value_upload(prepared.value_ref.clone(), vec![root.clone()])
+            .await
+            .unwrap(),
+        crate::large_values::LargeValueUploadProgress::Missing(_)
+    ));
+    assert!(matches!(
+        database
+            .continue_large_value_upload(
+                prepared.value_ref.clone(),
+                vec![valid_child, malformed_child],
+            )
+            .await,
+        Err(Error::IvmRuntime(
+            crate::ivm::runtime::IvmRuntimeError::LargeValue(
+                crate::large_values::Error::MalformedNode
+            )
+        ))
+    ));
+    assert!(
+        database
+            .pending_large_value_uploads()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(backend.len(), 1, "the valid earlier child was never staged");
+    drop(database);
+
+    let mut reopened = Database::new(schema, storage).await.unwrap();
+    reopened.set_chunk_storage(Rc::new(crate::chunks::ManagedChunkStorage::new(
+        backend.clone(),
+    )));
+    assert!(
+        reopened
+            .pending_large_value_uploads()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        reopened
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap()
+            > 0
+    );
+    assert_eq!(backend.len(), 0);
 }
 
 #[futures_test::test]

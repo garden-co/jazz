@@ -23,6 +23,7 @@ type PushPreparation = groove::large_values::PushStreamingPreparation<
 /// Resumable host-driven upload used by asynchronous bindings such as WASM.
 pub struct StreamingValueUpload {
     id: groove::large_values::StagedLargeValueId,
+    kind: groove::large_values::LargeValueKind,
     preparation: Option<PushPreparation>,
     emitted: Rc<RefCell<Vec<groove::large_values::StagedChunk>>>,
 }
@@ -612,6 +613,7 @@ where
         );
         Ok(StreamingValueUpload {
             id: groove::large_values::StagedLargeValueId(*uuid::Uuid::new_v4().as_bytes()),
+            kind,
             preparation: Some(preparation),
             emitted,
         })
@@ -641,7 +643,8 @@ where
         let chunks = std::mem::take(&mut *upload.emitted.borrow_mut());
         let stage_result = {
             let node = self.node.node.lock().await;
-            node.stage_large_value_chunk_batch(upload.id, chunks).await
+            node.stage_large_value_chunk_batch(upload.id, upload.kind, chunks)
+                .await
         };
         if let Err(error) = stage_result {
             upload.preparation.take();
@@ -707,7 +710,10 @@ where
         let chunks = std::mem::take(&mut *upload.emitted.borrow_mut());
         let staged_result = {
             let node = self.node.node.lock().await;
-            match node.stage_large_value_chunk_batch(upload.id, chunks).await {
+            match node
+                .stage_large_value_chunk_batch(upload.id, upload.kind, chunks)
+                .await
+            {
                 Ok(()) => node.finalize_large_value_upload(upload.id, value_ref).await,
                 Err(error) => Err(error),
             }

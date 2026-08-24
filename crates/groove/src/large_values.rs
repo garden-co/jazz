@@ -25,6 +25,10 @@ pub const BRANCH_MIN_CHILDREN: usize = 4;
 pub const BRANCH_TARGET_CHILDREN: usize = 16;
 pub const BRANCH_MAX_CHILDREN: usize = 64;
 pub const MAX_TREE_DEPTH: usize = 32;
+/// JSON syntax validation retains one frame per open array/object. Keep this
+/// separate from the immutable-tree bound: a small logical value can otherwise
+/// use arbitrarily deep JSON nesting to grow validator memory.
+pub const MAX_JSON_NESTING_DEPTH: usize = 128;
 pub const MAX_EDIT_COUNT: usize = 64;
 pub const MAX_EDIT_TAIL_BYTES: usize = 256 * 1024;
 pub const MAX_LOCATOR_BYTES: usize = 128;
@@ -308,6 +312,29 @@ pub(crate) struct LogicalValueValidator {
     utf8_tail: Vec<u8>,
     utf16_length: u64,
     json: Option<StreamingJsonValidator>,
+}
+
+/// Validate every supplied immutable node before an upload batch reaches a
+/// durable chunk backend. Upload batches are protocol-bounded, so retaining
+/// these small identity sets does not change the streaming memory bound.
+pub(crate) fn validate_staged_chunk_batch(
+    kind: LargeValueKind,
+    chunks: &[StagedChunk],
+) -> Result<(), Error> {
+    let mut locator_hashes = std::collections::BTreeMap::new();
+    for chunk in chunks {
+        if let Some(existing) =
+            locator_hashes.insert(chunk.node_ref.locator.0.clone(), chunk.node_ref.object_hash)
+            && existing != chunk.node_ref.object_hash
+        {
+            return Err(Error::ObjectHashMismatch);
+        }
+        // `decode_node` also checks the encoded-size and object-hash bounds.
+        // Validate the full semantic envelope here, rather than discovering a
+        // malformed later member after an earlier one is already durable.
+        decode_node(kind, chunk.node_ref.object_hash, &chunk.encoded)?;
+    }
+    Ok(())
 }
 
 impl LogicalValueValidator {

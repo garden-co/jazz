@@ -996,6 +996,7 @@ where
     pub(crate) async fn stage_large_value_chunk_batch(
         &self,
         upload_id: groove::large_values::StagedLargeValueId,
+        kind: groove::large_values::LargeValueKind,
         chunks: Vec<groove::large_values::StagedChunk>,
     ) -> Result<(), Error> {
         let encoded_bytes = chunks.iter().try_fold(0_u64, |total, chunk| {
@@ -1010,7 +1011,10 @@ where
             self.database.evict_staged_large_value(upload_id).await?;
             return Err(Error::LargeValueIngressRateLimited);
         }
-        Ok(self.database.stage_large_value_chunk_batch(upload_id, chunks).await?)
+        Ok(self
+            .database
+            .stage_large_value_chunk_batch(upload_id, kind, chunks)
+            .await?)
     }
 
     pub(crate) async fn evict_pending_large_value_upload(
