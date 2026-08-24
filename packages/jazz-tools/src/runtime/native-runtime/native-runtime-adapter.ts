@@ -84,16 +84,21 @@ type NativeDbConstructor = {
   openPersistent?(dataPath: string, schema: Uint8Array, config: Uint8Array): NativeDb;
 };
 
-type PendingNativeRead = {
-  poll(): Uint8Array | null;
-};
+type PendingNativeValue<T> = { poll(): T | null };
+type PendingNativeRead = PendingNativeValue<Uint8Array>;
+type PendingNativeWrite = PendingNativeValue<Write>;
 
 type NativeReadResult = Uint8Array | PendingNativeRead;
+type NativeReadStart = NativeReadResult | Promise<NativeReadResult>;
 
 type PendingNativeSubscriptionBatch = object;
 
-function isPendingNativeRead(value: NativeReadResult): value is PendingNativeRead {
-  return typeof (value as PendingNativeRead).poll === "function";
+function isPendingNativeRead(value: unknown): value is PendingNativeRead {
+  return typeof (value as PendingNativeRead | null)?.poll === "function";
+}
+
+function isPendingNativeWrite(value: unknown): value is PendingNativeWrite {
+  return typeof (value as PendingNativeWrite | null)?.poll === "function";
 }
 
 type NativeDb = {
@@ -107,23 +112,20 @@ type NativeDb = {
   rollbackTransaction(openBatchId: string): void;
   attachMergeableTx(openBatchId: string): Tx;
   attachExclusiveTx?(openBatchId: string): Tx;
-  all(query: PreparedQuery, opts: unknown): NativeReadResult;
-  allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): NativeReadResult;
-  allRelationQuery?(queryJson: string, opts: unknown): NativeReadResult | Promise<NativeReadResult>;
+  all(query: PreparedQuery, opts: unknown): NativeReadStart;
+  allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): NativeReadStart;
+  allRelationQuery?(queryJson: string, opts: unknown): NativeReadStart;
   allRelationQueryForIdentity?(
     queryJson: string,
     author: Uint8Array,
     opts: unknown,
-  ): NativeReadResult | Promise<NativeReadResult>;
-  allRelationSnapshot?(
-    query: PreparedQuery,
-    opts: unknown,
-  ): NativeReadResult | Promise<NativeReadResult>;
+  ): NativeReadStart;
+  allRelationSnapshot?(query: PreparedQuery, opts: unknown): NativeReadStart;
   allRelationSnapshotForIdentity?(
     query: PreparedQuery,
     author: Uint8Array,
     opts: unknown,
-  ): NativeReadResult | Promise<NativeReadResult>;
+  ): NativeReadStart;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
   attachQuery?(query: PreparedQuery, opts: unknown): unknown;
   attachQueryForIdentity?(query: PreparedQuery, author: Uint8Array, opts: unknown): unknown;
@@ -288,7 +290,7 @@ type NativeDb = {
   mergeableTx(openBatchId: OpenBatchId): Tx;
   mergeableTxForIdentity?(openBatchId: OpenBatchId, author: Uint8Array): Tx;
   exclusiveTx?(openBatchId: OpenBatchId): Tx;
-  allInTransaction?(query: PreparedQuery, tx: Tx, opts: unknown): NativeReadResult;
+  allInTransaction?(query: PreparedQuery, tx: Tx, opts: unknown): NativeReadStart;
   setTickScheduler(
     callback:
       | ((urgency: "immediate" | "deferred") => void)
@@ -308,14 +310,14 @@ type NativeDb = {
     column: string,
     start: number,
     end: number,
-  ): Uint8Array | Promise<Uint8Array>;
+  ): NativeReadStart;
   readTextUtf16Range?(
     table: string,
     rowId: Uint8Array,
     column: string,
     start: number,
     end: number,
-  ): string | Promise<string>;
+  ): string | NativeReadStart | Promise<string | NativeReadResult>;
   readJsonPointer?(
     table: string,
     rowId: Uint8Array,
@@ -327,7 +329,7 @@ type NativeDb = {
     rowId: Uint8Array,
     column: string,
     bytes: Uint8Array,
-  ): Write | Promise<Write>;
+  ): Write | PendingNativeWrite | Promise<Write | PendingNativeWrite>;
   spliceValue?(
     table: string,
     rowId: Uint8Array,
@@ -335,7 +337,7 @@ type NativeDb = {
     offset: number,
     deleteLength: number,
     insert: Uint8Array,
-  ): Write | Promise<Write>;
+  ): Write | PendingNativeWrite | Promise<Write | PendingNativeWrite>;
   connectUpstream(): Transport;
   connectUpstreamWithSession?(
     protocolVersion: number,
@@ -779,7 +781,9 @@ export class NativeRuntimeAdapter implements Runtime {
       return await this.ownerRuntime.readValueRange(table, objectId, column, start, end);
     }
     if (!this.db.readValueRange) throw new Error("Native runtime does not expose value ranges");
-    return await this.db.readValueRange(table, parseUuid(objectId), column, start, end);
+    return await this.awaitNativeRead(
+      this.db.readValueRange(table, parseUuid(objectId), column, start, end),
+    );
   }
 
   async readTextUtf16Range(
@@ -795,7 +799,11 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!this.db.readTextUtf16Range) {
       throw new Error("Native runtime does not expose UTF-16 value ranges");
     }
-    return await this.db.readTextUtf16Range(table, parseUuid(objectId), column, start, end);
+    const value = await this.db.readTextUtf16Range(table, parseUuid(objectId), column, start, end);
+    if (isPendingNativeRead(value)) {
+      return new TextDecoder().decode(await this.awaitNativeRead(value));
+    }
+    return value instanceof Uint8Array ? new TextDecoder().decode(value) : value;
   }
 
   async readJsonPointer(
@@ -808,7 +816,9 @@ export class NativeRuntimeAdapter implements Runtime {
       return await this.ownerRuntime.readJsonPointer(table, objectId, column, pointer);
     }
     if (!this.db.readJsonPointer) throw new Error("Native runtime does not expose JSON pointers");
-    const value = await this.db.readJsonPointer(table, parseUuid(objectId), column, pointer);
+    let value = await this.db.readJsonPointer(table, parseUuid(objectId), column, pointer);
+    if (isPendingNativeRead(value)) value = await this.awaitNativeRead(value);
+    if (value instanceof Uint8Array) value = new TextDecoder().decode(value);
     return typeof value === "string" ? JSON.parse(value) : value;
   }
 
@@ -822,8 +832,9 @@ export class NativeRuntimeAdapter implements Runtime {
       return await this.ownerRuntime.appendValue(table, objectId, column, bytes);
     }
     if (!this.db.appendValue) throw new Error("Native runtime does not expose value append");
+    const write = await this.db.appendValue(table, parseUuid(objectId), column, bytes);
     return this.finishMutation(
-      await this.db.appendValue(table, parseUuid(objectId), column, bytes),
+      isPendingNativeWrite(write) ? await this.awaitNativeValue(write) : write,
     );
   }
 
@@ -846,8 +857,16 @@ export class NativeRuntimeAdapter implements Runtime {
       );
     }
     if (!this.db.spliceValue) throw new Error("Native runtime does not expose value splice");
+    const write = await this.db.spliceValue(
+      table,
+      parseUuid(objectId),
+      column,
+      offset,
+      deleteLength,
+      insert,
+    );
     return this.finishMutation(
-      await this.db.spliceValue(table, parseUuid(objectId), column, offset, deleteLength, insert),
+      isPendingNativeWrite(write) ? await this.awaitNativeValue(write) : write,
     );
   }
 
@@ -1890,6 +1909,11 @@ export class NativeRuntimeAdapter implements Runtime {
     if (!identity) return this.readRowForWriteMerge(table, rowId);
     const query = this.prepareQuery(JSON.stringify({ table }));
     const rows = this.db.allForIdentity(query, identity, readOptions());
+    if (rows instanceof Promise) {
+      throw new Error(
+        "write result inspection cannot synchronously await an asynchronous binding read",
+      );
+    }
     if (isPendingNativeRead(rows)) {
       throw new Error(
         "write result inspection cannot synchronously hydrate a remote large value; read it after transport progress",
@@ -1913,6 +1937,11 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     const query = this.prepareQuery(JSON.stringify({ table }));
     const rows = this.db.all(query, readOptions());
+    if (rows instanceof Promise) {
+      throw new Error(
+        "write merge cannot synchronously await an asynchronous binding read; use the exact local row reader",
+      );
+    }
     if (isPendingNativeRead(rows)) {
       throw new Error(
         "write merge cannot synchronously hydrate a remote large value; use the exact local row reader",
@@ -1995,12 +2024,21 @@ export class NativeRuntimeAdapter implements Runtime {
     );
   }
 
-  private async awaitNativeRead(result: NativeReadResult): Promise<Uint8Array> {
-    if (!isPendingNativeRead(result)) return result;
-    const pending = result;
+  private async awaitNativeRead(result: NativeReadStart): Promise<Uint8Array> {
+    return this.awaitNativeValue(result);
+  }
+
+  private async awaitNativeValue<T>(
+    result: T | PendingNativeValue<T> | Promise<T | PendingNativeValue<T>>,
+  ): Promise<T> {
+    const started = await result;
+    if (typeof (started as PendingNativeValue<T> | null)?.poll !== "function") {
+      return started as T;
+    }
+    const pending = started as PendingNativeValue<T>;
     for (;;) {
       const value = pending.poll();
-      if (value) return value;
+      if (value !== null) return value;
       await this.waitForNativeHydrationWake();
     }
   }

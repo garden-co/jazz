@@ -211,7 +211,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     await runtime.waitForUpstreamServerConnection();
 
     const read = runtime.query(JSON.stringify({ table: "todos" }), undefined, "local");
-    await Promise.resolve();
+    await waitForFakeWebSocketNegotiation();
     expect(polls).toBe(1);
 
     // This is the native host's concrete wake: the websocket response enters
@@ -225,6 +225,72 @@ describe("NativeRuntimeAdapter server transport", () => {
     // call may restart a large-value hydration attempt.
     expect(polls).toBe(3);
     expect(allCalls).toBe(1);
+    await runtime.close();
+  });
+
+  it("re-polls one pending native large-value write after its routed chunk response", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+
+    let chunkArrived = false;
+    let polls = 0;
+    let appendCalls = 0;
+    const transport = Object.assign(new FakeTransport([]), {
+      routeAuxiliaryWireFrame: () => {
+        chunkArrived = true;
+        return null;
+      },
+    });
+    const pendingWrite = {
+      poll: () => {
+        polls += 1;
+        return chunkArrived ? fakeWrite() : null;
+      },
+    };
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            appendValue: () => {
+              appendCalls += 1;
+              return pendingWrite;
+            },
+            connectUpstream: () => transport,
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+
+    const write = runtime.appendValue(
+      "todos",
+      "00000000-0000-7000-8000-000000000001",
+      "title",
+      Uint8Array.from([1]),
+    );
+    await waitForFakeWebSocketNegotiation();
+    expect(polls).toBe(1);
+
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([0x42])]));
+
+    await expect(write).resolves.toMatchObject({ kind: "committed" });
+    expect(polls).toBe(3);
+    expect(appendCalls).toBe(1);
     await runtime.close();
   });
 
