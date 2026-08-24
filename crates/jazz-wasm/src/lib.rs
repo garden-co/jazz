@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 type BrowserStorage = IdbStorage<IndexedDbPageStore>;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use wasm_bindgen_futures::future_to_promise;
+use wasm_bindgen_futures::{future_to_promise, JsFuture};
 
 mod identity;
 
@@ -3283,18 +3283,14 @@ impl WasmTransport {
     pub fn auxiliary_outbound_ready(&self) -> js_sys::Promise {
         let pump = self.auxiliary_pump.clone();
         future_to_promise(async move {
-            pump.outbound_ready().await;
+            if let Some(delay) = pump.next_retry_delay() {
+                JsFuture::from(js_timeout(delay.as_millis() as i32)?).await?;
+                pump.tick();
+            } else {
+                pump.outbound_ready().await;
+            }
             Ok(JsValue::UNDEFINED)
         })
-    }
-
-    /// One-shot retry deadline for a host-owned transport timer. The host must
-    /// call `tick()` when it fires; this avoids subscription-pull polling.
-    #[wasm_bindgen(js_name = nextAuxiliaryRetryDelayMs)]
-    pub fn next_auxiliary_retry_delay_ms(&self) -> Option<f64> {
-        self.auxiliary_pump
-            .next_retry_delay()
-            .map(|delay| delay.as_millis() as f64)
     }
 
     #[wasm_bindgen(js_name = sendWireFrame)]
@@ -3348,6 +3344,21 @@ impl WasmTransport {
         self.auxiliary_pump.disconnect();
         self.inner.close()
     }
+}
+
+fn js_timeout(delay_ms: i32) -> Result<js_sys::Promise, JsValue> {
+    let set_timeout = js_sys::Reflect::get(&js_sys::global(), &JsValue::from_str("setTimeout"))?
+        .dyn_into::<js_sys::Function>()?;
+    Ok(js_sys::Promise::new(&mut |resolve, _reject| {
+        let callback = Closure::once_into_js(move || {
+            let _ = resolve.call0(&JsValue::UNDEFINED);
+        });
+        let _ = set_timeout.call2(
+            &JsValue::UNDEFINED,
+            &callback,
+            &JsValue::from_f64(delay_ms as f64),
+        );
+    }))
 }
 
 #[wasm_bindgen]
