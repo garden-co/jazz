@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  TopologyEnvelopeScheduler,
   TopologyScenarioError,
   deterministicRandom,
   runTopologyScenario,
@@ -7,6 +8,79 @@ import {
 } from "./harness.js";
 
 describe("shared example topology harness", () => {
+  it("deterministically plants envelope duplicates, delay, reordering, retry, and a healed partition", async () => {
+    const scheduler = new TopologyEnvelopeScheduler(73);
+    const delivered: Array<{ value: string; attempt: number; tick: number }> = [];
+    const send = (value: string) =>
+      scheduler.intercept(
+        { from: "browser", to: "edge", label: value },
+        value,
+        (received, context) => void delivered.push({ value: received, ...context }),
+      );
+
+    scheduler.duplicateNext();
+    await send("duplicate");
+    scheduler.delayNext(2);
+    await send("delayed");
+    scheduler.reorderNext();
+    await send("first");
+    await send("second");
+    scheduler.dropNextThenRetry(3);
+    await send("retry");
+
+    expect(delivered.map(({ value, attempt }) => `${value}:${attempt}`)).toEqual([
+      "duplicate:1",
+      "duplicate:2",
+      "second:1",
+      "first:1",
+    ]);
+    await scheduler.advance(2);
+    expect(delivered.map(({ value }) => value)).toEqual([
+      "duplicate",
+      "duplicate",
+      "second",
+      "first",
+      "delayed",
+    ]);
+    await scheduler.advance();
+    expect(delivered.some(({ value }) => value === "retry")).toBe(true);
+    scheduler.partition("browser", "edge");
+    await send("partitioned");
+    expect(delivered.some(({ value }) => value === "partitioned")).toBe(false);
+    await scheduler.heal("browser", "edge");
+    expect(delivered.map(({ value }) => value)).toContain("partitioned");
+
+    const receipt = scheduler.receipt();
+    expect(receipt).toMatchObject({ seed: 73, tick: 3, pending: 0, closed: false });
+    expect(receipt.activities.map(({ action }) => action)).toContain("dropped");
+    expect(receipt.activities.map(({ action }) => action)).toContain("retried");
+    expect(receipt.activities.map(({ action }) => action)).toContain("partitioned");
+  });
+
+  it("closes held envelopes after scenario cleanup, proving faults cannot leak between cases", async () => {
+    const scheduler = new TopologyEnvelopeScheduler(17);
+    scheduler.delayNext(10);
+    await scheduler.intercept({ from: "a", to: "b", label: "held" }, "held", () => undefined);
+
+    const receipt = await runTopologyScenario({
+      id: "harness.fixture.envelope-cleanup",
+      topology: ["fixture"],
+      seed: 17,
+      phaseTimeoutMs: 50,
+      faultTimeoutMs: 50,
+      targets: {},
+      replay: "envelope-cleanup-fixture",
+      envelopeSchedulers: [scheduler],
+      phases: [],
+    });
+    expect(receipt.envelopes).toHaveLength(1);
+    expect(receipt.envelopes[0]).toMatchObject({ closed: true, pending: 0 });
+    expect(receipt.envelopes[0]?.activities.at(-1)?.action).toBe("discarded");
+    await expect(
+      scheduler.intercept({ from: "a", to: "b" }, "late", () => undefined),
+    ).rejects.toThrow("scheduler is closed");
+  });
+
   it("runs deterministic phases and every fault callback with a replayable receipt", async () => {
     const seed = Number(process.env.JAZZ_EXAMPLE_TOPOLOGY_SEED ?? 29);
     const calls: string[] = [];
