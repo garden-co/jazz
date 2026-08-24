@@ -10,7 +10,7 @@
     "start": "next start",
     "test": "vitest run",
     "test:browser": "vitest run --config vitest.config.browser.ts",
-    "test:browser:focused": "node ../../../../packages/jazz-tools/scripts/test-browser-focused.mjs",
+    "test:browser:focused": "node scripts/test-browser-focused.mjs",
     "test:e2e": "playwright test"
   },
   "dependencies": {
