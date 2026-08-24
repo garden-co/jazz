@@ -18,6 +18,15 @@ function expectedPattern() {
   );
 }
 
+function expectedPatternAfterEditorBurst() {
+  return expectedPattern().map((pad, index) => ({
+    ...pad,
+    // The editor changes the first eight pads in every lane. This is a fixed
+    // 32-row fixture, so a dropped write cannot hide behind a row-count check.
+    pressed: index % STEPS_PER_TRACK < 8 ? !pad.pressed : pad.pressed,
+  }));
+}
+
 async function patternOn(page: Page) {
   return page.locator(".track-lane .pad").evaluateAll((pads) =>
     pads.map((pad) => ({
@@ -163,5 +172,46 @@ test("viewer pad writes receive an authorization rejection receipt", async ({ br
   } finally {
     await ownerContext.close();
     await viewerContext.close();
+  }
+});
+
+test("editor edit burst preserves a readable pattern", async ({ browser }) => {
+  const run = Date.now();
+  const ownerContext = await browser.newContext();
+  const editorContext = await browser.newContext();
+  try {
+    const owner = await makeClient(ownerContext, {
+      name: "Owner",
+      email: `owner-burst-${run}@example.com`,
+      password: "testpassword",
+    });
+    const editor = await makeClient(editorContext, {
+      name: "Editor",
+      email: `editor-burst-${run}@example.com`,
+      password: "testpassword",
+    });
+    await owner.page.getByRole("button", { name: "Create a 4-track session" }).click();
+    await expect(owner.page.getByRole("heading", { name: "Late-night rehearsal" })).toBeVisible({
+      timeout: TIMEOUT,
+    });
+    await invite(owner.page, editor.memberId, "editor");
+    await editor.page.reload();
+    await expect(editor.page.getByRole("heading", { name: "Late-night rehearsal" })).toBeVisible({
+      timeout: TIMEOUT,
+    });
+
+    const edits = TRACKS.flatMap((name) =>
+      Array.from({ length: 8 }, (_, step) =>
+        editor.page.getByRole("button", { name: `${name}, step ${step + 1}` }),
+      ),
+    );
+    await Promise.all(edits.map((pad) => pad.click()));
+
+    const expected = expectedPatternAfterEditorBurst();
+    await expect.poll(() => patternOn(editor.page), { timeout: TIMEOUT }).toEqual(expected);
+    await expect.poll(() => patternOn(owner.page), { timeout: TIMEOUT }).toEqual(expected);
+  } finally {
+    await ownerContext.close();
+    await editorContext.close();
   }
 });

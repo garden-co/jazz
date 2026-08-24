@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAll, useDb } from "jazz-tools/react";
 import { app } from "@/schema";
 import { TrackLane } from "@/components/track-lane";
+import { schedulePresenceHeartbeat } from "@/components/presence-heartbeat";
 
 export function SequencerSession({
   sessionId,
@@ -39,23 +40,23 @@ export function SequencerSession({
     [playhead, transport?.playing],
   );
 
+  const writeHeartbeatRef = useRef<() => void>(() => {});
+  const ownPresence = presence.find((value) => value.profile_id === profileId);
+  writeHeartbeatRef.current = () => {
+    const heartbeat_at = new Date();
+    if (ownPresence) db.update(app.presence, ownPresence.id, { heartbeat_at });
+    else
+      db.insert(app.presence, {
+        session_id: sessionId,
+        profile_id: profileId,
+        cursor_step: playhead,
+        heartbeat_at,
+      });
+  };
+
   useEffect(() => {
-    const ownPresence = presence.find((value) => value.profile_id === profileId);
-    const writeHeartbeat = () => {
-      const heartbeat_at = new Date();
-      if (ownPresence) db.update(app.presence, ownPresence.id, { heartbeat_at });
-      else
-        db.insert(app.presence, {
-          session_id: sessionId,
-          profile_id: profileId,
-          cursor_step: playhead,
-          heartbeat_at,
-        });
-    };
-    writeHeartbeat();
-    const interval = window.setInterval(writeHeartbeat, 5_000);
-    return () => window.clearInterval(interval);
-  }, [db, playhead, presence, profileId, sessionId]);
+    return schedulePresenceHeartbeat(() => writeHeartbeatRef.current());
+  }, [profileId, sessionId]);
 
   function toggleTransport() {
     db.insert(app.transport_observations, {
