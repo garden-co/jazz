@@ -118,23 +118,20 @@ where
                 }
                 SyncMessage::ChunkUploadNodes(batch) => {
                     self.evict_expired_staged_large_values().await?;
-                    let Some(upload_id) = self
+                    let upload_exists = self
                         .database
                         .pending_large_value_uploads()
                         .await?
                         .into_iter()
-                        .find(|upload| upload.descriptor.as_ref() == Some(&batch.value_ref))
-                        .map(|upload| upload.id)
-                    else {
+                        .any(|upload| upload.descriptor.as_ref() == Some(&batch.value_ref));
+                    if !upload_exists {
                         return Ok(PublicationOutcome::settled(vec![
                             SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
                                 value_ref: batch.value_ref,
                                 status: crate::protocol::ChunkUploadStatus::Rejected,
                             }),
                         ]));
-                    };
-                    self.require_pending_large_value_upload_current(upload_id)
-                        .await?;
+                    }
                     let accounting = batch.chunks.iter().try_fold(
                         groove::large_values::StagedLargeValueAccounting::default(),
                         |mut total, chunk| {
@@ -162,10 +159,24 @@ where
                     }
                     let progress = match self
                         .database
-                        .continue_large_value_upload(batch.value_ref.clone(), batch.chunks)
+                        .continue_large_value_upload_if_current(
+                            batch.value_ref.clone(),
+                            batch.chunks,
+                            self.large_value_staging_policy.max_age_ms,
+                        )
                         .await
                     {
-                        Ok(progress) => progress,
+                        Ok(Some(progress)) => progress,
+                        Ok(None) => {
+                            return Ok(PublicationOutcome::settled(vec![
+                                SyncMessage::ChunkUploadResult(
+                                    crate::protocol::ChunkUploadResult {
+                                        value_ref: batch.value_ref,
+                                        status: crate::protocol::ChunkUploadStatus::Rejected,
+                                    },
+                                ),
+                            ]));
+                        }
                         Err(error) if large_value_upload_is_rejected(&error) => {
                             return Ok(PublicationOutcome::settled(vec![
                                 SyncMessage::ChunkUploadResult(
