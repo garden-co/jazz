@@ -509,6 +509,8 @@ fn inherited_parent_policy_semijoin_preserves_visibility_across_duplicate_deriva
             ),
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    install_test_uuid_sub_claim(&mut core, reader);
+    install_test_uuid_sub_claim(&mut core, other);
 
     let _container_tx = accept_global(
         &mut core,
