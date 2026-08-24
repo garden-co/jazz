@@ -2,6 +2,7 @@ import type { Session } from "../runtime/context.js";
 import { acquireClient, releaseClient } from "../runtime/client-registry.js";
 import type { Db, DbConfig } from "../runtime/db.js";
 import { createDb } from "../runtime/db.js";
+import { runCleanupSteps } from "../runtime/run-cleanup-steps.js";
 import { SubscriptionsOrchestrator, trackPromise } from "../subscriptions-orchestrator.js";
 import { attachSubscriptionStore, getSubscriptionStore } from "../subscription-store-internal.js";
 import { registerWindowJazzStorageClient } from "../window-client-storage.js";
@@ -32,10 +33,12 @@ async function createJazzClientInternal(config: DbConfig): Promise<JazzClient> {
         return session;
       },
       async shutdown() {
-        stopSessionSync?.();
-        unregisterWindowJazzStorageClient();
-        await manager.shutdown();
-        await db.shutdown();
+        await runCleanupSteps([
+          () => stopSessionSync?.(),
+          () => unregisterWindowJazzStorageClient(),
+          () => manager.shutdown(),
+          () => db.shutdown(),
+        ]);
       },
     },
     manager,
