@@ -163,19 +163,15 @@ fn delayed_staged_tree_publishes_while_receipt_remains_present() {
         window_ms: 1_000,
         max_age_ms: 0,
     });
-    let prepared = groove::large_values::prepare(
-        groove::large_values::LargeValueKind::String,
-        "delayed staged body/".repeat(8_000).as_bytes(),
-        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
-    )
-    .unwrap();
-    let commit = crate::db::block_on(node.attach_prepared_large_cell(
+    let logical = "delayed staged body/".repeat(8_000);
+    let (commit, _) = crate::db::block_on(node.attach_large_cell_for_test(
         MergeableCommit::new("todos", row(0x7c), 10).cells(BTreeMap::from([(
             "title".to_owned(),
             Value::String("title".to_owned()),
         )])),
         "body",
-        &prepared,
+        groove::large_values::LargeValueKind::String,
+        logical.as_bytes(),
     ))
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(2));
@@ -509,7 +505,6 @@ fn delayed_chunk_upload_succeeds_while_pending_journal_remains_present() {
     let prepared = groove::large_values::prepare(
         groove::large_values::LargeValueKind::String,
         "delayed finalization/".repeat(20_000).as_bytes(),
-        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
     )
     .unwrap();
     let context = Some(CommitUnitIngestContext {
