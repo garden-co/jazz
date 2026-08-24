@@ -1776,6 +1776,15 @@ fn authorization_subplan_with_correlated_allowed_to_joins_lowers_without_occurre
 
     let program = lower_query_program(request, &mut FakeSourceResolver::default())
         .expect("correlated write authorization should lower");
+    let graph = format!("{:?}", program.lowered.terminals);
+    assert!(
+        !graph.contains("__flat_join_source_"),
+        "authorization decision graph must not request public occurrence carriers: {graph}"
+    );
+    assert!(
+        graph.contains("__policy_join_source_0_"),
+        "the next correlated predicate still needs the first join's internal values: {graph}"
+    );
     let OutputTerminalSchema::Fact(ProgramFactOutput {
         schema: ProgramFactSchema::ResultMembership(schema),
         ..
