@@ -7,6 +7,7 @@
  * shadow aggregate can prove that a faster shape did not sample or drop tests.
  */
 import { spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -34,6 +35,24 @@ const fail = (message) => {
   throw new Error(`rust-shadow-matrix: ${message}`);
 };
 const plainObject = (value) => typeof value === "object" && value !== null && !Array.isArray(value);
+const sourceFingerprint = (source) =>
+  crypto
+    .createHash("sha256")
+    .update(
+      ["headTree", "indexTree", "unstaged", "untracked"]
+        .map((field) => `${field}\0${source[field]}\0`)
+        .join(""),
+    )
+    .digest("hex");
+const validSourceIdentity = (source) =>
+  source?.dirty === false &&
+  /^[0-9a-f]{40}$/.test(source.commit) &&
+  /^[0-9a-f]{40}$/.test(source.headTree) &&
+  /^[0-9a-f]{40}$/.test(source.indexTree) &&
+  /^[0-9a-f]{64}$/.test(source.unstaged) &&
+  /^[0-9a-f]{64}$/.test(source.untracked) &&
+  /^[0-9a-f]{64}$/.test(source.fingerprint) &&
+  source.fingerprint === sourceFingerprint(source);
 
 function parsedInventory(output) {
   const document = JSON.parse(output);
@@ -210,6 +229,18 @@ function aggregate(argv) {
   const seenIndexes = new Set();
   const selected = new Set();
   let all;
+  const expectedNextestCommand = (index) => [
+    "cargo",
+    "nextest",
+    "run",
+    "--profile",
+    "jazz-ci",
+    "--no-fail-fast",
+    "--partition",
+    `hash:${index}/${count}`,
+    ...testArgs,
+  ];
+  const sourceFields = ["commit", "headTree", "indexTree", "unstaged", "untracked", "fingerprint"];
   for (const shardReceipt of shards) {
     if (shardReceipt?.kind !== "rust-shadow-shard-receipt" || shardReceipt.status !== "passed")
       fail("shard receipt is missing or failed");
@@ -237,8 +268,28 @@ function aggregate(argv) {
       selected.add(test);
     }
     const ran = shardReceipt.testReceipt;
-    if (ran?.status !== "passed" || ran?.shard?.index !== index || ran?.shard?.count !== count)
-      fail("partition test receipt does not prove the selected shard ran");
+    if (
+      ran?.status !== "passed" ||
+      ran?.runner !== "cargo-nextest" ||
+      ran?.nextestProfile !== "jazz-ci" ||
+      ran?.shard?.index !== index ||
+      ran?.shard?.count !== count
+    )
+      fail("partition test receipt does not prove the Nextest shard ran");
+    if (JSON.stringify(ran.command) !== JSON.stringify(expectedNextestCommand(index)))
+      fail("partition test receipt command does not match the exact shard selector");
+    if (JSON.stringify(shardReceipt.testArgs) !== JSON.stringify(testArgs))
+      fail("shard receipt test arguments do not match the canonical inventory");
+    for (const field of sourceFields)
+      if (
+        typeof shardReceipt.source?.[field] !== "string" ||
+        shardReceipt.source[field] !== ran.source?.[field]
+      )
+        fail(`partition test receipt source ${field} does not match its inventory receipt`);
+    if (!validSourceIdentity(shardReceipt.source) || !validSourceIdentity(ran.source))
+      fail("partition receipts must contain a clean checked-out source fingerprint");
+    if (ran.environment?.rustMinStack !== String(4 * 1024 * 1024))
+      fail("partition test receipt did not preserve the 4 MiB Rust stack");
   }
   const expected = JSON.parse(all);
   if (selected.size !== expected.length || expected.some((test) => !selected.has(test)))

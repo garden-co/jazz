@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -614,6 +615,11 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
   assert.match(rustShadowLauncher, /m3\.length !== 1.*shard\.index !== 1/);
   assert.match(rustShadowLauncher, /test belongs to more than one shard/);
   assert.match(rustShadowLauncher, /hash shards do not cover the exact executable inventory/);
+  assert.match(rustShadowLauncher, /sourceIdentity\(root\)/);
+  assert.match(
+    rustShadowLauncher,
+    /partition test receipt command does not match the exact shard selector/,
+  );
   assert.throws(
     () => assert.match(rustShadowLauncher.replace("JAZZ_SEED=11", "JAZZ_SEED=12"), /JAZZ_SEED=11/),
     /JAZZ_SEED/,
@@ -626,6 +632,113 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
       ),
     /require-nextest/,
   );
+
+  const source = {
+    commit: "a".repeat(40),
+    headTree: "b".repeat(40),
+    indexTree: "b".repeat(40),
+    unstaged: "c".repeat(64),
+    untracked: "d".repeat(64),
+    dirty: false,
+  };
+  source.fingerprint = crypto
+    .createHash("sha256")
+    .update(
+      ["headTree", "indexTree", "unstaged", "untracked"]
+        .map((field) => `${field}\0${source[field]}\0`)
+        .join(""),
+    )
+    .digest("hex");
+  const expectedCommand = (index) => [
+    "cargo",
+    "nextest",
+    "run",
+    "--profile",
+    "jazz-ci",
+    "--no-fail-fast",
+    "--partition",
+    `hash:${index}/2`,
+    "--workspace",
+    "--lib",
+    "--bins",
+    "--tests",
+    "--features",
+    "jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test",
+  ];
+  const shardReceipt = (index) => ({
+    kind: "rust-shadow-shard-receipt",
+    status: "passed",
+    shard: { index, count: 2, partition: `hash:${index}/2` },
+    testArgs: expectedCommand(index).slice(8),
+    source: structuredClone(source),
+    inventory: {
+      all: ["binary\\0one", "binary\\0two"],
+      selected: [index === 1 ? "binary\\0one" : "binary\\0two"],
+    },
+    testReceipt: {
+      status: "passed",
+      runner: "cargo-nextest",
+      nextestProfile: "jazz-ci",
+      shard: { index, count: 2 },
+      command: expectedCommand(index),
+      source: structuredClone(source),
+      environment: { rustMinStack: String(4 * 1024 * 1024) },
+    },
+    m3: index === 1 ? { seed: 11, status: "passed" } : { status: "not-assigned" },
+  });
+  const runAggregate = (mutate) => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-shadow-receipts-"));
+    const shards = [shardReceipt(1), shardReceipt(2)];
+    mutate?.(shards);
+    for (const [index, receipt] of shards.entries())
+      fs.writeFileSync(path.join(directory, `shard-${index + 1}.json`), JSON.stringify(receipt));
+    const result = spawnSync(
+      "node",
+      [rustShadowLauncherPath, "aggregate", directory, "2", path.join(directory, "aggregate.json")],
+      { encoding: "utf8" },
+    );
+    fs.rmSync(directory, { recursive: true, force: true });
+    return result;
+  };
+  const rustShadowLauncherPath = path.join(root, "dev/gates/rust-shadow-matrix.mjs");
+  assert.equal(runAggregate().status, 0);
+  for (const [name, mutate, message] of [
+    ["runner", (shards) => (shards[0].testReceipt.runner = "cargo-fallback"), /Nextest shard/],
+    [
+      "source fingerprint",
+      (shards) => (shards[0].testReceipt.source.fingerprint = "f".repeat(64)),
+      /source fingerprint/,
+    ],
+    [
+      "receipt profile",
+      (shards) => (shards[0].testReceipt.nextestProfile = "jazz"),
+      /Nextest shard/,
+    ],
+    [
+      "command profile",
+      (shards) => (shards[0].testReceipt.command[4] = "jazz"),
+      /exact shard selector/,
+    ],
+    [
+      "no-fail-fast",
+      (shards) => (shards[0].testReceipt.command[5] = "--fail-fast"),
+      /exact shard selector/,
+    ],
+    [
+      "partition",
+      (shards) => (shards[0].testReceipt.command[7] = "hash:1\/3"),
+      /exact shard selector/,
+    ],
+    ["test arguments", (shards) => shards[0].testArgs.pop(), /test arguments/],
+  ]) {
+    const result = runAggregate(mutate);
+    assert.notEqual(result.status, 0, `planted ${name} mismatch must fail`);
+    assert.match(
+      result.stderr,
+      message,
+      `planted ${name} mismatch must identify the violated binding`,
+    );
+  }
 });
 
 test("Blacksmith setup can exclude nondeterministic jobs from the Rust artifact cache", () => {
