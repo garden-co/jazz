@@ -290,6 +290,27 @@ pub struct AppliedBatch {
     abandoned_application: Rc<Cell<bool>>,
 }
 
+/// A persistence attempt can fail either in the ordinary storage write or in
+/// the Groove-owned resident large-value finalization that precedes it.  Keep
+/// the latter typed so callers observe the same chunk/IVM failure they would
+/// get from the established staged-value path.
+#[derive(Debug, Error)]
+enum PersistenceFailure {
+    #[error(transparent)]
+    Storage(#[from] crate::storage::Error),
+    #[error(transparent)]
+    Database(#[from] Error),
+}
+
+impl PersistenceFailure {
+    fn into_database_error(self) -> Error {
+        match self {
+            Self::Storage(error) => Error::from(error),
+            Self::Database(error) => error,
+        }
+    }
+}
+
 impl AppliedBatch {
     pub fn publication(&self) -> PublicationId {
         self.publication
@@ -343,10 +364,7 @@ impl AppliedBatch {
                     finalized_stages.push(stage.id());
                 }
                 match staging_error {
-                    Some(error) => Err(crate::storage::Error::Backend {
-                        backend: "resident large-value staging",
-                        message: error.to_string(),
-                    }),
+                    Some(error) => Err(PersistenceFailure::Database(error)),
                     None => {
                         let result = self.storage.write_many(self.operations.clone()).await;
                         if result.is_err() {
@@ -359,11 +377,11 @@ impl AppliedBatch {
                                 let _ = self.large_value_stager.evict_unconsumed_stage(id).await;
                             }
                         }
-                        result
+                        result.map_err(PersistenceFailure::Storage)
                     }
                 }
             }
-            Err(error) => Err(error),
+            Err(error) => Err(PersistenceFailure::Storage(error)),
         };
         let storage_write_time = storage_start.elapsed();
         self.lifecycle
@@ -456,7 +474,7 @@ fn advance_cancelled_publications(order: &mut PersistenceOrder) {
 #[must_use = "persistence completion must be settled on its database"]
 pub struct PersistedBatch {
     publication: PublicationId,
-    result: Result<(), crate::storage::Error>,
+    result: Result<(), PersistenceFailure>,
     notifications_deferred: bool,
     metrics: CommitMetrics,
     receipt: PersistenceReceipt,

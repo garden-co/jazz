@@ -655,6 +655,10 @@ where
             None => inferred_kind,
         };
         let stage = self.database.prepare_resident_large_value(kind, bytes)?;
+        if !self.admit_large_value_ingress(stage.encoded_bytes()) {
+            self.database.discard_resident_large_value(&stage);
+            return Err(Error::LargeValueIngressRateLimited);
+        }
         let descriptor = Value::Large(stage.value_ref().clone());
         *value = if nullable {
             Value::Nullable(Some(Box::new(descriptor)))

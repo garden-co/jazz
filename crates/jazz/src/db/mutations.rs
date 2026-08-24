@@ -2684,12 +2684,11 @@ where
             // own suspendable persistence and later peer visibility.
             self.refresh_subscriptions().await?;
             self.node.queue_local_publication(published, None);
-            // A resident publication is the local-lane commit boundary even
-            // while its owned durable persistence may suspend.  `wait(Local)`
-            // therefore observes the same immediate contract as an inline
-            // write; edge/global tiers remain pending until the queued receipt
-            // settles and normal sync progresses.
-            DurabilityTier::Local
+            // Visibility is resident and synchronous, but a write does not
+            // become locally durable until its queued persistence receipt has
+            // settled.  Keep `wait(Local)` honest while the host owns that
+            // suspendable work.
+            DurabilityTier::None
         } else {
             self.finish_publication_outcome(PublicationOutcome::published((), published))
                 .await?;

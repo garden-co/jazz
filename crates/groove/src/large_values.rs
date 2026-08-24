@@ -124,6 +124,7 @@ pub struct ResidentLargeValueStage {
     id: StagedLargeValueId,
     value_ref: LargeValueRef,
     node_refs: Vec<NodeRef>,
+    encoded_bytes: u64,
 }
 
 impl ResidentLargeValueStage {
@@ -131,11 +132,13 @@ impl ResidentLargeValueStage {
         id: StagedLargeValueId,
         value_ref: LargeValueRef,
         node_refs: Vec<NodeRef>,
+        encoded_bytes: u64,
     ) -> Self {
         Self {
             id,
             value_ref,
             node_refs,
+            encoded_bytes,
         }
     }
 
@@ -149,6 +152,12 @@ impl ResidentLargeValueStage {
 
     pub(crate) fn node_refs(&self) -> &[NodeRef] {
         &self.node_refs
+    }
+
+    /// Exact encoded chunk bytes that this direct resident value will stage
+    /// when its owning publication reaches persistence.
+    pub fn encoded_bytes(&self) -> u64 {
+        self.encoded_bytes
     }
 }
 
