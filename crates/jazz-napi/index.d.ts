@@ -12,6 +12,7 @@ export declare class JazzServer {
 }
 
 export declare class NapiDb {
+  beginStreamingMutationEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, kind: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
   static openMemory(schema: Uint8Array, config: Uint8Array): NapiDb
   static openPersistent(dataPath: string, schema: Uint8Array, config: Uint8Array): NapiDb
   /** Register and return a typed view backed by this same runtime owner. */
@@ -72,6 +73,15 @@ export declare class NapiDb {
   restoreEncodedInBranchForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, branch: JsonValue, author: Uint8Array): Write
   restoreEncodedForIdentity(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array, updatedAtMs?: number | undefined | null): Write
   tick(): void
+  /** Configure Jazz-owned upload ingress and unpublished-tree expiry limits. */
+  setLargeValueStagingPolicy(incomingBytesPerWindow: number, windowMs: number, maxAgeMs?: number | undefined | null): void
+  /** Run one idempotent expiry pass; native hosts normally call this on a timer. */
+  evictExpiredStagedLargeValues(): number
+  readValueRange(table: string, rowId: Uint8Array, column: string, start: number, end: number): Uint8Array
+  readTextUtf16Range(table: string, rowId: Uint8Array, column: string, start: number, end: number): string
+  readJsonPointer(table: string, rowId: Uint8Array, column: string, pointer: string): string | null
+  appendValue(table: string, rowId: Uint8Array, column: string, bytes: Uint8Array): Write
+  spliceValue(table: string, rowId: Uint8Array, column: string, offset: number, deleteLength: number, insert: Uint8Array): Write
   setNonDurableClient(): void
   connectUpstream(): Transport
   connectUpstreamWithSession(protocolVersion: number, features: number, remoteNode: Buffer, remoteEpoch: bigint, localNode: Buffer, localEpoch: bigint): Transport
@@ -88,6 +98,17 @@ export declare class QueryAttachment {
 
 }
 
+/**
+ * Native bounded-memory sink used by the TypeScript async streaming-mutation
+ * adapter. Each push incrementally prepares and stages bounded Groove nodes,
+ * using the same ingress policy and resumable construction as WASM.
+ */
+export declare class StreamingMutation {
+  push(chunk: Uint8Array): void
+  finish(): Write
+  abort(): boolean
+}
+
 export declare class Subscription {
   readAll(): Array<SubscriptionEvent>
   drain(): Array<SubscriptionEvent>
@@ -102,6 +123,9 @@ export declare class TestJwtIssuer {
 }
 
 export declare class Transport {
+  routeAuxiliaryWireFrame(frame: Uint8Array): Uint8Array | null
+  recvAuxiliaryWireFrames(): Array<Uint8Array>
+  auxiliaryOutboundReady(): boolean
   sendWireFrame(frame: Uint8Array): void
   sendWireFrames(frames: Array<Uint8Array>): void
   recvWireFrames(): Array<Uint8Array>

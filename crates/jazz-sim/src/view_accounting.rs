@@ -29,6 +29,11 @@ pub fn view_update_bytes(update: &SyncMessage) -> u64 {
         // update. Its row payload is part of the simulated delivery cost.
         SyncMessage::AuthorizationScopeView { view, .. } => view_update_bytes(view),
         SyncMessage::RegisterShape { .. }
+        | SyncMessage::ChunkRequestBatch(_)
+        | SyncMessage::ChunkResponseBatch(_)
+        | SyncMessage::ChunkUploadStart(_)
+        | SyncMessage::ChunkUploadNodes(_)
+        | SyncMessage::ChunkUploadResult(_)
         | SyncMessage::Subscribe(_)
         | SyncMessage::PublishSchema { .. }
         | SyncMessage::PublishSchemaWithLens { .. }

@@ -85,6 +85,7 @@ use support::*;
 use wire_transport::byte_duplex_with_session;
 
 mod catalogue;
+mod chunk_io_pump;
 mod lifecycle;
 mod mutations;
 mod node_runtime;

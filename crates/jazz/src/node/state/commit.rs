@@ -251,10 +251,16 @@ where
 
     pub(super) async fn commit_mergeable_many_at_with_schema_versions_and_provenance(
         &mut self,
-        commits: Vec<(SchemaVersionId, MergeableCommit)>,
+        mut commits: Vec<(SchemaVersionId, MergeableCommit)>,
         made_at: TxTime,
         contribution_merge: Option<ContributionMergeProvenance>,
     ) -> Result<PublishedTransaction, Error> {
+        self.prepare_and_stage_large_commit_values(&mut commits).await?;
+        let staged_ids = commits
+            .iter()
+            .flat_map(|(_, commit)| commit.staged_large_values.iter().copied())
+            .collect::<BTreeSet<_>>();
+        self.ensure_large_value_stages_current(&staged_ids).await?;
         let tx_id = TxId::new(made_at, self.node_uuid);
         let made_by = commits[0].1.made_by;
         let permission_subject = commits[0].1.effective_permission_subject();
@@ -276,6 +282,11 @@ where
         };
         let tx_node_alias = self.ensure_node_alias(tx_id.node).await?;
         let mut batch = self.database.open_batch();
+        for (_, commit) in &commits {
+            for staged_id in &commit.staged_large_values {
+                batch.accept_large_value(*staged_id);
+            }
+        }
         batch.insert(
             "jazz_transactions",
             transaction_values(
@@ -469,6 +480,85 @@ where
         Ok(PublishedTransaction { tx_id, persistence })
     }
 
+    /// Lower oversized ordinary scalar cells through Groove and atomically
+    /// stage their immutable nodes before row publication begins.
+    async fn prepare_and_stage_large_commit_values(
+        &mut self,
+        commits: &mut [(SchemaVersionId, MergeableCommit)],
+    ) -> Result<(), Error> {
+        for (schema_version, commit) in commits.iter_mut() {
+            let inherited = if commit.cells.values().any(value_contains_indirect_descriptor) {
+                self.current_physical_cells_in_branch_schema(
+                    *schema_version,
+                    &commit.table,
+                    &commit.branch,
+                    commit.row_uuid,
+                )
+                .await?
+                .unwrap_or_default()
+            } else {
+                BTreeMap::new()
+            };
+            for (column, value) in commit.cells.iter_mut() {
+                if value_contains_indirect_descriptor(value)
+                    && inherited.get(column) == Some(value)
+                {
+                    commit.prepared_large_columns.insert(column.clone());
+                    continue;
+                }
+                let Some(staged) = self.prepare_and_stage_large_scalar(value).await? else {
+                    continue;
+                };
+                commit.staged_large_values.push(staged.id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Lower one top-level scalar cell, preserving its nullable wrapper. This
+    /// is shared by mergeable and exclusive publication so neither write path
+    /// can leak an oversized inline scalar onto the wire.
+    pub(crate) async fn prepare_and_stage_large_scalar(
+        &mut self,
+        value: &mut Value,
+    ) -> Result<Option<groove::large_values::StagedLargeValue>, Error> {
+        use groove::large_values::{INLINE_VALUE_MAX_BYTES, LargeValueKind};
+
+        let candidate = match value {
+            Value::String(text) if text.len() > INLINE_VALUE_MAX_BYTES => {
+                Some((LargeValueKind::String, text.as_bytes().to_vec(), false))
+            }
+            Value::Bytes(bytes) if bytes.len() > INLINE_VALUE_MAX_BYTES => {
+                Some((LargeValueKind::Bytes, bytes.clone(), false))
+            }
+            Value::Nullable(Some(inner)) => match inner.as_ref() {
+                Value::String(text) if text.len() > INLINE_VALUE_MAX_BYTES => {
+                    Some((LargeValueKind::String, text.as_bytes().to_vec(), true))
+                }
+                Value::Bytes(bytes) if bytes.len() > INLINE_VALUE_MAX_BYTES => {
+                    Some((LargeValueKind::Bytes, bytes.clone(), true))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some((kind, bytes, nullable)) = candidate else {
+            return Ok(None);
+        };
+        let staged = self
+            .database
+            .prepare_and_stage_large_value(kind, &bytes)
+            .await?;
+        self.enforce_large_value_staging_policy(&staged).await?;
+        let descriptor = Value::Large(staged.value_ref.clone());
+        *value = if nullable {
+            Value::Nullable(Some(Box::new(descriptor)))
+        } else {
+            descriptor
+        };
+        Ok(Some(staged))
+    }
+
     /// Commit a local mergeable write and return its sync commit unit.
     pub async fn commit_mergeable_unit(
         &mut self,
@@ -610,12 +700,30 @@ where
         row_uuid: RowUuid,
     ) -> Result<Option<BTreeMap<String, Value>>, Error> {
         let schema_version = self.catalogue.current_write_schema.schema;
+        self.visible_current_physical_cells_in_branch_schema(
+            schema_version,
+            table,
+            branch,
+            row_uuid,
+        )
+        .await
+    }
+
+    /// Read a branch-local winner projected into one registered schema while
+    /// retaining indirect scalar descriptors rather than hydrating them.
+    pub(crate) async fn visible_current_physical_cells_in_branch_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        branch: &BranchSelector,
+        row_uuid: RowUuid,
+    ) -> Result<Option<BTreeMap<String, Value>>, Error> {
         let table_schema = self.table_in_schema(table, schema_version)?;
         let schema = &self
             .catalogue
             .catalogue_schemas
             .get(&schema_version)
-            .ok_or(Error::InvalidStoredValue("current write schema missing"))?
+            .ok_or(Error::InvalidStoredValue("registered read schema missing"))?
             .schema;
         let (branch_key, _) = schema
             .project_branch_selector(&table_schema, branch)
@@ -661,8 +769,24 @@ where
         else {
             return Ok(None);
         };
-        self.materialized_cells_for_version(&table_schema, &content)
-            .map(Some)
+        let authored_schema = self
+            .schema_version_for_alias(content.schema_version_alias())
+            .ok_or(Error::InvalidStoredValue(
+                "current version schema alias must exist",
+            ))?;
+        let authored_table = self.table_in_schema(content.table(), authored_schema)?.clone();
+        let mut cells = self.materialized_cells_for_version(&authored_table, &content)?;
+        let Some(projected_table) =
+            self.translate_cells(authored_schema, schema_version, content.table(), &mut cells)?
+        else {
+            return Ok(None);
+        };
+        if projected_table != table_schema.name {
+            return Err(Error::InvalidStoredValue(
+                "current version projects to an unexpected table",
+            ));
+        }
+        Ok(Some(cells))
     }
 
     /// Return the exact local content parent for a branch-local row.
@@ -1057,6 +1181,126 @@ where
             self.catalogue.current_write_schema.schema,
         )
         .await
+    }
+
+    /// Resolve an engine-owned indirect descriptor from the current physical
+    /// row. Callers must perform ordinary Jazz row authorization before using
+    /// this helper; the descriptor never crosses the public API boundary.
+    pub(crate) async fn current_physical_cell_in_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+        column: &str,
+    ) -> Result<Option<Value>, Error> {
+        Ok(self
+            .current_physical_cells_in_schema(schema_version, table, row_uuid)
+            .await?
+            .and_then(|mut cells| cells.remove(column)))
+    }
+
+    pub(crate) async fn current_physical_cells_in_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        row_uuid: RowUuid,
+    ) -> Result<Option<BTreeMap<String, Value>>, Error> {
+        self.current_physical_cells_in_branch_schema(
+            schema_version,
+            table,
+            &BranchSelector::default(),
+            row_uuid,
+        )
+        .await
+    }
+
+    async fn current_physical_cells_in_branch_schema(
+        &mut self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        branch: &BranchSelector,
+        row_uuid: RowUuid,
+    ) -> Result<Option<BTreeMap<String, Value>>, Error> {
+        self.visible_current_physical_cells_in_branch_schema(
+            schema_version,
+            table,
+            branch,
+            row_uuid,
+        )
+        .await
+    }
+
+    /// Seal a high-level partial-value update after verifying that every
+    /// indirect descriptor is either the freshly staged target or an exact
+    /// descriptor inherited from the current physical row.
+    pub(crate) async fn seal_large_value_update(
+        &mut self,
+        mut commit: MergeableCommit,
+        target_column: &str,
+        staged: groove::large_values::StagedLargeValue,
+        schema_version: SchemaVersionId,
+    ) -> Result<MergeableCommit, Error> {
+        let inherited = self
+            .current_physical_cells_in_branch_schema(
+                schema_version,
+                &commit.table,
+                &commit.branch,
+                commit.row_uuid,
+            )
+            .await?
+            .ok_or(Error::InvalidMergeableCommit(
+                "partial large-value update target is not observed",
+            ))?;
+        for (column, value) in &commit.cells {
+            if !value_contains_indirect_descriptor(value) {
+                continue;
+            }
+            let valid = if column == target_column {
+                let mut descriptors = Vec::new();
+                collect_indirect_descriptors(value, &mut descriptors);
+                descriptors.as_slice() == [staged.value_ref.clone()]
+            } else {
+                inherited.get(column) == Some(value)
+            };
+            if !valid {
+                return Err(Error::InvalidMergeableCommit(
+                    "partial large-value update contains an unverified descriptor",
+                ));
+            }
+            commit.prepared_large_columns.insert(column.clone());
+        }
+        commit.staged_large_values.push(staged.id);
+        Ok(commit)
+    }
+
+    pub(crate) async fn seal_inherited_large_values(
+        &mut self,
+        mut commit: MergeableCommit,
+        schema_version: SchemaVersionId,
+    ) -> Result<MergeableCommit, Error> {
+        if !commit.cells.values().any(value_contains_indirect_descriptor) {
+            return Ok(commit);
+        }
+        let inherited = self
+            .current_physical_cells_in_branch_schema(
+                schema_version,
+                &commit.table,
+                &commit.branch,
+                commit.row_uuid,
+            )
+            .await?
+            .unwrap_or_default();
+        for (column, value) in &commit.cells {
+            if value_contains_indirect_descriptor(value) {
+                if inherited.get(column) != Some(value) {
+                    return Err(Error::InvalidMergeableCommit(
+                        "row update contains an unverified large-value descriptor",
+                    ));
+                }
+                commit.prepared_large_columns.insert(column.clone());
+            }
+        }
+        Ok(commit)
     }
 
     pub(crate) async fn local_current_row_in_schema(

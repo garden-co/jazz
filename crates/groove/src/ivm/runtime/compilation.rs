@@ -56,6 +56,7 @@ impl IvmRuntime {
             GraphBuilder::Aggregate { .. }
             | GraphBuilder::Filter { .. }
             | GraphBuilder::Project { .. }
+            | GraphBuilder::StreamingChecksum { .. }
             | GraphBuilder::UnwrapNullable { .. }
             | GraphBuilder::Unnest { .. }
             | GraphBuilder::VariantProject { .. }
@@ -624,6 +625,39 @@ impl IvmRuntime {
                 self.initialize_node_runtime(node);
                 Ok(CompiledNode {
                     output,
+                    node,
+                    root_ordering_node: compiled_input.root_ordering_node,
+                })
+            }
+            GraphBuilder::StreamingChecksum {
+                input,
+                field,
+                output_field,
+                window_bytes,
+                max_bytes_per_turn,
+            } => {
+                if *window_bytes == 0 || *max_bytes_per_turn == 0 {
+                    return Err(IvmRuntimeError::InvalidStreamingChecksumBudget);
+                }
+                let compiled_input = self.add_dedup_graph_cached(input, output_memo)?;
+                let field_idx = resolve_field_ref(&compiled_input.output, field)?;
+                let node = self.graph.dedup_node(
+                    NodeDescriptor::new(
+                        OpType::StreamingChecksum(StreamingChecksumOp {
+                            field: field_ref_name(&compiled_input.output, field)?,
+                            field_idx,
+                            output_field: output_field.clone(),
+                            window_bytes: *window_bytes,
+                            max_bytes_per_turn: *max_bytes_per_turn,
+                        }),
+                        [compiled_input.node],
+                        inferred_output,
+                    ),
+                    NodeDurability::Ephemeral,
+                );
+                self.initialize_node_runtime(node);
+                Ok(CompiledNode {
+                    output: inferred_output,
                     node,
                     root_ordering_node: compiled_input.root_ordering_node,
                 })

@@ -502,19 +502,20 @@ where
         ExclusiveTxRef { db: self, tx_id }
     }
 
-    pub(super) async fn exclusive_read(
+    pub(super) async fn transaction_read(
         &self,
         tx_id: OpenTransactionId,
         table: &str,
         row: RowUuid,
     ) -> Result<Option<RowCells>, Error> {
-        self.node
-            .node
-            .lock()
-            .await
+        let mut node = self.node.node.lock().await;
+        let mut cells = node
             .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
-            .await
-            .map_err(Into::into)
+            .await?;
+        if let Some(cells) = &mut cells {
+            node.hydrate_large_value_cells(cells).await?;
+        }
+        Ok(cells)
     }
 
     pub(super) async fn transaction_all(
@@ -560,7 +561,7 @@ where
     ) -> Result<Vec<CurrentRow>, Error> {
         ensure_default_read_view(&opts)?;
         let mut node = self.node.node.lock().await;
-        match authorization_mode {
+        let mut rows = match authorization_mode {
             QueryAuthorizationMode::ClientLocal => node
                 .tx_query_with_options(
                     tx_id,
@@ -569,7 +570,7 @@ where
                     opts.include_deleted,
                 )
                 .await
-                .map_err(Into::into),
+                .map_err(Error::from)?,
             QueryAuthorizationMode::TrustedServing => node
                 .tx_query_for_identity_with_options(
                     tx_id,
@@ -579,8 +580,21 @@ where
                     opts.include_deleted,
                 )
                 .await
-                .map_err(Into::into),
-        }
+                .map_err(Error::from)?,
+        };
+        node.hydrate_current_rows(&mut rows).await?;
+        Ok(rows)
+    }
+
+    pub(super) async fn transaction_current_rows(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+    ) -> Result<Vec<CurrentRow>, Error> {
+        let mut node = self.node.node.lock().await;
+        let mut rows = node.tx_current_rows(tx_id, table).await?;
+        node.hydrate_current_rows(&mut rows).await?;
+        Ok(rows)
     }
 
     pub(super) async fn stage_exclusive_insert(
@@ -607,6 +621,33 @@ where
             )
             .await
             .map_err(Into::into)
+    }
+
+    pub(super) async fn stage_exclusive_update(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row: RowUuid,
+        patch: RowCells,
+    ) -> Result<(), Error> {
+        let now_ms = self.next_now_ms();
+        let mut node = self.node.node.lock().await;
+        let mut cells = node
+            .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
+            .await?
+            .unwrap_or_default();
+        cells.extend(patch);
+        node.tx_write_in_schema_at_ms(
+            tx_id,
+            self.schema_version_id,
+            table,
+            row,
+            cells,
+            None,
+            Some(now_ms),
+        )
+        .await?;
+        Ok(())
     }
 
     pub(super) async fn stage_exclusive_delete(

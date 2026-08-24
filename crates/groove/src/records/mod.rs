@@ -1259,7 +1259,8 @@ impl<'a> BorrowedRecord<'a> {
     }
 
     pub fn get_bytes(&self, field_idx: usize) -> Result<&'a [u8], Error> {
-        self.field_bytes(field_idx, &ValueType::Bytes)
+        let bytes = self.field_bytes(field_idx, &ValueType::Bytes)?;
+        Ok(crate::large_values::inline_scalar_bytes(bytes)?)
     }
 
     pub fn get_uuid(&self, field_idx: usize) -> Result<uuid::Uuid, Error> {
@@ -1268,7 +1269,8 @@ impl<'a> BorrowedRecord<'a> {
     }
 
     pub fn get_str(&self, field_idx: usize) -> Result<&'a str, Error> {
-        str::from_utf8(self.field_bytes(field_idx, &ValueType::String)?)
+        let bytes = self.field_bytes(field_idx, &ValueType::String)?;
+        str::from_utf8(crate::large_values::inline_scalar_bytes(bytes)?)
             .map_err(|_| Error::InvalidUtf8)
     }
 
@@ -1336,12 +1338,15 @@ impl<'a> BorrowedRecord<'a> {
 
     pub fn get_nullable_string(&self, field_idx: usize) -> Result<Option<&'a str>, Error> {
         self.nullable_field(field_idx, &ValueType::String, |payload| {
-            str::from_utf8(payload).map_err(|_| Error::InvalidUtf8)
+            str::from_utf8(crate::large_values::inline_scalar_bytes(payload)?)
+                .map_err(|_| Error::InvalidUtf8)
         })
     }
 
     pub fn get_nullable_bytes(&self, field_idx: usize) -> Result<Option<&'a [u8]>, Error> {
-        self.nullable_field(field_idx, &ValueType::Bytes, Ok)
+        self.nullable_field(field_idx, &ValueType::Bytes, |payload| {
+            Ok(crate::large_values::inline_scalar_bytes(payload)?)
+        })
     }
 
     pub fn get_nullable_uuid(&self, field_idx: usize) -> Result<Option<uuid::Uuid>, Error> {
@@ -1888,6 +1893,8 @@ impl Deref for BorrowedRecord<'_> {
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum Error {
+    #[error(transparent)]
+    LargeValue(#[from] crate::large_values::Error),
     #[error("expected {expected} values, got {actual}")]
     ArityMismatch { expected: usize, actual: usize },
     #[error("field not found: {0}")]

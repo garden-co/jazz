@@ -6,7 +6,9 @@
 //! [`views`] for sync view payloads. In the layer map it is the core between the
 //! `Db` facade and groove storage/IVM.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "testing")]
@@ -540,6 +542,12 @@ pub struct NodeState<S> {
     rejections: RejectionTracking,
     /// Groove database slot over this node's storage.
     database: DatabaseSlot,
+    local_chunk_reader: groove::chunks::LocalChunkReader,
+    chunk_resolver: Rc<dyn groove::chunks::MissingChunkResolver>,
+    large_value_staging_policy: LargeValueStagingPolicy,
+    large_value_ingress: RefCell<LargeValueIngressState>,
+    /// Groove-owned verified cache retained across internal database rebuilds.
+    content_runtime_provider: groove::chunks::OwnedChunkProvider,
     storage_type: std::marker::PhantomData<fn() -> S>,
     /// Process-local identity for runtime-local Groove handles such as prepared shape ids.
     groove_runtime_token: u64,
@@ -585,6 +593,39 @@ pub struct NodeState<S> {
     /// Once the initial snapshot has completed, ordinary writes return to their
     /// existing per-write durability boundaries.
     initial_sync_flush_completed: bool,
+}
+
+/// Jazz-owned limits for unpublished Groove staging roots.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LargeValueStagingPolicy {
+    /// Incoming upload bytes admitted during one fixed window.
+    pub incoming_bytes_per_window: u64,
+    /// Fixed rate-limit window duration.
+    pub window_ms: u64,
+    /// Maximum staging age; expired roots are evicted on policy checks.
+    pub max_age_ms: u64,
+}
+
+impl Default for LargeValueStagingPolicy {
+    fn default() -> Self {
+        Self {
+            // Admit one maximum-size logical wire message per second by
+            // default. Deployments can tighten this without changing Groove's
+            // policy-blind storage contract.
+            incoming_bytes_per_window: 256 * 1024 * 1024,
+            window_ms: 1_000,
+            // Completed uploads are deliberately short-lived claims. Ten
+            // minutes tolerates slow authority synchronization while bounding
+            // abandoned staging on an otherwise unconfigured host.
+            max_age_ms: 10 * 60 * 1_000,
+        }
+    }
+}
+
+#[derive(Default)]
+struct LargeValueIngressState {
+    window_started_ms: u64,
+    admitted_bytes: u64,
 }
 
 /// Schema catalogue and schema-version storage layout known by the node.
@@ -1429,6 +1470,10 @@ pub struct MergeableCommit {
     pub parents: Vec<TxId>,
     /// Optional application metadata.
     pub user_metadata_json: Option<String>,
+    /// Columns carrying Groove preparations staged through this node. Private
+    /// provenance prevents callers from handcrafting physical descriptors.
+    prepared_large_columns: BTreeSet<String>,
+    staged_large_values: Vec<groove::large_values::StagedLargeValueId>,
 }
 
 impl MergeableCommit {
@@ -1446,6 +1491,8 @@ impl MergeableCommit {
             deletion: None,
             parents: Vec::new(),
             user_metadata_json: None,
+            prepared_large_columns: BTreeSet::new(),
+            staged_large_values: Vec::new(),
         }
     }
 
@@ -1486,6 +1533,30 @@ impl MergeableCommit {
         self
     }
 
+    /// Attach Jazz-private provenance for a Groove-staged large scalar. This
+    /// remains crate-private so public callers cannot bless handcrafted
+    /// descriptors.
+    pub(crate) fn staged_large_cell(
+        mut self,
+        column: impl Into<String>,
+        staged: groove::large_values::StagedLargeValue,
+        nullable: bool,
+    ) -> Self {
+        let column = column.into();
+        let value = Value::Large(staged.value_ref);
+        self.cells.insert(
+            column.clone(),
+            if nullable {
+                Value::Nullable(Some(Box::new(value)))
+            } else {
+                value
+            },
+        );
+        self.prepared_large_columns.insert(column);
+        self.staged_large_values.push(staged.id);
+        self
+    }
+
     /// Preserve which cells were explicitly authored when `cells` is a
     /// materialized snapshot assembled for a partial update.
     pub fn authored_columns(mut self, columns: BTreeSet<String>) -> Self {
@@ -1512,8 +1583,83 @@ impl MergeableCommit {
     }
 
     fn validate(&self) -> Result<(), Error> {
-        validate_mergeable_write_shape(self.cells.is_empty(), self.deletion.is_some())
+        validate_mergeable_write_shape(self.cells.is_empty(), self.deletion.is_some())?;
+        if self.cells.iter().any(|(column, value)| {
+            value_contains_indirect_descriptor(value)
+                && !self.prepared_large_columns.contains(column)
+        }) {
+            return Err(Error::InvalidMergeableCommit(
+                "callers must author logical scalar values, not physical large descriptors",
+            ));
+        }
+        Ok(())
     }
+}
+
+fn value_contains_indirect_descriptor(value: &Value) -> bool {
+    match value {
+        Value::Large(_) => true,
+        Value::Tuple(values) | Value::Array(values) => {
+            values.iter().any(value_contains_indirect_descriptor)
+        }
+        Value::Nullable(Some(value)) => value_contains_indirect_descriptor(value),
+        Value::Record(record) => record
+            .to_values()
+            .is_ok_and(|values| values.iter().any(value_contains_indirect_descriptor)),
+        Value::Enum(value) => value
+            .record()
+            .to_values()
+            .is_ok_and(|values| values.iter().any(value_contains_indirect_descriptor)),
+        _ => false,
+    }
+}
+
+fn collect_indirect_descriptors(
+    value: &Value,
+    descriptors: &mut Vec<groove::large_values::LargeValueRef>,
+) {
+    match value {
+        Value::Large(value_ref) => {
+            if !descriptors.contains(value_ref) {
+                descriptors.push(value_ref.clone());
+            }
+        }
+        Value::Tuple(values) | Value::Array(values) => {
+            for value in values {
+                collect_indirect_descriptors(value, descriptors);
+            }
+        }
+        Value::Nullable(Some(value)) => collect_indirect_descriptors(value, descriptors),
+        Value::Record(record) => {
+            if let Ok(values) = record.to_values() {
+                for value in values {
+                    collect_indirect_descriptors(&value, descriptors);
+                }
+            }
+        }
+        Value::Enum(value) => {
+            if let Ok(values) = value.record().to_values() {
+                for value in values {
+                    collect_indirect_descriptors(&value, descriptors);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn version_indirect_descriptors(
+    versions: &[VersionRecord],
+) -> Vec<groove::large_values::LargeValueRef> {
+    let mut descriptors = Vec::new();
+    for version in versions {
+        for position in 0..version.application_cell_count() {
+            if let Some(value) = version.cell_at(position) {
+                collect_indirect_descriptors(&value, &mut descriptors);
+            }
+        }
+    }
+    descriptors
 }
 
 pub(crate) struct ViewUpdateParts {
@@ -1801,6 +1947,21 @@ pub enum Error {
     /// Error returned by groove.
     #[error(transparent)]
     Groove(#[from] GrooveDbError),
+    /// Error returned by Groove-owned chunk storage.
+    #[error(transparent)]
+    ChunkStorage(#[from] groove::chunks::ChunkStorageError),
+    /// Groove rejected a malformed logical value or indirect descriptor.
+    #[error(transparent)]
+    LargeValue(#[from] groove::large_values::Error),
+    /// Groove could not authenticate/export a locally referenced tree.
+    #[error(transparent)]
+    LargeValueReachability(#[from] groove::large_values::ReachabilityError),
+    /// Jazz staging policy rejected an otherwise valid Groove preparation.
+    #[error("large-value upload rate limit exceeded")]
+    LargeValueIngressRateLimited,
+    /// The row write arrived after its Groove staging root expired.
+    #[error("large-value staging root expired; upload again")]
+    LargeValueStageExpired,
     /// Error returned by groove records.
     #[error(transparent)]
     Record(#[from] records::Error),

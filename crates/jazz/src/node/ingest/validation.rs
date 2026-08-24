@@ -123,6 +123,13 @@ where
         view_scoped_cardinality: bool,
         staged_content_versions: Option<&mut Vec<VersionRow>>,
     ) -> Result<Vec<VersionRow>, Error> {
+        let large_value_descriptors = version_indirect_descriptors(&versions);
+        for staged_id in self
+            .current_staged_ids_for_descriptors(&large_value_descriptors, false)
+            .await?
+        {
+            batch.accept_large_value(staged_id);
+        }
         self.merge_tx_time(tx.tx_id.time);
         let tx_node_alias = self.ensure_node_alias(tx.tx_id.node).await?;
         let stored_tx = self.query_transaction(tx.tx_id).await?;

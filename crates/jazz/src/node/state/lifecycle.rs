@@ -69,12 +69,9 @@ where
         // too: an empty catalogue does not make an existing Jazz store safe to
         // repurpose as an uninitialized edge.
         let meta_schema = bootstrap_schema.lower_to_groove();
-        let meta_database = Database::new_with_storage_layout(
-            meta_schema,
-            storage,
-            StorageLayout::jazz_class_v1(),
-        )
-        .await?;
+        let meta_database =
+            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v1())
+                .await?;
         let mut genesis = None;
         let mut schemas = BTreeMap::new();
         let mut bootstrap_ready = None;
@@ -312,22 +309,31 @@ where
             catalogue,
             catalogue_bootstrap_state,
             database,
+            chunk_resolver,
             history_complete,
             ..
         } = self;
         let storage = database.into_inner().into_storage();
-        let reopened = match catalogue_bootstrap_state {
+        let mut reopened = match catalogue_bootstrap_state {
             CatalogueBootstrapState::Uninitialized => {
                 NodeState::<BoxedStorage>::new_catalogue_uninitialized(node_uuid, storage).await?
             }
-            CatalogueBootstrapState::Ready => NodeState::<BoxedStorage>::new_with_history_complete(
-                node_uuid,
-                catalogue.schema,
-                storage,
-                history_complete,
-            )
-            .await?,
+            CatalogueBootstrapState::Ready => {
+                NodeState::<BoxedStorage>::new_with_history_complete(
+                    node_uuid,
+                    catalogue.schema,
+                    storage,
+                    history_complete,
+                )
+                .await?
+            }
         };
+        reopened
+            .database
+            .set_missing_chunk_resolver(chunk_resolver.clone());
+        reopened.local_chunk_reader = reopened.database.local_chunk_reader();
+        reopened.chunk_resolver = chunk_resolver;
+        reopened.content_runtime_provider = reopened.database.owned_chunk_provider();
         Ok(reopened)
     }
 
@@ -474,8 +480,8 @@ where
                 );
             }
             let applied = database.apply_batch(batch).await?;
-let persisted = applied.persist().await;
-database.finish_persistence(persisted)?;
+            let persisted = applied.persist().await;
+            database.finish_persistence(persisted)?;
             schemas.insert(
                 staged.publication.schema.id,
                 staged.publication.schema.clone(),
@@ -501,6 +507,11 @@ database.finish_persistence(persisted)?;
             .unwrap_or_else(|| schema.clone());
         #[cfg(feature = "testing")]
         let started = receipt.as_ref().map(|_| Instant::now());
+        let chunk_resolver: Rc<dyn groove::chunks::MissingChunkResolver> =
+            Rc::new(groove::chunks::UnavailableChunkResolver);
+        database.set_missing_chunk_resolver(chunk_resolver.clone());
+        let content_runtime_provider = database.owned_chunk_provider();
+        let local_chunk_reader = database.local_chunk_reader();
         let mut node = Self {
             node_uuid,
             self_node_alias: None,
@@ -565,6 +576,11 @@ database.finish_persistence(persisted)?;
             },
             rejections: RejectionTracking::default(),
             database: DatabaseSlot::new(database),
+            local_chunk_reader,
+            chunk_resolver,
+            large_value_staging_policy: LargeValueStagingPolicy::default(),
+            large_value_ingress: RefCell::new(LargeValueIngressState::default()),
+            content_runtime_provider,
             storage_type: std::marker::PhantomData,
             groove_runtime_token: next_groove_runtime_token(),
             history_complete,
@@ -624,7 +640,8 @@ database.finish_persistence(persisted)?;
         let started = receipt.as_ref().map(|_| Instant::now());
         #[cfg(feature = "testing")]
         if let Some(receipt) = receipt.as_deref_mut() {
-            node.rebuild_ahead_current_keys_with_receipt(receipt).await?;
+            node.rebuild_ahead_current_keys_with_receipt(receipt)
+                .await?;
         } else {
             node.rebuild_ahead_current_keys().await?;
         }
@@ -741,6 +758,434 @@ database.finish_persistence(persisted)?;
         self.permissions_ready
     }
 
+    /// Replace the policy-blind immutable content backend used by Groove.
+    /// The backend instance and verified cache survive catalogue rebuilds.
+    pub fn set_chunk_storage(&mut self, storage: Rc<dyn groove::chunks::ChunkStorage>) {
+        self.database.set_chunk_storage(storage);
+        self.database
+            .set_missing_chunk_resolver(self.chunk_resolver.clone());
+        let runtime_provider = self.database.owned_chunk_provider();
+        self.local_chunk_reader = self.database.local_chunk_reader();
+        self.content_runtime_provider = runtime_provider;
+    }
+
+    /// Install Jazz's sync-plane fallback for chunks absent from Groove's
+    /// local storage. The resolver carries no authorization state; ordinary
+    /// row/view delivery is what discloses locators to callers.
+    pub fn set_missing_chunk_resolver(
+        &mut self,
+        resolver: Rc<dyn groove::chunks::MissingChunkResolver>,
+    ) {
+        self.database.set_missing_chunk_resolver(resolver.clone());
+        let runtime_provider = self.database.owned_chunk_provider();
+        self.chunk_resolver = resolver;
+        self.content_runtime_provider = runtime_provider;
+    }
+
+    /// Consult Groove's local immutable storage without invoking the peer
+    /// fallback. Peer forwarding uses this to avoid recursive request loops.
+    pub async fn local_chunk(
+        &self,
+        locator: Vec<u8>,
+        expected_hash: groove::large_values::ContentHash,
+    ) -> Result<bytes::Bytes, groove::chunks::ChunkStorageError> {
+        self.local_chunk_reader.get(locator, expected_hash).await
+    }
+
+    pub(crate) fn local_chunk_reader_handle(&self) -> groove::chunks::LocalChunkReader {
+        self.local_chunk_reader.clone()
+    }
+
+    /// Stage the immutable chunks from a Groove preparation. This does not
+    /// publish an owning Jazz row; normal commit authorization and publication
+    /// remain a separate boundary.
+    pub async fn stage_large_value(
+        &self,
+        prepared: &groove::large_values::PreparedLargeValue,
+    ) -> Result<groove::large_values::StagedLargeValue, Error> {
+        let staged = self
+            .database
+            .stage_large_value_preparation(prepared.clone())
+            .await?;
+        self.enforce_large_value_staging_policy(&staged).await?;
+        Ok(staged)
+    }
+
+    /// Replace Jazz's policy for unpublished Groove staging receipts.
+    pub fn set_large_value_staging_policy(&mut self, policy: LargeValueStagingPolicy) {
+        self.large_value_staging_policy = policy;
+    }
+
+    pub(super) async fn enforce_large_value_staging_policy(
+        &self,
+        newest: &groove::large_values::StagedLargeValue,
+    ) -> Result<(), Error> {
+        if !self.admit_large_value_ingress(newest.accounting.encoded_bytes) {
+            self.database.evict_staged_large_value(newest.id).await?;
+            return Err(Error::LargeValueIngressRateLimited);
+        }
+        self.evict_expired_large_value_stages_except(newest.id).await
+    }
+
+    async fn evict_expired_large_value_stages_except(
+        &self,
+        retained_id: groove::large_values::StagedLargeValueId,
+    ) -> Result<(), Error> {
+        let now_ms: u64 = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        for staged in self.database.staged_large_values().await? {
+            let expired = now_ms.saturating_sub(staged.created_at_ms)
+                > self.large_value_staging_policy.max_age_ms;
+            if expired && staged.id != retained_id {
+                self.database.evict_staged_large_value(staged.id).await?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn admit_large_value_ingress(&self, encoded_bytes: u64) -> bool {
+        let now_ms: u64 = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let mut ingress = self.large_value_ingress.borrow_mut();
+        if ingress.window_started_ms == 0
+            || now_ms.saturating_sub(ingress.window_started_ms)
+                >= self.large_value_staging_policy.window_ms.max(1)
+        {
+            ingress.window_started_ms = now_ms;
+            ingress.admitted_bytes = 0;
+        }
+        let next = ingress.admitted_bytes.saturating_add(encoded_bytes);
+        if next > self.large_value_staging_policy.incoming_bytes_per_window {
+            return false;
+        }
+        ingress.admitted_bytes = next;
+        true
+    }
+
+    pub(super) async fn ensure_large_value_stages_current(
+        &self,
+        ids: &BTreeSet<groove::large_values::StagedLargeValueId>,
+    ) -> Result<(), Error> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let now_ms: u64 = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let staged = self
+            .database
+            .staged_large_values()
+            .await?
+            .into_iter()
+            .map(|staged| (staged.id, staged))
+            .collect::<BTreeMap<_, _>>();
+        for id in ids {
+            let Some(receipt) = staged.get(id) else {
+                return Err(Error::LargeValueStageExpired);
+            };
+            if now_ms.saturating_sub(receipt.created_at_ms)
+                > self.large_value_staging_policy.max_age_ms
+            {
+                self.database.evict_staged_large_value(*id).await?;
+                return Err(Error::LargeValueStageExpired);
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn current_staged_ids_for_descriptors(
+        &self,
+        descriptors: &[groove::large_values::LargeValueRef],
+        require_every_descriptor: bool,
+    ) -> Result<Vec<groove::large_values::StagedLargeValueId>, Error> {
+        if descriptors.is_empty() {
+            return Ok(Vec::new());
+        }
+        let now_ms: u64 = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let staged = self.database.staged_large_values().await?;
+        let mut ids = Vec::new();
+        for descriptor in descriptors {
+            if let Some(expired) = staged.iter().find(|receipt| {
+                &receipt.value_ref == descriptor
+                    && now_ms.saturating_sub(receipt.created_at_ms)
+                        > self.large_value_staging_policy.max_age_ms
+            }) {
+                self.database.evict_staged_large_value(expired.id).await?;
+            }
+            let receipt = staged.iter().find(|receipt| {
+                &receipt.value_ref == descriptor
+                    && now_ms.saturating_sub(receipt.created_at_ms)
+                        <= self.large_value_staging_policy.max_age_ms
+            });
+            if let Some(receipt) = receipt {
+                ids.push(receipt.id);
+            } else if require_every_descriptor {
+                return Err(Error::LargeValueStageExpired);
+            }
+        }
+        Ok(ids)
+    }
+
+    pub(crate) async fn require_staged_large_values_for_versions(
+        &self,
+        versions: &[VersionRecord],
+    ) -> Result<(), Error> {
+        let descriptors = version_indirect_descriptors(versions);
+        self.current_staged_ids_for_descriptors(&descriptors, true)
+            .await
+            .map(|_| ())
+    }
+
+    /// Evict unpublished Groove staging roots older than the configured Jazz
+    /// policy. Hosts may call this from their ordinary maintenance cadence;
+    /// row acceptance independently performs the same freshness check.
+    pub async fn evict_expired_staged_large_values(&self) -> Result<usize, Error> {
+        let max_age_ms = self.large_value_staging_policy.max_age_ms;
+        let now_ms: u64 = web_time::SystemTime::now()
+            .duration_since(web_time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let mut evicted = 0;
+        for staged in self.database.staged_large_values().await? {
+            if now_ms.saturating_sub(staged.created_at_ms) > max_age_ms
+                && self.database.evict_staged_large_value(staged.id).await?
+            {
+                evicted += 1;
+            }
+        }
+        for upload in self.database.pending_large_value_uploads().await? {
+            if now_ms.saturating_sub(upload.created_at_ms) > max_age_ms
+                && self
+                    .database
+                    .evict_pending_large_value_upload(upload.id)
+                    .await?
+            {
+                evicted += 1;
+            }
+        }
+        Ok(evicted)
+    }
+
+    /// Evict an opaque Groove staging root selected by Jazz policy. All
+    /// persisted mechanics remain in Groove and repeated eviction is harmless.
+    pub async fn evict_staged_large_value(
+        &self,
+        id: groove::large_values::StagedLargeValueId,
+    ) -> Result<bool, Error> {
+        Ok(self.database.evict_staged_large_value(id).await?)
+    }
+
+    pub(crate) async fn stage_large_value_chunk_batch(
+        &self,
+        upload_id: groove::large_values::StagedLargeValueId,
+        kind: groove::large_values::LargeValueKind,
+        chunks: Vec<groove::large_values::StagedChunk>,
+    ) -> Result<(), Error> {
+        let encoded_bytes = chunks.iter().try_fold(0_u64, |total, chunk| {
+            total.checked_add(u64::try_from(chunk.encoded.len()).map_err(|_| {
+                Error::InvalidStoredValue("large-value chunk size exceeds u64")
+            })?)
+            .ok_or(Error::InvalidStoredValue(
+                "large-value chunk batch accounting overflow",
+            ))
+        })?;
+        if !self.admit_large_value_ingress(encoded_bytes) {
+            self.database.evict_staged_large_value(upload_id).await?;
+            return Err(Error::LargeValueIngressRateLimited);
+        }
+        Ok(self
+            .database
+            .stage_large_value_chunk_batch(upload_id, kind, chunks)
+            .await?)
+    }
+
+    pub(crate) async fn evict_pending_large_value_upload(
+        &self,
+        upload_id: groove::large_values::StagedLargeValueId,
+    ) -> Result<(), Error> {
+        self.database
+            .evict_pending_large_value_upload(upload_id)
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn finalize_large_value_upload(
+        &self,
+        upload_id: groove::large_values::StagedLargeValueId,
+        value_ref: groove::large_values::LargeValueRef,
+    ) -> Result<groove::large_values::StagedLargeValue, Error> {
+        let staged = self
+            .database
+            .finalize_large_value_upload(upload_id, value_ref)
+            .await?;
+        // Push uploads were charged batch-by-batch before persistence. Do not
+        // charge the completed tree a second time at root registration.
+        self.evict_expired_large_value_stages_except(staged.id)
+            .await?;
+        Ok(staged)
+    }
+
+    /// Stage one Groove-owned preparation and attach its physical descriptor
+    /// to an otherwise ordinary authorized Jazz commit. The private marker is
+    /// admission provenance, not canonical row state.
+    pub async fn attach_prepared_large_cell(
+        &self,
+        mut commit: MergeableCommit,
+        column: impl Into<String>,
+        prepared: &groove::large_values::PreparedLargeValue,
+    ) -> Result<MergeableCommit, Error> {
+        let staged = self.stage_large_value(prepared).await?;
+        let column = column.into();
+        commit
+            .cells
+            .insert(column.clone(), Value::Large(prepared.value_ref.clone()));
+        commit.prepared_large_columns.insert(column);
+        commit.staged_large_values.push(staged.id);
+        Ok(commit)
+    }
+
+    /// Consolidate through Groove-owned storage. Jazz receives only the
+    /// publishable descriptor used by its high-level row-write API.
+    pub async fn consolidate_and_stage_large_value(
+        &self,
+        value: groove::large_values::LargeValueRef,
+    ) -> Result<groove::large_values::StagedLargeValue, Error> {
+        let staged = self
+            .database
+            .consolidate_and_stage_large_value(value)
+            .await?;
+        self.enforce_large_value_staging_policy(&staged).await?;
+        Ok(staged)
+    }
+
+    /// Prepare and stage a logical append through Groove's bounded tail and
+    /// localized consolidation path.
+    pub async fn append_and_stage_large_value(
+        &self,
+        value: groove::large_values::LargeValueRef,
+        bytes: Vec<u8>,
+    ) -> Result<groove::large_values::StagedLargeValue, Error> {
+        let staged = self
+            .database
+            .append_and_stage_large_value(value, bytes)
+            .await?;
+        self.enforce_large_value_staging_policy(&staged).await?;
+        Ok(staged)
+    }
+
+    /// Prepare and stage a logical byte-coordinate splice through Groove.
+    pub async fn edit_and_stage_large_value(
+        &self,
+        value: groove::large_values::LargeValueRef,
+        offset: u64,
+        delete_length: u64,
+        insert_bytes: Vec<u8>,
+    ) -> Result<groove::large_values::StagedLargeValue, Error> {
+        let staged = self
+            .database
+            .edit_and_stage_large_value(value, offset, delete_length, insert_bytes)
+            .await?;
+        self.enforce_large_value_staging_policy(&staged).await?;
+        Ok(staged)
+    }
+
+    pub(crate) async fn read_large_value_range(
+        &self,
+        value: &groove::large_values::LargeValueRef,
+        range: std::ops::Range<u64>,
+    ) -> Result<Vec<u8>, Error> {
+        Ok(self.database.read_large_value_range(value, range).await?)
+    }
+
+    pub(crate) async fn read_large_text_utf16_range(
+        &self,
+        value: &groove::large_values::LargeValueRef,
+        range: std::ops::Range<u64>,
+    ) -> Result<String, Error> {
+        Ok(self
+            .database
+            .read_large_text_utf16_range(value, range)
+            .await?)
+    }
+
+    pub(crate) async fn read_large_json_pointer(
+        &self,
+        value: &groove::large_values::LargeValueRef,
+        pointer: &str,
+    ) -> Result<Option<serde_json::Value>, Error> {
+        Ok(self
+            .database
+            .read_large_json_pointer(value, pointer)
+            .await?)
+    }
+
+    /// Materialize physical indirect scalar arms before returning cells across
+    /// a public transaction read boundary.
+    pub(crate) async fn hydrate_large_value_cells(
+        &self,
+        cells: &mut BTreeMap<String, Value>,
+    ) -> Result<(), Error> {
+        self.hydrate_large_value_values(cells.values_mut()).await
+    }
+
+    pub(crate) async fn hydrate_current_rows(&self, rows: &mut [CurrentRow]) -> Result<(), Error> {
+        for row in rows {
+            let descriptor = row.record.descriptor().clone();
+            let mut values = row.record.to_values()?;
+            self.hydrate_large_value_values(values.iter_mut()).await?;
+            row.record =
+                std::sync::Arc::new(OwnedRecord::new(descriptor.create(&values)?, descriptor));
+        }
+        Ok(())
+    }
+
+    async fn hydrate_large_value_values<'a>(
+        &self,
+        values: impl IntoIterator<Item = &'a mut Value>,
+    ) -> Result<(), Error> {
+        for value in values {
+            let target = match value {
+                Value::Nullable(Some(inner)) => inner.as_mut(),
+                value => value,
+            };
+            let Value::Large(value_ref) = target else {
+                continue;
+            };
+            let bytes = self
+                .database
+                .read_large_value_range(value_ref, 0..value_ref.byte_length)
+                .await?;
+            let logical = match value_ref.kind {
+                groove::large_values::LargeValueKind::Bytes => Value::Bytes(bytes),
+                groove::large_values::LargeValueKind::String
+                | groove::large_values::LargeValueKind::Json => Value::String(
+                    String::from_utf8(bytes)
+                        .map_err(|_| Error::InvalidStoredValue("large text is not valid UTF-8"))?,
+                ),
+            };
+            *target = logical;
+        }
+        Ok(())
+    }
+
     async fn rebuild_database_slot(&mut self) -> Result<(), Error> {
         // Reopening the database refreshes Groove's physical table catalogue.
         // Parking is in-memory delivery state, not derivable from storage, so a
@@ -748,7 +1193,7 @@ database.finish_persistence(persisted)?;
         let parking = self.parking.clone();
         let old_database = self.database.take();
         let storage = old_database.into_storage();
-        let database = Self::open_full_database(
+        let mut database = Self::open_full_database(
             &self.catalogue.schema,
             &self.catalogue.catalogue_schemas,
             &self.catalogue.schema_version_aliases,
@@ -756,6 +1201,13 @@ database.finish_persistence(persisted)?;
             storage,
         )
         .await?;
+        database.set_missing_chunk_resolver(self.chunk_resolver.clone());
+        self.content_runtime_provider = database.owned_chunk_provider();
+        // Peer upload retries read through this handle outside the Groove
+        // runtime.  The old reader's ordered chunk backend deliberately holds
+        // only a weak storage reference, so retaining it across a database
+        // rebuild makes a later fragmented upload observe a closed store.
+        self.local_chunk_reader = database.local_chunk_reader();
         self.database.replace(database);
         self.register_physical_history_variant_projections().await?;
         self.register_physical_current_variant_projections().await?;
@@ -873,12 +1325,9 @@ database.finish_persistence(persisted)?;
     {
         let current_schema_version_id = schema.version_id();
         let meta_schema = schema.lower_catalogue_meta_to_groove();
-        let mut meta_database = Database::new_with_storage_layout(
-            meta_schema,
-            storage,
-            StorageLayout::jazz_class_v1(),
-        )
-        .await?;
+        let mut meta_database =
+            Database::new_with_storage_layout(meta_schema, storage, StorageLayout::jazz_class_v1())
+                .await?;
         let mut catalogue_schemas = BTreeMap::new();
         let mut catalogue_lenses = BTreeMap::new();
         let mut staged_lineages_by_id = BTreeMap::new();
@@ -1195,8 +1644,8 @@ database.finish_persistence(persisted)?;
                     &mapping,
                 )?;
                 let applied = meta_database.apply_batch(batch).await?;
-let persisted = applied.persist().await;
-meta_database.finish_persistence(persisted)?;
+                let persisted = applied.persist().await;
+                meta_database.finish_persistence(persisted)?;
             }
             schema_version_aliases.insert(current_schema_version_id, alias);
             physical_mappings.insert(current_schema_version_id, mapping);
@@ -1267,5 +1716,4 @@ meta_database.finish_persistence(persisted)?;
         })?;
         Ok(())
     }
-
 }

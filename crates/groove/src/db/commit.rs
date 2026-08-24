@@ -109,9 +109,56 @@ impl Database {
     /// storage suspends.
     pub async fn apply_batch(&mut self, batch: DatabaseBatch) -> Result<AppliedBatch, Error> {
         self.ensure_not_poisoned()?;
+        let accepted_large_values = batch.accepted_large_values.clone();
         let defer_notifications_until_durable =
             batch.notification_timing == NotificationTiming::AfterPersistence;
         let pending_writes = self.pending_writes_from_batch(batch)?;
+        let mut accepted_staging = Vec::new();
+        for staged_id in &accepted_large_values {
+            let key = staged_large_value_key(*staged_id);
+            let encoded = self
+                .storage
+                .get(LARGE_VALUE_METADATA_CF.to_owned(), key)
+                .await?
+                .ok_or_else(|| {
+                    Error::InvalidLargeValueMetadata(
+                        "accepted staging id is missing or already consumed".to_owned(),
+                    )
+                })?;
+            let staged: crate::large_values::StagedLargeValue = postcard::from_bytes(&encoded)
+                .map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot decode accepted staging root: {error}"
+                    ))
+                })?;
+            accepted_staging.push(staged);
+        }
+        for staged in &accepted_staging {
+            let mut found = false;
+            for write in &pending_writes {
+                let PendingTableWrite::Set {
+                    descriptor, record, ..
+                } = write
+                else {
+                    continue;
+                };
+                for value in descriptor.bind(record).to_values()? {
+                    if value_contains_large_ref(&value, &staged.value_ref) {
+                        found = true;
+                        break;
+                    }
+                }
+                if found {
+                    break;
+                }
+            }
+            if !found {
+                return Err(Error::InvalidLargeValueMetadata(
+                    "accepted staging root is not referenced by this physical-record batch"
+                        .to_owned(),
+                ));
+            }
+        }
         let descriptors = pending_writes
             .iter()
             .map(PendingTableWrite::descriptor)
@@ -130,7 +177,15 @@ impl Database {
             .collect::<Vec<_>>();
         let table_deltas =
             compute_table_deltas(&pending_writes, &stores, self.ivm_runtime.schema()).await?;
-        let staged_operations = pending_writes
+        let mut durable_root_deltas = BTreeMap::<crate::large_values::NodeRef, i64>::new();
+        for table_delta in &table_deltas {
+            for delta in &table_delta.deltas {
+                for value in table_delta.descriptor.bind(&delta.record).to_values()? {
+                    collect_large_root_deltas(&value, delta.weight, &mut durable_root_deltas);
+                }
+            }
+        }
+        let mut staged_operations = pending_writes
             .iter()
             .map(|write| match write {
                 PendingTableWrite::Set { key, .. } => OwnedWriteOperation::Set {
@@ -144,6 +199,163 @@ impl Database {
                 },
             })
             .collect::<Vec<_>>();
+        for staged_id in accepted_large_values {
+            let key = staged_large_value_key(staged_id);
+            if self
+                .storage
+                .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
+                .await?
+                .is_none()
+            {
+                return Err(Error::InvalidLargeValueMetadata(
+                    "accepted staging id is missing or already consumed".to_owned(),
+                ));
+            }
+            staged_operations.push(OwnedWriteOperation::Delete {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key,
+            });
+        }
+        let mut accepted_roots = BTreeMap::<crate::large_values::NodeRef, u64>::new();
+        for staged in &accepted_staging {
+            *accepted_roots
+                .entry(staged.value_ref.root.clone())
+                .or_default() += 1;
+        }
+        let roots = durable_root_deltas
+            .keys()
+            .chain(accepted_roots.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut node_transitions = Vec::<(crate::large_values::NodeRef, i8)>::new();
+        for root in roots {
+            let key = large_value_root_key(&root)?;
+            let mut references = match self
+                .storage
+                .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
+                .await?
+            {
+                Some(encoded) => postcard::from_bytes(&encoded).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot decode root references: {error}"
+                    ))
+                })?,
+                None => LargeValueRootReferences::default(),
+            };
+            let previous_total = references.durable.saturating_add(references.staged);
+            let durable_delta = durable_root_deltas.get(&root).copied().unwrap_or_default();
+            references.durable = if durable_delta >= 0 {
+                references.durable.checked_add(durable_delta as u64)
+            } else {
+                references.durable.checked_sub(durable_delta.unsigned_abs())
+            }
+            .ok_or_else(|| {
+                Error::InvalidLargeValueMetadata("durable root count overflow/underflow".to_owned())
+            })?;
+            references.staged = references
+                .staged
+                .checked_sub(accepted_roots.get(&root).copied().unwrap_or_default())
+                .ok_or_else(|| {
+                    Error::InvalidLargeValueMetadata("staged root count underflow".to_owned())
+                })?;
+            let next_total = references.durable.saturating_add(references.staged);
+            if previous_total == 0 && next_total > 0 && !references.node_active {
+                if self
+                    .storage
+                    .get(
+                        LARGE_VALUE_METADATA_CF.to_owned(),
+                        large_value_node_key(&root)?,
+                    )
+                    .await?
+                    .is_some()
+                {
+                    references.node_active = true;
+                    node_transitions.push((root.clone(), 1));
+                }
+            } else if previous_total > 0 && next_total == 0 && references.node_active {
+                references.node_active = false;
+                node_transitions.push((root.clone(), -1));
+            }
+            staged_operations.push(OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key,
+                value: postcard::to_allocvec(&references).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot encode root references: {error}"
+                    ))
+                })?,
+            });
+        }
+        let mut node_updates =
+            BTreeMap::<crate::large_values::NodeRef, LargeValueNodeReferences>::new();
+        let mut pending = node_transitions;
+        while let Some((node_ref, delta)) = pending.pop() {
+            let mut metadata = if let Some(metadata) = node_updates.remove(&node_ref) {
+                metadata
+            } else {
+                let encoded = self
+                    .storage
+                    .get(
+                        LARGE_VALUE_METADATA_CF.to_owned(),
+                        large_value_node_key(&node_ref)?,
+                    )
+                    .await?
+                    .ok_or_else(|| {
+                        Error::InvalidLargeValueMetadata(
+                            "active node reference metadata is missing".to_owned(),
+                        )
+                    })?;
+                postcard::from_bytes(&encoded).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot decode node references: {error}"
+                    ))
+                })?
+            };
+            let crossed_zero = if delta > 0 {
+                let crossed = metadata.references == 0;
+                metadata.references = metadata.references.checked_add(1).ok_or_else(|| {
+                    Error::InvalidLargeValueMetadata("node reference count overflow".to_owned())
+                })?;
+                crossed
+            } else {
+                metadata.references = metadata.references.checked_sub(1).ok_or_else(|| {
+                    Error::InvalidLargeValueMetadata("node reference count underflow".to_owned())
+                })?;
+                metadata.references == 0
+            };
+            if crossed_zero {
+                pending.extend(
+                    metadata
+                        .children
+                        .iter()
+                        .cloned()
+                        .map(|child| (child, delta)),
+                );
+            }
+            node_updates.insert(node_ref, metadata);
+        }
+        for (node_ref, metadata) in node_updates {
+            staged_operations.push(OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key: large_value_node_key(&node_ref)?,
+                value: postcard::to_allocvec(&metadata).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot encode node references: {error}"
+                    ))
+                })?,
+            });
+            if metadata.references == 0 {
+                staged_operations.push(OwnedWriteOperation::Set {
+                    cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                    key: large_value_reclaim_key(&node_ref)?,
+                    value: postcard::to_allocvec(&node_ref).map_err(|error| {
+                        Error::InvalidLargeValueMetadata(format!(
+                            "cannot encode reclaim entry: {error}"
+                        ))
+                    })?,
+                });
+            }
+        }
         let resident_overlay = Rc::new(StagedWriteOverlay::new_owned(
             Rc::clone(&self.storage),
             Rc::clone(&self.resident_writes),
@@ -387,5 +599,59 @@ impl Database {
         } else {
             Ok(())
         }
+    }
+}
+
+fn value_contains_large_ref(value: &Value, expected: &crate::large_values::LargeValueRef) -> bool {
+    match value {
+        Value::Large(value_ref) => value_ref == expected,
+        Value::Tuple(values) | Value::Array(values) => values
+            .iter()
+            .any(|value| value_contains_large_ref(value, expected)),
+        Value::Nullable(Some(value)) => value_contains_large_ref(value, expected),
+        Value::Record(record) => record.to_values().is_ok_and(|values| {
+            values
+                .iter()
+                .any(|value| value_contains_large_ref(value, expected))
+        }),
+        Value::Enum(value) => value.record().to_values().is_ok_and(|values| {
+            values
+                .iter()
+                .any(|value| value_contains_large_ref(value, expected))
+        }),
+        _ => false,
+    }
+}
+
+fn collect_large_root_deltas(
+    value: &Value,
+    weight: i64,
+    deltas: &mut BTreeMap<crate::large_values::NodeRef, i64>,
+) {
+    match value {
+        Value::Large(value_ref) => {
+            *deltas.entry(value_ref.root.clone()).or_default() += weight;
+        }
+        Value::Tuple(values) | Value::Array(values) => {
+            for value in values {
+                collect_large_root_deltas(value, weight, deltas);
+            }
+        }
+        Value::Nullable(Some(value)) => collect_large_root_deltas(value, weight, deltas),
+        Value::Record(record) => {
+            if let Ok(values) = record.to_values() {
+                for value in values {
+                    collect_large_root_deltas(&value, weight, deltas);
+                }
+            }
+        }
+        Value::Enum(value) => {
+            if let Ok(values) = value.record().to_values() {
+                for value in values {
+                    collect_large_root_deltas(&value, weight, deltas);
+                }
+            }
+        }
+        _ => {}
     }
 }

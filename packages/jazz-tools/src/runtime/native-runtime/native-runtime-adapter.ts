@@ -18,6 +18,9 @@ import type {
   OpenBatchId,
   PermissionAdvice,
   Runtime,
+  StreamingInsertResult,
+  StreamingMutationKind,
+  StreamingValueSource,
   TransactionKind,
 } from "../client.js";
 import type { Session } from "../context.js";
@@ -74,6 +77,7 @@ const SERVER_PUMP_DEBOUNCE_MS = 16;
 const MAX_CORE_TICKS_PER_TURN = 4;
 
 type ReadAuthorizationHost = "client-local" | "trusted-serving";
+type CoreTickWake = "immediate" | "deferred" | `after:${number}`;
 
 type NativeDbConstructor = {
   openMemory(schema: Uint8Array, config: Uint8Array): NativeDb;
@@ -137,6 +141,18 @@ type NativeDb = {
     cells: Uint8Array,
     updatedAtMs?: number | null,
   ): Write;
+  beginStreamingMutationEncoded?(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    column: string,
+    kind: "Text" | "Json" | "Bytea",
+    mutation?: StreamingMutationKind,
+    author?: Uint8Array,
+    updatedAtMs?: number,
+    head?: unknown,
+    base?: unknown,
+  ): NativeStreamingMutation;
   insertWithIdEncodedInBranch?(
     table: string,
     rowId: Uint8Array,
@@ -265,6 +281,46 @@ type NativeDb = {
   ): void;
   onMutationError(callback: (event: MutationErrorEvent) => void): void;
   setNonDurableClient?(): void;
+  setLargeValueStagingPolicy?(
+    incomingBytesPerWindow: number,
+    windowMs: number,
+    maxAgeMs?: number | null,
+  ): void;
+  evictExpiredStagedLargeValues?(): number | Promise<number>;
+  readValueRange?(
+    table: string,
+    rowId: Uint8Array,
+    column: string,
+    start: number,
+    end: number,
+  ): Uint8Array | Promise<Uint8Array>;
+  readTextUtf16Range?(
+    table: string,
+    rowId: Uint8Array,
+    column: string,
+    start: number,
+    end: number,
+  ): string | Promise<string>;
+  readJsonPointer?(
+    table: string,
+    rowId: Uint8Array,
+    column: string,
+    pointer: string,
+  ): unknown | Promise<unknown>;
+  appendValue?(
+    table: string,
+    rowId: Uint8Array,
+    column: string,
+    bytes: Uint8Array,
+  ): Write | Promise<Write>;
+  spliceValue?(
+    table: string,
+    rowId: Uint8Array,
+    column: string,
+    offset: number,
+    deleteLength: number,
+    insert: Uint8Array,
+  ): Write | Promise<Write>;
   connectUpstream(): Transport;
   connectUpstreamWithSession?(
     protocolVersion: number,
@@ -278,6 +334,12 @@ type NativeDb = {
   tick(): void | Promise<void>;
   close?(): void;
   free?(): void;
+};
+
+type NativeStreamingMutation = {
+  push(chunk: Uint8Array): void | Promise<void>;
+  finish(): Write | Promise<Write>;
+  abort(): boolean | Promise<boolean>;
 };
 
 type NativePermissionAdviceRequest = {
@@ -358,6 +420,9 @@ export type Transport = {
   sendWireFrames?(frames: readonly Uint8Array[]): void;
   setOutboundScheduler?(callback: () => void): void;
   clearOutboundScheduler?(): void;
+  routeAuxiliaryWireFrame?(frame: Uint8Array): unknown | Promise<unknown>;
+  recvAuxiliaryWireFrames?(): unknown[];
+  auxiliaryOutboundReady?(): boolean | Promise<void>;
   tick(): number | Promise<number>;
   updateAuthenticatedClaims?(claims: Record<string, unknown>): void | Promise<void>;
   free?(): void;
@@ -509,6 +574,8 @@ export class NativeRuntimeAdapter implements Runtime {
   private serverEndpointUrl: string | null = null;
   private readonly queuedServerFrames: Uint8Array[] = [];
   private readonly pendingInboundServerFrames: Uint8Array[] = [];
+  private serverInboundRouting: Promise<void> = Promise.resolve();
+  private serverInboundProcessed = false;
   private readonly peerTransportWorkListeners = new Set<() => void>();
   private peerTransportActivityEpoch = 0;
   private coreTickScheduled = false;
@@ -599,8 +666,12 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     this.db.setTickScheduler(((first: Error | string | null, second?: string) => {
       const urgency = typeof first === "string" ? first : second;
-      if (urgency === "immediate" || urgency === "deferred") {
-        this.scheduleCoreWake(urgency);
+      if (
+        urgency === "immediate" ||
+        urgency === "deferred" ||
+        (typeof urgency === "string" && urgency.startsWith("after:"))
+      ) {
+        this.scheduleCoreWake(urgency as CoreTickWake);
       }
     }) as (error: Error | null, urgency: string) => void);
   }
@@ -649,6 +720,119 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     this.db.setNonDurableClient();
     this.nonDurableClient = true;
+  }
+
+  /** Configure Jazz-owned upload rate and unpublished-tree expiry policy. */
+  setLargeValueStagingPolicy(
+    incomingBytesPerWindow: number,
+    windowMs: number,
+    maxAgeMs?: number | null,
+  ): void {
+    if (this !== this.ownerRuntime) {
+      return this.ownerRuntime.setLargeValueStagingPolicy(
+        incomingBytesPerWindow,
+        windowMs,
+        maxAgeMs,
+      );
+    }
+    if (!this.db.setLargeValueStagingPolicy) {
+      throw new Error("Native runtime does not expose large-value staging policy");
+    }
+    this.db.setLargeValueStagingPolicy(incomingBytesPerWindow, windowMs, maxAgeMs);
+  }
+
+  /** Run one idempotent expiry pass from an environment-owned timer. */
+  async evictExpiredStagedLargeValues(): Promise<number> {
+    if (this !== this.ownerRuntime) {
+      return await this.ownerRuntime.evictExpiredStagedLargeValues();
+    }
+    if (!this.db.evictExpiredStagedLargeValues) {
+      throw new Error("Native runtime does not expose large-value staging maintenance");
+    }
+    return await this.db.evictExpiredStagedLargeValues();
+  }
+
+  async readValueRange(
+    table: string,
+    objectId: string,
+    column: string,
+    start: number,
+    end: number,
+  ): Promise<Uint8Array> {
+    if (this !== this.ownerRuntime) {
+      return await this.ownerRuntime.readValueRange(table, objectId, column, start, end);
+    }
+    if (!this.db.readValueRange) throw new Error("Native runtime does not expose value ranges");
+    return await this.db.readValueRange(table, parseUuid(objectId), column, start, end);
+  }
+
+  async readTextUtf16Range(
+    table: string,
+    objectId: string,
+    column: string,
+    start: number,
+    end: number,
+  ): Promise<string> {
+    if (this !== this.ownerRuntime) {
+      return await this.ownerRuntime.readTextUtf16Range(table, objectId, column, start, end);
+    }
+    if (!this.db.readTextUtf16Range) {
+      throw new Error("Native runtime does not expose UTF-16 value ranges");
+    }
+    return await this.db.readTextUtf16Range(table, parseUuid(objectId), column, start, end);
+  }
+
+  async readJsonPointer(
+    table: string,
+    objectId: string,
+    column: string,
+    pointer: string,
+  ): Promise<unknown> {
+    if (this !== this.ownerRuntime) {
+      return await this.ownerRuntime.readJsonPointer(table, objectId, column, pointer);
+    }
+    if (!this.db.readJsonPointer) throw new Error("Native runtime does not expose JSON pointers");
+    const value = await this.db.readJsonPointer(table, parseUuid(objectId), column, pointer);
+    return typeof value === "string" ? JSON.parse(value) : value;
+  }
+
+  async appendValue(
+    table: string,
+    objectId: string,
+    column: string,
+    bytes: Uint8Array,
+  ): Promise<MutationResult> {
+    if (this !== this.ownerRuntime) {
+      return await this.ownerRuntime.appendValue(table, objectId, column, bytes);
+    }
+    if (!this.db.appendValue) throw new Error("Native runtime does not expose value append");
+    return this.finishMutation(
+      await this.db.appendValue(table, parseUuid(objectId), column, bytes),
+    );
+  }
+
+  async spliceValue(
+    table: string,
+    objectId: string,
+    column: string,
+    offset: number,
+    deleteLength: number,
+    insert: Uint8Array,
+  ): Promise<MutationResult> {
+    if (this !== this.ownerRuntime) {
+      return await this.ownerRuntime.spliceValue(
+        table,
+        objectId,
+        column,
+        offset,
+        deleteLength,
+        insert,
+      );
+    }
+    if (!this.db.spliceValue) throw new Error("Native runtime does not expose value splice");
+    return this.finishMutation(
+      await this.db.spliceValue(table, parseUuid(objectId), column, offset, deleteLength, insert),
+    );
   }
 
   acceptPeer(claims: Record<string, unknown> = {}): Transport {
@@ -808,6 +992,93 @@ export class NativeRuntimeAdapter implements Runtime {
           : this.db.insertWithIdEncoded(table, rowId, cells, updatedAtMs),
     );
     return this.finishInsert(table, rowId, values, write);
+  }
+
+  async streamingMutation(
+    mutation: StreamingMutationKind,
+    table: string,
+    values: InsertValues,
+    column: string,
+    source: StreamingValueSource,
+    writeContext?: string | null,
+    objectId?: string | null,
+  ): Promise<StreamingInsertResult> {
+    const begin = this.db.beginStreamingMutationEncoded;
+    if (!begin) throw new Error("Native runtime does not expose streaming mutations");
+    const operation =
+      mutation === "insert" ? "Insert" : mutation === "update" ? "Update" : "Upsert";
+    if (this.currentTx(writeContext, operation)) {
+      throw new Error("Streaming mutations are not supported inside a transaction");
+    }
+    const writeSession = sessionFromWriteContext(writeContext);
+    this.applySessionClaims(writeSession);
+    const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const branchView = branchViewFromWriteContext(writeContext);
+    const updatedAtMs = effectiveUpdatedAtMs(writeContext);
+
+    const definition = this.table(table);
+    const descriptor = definition.columns.find((candidate) => candidate.name === column);
+    const kind = descriptor?.column_type.type;
+    if (kind !== "Text" && kind !== "Json" && kind !== "Bytea") {
+      throw new Error(
+        `Streaming insert requires a Text, Json, or Bytea column: ${table}.${column}`,
+      );
+    }
+    const rowId = objectId ? parseUuid(objectId) : crypto.getRandomValues(new Uint8Array(16));
+    const cells =
+      mutation === "insert"
+        ? encodeCellsForStreamingRow(definition, values, column, table)
+        : encodeCellsForStreamingPatch(definition, values, column);
+    const upload = begin.call(
+      this.db,
+      table,
+      rowId,
+      cells,
+      column,
+      kind,
+      mutation,
+      writeIdentity,
+      updatedAtMs ?? undefined,
+      branchView?.head,
+      branchView?.base,
+    );
+    const encoder = new TextEncoder();
+    const pushBounded = async (bytes: Uint8Array): Promise<void> => {
+      const hostWindowBytes = 64 * 1024;
+      for (let offset = 0; offset < bytes.byteLength; offset += hostWindowBytes) {
+        await upload.push(bytes.subarray(offset, offset + hostWindowBytes));
+      }
+    };
+    let pendingHighSurrogate = "";
+    try {
+      for await (const chunk of streamingChunks(source)) {
+        if (typeof chunk === "string") {
+          if (kind === "Bytea") throw new Error("Bytea streams require Uint8Array chunks");
+          let text = pendingHighSurrogate + chunk;
+          pendingHighSurrogate = "";
+          const trailing = text.charCodeAt(text.length - 1);
+          if (trailing >= 0xd800 && trailing <= 0xdbff) {
+            pendingHighSurrogate = text.slice(-1);
+            text = text.slice(0, -1);
+          }
+          if (text.length > 0) await pushBounded(encoder.encode(text));
+        } else if (chunk instanceof Uint8Array) {
+          if (pendingHighSurrogate) {
+            await pushBounded(encoder.encode(pendingHighSurrogate));
+            pendingHighSurrogate = "";
+          }
+          await pushBounded(chunk);
+        } else {
+          throw new Error("Streaming insert chunks must be strings or Uint8Array values");
+        }
+      }
+      if (pendingHighSurrogate) await pushBounded(encoder.encode(pendingHighSurrogate));
+      const receipt = this.finishMutation(await upload.finish());
+      return { id: formatUuid(rowId), ...receipt };
+    } catch (error) {
+      await upload.abort();
+      throw error;
+    }
   }
 
   restore(
@@ -1426,6 +1697,17 @@ export class NativeRuntimeAdapter implements Runtime {
         this.pendingInboundServerFrames.push(frame);
         this.notifyServerTransportWork();
         this.scheduleServerPump();
+        // A normal idle connection lets the debounced pump coalesce frames.
+        // If the pump is already suspended in a core tick waiting for a chunk,
+        // route the frame independently so the response can wake that tick.
+        if (this.serverPumpRunning) {
+          queueMicrotask(() => {
+            if (!this.serverPumpRunning || this.pendingInboundServerFrames.length === 0) return;
+            void this.routePendingInboundServerFrames().catch((error) =>
+              this.handleServerTransportError(error, generation),
+            );
+          });
+        }
       },
       onError: (error) => {
         this.handleServerTransportError(error, generation);
@@ -1446,6 +1728,7 @@ export class NativeRuntimeAdapter implements Runtime {
         throw contextualError("connecting the negotiated upstream transport", error);
       }
       this.serverTransport = transport;
+      void this.watchAuxiliaryOutbound(transport, carrier, generation);
       this.flushQueuedServerFrames(carrier);
       await this.pumpServerTransport();
       this.pumpSubscriptions();
@@ -1962,8 +2245,17 @@ export class NativeRuntimeAdapter implements Runtime {
     });
   }
 
-  private scheduleCoreWake(urgency: "immediate" | "deferred"): void {
+  private scheduleCoreWake(urgency: CoreTickWake): void {
     if (this.closed) return;
+    if (urgency.startsWith("after:")) {
+      const delayMs = Number(urgency.slice("after:".length));
+      if (!Number.isSafeInteger(delayMs) || delayMs < 0) return;
+      // A protocol admission deadline is not a deferred microtask. Keep the
+      // host event loop live and only wake the thread-affine core after the
+      // promised window has elapsed.
+      setTimeout(() => this.scheduleCoreWake("immediate"), delayMs);
+      return;
+    }
     this.notifyPeerTransportWork();
     if (urgency === "immediate") {
       this.scheduleCoreTick();
@@ -2387,15 +2679,26 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     this.serverPumpRunning = true;
     try {
-      let processedInbound = this.drainPendingInboundServerFrames(transport);
+      let processedInbound =
+        this.pendingInboundServerFrames.length > 0
+          ? await this.routePendingInboundServerFrames()
+          : false;
+      processedInbound ||= this.serverInboundProcessed;
+      this.serverInboundProcessed = false;
       for (let round = 0; round < 32; round += 1) {
         await this.runCoreTick();
-        if (processedInbound) {
+        this.flushAuxiliaryOutbound(transport, carrier, generation);
+        if (processedInbound || this.serverInboundProcessed) {
           // Frame arrival wakes waiters promptly, but the observable write or
           // coverage state changes only after the evaluator consumes it.
           // Publish that second edge so waiters re-read settled state.
           processedInbound = false;
+          this.serverInboundProcessed = false;
           this.notifyServerTransportWork();
+          // A frame can be routed by the auxiliary path while the waiter is
+          // still consuming the arrival edge. Publish once more after those
+          // promise continuations have had a chance to re-arm.
+          queueMicrotask(() => this.notifyServerTransportWork());
         }
         if (
           this.closed ||
@@ -2424,15 +2727,66 @@ export class NativeRuntimeAdapter implements Runtime {
     }
   }
 
-  private drainPendingInboundServerFrames(transport: Transport): boolean {
-    if (this.pendingInboundServerFrames.length === 0) return false;
-    const frames = this.pendingInboundServerFrames.splice(0);
-    if (transport.sendWireFrames) {
-      transport.sendWireFrames(frames);
-      return true;
+  private async routePendingInboundServerFrames(): Promise<boolean> {
+    let processedInbound = false;
+    const operation = this.serverInboundRouting.then(async () => {
+      const transport = this.serverTransport;
+      if (!transport || this.pendingInboundServerFrames.length === 0) return;
+      const frames = this.pendingInboundServerFrames.splice(0);
+      processedInbound = true;
+      this.serverInboundProcessed = true;
+      const canonical: Uint8Array[] = [];
+      for (const frame of frames) {
+        const routed = transport.routeAuxiliaryWireFrame
+          ? await transport.routeAuxiliaryWireFrame(frame)
+          : frame;
+        if (routed != null) canonical.push(normalizeTransportFrame(routed));
+      }
+      if (canonical.length > 0) {
+        if (transport.sendWireFrames) transport.sendWireFrames(canonical);
+        else for (const frame of canonical) transport.sendWireFrame(frame);
+      }
+      const carrier = this.serverCarrier;
+      if (carrier) {
+        this.flushAuxiliaryOutbound(transport, carrier, this.serverConnectionGeneration);
+      }
+    });
+    this.serverInboundRouting = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    await operation;
+    return processedInbound;
+  }
+
+  private flushAuxiliaryOutbound(
+    transport: Transport,
+    carrier: WebSocketCarrier,
+    generation: number,
+  ): void {
+    const receive = transport.recvAuxiliaryWireFrames;
+    if (!receive) return;
+    const frames = normalizeTransportFrames(receive.call(transport));
+    if (frames.length > 0) this.sendServerFrames(frames, carrier, generation);
+  }
+
+  private async watchAuxiliaryOutbound(
+    transport: Transport,
+    carrier: WebSocketCarrier,
+    generation: number,
+  ): Promise<void> {
+    while (
+      !this.closed &&
+      transport === this.serverTransport &&
+      carrier === this.serverCarrier &&
+      generation === this.serverConnectionGeneration
+    ) {
+      const readiness = transport.auxiliaryOutboundReady?.();
+      if (!readiness || typeof readiness === "boolean") return;
+      await readiness;
+      if (transport !== this.serverTransport || carrier !== this.serverCarrier) return;
+      this.flushAuxiliaryOutbound(transport, carrier, generation);
     }
-    for (const frame of frames) transport.sendWireFrame(frame);
-    return true;
   }
 
   private sendServerFrames(
@@ -2609,6 +2963,12 @@ function normalizeTransportFrames(frames: unknown[]): Uint8Array[] {
   );
 }
 
+function normalizeTransportFrame(frame: unknown): Uint8Array {
+  const normalized = normalizeTransportFrames([frame])[0];
+  if (!normalized) throw new Error("native transport returned a non-byte wire frame");
+  return normalized;
+}
+
 function recordWrite(write: Write, writes: Map<string, Write>): BatchId {
   const id = write.batchId as BatchId;
   writes.set(id, write);
@@ -2670,13 +3030,17 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
 
 function updatedAtMsFromWriteContext(writeContext?: string | null): number | undefined {
   if (!writeContext) return undefined;
+  let parsed: { updated_at?: unknown };
   try {
-    const parsed = JSON.parse(writeContext) as { updated_at?: unknown };
-    if (typeof parsed.updated_at !== "number") return undefined;
-    return Math.trunc(parsed.updated_at / 1_000);
+    parsed = JSON.parse(writeContext) as { updated_at?: unknown };
   } catch {
     return undefined;
   }
+  if (typeof parsed.updated_at !== "number") return undefined;
+  if (!Number.isSafeInteger(parsed.updated_at) || parsed.updated_at < 0) {
+    throw new Error("updatedAt must be a nonnegative safe integer");
+  }
+  return Math.trunc(parsed.updated_at / 1_000);
 }
 
 function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
@@ -4047,6 +4411,60 @@ export function encodeCellsForRow(
   return encodeCells(columns, (column) => row[column.name], true);
 }
 
+function encodeCellsForStreamingRow(
+  definition: { columns: ColumnDescriptor[]; policies?: TablePolicies },
+  row: InsertValues,
+  streamedColumn: string,
+  table?: string,
+): Uint8Array {
+  assertRequiredRowColumnsPresent(
+    definition.columns.filter((column) => column.name !== streamedColumn),
+    row,
+    table,
+  );
+  const columns = definition.columns.filter(
+    (column) =>
+      column.name !== streamedColumn &&
+      (Object.hasOwn(row, column.name) ||
+        (column.column_type.type === "Array" && column.default == null)),
+  );
+  return encodeCells(columns, (column) => row[column.name], true);
+}
+
+function encodeCellsForStreamingPatch(
+  definition: { columns: ColumnDescriptor[]; policies?: TablePolicies },
+  row: InsertValues,
+  streamedColumn: string,
+): Uint8Array {
+  const columns = definition.columns.filter(
+    (column) => column.name !== streamedColumn && Object.hasOwn(row, column.name),
+  );
+  return encodeCells(columns, (column) => row[column.name], false);
+}
+
+async function* streamingChunks(source: StreamingValueSource): AsyncGenerator<Uint8Array | string> {
+  const readable = source as ReadableStream<Uint8Array | string>;
+  if (typeof readable.getReader !== "function") {
+    yield* source as AsyncIterable<Uint8Array | string>;
+    return;
+  }
+  const reader = readable.getReader();
+  let completed = false;
+  try {
+    while (true) {
+      const result = await reader.read();
+      if (result.done) {
+        completed = true;
+        return;
+      }
+      yield result.value;
+    }
+  } finally {
+    if (!completed) await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+}
+
 export function encodeCellsForPatch(
   definition: { columns: ColumnDescriptor[]; policies?: TablePolicies },
   patch: Record<string, Value>,
@@ -4551,13 +4969,15 @@ function decodeBytes(
     case "Text":
     case "Json":
     case "Enum":
-      return { type: "Text", value: textDecoder.decode(bytes) };
+      if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
+      return { type: "Text", value: textDecoder.decode(bytes.subarray(1)) };
     case "EnumPayload":
       return decodePayloadEnumBytes(type, bytes, storageType, nestedRowCarrier);
     case "Uuid":
       return { type: "Uuid", value: formatUuid(bytes) };
     case "Bytea":
-      return { type: "Bytea", value: bytes.slice() };
+      if (bytes[0] !== 0) throw new Error("indirect scalar crossed a logical binding boundary");
+      return { type: "Bytea", value: bytes.subarray(1).slice() };
     case "Array":
       return {
         type: "Array",
@@ -5001,7 +5421,29 @@ function plainResetChunkCanStayPacked(
   const sourceRowKeysOnly = chunk.delta.addedOccurrenceKeys.every(
     (key) => key.length === 17 && key[0] === 1,
   );
-  const canStayPacked = reset && noUpdated && noRemoved && identityProjection && sourceRowKeysOnly;
+  // Packed resets bypass `rowsFromBatches`, so their raw records may only go
+  // straight to the public delta decoder when every producer descriptor is
+  // already the exact public logical frame. Relation queries can return a
+  // different table (for example a hop target) or a CurrentRow carrier; both
+  // need the normal decode/re-encode bridge before publication.
+  const directPublicFrames = chunk.delta.added.every((batch) => {
+    const columns = subscription.outputColumns
+      ? batch.table === subscription.outputColumns.rootTable
+        ? subscription.outputColumns.rootColumns
+        : undefined
+      : schema[batch.table]?.columns;
+    return (
+      columns !== undefined &&
+      nativeDescriptorMatchesColumns(batch.descriptor, logicalStorageColumns(columns))
+    );
+  });
+  const canStayPacked =
+    reset &&
+    noUpdated &&
+    noRemoved &&
+    identityProjection &&
+    sourceRowKeysOnly &&
+    directPublicFrames;
   return canStayPacked;
 }
 

@@ -170,8 +170,35 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         Vec::<String>::new(),
         Vec::<String>::new(),
     );
+    let large_value = groove::large_values::prepare(
+        groove::large_values::LargeValueKind::Bytes,
+        &vec![0x5a; groove::large_values::INLINE_VALUE_MAX_BYTES + 1],
+        |hash| groove::large_values::Locator(hash.0[..16].to_vec()),
+    )
+    .expect("large-value wire fixture prepares");
+    let root_chunk = large_value
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == large_value.value_ref.root)
+        .expect("prepared fixture has its root")
+        .clone();
 
     vec![
+        (
+            "chunk_upload_start_root_descriptor",
+            "ChunkUploadStart",
+            SyncMessage::ChunkUploadStart(jazz::protocol::ChunkUploadStart {
+                value_ref: large_value.value_ref.clone(),
+            }),
+        ),
+        (
+            "chunk_upload_nodes_requested_root",
+            "ChunkUploadNodes",
+            SyncMessage::ChunkUploadNodes(jazz::protocol::ChunkUploadNodes {
+                value_ref: large_value.value_ref,
+                chunks: vec![root_chunk],
+            }),
+        ),
         (
             "session_claims_role_editor",
             "SessionClaims",
@@ -517,7 +544,7 @@ fn fixture_manifest() -> Manifest {
         .collect();
 
     Manifest {
-        fixture_set: "jazz-wire-message-frames-v11",
+        fixture_set: "jazz-wire-message-frames-v12",
         codec: "postcard WireFrame::Message(WireEnvelope { payload: encode_sync_message(..) })",
         protocol_version: WIRE_PROTOCOL_VERSION,
         features: FEATURE_SYNC_MESSAGE_PAYLOAD,

@@ -348,6 +348,57 @@ pub(super) fn duplex_with_admitted_session_context(
     )
 }
 
+/// Authenticated in-memory transport pair with a read-only client-to-server
+/// tap. This keeps reconnect tests at the real session-context boundary while
+/// exposing only the wire frames they need to assert.
+pub(super) fn duplex_with_admitted_session_context_and_client_outbound_tap(
+    identity: AuthorId,
+    client_node: NodeUuid,
+    client_epoch: u64,
+    server_node: NodeUuid,
+    server_epoch: u64,
+) -> (
+    Box<dyn Transport>,
+    Box<dyn Transport>,
+    Rc<RefCell<std::collections::VecDeque<SyncMessage>>>,
+) {
+    use std::collections::VecDeque;
+    let client_to_server = Rc::new(RefCell::new(VecDeque::new()));
+    let server_to_client = Rc::new(RefCell::new(VecDeque::new()));
+    let features = crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS;
+    let client = ConnectionSessionContext {
+        local: crate::wire::WireAuthorityEndpoint {
+            node: client_node,
+            epoch: client_epoch,
+        },
+        remote: crate::wire::WireAuthorityEndpoint {
+            node: server_node,
+            epoch: server_epoch,
+        },
+        link_identity: identity,
+        negotiated_features: features,
+    };
+    let server = ConnectionSessionContext {
+        local: client.remote,
+        remote: client.local,
+        link_identity: identity,
+        negotiated_features: features,
+    };
+    (
+        Box::new(DuplexTransport {
+            outbound: Rc::clone(&client_to_server),
+            inbound: Rc::clone(&server_to_client),
+            session_context: Some(client),
+        }),
+        Box::new(DuplexTransport {
+            outbound: server_to_client,
+            inbound: Rc::clone(&client_to_server),
+            session_context: Some(server),
+        }),
+        client_to_server,
+    )
+}
+
 pub(super) fn block_on<F: Future>(future: F) -> F::Output {
     let waker = Waker::noop();
     let mut cx = Context::from_waker(waker);
@@ -692,17 +743,26 @@ where
 #[derive(Default)]
 pub(super) struct RecordingScheduler {
     calls: RefCell<Vec<TickUrgency>>,
+    delayed_calls_ms: RefCell<Vec<u64>>,
 }
 
 impl TickScheduler for RecordingScheduler {
     fn schedule_tick(&self, urgency: TickUrgency) {
         self.calls.borrow_mut().push(urgency);
     }
+
+    fn schedule_tick_after(&self, delay_ms: u64) {
+        self.delayed_calls_ms.borrow_mut().push(delay_ms);
+    }
 }
 
 impl RecordingScheduler {
     pub(super) fn take(&self) -> Vec<TickUrgency> {
         std::mem::take(&mut self.calls.borrow_mut())
+    }
+
+    pub(super) fn take_delays(&self) -> Vec<u64> {
+        std::mem::take(&mut self.delayed_calls_ms.borrow_mut())
     }
 }
 

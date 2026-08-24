@@ -2,6 +2,548 @@
 
 use super::*;
 
+#[test]
+fn large_write_pushes_staging_before_syncing_its_referencing_row() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xc1; 16]);
+    let core = open_core(0xc0, AuthorId::SYSTEM, &schema);
+    let writer = open_db(0xc1, author, &schema);
+    let (writer_transport, core_transport) = duplex();
+    let _upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
+    let _subscriber = core.accept_subscriber(core_transport, author);
+    let title = "push-before-row/".repeat(8_000);
+    writer
+        .insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String(title.clone())),
+                ("done".to_owned(), Value::Bool(false)),
+                ("owner".to_owned(), Value::Uuid(author.0)),
+            ]),
+        )
+        .unwrap();
+
+    for _ in 0..16 {
+        writer.tick().unwrap();
+        core.tick().unwrap();
+        if !core.read(&core.table("todos")).unwrap().is_empty() {
+            break;
+        }
+    }
+    let rows = core.read(&core.table("todos")).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].cell_at(0), Some(Value::String(title)));
+}
+
+/// Internal topology canary: exact push-before-row ordering on both relay legs
+/// and pull forwarding after edge chunk eviction are protocol/runtime
+/// properties that are not observable through the public client API alone.
+/// The accepted write and reconstructed value are still asserted through that
+/// API. Every node is opened with its own storage directory.
+#[test]
+fn large_value_pushes_through_edge_then_pulls_from_core_after_edge_chunk_eviction() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xc4; 16]);
+    let core = open_core(0xc5, AuthorId::SYSTEM, &schema);
+    let upload_edge = open_db(0xc6, AuthorId::SYSTEM, &schema);
+    let writer = open_db(0xc7, author, &schema);
+
+    let (upload_edge_transport, core_upload_transport, upload_edge_to_core) =
+        duplex_with_client_outbound_tap();
+    let _upload_edge_upstream =
+        crate::db::block_on(upload_edge.connect_upstream(upload_edge_transport));
+    let _core_upload_edge = core.accept_subscriber_with_trust(
+        core_upload_transport,
+        AuthorId::SYSTEM,
+        CommitUnitTrust::TrustedBackend,
+    );
+    let (writer_transport, upload_edge_client_transport, writer_to_upload_edge) =
+        duplex_with_client_outbound_tap();
+    let _writer_upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
+    let _upload_edge_writer = upload_edge.accept_subscriber(upload_edge_client_transport, author);
+
+    let title = "multi-hop-large-value/".repeat(8_000);
+    let write = writer
+        .insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String(title.clone())),
+                ("done".to_owned(), Value::Bool(false)),
+                ("owner".to_owned(), Value::Uuid(author.0)),
+            ]),
+        )
+        .unwrap();
+
+    let mut writer_messages = Vec::new();
+    let mut upload_edge_messages = Vec::new();
+    for _ in 0..64 {
+        writer.tick().unwrap();
+        writer_messages.extend(writer_to_upload_edge.borrow().iter().cloned());
+        upload_edge.tick().unwrap();
+        upload_edge_messages.extend(upload_edge_to_core.borrow().iter().cloned());
+        core.tick().unwrap();
+        upload_edge.tick().unwrap();
+        writer.tick().unwrap();
+        if writer.write_state(write.tx_id).unwrap().durability == DurabilityTier::Global {
+            break;
+        }
+    }
+    assert_eq!(
+        writer.write_state(write.tx_id).unwrap().durability,
+        DurabilityTier::Global
+    );
+    assert_eq!(
+        core.read(&core.table("todos")).unwrap()[0].cell_at(0),
+        Some(Value::String(title.clone()))
+    );
+
+    for (leg, messages) in [
+        ("writer-to-upload-edge", writer_messages),
+        ("upload-edge-to-core", upload_edge_messages),
+    ] {
+        let staged = messages
+            .iter()
+            .rposition(|message| matches!(message, SyncMessage::ChunkUploadNodes(_)))
+            .unwrap_or_else(|| panic!("{leg} sends receiver-requested chunk nodes"));
+        let row = messages
+            .iter()
+            .position(|message| {
+                matches!(message, SyncMessage::CommitUnit { tx, .. } if tx.tx_id == write.tx_id)
+            })
+            .unwrap_or_else(|| panic!("{leg} sends the referencing row"));
+        assert!(staged < row, "{leg} stages the chunks before the row");
+    }
+    assert_eq!(
+        prepared_read(&upload_edge, &upload_edge.table("todos")).len(),
+        1,
+        "the upload edge retained the accepted row"
+    );
+
+    // Retain the accepted row and its disclosed locator, but replace only the
+    // edge's Groove chunk backend with an empty independent store. Its only
+    // route to the value bytes is now to forward this edge-local access to Core.
+    upload_edge
+        .node
+        .node
+        .borrow_mut()
+        .set_chunk_storage(Rc::new(groove::chunks::MemoryChunkStorage::new()));
+    let query = upload_edge.table("todos");
+    let mut subscription = prepared_subscribe(
+        &upload_edge,
+        &query,
+        ReadOpts {
+            tier: DurabilityTier::Local,
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        },
+    )
+    .unwrap();
+    let mut received = None;
+    let mut snapshot = RelationSnapshot::default();
+    let mut pull_messages = Vec::new();
+    for _ in 0..128 {
+        upload_edge.tick().unwrap();
+        pull_messages.extend(upload_edge_to_core.borrow().iter().cloned());
+        core.tick().unwrap();
+        upload_edge.tick().unwrap();
+        while let Some(event) = subscription.try_next_event() {
+            apply_subscription_event(&mut snapshot, event);
+        }
+        received = snapshot.rows.first().and_then(|row| row.cell_at(0));
+        if received == Some(Value::String(title.clone())) {
+            break;
+        }
+    }
+    assert_eq!(
+        snapshot.rows.len(),
+        1,
+        "the empty edge delivers the referencing row",
+    );
+    assert!(
+        pull_messages
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ChunkRequestBatch(_))),
+        "the empty edge requests missing chunks from Core"
+    );
+    assert_eq!(
+        received,
+        Some(Value::String(title)),
+        "the empty edge forwards the missing chunk pull to Core"
+    );
+}
+
+#[derive(Clone)]
+struct PausedUploadRetryClock(Rc<Cell<u64>>);
+
+impl UploadRetryClock for PausedUploadRetryClock {
+    fn now_ms(&self) -> u64 {
+        self.0.get()
+    }
+}
+
+/// Internal transport test: the public write outcome is asserted below, but
+/// the exact-batch retry and no-early-resend properties sit below the public
+/// API at the peer protocol boundary.
+#[test]
+fn rate_limited_push_waits_then_retries_the_exact_batch_without_rejecting_the_write() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xc2; 16]);
+    let core = open_core(0xc3, AuthorId::SYSTEM, &schema);
+    core.node()
+        .borrow_mut()
+        .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
+            incoming_bytes_per_window: 1,
+            window_ms: 60_000,
+            max_age_ms: 10 * 60 * 1_000,
+        });
+    let writer = open_db(0xc2, author, &schema);
+    let clock = Rc::new(Cell::new(10_000));
+    writer
+        .node
+        .set_upload_retry_clock_for_test(Rc::new(PausedUploadRetryClock(Rc::clone(&clock))));
+    let scheduler = Rc::new(RecordingScheduler::default());
+    writer.set_tick_scheduler(Some(scheduler.clone()));
+    let writer_node = NodeUuid::from_bytes([0xc2; 16]);
+    let core_node = NodeUuid::from_bytes([0xc3; 16]);
+    let (writer_transport, core_transport, writer_outbound) =
+        duplex_with_admitted_session_context_and_client_outbound_tap(
+            author,
+            writer_node,
+            1,
+            core_node,
+            1,
+        );
+    let upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
+    let _subscriber = core.accept_subscriber(core_transport, author);
+    let write = writer
+        .insert(
+            "todos",
+            BTreeMap::from([
+                (
+                    "title".to_owned(),
+                    Value::String("rate-limited/".repeat(8_000)),
+                ),
+                ("done".to_owned(), Value::Bool(false)),
+                ("owner".to_owned(), Value::Uuid(author.0)),
+            ]),
+        )
+        .unwrap();
+
+    // Start, receive the requested frontier, then send the first batch that
+    // Core rate-limits. Capture it before the Core transport drains it.
+    writer.tick().unwrap();
+    core.tick().unwrap();
+    writer.tick().unwrap();
+    let first_batch = writer_outbound
+        .borrow()
+        .iter()
+        .find_map(|message| match message {
+            SyncMessage::ChunkUploadNodes(batch) => Some(batch.clone()),
+            _ => None,
+        })
+        .expect("writer sends the requested chunk batch");
+    core.tick().unwrap();
+    writer.tick().unwrap();
+
+    assert_eq!(
+        scheduler.take_delays(),
+        vec![1_000],
+        "RateLimited schedules the bounded admission deadline rather than a deferred hot loop"
+    );
+    assert!(
+        !matches!(
+            writer.write_state(write.tx_id).unwrap().fate,
+            Fate::Rejected(_)
+        ),
+        "a rate-limited batch remains resumable"
+    );
+
+    // Reconnect before the deadline. The old transport's queue-local upload
+    // state must transfer only to this same logical destination, while the
+    // node-scoped deadline also gates a fresh Start on any replacement link.
+    assert!(writer.detach_connection(&upstream));
+    let (reconnected_transport, reconnected_core_transport, reconnected_outbound) =
+        duplex_with_admitted_session_context_and_client_outbound_tap(
+            author,
+            writer_node,
+            2,
+            core_node,
+            2,
+        );
+    let _reconnected_upstream = crate::db::block_on(writer.connect_upstream(reconnected_transport));
+    let _reconnected_subscriber = core.accept_subscriber(reconnected_core_transport, author);
+
+    // An unrelated immediate/manual host tick before the deadline must not
+    // resend the batch. The paused clock makes this deterministic.
+    for _ in 0..3 {
+        writer.tick().unwrap();
+        assert!(
+            reconnected_outbound.borrow().is_empty(),
+            "reconnect sends neither Start nor chunk nodes before the admission deadline"
+        );
+    }
+
+    // The receiver becomes admissible before the scheduled retry, then the
+    // fake clock advances exactly to that deadline. The retry is byte-for-byte
+    // the same requested batch, not a restarted upload or a new row write.
+    core.node()
+        .borrow_mut()
+        .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy::default());
+    clock.set(11_000);
+    writer.tick().unwrap();
+    assert!(
+        !reconnected_outbound
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ChunkUploadStart(_))),
+        "same-destination reconnect resumes the retained frontier instead of restarting upload"
+    );
+    let retry_batch = reconnected_outbound
+        .borrow()
+        .iter()
+        .find_map(|message| match message {
+            SyncMessage::ChunkUploadNodes(batch) => Some(batch.clone()),
+            _ => None,
+        })
+        .expect("the deadline permits the retained batch to retry");
+    assert_eq!(
+        retry_batch, first_batch,
+        "retry retains the exact failed batch"
+    );
+
+    for _ in 0..128 {
+        core.tick().unwrap();
+        writer.tick().unwrap();
+        if writer.write_state(write.tx_id).unwrap().durability == DurabilityTier::Global {
+            break;
+        }
+    }
+    assert_eq!(
+        writer.write_state(write.tx_id).unwrap().durability,
+        DurabilityTier::Global,
+        "the delayed retry eventually publishes the original write"
+    );
+    assert_eq!(core.read(&core.table("todos")).unwrap().len(), 1);
+}
+
+/// Unauthenticated links retain the bounded admission deadline but never a
+/// receiver-specific frontier; expiry still independently reclaims staging.
+#[test]
+fn unauthenticated_reconnect_restarts_after_deadline_and_does_not_prevent_ttl_cleanup() {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xc8; 16]);
+    let core = open_core(0xc9, AuthorId::SYSTEM, &schema);
+    core.node()
+        .borrow_mut()
+        .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
+            incoming_bytes_per_window: 1,
+            window_ms: 60_000,
+            max_age_ms: 10 * 60 * 1_000,
+        });
+    let writer = open_db(0xc8, author, &schema);
+    let clock = Rc::new(Cell::new(20_000));
+    writer
+        .node
+        .set_upload_retry_clock_for_test(Rc::new(PausedUploadRetryClock(Rc::clone(&clock))));
+    let scheduler = Rc::new(RecordingScheduler::default());
+    writer.set_tick_scheduler(Some(scheduler.clone()));
+    let (writer_transport, core_transport, writer_outbound) = duplex_with_client_outbound_tap();
+    let upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
+    let _subscriber = core.accept_subscriber(core_transport, author);
+    let write = writer
+        .insert(
+            "todos",
+            BTreeMap::from([
+                (
+                    "title".to_owned(),
+                    Value::String("expired-rate-limited/".repeat(8_000)),
+                ),
+                ("done".to_owned(), Value::Bool(false)),
+                ("owner".to_owned(), Value::Uuid(author.0)),
+            ]),
+        )
+        .unwrap();
+
+    writer.tick().unwrap();
+    core.tick().unwrap();
+    writer.tick().unwrap();
+    assert!(
+        writer_outbound
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ChunkUploadNodes(_)))
+    );
+    assert!(
+        !writer_outbound
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::CommitUnit { .. })),
+        "the initial row commit remains behind the rate-limited upload"
+    );
+    core.tick().unwrap();
+    writer.tick().unwrap();
+    assert_eq!(scheduler.take_delays(), vec![1_000]);
+
+    assert!(writer.detach_connection(&upstream));
+    core.node()
+        .borrow_mut()
+        .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
+            incoming_bytes_per_window: u64::MAX,
+            window_ms: 60_000,
+            max_age_ms: 0,
+        });
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    assert_eq!(
+        crate::db::block_on(core.server.evict_expired_staged_large_values()).unwrap(),
+        1,
+        "the abandoned receiver-side staging claim expires"
+    );
+
+    assert!(
+        writer.node.detached_large_value_uploads.borrow().is_empty(),
+        "a context-free link never retains another receiver's missing-node frontier"
+    );
+    assert!(
+        writer
+            .node
+            .large_value_upload_retry_deadlines
+            .borrow()
+            .contains_key(&write.tx_id),
+        "the sender retains only the bounded admission deadline"
+    );
+
+    let (reconnected_transport, reconnected_core_transport, reconnected_outbound) =
+        duplex_with_client_outbound_tap();
+    let _reconnected_upstream = crate::db::block_on(writer.connect_upstream(reconnected_transport));
+    let _reconnected_subscriber = core.accept_subscriber(reconnected_core_transport, author);
+    writer.tick().unwrap();
+    assert!(
+        reconnected_outbound.borrow().is_empty(),
+        "an unauthenticated reconnect remains gated before the deadline"
+    );
+    clock.set(21_000);
+    writer.tick().unwrap();
+    assert!(
+        reconnected_outbound
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ChunkUploadStart(_))),
+        "after the deadline an unauthenticated reconnect starts a fresh handshake"
+    );
+    assert!(
+        !reconnected_outbound
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ChunkUploadNodes(_))),
+        "an unauthenticated reconnect never replays the previous receiver frontier"
+    );
+}
+
+fn assert_different_authenticated_destination_restarts_upload(
+    reconnect_remote_node: NodeUuid,
+    reconnect_link_identity: AuthorId,
+) {
+    let schema = schema();
+    let author = AuthorId::from_bytes([0xd2; 16]);
+    let writer_node = NodeUuid::from_bytes([0xd2; 16]);
+    let core_node = NodeUuid::from_bytes([0xd3; 16]);
+    let core = open_core(0xd3, AuthorId::SYSTEM, &schema);
+    core.node()
+        .borrow_mut()
+        .set_large_value_staging_policy(crate::node::LargeValueStagingPolicy {
+            incoming_bytes_per_window: 1,
+            window_ms: 60_000,
+            max_age_ms: 10 * 60 * 1_000,
+        });
+    let writer = open_db(0xd2, author, &schema);
+    let clock = Rc::new(Cell::new(30_000));
+    writer
+        .node
+        .set_upload_retry_clock_for_test(Rc::new(PausedUploadRetryClock(Rc::clone(&clock))));
+    let (writer_transport, core_transport, _writer_outbound) =
+        duplex_with_admitted_session_context_and_client_outbound_tap(
+            author,
+            writer_node,
+            1,
+            core_node,
+            1,
+        );
+    let upstream = crate::db::block_on(writer.connect_upstream(writer_transport));
+    let _subscriber = core.accept_subscriber(core_transport, author);
+    let write = writer
+        .insert(
+            "todos",
+            BTreeMap::from([
+                ("title".to_owned(), Value::String("isolated/".repeat(8_000))),
+                ("done".to_owned(), Value::Bool(false)),
+                ("owner".to_owned(), Value::Uuid(author.0)),
+            ]),
+        )
+        .unwrap();
+    writer.tick().unwrap();
+    core.tick().unwrap();
+    writer.tick().unwrap();
+    core.tick().unwrap();
+    writer.tick().unwrap();
+    assert!(
+        writer
+            .node
+            .large_value_upload_retry_deadlines
+            .borrow()
+            .contains_key(&write.tx_id)
+    );
+    assert!(writer.detach_connection(&upstream));
+    assert_eq!(writer.node.detached_large_value_uploads.borrow().len(), 1);
+
+    clock.set(31_000);
+    let (reconnect_transport, reconnect_core_transport, reconnect_outbound) =
+        duplex_with_admitted_session_context_and_client_outbound_tap(
+            reconnect_link_identity,
+            writer_node,
+            2,
+            reconnect_remote_node,
+            2,
+        );
+    let _reconnect = crate::db::block_on(writer.connect_upstream(reconnect_transport));
+    let _reconnect_subscriber = core.accept_subscriber(reconnect_core_transport, author);
+    writer.tick().unwrap();
+    assert!(
+        reconnect_outbound
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ChunkUploadStart(_))),
+        "a mismatched authenticated destination starts a fresh handshake"
+    );
+    assert!(
+        !reconnect_outbound
+            .borrow()
+            .iter()
+            .any(|message| matches!(message, SyncMessage::ChunkUploadNodes(_))),
+        "a mismatched authenticated destination never receives the retained frontier"
+    );
+    assert_eq!(
+        writer.node.detached_large_value_uploads.borrow().len(),
+        1,
+        "a mismatched reconnect cannot consume the original destination's frontier"
+    );
+}
+
+#[test]
+fn reconnect_to_different_authenticated_node_never_replays_upload_frontier() {
+    assert_different_authenticated_destination_restarts_upload(
+        NodeUuid::from_bytes([0xd4; 16]),
+        AuthorId::from_bytes([0xd2; 16]),
+    );
+}
+
+#[test]
+fn reconnect_with_different_authenticated_link_never_replays_upload_frontier() {
+    assert_different_authenticated_destination_restarts_upload(
+        NodeUuid::from_bytes([0xd3; 16]),
+        AuthorId::from_bytes([0xd5; 16]),
+    );
+}
+
 /// A Core immediately refreshes a peer-edge subscriber that was visited before
 /// a later client upload in the same service pass, so Bob receives Alice's
 /// later canonical row without needing an unrelated next websocket frame.

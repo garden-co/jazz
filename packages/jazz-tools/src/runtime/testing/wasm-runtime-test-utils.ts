@@ -7,7 +7,15 @@ import type { WasmSchema } from "../../drivers/types.js";
 import { onTestFinished } from "vitest";
 import { NativeRuntimeAdapter } from "../native-runtime/native-runtime-adapter.js";
 
-export type TestRuntime = Runtime & { free?(): void };
+export type TestRuntime = Runtime & {
+  free?(): void;
+  setLargeValueStagingPolicy?(
+    incomingBytesPerWindow: number,
+    windowMs: number,
+    maxAgeMs?: number | null,
+  ): void;
+  evictExpiredStagedLargeValues?(): Promise<number>;
+};
 
 let wasmModulePromise: Promise<any> | null = null;
 

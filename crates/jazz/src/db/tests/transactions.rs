@@ -3,6 +3,92 @@
 use super::*;
 
 #[test]
+fn exclusive_transactions_lower_oversized_scalars_before_publication() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let title = "x".repeat(groove::large_values::INLINE_VALUE_MAX_BYTES + 91);
+    let row = row(0x4e);
+    let tx = db.exclusive_tx().unwrap();
+    tx.insert_with_id("todos", row, doctest_support::todo_cells(&title, false))
+        .unwrap();
+    tx.commit().unwrap();
+
+    let physical = block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .current_physical_cell_in_schema(db.schema_version_id, "todos", row, "title")
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    assert!(matches!(physical, Value::Large(_)));
+    let result = db
+        .read(&db.prepare_query(&db.table("todos")).unwrap())
+        .unwrap();
+    assert_eq!(
+        result[0].cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String(title.clone()))
+    );
+
+    let update = db.exclusive_tx().unwrap();
+    assert_eq!(
+        update.read("todos", row).unwrap().unwrap().get("title"),
+        Some(&Value::String(title.clone())),
+        "public transaction reads must not expose the physical descriptor"
+    );
+    assert_eq!(
+        update.all("todos").unwrap()[0].cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String(title.clone()))
+    );
+    update
+        .update(
+            "todos",
+            row,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        )
+        .unwrap();
+    update.commit().unwrap();
+    let after_update = block_on(async {
+        db.node
+            .node
+            .lock()
+            .await
+            .current_physical_cell_in_schema(db.schema_version_id, "todos", row, "title")
+            .await
+            .unwrap()
+            .unwrap()
+    });
+    assert_eq!(physical, after_update, "unchanged locators must be stable");
+
+    let mergeable = db.mergeable_tx().unwrap();
+    assert_eq!(
+        mergeable.read("todos", row).unwrap().unwrap().get("title"),
+        Some(&Value::String(title.clone()))
+    );
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    assert_eq!(
+        mergeable.all_prepared(&prepared).unwrap()[0]
+            .cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String(title.clone()))
+    );
+
+    let forged = db.exclusive_tx().unwrap();
+    forged
+        .insert_with_id(
+            "todos",
+            RowUuid::from_bytes([0x4f; 16]),
+            BTreeMap::from([
+                ("title".to_owned(), physical),
+                ("done".to_owned(), Value::Bool(false)),
+            ]),
+        )
+        .unwrap();
+    let error = block_on(forged.commit()).unwrap_err();
+    assert!(error.message.contains("unverified large-value descriptor"));
+}
+
+#[test]
 fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
     let empty = build_public_db_test_schema(PublicSchemaBuilder::new());
     let refs = empty.column_families();

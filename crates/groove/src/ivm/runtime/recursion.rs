@@ -1117,9 +1117,10 @@ impl HydrationEvaluator<'_> {
                             .collect(),
                     })
                 }
-                OpType::Persist(_) | OpType::Distinct | OpType::Negate => {
-                    Err(IvmRuntimeError::UnsupportedOperator)
-                }
+                OpType::Persist(_)
+                | OpType::StreamingChecksum(_)
+                | OpType::Distinct
+                | OpType::Negate => Err(IvmRuntimeError::UnsupportedOperator),
                 OpType::SemiJoin(_) | OpType::Aggregate(_) => {
                     Err(IvmRuntimeError::UnsupportedOperator)
                 }
@@ -1206,6 +1207,7 @@ impl HydrationEvaluator<'_> {
                 graph_node
                     .descriptor
                     .output
+                    .records()
                     .fields()
                     .iter()
                     .any(|candidate| candidate.name.as_deref() == Some(field))

@@ -379,6 +379,7 @@ pub(super) fn encode_primary_key_part(key: &mut Vec<u8>, value: &Value) -> Resul
         | Value::Array(_)
         | Value::Nullable(_)
         | Value::Record(_)
+        | Value::Large(_)
         // Direct-store keys require a declared total order; enums do not have one.
         | Value::Enum(_) => {
             return Err(Error::InvalidDirectRecordStoreKey(

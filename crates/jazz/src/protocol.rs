@@ -25,6 +25,12 @@ use crate::tx::{DeletionEvent, DurabilityTier, Fate, Snapshot, Transaction, TxId
 /// Messages exchanged between Jazz nodes.
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub enum SyncMessage {
+    /// Auxiliary, non-canonical requests for immutable Groove chunks that are
+    /// absent from the receiver's local chunk storage.
+    ChunkRequestBatch(ChunkRequestBatch),
+    /// Auxiliary responses to a chunk request batch. These carry storage
+    /// objects, never row facts or authorization grants.
+    ChunkResponseBatch(ChunkResponseBatch),
     /// Trusted backend assertion of process-local auth claims for a write subject.
     SessionClaims {
         /// Identity these claims describe.
@@ -247,6 +253,102 @@ pub enum SyncMessage {
         /// Final authority result for the zero-support action.
         advice: PermissionAdvice,
     },
+    /// Begin a root-first push upload with its complete immutable descriptor.
+    ChunkUploadStart(ChunkUploadStart),
+    /// Supply one bounded set of nodes requested by the receiver.
+    ChunkUploadNodes(ChunkUploadNodes),
+    /// Receiver acknowledgement for a pushed upload.
+    ChunkUploadResult(ChunkUploadResult),
+}
+
+/// Bounded batch of exact immutable-chunk requests on one peer link.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ChunkRequestBatch {
+    /// Exact requests coalesced for one transport frame.
+    pub requests: Vec<ChunkRequestEntry>,
+}
+
+/// One hop-local request. `remaining_hops` is decremented before forwarding.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ChunkRequestEntry {
+    /// Identifier meaningful only on this peer hop.
+    pub request_id: u64,
+    /// Opaque Groove storage locator.
+    pub locator: Vec<u8>,
+    /// Hash Groove must verify before accepting returned bytes.
+    pub expected_hash: [u8; 32],
+    /// Maximum remaining forwarding edges.
+    pub remaining_hops: u8,
+}
+
+/// Bounded batch of replies addressed by the request id allocated on this hop.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ChunkResponseBatch {
+    /// Replies coalesced for one transport frame.
+    pub responses: Vec<ChunkResponseEntry>,
+}
+
+/// One hop-local immutable-chunk reply.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ChunkResponseEntry {
+    /// Request identifier allocated by the receiver of this response.
+    pub request_id: u64,
+    /// Storage result for the exact requested locator and hash.
+    pub result: ChunkResponse,
+}
+
+/// Result of one auxiliary immutable-chunk request.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum ChunkResponse {
+    /// Exact stored bytes; Groove still verifies the expected hash.
+    Found(Vec<u8>),
+    /// This route cannot supply the requested object.
+    Unavailable,
+    /// The route may become available after the suggested delay.
+    Retryable {
+        /// Minimum suggested retry delay.
+        retry_after_ms: u32,
+    },
+}
+
+/// Root-first upload announcement. The descriptor, already carried by the
+/// later transaction, is the protocol identity.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ChunkUploadStart {
+    /// Exact immutable value whose root the receiver checks first.
+    pub value_ref: groove::large_values::LargeValueRef,
+}
+
+/// A bounded collection of receiver-requested immutable Groove nodes.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ChunkUploadNodes {
+    /// Descriptor whose current missing frontier requested these nodes.
+    pub value_ref: groove::large_values::LargeValueRef,
+    /// Authenticated immutable nodes, bounded by the semantic frame limit.
+    pub chunks: Vec<groove::large_values::StagedChunk>,
+}
+
+/// Hop-local upload outcome. A rejected upload must be retried from its first
+/// batch; no referencing row may be sent before `Staged`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct ChunkUploadResult {
+    /// Descriptor whose derived receiver state changed.
+    pub value_ref: groove::large_values::LargeValueRef,
+    /// Current receiver outcome.
+    pub status: ChunkUploadStatus,
+}
+
+/// Receiver outcome for one push-upload step.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub enum ChunkUploadStatus {
+    /// Authenticated nodes still absent from local Groove storage.
+    Need(Vec<groove::large_values::NodeRef>),
+    /// Groove derived graph closure and created a persisted retainer claim.
+    Staged,
+    /// Jazz rejected incoming bytes under its deployment policy.
+    RateLimited,
+    /// The descriptor or a supplied node was invalid.
+    Rejected,
 }
 
 /// Opaque identity for one permission-advice exchange.
@@ -404,6 +506,11 @@ impl SyncMessage {
             | Self::AuthorizationScopeDecision { .. } => {
                 crate::wire::FEATURE_AUTHORIZATION_SCOPE_VIEWS
             }
+            Self::ChunkRequestBatch(_)
+            | Self::ChunkResponseBatch(_)
+            | Self::ChunkUploadStart(_)
+            | Self::ChunkUploadNodes(_)
+            | Self::ChunkUploadResult(_) => crate::wire::FEATURE_AUXILIARY_CHUNKS,
             _ => crate::wire::FEATURE_NONE,
         }
     }
@@ -740,6 +847,14 @@ impl VersionRecord {
             .nullable_value()
             .ok()
             .flatten()
+    }
+
+    pub(crate) fn application_cell_count(&self) -> usize {
+        self.record
+            .descriptor()
+            .fields()
+            .len()
+            .saturating_sub(WireRowRecord::USER_CELLS)
     }
 }
 
@@ -2840,6 +2955,14 @@ fn put_value(bytes: &mut Vec<u8>, value: &Value) {
             panic!(
                 "union-valued values are an internal Groove representation, not a Jazz protocol value"
             )
+        }
+        Value::Large(value) => {
+            bytes.push(15);
+            let encoded = groove::large_values::encode_stored_scalar(
+                &groove::large_values::StoredScalar::Large(value.clone()),
+            )
+            .expect("admitted large descriptor has canonical encoding");
+            put_bytes(bytes, &encoded);
         }
     }
 }
