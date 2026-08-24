@@ -976,7 +976,7 @@ type SharedTickScheduler = Rc<RefCell<Option<Rc<dyn TickScheduler>>>>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct UpstreamUploadDestination {
     remote_node: [u8; 16],
-    link_identity: [u8; 16],
+    link_identity: AuthorSubject,
 }
 
 pub(crate) trait UploadRetryClock {

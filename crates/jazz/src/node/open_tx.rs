@@ -13,8 +13,14 @@ where
 {
     /// Open an exclusive transaction over the current snapshot.
     pub async fn open_exclusive(&mut self, id: OpenTransactionId) -> Result<(), Error> {
-        self.open_exclusive_for_identity(id, AuthorSubject::SYSTEM)
-            .await
+        self.open_transaction(
+            id,
+            OpenTransactionKind::Exclusive {
+                bound_author: Some(AuthorSubject::SYSTEM),
+            },
+            AuthorSubject::SYSTEM,
+        )
+        .await
     }
 
     #[cfg(feature = "testing")]
@@ -32,8 +38,14 @@ where
         id: OpenTransactionId,
         made_by: AuthorSubject,
     ) -> Result<(), Error> {
-        self.open_transaction(id, OpenTransactionKind::Exclusive, made_by)
-            .await
+        self.open_transaction(
+            id,
+            OpenTransactionKind::Exclusive {
+                bound_author: Some(made_by),
+            },
+            made_by,
+        )
+        .await
     }
 
     /// Open a mergeable transaction over the current snapshot.
@@ -377,7 +389,10 @@ where
         deletion: Option<DeletionEvent>,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
-        if !matches!(self.open_tx(tx_id)?.kind, OpenTransactionKind::Exclusive) {
+        if !matches!(
+            self.open_tx(tx_id)?.kind,
+            OpenTransactionKind::Exclusive { .. }
+        ) {
             return Err(Error::InvalidMergeableCommit(
                 "open transaction is not exclusive",
             ));
@@ -678,20 +693,41 @@ where
     }
 
     /// Commit an exclusive transaction and return its sync commit unit.
+    pub(crate) async fn commit_exclusive_bound(
+        &mut self,
+        open_batch_id: OpenTransactionId,
+        now_ms: u64,
+    ) -> Result<(PublishedTransaction, SyncMessage), Error> {
+        let OpenTransactionKind::Exclusive {
+            bound_author: Some(author),
+        } = self.open_tx(open_batch_id)?.kind
+        else {
+            return Err(Error::OpenTransactionIdentityMismatch);
+        };
+        self.commit_exclusive(open_batch_id, author, now_ms).await
+    }
+
+    /// Commit an exclusive transaction and return its sync commit unit.
     pub async fn commit_exclusive(
         &mut self,
         open_batch_id: OpenTransactionId,
         made_by: AuthorSubject,
         now_ms: u64,
     ) -> Result<(PublishedTransaction, SyncMessage), Error> {
-        if !matches!(
-            self.open_tx(open_batch_id)?.kind,
-            OpenTransactionKind::Exclusive
-        ) {
-            return Err(Error::InvalidMergeableCommit(
-                "open transaction is not exclusive",
-            ));
-        }
+        let made_by = match self.open_tx(open_batch_id)?.kind {
+            OpenTransactionKind::Exclusive {
+                bound_author: Some(bound_author),
+            } if bound_author != made_by => return Err(Error::OpenTransactionIdentityMismatch),
+            OpenTransactionKind::Exclusive {
+                bound_author: Some(bound_author),
+            } => bound_author,
+            OpenTransactionKind::Exclusive { bound_author: None } => made_by,
+            OpenTransactionKind::Mergeable { .. } => {
+                return Err(Error::InvalidMergeableCommit(
+                    "open transaction is not exclusive",
+                ));
+            }
+        };
         if !self
             .open_exclusive_is_locally_serializable(open_batch_id)
             .await?
@@ -721,7 +757,7 @@ where
                 )
                 .await;
             let table_schema = self.table_in_schema(&write.table, write.schema_version)?;
-            let PendingCells::Replace(cells) = write.cells else {
+            let PendingCells::Replace(mut cells) = write.cells else {
                 return Err(Error::InvalidMergeableCommit(
                     "exclusive transaction cannot contain update patches",
                 ));
@@ -1262,7 +1298,9 @@ where
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OpenTransactionKind {
-    Exclusive,
+    Exclusive {
+        bound_author: Option<AuthorSubject>,
+    },
     Mergeable {
         made_by: AuthorSubject,
         permission_subject: Option<AuthorSubject>,

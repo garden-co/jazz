@@ -297,6 +297,29 @@ impl AuthorSubject {
         Ok(author)
     }
 
+    /// Parse a canonical subject received through an untrusted public binding.
+    ///
+    /// Jazz-reserved issuers are capabilities selected only by verified or
+    /// in-process authority paths; serialized callers may never select them.
+    pub fn from_untrusted_canonical(canonical: &str) -> Result<Self, AuthorSubjectError> {
+        let (issuer, subject): (String, String) = serde_json::from_str(canonical)
+            .map_err(|error| AuthorSubjectError::InvalidCanonical(error.to_string()))?;
+        let author = Self::authenticated(&issuer, &subject)?;
+        if author.canonical() != canonical {
+            return Err(AuthorSubjectError::NonCanonical);
+        }
+        Ok(author)
+    }
+
+    /// Deserialize an author received through an untrusted public binding.
+    pub fn deserialize_untrusted<'de, D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let canonical = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Self::from_untrusted_canonical(&canonical).map_err(serde::de::Error::custom)
+    }
+
     /// Return the portable canonical JSON string.
     pub fn canonical(&self) -> &str {
         match self {
@@ -426,6 +449,30 @@ mod tests {
         ] {
             assert_eq!(
                 AuthorSubject::authenticated(issuer, "user"),
+                Err(AuthorSubjectError::ReservedIssuer(issuer.to_owned()))
+            );
+        }
+    }
+
+    #[test]
+    fn untrusted_canonical_author_rejects_every_reserved_issuer() {
+        let external = r#"["https://issuer.example","alice"]"#;
+        assert_eq!(
+            AuthorSubject::from_untrusted_canonical(external)
+                .unwrap()
+                .canonical(),
+            external
+        );
+
+        for issuer in [
+            AuthorSubject::SYSTEM_ISSUER,
+            AuthorSubject::LOCAL_FIRST_ISSUER,
+            AuthorSubject::STATIC_BEARER_ISSUER,
+            AuthorSubject::ANONYMOUS_ISSUER,
+        ] {
+            let canonical = serde_json::to_string(&(issuer, "caller")).unwrap();
+            assert_eq!(
+                AuthorSubject::from_untrusted_canonical(&canonical),
                 Err(AuthorSubjectError::ReservedIssuer(issuer.to_owned()))
             );
         }
