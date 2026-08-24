@@ -303,6 +303,7 @@ it("uses identity-aware core txs only on an explicit trusted-serving host", () =
 
 it("binds a trusted-serving exclusive transaction to its opening identity", () => {
   const alice = "00000000-0000-0000-0000-0000000000a1";
+  const issuer = "https://issuer.example";
   const beganAs: string[] = [];
   const policySchema = {
     todos: {
@@ -328,7 +329,7 @@ it("binds a trusted-serving exclusive transaction to its opening identity", () =
         };
         const begin = db.beginTransaction.bind(db);
         db.beginTransaction = (openBatchId, kind, author) => {
-          beganAs.push(author === undefined ? "none" : formatUuidForTest(author));
+          beganAs.push(author === undefined ? "none" : new TextDecoder().decode(author));
           begin(openBatchId, kind, author);
         };
         return db;
@@ -346,22 +347,22 @@ it("binds a trusted-serving exclusive transaction to its opening identity", () =
   );
 
   const tx = createOpenBatchId();
-  runtime.beginTransaction("exclusive", tx, JSON.stringify({ user_id: alice }));
+  runtime.beginTransaction("exclusive", tx, JSON.stringify({ issuer, user_id: alice }));
   runtime.insert(
     "todos",
     { title: { type: "Text", value: "session-scoped exclusive write" } },
-    JSON.stringify({ batch_id: tx, session: { user_id: alice } }),
+    JSON.stringify({ batch_id: tx, session: { issuer, user_id: alice } }),
     "00000000-0000-0000-0000-000000000001",
   );
 
-  expect(beganAs).toEqual([alice]);
+  expect(beganAs).toEqual([`["${issuer}","${alice}"]`]);
   expect(() =>
     runtime.insert(
       "todos",
       { title: { type: "Text", value: "wrong subject" } },
       JSON.stringify({
         batch_id: tx,
-        session: { user_id: "00000000-0000-0000-0000-0000000000b2" },
+        session: { issuer, user_id: "00000000-0000-0000-0000-0000000000b2" },
       }),
       "00000000-0000-0000-0000-000000000002",
     ),
@@ -370,6 +371,7 @@ it("binds a trusted-serving exclusive transaction to its opening identity", () =
 
 it("uses the opening identity for trusted-serving transaction reads", async () => {
   const alice = "00000000-0000-0000-0000-0000000000a1";
+  const issuer = "https://issuer.example";
   const tx = fakeTx();
   const runtime = new NativeRuntimeAdapter(
     {
@@ -404,12 +406,12 @@ it("uses the opening identity for trusted-serving transaction reads", async () =
   );
 
   const transactionId = createOpenBatchId();
-  runtime.beginTransaction("exclusive", transactionId, JSON.stringify({ user_id: alice }));
+  runtime.beginTransaction("exclusive", transactionId, JSON.stringify({ issuer, user_id: alice }));
 
   await expect(
     runtime.query(
       JSON.stringify({ table: "todos" }),
-      JSON.stringify({ user_id: "00000000-0000-0000-0000-0000000000b2" }),
+      JSON.stringify({ issuer, user_id: "00000000-0000-0000-0000-0000000000b2" }),
       "local",
       JSON.stringify({ transaction_batch_id: transactionId }),
     ),

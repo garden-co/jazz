@@ -182,6 +182,21 @@ pub(super) fn open_db(node: u8, author: AuthorSubject, schema: &JazzSchema) -> D
     .unwrap()
 }
 
+/// Construct the explicit provider-side identity fixture used by DB tests.
+///
+/// Test `AuthorSubject`s identify Jazz provenance; application UUID columns
+/// intentionally compare against the separately admitted provider `user_id`.
+/// This helper keeps that distinction visible without inventing a provider
+/// `sub` from the logical author.
+pub(super) fn test_provider_claims(author: AuthorSubject) -> BTreeMap<String, Value> {
+    match author {
+        AuthorSubject::System => BTreeMap::new(),
+        AuthorSubject::Authenticated(_) => {
+            BTreeMap::from([("user_id".to_owned(), Value::Uuid(author.test_uuid()))])
+        }
+    }
+}
+
 pub(super) fn row_ids(rows: &[CurrentRow]) -> Vec<RowUuid> {
     rows.iter().map(CurrentRow::row_uuid).collect()
 }
@@ -1034,17 +1049,22 @@ pub(super) fn owner_read_schema() -> JazzSchema {
                 .column("owner", PublicColumnType::Uuid)
                 .policies(
                     PublicTablePolicies::new()
-                        .with_select(public_session_eq("owner", &["claims", "sub"])),
+                        .with_select(public_session_eq("owner", &["user_id"])),
                 ),
         ),
     )
 }
 
 pub(super) fn created_by_read_schema() -> JazzSchema {
-    created_by_read_schema_for_claim("sub")
+    created_by_read_schema_for_claim("author")
 }
 
 pub(super) fn created_by_read_schema_for_claim(claim_name: &str) -> JazzSchema {
+    let session_path = if claim_name == "author" {
+        vec!["author"]
+    } else {
+        vec!["claims", claim_name]
+    };
     build_public_db_test_schema(
         PublicSchemaBuilder::new().table(
             PublicTableSchemaBuilder::new("todos")
@@ -1052,7 +1072,7 @@ pub(super) fn created_by_read_schema_for_claim(claim_name: &str) -> JazzSchema {
                 .column("done", PublicColumnType::Boolean)
                 .policies(
                     PublicTablePolicies::new()
-                        .with_select(public_session_eq("$createdBy", &["claims", claim_name])),
+                        .with_select(public_session_eq("$createdBy", &session_path)),
                 ),
         ),
     )
@@ -1067,7 +1087,7 @@ pub(super) fn owner_write_schema() -> JazzSchema {
                 .column("owner", PublicColumnType::Uuid)
                 .policies(public_legacy_write_policy(public_session_eq(
                     "owner",
-                    &["claims", "sub"],
+                    &["user_id"],
                 ))),
         ),
     )
@@ -1157,7 +1177,7 @@ pub(super) fn benchmark_shaped_recursive_reachable_read_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "group_access_edges",
         "user_id",
-        &["claims", "sub"],
+        &["user_id"],
         "group_id",
     );
     build_public_db_test_schema(
@@ -1242,7 +1262,7 @@ pub(super) fn customer_resource_policy_minimal_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "group_access_edges",
         "user_id",
-        &["claims", "sub"],
+        &["user_id"],
         "group_id",
     );
     build_public_db_test_schema(
@@ -1282,7 +1302,7 @@ pub(super) fn customer_two_resource_policy_minimal_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "group_access_edges",
         "user_id",
-        &["claims", "sub"],
+        &["user_id"],
         "group_id",
     );
     let res_j_policy = public_recursive_access_policy(
@@ -1298,7 +1318,7 @@ pub(super) fn customer_two_resource_policy_minimal_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "group_access_edges",
         "user_id",
-        &["claims", "sub"],
+        &["user_id"],
         "group_id",
     );
     build_public_db_test_schema(
@@ -1339,7 +1359,7 @@ pub(super) fn same_table_seeded_resource_policy_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "teams",
         "identity_key",
-        &["claims", "sub"],
+        &["user_id"],
         "id",
     );
     same_table_seeded_public_schema(PublicColumnType::Uuid, resource_policy)
@@ -1410,7 +1430,7 @@ pub(super) fn customer_inherited_child_policy_schema() -> JazzSchema {
         &[("administrator", PublicValue::Boolean(false))],
         "group_access_edges",
         "user_id",
-        &["claims", "sub"],
+        &["user_id"],
         "group_id",
     );
     let child_read = PublicPolicyExpr::and(vec![
@@ -1474,7 +1494,7 @@ pub(super) fn inherited_insert_policy_schema() -> JazzSchema {
                         PublicTablePolicies::new()
                             .with_select(PublicPolicyExpr::True)
                             .with_update(
-                                Some(public_session_eq("owner", &["claims", "sub"])),
+                                Some(public_session_eq("owner", &["user_id"])),
                                 public_literal_eq("locked", PublicValue::Boolean(false)),
                             ),
                     ),
@@ -1628,7 +1648,7 @@ pub(super) fn policy_relation_schema() -> JazzSchema {
                     .column("owner", PublicColumnType::Uuid)
                     .policies(
                         PublicTablePolicies::new()
-                            .with_select(public_session_eq("owner", &["claims", "sub"])),
+                            .with_select(public_session_eq("owner", &["user_id"])),
                     ),
             ),
     )
@@ -1644,7 +1664,7 @@ pub(super) fn evolved_owner_write_schema() -> JazzSchema {
                 .column("body", PublicColumnType::Text)
                 .policies(public_legacy_write_policy(public_session_eq(
                     "owner",
-                    &["claims", "sub"],
+                    &["user_id"],
                 ))),
         ),
     )
@@ -1741,12 +1761,13 @@ pub(super) struct CoreDb {
 
 pub(super) fn open_core(node_byte: u8, author: AuthorSubject, schema: &JazzSchema) -> CoreDb {
     let storage = rocks_storage(schema);
-    let node = NodeState::new_history_complete(
+    let mut node = NodeState::new_history_complete(
         NodeUuid::from_bytes([node_byte; 16]),
         schema.clone(),
         storage,
     )
     .unwrap();
+    node.set_session_claims(author, test_provider_claims(author));
     CoreDb {
         server: Node::new(node),
         schema: schema.clone(),
@@ -1979,7 +2000,11 @@ impl CoreDb {
         transport: Box<dyn Transport>,
         identity: AuthorSubject,
     ) -> Rc<LocalMutex<PeerConnection<RocksDbStorage>>> {
-        self.server.accept_subscriber(transport, identity)
+        self.server.accept_subscriber_with_claims(
+            transport,
+            identity,
+            test_provider_claims(identity),
+        )
     }
 
     pub(super) fn accept_subscriber_with_trust(
@@ -1988,8 +2013,12 @@ impl CoreDb {
         identity: AuthorSubject,
         trust: CommitUnitTrust,
     ) -> Rc<LocalMutex<PeerConnection<RocksDbStorage>>> {
-        self.server
-            .accept_subscriber_with_trust(transport, identity, trust)
+        self.server.accept_subscriber_with_claims_and_trust(
+            transport,
+            identity,
+            test_provider_claims(identity),
+            trust,
+        )
     }
 
     pub(super) fn accept_subscriber_with_claims(
