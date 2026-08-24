@@ -149,6 +149,7 @@ fn streaming_update_and_upsert_publish_ordinary_logical_rows() {
         LargeValueKind::String,
         Cursor::new("updated"),
         None,
+        None,
         Some(42),
         None,
         None,

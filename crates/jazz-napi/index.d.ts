@@ -17,7 +17,13 @@ export declare class NapiDb {
   upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions | undefined | null): Write
   deleteEncoded(table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): Write
   restoreEncoded(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): Write
+  insertWithIdEncodedAttributed(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): Write
+  updateEncodedAttributed(table: string, rowId: Uint8Array, patch: Uint8Array, author: Uint8Array): Write
+  upsertEncodedAttributed(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): Write
+  deleteAttributed(table: string, rowId: Uint8Array, author: Uint8Array): Write
+  restoreEncodedAttributed(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): Write
   beginStreamingMutationEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, kind: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
+  beginStreamingMutationAttributedEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, kind: string, mutation: string | undefined | null, author: Uint8Array | undefined | null, attribution: Uint8Array, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
   static openMemory(schema: Uint8Array, config: Uint8Array): NapiDb
   /**
    * Open a deliberate backend runtime. Unlike the public raw-open entrypoint,
@@ -48,7 +54,7 @@ export declare class NapiDb {
   /** Attach a schema view to an existing owner-wide exclusive batch. */
   attachExclusiveTx(openBatchId: string): Tx
   /** Begin one owner-wide transaction without creating an owning per-schema Tx. */
-  beginTransaction(openBatchId: string, kind: string, author?: Uint8Array | undefined | null): void
+  beginTransaction(openBatchId: string, kind: string, author?: Uint8Array | undefined | null, attribution?: Uint8Array | undefined | null): void
   /** Commit an owner-wide transaction by id and optional kind. */
   commitTransaction(openBatchId: string, kind?: string | undefined | null): Write
   /** Roll back an owner-wide open transaction by id. */
