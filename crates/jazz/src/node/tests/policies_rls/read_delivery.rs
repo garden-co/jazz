@@ -98,6 +98,20 @@ fn message_read_policy_allows_public_chat_or_membership_join() {
             ),
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    core.set_session_claims(
+        member,
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(member.test_uuid().to_string()),
+        )]),
+    );
+    core.set_session_claims(
+        other,
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(other.test_uuid().to_string()),
+        )]),
+    );
 
     accept_global(
         &mut core,
