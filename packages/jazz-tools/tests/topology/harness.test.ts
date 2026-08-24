@@ -3,21 +3,19 @@ import {
   TopologyScenarioError,
   deterministicRandom,
   runTopologyScenario,
-  type TopologyFaultKind,
+  type TopologyFaultTarget,
 } from "./harness.js";
 
 describe("shared example topology harness", () => {
   it("runs deterministic phases and every fault callback with a replayable receipt", async () => {
     const seed = Number(process.env.JAZZ_EXAMPLE_TOPOLOGY_SEED ?? 29);
     const calls: string[] = [];
-    const target = Object.fromEntries(
-      (["disconnect", "reconnect", "restart", "failure"] as const).map((kind) => [
-        kind,
-        async () => {
-          calls.push(kind);
-        },
-      ]),
-    ) as Record<TopologyFaultKind, () => Promise<void>>;
+    const target: TopologyFaultTarget = {
+      disconnect: async () => void calls.push("disconnect"),
+      reconnect: async () => void calls.push("reconnect"),
+      restart: async () => void calls.push("restart"),
+      failure: async () => void calls.push("failure"),
+    };
     const receipt = await runTopologyScenario({
       id: "harness.fixture.cross-topology-faults",
       topology: ["core", "edge", "browser", "native", "fixture"],
@@ -46,10 +44,13 @@ describe("shared example topology harness", () => {
       "restart",
       "failure",
     ]);
+    expect(receipt.phases[0]?.status).toBe("completed");
+    expect(receipt.faults.every(({ status }) => status === "completed")).toBe(true);
   });
 
   it("bounds a stalled phase and retains its exact replay command", async () => {
-    const pending = new Promise<void>(() => undefined);
+    let postTimeoutEffect = false;
+    let cleanedUp = false;
     await expect(
       runTopologyScenario({
         id: "harness.fixture.timeout",
@@ -59,13 +60,39 @@ describe("shared example topology harness", () => {
         faultTimeoutMs: 5,
         targets: {},
         replay: "JAZZ_EXAMPLE_TOPOLOGY_SEED=11 replay-fixture",
-        phases: [{ name: "planted stall", run: () => pending }],
+        cleanup: async () => {
+          cleanedUp = true;
+        },
+        phases: [
+          {
+            name: "planted stall",
+            run: ({ signal }) =>
+              new Promise<void>((resolve) => {
+                const timer = setTimeout(() => {
+                  postTimeoutEffect = true;
+                  resolve();
+                }, 30);
+                signal.addEventListener(
+                  "abort",
+                  () => {
+                    clearTimeout(timer);
+                    resolve();
+                  },
+                  { once: true },
+                );
+              }),
+          },
+        ],
       }),
     ).rejects.toSatisfy(
       (error: unknown) =>
         error instanceof TopologyScenarioError &&
         error.receipt.replay.includes("JAZZ_EXAMPLE_TOPOLOGY_SEED=11") &&
-        error.receipt.error?.includes("planted stall"),
+        error.receipt.error?.includes("planted stall") &&
+        error.receipt.phases[0]?.status === "failed",
     );
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(cleanedUp).toBe(true);
+    expect(postTimeoutEffect).toBe(false);
   });
 });

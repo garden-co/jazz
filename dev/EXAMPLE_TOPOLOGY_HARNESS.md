@@ -17,6 +17,19 @@ Copy a failing case's `replay` field from
 `target/example-topology-soak/summary.json`. The runner never evaluates shell
 strings; registry commands remain explicit argv arrays.
 
+The registry is trusted repository code, not user input. Its path, every
+scenario working directory, and the output directory are confined to the
+repository before execution. The outer watchdog terminates the scenario's full
+process tree. In-process phases and faults receive an `AbortSignal`; they must
+stop scheduled work when it aborts. Scenarios that acquire servers, clients, or
+other resources provide `cleanup`, which runs in `finally` and is independently
+bounded. Receipts retain attempted, completed, and failed activities and their
+errors.
+
+This is currently a tested scaffold and local soak entrypoint. It does not
+claim continuous app coverage until app-owned scenarios are registered and the
+browser-capable CI job invokes it.
+
 ## Open app-branch integration
 
 The product apps are not on `main` yet. Their integration remains deliberately

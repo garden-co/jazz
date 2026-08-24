@@ -2,11 +2,15 @@ export type TopologyKind = "core" | "edge" | "browser" | "native" | "fixture";
 
 export type TopologyFaultKind = "disconnect" | "reconnect" | "restart" | "failure";
 
+export interface TopologyOperationContext {
+  signal: AbortSignal;
+}
+
 export interface TopologyFaultTarget {
-  disconnect?: () => Promise<void>;
-  reconnect?: () => Promise<void>;
-  restart?: () => Promise<void>;
-  fail?: () => Promise<void>;
+  disconnect?: (context: TopologyOperationContext) => Promise<void>;
+  reconnect?: (context: TopologyOperationContext) => Promise<void>;
+  restart?: (context: TopologyOperationContext) => Promise<void>;
+  failure?: (context: TopologyOperationContext) => Promise<void>;
 }
 
 export interface TopologyFault {
@@ -18,6 +22,7 @@ export interface TopologyFault {
 export interface TopologyPhaseContext {
   seed: number;
   random: () => number;
+  signal: AbortSignal;
 }
 
 export interface TopologyPhase {
@@ -36,6 +41,16 @@ export interface TopologyScenario {
   targets: Readonly<Record<string, TopologyFaultTarget>>;
   phases: readonly TopologyPhase[];
   replay: string;
+  cleanup?: () => Promise<void>;
+  cleanupTimeoutMs?: number;
+}
+
+export type TopologyActivityStatus = "attempted" | "completed" | "failed";
+
+export interface TopologyActivityReceipt {
+  status: TopologyActivityStatus;
+  elapsedMs: number;
+  error?: string;
 }
 
 export interface TopologyReceipt {
@@ -45,8 +60,8 @@ export interface TopologyReceipt {
   seed: number;
   status: "passed" | "failed";
   elapsedMs: number;
-  phases: Array<{ name: string; elapsedMs: number }>;
-  faults: Array<{ kind: TopologyFaultKind; target: string; elapsedMs: number }>;
+  phases: Array<TopologyActivityReceipt & { name: string }>;
+  faults: Array<TopologyActivityReceipt & { kind: TopologyFaultKind; target: string }>;
   replay: string;
   error?: string;
 }
@@ -75,49 +90,87 @@ export async function runTopologyScenario(
   };
   const scenarioStarted = now();
   const random = deterministicRandom(scenario.seed);
+  let scenarioError: unknown;
   try {
     for (const phase of scenario.phases) {
       const started = now();
+      const activity: TopologyReceipt["phases"][number] = {
+        name: phase.name,
+        status: "attempted",
+        elapsedMs: 0,
+      };
+      receipt.phases.push(activity);
       reporter.phase("start", phase.name, 0);
       try {
         await withTopologyTimeout(
-          phase.run({ seed: scenario.seed, random }),
+          (signal) => phase.run({ seed: scenario.seed, random, signal }),
           phase.timeoutMs ?? scenario.phaseTimeoutMs,
           `topology phase timed out: ${phase.name}`,
         );
         const elapsedMs = elapsed(started);
-        receipt.phases.push({ name: phase.name, elapsedMs });
+        Object.assign(activity, { status: "completed", elapsedMs });
         reporter.phase("complete", phase.name, elapsedMs);
       } catch (error) {
-        reporter.phase("failed", phase.name, elapsed(started));
+        Object.assign(activity, {
+          status: "failed",
+          elapsedMs: elapsed(started),
+          error: errorMessage(error),
+        });
+        reporter.phase("failed", phase.name, activity.elapsedMs);
         throw error;
       }
       for (const fault of phase.faultsAfter ?? []) {
-        const target = scenario.targets[fault.target];
-        const operation = target?.[fault.kind];
-        if (!operation) {
-          throw new Error(`topology target ${fault.target} does not support ${fault.kind}`);
-        }
         const started = now();
-        await withTopologyTimeout(
-          operation(),
-          fault.timeoutMs ?? scenario.faultTimeoutMs,
-          `topology fault timed out: ${fault.kind} ${fault.target}`,
-        );
-        receipt.faults.push({
+        const activity: TopologyReceipt["faults"][number] = {
           kind: fault.kind,
           target: fault.target,
-          elapsedMs: elapsed(started),
-        });
+          status: "attempted",
+          elapsedMs: 0,
+        };
+        receipt.faults.push(activity);
+        try {
+          const operation = scenario.targets[fault.target]?.[fault.kind];
+          if (!operation) {
+            throw new Error(`topology target ${fault.target} does not support ${fault.kind}`);
+          }
+          await withTopologyTimeout(
+            operation,
+            fault.timeoutMs ?? scenario.faultTimeoutMs,
+            `topology fault timed out: ${fault.kind} ${fault.target}`,
+          );
+          Object.assign(activity, { status: "completed", elapsedMs: elapsed(started) });
+        } catch (error) {
+          Object.assign(activity, {
+            status: "failed",
+            elapsedMs: elapsed(started),
+            error: errorMessage(error),
+          });
+          throw error;
+        }
       }
     }
   } catch (error) {
     receipt.status = "failed";
-    receipt.error = error instanceof Error ? error.message : String(error);
-    throw new TopologyScenarioError(receipt, error);
+    receipt.error = errorMessage(error);
+    scenarioError = error;
   } finally {
+    if (scenario.cleanup) {
+      try {
+        await withTopologyTimeout(
+          () => scenario.cleanup!(),
+          scenario.cleanupTimeoutMs ?? scenario.faultTimeoutMs,
+          "topology scenario cleanup timed out",
+        );
+      } catch (cleanupError) {
+        const message = `cleanup failed: ${errorMessage(cleanupError)}`;
+        receipt.status = "failed";
+        receipt.error = receipt.error ? `${receipt.error}; ${message}` : message;
+        scenarioError ??= cleanupError;
+      }
+    }
     receipt.elapsedMs = elapsed(scenarioStarted);
   }
+  if (receipt.status === "failed") throw new TopologyScenarioError(receipt, scenarioError);
   return receipt;
 }
 
@@ -142,21 +195,31 @@ export function deterministicRandom(seed: number): () => number {
 }
 
 export async function withTopologyTimeout<T>(
-  operation: Promise<T>,
+  operation: (signal: AbortSignal) => Promise<T>,
   timeoutMs: number,
   label: string,
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const controller = new AbortController();
+  const pending = operation(controller.signal);
   try {
     return await Promise.race([
-      operation,
+      pending,
       new Promise<T>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${label} after ${timeoutMs}ms`)), timeoutMs);
+        timer = setTimeout(() => {
+          const error = new Error(`${label} after ${timeoutMs}ms`);
+          reject(error);
+          controller.abort(error);
+        }, timeoutMs);
       }),
     ]);
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function now(): number {

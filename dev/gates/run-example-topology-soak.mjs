@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { spawnSync } from "node:child_process";
+import { isAbsolute, relative, resolve, sep } from "node:path";
+import { spawn, spawnSync } from "node:child_process";
 
 const root = resolve(import.meta.dirname, "../..");
 const registryPath = process.env.JAZZ_EXAMPLE_TOPOLOGY_REGISTRY
-  ? resolve(process.env.JAZZ_EXAMPLE_TOPOLOGY_REGISTRY)
+  ? confinedPath(process.env.JAZZ_EXAMPLE_TOPOLOGY_REGISTRY, "scenario registry")
   : resolve(root, "dev/example-topology-scenarios.json");
 const registry = JSON.parse(readFileSync(registryPath, "utf8"));
 validateRegistry(registry);
@@ -33,28 +33,25 @@ if (scenarios.length === 0 || selected.some((id) => !scenarios.some((item) => it
   usage("unknown or empty scenario selection");
 }
 
-const outputDir = resolve(root, output);
+const outputDir = confinedPath(output, "output");
 mkdirSync(resolve(outputDir, "logs"), { recursive: true });
 const fixedSeeds = [11, 29, 47, 83, 32676, 40595, 2234158, 3715011, 4372288];
 const cases = [];
 for (const scenario of scenarios) {
   for (let index = 0; index < seedCount; index++) {
     const seed = fixedSeeds[index] ?? 1000 + (index - fixedSeeds.length) * 7919;
-    const logName = `${scenario.id.replaceAll(/[^a-zA-Z0-9.-]/g, "-")}-seed-${seed}.log`;
+    const logName = `${cases.length}-${scenario.id.replaceAll(/[^a-zA-Z0-9.-]/g, "-")}-seed-${seed}.log`;
     const command = [`JAZZ_EXAMPLE_TOPOLOGY_SEED=${seed}`, ...scenario.argv.map(shellQuote)].join(
       " ",
     );
     const replay = scenario.cwd === "." ? command : `cd ${shellQuote(scenario.cwd)} && ${command}`;
     const started = Date.now();
-    const result = spawnSync(scenario.argv[0], scenario.argv.slice(1), {
-      cwd: resolve(root, scenario.cwd),
+    const result = await runProcess(scenario.argv[0], scenario.argv.slice(1), {
+      cwd: confinedPath(scenario.cwd, `scenario ${scenario.id} cwd`),
       env: { ...process.env, JAZZ_EXAMPLE_TOPOLOGY_SEED: String(seed) },
-      encoding: "utf8",
-      timeout: watchdogSeconds * 1000,
-      killSignal: "SIGKILL",
+      timeoutMs: watchdogSeconds * 1000,
     });
-    const status =
-      result.error?.code === "ETIMEDOUT" ? "timeout" : result.status === 0 ? "passed" : "failed";
+    const status = result.timedOut ? "timeout" : result.status === 0 ? "passed" : "failed";
     writeFileSync(
       resolve(outputDir, "logs", logName),
       `${result.stdout ?? ""}${result.stderr ?? ""}`,
@@ -90,6 +87,57 @@ function shellQuote(value) {
   return /^[a-zA-Z0-9_./:@=-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
+function confinedPath(value, label) {
+  const path = resolve(root, value);
+  const fromRoot = relative(root, path);
+  if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
+    usage(`${label} must remain inside the repository`);
+  }
+  return path;
+}
+
+function runProcess(command, args, { cwd, env, timeoutMs }) {
+  return new Promise((resolveResult) => {
+    const child = spawn(command, args, {
+      cwd,
+      env,
+      detached: process.platform !== "win32",
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk));
+    child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk));
+    const timer = setTimeout(() => {
+      timedOut = true;
+      terminateProcessTree(child.pid);
+    }, timeoutMs);
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolveResult({ status: null, stdout, stderr: `${stderr}${error.message}\n`, timedOut });
+    });
+    child.on("close", (status) => {
+      clearTimeout(timer);
+      resolveResult({ status, stdout, stderr, timedOut });
+    });
+  });
+}
+
+function terminateProcessTree(pid) {
+  if (!pid) return;
+  if (process.platform === "win32") {
+    spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
+    return;
+  }
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch (error) {
+    if (error?.code !== "ESRCH") throw error;
+  }
+}
+
 function validateRegistry(value) {
   if (value?.schemaVersion !== 1 || !Array.isArray(value.scenarios)) {
     usage("scenario registry must have schemaVersion 1 and a scenarios array");
@@ -103,6 +151,10 @@ function validateRegistry(value) {
     ids.add(scenario.id);
     if (!Array.isArray(scenario.topology) || scenario.topology.length === 0) {
       usage(`scenario ${scenario.id} requires at least one topology`);
+    }
+    const topologyKinds = new Set(["core", "edge", "browser", "native", "fixture"]);
+    if (scenario.topology.some((kind) => !topologyKinds.has(kind))) {
+      usage(`scenario ${scenario.id} has an unknown topology`);
     }
     if (typeof scenario.cwd !== "string" || scenario.cwd.length === 0) {
       usage(`scenario ${scenario.id} requires cwd`);
