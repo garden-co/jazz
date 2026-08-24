@@ -248,6 +248,27 @@ impl Database {
             .await
     }
 
+    /// Stage a descriptor produced by Groove from an already authenticated
+    /// local value. Such edits deliberately reuse unchanged base-tree nodes,
+    /// so bind their exact derived descriptor before finalization rather than
+    /// applying the raw-upload rule that every reachable node be newly owned.
+    async fn stage_derived_large_value_preparation(
+        &self,
+        prepared: crate::large_values::PreparedLargeValue,
+    ) -> Result<crate::large_values::StagedLargeValue, Error> {
+        let upload_id = crate::large_values::StagedLargeValueId(*uuid::Uuid::new_v4().as_bytes());
+        self.stage_large_value_chunk_batch(
+            upload_id,
+            prepared.value_ref.kind,
+            prepared.staged_chunks,
+        )
+        .await?;
+        self.bind_pending_upload_descriptor(upload_id, &prepared.value_ref)
+            .await?;
+        self.finalize_large_value_upload(upload_id, prepared.value_ref)
+            .await
+    }
+
     /// Install one bounded batch belonging to a remote push upload. Receipt
     /// creation remains a separate finalize operation so Groove never buffers
     /// the complete tree in memory.
@@ -1336,7 +1357,7 @@ impl Database {
         let prepared = self
             .consolidate_large_value(value, Self::fresh_chunk_locator)
             .await?;
-        self.stage_large_value_preparation(prepared).await
+        self.stage_derived_large_value_preparation(prepared).await
     }
 
     /// Prepare an append using the bounded edit tail, consolidating through a
@@ -1371,7 +1392,7 @@ impl Database {
         let prepared = self
             .append_large_value(value, bytes, Self::fresh_chunk_locator)
             .await?;
-        self.stage_large_value_preparation(prepared).await
+        self.stage_derived_large_value_preparation(prepared).await
     }
 
     /// Prepare an arbitrary byte-coordinate splice. Text boundary/UTF-16 and
@@ -1442,7 +1463,7 @@ impl Database {
                 Self::fresh_chunk_locator,
             )
             .await?;
-        self.stage_large_value_preparation(prepared).await
+        self.stage_derived_large_value_preparation(prepared).await
     }
 
     /// Read one byte-coordinate range from the final logical scalar while the
