@@ -234,6 +234,10 @@ function attachTab(context: RuntimeContext, tabId: string, port: MessagePort): v
   context.peers.set(tabId, peer);
   port.addEventListener("message", onMessage);
   port.addEventListener("messageerror", onMessageError);
+  // SharedWorker connection ports are started by `onconnect`, but inspector
+  // peers arrive as freshly transferred MessageChannel ports. Starting is
+  // idempotent and required before addEventListener-based delivery can begin.
+  port.start();
 }
 
 async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortRequest): Promise<void> {

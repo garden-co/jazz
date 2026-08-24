@@ -10,7 +10,7 @@
 use super::*;
 use crate::protocol::{CatalogueAck, LensOp, SchemaLineagePublication, VersionBundleRef};
 use crate::protocol_limits::{
-    commit_unit_limit_violation, validate_known_state_declaration, validate_shape_ast_size,
+    commit_unit_limit_violation, validate_known_state_declaration, validate_shape_registration_size,
 };
 use crate::schema::{ColumnSchema, MERGE_HEADS_TABLE};
 use groove::records::ValueType;

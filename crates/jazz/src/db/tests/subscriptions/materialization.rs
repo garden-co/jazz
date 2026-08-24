@@ -70,13 +70,34 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
     let middle = row(0x72);
     let last = row(0x73);
     let first_write = client
-        .insert_with_id("todos", first, cells("alpha", false, client_author))
+        .insert(
+            "todos",
+            cells("alpha", false, client_author),
+            crate::db::InsertOptions {
+                row_id: Some(first),
+                ..Default::default()
+            },
+        )
         .unwrap();
     let _middle_write = client
-        .insert_with_id("todos", middle, cells("middle", false, client_author))
+        .insert(
+            "todos",
+            cells("middle", false, client_author),
+            crate::db::InsertOptions {
+                row_id: Some(middle),
+                ..Default::default()
+            },
+        )
         .unwrap();
     let last_write = client
-        .insert_with_id("todos", last, cells("omega", false, client_author))
+        .insert(
+            "todos",
+            cells("omega", false, client_author),
+            crate::db::InsertOptions {
+                row_id: Some(last),
+                ..Default::default()
+            },
+        )
         .unwrap();
     client.tick().unwrap();
 
@@ -97,6 +118,7 @@ fn authoritative_reset_rebuilds_occurrence_sidecar_after_order_and_count_change(
             "todos",
             first,
             BTreeMap::from([("title".to_owned(), Value::String("zulu".to_owned()))]),
+            Default::default(),
         )
         .unwrap();
     let binding_view_key = BindingViewKey::new(

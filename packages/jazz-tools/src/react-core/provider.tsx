@@ -42,6 +42,7 @@ export type JazzClientProviderProps = {
 
 export type JazzProviderProps = {
   config: DbConfig;
+  /** Rendered during SSR and until client acquisition completes after browser commit. */
   fallback?: ReactNode;
   children: ReactNode;
   createJazzClient: CreateJazzClient;
@@ -201,8 +202,8 @@ export function JazzProvider({
   createJazzClient,
   onJWTExpired,
 }: JazzProviderProps) {
-  // Stable per-provider identity; used as the Set key so the useState
-  // initializer and useEffect don't double-count the same provider.
+  // Stable per-provider identity, used as the registry holder across effect
+  // cleanup and re-acquisition (including React Strict Mode's effect replay).
   const holder = useRef({}).current;
 
   // Keep the framework-level lease distinct from createJazzClient's own shared
@@ -210,36 +211,54 @@ export function JazzProvider({
   // makes provider teardown recursively release itself instead of the runtime.
   const configKey = `react:${serializeClientConfig(config)}`;
 
-  const [clientPromise, setClientPromise] = useState(() => {
-    return acquireClient<CoreJazzClient>(configKey, config, createJazzClient, holder);
-  });
-  const activeConfigKey = useRef(configKey);
+  const [clientLease, setClientLease] = useState<{
+    configKey: string;
+    promise: Promise<CoreJazzClient>;
+  } | null>(null);
+  const lifecycle = useRef<{
+    configKey: string | null;
+    release: Promise<void>;
+  }>({ configKey: null, release: Promise.resolve() });
 
   useEffect(() => {
     let cancelled = false;
-    const previousConfigKey = activeConfigKey.current;
-    activeConfigKey.current = configKey;
-    const clientPromise =
-      previousConfigKey === configKey
-        ? acquireClient<CoreJazzClient>(configKey, config, createJazzClient, holder)
-        : releaseClient(previousConfigKey, holder)
-            .then(() => acquireClient<CoreJazzClient>(configKey, config, createJazzClient, holder))
-            .then((client) => {
-              if (cancelled) void releaseClient(configKey, holder);
-              return client;
-            });
-
-    setClientPromise(clientPromise);
+    let acquired = false;
+    const previous = lifecycle.current;
+    // A same-key re-acquire must run immediately so the registry can cancel its
+    // deferred release during Strict Mode replay. A different key waits for the
+    // complete prior lifecycle, including any replacement that was cancelled
+    // before it acquired a lease.
+    const ready = previous.configKey === configKey ? Promise.resolve() : previous.release;
+    const acquisition = ready.then(() => {
+      if (cancelled) return;
+      const promise = acquireClient<CoreJazzClient>(configKey, config, createJazzClient, holder);
+      acquired = true;
+      setClientLease({ configKey, promise });
+    });
 
     return () => {
       cancelled = true;
-      void releaseClient(configKey, holder);
+      lifecycle.current = {
+        configKey,
+        release: acquisition.then(() => {
+          if (acquired) {
+            return releaseClient(configKey, holder);
+          }
+        }),
+      };
     };
   }, [configKey, createJazzClient, holder]);
 
+  // Effects do not run during SSR. Rendering the same fallback before the first
+  // browser commit keeps hydration stable while deferring all registry work to
+  // the committed lifecycle.
+  if (clientLease?.configKey !== configKey) {
+    return <>{fallback}</>;
+  }
+
   return (
     <React.Suspense fallback={fallback}>
-      <JazzClientProvider client={clientPromise} onJWTExpired={onJWTExpired}>
+      <JazzClientProvider client={clientLease.promise} onJWTExpired={onJWTExpired}>
         {children}
       </JazzClientProvider>
     </React.Suspense>

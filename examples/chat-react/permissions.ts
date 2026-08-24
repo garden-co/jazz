@@ -39,7 +39,10 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
     ]),
   );
   policy.messages.allowInsert.where((message) =>
-    policy.chatMembers.exists.where({ chatId: message.chatId, userId: session.user_id }),
+    allOf([
+      policy.chatMembers.exists.where({ chatId: message.chatId, userId: session.user_id }),
+      policy.profiles.exists.where({ id: message.senderId, userId: session.user_id }),
+    ]),
   );
   policy.messages.allowDelete.where((message) =>
     policy.profiles.exists.where({ id: message.senderId, userId: session.user_id }),

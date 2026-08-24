@@ -164,14 +164,25 @@ fn seed_data(db: &BenchDb, scale: usize) -> BenchmarkData {
         let owner = if is_owned { AUTHOR } else { OTHER_AUTHOR };
 
         let write = db
-            .insert_with_id("folders", folder, folder_cells(index, owner))
+            .insert(
+                "folders",
+                folder_cells(index, owner),
+                jazz::db::InsertOptions {
+                    row_id: Some(folder),
+                    ..Default::default()
+                },
+            )
             .expect("seed folder");
         wait_local(write);
 
         if is_owned || is_team_accessible {
             let role = if is_owned { "owner" } else { "member" };
             let write = db
-                .insert("folder_access", access_cells(folder, AUTHOR, role))
+                .insert(
+                    "folder_access",
+                    access_cells(folder, AUTHOR, role),
+                    Default::default(),
+                )
                 .expect("seed folder access");
             wait_local(write);
         }
@@ -204,6 +215,7 @@ fn seed_data(db: &BenchDb, scale: usize) -> BenchmarkData {
                     author,
                     index as u64,
                 ),
+                Default::default(),
             )
             .expect("seed document");
         wait_local(write);
@@ -238,6 +250,7 @@ fn insert_own_folder(c: &mut Criterion) {
                             AUTHOR,
                             current_timestamp(),
                         ),
+                        Default::default(),
                     )
                     .expect("own-folder insert should succeed");
                 wait_local(write)
@@ -271,6 +284,7 @@ fn insert_team_folder(c: &mut Criterion) {
                             OTHER_AUTHOR,
                             current_timestamp(),
                         ),
+                        Default::default(),
                     )
                     .expect("team-folder insert should succeed via folder access");
                 wait_local(write)
@@ -317,6 +331,7 @@ fn insert_batch(c: &mut Criterion) {
                                     AUTHOR,
                                     timestamp + index as u64,
                                 ),
+                                Default::default(),
                             )
                             .expect("batch insert should succeed");
                         wait_local(write);

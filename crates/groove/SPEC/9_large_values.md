@@ -392,6 +392,10 @@ tree. Completion is derived from an empty validated frontier rather than a
 sender finalization assertion. Partial uploads and completed timestamped
 retainer claims carry persisted creation/accounting metadata so host-driven
 expiry can reclaim abandoned uploads without consulting Jazz row history.
+Those timestamps are GC and resource-management metadata, not synchronous
+admission deadlines: while a journal or receipt remains present, chunk pushes,
+finalization, and publication may proceed regardless of wall-clock age. Once
+maintenance evicts it, stale handles fail by absence and cannot recreate it.
 Frontier collection itself stops at the negotiated batch bound; it does not
 allocate an unbounded list and truncate it after returning. A stale frontier
 response racing another uploader is accepted only when its redundant nodes

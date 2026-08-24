@@ -4,8 +4,9 @@ mod common;
 
 use jazz::block_on;
 use jazz::db::{
-    Db, DbConfig, DbIdentity, ErrorCode, LocalUpdates, MergeableTxOps, Propagation, ReadOpts,
-    SeededRowIdSource, SubscriptionEvent, SubscriptionStream,
+    Db, DbConfig, DbIdentity, ErrorCode, InsertOptions, LocalUpdates, MergeableTxOps, Propagation,
+    ReadOpts, SeededRowIdSource, SubscriptionEvent, SubscriptionStream, UpdateOptions,
+    UpsertOptions, WriteIdentity,
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
@@ -94,25 +95,31 @@ fn opts() -> ReadOpts {
 }
 
 fn insert_document(db: &Db<TestStorage>, id: RowUuid, team: RowUuid, rank: u64) {
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         DOCUMENTS,
-        id,
         BTreeMap::from([
             ("team".to_owned(), Value::Uuid(team.0)),
             ("rank".to_owned(), Value::U64(rank)),
         ]),
+        InsertOptions {
+            row_id: Some(id),
+            ..Default::default()
+        },
     ))
     .expect("insert document");
 }
 
 fn insert_membership(db: &Db<TestStorage>, id: RowUuid, team: RowUuid, user: AuthorId) {
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         MEMBERSHIPS,
-        id,
         BTreeMap::from([
             ("team".to_owned(), Value::Uuid(team.0)),
             ("user".to_owned(), Value::Uuid(user.0)),
         ]),
+        InsertOptions {
+            row_id: Some(id),
+            ..Default::default()
+        },
     ))
     .expect("insert membership");
 }
@@ -133,9 +140,25 @@ fn upsert_applies_insert_policy_only_to_a_genuinely_absent_target() {
         ("rank".to_owned(), Value::U64(1)),
     ]);
 
-    block_on(db.upsert_for_identity(READER, DOCUMENTS, document, cells.clone()))
-        .expect("absent target follows public insert policy");
-    let error = match block_on(db.upsert_for_identity(READER, DOCUMENTS, document, cells)) {
+    block_on(db.upsert(
+        DOCUMENTS,
+        document,
+        cells.clone(),
+        UpsertOptions {
+            identity: WriteIdentity::Session(READER),
+            ..Default::default()
+        },
+    ))
+    .expect("absent target follows public insert policy");
+    let error = match block_on(db.upsert(
+        DOCUMENTS,
+        document,
+        cells,
+        UpsertOptions {
+            identity: WriteIdentity::Session(READER),
+            ..Default::default()
+        },
+    )) {
         Ok(_) => panic!("hidden existing target requires read permission"),
         Err(error) => error,
     };
@@ -236,10 +259,13 @@ fn write_only_full_row_update_succeeds_but_partial_update_and_upsert_are_denied(
     let second = row(0x22);
     let refill = row(0x23);
 
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         TEAMS,
-        authorized_team,
         BTreeMap::from([("name".to_owned(), Value::String("authorized".to_owned()))]),
+        InsertOptions {
+            row_id: Some(authorized_team),
+            ..Default::default()
+        },
     ))
     .expect("insert team");
     insert_membership(&db, row(0x31), authorized_team, READER);
@@ -255,23 +281,29 @@ fn write_only_full_row_update_succeeds_but_partial_update_and_upsert_are_denied(
         )
         .expect("prepare exact ordered page");
 
-    block_on(db.update_for_identity(
-        WRITER,
+    block_on(db.update(
         DOCUMENTS,
         winner,
         BTreeMap::from([
             ("team".to_owned(), Value::Uuid(authorized_team.0)),
             ("rank".to_owned(), Value::U64(5)),
         ]),
+        UpdateOptions {
+            identity: WriteIdentity::Session(WRITER),
+            ..Default::default()
+        },
     ))
     .expect("write-only principal can issue a full-row update");
     assert_eq!(ordered_page(&db, READER, &prepared), vec![second, refill]);
 
-    let partial_error = match block_on(db.update_for_identity(
-        WRITER,
+    let partial_error = match block_on(db.update(
         DOCUMENTS,
         winner,
         BTreeMap::from([("rank".to_owned(), Value::U64(40))]),
+        UpdateOptions {
+            identity: WriteIdentity::Session(WRITER),
+            ..Default::default()
+        },
     )) {
         Ok(_) => panic!("write-only principal's partial update must be denied"),
         Err(error) => error,
@@ -284,14 +316,17 @@ fn write_only_full_row_update_succeeds_but_partial_update_and_upsert_are_denied(
     );
     assert_eq!(ordered_page(&db, READER, &prepared), vec![second, refill]);
 
-    let upsert_error = match block_on(db.upsert_for_identity(
-        WRITER,
+    let upsert_error = match block_on(db.upsert(
         DOCUMENTS,
         winner,
         BTreeMap::from([
             ("team".to_owned(), Value::Uuid(authorized_team.0)),
             ("rank".to_owned(), Value::U64(40)),
         ]),
+        UpsertOptions {
+            identity: WriteIdentity::Session(WRITER),
+            ..Default::default()
+        },
     )) {
         Ok(_) => panic!("write-only principal's upsert must be denied"),
         Err(error) => error,
@@ -311,12 +346,14 @@ fn write_only_full_row_update_succeeds_but_partial_update_and_upsert_are_denied(
         DOCUMENTS,
         winner,
         BTreeMap::from([("rank".to_owned(), Value::U64(41))]),
+        Default::default(),
     ))
     .expect("client-local partial update stages optimistically");
     block_on(db.upsert(
         DOCUMENTS,
         winner,
         BTreeMap::from([("rank".to_owned(), Value::U64(42))]),
+        Default::default(),
     ))
     .expect("client-local upsert stages optimistically");
 }
@@ -334,10 +371,13 @@ fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
         (authorized_team, "authorized"),
         (unauthorized_team, "unauthorized"),
     ] {
-        block_on(db.insert_with_id(
+        block_on(db.insert(
             TEAMS,
-            team,
             BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+            InsertOptions {
+                row_id: Some(team),
+                ..Default::default()
+            },
         ))
         .expect("insert team");
     }
@@ -374,11 +414,14 @@ fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
          is only meaningful for a write-only principal"
     );
 
-    let denied = match block_on(db.update_for_identity(
-        WRITER,
+    let denied = match block_on(db.update(
         DOCUMENTS,
         winner,
         BTreeMap::from([("team".to_owned(), Value::Uuid(unauthorized_team.0))]),
+        UpdateOptions {
+            identity: WriteIdentity::Session(WRITER),
+            ..Default::default()
+        },
     )) {
         Ok(_) => {
             panic!("write-only partial update must be denied before it can corrupt omitted cells")
@@ -390,11 +433,14 @@ fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
     assert_eq!(reader_page(), vec![winner, second]);
     assert!(stream.try_next_event().is_none());
 
-    block_on(db.update_for_identity(
-        MAINTAINER,
+    block_on(db.update(
         DOCUMENTS,
         winner,
         BTreeMap::from([("team".to_owned(), Value::Uuid(unauthorized_team.0))]),
+        UpdateOptions {
+            identity: WriteIdentity::Session(MAINTAINER),
+            ..Default::default()
+        },
     ))
     .expect("reader-authorized principal moves winning document out of scope");
     let move_out_delta = exact_delta(&mut stream);
@@ -416,6 +462,7 @@ fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
             DOCUMENTS,
             winner,
             BTreeMap::from([("team".to_owned(), Value::Uuid(authorized_team.0))]),
+            Default::default(),
         )
         .await?;
         // The authority re-entry and this ordinary content update share one
@@ -425,6 +472,7 @@ fn maintained_authorization_restores_an_ordered_page_after_scope_reentry() {
             DOCUMENTS,
             second,
             BTreeMap::from([("rank".to_owned(), Value::U64(21))]),
+            Default::default(),
         )
         .await?;
         Ok(())
