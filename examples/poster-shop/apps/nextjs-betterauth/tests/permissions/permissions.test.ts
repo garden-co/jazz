@@ -12,8 +12,18 @@ afterEach(async () => testApp.shutdown());
 it("allows an admin to bootstrap a canvas, invite an editor, then revokes edits", async () => {
   const ownerId = "poster-owner",
     editorId = "poster-editor";
-  const owner = testApp.as({ user_id: ownerId, claims: {}, authMode: "external" });
-  const editor = testApp.as({ user_id: editorId, claims: {}, authMode: "external" });
+  const owner = testApp.as({
+    issuer: "https://poster-shop.test",
+    user_id: ownerId,
+    claims: {},
+    authMode: "external",
+  });
+  const editor = testApp.as({
+    issuer: "https://poster-shop.test",
+    user_id: editorId,
+    claims: {},
+    authMode: "external",
+  });
   const canvas = await owner
     .insert(app.canvases, { title: "Poster", width: 1080, height: 1350 })
     .wait({ tier: "edge" });
@@ -61,9 +71,24 @@ it("keeps canvas ordering and history markers behind the same membership boundar
   const ownerId = "canvas-owner";
   const editorId = "canvas-editor";
   const viewerId = "canvas-viewer";
-  const owner = testApp.as({ user_id: ownerId, claims: {}, authMode: "external" });
-  const editor = testApp.as({ user_id: editorId, claims: {}, authMode: "external" });
-  const viewer = testApp.as({ user_id: viewerId, claims: {}, authMode: "external" });
+  const owner = testApp.as({
+    issuer: "https://poster-shop.test",
+    user_id: ownerId,
+    claims: {},
+    authMode: "external",
+  });
+  const editor = testApp.as({
+    issuer: "https://poster-shop.test",
+    user_id: editorId,
+    claims: {},
+    authMode: "external",
+  });
+  const viewer = testApp.as({
+    issuer: "https://poster-shop.test",
+    user_id: viewerId,
+    claims: {},
+    authMode: "external",
+  });
   const canvas = await owner
     .insert(app.canvases, { title: "Deterministic canvas", width: 1080, height: 1350 })
     .wait({ tier: "edge" });
@@ -122,8 +147,18 @@ it("keeps canvas ordering and history markers behind the same membership boundar
 it("permits replaceable cursor presence only to its author", async () => {
   const ownerId = "cursor-owner";
   const editorId = "cursor-editor";
-  const owner = testApp.as({ user_id: ownerId, claims: {}, authMode: "external" });
-  const editor = testApp.as({ user_id: editorId, claims: {}, authMode: "external" });
+  const owner = testApp.as({
+    issuer: "https://poster-shop.test",
+    user_id: ownerId,
+    claims: {},
+    authMode: "external",
+  });
+  const editor = testApp.as({
+    issuer: "https://poster-shop.test",
+    user_id: editorId,
+    claims: {},
+    authMode: "external",
+  });
   const canvas = await owner
     .insert(app.canvases, { title: "Presence", width: 1, height: 1 })
     .wait({ tier: "edge" });
