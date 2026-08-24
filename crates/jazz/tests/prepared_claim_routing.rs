@@ -408,10 +408,13 @@ fn opts() -> ReadOpts {
 
 fn seed(db: &BenchDb, team_a: RowUuid, team_b: RowUuid, region_a: &str, region_b: &str) {
     for (team, name) in [(team_a, "Team A"), (team_b, "Team B")] {
-        block_on(db.insert_with_id(
+        block_on(db.insert(
             TEAMS,
-            team,
             BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(team),
+                ..Default::default()
+            },
         ))
         .expect("seed team");
     }
@@ -419,25 +422,31 @@ fn seed(db: &BenchDb, team_a: RowUuid, team_b: RowUuid, region_a: &str, region_b
         (row(0x31), team_a, USER_A, region_a),
         (row(0x32), team_b, USER_B, region_b),
     ] {
-        block_on(db.insert_with_id(
+        block_on(db.insert(
             MEMBERSHIPS,
-            membership,
             BTreeMap::from([
                 ("team".to_owned(), Value::Uuid(team.0)),
                 ("user".to_owned(), Value::Uuid(user.0)),
                 ("region".to_owned(), Value::String(region.to_owned())),
             ]),
+            jazz::db::InsertOptions {
+                row_id: Some(membership),
+                ..Default::default()
+            },
         ))
         .expect("seed membership");
     }
     for (document, team, updated_at) in [(row(0x41), team_a, 10), (row(0x42), team_b, 20)] {
-        block_on(db.insert_with_id(
+        block_on(db.insert(
             DOCUMENTS,
-            document,
             BTreeMap::from([
                 ("team".to_owned(), Value::Uuid(team.0)),
                 ("updated_at".to_owned(), Value::U64(updated_at)),
             ]),
+            jazz::db::InsertOptions {
+                row_id: Some(document),
+                ..Default::default()
+            },
         ))
         .expect("seed document");
     }
@@ -452,31 +461,40 @@ fn seed_two_hop_reachability_policy(db: &BenchDb) -> (RowUuid, RowUuid, RowUuid,
     let group_b = row(0x72);
 
     for (project, name) in [(project_a, "project-a"), (project_b, "project-b")] {
-        block_on(db.insert_with_id(
+        block_on(db.insert(
             PROJECTS,
-            project,
             BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(project),
+                ..Default::default()
+            },
         ))
         .expect("seed project");
     }
     for (group, name) in [(group_a, "group-a"), (group_b, "group-b")] {
-        block_on(db.insert_with_id(
+        block_on(db.insert(
             GROUPS,
-            group,
             BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+            jazz::db::InsertOptions {
+                row_id: Some(group),
+                ..Default::default()
+            },
         ))
         .expect("seed group");
     }
     for (document, project, updated_at) in
         [(document_a, project_a, 10), (document_b, project_b, 20)]
     {
-        block_on(db.insert_with_id(
+        block_on(db.insert(
             DOCUMENTS,
-            document,
             BTreeMap::from([
                 ("project".to_owned(), Value::Uuid(project.0)),
                 ("updated_at".to_owned(), Value::U64(updated_at)),
             ]),
+            jazz::db::InsertOptions {
+                row_id: Some(document),
+                ..Default::default()
+            },
         ))
         .expect("seed document");
     }
@@ -484,13 +502,16 @@ fn seed_two_hop_reachability_policy(db: &BenchDb) -> (RowUuid, RowUuid, RowUuid,
         (row(0x81), document_a, project_a),
         (row(0x82), document_b, project_b),
     ] {
-        block_on(db.insert_with_id(
+        block_on(db.insert(
             MEMBERSHIPS,
-            membership,
             BTreeMap::from([
                 ("document".to_owned(), Value::Uuid(document.0)),
                 ("project".to_owned(), Value::Uuid(project.0)),
             ]),
+            jazz::db::InsertOptions {
+                row_id: Some(membership),
+                ..Default::default()
+            },
         ))
         .expect("seed membership");
     }
@@ -498,24 +519,30 @@ fn seed_two_hop_reachability_policy(db: &BenchDb) -> (RowUuid, RowUuid, RowUuid,
         (row(0x91), project_a, group_a),
         (row(0x92), project_b, group_b),
     ] {
-        block_on(db.insert_with_id(
+        block_on(db.insert(
             PROJECT_ACCESS,
-            access,
             BTreeMap::from([
                 ("project".to_owned(), Value::Uuid(project.0)),
                 ("group".to_owned(), Value::Uuid(group.0)),
             ]),
+            jazz::db::InsertOptions {
+                row_id: Some(access),
+                ..Default::default()
+            },
         ))
         .expect("seed project access");
     }
     for (membership, group, user) in [(row(0xa1), group_a, USER_A), (row(0xa2), group_b, USER_B)] {
-        block_on(db.insert_with_id(
+        block_on(db.insert(
             GROUP_MEMBERS,
-            membership,
             BTreeMap::from([
                 ("group".to_owned(), Value::Uuid(group.0)),
                 ("user".to_owned(), Value::Uuid(user.0)),
             ]),
+            jazz::db::InsertOptions {
+                row_id: Some(membership),
+                ..Default::default()
+            },
         ))
         .expect("seed reachability seed membership");
     }
@@ -626,34 +653,43 @@ fn prepared_policy_claim_routing_preserves_claimless_union_branches() {
         USER_B,
         BTreeMap::from([("region".to_owned(), Value::String("region-b".to_owned()))]),
     );
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         DOCUMENTS,
-        public,
         BTreeMap::from([
             ("visibility".to_owned(), Value::String("public".to_owned())),
             ("owner".to_owned(), Value::Uuid(WRITER.0)),
             ("region".to_owned(), Value::String("other".to_owned())),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(public),
+            ..Default::default()
+        },
     ))
     .expect("seed public document");
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         DOCUMENTS,
-        private,
         BTreeMap::from([
             ("visibility".to_owned(), Value::String("private".to_owned())),
             ("owner".to_owned(), Value::Uuid(USER_A.0)),
             ("region".to_owned(), Value::String("other".to_owned())),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(private),
+            ..Default::default()
+        },
     ))
     .expect("seed private document");
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         DOCUMENTS,
-        regional,
         BTreeMap::from([
             ("visibility".to_owned(), Value::String("private".to_owned())),
             ("owner".to_owned(), Value::Uuid(WRITER.0)),
             ("region".to_owned(), Value::String("region-a".to_owned())),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(regional),
+            ..Default::default()
+        },
     ))
     .expect("seed regional document");
 
@@ -800,9 +836,8 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
         (chat_a, "chat-a", join_code_a),
         (chat_b, "chat-b", join_code_b),
     ] {
-        block_on(db.insert_with_id(
+        block_on(db.insert(
             CHATS,
-            chat,
             BTreeMap::from([
                 ("name".to_owned(), Value::String(name.to_owned())),
                 (
@@ -810,6 +845,10 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
                     Value::Nullable(Some(Box::new(Value::String(format!("stored-{join_code}"))))),
                 ),
             ]),
+            jazz::db::InsertOptions {
+                row_id: Some(chat),
+                ..Default::default()
+            },
         ))
         .expect("seed invite chat");
     }
@@ -858,13 +897,16 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
         "a chat without its membership must not be visible"
     );
 
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         CHAT_MEMBERS,
-        row(0xc3),
         BTreeMap::from([
             ("chatId".to_owned(), Value::Uuid(chat_a.0)),
             ("userId".to_owned(), Value::String(user_id_a.to_owned())),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(row(0xc3)),
+            ..Default::default()
+        },
     ))
     .expect("commit membership for binding A");
     let added_rows = |event| match event {
@@ -892,13 +934,16 @@ fn prepared_nested_claim_routes_keep_two_bindings_isolated_through_live_membersh
         "binding A's CommitUnit must not leak into binding B"
     );
 
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         CHAT_MEMBERS,
-        row(0xc4),
         BTreeMap::from([
             ("chatId".to_owned(), Value::Uuid(chat_b.0)),
             ("userId".to_owned(), Value::String(user_id_b.to_owned())),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(row(0xc4)),
+            ..Default::default()
+        },
     ))
     .expect("commit membership for binding B");
     assert_eq!(
@@ -1053,16 +1098,22 @@ fn mutually_referential_dependency_policies_do_not_recurse() {
     let db = open_db_with_schema(policy_proof_cycle_schema());
     let a = row(0xb1);
     let b = row(0xb2);
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         CYCLE_A,
-        a,
         BTreeMap::from([("b".to_owned(), Value::Uuid(b.0))]),
+        jazz::db::InsertOptions {
+            row_id: Some(a),
+            ..Default::default()
+        },
     ))
     .expect("seed cycle A");
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         CYCLE_B,
-        b,
         BTreeMap::from([("a".to_owned(), Value::Uuid(a.0))]),
+        jazz::db::InsertOptions {
+            row_id: Some(b),
+            ..Default::default()
+        },
     ))
     .expect("seed cycle B");
 
@@ -1285,12 +1336,14 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
         DOCUMENTS,
         row(0x41),
         BTreeMap::from([("updated_at".to_owned(), Value::U64(11))]),
+        Default::default(),
     ))
     .expect("trigger A subscription rehydration");
     block_on(db.update(
         DOCUMENTS,
         row(0x42),
         BTreeMap::from([("updated_at".to_owned(), Value::U64(21))]),
+        Default::default(),
     ))
     .expect("trigger B subscription rehydration");
     assert!(matches!(
@@ -1316,13 +1369,16 @@ fn rebuilt_subscription_drop_releases_rehydrated_handle_without_touching_peer() 
     // must be retired by the next node owner turn, without touching Bob's.
     block_on(db.tick()).expect("drain A finalization after runtime rebuild");
     assert_eq!(db.active_groove_subscriptions_for_test(), 1);
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         DOCUMENTS,
-        row(0x43),
         BTreeMap::from([
             ("team".to_owned(), Value::Uuid(team_b.0)),
             ("updated_at".to_owned(), Value::U64(30)),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(row(0x43)),
+            ..Default::default()
+        },
     ))
     .expect("write after dropping A");
     assert!(matches!(
@@ -1347,19 +1403,25 @@ fn prepared_join_handle_recompiles_after_catalogue_runtime_rebuild() {
     let db = open_db_with_schema_as(v1.clone(), AuthorId::SYSTEM);
     let team = row(0xa1);
     let document = row(0xa2);
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         TEAMS,
-        team,
         BTreeMap::from([("name".to_owned(), Value::String("Team A".to_owned()))]),
+        jazz::db::InsertOptions {
+            row_id: Some(team),
+            ..Default::default()
+        },
     ))
     .expect("seed team");
-    block_on(db.insert_with_id(
+    block_on(db.insert(
         DOCUMENTS,
-        document,
         BTreeMap::from([
             ("team".to_owned(), Value::Uuid(team.0)),
             ("updated_at".to_owned(), Value::U64(1)),
         ]),
+        jazz::db::InsertOptions {
+            row_id: Some(document),
+            ..Default::default()
+        },
     ))
     .expect("seed document");
     let join = Query::from(DOCUMENTS).join_via_column(

@@ -6,16 +6,22 @@ use super::*;
 fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
     let schema = relation_schema();
     let db = open_db(0xc1, AuthorId::from_bytes([0xc1; 16]), &schema);
-    db.insert_with_id(
+    db.insert(
         "users",
-        row(0xa1),
         BTreeMap::from([("name".to_owned(), Value::String("alice".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "users",
-        row(0xb1),
         BTreeMap::from([("name".to_owned(), Value::String("bob".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xb1)),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -43,13 +49,16 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
     );
     assert!(snapshot.edges.is_empty());
 
-    db.insert_with_id(
+    db.insert(
         "todos",
-        row(0x11),
         BTreeMap::from([
             ("title".to_owned(), Value::String("first".to_owned())),
             ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x11)),
+            ..Default::default()
+        },
     )
     .unwrap();
     db.tick().unwrap();
@@ -86,6 +95,7 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
         "todos",
         row(0x11),
         BTreeMap::from([("owner_id".to_owned(), Value::Uuid(row(0xb1).0))]),
+        Default::default(),
     )
     .unwrap();
     let removed_child = block_on(subscription.next_raw()).unwrap();
@@ -99,6 +109,7 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
         "todos",
         row(0x11),
         BTreeMap::from([("owner_id".to_owned(), Value::Uuid(row(0xa1).0))]),
+        Default::default(),
     )
     .unwrap();
     let restored_child = block_on(subscription.next_raw()).unwrap();
@@ -113,10 +124,13 @@ fn array_subquery_live_subscription_publishes_only_terminal_root_rows() {
 fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     let schema = relation_schema();
     let db = open_db(0xc4, AuthorId::from_bytes([0xc4; 16]), &schema);
-    db.insert_with_id(
+    db.insert(
         "users",
-        row(0xa1),
         BTreeMap::from([("name".to_owned(), Value::String("zulu".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -134,10 +148,13 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
     let snapshot = snapshot_from_event(initial);
     assert_eq!(row_ids(&snapshot.rows), vec![row(0xa1)]);
 
-    db.insert_with_id(
+    db.insert(
         "users",
-        row(0xb1),
         BTreeMap::from([("name".to_owned(), Value::String("alpha".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xb1)),
+            ..Default::default()
+        },
     )
     .unwrap();
     db.tick().unwrap();
@@ -200,6 +217,7 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
         "users",
         row(0xb1),
         BTreeMap::from([("name".to_owned(), Value::String("zzzz".to_owned()))]),
+        Default::default(),
     )
     .unwrap();
     db.tick().unwrap();
@@ -233,7 +251,7 @@ fn structured_subscription_splices_in_terminal_root_order_after_insert() {
         ] if remove_path.is_empty() && insert_path.is_empty()
     ));
 
-    db.delete("users", row(0xa1)).unwrap();
+    db.delete("users", row(0xa1), Default::default()).unwrap();
     db.tick().unwrap();
     let removed = block_on(subscription.next_raw()).unwrap();
     let SubscriptionEvent::Delta { reset, .. } = &removed else {
@@ -380,14 +398,17 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
     client.detach_query(normal_chat_attachment);
 
     let accepted_membership = invite_client
-        .insert_with_id(
+        .insert(
             "chat_members",
-            row(0xc2),
             BTreeMap::from([
                 ("chat_id".to_owned(), Value::Uuid(chat.0)),
                 ("user_id".to_owned(), Value::String(reader.0.to_string())),
                 ("join_code".to_owned(), Value::Nullable(None)),
             ]),
+            crate::db::InsertOptions {
+                row_id: Some(row(0xc2)),
+                ..Default::default()
+            },
         )
         .unwrap();
     invite_client.tick().unwrap();
@@ -489,16 +510,22 @@ fn propagated_structured_subscription_rehydrates_after_membership_scoped_one_sho
 fn flat_subscription_hydrates_in_declared_root_order() {
     let schema = relation_schema();
     let db = open_db(0xd4, AuthorId::from_bytes([0xd4; 16]), &schema);
-    db.insert_with_id(
+    db.insert(
         "users",
-        row(0xa1),
         BTreeMap::from([("name".to_owned(), Value::String("zulu".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
     )
     .unwrap();
-    db.insert_with_id(
+    db.insert(
         "users",
-        row(0xb1),
         BTreeMap::from([("name".to_owned(), Value::String("alpha".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xb1)),
+            ..Default::default()
+        },
     )
     .unwrap();
 
@@ -515,10 +542,13 @@ fn flat_subscription_hydrates_in_default_row_id_order() {
     let schema = relation_schema();
     let db = open_db(0xd7, AuthorId::from_bytes([0xd7; 16]), &schema);
     for id in [0xb1, 0xa1] {
-        db.insert_with_id(
+        db.insert(
             "users",
-            row(id),
             BTreeMap::from([("name".to_owned(), Value::String(format!("user-{id}")))]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -540,10 +570,13 @@ fn flat_subscription_inserts_at_declared_root_position() {
     let _initial = block_on(subscription.next_raw()).unwrap();
 
     for (id, name) in [(0xa1, "zulu"), (0xb1, "zzzz")] {
-        db.insert_with_id(
+        db.insert(
             "users",
-            row(id),
             BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
         )
         .unwrap();
         db.tick().unwrap();
@@ -571,6 +604,7 @@ fn flat_subscription_inserts_at_declared_root_position() {
         "users",
         row(0xa1),
         BTreeMap::from([("name".to_owned(), Value::String("yyyy".to_owned()))]),
+        Default::default(),
     )
     .unwrap();
     db.tick().unwrap();
@@ -595,19 +629,21 @@ fn flat_subscription_updates_with_nullable_sort_payload() {
         ),
     );
     let db = open_db(0xd6, AuthorId::from_bytes([0xd6; 16]), &schema);
-    db.insert_with_id(
+    db.insert(
         "users",
-        row(0xa1),
         BTreeMap::from([
             ("name".to_owned(), Value::String("before".to_owned())),
             ("rank".to_owned(), Value::Nullable(None)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
     )
     .unwrap();
     for (id, rank) in [(0xb1, 1), (0xc1, 2)] {
-        db.insert_with_id(
+        db.insert(
             "users",
-            row(id),
             BTreeMap::from([
                 ("name".to_owned(), Value::String(format!("rank-{rank}"))),
                 (
@@ -615,6 +651,10 @@ fn flat_subscription_updates_with_nullable_sort_payload() {
                     Value::Nullable(Some(Box::new(Value::I32(rank)))),
                 ),
             ]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -627,6 +667,7 @@ fn flat_subscription_updates_with_nullable_sort_payload() {
         "users",
         row(0xa1),
         BTreeMap::from([("name".to_owned(), Value::String("after".to_owned()))]),
+        Default::default(),
     )
     .unwrap();
     db.tick().unwrap();
@@ -665,13 +706,16 @@ fn flat_subscription_update_respects_descending_row_id_tie_break() {
     );
     let db = open_db(0xd8, AuthorId::from_bytes([0xd8; 16]), &schema);
     for (id, rank) in [(0xf0, 1), (0xe0, 1), (0x10, 2)] {
-        db.insert_with_id(
+        db.insert(
             "users",
-            row(id),
             BTreeMap::from([
                 ("name".to_owned(), Value::String(format!("user-{id}"))),
                 ("rank".to_owned(), Value::I32(rank)),
             ]),
+            InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -690,6 +734,7 @@ fn flat_subscription_update_respects_descending_row_id_tie_break() {
         "users",
         row(0x10),
         BTreeMap::from([("rank".to_owned(), Value::I32(1))]),
+        Default::default(),
     )
     .unwrap();
     db.tick().unwrap();
@@ -720,13 +765,16 @@ fn flat_subscription_update_moves_largest_descending_row_id_to_front() {
     );
     let db = open_db(0xd9, AuthorId::from_bytes([0xd9; 16]), &schema);
     for (id, rank) in [(0xf0, 1), (0xe0, 1), (0xff, 2)] {
-        db.insert_with_id(
+        db.insert(
             "users",
-            row(id),
             BTreeMap::from([
                 ("name".to_owned(), Value::String(format!("user-{id}"))),
                 ("rank".to_owned(), Value::I32(rank)),
             ]),
+            InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -741,6 +789,7 @@ fn flat_subscription_update_moves_largest_descending_row_id_to_front() {
         "users",
         row(0xff),
         BTreeMap::from([("rank".to_owned(), Value::I32(1))]),
+        Default::default(),
     )
     .unwrap();
     db.tick().unwrap();
@@ -765,10 +814,13 @@ fn flat_subscription_shifts_offset_window_when_leading_row_is_deleted() {
     let schema = relation_schema();
     let db = open_db(0xd8, AuthorId::from_bytes([0xd8; 16]), &schema);
     for (id, name) in [(0xa1, "a"), (0xb1, "b"), (0xc1, "c"), (0xd1, "d")] {
-        db.insert_with_id(
+        db.insert(
             "users",
-            row(id),
             BTreeMap::from([("name".to_owned(), Value::String(name.to_owned()))]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -781,7 +833,7 @@ fn flat_subscription_shifts_offset_window_when_leading_row_is_deleted() {
     let initial = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
     assert_eq!(row_ids(&initial.rows), vec![row(0xb1), row(0xc1)]);
 
-    db.delete("users", row(0xa1)).unwrap();
+    db.delete("users", row(0xa1), Default::default()).unwrap();
     db.tick().unwrap();
     let event = block_on(subscription.next_raw()).unwrap();
     assert!(matches!(
@@ -796,13 +848,16 @@ fn flat_subscription_shifts_offset_window_when_leading_row_is_deleted() {
 fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
     let schema = relation_schema();
     let db = open_db(0xc2, AuthorId::from_bytes([0xc2; 16]), &schema);
-    db.insert_with_id(
+    db.insert(
         "todos",
-        row(0x21),
         BTreeMap::from([
             ("title".to_owned(), Value::String("parent".to_owned())),
             ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x21)),
+            ..Default::default()
+        },
     )
     .unwrap();
     let query = Query::from("todos")
@@ -816,13 +871,16 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
         Vec::<String>::new()
     );
 
-    db.insert_with_id(
+    db.insert(
         "comments",
-        row(0xc1),
         BTreeMap::from([
             ("body".to_owned(), Value::String("first".to_owned())),
             ("todo_id".to_owned(), Value::Uuid(row(0x21).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xc1)),
+            ..Default::default()
+        },
     )
     .unwrap();
     assert!(matches!(
@@ -838,6 +896,7 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
         "comments",
         row(0xc1),
         BTreeMap::from([("body".to_owned(), Value::String("edited".to_owned()))]),
+        Default::default(),
     )
     .unwrap();
     let SubscriptionEvent::Delta {
@@ -868,7 +927,8 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
         "canonical replacement must address one stable child identity"
     );
 
-    db.delete("comments", row(0xc1)).unwrap();
+    db.delete("comments", row(0xc1), Default::default())
+        .unwrap();
     assert!(matches!(
         block_on(subscription.next_raw()).unwrap(),
         SubscriptionEvent::Delta { terminal_operations, .. }
@@ -878,13 +938,16 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
             ))
     ));
 
-    db.insert_with_id(
+    db.insert(
         "comments",
-        row(0xc2),
         BTreeMap::from([
             ("body".to_owned(), Value::String("second".to_owned())),
             ("todo_id".to_owned(), Value::Uuid(row(0x21).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xc2)),
+            ..Default::default()
+        },
     )
     .unwrap();
     assert!(matches!(
@@ -896,7 +959,7 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
             ))
     ));
 
-    db.delete("todos", row(0x21)).unwrap();
+    db.delete("todos", row(0x21), Default::default()).unwrap();
     assert!(matches!(
         block_on(subscription.next_raw()).unwrap(),
         SubscriptionEvent::Delta { terminal_operations, .. }
@@ -911,13 +974,16 @@ fn array_subquery_subscription_reflects_child_mutations_and_parent_removal() {
 fn array_subquery_subscription_updates_child_order_limit_boundary() {
     let schema = relation_schema();
     let db = open_db(0xc3, AuthorId::from_bytes([0xc3; 16]), &schema);
-    db.insert_with_id(
+    db.insert(
         "todos",
-        row(0x31),
         BTreeMap::from([
             ("title".to_owned(), Value::String("parent".to_owned())),
             ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x31)),
+            ..Default::default()
+        },
     )
     .unwrap();
     let query = Query::from("todos").array_subquery(
@@ -935,13 +1001,16 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
         Vec::<String>::new()
     );
 
-    db.insert_with_id(
+    db.insert(
         "comments",
-        row(0xd1),
         BTreeMap::from([
             ("body".to_owned(), Value::String("b".to_owned())),
             ("todo_id".to_owned(), Value::Uuid(row(0x31).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xd1)),
+            ..Default::default()
+        },
     )
     .unwrap();
     db.tick().unwrap();
@@ -954,13 +1023,16 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
         Vec::<String>::new()
     );
 
-    db.insert_with_id(
+    db.insert(
         "comments",
-        row(0xd2),
         BTreeMap::from([
             ("body".to_owned(), Value::String("c".to_owned())),
             ("todo_id".to_owned(), Value::Uuid(row(0x31).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xd2)),
+            ..Default::default()
+        },
     )
     .unwrap();
     db.tick().unwrap();
@@ -983,13 +1055,16 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
     };
     expect_inserted_child(block_on(subscription.next_raw()).unwrap(), row(0xd2));
 
-    db.insert_with_id(
+    db.insert(
         "comments",
-        row(0xd3),
         BTreeMap::from([
             ("body".to_owned(), Value::String("a".to_owned())),
             ("todo_id".to_owned(), Value::Uuid(row(0x31).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xd3)),
+            ..Default::default()
+        },
     )
     .unwrap();
     db.tick().unwrap();
@@ -999,6 +1074,7 @@ fn array_subquery_subscription_updates_child_order_limit_boundary() {
         "comments",
         row(0xd3),
         BTreeMap::from([("body".to_owned(), Value::String("z".to_owned()))]),
+        Default::default(),
     )
     .unwrap();
     db.tick().unwrap();
@@ -1012,24 +1088,30 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
     let other = AuthorId::from_bytes([0xb1; 16]);
     let spy = AuthorId::from_bytes([0xc1; 16]);
     let db = open_db(0xc4, AuthorId::SYSTEM, &schema);
-    db.insert_with_id(
+    db.insert(
         "todos",
-        row(0x41),
         BTreeMap::from([("title".to_owned(), Value::String("parent".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x41)),
+            ..Default::default()
+        },
     )
     .unwrap();
     for (id, body, owner) in [
         (0xe1, "member-visible", member),
         (0xe2, "other-visible", other),
     ] {
-        db.insert_with_id(
+        db.insert(
             "comments",
-            row(id),
             BTreeMap::from([
                 ("body".to_owned(), Value::String(body.to_owned())),
                 ("todo_id".to_owned(), Value::Uuid(row(0x41).0)),
                 ("owner".to_owned(), Value::Uuid(owner.0)),
             ]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -1072,23 +1154,29 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
 fn array_subquery_one_shot_and_maintained_subscription_are_equivalent() {
     let schema = relation_schema();
     let db = open_db(0xc5, AuthorId::from_bytes([0xc5; 16]), &schema);
-    db.insert_with_id(
+    db.insert(
         "todos",
-        row(0x51),
         BTreeMap::from([
             ("title".to_owned(), Value::String("parent".to_owned())),
             ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x51)),
+            ..Default::default()
+        },
     )
     .unwrap();
     for (id, body) in [(0xf1, "first"), (0xf2, "second")] {
-        db.insert_with_id(
+        db.insert(
             "comments",
-            row(id),
             BTreeMap::from([
                 ("body".to_owned(), Value::String(body.to_owned())),
                 ("todo_id".to_owned(), Value::Uuid(row(0x51).0)),
             ]),
+            crate::db::InsertOptions {
+                row_id: Some(row(id)),
+                ..Default::default()
+            },
         )
         .unwrap();
     }
@@ -1112,10 +1200,13 @@ fn array_subquery_one_shot_and_maintained_subscription_are_equivalent() {
 fn array_subquery_subscription_projects_late_root_and_existing_forward_target() {
     let schema = relation_schema();
     let db = open_db(0xc7, AuthorId::from_bytes([0xc7; 16]), &schema);
-    db.insert_with_id(
+    db.insert(
         "users",
-        row(0xa1),
         BTreeMap::from([("name".to_owned(), Value::String("owner".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa1)),
+            ..Default::default()
+        },
     )
     .unwrap();
     let query = Query::from("todos")
@@ -1126,13 +1217,16 @@ fn array_subquery_subscription_projects_late_root_and_existing_forward_target() 
     let opened = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
     assert!(opened.rows.is_empty());
 
-    db.insert_with_id(
+    db.insert(
         "todos",
-        row(0x52),
         BTreeMap::from([
             ("title".to_owned(), Value::String("late root".to_owned())),
             ("owner_id".to_owned(), Value::Uuid(row(0xa1).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x52)),
+            ..Default::default()
+        },
     )
     .unwrap();
     assert!(matches!(
@@ -1149,10 +1243,13 @@ fn array_subquery_subscription_projects_late_root_and_existing_forward_target() 
 fn array_subquery_subscription_projects_late_camel_case_root_and_existing_forward_target() {
     let schema = issue_schema();
     let db = open_db(0xc8, AuthorId::from_bytes([0xc8; 16]), &schema);
-    db.insert_with_id(
+    db.insert(
         "projects",
-        row(0xa2),
         BTreeMap::from([("name".to_owned(), Value::String("project".to_owned()))]),
+        crate::db::InsertOptions {
+            row_id: Some(row(0xa2)),
+            ..Default::default()
+        },
     )
     .unwrap();
     let query = Query::from("issues").select(["title"]).array_subquery(
@@ -1163,9 +1260,8 @@ fn array_subquery_subscription_projects_late_camel_case_root_and_existing_forwar
     let opened = snapshot_from_event(block_on(subscription.next_raw()).unwrap());
     assert!(opened.rows.is_empty());
 
-    db.insert_with_id(
+    db.insert(
         "issues",
-        row(0x53),
         issue_cells(
             "late issue",
             "open",
@@ -1175,6 +1271,10 @@ fn array_subquery_subscription_projects_late_camel_case_root_and_existing_forwar
             &[],
             None,
         ),
+        crate::db::InsertOptions {
+            row_id: Some(row(0x53)),
+            ..Default::default()
+        },
     )
     .unwrap();
     assert!(matches!(
@@ -1294,14 +1394,17 @@ fn ordered_suffix_delta_preserves_typed_union_occurrence_ids_for_duplicate_rows(
     let schema = schema();
     let db = open_db(0xd1, AuthorId::SYSTEM, &schema);
     let root = row(0xd2);
-    db.insert_with_id(
+    db.insert(
         "todos",
-        root,
         BTreeMap::from([
             ("title".to_owned(), Value::String("same source".to_owned())),
             ("done".to_owned(), Value::Bool(false)),
             ("owner".to_owned(), Value::Uuid(row(0xd3).0)),
         ]),
+        crate::db::InsertOptions {
+            row_id: Some(root),
+            ..Default::default()
+        },
     )
     .unwrap();
     let source_row = prepared_one(&db, &Query::from("todos")).expect("inserted source row");
