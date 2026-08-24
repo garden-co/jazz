@@ -42,6 +42,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       }
     } as unknown as typeof WebSocket;
     const transport = new FakeTransport([Uint8Array.from([1, 2, 3])]);
+    const runtimeAuthor = new TextEncoder().encode('["urn:jazz:test","runtime-user"]');
     const runtime = new NativeRuntimeAdapter(
       {
         openMemory: () =>
@@ -55,7 +56,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       } as never,
       testSchema,
       new Uint8Array(16),
-      Uint8Array.from([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]),
+      runtimeAuthor,
       1,
       true,
     );
@@ -66,12 +67,7 @@ describe("NativeRuntimeAdapter server transport", () => {
 
     expect(sockets).toHaveLength(1);
     expect(sockets[0]!.url).toBe("ws://127.0.0.1:4200/apps/app-a/ws");
-    expect(sockets[0]!.sent[0]).toEqual(
-      encodeWebSocketPrelude(
-        "{}",
-        Uint8Array.from([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]),
-      ),
-    );
+    expect(sockets[0]!.sent[0]).toEqual(encodeWebSocketPrelude("{}", runtimeAuthor));
     const helloBatch = decodeWebSocketFrameBatch(sockets[0]!.sent[1]! as Uint8Array);
     expect(helloBatch).toHaveLength(1);
     expect(isWireHello(helloBatch[0]!)).toBe(true);
@@ -87,18 +83,57 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(sockets).toHaveLength(2);
     expect(sockets[0]!.closed).toBe(true);
     expect(JSON.parse(sockets[1]!.sent[0] as string)).toEqual({
-      peer_identity: "01010101010101010101010101010101",
+      peer_identity: '["urn:jazz:test","runtime-user"]',
       auth: {
-        sub: "01010101010101010101010101010101",
+        sub: "runtime-user",
         jwt_token: "fresh.jwt",
       },
-      sub: "01010101010101010101010101010101",
+      sub: "runtime-user",
       jwt_token: "fresh.jwt",
     });
 
     runtime.disconnect();
 
     expect(sockets[1]!.closed).toBe(true);
+  });
+
+  it("uses the canonical credential author for websocket identity, not the raw runtime host", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({ connectUpstream: () => new FakeTransport([]), tick: () => undefined }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new TextEncoder().encode('["urn:jazz:runtime-host","local-cache"]'),
+      1,
+      true,
+    );
+
+    // A reserved issuer is valid only once the server verifies this signed
+    // first-party credential. The raw runtime host identity must never leak
+    // into that authenticated transport assertion.
+    const jwt = `header.${btoa(
+      JSON.stringify({ iss: "urn:jazz:local-first", sub: "provider-subject" }),
+    )}.signature`;
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", JSON.stringify({ jwt_token: jwt }));
+    await waitForFakeWebSocketNegotiation();
+
+    expect(JSON.parse(sockets[0]!.sent[0] as string)).toMatchObject({
+      peer_identity: '["urn:jazz:local-first","provider-subject"]',
+      auth: { jwt_token: jwt, sub: "provider-subject" },
+    });
+    runtime.disconnect();
   });
 
   it("routes auxiliary frames and drains their output without semantic delivery", async () => {

@@ -58,7 +58,12 @@ import {
 } from "./native-codec.js";
 import { encodeSchema } from "./schema-codec.js";
 import { nativeRowFieldPlanCacheKey, valueTypeCacheKey } from "./native-row-descriptor-key.js";
-import { WebSocketCarrier, type WebSocketNegotiation, wireAuthFailureReason } from "./websocket.js";
+import {
+  WebSocketCarrier,
+  peerIdentityForWebSocketAuth,
+  type WebSocketNegotiation,
+  wireAuthFailureReason,
+} from "./websocket.js";
 import {
   createNativeRowValueEncoder,
   createRecord,
@@ -1715,11 +1720,12 @@ export class NativeRuntimeAdapter implements Runtime {
     // shutdown is allowed to reject them.
     void this.disconnect({ rejectWaiters: false });
     const generation = ++this.serverConnectionGeneration;
+    const transportIdentity = peerIdentityForWebSocketAuth(authJson, this.peerIdentity);
     this.serverTransportError = null;
     this.serverEndpointUrl = url;
     const carrier = new WebSocketCarrier({
       endpointUrl: url,
-      peerIdentity: this.peerIdentity,
+      peerIdentity: transportIdentity,
       authJson,
       onFrame: (frame) => {
         if (generation !== this.serverConnectionGeneration) return;
