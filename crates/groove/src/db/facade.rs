@@ -265,8 +265,10 @@ impl Database {
         kind: crate::large_values::LargeValueKind,
         chunks: Vec<crate::large_values::StagedChunk>,
     ) -> Result<(), Error> {
-        self.stage_large_value_chunk_batch_with_presence(upload_id, kind, chunks, false)
-            .await?;
+        self.stage_large_value_chunk_batch_with_presence_and_pending_limit(
+            upload_id, kind, chunks, false, None,
+        )
+        .await?;
         Ok(())
     }
 
@@ -279,16 +281,19 @@ impl Database {
         kind: crate::large_values::LargeValueKind,
         chunks: Vec<crate::large_values::StagedChunk>,
     ) -> Result<bool, Error> {
-        self.stage_large_value_chunk_batch_with_presence(upload_id, kind, chunks, true)
-            .await
+        self.stage_large_value_chunk_batch_with_presence_and_pending_limit(
+            upload_id, kind, chunks, true, None,
+        )
+        .await
     }
 
-    async fn stage_large_value_chunk_batch_with_presence(
+    async fn stage_large_value_chunk_batch_with_presence_and_pending_limit(
         &self,
         upload_id: crate::large_values::StagedLargeValueId,
         kind: crate::large_values::LargeValueKind,
         chunks: Vec<crate::large_values::StagedChunk>,
         require_existing: bool,
+        pending_limit: Option<usize>,
     ) -> Result<bool, Error> {
         let _lifecycle = self.large_value_lifecycle.lock().await;
         // This must precede both chunk staging and metadata mutation. In
@@ -312,6 +317,11 @@ impl Database {
         } else {
             if require_existing {
                 return Ok(false);
+            }
+            if let Some(limit) = pending_limit
+                && self.pending_large_value_upload_limit_reached(limit).await?
+            {
+                return Err(Error::PendingLargeValueUploadLimitExceeded { limit });
             }
             crate::large_values::PendingLargeValueUpload {
                 id: upload_id,
@@ -420,6 +430,27 @@ impl Database {
         Ok(true)
     }
 
+    async fn pending_large_value_upload_limit_reached(&self, limit: usize) -> Result<bool, Error> {
+        if limit == 0 {
+            return Ok(true);
+        }
+        let mut cursor = self
+            .storage
+            .scan(crate::storage::ScanRequest::prefix(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                b"upload/".to_vec(),
+            ))
+            .await?;
+        let mut count = 0_usize;
+        while let Some(batch) = cursor.next_batch().await? {
+            count = count.saturating_add(batch.len());
+            if count >= limit {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn descriptor_upload_id(
         value_ref: &crate::large_values::LargeValueRef,
     ) -> Result<crate::large_values::StagedLargeValueId, Error> {
@@ -437,9 +468,34 @@ impl Database {
         &self,
         value_ref: crate::large_values::LargeValueRef,
     ) -> Result<crate::large_values::LargeValueUploadProgress, Error> {
+        self.begin_large_value_upload_inner(value_ref, None).await
+    }
+
+    /// Start or resume an upload without creating more than `pending_limit`
+    /// restart-persistent incomplete-upload records.
+    pub async fn begin_large_value_upload_with_pending_limit(
+        &self,
+        value_ref: crate::large_values::LargeValueRef,
+        pending_limit: usize,
+    ) -> Result<crate::large_values::LargeValueUploadProgress, Error> {
+        self.begin_large_value_upload_inner(value_ref, Some(pending_limit))
+            .await
+    }
+
+    async fn begin_large_value_upload_inner(
+        &self,
+        value_ref: crate::large_values::LargeValueRef,
+        pending_limit: Option<usize>,
+    ) -> Result<crate::large_values::LargeValueUploadProgress, Error> {
         let upload_id = Self::descriptor_upload_id(&value_ref)?;
-        self.stage_large_value_chunk_batch(upload_id, value_ref.kind, Vec::new())
-            .await?;
+        self.stage_large_value_chunk_batch_with_presence_and_pending_limit(
+            upload_id,
+            value_ref.kind,
+            Vec::new(),
+            false,
+            pending_limit,
+        )
+        .await?;
         self.bind_pending_upload_descriptor(upload_id, &value_ref)
             .await?;
         self.large_value_upload_progress(upload_id, value_ref, false)

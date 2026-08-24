@@ -118,6 +118,51 @@ fn default_large_value_staging_policy_is_finite() {
 }
 
 #[test]
+fn upload_start_is_rate_admitted_before_pending_metadata_is_written() {
+    let schema = two_column_schema();
+    let (_temp_dir, mut receiver) = open_node_with_schema(node(0x82), schema);
+    receiver.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: 0,
+        window_ms: 60_000,
+        max_age_ms: 10 * 60 * 1_000,
+    });
+    let prepared = groove::large_values::prepare(
+        groove::large_values::LargeValueKind::String,
+        b"rate-admitted upload start",
+        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
+    )
+    .unwrap();
+    let outcome = receiver
+        .apply_sync_message_with_ingest_context(
+            SyncMessage::ChunkUploadStart(crate::protocol::ChunkUploadStart {
+                value_ref: prepared.value_ref,
+            }),
+            Some(CommitUnitIngestContext {
+                identity: AuthorId::SYSTEM,
+                trust: CommitUnitTrust::Session,
+                edge_authority: false,
+            }),
+        )
+        .resolve()
+        .unwrap()
+        .value;
+
+    assert!(matches!(
+        outcome.as_slice(),
+        [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+            status: crate::protocol::ChunkUploadStatus::RateLimited,
+            ..
+        })]
+    ));
+    assert!(
+        crate::db::block_on(receiver.database.pending_large_value_uploads())
+            .unwrap()
+            .is_empty(),
+        "rate-limited starts must not create durable pending metadata"
+    );
+}
+
+#[test]
 fn expired_staged_tree_requires_reupload_before_row_publication() {
     let schema = two_column_schema();
     let (_temp_dir, mut node) = open_node_with_schema(node(0x7b), schema);
