@@ -48,13 +48,12 @@ export function RecordPlayerProvider({ children }: { children: React.ReactNode }
     [jwt],
   );
 
-  if (isPending || (sessionId && (!config || bootstrapState === "idle"))) {
-    return <p>Preparing your RecordPlayer…</p>;
-  }
+  if (isPending) return <p>Preparing your RecordPlayer…</p>;
   if (!sessionId) return <SignIn />;
-  if (bootstrapState === "error" || !config) {
+  if (bootstrapState === "error") {
     return <p role="alert">RecordPlayer could not establish its trusted session.</p>;
   }
+  if (!config || bootstrapState === "idle") return <p>Preparing your RecordPlayer…</p>;
 
   return (
     <JazzProvider

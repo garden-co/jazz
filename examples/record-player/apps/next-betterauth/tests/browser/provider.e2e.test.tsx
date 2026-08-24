@@ -43,6 +43,14 @@ async function waitFor(check: () => boolean, message: string): Promise<void> {
   throw new Error(message);
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
 describe("RecordPlayer Better Auth bridge", () => {
   let root: Root | undefined;
   let container: HTMLDivElement | undefined;
@@ -81,6 +89,67 @@ describe("RecordPlayer Better Auth bridge", () => {
       credentials: "same-origin",
     });
     expect(container.querySelector("button")?.textContent).toBe("Create playlist");
+  });
+
+  it("keeps Jazz and its query surface unmounted until trusted bootstrap succeeds", async () => {
+    const bootstrap = deferred<Response>();
+    const fetch = vi.fn(() => bootstrap.promise);
+    vi.stubGlobal("fetch", fetch);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <RecordPlayerProvider>
+          <RecordPlayerClient />
+        </RecordPlayerProvider>,
+      );
+    });
+
+    await waitFor(() => fetch.mock.calls.length === 1, "expected trusted bootstrap to start");
+    expect(container.querySelector("[data-jazz-jwt]")).toBeNull();
+    expect(container.querySelector("button")).toBeNull();
+    expect(container.textContent).toContain("Preparing your RecordPlayer");
+
+    await act(async () => {
+      bootstrap.resolve(new Response(null, { status: 200 }));
+      await bootstrap.promise;
+    });
+
+    await waitFor(
+      () => container?.querySelector("[data-jazz-jwt='jazz-jwt']") !== null,
+      "expected Jazz to mount after trusted bootstrap",
+    );
+    expect(container.querySelector("button")?.textContent).toBe("Create playlist");
+  });
+
+  it("shows a bootstrap error without mounting Jazz after trusted bootstrap rejects", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("trusted bootstrap rejected");
+      }),
+    );
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <RecordPlayerProvider>
+          <RecordPlayerClient />
+        </RecordPlayerProvider>,
+      );
+    });
+
+    await waitFor(
+      () => container?.querySelector("[role='alert']") !== null,
+      "expected trusted bootstrap failure to be rendered",
+    );
+    expect(container.querySelector("[data-jazz-jwt]")).toBeNull();
+    expect(container.querySelector("button")).toBeNull();
+    expect(container.textContent).toContain("could not establish its trusted session");
   });
 
   it("does not mount the Jazz query surface before Better Auth has a session", async () => {
