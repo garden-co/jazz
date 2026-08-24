@@ -60,11 +60,7 @@
         "JAZZ_ARTIFACT_BUILD_LEASE",
         "JAZZ_ARTIFACT_BUILD_LOCK_PATH"
       ],
-      "outputs": [
-        "native-binding.cjs",
-        "native-artifact-fingerprint.cjs",
-        ".native-artifacts/**"
-      ]
+      "outputs": ["native-binding.cjs", "native-artifact-fingerprint.cjs", ".native-artifacts/**"]
     },
     "jazz-wasm#build": {
       "inputs": [
