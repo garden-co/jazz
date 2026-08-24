@@ -20,6 +20,20 @@ type PushPreparation = groove::large_values::PushStreamingPreparation<
     Box<dyn FnMut(groove::large_values::StagedChunk) -> Result<(), groove::large_values::Error>>,
 >;
 
+const MAX_PHYSICAL_TIMESTAMP_MS: u64 = (1 << 48) - 1;
+
+pub(super) fn validate_updated_at_ms(updated_at_ms: Option<u64>) -> Result<(), Error> {
+    if let Some(updated_at_ms) = updated_at_ms
+        && updated_at_ms > MAX_PHYSICAL_TIMESTAMP_MS
+    {
+        return Err(Error::new(
+            ErrorCode::WriteRejected,
+            format!("updated_at_ms {updated_at_ms} exceeds the 48-bit physical millisecond range"),
+        ));
+    }
+    Ok(())
+}
+
 /// Resumable host-driven upload used by asynchronous bindings such as WASM.
 pub struct StreamingValueUpload {
     id: groove::large_values::StagedLargeValueId,
@@ -468,6 +482,7 @@ where
             target,
             updated_at_ms,
         } = options;
+        validate_updated_at_ms(updated_at_ms)?;
         let supplied_row_id = row_id.is_some();
         let row = row_id.unwrap_or_else(|| self.row_id_source.borrow_mut().next_row_id());
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
@@ -1066,6 +1081,7 @@ where
             target,
             updated_at_ms,
         } = options;
+        validate_updated_at_ms(updated_at_ms)?;
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
 
@@ -1179,6 +1195,7 @@ where
             target,
             updated_at_ms,
         } = options;
+        validate_updated_at_ms(updated_at_ms)?;
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let branch = target.branch();
@@ -1270,6 +1287,7 @@ where
             target,
             updated_at_ms,
         } = options;
+        validate_updated_at_ms(updated_at_ms)?;
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
 
@@ -1422,6 +1440,7 @@ where
             target,
             updated_at_ms,
         } = options;
+        validate_updated_at_ms(updated_at_ms)?;
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
         let branch = target.branch();
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());

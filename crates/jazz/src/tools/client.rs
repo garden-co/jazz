@@ -2274,24 +2274,27 @@ impl JazzClient {
             .map(|session| core_author_from_principal(session.get_user_id()))
     }
 
-    /// Convert a public write-context timestamp to core's packed HLC form.
-    /// Public callers supply physical milliseconds; logical counters remain
-    /// internal ordering state.
+    /// Validate a public write-context physical-millisecond timestamp.
+    /// Core mints its packed HLC representation when it constructs provenance.
     fn write_updated_at(&self) -> Result<Option<u64>> {
-        let Some(updated_at) = self
-            .write_context
-            .as_ref()
-            .and_then(WriteContext::updated_at)
-        else {
+        let Some(context) = self.write_context.as_ref() else {
             return Ok(None);
         };
+        let Some(updated_at) = context.updated_at() else {
+            return Ok(None);
+        };
+        if context.transaction_id().is_some() {
+            return Err(JazzError::Write(
+                "updated_at is not supported for transaction-scoped writes".to_owned(),
+            ));
+        }
         const MAX_PHYSICAL_MS: u64 = (1 << 48) - 1;
         if updated_at > MAX_PHYSICAL_MS {
             return Err(JazzError::Write(format!(
                 "updated_at {updated_at} exceeds the 48-bit physical millisecond range"
             )));
         }
-        Ok(Some(crate::time::TxTime::new(updated_at, 0).0))
+        Ok(Some(updated_at))
     }
 
     fn check_core_write_not_rejected(db: &Backend, tx_id: CoreTxId) -> Result<()> {
@@ -3160,6 +3163,7 @@ impl JazzClient {
     ) -> Result<Option<TransactionId>> {
         {
             let cells = self.core_cells(table, values)?;
+            let updated_at = self.write_updated_at()?;
             if let Some(transaction_id) = self
                 .write_context
                 .as_ref()
@@ -3174,7 +3178,7 @@ impl JazzClient {
                     object_id,
                     cells,
                     self.write_identity(),
-                    self.write_updated_at()?,
+                    updated_at,
                 )?;
                 Ok(Some(core_batch_id(tx_id)))
             }
@@ -3201,6 +3205,7 @@ impl JazzClient {
                     )
                 })?;
             let cells = self.core_cells(&table, updates.into_iter().collect())?;
+            let updated_at = self.write_updated_at()?;
             if let Some(transaction_id) = self
                 .write_context
                 .as_ref()
@@ -3209,12 +3214,9 @@ impl JazzClient {
                 self.db.stage_update(transaction_id, object_id, cells)?;
                 Ok(None)
             } else {
-                let tx_id = self.db.update(
-                    object_id,
-                    cells,
-                    self.write_identity(),
-                    self.write_updated_at()?,
-                )?;
+                let tx_id = self
+                    .db
+                    .update(object_id, cells, self.write_identity(), updated_at)?;
                 Ok(Some(core_batch_id(tx_id)))
             }
         }
@@ -3692,6 +3694,38 @@ mod tests {
         assert_eq!(child_values[2], CoreValue::U64(42));
         assert_eq!(child_values[3], CoreValue::U64(child_updated.0));
         assert_eq!(children[1], CoreValue::Nullable(None));
+    }
+
+    #[tokio::test]
+    async fn transaction_scoped_timestamp_override_is_rejected() {
+        let client = JazzClient::test_client(declared_todo_schema()).await;
+        let transaction = client
+            .begin_transaction()
+            .expect("open transaction for rejection receipt");
+        let scoped = transaction.client().with_write_context(
+            WriteContext::default()
+                .with_transaction_id(transaction.transaction_id())
+                .with_updated_at(1_700_000_000_001),
+        );
+
+        let error = scoped
+            .upsert(
+                "todos",
+                Uuid::from_u128(7),
+                HashMap::from([
+                    ("title".to_owned(), Value::Text("no staging".to_owned())),
+                    ("completed".to_owned(), Value::Boolean(false)),
+                ]),
+            )
+            .expect_err("a staged write cannot silently discard updated_at");
+        assert!(
+            error
+                .to_string()
+                .contains("updated_at is not supported for transaction-scoped writes"),
+            "unexpected rejection: {error}"
+        );
+
+        transaction.rollback().expect("rollback empty transaction");
     }
 
     #[test]

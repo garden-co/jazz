@@ -120,6 +120,7 @@ where
         cells: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        super::mutations::validate_updated_at_ms(now_ms)?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
         self.node
@@ -150,6 +151,7 @@ where
         cells: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        super::mutations::validate_updated_at_ms(now_ms)?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
         self.node
@@ -179,6 +181,7 @@ where
         patch: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        super::mutations::validate_updated_at_ms(now_ms)?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         self.node
             .node
@@ -199,6 +202,7 @@ where
         patch: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        super::mutations::validate_updated_at_ms(now_ms)?;
         if patch.is_empty() {
             return Err(Error::new(
                 ErrorCode::Schema,
@@ -255,6 +259,7 @@ where
         row: RowUuid,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        super::mutations::validate_updated_at_ms(now_ms)?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         self.node
             .node
@@ -284,6 +289,7 @@ where
         row: RowUuid,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        super::mutations::validate_updated_at_ms(now_ms)?;
         if self
             .node
             .node
@@ -326,6 +332,7 @@ where
         cells: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        super::mutations::validate_updated_at_ms(now_ms)?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.node.node.lock().await;
@@ -375,6 +382,7 @@ where
         cells: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        super::mutations::validate_updated_at_ms(now_ms)?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.node.node.lock().await;
@@ -605,6 +613,7 @@ where
         cells: RowCells,
         updated_at_ms: Option<u64>,
     ) -> Result<(), Error> {
+        super::mutations::validate_updated_at_ms(updated_at_ms)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let cells = self.apply_insert_defaults(table, cells)?;
         self.node
@@ -632,6 +641,7 @@ where
         patch: RowCells,
         updated_at_ms: Option<u64>,
     ) -> Result<(), Error> {
+        super::mutations::validate_updated_at_ms(updated_at_ms)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let mut node = self.node.node.lock().await;
         let mut cells = node
@@ -660,6 +670,7 @@ where
         patch: RowCells,
         updated_at_ms: Option<u64>,
     ) -> Result<(), Error> {
+        super::mutations::validate_updated_at_ms(updated_at_ms)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let mut node = self.node.node.lock().await;
         let mut cells = node
@@ -688,6 +699,7 @@ where
         row: RowUuid,
         updated_at_ms: Option<u64>,
     ) -> Result<(), Error> {
+        super::mutations::validate_updated_at_ms(updated_at_ms)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         self.node
             .node
@@ -714,6 +726,7 @@ where
         cells: RowCells,
         updated_at_ms: Option<u64>,
     ) -> Result<(), Error> {
+        super::mutations::validate_updated_at_ms(updated_at_ms)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let cells = self.apply_insert_defaults(table, cells)?;
         let mut node = self.node.node.lock().await;

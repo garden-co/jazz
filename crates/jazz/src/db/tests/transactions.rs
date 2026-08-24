@@ -250,8 +250,14 @@ fn attached_schema_mergeable_batch_is_queryable_after_owner_commit() {
     );
     assert_eq!(overlay_row.cell_at(1), Some(Value::Bool(true)));
     let overlay_provenance = overlay_row.provenance().unwrap().unwrap();
-    assert_eq!(overlay_provenance.created_at, TxTime(1_704_067_200_456));
-    assert_eq!(overlay_provenance.updated_at, TxTime(1_704_067_200_456));
+    assert_eq!(
+        overlay_provenance.created_at,
+        TxTime::from(1_704_067_200_456)
+    );
+    assert_eq!(
+        overlay_provenance.updated_at,
+        TxTime::from(1_704_067_200_456)
+    );
     owner.abandon_transaction_handle(overlay_open).unwrap();
 
     let rows = block_on(view.all(&prepared, ReadOpts::default())).unwrap();
@@ -323,8 +329,8 @@ fn mergeable_overlay_uses_staged_provenance_and_preserves_it_at_commit() {
         .provenance()
         .unwrap()
         .unwrap();
-    assert_eq!(inserted_overlay.created_at, TxTime(200));
-    assert_eq!(inserted_overlay.updated_at, TxTime(200));
+    assert_eq!(inserted_overlay.created_at, TxTime::from(200));
+    assert_eq!(inserted_overlay.updated_at, TxTime::from(200));
     assert_eq!(inserted_overlay.created_by, db.identity.author);
     let updated_overlay = overlay
         .iter()
@@ -333,8 +339,8 @@ fn mergeable_overlay_uses_staged_provenance_and_preserves_it_at_commit() {
         .provenance()
         .unwrap()
         .unwrap();
-    assert_eq!(updated_overlay.created_at, TxTime(100));
-    assert_eq!(updated_overlay.updated_at, TxTime(300));
+    assert_eq!(updated_overlay.created_at, TxTime::from(100));
+    assert_eq!(updated_overlay.updated_at, TxTime::from(300));
     assert_eq!(updated_overlay.updated_by, db.identity.author);
 
     tx.commit().unwrap();
@@ -407,7 +413,7 @@ fn exclusive_overlay_reserves_stable_provenance_for_insert_and_update() {
     let updated_overlay = provenance(&overlay, existing);
     assert_ne!(inserted_overlay.created_at, TxTime(0));
     assert_eq!(inserted_overlay.created_at, inserted_overlay.updated_at);
-    assert_eq!(updated_overlay.created_at, TxTime(100));
+    assert_eq!(updated_overlay.created_at, TxTime::from(100));
     assert_ne!(updated_overlay.updated_at, TxTime(0));
 
     tx.commit().unwrap();
@@ -516,10 +522,36 @@ fn exclusive_crud_preserves_explicit_updated_at() {
             .updated_at
     };
 
-    assert_eq!(updated_at(inserted), TxTime(100));
-    assert_eq!(updated_at(upserted), TxTime(200));
-    assert_eq!(updated_at(deleted), TxTime(300));
-    assert_eq!(updated_at(restored), TxTime(400));
+    assert_eq!(updated_at(inserted), TxTime::from(100));
+    assert_eq!(updated_at(upserted), TxTime::from(200));
+    assert_eq!(updated_at(deleted), TxTime::from(300));
+    assert_eq!(updated_at(restored), TxTime::from(400));
+}
+
+#[test]
+fn out_of_range_explicit_timestamp_is_rejected_before_mutating() {
+    let db = block_on(doctest_support::open_todos_db()).unwrap();
+    let row_id = row(0xc5);
+    let result = block_on(db.insert(
+        "todos",
+        doctest_support::todo_cells("must not be written", false),
+        InsertOptions {
+            row_id: Some(row_id),
+            updated_at_ms: Some(1 << 48),
+            ..Default::default()
+        },
+    ));
+    let error = match result {
+        Ok(_) => panic!("a timestamp outside the HLC physical range must be rejected"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+
+    let query = db.prepare_query(&db.table("todos")).unwrap();
+    assert!(
+        db.read(&query).unwrap().is_empty(),
+        "rejected timestamp input must not leave a visible row"
+    );
 }
 
 /// This stays internal because transaction overlays are not sync-visible. The

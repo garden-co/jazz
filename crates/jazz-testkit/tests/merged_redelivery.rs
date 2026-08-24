@@ -415,7 +415,7 @@ async fn same_value_write_still_advances_visible_row_metadata_impl() {
     // bits. Inject a distinct physical timestamp through the documented write
     // context so this metadata-only delivery remains observable through
     // `$updatedAt`, regardless of the client's synthetic HLC counter.
-    let explicit_updated_at = initial_updated_at + 1;
+    let explicit_updated_at = 1_700_000_000_001;
     alice
         .with_write_context(WriteContext::default().with_updated_at(explicit_updated_at))
         .update(

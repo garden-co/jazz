@@ -275,7 +275,7 @@ where
                     let Some(now_ms) = write.now_ms else {
                         continue;
                     };
-                    let updated_at = TxTime(now_ms);
+                    let updated_at = TxTime::from(now_ms);
                     provenance = Some(match provenance {
                         Some(existing) => RowProvenance {
                             updated_by: provisional_author,
@@ -763,7 +763,7 @@ where
                 self.prepare_and_stage_large_scalar(value).await?;
             }
             let cells = positional_cells_from_map(&table_schema, &cells)?;
-            let provenance_at = TxTime(write.now_ms.unwrap_or(now_ms));
+            let provenance_at = TxTime::from(write.now_ms.unwrap_or(now_ms));
             let (created_by, created_at) = snapshot_content
                 .as_ref()
                 .map(|version| (version.created_by(), version.created_at()))
