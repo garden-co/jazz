@@ -592,6 +592,29 @@ jobs:
           done
           echo "Source snapshot ${GITHUB_SHA} exactly matches ${PUBLISHED_VERSION}."
 
+      - name: Ensure release source tag
+        if: env.RELEASE_MODE == 'publish'
+        run: |
+          VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/create-jazz/package.json","utf8")).version')
+          TAG="v${VERSION}"
+          SOURCE_COMMIT=$(git rev-parse "${GITHUB_SHA}^{commit}")
+          EXISTING_TAG_TARGET=$(git ls-remote --tags origin "refs/tags/${TAG}" "refs/tags/${TAG}^{}" | awk -v tag="${TAG}" '
+            $2 == "refs/tags/" tag "^{}" { peeled = $1 }
+            $2 == "refs/tags/" tag { direct = $1 }
+            END { print peeled ? peeled : direct }
+          ')
+
+          if [ -n "${EXISTING_TAG_TARGET}" ]; then
+            if [ "${EXISTING_TAG_TARGET}" != "${SOURCE_COMMIT}" ]; then
+              echo "${TAG} already points to ${EXISTING_TAG_TARGET}, not the release source ${SOURCE_COMMIT}."
+              exit 1
+            fi
+            echo "${TAG} already points at the release source snapshot."
+          else
+            git tag "${TAG}" "${SOURCE_COMMIT}"
+            git push origin "refs/tags/${TAG}"
+          fi
+
       - name: Verify packed jazz-wasm payload
         run: |
           TMP_DIR=$(mktemp -d)
@@ -706,29 +729,6 @@ jobs:
           fi
 
           npm dist-tag add "create-jazz@${CREATE_JAZZ_VERSION}" latest
-
-      - name: Tag published source snapshot
-        if: env.RELEASE_MODE == 'publish'
-        run: |
-          VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("packages/create-jazz/package.json","utf8")).version')
-          TAG="v${VERSION}"
-          SOURCE_COMMIT=$(git rev-parse "${GITHUB_SHA}^{commit}")
-          EXISTING_TAG_TARGET=$(git ls-remote --tags origin "refs/tags/${TAG}" "refs/tags/${TAG}^{}" | awk -v tag="${TAG}" '
-            $2 == "refs/tags/" tag "^{}" { peeled = $1 }
-            $2 == "refs/tags/" tag { direct = $1 }
-            END { print peeled ? peeled : direct }
-          ')
-
-          if [ -n "${EXISTING_TAG_TARGET}" ]; then
-            if [ "${EXISTING_TAG_TARGET}" != "${SOURCE_COMMIT}" ]; then
-              echo "${TAG} already points to ${EXISTING_TAG_TARGET}, not the published source ${SOURCE_COMMIT}."
-              exit 1
-            fi
-            echo "${TAG} already points at the published source snapshot."
-          else
-            git tag "${TAG}" "${SOURCE_COMMIT}"
-            git push origin "refs/tags/${TAG}"
-          fi
 
   deploy-inspector-production:
     name: Promote inspector production
