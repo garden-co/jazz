@@ -51,6 +51,30 @@ const arraySchema = {
   },
 } satisfies WasmSchema;
 
+// Keep the three physical encodings in separate rows.  That makes the receipt
+// exercise the public streaming create API for each encoding, without turning
+// this topology test into a test of multi-column mutation encoding.
+const largeValueSchema = {
+  large_values: {
+    columns: [
+      { name: "kind", column_type: { type: "Text" }, nullable: false },
+      { name: "value", column_type: { type: "Text" }, nullable: false },
+    ],
+  },
+  large_bytes: {
+    columns: [
+      { name: "kind", column_type: { type: "Text" }, nullable: false },
+      { name: "value", column_type: { type: "Bytea" }, nullable: false },
+    ],
+  },
+  large_json: {
+    columns: [
+      { name: "kind", column_type: { type: "Text" }, nullable: false },
+      { name: "value", column_type: { type: "Json" }, nullable: false },
+    ],
+  },
+} satisfies WasmSchema;
+
 describe("NativeRuntimeAdapter server convergence", () => {
   let server: LocalJazzServerHandle | null = null;
   const clients: JazzClient[] = [];
@@ -259,6 +283,129 @@ describe("NativeRuntimeAdapter server convergence", () => {
     },
     20_000,
   );
+
+  // TODO(#1857): Enable after the runtime streaming-create spin is repaired.
+  // This is intentionally a real two-client/server receipt rather than a
+  // mocked resolver test: it catches a JS-thread deadlock that unit-level
+  // pending-read receipts cannot observe.
+  it.skip("hydrates streamed Text, Bytea, and Json from the server without blocking the reader event loop", async () => {
+    globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
+
+    const appId = "00000000-0000-0000-0000-00000000c005";
+    server = await startLocalJazzServer({
+      appId,
+      inMemory: true,
+      adminSecret: "native-runtime-large-value-hydration-admin",
+      schema: encodeSchema(largeValueSchema),
+    });
+
+    const writer = await createClient({
+      appId,
+      serverUrl: server.url,
+      peer: "large-value-writer",
+      schema: largeValueSchema,
+    });
+    clients.push(writer);
+    writer.connectTransport(server.url, { admin_secret: server.adminSecret });
+
+    // Streaming always creates an indirect tree, even below the ordinary
+    // inline-write threshold.  Keep this topology receipt compact: #1857
+    // separately tracks the current oversized upload CPU spin, while this
+    // test proves the remote descriptor/chunk hydration path itself.
+    const text = `opening:${"é🎷".repeat(1024)}`;
+    const bytes = Uint8Array.from({ length: 20 * 1024 }, (_, index) => index % 251);
+    const document = JSON.stringify({
+      title: "hydration receipt",
+      notes: Array.from({ length: 1_024 }, (_, index) => ({ index, text: "🎵" })),
+    });
+
+    const textWrite = await writer.insertStreaming(
+      "large_values",
+      { kind: { type: "Text", value: "text" } },
+      "value",
+      chunked(text),
+    );
+    const bytesWrite = await writer.insertStreaming(
+      "large_bytes",
+      { kind: { type: "Text", value: "bytes" } },
+      "value",
+      chunked(bytes),
+    );
+    const jsonWrite = await writer.insertStreaming(
+      "large_json",
+      { kind: { type: "Text", value: "json" } },
+      "value",
+      chunked(document),
+    );
+    await Promise.all([
+      waitForPromise(textWrite.wait({ tier: "edge" }), "Text streaming insert did not settle"),
+      waitForPromise(bytesWrite.wait({ tier: "edge" }), "Bytea streaming insert did not settle"),
+      waitForPromise(jsonWrite.wait({ tier: "edge" }), "Json streaming insert did not settle"),
+    ]);
+
+    // B starts after the writes have settled.  It therefore only has the row
+    // descriptors initially; hydration must request the referenced chunks
+    // through the real websocket server, without synchronously parking the
+    // JS thread that receives the response.
+    const reader = await createClient({
+      appId,
+      serverUrl: server.url,
+      peer: "large-value-reader",
+      schema: largeValueSchema,
+    });
+    clients.push(reader);
+    reader.connectTransport(server.url, { admin_secret: server.adminSecret });
+
+    const subscriptionValues: string[] = [];
+    const subscription = new Promise<void>((resolve) => {
+      reader.subscribe(
+        JSON.stringify({ table: "large_values" }),
+        (delta) => {
+          for (const change of normalizeTestDelta(delta, largeValueSchema)) {
+            const value = "row" in change ? change.row?.values[1] : undefined;
+            if (value?.type === "Text" && value.value === text) {
+              subscriptionValues.push(value.value);
+              resolve();
+            }
+          }
+        },
+        { tier: "local" },
+      );
+    });
+
+    const [hydratedText, hydratedBytes, hydratedJson] = await Promise.all([
+      waitFor(async () => {
+        const rows = await reader.query(JSON.stringify({ table: "large_values" }), {
+          tier: "local",
+        });
+        const row = rows.find((candidate) => candidate.id === textWrite.value.id);
+        const value = row?.values[1];
+        return value?.type === "Text" && value.value === text ? value.value : undefined;
+      }, 15_000),
+      waitFor(async () => {
+        const rows = await reader.query(JSON.stringify({ table: "large_bytes" }), {
+          tier: "local",
+        });
+        const row = rows.find((candidate) => candidate.id === bytesWrite.value.id);
+        const value = row?.values[1];
+        return value?.type === "Bytea" ? value.value : undefined;
+      }, 15_000),
+      waitFor(async () => {
+        const rows = await reader.query(JSON.stringify({ table: "large_json" }), {
+          tier: "local",
+        });
+        const row = rows.find((candidate) => candidate.id === jsonWrite.value.id);
+        const value = row?.values[1];
+        return value?.type === "Json" ? value.value : undefined;
+      }, 15_000),
+      waitForPromise(subscription, "subscription did not resume after Text hydration", 15_000),
+    ]);
+
+    expect(hydratedText).toBe(text);
+    expect(Array.from(hydratedBytes)).toEqual(Array.from(bytes));
+    expect(hydratedJson).toEqual(JSON.parse(document));
+    expect(subscriptionValues).toEqual([text]);
+  }, 45_000);
 
   maybeIt("replays accepted BYTEA rows to a fresh websocket subscriber", async () => {
     globalThis.WebSocket ??= WebSocket as unknown as typeof globalThis.WebSocket;
@@ -480,5 +627,18 @@ async function waitForPromise<T>(
     ]);
   } finally {
     if (timeout) clearTimeout(timeout);
+  }
+}
+
+async function* chunked(value: string | Uint8Array): AsyncGenerator<string | Uint8Array> {
+  const chunkBytes = 16 * 1024;
+  if (typeof value === "string") {
+    for (let offset = 0; offset < value.length; offset += chunkBytes) {
+      yield value.slice(offset, offset + chunkBytes);
+    }
+    return;
+  }
+  for (let offset = 0; offset < value.byteLength; offset += chunkBytes) {
+    yield value.subarray(offset, offset + chunkBytes);
   }
 }
