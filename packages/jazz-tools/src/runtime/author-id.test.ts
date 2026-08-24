@@ -3,6 +3,7 @@ import {
   authorBytesForSession,
   canonicalAuthorSubject,
   decodeCanonicalAuthorSubjectBytes,
+  isPortableAuthorComponent,
   isUsableSubject,
   parseCanonicalAuthorSubject,
 } from "./author-id.js";
@@ -45,6 +46,19 @@ describe("canonical author subjects", () => {
       expect(() => canonicalAuthorSubject("issuer", blank)).toThrow(/nonempty/);
   });
 
+  it("rejects unpaired UTF-16 surrogates while preserving valid code points", () => {
+    expect(isPortableAuthorComponent("\ud83d\ude80")).toBe(true);
+    expect(isPortableAuthorComponent("rocket-\ud83d\ude80")).toBe(true);
+    expect(isPortableAuthorComponent("\ud800")).toBe(false);
+    expect(isPortableAuthorComponent("\udc00")).toBe(false);
+    expect(() => canonicalAuthorSubject("issuer", "\ud800")).toThrow(/portable/);
+    expect(() => canonicalAuthorSubject("issuer", "\udc00")).toThrow(/portable/);
+
+    const canonical = canonicalAuthorSubject("issuer", "🚀");
+    expect(canonical).toBe('["issuer","🚀"]');
+    expect(parseCanonicalAuthorSubject(canonical)?.user_id).toBe("🚀");
+  });
+
   it("strictly parses only exact canonical two-string JSON", () => {
     const canonical = '["https://issuer.example","opaque:subject"]';
     expect(parseCanonicalAuthorSubject(canonical)).toEqual({
@@ -59,6 +73,9 @@ describe("canonical author subjects", () => {
       '{"issuer":"https://issuer.example","user_id":"opaque:subject"}',
       '["https://issuer.example"," "]',
       '[" ","opaque:subject"]',
+      String.raw`["https://issuer.example","\ud800"]`,
+      String.raw`["https://issuer.example","\udc00"]`,
+      String.raw`["https://issuer.example","\ud83d\ude80"]`,
       "not-json",
     ]) {
       expect(parseCanonicalAuthorSubject(value)).toBeNull();
@@ -78,6 +95,8 @@ describe("canonical author subjects", () => {
       Uint8Array.from([0, ...storedScalar(canonical)]),
       encoder.encode(`[ "urn:jazz:test", "author" ]`),
       encoder.encode('["urn:jazz:test"," "]'),
+      encoder.encode(String.raw`["urn:jazz:test","\ud800"]`),
+      encoder.encode(String.raw`["urn:jazz:test","\ud83d\ude80"]`),
       Uint8Array.from([0x5b, 0xff, 0x5d]),
     ]) {
       expect(() => decodeCanonicalAuthorSubjectBytes(bytes)).toThrow(/canonical author subject/);

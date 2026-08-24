@@ -2790,6 +2790,18 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(() =>
       runtime.createSubscription(
         JSON.stringify({ table: "todos" }),
+        JSON.stringify({ issuer: "https://issuer.example", user_id: "\ud800" }),
+      ),
+    ).toThrow("session is missing user_id");
+    expect(() =>
+      runtime.createSubscription(
+        JSON.stringify({ table: "todos" }),
+        JSON.stringify({ issuer: "\udc00", user_id: "00000000-0000-0000-0000-000000000000" }),
+      ),
+    ).toThrow("session is missing issuer");
+    expect(() =>
+      runtime.createSubscription(
+        JSON.stringify({ table: "todos" }),
         JSON.stringify({ user_id: "00000000-0000-0000-0000-000000000000" }),
       ),
     ).toThrow("session is missing issuer");

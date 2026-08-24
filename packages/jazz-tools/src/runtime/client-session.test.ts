@@ -144,6 +144,40 @@ describe("client session resolution", () => {
     }
   });
 
+  it("rejects unpaired surrogate issuer and subject components from JWTs and cookies", () => {
+    for (const [iss, sub] of [
+      ["issuer", "\ud800"],
+      ["issuer", "\udc00"],
+      ["\ud800", "alice"],
+      ["\udc00", "alice"],
+    ]) {
+      expect(
+        resolveClientSessionSync({
+          appId: "app-jwt-surrogate-subject",
+          jwtToken: makeJwt({ iss, sub }),
+        }),
+      ).toBeNull();
+      expect(
+        resolveClientSessionSync({
+          appId: "cookie-app",
+          cookieSession: {
+            issuer: iss,
+            user_id: sub,
+            claims: {},
+            authMode: "external",
+          },
+        }),
+      ).toBeNull();
+    }
+
+    expect(
+      resolveClientSessionSync({
+        appId: "app-jwt-emoji-subject",
+        jwtToken: makeJwt({ iss: "issuer🚀", sub: "alice🚀" }),
+      }),
+    ).toMatchObject({ issuer: "issuer🚀", user_id: "alice🚀" });
+  });
+
   it("rejects a JWT without an iss claim", () => {
     const jwt = makeJwt({
       sub: "user-subject",

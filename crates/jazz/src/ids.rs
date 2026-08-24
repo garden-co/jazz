@@ -437,4 +437,16 @@ mod tests {
         assert!(AuthorSubject::from_canonical(r#"[ "issuer", "subject" ]"#).is_err());
         assert!(AuthorSubject::from_canonical(r#"["urn:jazz:system","user"]"#).is_err());
     }
+
+    #[test]
+    fn canonical_author_subject_rejects_lone_surrogates_but_accepts_valid_code_points() {
+        assert!(AuthorSubject::from_canonical(r#"["issuer","\ud800"]"#).is_err());
+        assert!(AuthorSubject::from_canonical(r#"["issuer","\udc00"]"#).is_err());
+
+        let emoji = AuthorSubject::authenticated("issuer🚀", "subject🚀").unwrap();
+        assert_eq!(emoji.canonical(), r#"["issuer🚀","subject🚀"]"#);
+        assert_eq!(AuthorSubject::from_canonical(emoji.canonical()), Ok(emoji));
+
+        assert!(AuthorSubject::from_canonical(r#"["issuer","\ud83d\ude80"]"#).is_err());
+    }
 }
