@@ -499,6 +499,8 @@ pub enum Error {
     TableFieldDefinitionMismatch { table: String, field: String },
     #[error("index definition does not match the live catalogue: {table}.{index}")]
     TableIndexDefinitionMismatch { table: String, index: String },
+    #[error("cannot register index {table}.{index} while database publications remain resident")]
+    TableIndexRegistrationWhilePublicationsResident { table: String, index: String },
     #[error("index {table}.{index} references unknown field {field}")]
     TableIndexFieldNotFound {
         table: String,

@@ -1279,13 +1279,15 @@ async fn live_index_registration_rejects_while_a_publication_is_resident() {
     let applied = database.apply_batch(batch).await.unwrap();
     let index = IndexSchema::new("albums_by_title", ["title"]);
 
-    assert!(
-        database
-            .register_table_index("albums", index.clone())
-            .await
-            .is_err(),
-        "schema mutation must not race a resident publication"
-    );
+    let error = database
+        .register_table_index("albums", index.clone())
+        .await
+        .expect_err("schema mutation must not race a resident publication");
+    assert!(matches!(
+        error,
+        Error::TableIndexRegistrationWhilePublicationsResident { table, index }
+            if table == "albums" && index == "albums_by_title"
+    ));
 
     let persisted = applied.persist().await;
     database.finish_persistence(persisted).unwrap();
