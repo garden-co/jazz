@@ -43,6 +43,19 @@ describe("serializeClientConfig", () => {
     );
   });
 
+  it("treats sparse array holes like undefined and null", () => {
+    const sparse = new Array(1);
+
+    const serializeSource = (wasmSource: unknown) =>
+      serializeClientConfig({
+        appId: "app",
+        runtimeSources: { wasmSource: wasmSource as never },
+      });
+
+    expect(serializeSource(sparse)).toBe(serializeSource([undefined]));
+    expect(serializeSource(sparse)).toBe(serializeSource([null]));
+  });
+
   it("cannot collide opaque identity with a plain JSON value", () => {
     class OpaqueRuntimeSource {}
     const opaque = new OpaqueRuntimeSource();

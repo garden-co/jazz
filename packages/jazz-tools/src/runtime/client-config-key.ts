@@ -53,7 +53,10 @@ function canonicalizeConfigValue(value: unknown, active: WeakSet<object>): strin
   active.add(value);
   try {
     if (Array.isArray(value)) {
-      const items = value.map((item) => canonicalizeConfigValue(item, active) ?? "N");
+      const items: string[] = [];
+      for (let index = 0; index < value.length; index++) {
+        items.push(canonicalizeConfigValue(value[index], active) ?? "N");
+      }
       return `A${items.length}:[${items.join("")}]`;
     }
 
