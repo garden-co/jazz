@@ -30,6 +30,17 @@ const acknowledgementPermissions = s.definePermissions(acknowledgementApp, ({ po
   policy.receipts.allowInsert.always();
 });
 
+// Keep this intentionally separate from RecordPlayer's relational policies:
+// it is the smallest external-JWT receipt for a row routed to a recipient by
+// an application-owned scalar subject rather than by `$createdBy`.
+const recipientApp = s.defineApp({
+  invitations: s.table({ subject: s.string(), label: s.string() }),
+});
+const recipientPermissions = s.definePermissions(recipientApp, ({ policy, session }) => {
+  policy.invitations.allowRead.where({ subject: session.user_id });
+  policy.invitations.allowInsert.always();
+});
+
 describe("RecordPlayer authenticated playlist topology", () => {
   it("settles an identical one-table write at edge", async () => {
     const server = await getJazzServerInfo(uniqueDbName("record-player-ack-probe"));
@@ -62,6 +73,46 @@ describe("RecordPlayer authenticated playlist topology", () => {
     } finally {
       stop();
     }
+  }, 30_000);
+
+  it("delivers an external-JWT row through a raw scalar recipient subject", async () => {
+    const server = await getJazzServerInfo(uniqueDbName("record-player-recipient-scalar"));
+    await deploy({
+      appId: server.appId,
+      serverUrl: server.serverUrl,
+      adminSecret: server.adminSecret,
+      schema: recipientApp,
+      permissions: recipientPermissions,
+    });
+    const [ownerToken, recipientToken] = await Promise.all([
+      getJazzServerJwtForUser("record-player-scalar-owner", undefined, server.appId),
+      getJazzServerJwtForUser("record-player-scalar-recipient", undefined, server.appId),
+    ]);
+    const owner = await openClient(server, "scalar-owner", ownerToken);
+    const recipient = await openClient(server, "scalar-recipient", recipientToken);
+    const invite = await owner
+      .insert(recipientApp.invitations, {
+        subject: "record-player-scalar-recipient",
+        label: "recipient routing receipt",
+      })
+      .wait({ tier: "edge" });
+
+    await expect(
+      waitForQuery(
+        recipient,
+        recipientApp.invitations.where({ subject: "record-player-scalar-recipient" }),
+        (rows) => rows.length === 1 && rows[0]?.id === invite.id,
+        "external-JWT scalar recipient receives invitation",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toEqual([
+      {
+        id: invite.id,
+        subject: "record-player-scalar-recipient",
+        label: "recipient routing receipt",
+      },
+    ]);
   }, 30_000);
 
   it("rejects forged acceptance and converges two offline playlist editors exactly", async () => {
