@@ -36,9 +36,9 @@ The deployed permission receipt proves legitimate owner creation/invite/send, re
 
 `tests/browser/topology.e2e.test.ts` is the adopter-owned public-API receipt for
 client → edge → core → peer-edge: it verifies concurrent messages, reactions,
-ordinary inline attachment bytes, idempotent mutation waits, offline replay, and
-ordered subscription convergence. Its scenario declares deterministic fault and
-soak inputs for the shared topology harness. The focused expected-failure test is
+ordinary inline attachment bytes, offline replay, and ordered subscription
+convergence. Its shared-harness receipt covers authorization rejection plus
+browser disconnect/reconnect. The focused expected-failure test is
 intentionally linked to #1844 (reproducing PRs #1830 and #1838): indirect
 Text/Bytea peer-edge materialization remains a known red regression and must not
 be replaced with an inline-only fixture.

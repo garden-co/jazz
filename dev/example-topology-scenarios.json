@@ -15,9 +15,9 @@
         "pnpm",
         "--dir",
         "examples/band-chat/apps/nextjs-betterauth",
-        "test:browser",
+        "test:browser:focused",
         "--",
-        "topology.e2e.test.tsx"
+        "tests/browser/topology.e2e.test.tsx"
       ]
     }
   ]

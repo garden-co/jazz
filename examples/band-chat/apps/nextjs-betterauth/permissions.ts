@@ -58,8 +58,11 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
   );
 
   policy.reactions.allowRead.where(allowedTo.read("messageId"));
+  // A reaction author must be a current reader of the referenced message. Do
+  // not delegate to message insertion: that policy compares a new message's
+  // sender profile and has no meaningful operand for an existing message ref.
   policy.reactions.allowInsert.where(
-    allOf([allowedTo.insert("messageId"), { userId: session.user_id }]),
+    allOf([allowedTo.read("messageId"), { userId: session.user_id }]),
   );
   policy.reactions.allowUpdate.never();
   policy.reactions.allowDelete.where({ userId: session.user_id });

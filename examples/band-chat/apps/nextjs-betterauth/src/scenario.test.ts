@@ -4,5 +4,5 @@ import { createSmokeScenario } from "./scenario.js";
 it("defines a deterministic public topology contract", () => {
   expect(createSmokeScenario("repeatable")).toEqual(createSmokeScenario("repeatable"));
   expect(createSmokeScenario().operations).toContain("reconnect-and-replay");
-  expect(createSmokeScenario().faults).toContain("core-restart");
+  expect(createSmokeScenario().faults).toContain("disconnect");
 });

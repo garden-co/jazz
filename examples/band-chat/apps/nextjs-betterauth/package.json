@@ -12,7 +12,8 @@
     "test:e2e": "playwright test",
     "test": "pnpm run test:headless && pnpm run test:browser",
     "test:headless": "vitest run --config vitest.config.ts",
-    "test:browser": "vitest run --config vitest.config.browser.ts"
+    "test:browser": "vitest run --config vitest.config.browser.ts",
+    "test:browser:focused": "node scripts/test-browser-focused.mjs"
   },
   "dependencies": {
     "better-auth": "1.6.24",

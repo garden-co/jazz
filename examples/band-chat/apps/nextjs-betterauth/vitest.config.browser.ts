@@ -42,6 +42,16 @@ export default defineConfig({
           unblockJazzServerNetwork(context, serverUrl),
         jazzServerJwtForUser: async (_context, userId, claims, appId) =>
           jazzServerJwtForUser(userId, claims, appId),
+        jazzBandChatBootstrapProfile: async (_context, server, userId, displayName) => {
+          // Exercise the application's actual trusted bootstrap path. The backend
+          // secret stays in the Node-side browser command and is never given to a
+          // browser client.
+          process.env.NEXT_PUBLIC_JAZZ_APP_ID = server.appId;
+          process.env.NEXT_PUBLIC_JAZZ_SERVER_URL = server.serverUrl;
+          process.env.BACKEND_SECRET = "jazz-browser-test-backend";
+          const { ensureProfile } = await import("./src/lib/bootstrap.ts");
+          await ensureProfile(userId, displayName);
+        },
       },
     },
     setupFiles: ["tests/browser/setup-react.ts"],

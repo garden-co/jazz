@@ -13,8 +13,7 @@ export type BandChatScenario = {
     "revoke-peer",
   ];
   assertion: { visibleText: string };
-  faults: readonly ["partition", "reconnect", "edge-restart", "core-restart"];
-  soak: { rounds: number; delayMs: number; dropEvery: number };
+  faults: readonly ["authorization", "disconnect", "reconnect"];
 };
 
 /** Framework-neutral workload contract consumed by UI and headless runners. */
@@ -33,9 +32,6 @@ export function createSmokeScenario(seed?: string): BandChatScenario {
       "revoke-peer",
     ],
     assertion: { visibleText: fixture.messages[0] },
-    // These remain explicit inputs so the shared harness can apply deterministic
-    // delay/drop/restart schedules without forking BandChat's workload semantics.
-    faults: ["partition", "reconnect", "edge-restart", "core-restart"],
-    soak: { rounds: 3, delayMs: 25, dropEvery: 0 },
+    faults: ["authorization", "disconnect", "reconnect"],
   };
 }

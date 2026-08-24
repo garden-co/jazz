@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { commands } from "vitest/browser";
 import { createDb, type Db } from "jazz-tools";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
@@ -19,13 +20,23 @@ import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
 import { createSmokeScenario } from "../../src/scenario.js";
 
+declare module "vitest/internal/browser" {
+  interface BrowserCommands {
+    jazzBandChatBootstrapProfile: (
+      server: { appId: string; serverUrl: string },
+      userId: string,
+      displayName: string,
+    ) => Promise<void>;
+  }
+}
+
 const ctx = new TestCleanup();
 afterEach(async () => ctx.cleanup());
 
 /**
  * Adopter-level receipt for the public client -> edge -> core -> peer-edge path.
- * The shared harness supplies process restart and deterministic packet controls;
- * this app-owned workload deliberately keeps its schema and assertions local.
+ * The shared harness supplies phase/fault timeouts and receipts; this app-owned
+ * workload deliberately keeps its schema and assertions local.
  */
 describe("BandChat cross-topology recovery", () => {
   it("converges concurrent messages, reactions, attachments, and an offline replay exactly once", async () => {
@@ -39,6 +50,9 @@ describe("BandChat cross-topology recovery", () => {
     let room: { id: string } | undefined;
     let subscription: string[] = [];
     let ownerMessage: { id: string } | undefined;
+    let peerMessage: { id: string } | undefined;
+    let attachmentMessage: { id: string } | undefined;
+    let offlineMessage: { id: string } | undefined;
     const receipt = await runTopologyScenario(
       {
         id: scenario.id,
@@ -46,7 +60,7 @@ describe("BandChat cross-topology recovery", () => {
         seed: Number.isSafeInteger(seed) ? seed : 29,
         phaseTimeoutMs: 25_000,
         faultTimeoutMs: 15_000,
-        replay: `JAZZ_EXAMPLE_TOPOLOGY_SEED=${seed} pnpm --dir examples/band-chat/apps/nextjs-betterauth test:browser -- topology.e2e.test.tsx`,
+        replay: `JAZZ_EXAMPLE_TOPOLOGY_SEED=${seed} pnpm --dir examples/band-chat/apps/nextjs-betterauth test:browser:focused -- tests/browser/topology.e2e.test.tsx`,
         targets: {
           owner: {
             disconnect: async () => owner!.disconnect(),
@@ -90,16 +104,31 @@ describe("BandChat cross-topology recovery", () => {
               ]);
               owner = await openClient(server, "owner", ownerToken);
               peer = await openClient(server, "peer", peerToken);
-              ownerProfile = (
-                await owner
-                  .insert(app.profiles, { userId: "band-chat-owner", displayName: "Owner" })
-                  .wait({ tier: "edge" })
-              ).value;
-              peerProfile = (
-                await peer
-                  .insert(app.profiles, { userId: "band-chat-peer", displayName: "Peer" })
-                  .wait({ tier: "edge" })
-              ).value;
+              // Profiles are intentionally provisioned by the trusted Better Auth
+              // backend, not by the JWT-bearing browser clients.
+              const untrustedOwner = await openClient(server, "untrusted-owner", ownerToken);
+              await expect(
+                untrustedOwner
+                  .insert(app.profiles, {
+                    userId: "band-chat-owner",
+                    displayName: "forged browser profile",
+                  })
+                  .wait({ tier: "edge" }),
+              ).rejects.toThrow(/permission_denied/i);
+              await Promise.all([
+                commands.jazzBandChatBootstrapProfile(server, "band-chat-owner", "Owner"),
+                commands.jazzBandChatBootstrapProfile(server, "band-chat-peer", "Peer"),
+              ]);
+              ownerProfile = await owner.one(app.profiles.where({ userId: "band-chat-owner" }), {
+                tier: "edge",
+              });
+              peerProfile = await peer.one(app.profiles.where({ userId: "band-chat-peer" }), {
+                tier: "edge",
+              });
+              if (!ownerProfile || !peerProfile)
+                throw new Error("trusted profile bootstrap did not persist");
+              expect(ownerProfile).toMatchObject({ userId: "band-chat-owner" });
+              expect(peerProfile).toMatchObject({ userId: "band-chat-peer" });
               room = (
                 await owner
                   .insert(app.rooms, { name: scenario.assertion.visibleText })
@@ -123,7 +152,7 @@ describe("BandChat cross-topology recovery", () => {
             faultsAfter: [{ kind: "failure", target: "authorization" }],
           },
           {
-            name: "two-client duplicate, reaction, and attachment delivery",
+            name: "two-client reaction and attachment delivery",
             run: async () => {
               const unsubscribe = peer!.subscribeAll(
                 app.messages
@@ -135,14 +164,13 @@ describe("BandChat cross-topology recovery", () => {
                 },
               );
               ctx.trackSubscription(unsubscribe);
-              const duplicate = owner!.insert(app.messages, {
+              const ownerInsert = owner!.insert(app.messages, {
                 roomId: room!.id,
                 senderId: ownerProfile!.id,
-                text: "duplicate receipt",
+                text: "owner concurrent",
               });
-              const [created] = await Promise.all([
-                duplicate.wait({ tier: "edge" }),
-                duplicate.wait({ tier: "edge" }),
+              const [created, peerCreated] = await Promise.all([
+                ownerInsert.wait({ tier: "edge" }),
                 peer!
                   .insert(app.messages, {
                     roomId: room!.id,
@@ -152,6 +180,7 @@ describe("BandChat cross-topology recovery", () => {
                   .wait({ tier: "edge" }),
               ]);
               ownerMessage = created.value;
+              peerMessage = peerCreated.value;
               await Promise.all([
                 owner!
                   .insert(app.reactions, {
@@ -175,7 +204,10 @@ describe("BandChat cross-topology recovery", () => {
                     attachment: new Uint8Array([1, 2, 3]),
                     attachmentName: "setlist.txt",
                   })
-                  .wait({ tier: "edge" }),
+                  .wait({ tier: "edge" })
+                  .then((receipt) => {
+                    attachmentMessage = receipt.value;
+                  }),
               ]);
             },
             faultsAfter: [{ kind: "disconnect", target: "owner" }],
@@ -188,7 +220,7 @@ describe("BandChat cross-topology recovery", () => {
                 senderId: ownerProfile!.id,
                 text: "offline replay",
               });
-              await offline.wait({ tier: "local" });
+              offlineMessage = (await offline.wait({ tier: "local" })).value;
               expect(
                 (await owner!.all(app.messages.where({ roomId: room!.id }))).some(
                   (message) => message.text === "offline replay",
@@ -217,7 +249,21 @@ describe("BandChat cross-topology recovery", () => {
                 "peer subscription did not converge",
               );
               expect(subscription).toEqual(messages.map((message) => message.id));
-              expect(new Set(messages.map((message) => message.id)).size).toBe(4);
+              expect(new Set(messages.map((message) => message.id))).toEqual(
+                new Set([
+                  ownerMessage!.id,
+                  peerMessage!.id,
+                  attachmentMessage!.id,
+                  offlineMessage!.id,
+                ]),
+              );
+              expect(
+                messages.find((message) => message.id === attachmentMessage!.id),
+              ).toMatchObject({
+                text: "inline attachment",
+                attachment: new Uint8Array([1, 2, 3]),
+                attachmentName: "setlist.txt",
+              });
               expect(
                 (
                   await peer!.all(app.reactions.where({ messageId: ownerMessage!.id }), {
@@ -230,6 +276,8 @@ describe("BandChat cross-topology recovery", () => {
             },
           },
         ],
+        cleanup: async () => ctx.cleanup(),
+        cleanupTimeoutMs: 10_000,
       },
       browserTopologyReporter,
     );
@@ -299,7 +347,7 @@ describe("BandChat cross-topology recovery", () => {
 });
 
 async function openClient(
-  server: { appId: string; serverUrl: string; adminSecret: string },
+  server: { appId: string; serverUrl: string },
   label: string,
   jwtToken: string,
 ): Promise<Db> {
@@ -307,7 +355,6 @@ async function openClient(
     await createDb({
       appId: server.appId,
       serverUrl: server.serverUrl,
-      adminSecret: server.adminSecret,
       jwtToken,
       driver: { type: "persistent", dbName: uniqueDbName(`band-chat-${label}`) },
     }),

@@ -81,6 +81,21 @@ test("rejects duplicate scenario ids", () => {
   rmSync(temporary, { recursive: true });
 });
 
+test("registry keeps the BandChat topology invocation focused to its receipt", () => {
+  const registry = JSON.parse(
+    readFileSync(resolve(root, "dev/example-topology-scenarios.json"), "utf8"),
+  );
+  const scenario = registry.scenarios.find(({ id }) => id === "band-chat.topology.room-recovery");
+  assert.deepEqual(scenario?.argv, [
+    "pnpm",
+    "--dir",
+    "examples/band-chat/apps/nextjs-betterauth",
+    "test:browser:focused",
+    "--",
+    "tests/browser/topology.e2e.test.tsx",
+  ]);
+});
+
 test("timeout terminates descendants", async () => {
   const temporary = mkdtempSync(resolve(root, "target/jazz-topology-soak-"));
   const registry = resolve(temporary, "registry.json");
