@@ -783,6 +783,42 @@ describe("permissions DSL", () => {
     }
   });
 
+  it("keeps a filtered join RHS inside the ExistsRel relation", () => {
+    const compiled = definePermissions(socialApp, ({ policy, session }) => [
+      policy.profiles.allowRead.where((profile) =>
+        policy.exists(
+          policy.people
+            .where({ profileId: profile.id })
+            .join(policy.friendships.where({ personBId: session.personId }), {
+              left: "id",
+              right: "personAId",
+            }),
+        ),
+      ),
+    ]);
+
+    const using = compiled.profiles!.select?.using;
+    expect(using?.type).toBe("ExistsRel");
+    if (!using || using.type !== "ExistsRel") {
+      throw new Error("Expected filtered join policy to compile to ExistsRel.");
+    }
+    const rel = toAssertionRelExprForTest(using.rel);
+    expect(rel.type).toBe("Filter");
+    if (rel.type !== "Filter") {
+      throw new Error("Expected outer profile correlation filter.");
+    }
+    expect(rel.input.type).toBe("Join");
+    if (rel.input.type !== "Join") {
+      throw new Error("Expected joined relation.");
+    }
+    expect(rel.input.right.type).toBe("Filter");
+    if (rel.input.right.type !== "Filter") {
+      throw new Error("Expected filtered RHS relation to remain nested.");
+    }
+    expect(rel.input.right.predicate.type).toBe("Cmp");
+    expect(JSON.stringify(rel.input.right)).toContain('"personBId"');
+  });
+
   it("supports one-clause friend-profile chain style using hopTo(...).where(...)", () => {
     const compiled = definePermissions(socialApp, ({ policy, anyOf, session }) => [
       policy.profiles.allowRead.where((profile) =>
