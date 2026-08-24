@@ -1894,6 +1894,8 @@ fn hydrate(
     binding: &Binding,
 ) -> HydrateSummary {
     let start = ctx.now_ms();
+    install_claims(core, edge.core_peer.identity());
+    install_claims(&mut edge.node, client.peer.identity());
     core.reset_storage_read_metrics();
     let core_update = block_on(edge.core_peer.rehydrate_query(core, shape, binding)).unwrap();
     let core_read_metrics = core.take_storage_read_metrics();
@@ -1929,6 +1931,7 @@ fn hydrate_direct(
     binding: &Binding,
 ) -> HydrateSummary {
     let start = ctx.now_ms();
+    install_claims(core, client.peer.identity());
     core.reset_storage_read_metrics();
     let update = block_on(client.peer.rehydrate_query(core, shape, binding)).unwrap();
     let view_read_metrics = core.take_storage_read_metrics();
@@ -1957,6 +1960,8 @@ fn deliver_update(
     shape: &ValidatedQuery,
     binding: &Binding,
 ) {
+    install_claims(core, edge.core_peer.identity());
+    install_claims(&mut edge.node, client.peer.identity());
     hydrate_edge_policy(ctx, core, edge);
     let core_update = block_on(edge.core_peer.query_update(core, shape, binding)).unwrap();
     ctx.send("core", &edge.name, core_update);
@@ -2468,10 +2473,14 @@ fn edge_acceptance_phase(
 ) -> EdgeAcceptanceSummary {
     let mut acceptance_latency = Histogram::new(3).unwrap();
     let start = ctx.now_ms();
+    let writer_author = AuthorSubject::for_test_uuid(writer.0);
+    install_claims(core, writer_author);
+    install_claims(&mut edge.node, writer_author);
+    install_claims(&mut client.node, writer_author);
     let (_tx_id, unit) = commit_mergeable_unit_settled(
         &mut client.node,
         MergeableCommit::new(RESOURCES, resource, 950_000)
-            .made_by(AuthorSubject::for_test_uuid(writer.0))
+            .made_by(writer_author)
             .cells(resource_cells(950_000)),
     )
     .unwrap();
@@ -2504,7 +2513,7 @@ fn edge_acceptance_phase(
     );
 
     let (scope_shape, scope_binding) = resource_subscription(&schema());
-    let mut core_to_edge_scope = PeerState::edge_client(AuthorSubject::for_test_uuid(writer.0));
+    let mut core_to_edge_scope = PeerState::edge_client(writer_author);
     let scope_update =
         block_on(core_to_edge_scope.rehydrate_query(core, &scope_shape, &scope_binding)).unwrap();
     let hydration_bytes = view_update_bytes(&scope_update);
@@ -2561,7 +2570,8 @@ fn open_client(
     schema: JazzSchema,
     author: AuthorSubject,
 ) -> Client {
-    let (dir, node) = open_node(node_uuid, schema);
+    let (dir, mut node) = open_node(node_uuid, schema);
+    install_claims(&mut node, author);
     Client {
         name: name.to_owned(),
         node,
@@ -2578,7 +2588,8 @@ fn open_edge(
     schema: JazzSchema,
     author: AuthorSubject,
 ) -> EdgeRoute {
-    let (dir, node) = open_node(node_uuid, schema);
+    let (dir, mut node) = open_node(node_uuid, schema);
+    install_claims(&mut node, author);
     EdgeRoute {
         name: name.to_owned(),
         node,
@@ -2609,6 +2620,7 @@ fn open_db_client(
     core: &CoreDb,
 ) -> DbClient {
     let (dir, db) = open_db(node_uuid, schema, author, node_seed(node_uuid));
+    install_core_db_claims(core, author);
     let duplex = duplex_counted();
     let bytes = Rc::clone(&duplex.server_to_client_bytes);
     let floor_bytes = Rc::clone(&duplex.server_to_client_floor_bytes);
@@ -2680,6 +2692,7 @@ fn open_db(
         id_source: Some(Box::new(SeededRowIdSource::new(seed))),
     }))
     .unwrap();
+    install_db_claims(&db, author);
     (dir, db)
 }
 
@@ -3675,6 +3688,39 @@ fn row(idx: usize) -> RowUuid {
 
 fn resource_row(idx: usize) -> RowUuid {
     row(100_000 + idx)
+}
+
+fn raw_claims(author: AuthorSubject) -> BTreeMap<String, Value> {
+    let sub = author.test_uuid().to_string();
+    BTreeMap::from([
+        ("iss".to_owned(), Value::String("urn:jazz:test".to_owned())),
+        (
+            "issuer".to_owned(),
+            Value::String("urn:jazz:test".to_owned()),
+        ),
+        ("sub".to_owned(), Value::String(sub.clone())),
+        ("user_id".to_owned(), Value::String(sub)),
+    ])
+}
+
+fn install_claims(node: &mut NodeState<RocksDbStorage>, author: AuthorSubject) {
+    if author != AuthorSubject::SYSTEM {
+        node.admit_test_session_claims(author, raw_claims(author));
+    }
+}
+
+fn install_core_db_claims(core: &CoreDb, author: AuthorSubject) {
+    if author != AuthorSubject::SYSTEM {
+        let node = core.server.node();
+        let mut node = block_on(node.lock());
+        install_claims(&mut node, author);
+    }
+}
+
+fn install_db_claims(db: &Db<RocksDbStorage>, author: AuthorSubject) {
+    if author != AuthorSubject::SYSTEM {
+        db.set_identity_claims(author, raw_claims(author));
+    }
 }
 
 fn node(byte: u8) -> NodeUuid {

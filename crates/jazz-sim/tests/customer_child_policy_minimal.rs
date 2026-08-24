@@ -47,8 +47,6 @@ impl Transport for QueueTransport {
 struct Duplex {
     left: Box<dyn Transport>,
     right: Box<dyn Transport>,
-    left_sent: Rc<Cell<usize>>,
-    right_sent: Rc<Cell<usize>>,
 }
 
 fn duplex() -> Duplex {
@@ -67,8 +65,6 @@ fn duplex() -> Duplex {
             inbound: left_queue,
             sent: Rc::clone(&right_sent),
         }),
-        left_sent,
-        right_sent,
     }
 }
 
@@ -172,7 +168,9 @@ fn db_config(
 }
 
 fn open_db(schema: JazzSchema, node_uuid: NodeUuid, author: AuthorSubject) -> Db<MemoryStorage> {
-    jazz::db::block_on(Db::open(db_config(schema, node_uuid, author))).expect("open db")
+    let db = jazz::db::block_on(Db::open(db_config(schema, node_uuid, author))).expect("open db");
+    install_db_claims(&db, author);
+    db
 }
 
 fn open_history_complete_db(
@@ -183,7 +181,30 @@ fn open_history_complete_db(
     jazz::db::block_on(Db::open_history_complete(db_config(
         schema, node_uuid, author,
     )))
+    .map(|db| {
+        install_db_claims(&db, author);
+        db
+    })
     .expect("open db")
+}
+
+fn raw_claims(author: AuthorSubject) -> BTreeMap<String, Value> {
+    let sub = author.test_uuid().to_string();
+    BTreeMap::from([
+        ("iss".to_owned(), Value::String("urn:jazz:test".to_owned())),
+        (
+            "issuer".to_owned(),
+            Value::String("urn:jazz:test".to_owned()),
+        ),
+        ("sub".to_owned(), Value::String(sub.clone())),
+        ("user_id".to_owned(), Value::String(sub)),
+    ])
+}
+
+fn install_db_claims(db: &Db<MemoryStorage>, author: AuthorSubject) {
+    if author != AuthorSubject::SYSTEM {
+        db.set_identity_claims(author, raw_claims(author));
+    }
 }
 
 fn insert(db: &Db<MemoryStorage>, table: &str, row: RowUuid, cells: BTreeMap<String, Value>) {
@@ -237,6 +258,8 @@ fn child_policy_reaches_client_through_relay() {
     let core = open_history_complete_db(schema.clone(), node(0x01), AuthorSubject::SYSTEM);
     let relay = open_db(schema.clone(), node(0x02), AuthorSubject::SYSTEM);
     let client = open_db(schema.clone(), node(0x03), member);
+    install_db_claims(&core, member);
+    install_db_claims(&relay, member);
 
     let member_group = row(0x10);
     let reachable_group = row(0x11);
@@ -308,15 +331,10 @@ fn child_policy_reaches_client_through_relay() {
     );
 
     let core_member_count = count(&core, CHILD, member);
-    eprintln!("MIN_CHILD core member one-shot child rows={core_member_count}");
     assert_eq!(core_member_count, 1, "core member one-shot must see child");
 
     let relay_core = duplex();
     let client_relay = duplex();
-    let relay_core_left_sent = Rc::clone(&relay_core.left_sent);
-    let relay_core_right_sent = Rc::clone(&relay_core.right_sent);
-    let client_relay_left_sent = Rc::clone(&client_relay.left_sent);
-    let client_relay_right_sent = Rc::clone(&client_relay.right_sent);
     let _relay_upstream = jazz::db::block_on(relay.connect_upstream(relay_core.left));
     let _core_sub = core.accept_subscriber(relay_core.right, AuthorSubject::SYSTEM);
     let _client_upstream = jazz::db::block_on(client.connect_upstream(client_relay.left));
@@ -339,58 +357,30 @@ fn child_policy_reaches_client_through_relay() {
         subscriptions.push((table, stream, BTreeSet::<RowUuid>::new()));
     }
 
-    for tick in 0..200 {
+    for _ in 0..200 {
         tick_all(&core, &relay, &client);
         for (_, stream, rows) in &mut subscriptions {
             while let Some(event) = stream.try_next_event() {
                 apply_event(rows, event);
             }
         }
-        let seen = subscriptions
+        if subscriptions
             .iter()
             .find(|(table, _, _)| *table == CHILD)
             .map(|(_, _, rows)| rows)
-            .unwrap();
-
-        if tick == 10 || tick == 50 || tick == 199 {
-            let relay_member_count = count(&relay, CHILD, member);
-            let relay_system_child = count(&relay, CHILD, AuthorSubject::SYSTEM);
-            let relay_system_child_access = count(&relay, CHILD_ACCESS, AuthorSubject::SYSTEM);
-            let relay_system_group_entry = count(&relay, GROUP_ENTRY, AuthorSubject::SYSTEM);
-            let relay_system_parent_access = count(&relay, PARENT_ACCESS, AuthorSubject::SYSTEM);
-            eprintln!(
-                "MIN_CHILD tick={tick} relay->core={} core->relay={} client->relay={} relay->client={} relay member child={relay_member_count} relay system child={relay_system_child} child_access={relay_system_child_access} group_entry={relay_system_group_entry} parent_access={relay_system_parent_access} client_subscription_rows={}",
-                relay_core_left_sent.get(),
-                relay_core_right_sent.get(),
-                client_relay_left_sent.get(),
-                client_relay_right_sent.get(),
-                seen.len()
-            );
-        }
-        if seen.contains(&child) {
-            let relay_member_count = count(&relay, CHILD, member);
-            eprintln!(
-                "MIN_CHILD reached tick={tick} relay member one-shot child rows={relay_member_count} client_subscription_rows={}",
-                seen.len()
-            );
+            .unwrap()
+            .contains(&child)
+        {
             return;
         }
     }
 
     let relay_member_count = count(&relay, CHILD, member);
-    let relay_system_child = count(&relay, CHILD, AuthorSubject::SYSTEM);
-    let relay_system_child_access = count(&relay, CHILD_ACCESS, AuthorSubject::SYSTEM);
-    let relay_system_group_entry = count(&relay, GROUP_ENTRY, AuthorSubject::SYSTEM);
-    let relay_system_parent_access = count(&relay, PARENT_ACCESS, AuthorSubject::SYSTEM);
     let seen = subscriptions
         .iter()
         .find(|(table, _, _)| *table == CHILD)
         .map(|(_, _, rows)| rows)
         .unwrap();
-    eprintln!(
-        "MIN_CHILD final relay member child={relay_member_count} relay system child={relay_system_child} child_access={relay_system_child_access} group_entry={relay_system_group_entry} parent_access={relay_system_parent_access} client_subscription_rows={}",
-        seen.len()
-    );
     assert_eq!(
         relay_member_count, 1,
         "relay member one-shot must see child"
