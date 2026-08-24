@@ -166,7 +166,10 @@ test("relay artifact staging targets every Android ABI and iOS framework slice",
     "utf8",
   );
 
-  assert.equal(packageJson.scripts["build:relay:android"], "bash scripts/build-relay-artifacts.sh android");
+  assert.equal(
+    packageJson.scripts["build:relay:android"],
+    "bash scripts/build-relay-artifacts.sh android",
+  );
   assert.equal(packageJson.scripts["build:relay:ios"], "bash scripts/build-relay-artifacts.sh ios");
   assert.match(script, /\[arm64-v8a\]=aarch64-linux-android/);
   assert.match(script, /\[armeabi-v7a\]=armv7-linux-androideabi/);
