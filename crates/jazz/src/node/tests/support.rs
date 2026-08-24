@@ -1698,7 +1698,7 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 let (made_by, owner) =
                     seeded_author_and_owner(&mut rng, default_author, author_a, author_b);
                 let tx_id = OpenTransactionId::new();
-                writer.open_exclusive(tx_id).unwrap();
+                writer.open_exclusive_for_identity(tx_id, made_by).unwrap();
                 writer
                     .tx_read(tx_id, "todos", rows[rng.choose(rows.len())])
                     .unwrap();
@@ -1824,7 +1824,7 @@ fn run_m3_seed(seed: u64) -> M3RunSummary {
                 let (made_by, owner) =
                     seeded_author_and_owner(&mut rng, default_author, author_a, author_b);
                 let tx_id = OpenTransactionId::new();
-                writer.open_exclusive(tx_id).unwrap();
+                writer.open_exclusive_for_identity(tx_id, made_by).unwrap();
                 writer
                     .tx_read(tx_id, "todos", rows[rng.choose(rows.len())])
                     .unwrap();
