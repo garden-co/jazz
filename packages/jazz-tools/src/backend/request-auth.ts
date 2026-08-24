@@ -8,7 +8,9 @@ import {
 } from "jose";
 import type { RequestLike } from "../runtime/client.js";
 import {
+  ANONYMOUS_JWT_ISSUER,
   LOCAL_FIRST_JWT_ISSUER,
+  SYSTEM_SESSION_ISSUER,
   parseJwtPayload,
   sessionFromJwtPayload,
   type JwtPayload,
@@ -294,6 +296,17 @@ function requireJwtSession(payload: JwtPayload): Session {
   return session;
 }
 
+function rejectReservedExternalJwtIssuer(session: Session): void {
+  if (
+    session.issuer === SYSTEM_SESSION_ISSUER ||
+    session.issuer === LOCAL_FIRST_JWT_ISSUER ||
+    session.issuer === ANONYMOUS_JWT_ISSUER ||
+    session.issuer === "urn:jazz:static-bearer"
+  ) {
+    throw new Error("Invalid JWT payload");
+  }
+}
+
 function ensureJwtNotExpired(payload: JwtPayload): void {
   if (payload.exp === undefined) {
     return;
@@ -377,6 +390,7 @@ export async function resolveRequestSession(
     return session;
   }
 
+  rejectReservedExternalJwtIssuer(session);
   await verifyExternalJwt(token, config);
   return session;
 }

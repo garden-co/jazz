@@ -208,10 +208,10 @@ impl AuthorSubject {
 
     /// Construct a subject from externally authenticated JWT components.
     pub fn authenticated(issuer: &str, subject: &str) -> Result<Self, AuthorSubjectError> {
-        if issuer.trim().is_empty() {
+        if !principal_is_nonempty(issuer) {
             return Err(AuthorSubjectError::MissingIssuer);
         }
-        if subject.trim().is_empty() {
+        if !principal_is_nonempty(subject) {
             return Err(AuthorSubjectError::MissingSubject);
         }
         if Self::is_reserved_issuer(issuer) {
@@ -222,7 +222,7 @@ impl AuthorSubject {
 
     /// Construct an identity in a Jazz-owned issuer namespace.
     pub(crate) fn reserved(issuer: &str, subject: &str) -> Result<Self, AuthorSubjectError> {
-        if subject.trim().is_empty() {
+        if !principal_is_nonempty(subject) {
             return Err(AuthorSubjectError::MissingSubject);
         }
         if !matches!(
@@ -284,10 +284,10 @@ impl AuthorSubject {
         if issuer == Self::SYSTEM_ISSUER {
             return Err(AuthorSubjectError::ReservedIssuer(issuer));
         }
-        if issuer.trim().is_empty() {
+        if !principal_is_nonempty(&issuer) {
             return Err(AuthorSubjectError::MissingIssuer);
         }
-        if subject.trim().is_empty() {
+        if !principal_is_nonempty(&subject) {
             return Err(AuthorSubjectError::MissingSubject);
         }
         let author = Self::intern(&issuer, &subject);
@@ -304,6 +304,13 @@ impl AuthorSubject {
             Self::Authenticated(value) => value.as_str(),
         }
     }
+}
+
+fn principal_is_nonempty(value: &str) -> bool {
+    value
+        .as_bytes()
+        .iter()
+        .any(|byte| !matches!(byte, b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r' | b' '))
 }
 
 impl PartialOrd for AuthorSubject {
@@ -377,6 +384,23 @@ mod tests {
     }
 
     #[test]
+    fn author_subject_preserves_exact_ascii_space_and_unicode_whitespace_components() {
+        let spaced = AuthorSubject::authenticated(" https://issuer.example ", " alice ").unwrap();
+        assert_eq!(
+            spaced.canonical(),
+            r#"[" https://issuer.example "," alice "]"#
+        );
+
+        for value in ["\u{85}", "\u{feff}", "\u{85}provider", "provider\u{feff}"] {
+            let author = AuthorSubject::authenticated(value, value).unwrap();
+            assert_eq!(
+                AuthorSubject::from_canonical(author.canonical()),
+                Ok(author)
+            );
+        }
+    }
+
+    #[test]
     fn external_author_subject_rejects_missing_and_reserved_components() {
         assert_eq!(
             AuthorSubject::authenticated("", "user"),
@@ -388,6 +412,10 @@ mod tests {
         );
         assert_eq!(
             AuthorSubject::authenticated("https://issuer.example", ""),
+            Err(AuthorSubjectError::MissingSubject)
+        );
+        assert_eq!(
+            AuthorSubject::authenticated("https://issuer.example", "\t \n\r"),
             Err(AuthorSubjectError::MissingSubject)
         );
         for issuer in [

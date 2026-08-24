@@ -7,7 +7,7 @@ use jazz::db::{Db, DbConfig, DbIdentity, PreparedQuery, block_on};
 use jazz::groove::large_values::{INLINE_VALUE_MAX_BYTES, LargeValueKind};
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::{JazzSchema, TableSchema};
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
@@ -177,7 +177,7 @@ fn open(schema: JazzSchema, storage: TestStorage) -> BenchDb {
         storage,
         DbIdentity {
             node: NodeUuid::from_bytes([0x41; 16]),
-            author: AuthorId::from_bytes([0x51; 16]),
+            author: AuthorSubject::for_test_bytes([0x51; 16]),
         },
     )))
     .expect("open MusicAgent database")

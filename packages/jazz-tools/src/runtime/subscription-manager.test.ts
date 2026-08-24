@@ -6,6 +6,7 @@ import { describe, it, expect } from "vitest";
 import { SubscriptionManager, applySubscriptionDelta } from "./subscription-manager.js";
 import type { SubscriptionDelta } from "./subscription-manager.js";
 import {
+  createRecord,
   encodeNativeRowValues,
   logicalStorageColumns,
   storageColumnValueType,
@@ -1192,14 +1193,10 @@ describe("SubscriptionManager", () => {
     expect(result.all).toEqual([{ id, name: "layout", count: 9 }]);
   });
 
-  it("decodes UUID provenance through reordered public text columns", () => {
+  it("decodes canonical text provenance through reordered public text columns", () => {
     const id = "00000000-0000-4000-8000-000000000001";
-    const author = "00000000-0000-4000-8000-0000000000aa";
+    const author = JSON.stringify(["https://issuer.example", "user-1"]);
     const key = [10, ...uuidBytes(id)];
-    const producerColumns: ColumnDescriptor[] = [
-      { name: "$createdBy", column_type: { type: "Uuid" }, nullable: false },
-      { name: "$createdAt", column_type: { type: "Timestamp" }, nullable: false },
-    ];
     const publicColumns: ColumnDescriptor[] = [
       { name: "$createdAt", column_type: { type: "Timestamp" }, nullable: false },
       { name: "$createdBy", column_type: { type: "Text" }, nullable: false },
@@ -1207,15 +1204,18 @@ describe("SubscriptionManager", () => {
     const descriptorWriter = new PostcardWriter();
     writeDescriptor(descriptorWriter, [
       { name: "row_uuid", valueType: { tag: 10 } },
-      { name: "$createdBy", valueType: { tag: 10 } },
+      { name: "$createdBy", valueType: { tag: 8 } },
       { name: "$createdAt", valueType: { tag: 3 } },
     ]);
     const value = Uint8Array.from([
       ...uuidBytes(id),
-      ...encodeNativeRowValues(producerColumns, [
-        { type: "Uuid", value: author },
-        { type: "Timestamp", value: 42 },
-      ]),
+      ...createRecord(
+        [
+          { name: "$createdBy", valueType: { tag: 8 } },
+          { name: "$createdAt", valueType: { tag: 3 } },
+        ],
+        [new TextEncoder().encode(author), Uint8Array.of(42, 0, 0, 0, 0, 0, 0, 0)],
+      ),
     ]);
     const result = new SubscriptionManager<WasmRow>().handleDelta(
       {

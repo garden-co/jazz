@@ -98,18 +98,20 @@ describe("client session resolution", () => {
     ).toMatchObject({ issuer: "https://issuer.example", user_id: "alice", claims });
   });
 
-  it("preserves exact nonblank JWT subject bytes and rejects whitespace-only subjects", () => {
+  it("preserves exact nonblank JWT issuer and subject bytes and rejects ASCII-whitespace-only components", () => {
     const spaced = resolveClientSessionSync({
       appId: "app-jwt-spaced-subject",
-      jwtToken: makeJwt({ iss: "issuer", sub: " alice " }),
+      jwtToken: makeJwt({ iss: " issuer ", sub: " alice " }),
     });
     const plain = resolveClientSessionSync({
       appId: "app-jwt-plain-subject",
       jwtToken: makeJwt({ iss: "issuer", sub: "alice" }),
     });
 
+    expect(spaced?.issuer).toBe(" issuer ");
     expect(spaced?.user_id).toBe(" alice ");
     expect(spaced?.claims.subject).toBeUndefined();
+    expect(spaced?.issuer).not.toBe(plain?.issuer);
     expect(spaced?.user_id).not.toBe(plain?.user_id);
     for (const subject of [" ", "\t", "\n", "\v", "\f", "\r", " \t\n\v\f\r "]) {
       expect(
@@ -119,15 +121,24 @@ describe("client session resolution", () => {
         }),
       ).toBeNull();
     }
+    for (const issuer of [" ", "\t", "\n", "\v", "\f", "\r", " \t\n\v\f\r "]) {
+      expect(
+        resolveClientSessionSync({
+          appId: "app-jwt-whitespace-issuer",
+          jwtToken: makeJwt({ iss: issuer, sub: "alice" }),
+        }),
+      ).toBeNull();
+    }
   });
 
-  it("preserves Unicode whitespace in a usable subject", () => {
+  it("preserves Unicode whitespace in usable issuer and subject components", () => {
     for (const subject of ["\u0085", "\uFEFF", "\u0085provider", "provider\uFEFF"]) {
       const session = resolveClientSessionSync({
         appId: "app-jwt-unicode-subject",
-        jwtToken: makeJwt({ iss: "issuer", sub: subject }),
+        jwtToken: makeJwt({ iss: `${subject}issuer`, sub: subject }),
       });
 
+      expect(session?.issuer).toBe(`${subject}issuer`);
       expect(session?.user_id).toBe(subject);
       expect(session?.claims.subject).toBeUndefined();
     }
