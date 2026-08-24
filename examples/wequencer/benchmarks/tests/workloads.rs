@@ -26,3 +26,8 @@ fn edit_burst_preserves_a_readable_converged_pattern() {
 fn subscribed_step_edit_delivers_a_public_subscription_event() {
     assert!(Fixture::new().subscribed_step_edit());
 }
+
+#[test]
+fn one_write_reaches_every_subscribed_pattern_listener() {
+    assert_eq!(Fixture::new().subscribed_step_fanout(8), 8);
+}

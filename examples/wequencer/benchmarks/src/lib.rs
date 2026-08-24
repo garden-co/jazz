@@ -152,6 +152,47 @@ impl Fixture {
             SubscriptionEvent::Delta { updated, .. } if !updated.is_empty()
         )
     }
+
+    /// Models the subscription fan-out behind a shared pattern-grid hotspot.
+    /// Each listener is a separate public subscription over the same ordered
+    /// track. The benchmark measures initial materialization plus delivery of
+    /// an edited pad to every listener.
+    pub fn subscribed_step_fanout(&self, subscribers: usize) -> usize {
+        assert!(subscribers > 0, "fan-out requires at least one subscriber");
+        let mut streams = (0..subscribers)
+            .map(|_| {
+                let mut stream =
+                    block_on(self.db.subscribe(&self.track_window, ReadOpts::default()))
+                        .expect("open Wequencer step subscription");
+                let initial =
+                    block_on(stream.next_event()).expect("subscription has initial step snapshot");
+                assert!(matches!(
+                    initial,
+                    SubscriptionEvent::Delta { reset: true, .. }
+                ));
+                stream
+            })
+            .collect::<Vec<_>>();
+
+        let write = block_on(self.db.update(
+            "steps",
+            row_id(3, 0),
+            BTreeMap::from([("enabled".into(), Value::Bool(false))]),
+        ))
+        .expect("edit fan-out Wequencer step");
+        block_on(write.wait(DurabilityTier::Local)).expect("fan-out step reaches local durability");
+
+        streams
+            .iter_mut()
+            .map(|stream| {
+                matches!(
+                    block_on(stream.next_event()).expect("subscription observes fan-out step edit"),
+                    SubscriptionEvent::Delta { updated, .. } if !updated.is_empty()
+                )
+            })
+            .filter(|delivered| *delivered)
+            .count()
+    }
 }
 
 fn schema() -> JazzSchema {
