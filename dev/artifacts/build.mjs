@@ -30,6 +30,8 @@ export function createWasmPackageStage(rootDir = root, profile = "release") {
   return { path, outDir: basename(path) };
 }
 export function assertCompleteWasmPackage(path) {
+  if (!existsSync(path) || !lstatSync(path).isDirectory() || lstatSync(path).isSymbolicLink())
+    throw new Error(`WASM build package directory is not a real directory (${basename(path)})`);
   const invalid = wasmPackageFiles.filter((file) => {
     const candidate = join(path, file);
     return !existsSync(candidate) || !lstatSync(candidate).isFile() || lstatSync(candidate).size === 0;
@@ -73,14 +75,34 @@ function journalChild(packageDir, name, prefix) {
     throw new Error(`WASM package transaction journal ${prefix} is outside its package directory`);
   return path;
 }
+function realDirectory(path, label, { required = false } = {}) {
+  if (!existsSync(path)) {
+    if (required) throw new Error(`WASM package transaction ${label} is missing`);
+    return false;
+  }
+  const stat = lstatSync(path);
+  if (!stat.isDirectory() || stat.isSymbolicLink())
+    throw new Error(`WASM package transaction ${label} must be a real directory`);
+  return true;
+}
+function validateJournal(journal) {
+  if (!journal || journal.schema !== 1 || typeof journal.hadCurrent !== "boolean" || !["prepared", "old-moved", "new-published"].includes(journal.state))
+    throw new Error("WASM package transaction journal has an invalid shape");
+  if (!journal.hashes || typeof journal.hashes !== "object" || Object.keys(journal.hashes).length !== wasmPackageFiles.length || wasmPackageFiles.some((file) => !/^[a-f0-9]{64}$/.test(journal.hashes[file] ?? "")))
+    throw new Error("WASM package transaction journal has invalid generation hashes");
+}
 /** Recover an interrupted old→new directory swap. Must run while holding the clone lock. */
 export function recoverWasmPackageTransaction(packageDir) {
   const journal = readJournal(journalPath(packageDir));
   if (!journal) return;
+  validateJournal(journal);
   const pkg = join(packageDir, "pkg");
   const stage = journalChild(packageDir, journal.stage, ".pkg-stage-");
   const backup = journal.backup ? journalChild(packageDir, journal.backup, ".pkg-backup-") : undefined;
   try {
+    realDirectory(pkg, "pkg");
+    realDirectory(stage, "stage");
+    if (backup) realDirectory(backup, "backup");
     if (existsSync(pkg) && matches(pkg, journal.hashes)) { if (backup && existsSync(backup)) rmSync(backup, { recursive: true, force: true }); }
     // `prepared` is journaled before the first rename. A crash here leaves the
     // complete prior pkg in place and no backup; do not mistake it for loss.
@@ -99,6 +121,8 @@ export function publishWasmPackage(stagePath, packagePath, { profile = "release"
   const lock = alreadyLocked ? undefined : acquireWasmLease();
   try {
     recoverWasmPackageTransaction(packageDir);
+    realDirectory(stagePath, "stage", { required: true });
+    realDirectory(packagePath, "pkg");
     const hashes = assertCompleteWasmPackage(stagePath);
     const backupPath = join(packageDir, `.pkg-backup-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     const transaction = { schema: 1, profile, stage: basename(stagePath), backup: basename(backupPath), hadCurrent: existsSync(packagePath), hashes, state: "prepared" };
