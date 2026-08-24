@@ -1598,6 +1598,20 @@ fn read_policy_branch_or_join_allows_public_or_membership_reads() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
     let (_member_dir, _member_reader) = open_node_with_schema(node(3), schema.clone());
     let (_other_dir, _other_reader) = open_node_with_schema(node(4), schema);
+    core.set_session_claims(
+        member,
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(member.test_uuid().to_string()),
+        )]),
+    );
+    core.set_session_claims(
+        other,
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(other.test_uuid().to_string()),
+        )]),
+    );
 
     accept_global(
         &mut core,
