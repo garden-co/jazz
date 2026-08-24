@@ -1,40 +1,62 @@
 import { schema as s } from "jazz-tools";
 
-// BandBinder deliberately uses one recursive block relation for every page
-// surface. A block can be prose, a song section, a task, a calendar entry, or
-// an attachment placeholder; product rendering decides how to interpret it.
+// Workspace ids are intentionally denormalized onto every content row. That
+// makes authorization scope explicit instead of inventing recursive permission
+// inheritance through the page and block relations.
 const schema = {
-  workspaces: s.table({ name: s.string() }),
+  workspaces: s.table({ name: s.string(), ownerSubject: s.string() }),
   members: s.table({
-    workspace_id: s.ref("workspaces"),
+    workspaceId: s.ref("workspaces"),
     subject: s.string(),
     role: s.enum("owner", "member", "stage_manager"),
   }),
   pages: s.table({
-    workspace_id: s.ref("workspaces"),
-    parent_page_id: s.ref("pages").optional(),
+    workspaceId: s.ref("workspaces"),
+    parentPageId: s.ref("pages").optional(),
     title: s.string(),
-    branch: s.string(),
   }),
   blocks: s.table({
-    page_id: s.ref("pages"),
-    parent_block_id: s.ref("blocks").optional(),
+    workspaceId: s.ref("workspaces"),
+    pageId: s.ref("pages"),
+    parentBlockId: s.ref("blocks").optional(),
     position: s.float(),
-    kind: s.enum("text", "song", "task", "calendar", "attachment", "embed"),
+    kind: s.enum("text", "song", "task", "calendar", "attachment", "page"),
     payload: s.json(),
   }),
+  tasks: s.table({
+    workspaceId: s.ref("workspaces"),
+    blockId: s.ref("blocks"),
+    title: s.string(),
+    completed: s.boolean(),
+    assigneeSubject: s.string().optional(),
+    dueAt: s.timestamp().optional(),
+  }),
+  calendarEvents: s.table({
+    workspaceId: s.ref("workspaces"),
+    blockId: s.ref("blocks"),
+    title: s.string(),
+    startsAt: s.timestamp(),
+    endsAt: s.timestamp(),
+  }),
+  songs: s.table({
+    workspaceId: s.ref("workspaces"),
+    blockId: s.ref("blocks"),
+    title: s.string(),
+    key: s.string().optional(),
+    bpm: s.float().optional(),
+  }),
   suggestions: s.table({
-    block_id: s.ref("blocks"),
-    branch: s.string(),
+    workspaceId: s.ref("workspaces"),
+    blockId: s.ref("blocks"),
     payload: s.json(),
     status: s.enum("open", "accepted", "rejected"),
   }),
   attachments: s.table({
-    page_id: s.ref("pages"),
+    workspaceId: s.ref("workspaces"),
+    blockId: s.ref("blocks"),
     name: s.string(),
-    media_type: s.string(),
-    // Large-content streaming is intentionally tracked separately (#1833/#1839/#1844).
-    content_locator: s.string().optional(),
+    mediaType: s.string(),
+    bytes: s.bytes(),
   }),
 };
 

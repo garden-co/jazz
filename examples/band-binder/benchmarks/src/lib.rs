@@ -18,6 +18,11 @@ pub struct Fixture {
     db: BenchDb,
     sibling_window: PreparedQuery,
     child_pages: PreparedQuery,
+    task_window: PreparedQuery,
+    calendar_window: PreparedQuery,
+    song_window: PreparedQuery,
+    suggestion_window: PreparedQuery,
+    attachment_window: PreparedQuery,
 }
 
 impl Fixture {
@@ -42,16 +47,18 @@ impl Fixture {
             &db,
             "workspaces",
             workspace,
-            BTreeMap::from([("name".into(), Value::String("BandBinder".into()))]),
+            BTreeMap::from([
+                ("name".into(), Value::String("BandBinder".into())),
+                ("ownerSubject".into(), Value::String("owner".into())),
+            ]),
         );
         insert(
             &db,
             "pages",
             root,
             BTreeMap::from([
-                ("workspace".into(), Value::Uuid(workspace.0)),
+                ("workspaceId".into(), Value::Uuid(workspace.0)),
                 ("title".into(), Value::String("Tour book".into())),
-                ("branch".into(), Value::String("main".into())),
             ]),
         );
         for index in 0..16 {
@@ -60,13 +67,15 @@ impl Fixture {
                 "pages",
                 row_id(2, index + 1),
                 BTreeMap::from([
-                    ("workspace".into(), Value::Uuid(workspace.0)),
-                    ("parent_page".into(), Value::Uuid(root.0)),
+                    ("workspaceId".into(), Value::Uuid(workspace.0)),
+                    (
+                        "parentPageId".into(),
+                        Value::Nullable(Some(Box::new(Value::Uuid(root.0)))),
+                    ),
                     (
                         "title".into(),
                         Value::String(format!("Child page {index:02}")),
                     ),
-                    ("branch".into(), Value::String("main".into())),
                 ]),
             );
         }
@@ -76,20 +85,95 @@ impl Fixture {
                 "blocks",
                 row_id(3, index),
                 BTreeMap::from([
-                    ("page".into(), Value::Uuid(root.0)),
+                    ("workspaceId".into(), Value::Uuid(workspace.0)),
+                    ("pageId".into(), Value::Uuid(root.0)),
                     ("position".into(), Value::F64(index as f64)),
                     (
                         "kind".into(),
                         Value::String(["text", "song", "task", "calendar"][index % 4].into()),
                     ),
-                    ("body".into(), Value::String(format!("Block {index:05}"))),
+                    (
+                        "payload".into(),
+                        Value::String(format!("{{\"text\":\"Block {index:05}\"}}")),
+                    ),
+                ]),
+            );
+        }
+        for index in 0..32 {
+            let block = row_id(3, index);
+            insert(
+                &db,
+                "tasks",
+                row_id(4, index),
+                BTreeMap::from([
+                    ("workspaceId".into(), Value::Uuid(workspace.0)),
+                    ("blockId".into(), Value::Uuid(block.0)),
+                    ("title".into(), Value::String(format!("Task {index:02}"))),
+                    ("completed".into(), Value::Bool(index % 3 == 0)),
+                ]),
+            );
+            insert(
+                &db,
+                "calendarEvents",
+                row_id(5, index),
+                BTreeMap::from([
+                    ("workspaceId".into(), Value::Uuid(workspace.0)),
+                    ("blockId".into(), Value::Uuid(block.0)),
+                    ("title".into(), Value::String(format!("Show {index:02}"))),
+                    (
+                        "startsAt".into(),
+                        Value::U64(1_800_000_000_000_000 + index as u64),
+                    ),
+                    (
+                        "endsAt".into(),
+                        Value::U64(1_800_003_600_000_000 + index as u64),
+                    ),
+                ]),
+            );
+            insert(
+                &db,
+                "songs",
+                row_id(6, index),
+                BTreeMap::from([
+                    ("workspaceId".into(), Value::Uuid(workspace.0)),
+                    ("blockId".into(), Value::Uuid(block.0)),
+                    ("title".into(), Value::String(format!("Song {index:02}"))),
+                ]),
+            );
+            insert(
+                &db,
+                "suggestions",
+                row_id(7, index),
+                BTreeMap::from([
+                    ("workspaceId".into(), Value::Uuid(workspace.0)),
+                    ("blockId".into(), Value::Uuid(block.0)),
+                    (
+                        "payload".into(),
+                        Value::String(format!("{{\"replacement\":\"Verse {index:02}\"}}")),
+                    ),
+                    ("status".into(), Value::String("open".into())),
+                ]),
+            );
+            insert(
+                &db,
+                "attachments",
+                row_id(8, index),
+                BTreeMap::from([
+                    ("workspaceId".into(), Value::Uuid(workspace.0)),
+                    ("blockId".into(), Value::Uuid(block.0)),
+                    (
+                        "name".into(),
+                        Value::String(format!("chart-{index:02}.pdf")),
+                    ),
+                    ("mediaType".into(), Value::String("application/pdf".into())),
+                    ("bytes".into(), Value::Bytes(vec![index as u8; 64])),
                 ]),
             );
         }
         let sibling_window = db
             .prepare_query(
                 &Query::from("blocks")
-                    .filter(eq(col("page"), lit(root.0)))
+                    .filter(eq(col("pageId"), lit(root.0)))
                     .order_by("position", OrderDirection::Asc)
                     .offset(8)
                     .limit(16),
@@ -98,14 +182,24 @@ impl Fixture {
         let child_pages = db
             .prepare_query(
                 &Query::from("pages")
-                    .filter(eq(col("parent_page"), lit(root.0)))
+                    .filter(eq(col("parentPageId"), lit(root.0)))
                     .order_by("title", OrderDirection::Asc),
             )
             .expect("prepare child page traversal");
+        let task_window = bounded_workspace_query(&db, "tasks", "title", workspace);
+        let calendar_window = bounded_workspace_query(&db, "calendarEvents", "startsAt", workspace);
+        let song_window = bounded_workspace_query(&db, "songs", "title", workspace);
+        let suggestion_window = bounded_workspace_query(&db, "suggestions", "status", workspace);
+        let attachment_window = bounded_workspace_query(&db, "attachments", "name", workspace);
         Self {
             db,
             sibling_window,
             child_pages,
+            task_window,
+            calendar_window,
+            song_window,
+            suggestion_window,
+            attachment_window,
         }
     }
 
@@ -122,27 +216,118 @@ impl Fixture {
             .expect("read child pages")
             .len()
     }
+
+    pub fn surface_window_counts(&self) -> [usize; 5] {
+        [
+            self.db.read(&self.task_window).expect("read tasks").len(),
+            self.db
+                .read(&self.calendar_window)
+                .expect("read calendar")
+                .len(),
+            self.db.read(&self.song_window).expect("read songs").len(),
+            self.db
+                .read(&self.suggestion_window)
+                .expect("read suggestions")
+                .len(),
+            self.db
+                .read(&self.attachment_window)
+                .expect("read attachments")
+                .len(),
+        ]
+    }
+}
+
+fn bounded_workspace_query(
+    db: &BenchDb,
+    table: &str,
+    order: &str,
+    workspace: RowUuid,
+) -> PreparedQuery {
+    db.prepare_query(
+        &Query::from(table)
+            .filter(eq(col("workspaceId"), lit(workspace.0)))
+            .order_by(order, OrderDirection::Asc)
+            .limit(12),
+    )
+    .expect("prepare bounded workspace surface")
 }
 
 fn schema() -> JazzSchema {
     JazzSchema::new(
         &SchemaBuilder::new()
-            .table(TableSchemaBuilder::new("workspaces").column("name", ColumnType::Text))
+            .table(
+                TableSchemaBuilder::new("workspaces")
+                    .column("name", ColumnType::Text)
+                    .column("ownerSubject", ColumnType::Text),
+            )
+            .table(
+                TableSchemaBuilder::new("members")
+                    .fk_column("workspaceId", "workspaces")
+                    .column("subject", ColumnType::Text)
+                    .column("role", ColumnType::Text)
+                    .index_only(["workspaceId", "subject", "role"]),
+            )
             .table(
                 TableSchemaBuilder::new("pages")
-                    .fk_column("workspace", "workspaces")
-                    .fk_column("parent_page", "pages")
+                    .fk_column("workspaceId", "workspaces")
+                    .nullable_fk_column("parentPageId", "pages")
                     .column("title", ColumnType::Text)
-                    .column("branch", ColumnType::Text)
-                    .index_only(["parent_page", "title"]),
+                    .index_only(["parentPageId", "title"]),
             )
             .table(
                 TableSchemaBuilder::new("blocks")
-                    .fk_column("page", "pages")
+                    .fk_column("workspaceId", "workspaces")
+                    .fk_column("pageId", "pages")
+                    .nullable_fk_column("parentBlockId", "blocks")
                     .column("position", ColumnType::Double)
                     .column("kind", ColumnType::Text)
-                    .column("body", ColumnType::Text)
-                    .index_only(["page", "position", "kind"]),
+                    .column("payload", ColumnType::Json { schema: None })
+                    .index_only(["pageId", "position", "kind"]),
+            )
+            .table(
+                TableSchemaBuilder::new("tasks")
+                    .fk_column("workspaceId", "workspaces")
+                    .fk_column("blockId", "blocks")
+                    .column("title", ColumnType::Text)
+                    .column("completed", ColumnType::Boolean)
+                    .nullable_column("assigneeSubject", ColumnType::Text)
+                    .nullable_column("dueAt", ColumnType::Timestamp)
+                    .index_only(["workspaceId", "dueAt"]),
+            )
+            .table(
+                TableSchemaBuilder::new("calendarEvents")
+                    .fk_column("workspaceId", "workspaces")
+                    .fk_column("blockId", "blocks")
+                    .column("title", ColumnType::Text)
+                    .column("startsAt", ColumnType::Timestamp)
+                    .column("endsAt", ColumnType::Timestamp)
+                    .index_only(["workspaceId", "startsAt"]),
+            )
+            .table(
+                TableSchemaBuilder::new("songs")
+                    .fk_column("workspaceId", "workspaces")
+                    .fk_column("blockId", "blocks")
+                    .column("title", ColumnType::Text)
+                    .nullable_column("key", ColumnType::Text)
+                    .nullable_column("bpm", ColumnType::Double)
+                    .index_only(["workspaceId", "title"]),
+            )
+            .table(
+                TableSchemaBuilder::new("suggestions")
+                    .fk_column("workspaceId", "workspaces")
+                    .fk_column("blockId", "blocks")
+                    .column("payload", ColumnType::Json { schema: None })
+                    .column("status", ColumnType::Text)
+                    .index_only(["workspaceId", "blockId", "status"]),
+            )
+            .table(
+                TableSchemaBuilder::new("attachments")
+                    .fk_column("workspaceId", "workspaces")
+                    .fk_column("blockId", "blocks")
+                    .column("name", ColumnType::Text)
+                    .column("mediaType", ColumnType::Text)
+                    .column("bytes", ColumnType::Bytea)
+                    .index_only(["workspaceId", "blockId", "name"]),
             )
             .build(),
     )
