@@ -180,6 +180,49 @@ const ownerOrMembershipPermissions = schema.definePermissions(
   ],
 );
 
+// This isolates the index-only physical shape used by application schemas.
+// The smaller receipt above proves the logical policy and external-JWT path;
+// this one keeps the same proof while exercising selective access paths.
+const indexedOwnerMembershipApp = schema.defineApp({
+  chats: schema
+    .table({
+      title: schema.string(),
+      owner_id: schema.string(),
+    })
+    .indexOnly(["owner_id"]),
+  chat_members: schema
+    .table({
+      chat_id: schema.ref("chats"),
+      user_id: schema.string(),
+      role: schema.enum("owner", "member"),
+    })
+    .indexOnly(["chat_id", "user_id", "role"]),
+});
+
+const indexedOwnerOrMembershipPermissions = schema.definePermissions(
+  indexedOwnerMembershipApp,
+  ({ policy, anyOf, allowedTo, session }) => [
+    policy.chats.allowRead.where((chat) =>
+      anyOf([
+        { owner_id: session.user_id },
+        policy.chat_members.exists.where({
+          chat_id: chat.id,
+          user_id: session.user_id,
+        }),
+      ]),
+    ),
+    policy.chats.allowInsert.always(),
+    policy.chats.allowUpdate.always(),
+    policy.chats.allowDelete.always(),
+    policy.chat_members.allowRead.where(
+      anyOf([{ user_id: session.user_id }, allowedTo.read("chat_id")]),
+    ),
+    policy.chat_members.allowInsert.always(),
+    policy.chat_members.allowUpdate.always(),
+    policy.chat_members.allowDelete.always(),
+  ],
+);
+
 const camelChatStyleMessagePermissions = schema.definePermissions(
   camelChatApp,
   ({ policy, anyOf, allowedTo, session }) => [
@@ -813,6 +856,70 @@ describe("raw websocket private read gate", () => {
         app.chats.where({ id: chat.id }),
         (rows) => rows.some((row) => row.id === chat.id),
         "external manager receives the parent through the membership disjunct",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
+  }, 60_000);
+
+  it("delivers the indexed parent after an external-JWT membership grant", async () => {
+    const { appId, serverUrl, adminSecret } = await getJazzServerInfo(
+      uniqueDbName("external-indexed-owner-or-member-read"),
+    );
+    await publishSchemaAndPermissions(
+      appId,
+      serverUrl,
+      adminSecret,
+      indexedOwnerOrMembershipPermissions,
+      indexedOwnerMembershipApp,
+    );
+
+    const [ownerToken, managerToken] = await Promise.all([
+      getJazzServerJwtForUser("indexed-external-owner", undefined, appId),
+      getJazzServerJwtForUser("indexed-external-manager", undefined, appId),
+    ]);
+    const owner = await openJwtUserDb(appId, serverUrl, "indexed-external-owner", ownerToken);
+    const manager = await openJwtUserDb(appId, serverUrl, "indexed-external-manager", managerToken);
+    const chat = await owner
+      .insert(indexedOwnerMembershipApp.chats, {
+        title: `indexed-owner-or-member-${Date.now()}`,
+        owner_id: "indexed-external-owner",
+      })
+      .wait({ tier: "edge" });
+    await owner
+      .insert(indexedOwnerMembershipApp.chat_members, {
+        chat_id: chat.id,
+        user_id: "indexed-external-owner",
+        role: "owner",
+      })
+      .wait({ tier: "edge" });
+    const managerMembership = await owner
+      .insert(indexedOwnerMembershipApp.chat_members, {
+        chat_id: chat.id,
+        user_id: "indexed-external-manager",
+        role: "member",
+      })
+      .wait({ tier: "edge" });
+
+    await expect(
+      waitForQuery(
+        manager,
+        indexedOwnerMembershipApp.chat_members.where({
+          id: managerMembership.id,
+          user_id: "indexed-external-manager",
+        }),
+        (rows) => rows.length === 1,
+        "external manager receives its indexed direct membership grant",
+        15_000,
+        "edge",
+      ),
+    ).resolves.toBeDefined();
+    await expect(
+      waitForQuery(
+        manager,
+        indexedOwnerMembershipApp.chats.where({ id: chat.id }),
+        (rows) => rows.some((row) => row.id === chat.id),
+        "external manager receives the indexed parent through membership",
         15_000,
         "edge",
       ),
