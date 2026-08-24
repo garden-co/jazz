@@ -19,10 +19,10 @@ describe("public integer values", () => {
 
     try {
       const db = testApp.as({
-        issuer: "urn:jazz:local-first",
+        issuer: "https://issuer.example",
         user_id: "integer-boundary",
         claims: {},
-        authMode: "local-first",
+        authMode: "external",
       });
       const boundaries = [-2_147_483_648, 2_147_483_647];
 

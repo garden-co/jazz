@@ -164,6 +164,7 @@ export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
         env: config.env,
         jwtToken: config.jwtToken,
         cookieSession: config.cookieSession,
+        trustedReservedSession: config.trustedReservedSession,
         backendSecret: config.backendSecret,
         adminSecret: config.adminSecret,
         tier: "local",

@@ -24,7 +24,12 @@ import type {
   TransactionKind,
 } from "../client.js";
 import type { Session } from "../context.js";
-import { SYSTEM_AUTHOR_ID, SYSTEM_READ_SESSION } from "../system-identity.js";
+import { SYSTEM_AUTHOR_ID } from "../system-identity.js";
+import {
+  TRUSTED_RESERVED_SESSION_TOKEN_FIELD,
+  isReservedJazzIssuer,
+  isTrustedReservedSession,
+} from "../client-session.js";
 import {
   authorBytesForSession,
   canonicalAuthorSubject,
@@ -3022,11 +3027,21 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
       claims?: unknown;
       authMode?: unknown;
       attribution?: unknown;
-      session?: { issuer?: unknown; user_id?: unknown; claims?: unknown; authMode?: unknown };
+      [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]?: unknown;
+      session?: {
+        issuer?: unknown;
+        user_id?: unknown;
+        claims?: unknown;
+        authMode?: unknown;
+        [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]?: unknown;
+      };
     };
+    if (parsed.attribution === SYSTEM_AUTHOR_ID) {
+      throw new Error("Native runtime public session uses reserved issuer");
+    }
     const attributedAuthor =
-      typeof parsed.attribution === "string" && parsed.attribution !== SYSTEM_AUTHOR_ID
-        ? parseCanonicalAuthor(parsed.attribution)
+      typeof parsed.attribution === "string"
+        ? parsePublicCanonicalAuthor(parsed.attribution)
         : null;
     const userId =
       attributedAuthor?.user_id ??
@@ -3034,14 +3049,9 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
         ? parsed.user_id
         : typeof parsed.session?.user_id === "string"
           ? parsed.session.user_id
-          : parsed.attribution === SYSTEM_AUTHOR_ID
-            ? SYSTEM_AUTHOR_ID
-            : undefined);
+          : undefined);
     if (!userId || !isUsableSubject(userId)) return null;
-    const issuer =
-      parsed.attribution === SYSTEM_AUTHOR_ID
-        ? SYSTEM_READ_SESSION.issuer
-        : (attributedAuthor?.issuer ?? parsed.session?.issuer ?? parsed.issuer);
+    const issuer = attributedAuthor?.issuer ?? parsed.session?.issuer ?? parsed.issuer;
     if (typeof issuer !== "string" || !isUsableSubject(issuer)) {
       throw new Error("session is missing issuer");
     }
@@ -3055,17 +3065,50 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
             ? parsed.authMode
             : undefined,
     };
+    assertPublicSessionIssuer(
+      session.issuer,
+      session.user_id,
+      session.authMode,
+      parsed.session?.[TRUSTED_RESERVED_SESSION_TOKEN_FIELD] ??
+        parsed[TRUSTED_RESERVED_SESSION_TOKEN_FIELD],
+    );
     const claims = sessionClaims(parsed.session?.claims ?? parsed.claims, session);
     return { ...session, claims, identity: authorBytesForSession(session) };
   } catch (error) {
-    if (error instanceof Error && error.message === "session is missing issuer") throw error;
+    if (
+      error instanceof Error &&
+      (error.message === "session is missing issuer" ||
+        error.message === "Native runtime public session uses reserved issuer")
+    ) {
+      throw error;
+    }
     return null;
   }
 }
 
-function parseCanonicalAuthor(value: string): { issuer: string; user_id: string } | null {
+function parsePublicCanonicalAuthor(value: string): { issuer: string; user_id: string } | null {
   const parsed = parseCanonicalAuthorSubject(value);
+  if (parsed && isReservedJazzIssuer(parsed.issuer)) {
+    throw new Error("Native runtime public session uses reserved issuer");
+  }
   return parsed ? { issuer: parsed.issuer, user_id: parsed.user_id } : null;
+}
+
+function assertPublicSessionIssuer(
+  issuer: string,
+  userId: string,
+  authMode: string | undefined,
+  trustedToken?: unknown,
+): void {
+  if (
+    isReservedJazzIssuer(issuer) &&
+    !(
+      (authMode === "local-first" || authMode === "anonymous" || authMode === "external") &&
+      isTrustedReservedSession({ issuer, user_id: userId, authMode }, trustedToken)
+    )
+  ) {
+    throw new Error("Native runtime public session uses reserved issuer");
+  }
 }
 
 function updatedAtMsFromWriteContext(writeContext?: string | null): number | undefined {
@@ -3184,6 +3227,7 @@ function readSession(sessionJson?: string | null): RuntimeSession | null {
     user_id?: unknown;
     claims?: unknown;
     authMode?: unknown;
+    [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]?: unknown;
   };
   if (typeof parsed.user_id !== "string" || !isUsableSubject(parsed.user_id)) {
     throw new Error("Native runtime session is missing user_id");
@@ -3196,6 +3240,12 @@ function readSession(sessionJson?: string | null): RuntimeSession | null {
     user_id: parsed.user_id,
     authMode: typeof parsed.authMode === "string" ? parsed.authMode : undefined,
   };
+  assertPublicSessionIssuer(
+    session.issuer,
+    session.user_id,
+    session.authMode,
+    parsed[TRUSTED_RESERVED_SESSION_TOKEN_FIELD],
+  );
   return {
     ...session,
     claims: sessionClaims(parsed.claims, session),
