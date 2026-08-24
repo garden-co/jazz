@@ -218,6 +218,51 @@ async fn staged_large_value_is_consumed_atomically_with_its_referencing_row() {
 }
 
 #[futures_test::test]
+async fn direct_consolidation_stages_a_derived_descriptor_with_reused_base_nodes() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks);
+
+    let mut logical = vec![0x5a; crate::large_values::INLINE_VALUE_MAX_BYTES * 9];
+    let staged = database
+        .prepare_and_stage_large_value(crate::large_values::LargeValueKind::Bytes, &logical)
+        .await
+        .unwrap();
+    let crate::large_values::TailAppendOutcome::Updated(with_tail) =
+        crate::large_values::append_tail(&staged.value_ref, vec![0xa5]).unwrap()
+    else {
+        panic!("one-byte tail must remain below consolidation limits");
+    };
+    logical.push(0xa5);
+
+    let consolidated = database
+        .consolidate_and_stage_large_value(with_tail)
+        .await
+        .unwrap();
+
+    assert!(consolidated.value_ref.edit_tail.is_empty());
+    assert_eq!(
+        database
+            .read_large_value_range(
+                &consolidated.value_ref,
+                0..u64::try_from(logical.len()).unwrap(),
+            )
+            .await
+            .unwrap(),
+        logical
+    );
+}
+
+#[futures_test::test]
 async fn idempotent_restaging_reports_incoming_bytes_for_each_upload() {
     let schema = DatabaseSchema::new([TableSchema::new(
         "objects",

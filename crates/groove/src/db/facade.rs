@@ -1373,7 +1373,10 @@ impl Database {
         value: crate::large_values::LargeValueRef,
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
         let prepared = self.consolidate_large_value(value).await?;
-        self.stage_large_value_preparation(prepared).await
+        // Consolidation retains authenticated unchanged base nodes. Keep the
+        // derived-receipt distinction here, where this local provenance is
+        // still known, rather than weakening raw peer-upload admission.
+        self.stage_derived_large_value_preparation(prepared).await
     }
 
     /// Prepare an append using the bounded edit tail, consolidating through a
