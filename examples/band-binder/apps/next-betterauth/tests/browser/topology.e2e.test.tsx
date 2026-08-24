@@ -12,8 +12,10 @@ import {
   runTopologyScenario,
 } from "../../../../../../packages/jazz-tools/tests/browser/topology-harness.js";
 import {
+  blockJazzServerNetwork,
   getJazzServerInfo,
   getJazzServerJwtForUser,
+  unblockJazzServerNetwork,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
@@ -57,6 +59,7 @@ describe("BandBinder cross-topology recovery", () => {
     let server: Awaited<ReturnType<typeof getJazzServerInfo>> | undefined;
     let owner: Db | undefined;
     let manager: Db | undefined;
+    let outsider: Db | undefined;
     let managerJwt = "";
     let managerDbName = "";
     let workspaceId = "";
@@ -68,7 +71,9 @@ describe("BandBinder cross-topology recovery", () => {
     let nestedPageId = "";
     let nestedBlockId = "";
     let nestedAttachmentId = "";
+    let networkBlocked = false;
     const expectedChildPages: { id: string; title: string }[] = [];
+    let expectedChildPagesBeforeReconnect: { id: string; title: string }[] = [];
     const ownerMutationErrors: unknown[] = [];
     const taskSubscriptionSnapshots: string[][] = [];
     const childPageWindowSubscriptionSnapshots: { id: string; title: string }[][] = [];
@@ -98,9 +103,18 @@ describe("BandBinder cross-topology recovery", () => {
             // transport reconnect: this exercises IndexedDB rehydration.
             restart: async () => {
               managerChildPageWindowSubscriptionSnapshots.length = 0;
-              cleanup.untrack(manager!);
+              await blockJazzServerNetwork(server!.serverUrl);
+              networkBlocked = true;
+              await manager!.disconnect();
               await manager!.shutdown();
+              cleanup.untrack(manager!);
               manager = await openClient(server!, "manager", managerJwt, managerDbName);
+            },
+          },
+          serverNetwork: {
+            reconnect: async () => {
+              await unblockJazzServerNetwork(server!.serverUrl);
+              networkBlocked = false;
             },
           },
           authorization: {
@@ -110,7 +124,7 @@ describe("BandBinder cross-topology recovery", () => {
                 undefined,
                 server!.appId,
               );
-              const outsider = await openClient(server!, "outsider", token);
+              outsider = await openClient(server!, "outsider", token);
               await expect(
                 outsider
                   .insert(app.pages, { workspaceId, title: "Unauthorized rider" })
@@ -580,6 +594,7 @@ describe("BandBinder cross-topology recovery", () => {
               // Updating the expected sequence now gives the reconnect phase
               // an exact shifting-window oracle rather than a weak length
               // assertion.
+              expectedChildPagesBeforeReconnect = expectedChildPages.map((page) => ({ ...page }));
               const childPage = await manager!
                 .insert(app.pages, {
                   workspaceId,
@@ -595,6 +610,17 @@ describe("BandBinder cross-topology recovery", () => {
                   ({ id, title }) => ({ id, title }),
                 ),
               ).toEqual(expectedChildPages);
+              // The manager's optimistic writes must remain isolated while
+              // its transport is disconnected. These edge reads are the
+              // negative half of the subsequent convergence assertions.
+              await expect(
+                owner!.all(app.tasks.where({ workspaceId, id: offlineTaskId }), { tier: "edge" }),
+              ).resolves.toEqual([]);
+              expect(
+                (await owner!.all(childPageWindow(workspaceId, pageId), { tier: "edge" })).map(
+                  ({ id, title }) => ({ id, title }),
+                ),
+              ).toEqual(expectedChildPagesBeforeReconnect);
             },
             faultsAfter: [{ kind: "reconnect", target: "manager" }],
           },
@@ -639,7 +665,7 @@ describe("BandBinder cross-topology recovery", () => {
             faultsAfter: [{ kind: "restart", target: "manager" }],
           },
           {
-            name: "persisted manager remount rehydrates then loses access on revocation",
+            name: "offline persisted manager remount rehydrates exact local surfaces",
             run: async () => {
               const persistedTasks = await waitForQuery(
                 manager!,
@@ -678,6 +704,35 @@ describe("BandBinder cross-topology recovery", () => {
               expect(persistedChildPages.map(({ id, title }) => ({ id, title }))).toEqual(
                 expectedChildPages,
               );
+              expect(networkBlocked).toBe(true);
+            },
+            faultsAfter: [
+              { kind: "reconnect", target: "serverNetwork" },
+              { kind: "reconnect", target: "manager" },
+            ],
+          },
+          {
+            name: "reconnected manager settles then loses live and persisted access",
+            run: async () => {
+              await waitForQuery(
+                manager!,
+                app.tasks.where({ workspaceId, id: offlineTaskId }),
+                (rows) => rows.length === 1,
+                "reconnected manager settles its persisted task at edge",
+                15_000,
+                "edge",
+              );
+              const settledChildPages = await waitForQuery(
+                manager!,
+                childPageWindow(workspaceId, pageId),
+                isExpectedChildPageWindow,
+                "reconnected manager settles the exact bounded child-page window at edge",
+                15_000,
+                "edge",
+              );
+              expect(settledChildPages.map(({ id, title }) => ({ id, title }))).toEqual(
+                expectedChildPages,
+              );
               // Restart creates a new client instance, so this is a fresh
               // subscription on its rehydrated cache. It must observe the
               // same window before revocation and then receive the removal.
@@ -694,6 +749,7 @@ describe("BandBinder cross-topology recovery", () => {
                 15_000,
                 "rehydrated manager subscription starts with the exact bounded window",
               );
+              const revocationSnapshotCursor = managerChildPageWindowSubscriptionSnapshots.length;
               await owner!.delete(app.members, managerMembershipId).wait({ tier: "edge" });
               const rejected = manager!.insert(app.pages, {
                 workspaceId,
@@ -758,15 +814,45 @@ describe("BandBinder cross-topology recovery", () => {
               ]);
               await waitForCondition(
                 async () =>
-                  managerChildPageWindowSubscriptionSnapshots.some((rows) => rows.length === 0),
+                  managerChildPageWindowSubscriptionSnapshots
+                    .slice(revocationSnapshotCursor)
+                    .some((rows) => rows.length === 0),
                 15_000,
                 "revocation publishes an empty bounded child-page subscription to the manager",
               );
             },
           },
         ],
-        cleanup: async () => cleanup.cleanup(),
-        cleanupTimeoutMs: 10_000,
+        cleanup: async () => {
+          const errors: Error[] = [];
+          if (networkBlocked && server) {
+            try {
+              await unblockJazzServerNetwork(server.serverUrl);
+              networkBlocked = false;
+            } catch (error) {
+              errors.push(new Error("failed to unblock BandBinder test network", { cause: error }));
+            }
+          }
+          for (const [label, db] of [
+            ["outsider", outsider],
+            ["manager", manager],
+            ["owner", owner],
+          ] as const) {
+            if (!db) continue;
+            try {
+              await db.shutdown();
+            } catch (error) {
+              errors.push(new Error(`failed to shut down BandBinder ${label}`, { cause: error }));
+            } finally {
+              cleanup.untrack(db);
+            }
+          }
+          await cleanup.cleanup();
+          if (errors.length > 0) {
+            throw new AggregateError(errors, "BandBinder topology cleanup failed");
+          }
+        },
+        cleanupTimeoutMs: 15_000,
       },
       browserTopologyReporter,
     );
@@ -776,8 +862,10 @@ describe("BandBinder cross-topology recovery", () => {
       ["disconnect", "completed"],
       ["reconnect", "completed"],
       ["restart", "completed"],
+      ["reconnect", "completed"],
+      ["reconnect", "completed"],
     ]);
-  }, 90_000);
+  }, 270_000);
 });
 
 async function openClient(
