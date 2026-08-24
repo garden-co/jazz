@@ -228,6 +228,76 @@ describe("NativeRuntimeAdapter server transport", () => {
     await runtime.close();
   });
 
+  it("retries one retained native subscription batch only after its routed chunk response", async () => {
+    const sockets: FakeWebSocket[] = [];
+    globalThis.WebSocket = class extends FakeWebSocket {
+      constructor(url: string) {
+        super(url);
+        sockets.push(this);
+      }
+    } as unknown as typeof WebSocket;
+
+    let chunkArrived = false;
+    const pendingBatch = {};
+    let batchReads = 0;
+    const subscription = {
+      readAll: () => {
+        batchReads += 1;
+        return chunkArrived ? [{ type: "closed" }] : pendingBatch;
+      },
+      close: () => true,
+    };
+    const transport = Object.assign(new FakeTransport([]), {
+      routeAuxiliaryWireFrame: () => {
+        chunkArrived = true;
+        return null;
+      },
+    });
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () =>
+          fakeDb({
+            all: () => new Uint8Array([0]),
+            subscribe: () => subscription,
+            connectUpstream: () => transport,
+            prepareQuery: () => ({}),
+            tick: () => undefined,
+          }),
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      new Uint8Array(16),
+      1,
+      true,
+    );
+
+    runtime.connect("ws://127.0.0.1:4200/apps/app-a/ws", "{}");
+    await runtime.waitForUpstreamServerConnection();
+    const handle = runtime.createSubscription(
+      JSON.stringify({ table: "todos" }),
+      undefined,
+      "local",
+    );
+    runtime.executeSubscription(handle, () => {
+      throw new Error("closed subscription must not publish a value");
+    });
+    await Promise.resolve();
+    expect(batchReads).toBe(1);
+
+    sockets[0]!.emitMessage(encodeWebSocketFrameBatch([Uint8Array.from([0x42])]));
+    await waitForFakeWebSocketNegotiation();
+
+    // The NAPI Subscription owns its retained raw batch internally.  The TS
+    // Routing intentionally publishes arrival and post-evaluation wake edges.
+    // Those yield two bounded re-pulls, never a tight loop or a reconstructed
+    // subscription source.
+    expect(batchReads).toBe(3);
+    await runtime.close();
+  });
+
   it("pumps the newly owned transport before auth-refresh reconnect readiness", async () => {
     const sockets: FakeWebSocket[] = [];
     globalThis.WebSocket = class extends FakeWebSocket {
