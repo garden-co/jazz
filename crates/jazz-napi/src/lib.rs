@@ -971,10 +971,10 @@ impl Drop for Tx {
 pub struct NapiDb {
     inner: NapiDbInner,
     owns_runtime: bool,
-    /// This is derived once from the opaque open credential.  Attribution is
-    /// deliberately not a public capability of an otherwise ordinary local
-    /// runtime: only a backend-opened NAPI handle may select the core's
-    /// SYSTEM admission identity while stamping another author.
+    /// This is derived once from the opaque open credential. Attribution is a
+    /// trusted in-process opt-in, not an ordinary local-runtime API: only a
+    /// backend-opened NAPI handle may select the core's SYSTEM admission
+    /// identity while stamping another author.
     trusted_backend: bool,
 }
 
@@ -3456,9 +3456,15 @@ where
     let initial_sync_flush_every = config.initial_sync_flush_every;
     if config.history_complete {
         let db = if trusted_backend {
-            core_block_on(CoreDb::open_history_complete_with_backend_attribution(
-                db_config,
-            ))
+            // SAFETY: `trusted_backend` is true only after this NAPI open
+            // configuration carried a non-empty backend credential. This is
+            // the binding's intentionally narrow trusted in-process boundary;
+            // it is not inferred from SYSTEM or a caller-supplied author.
+            unsafe {
+                core_block_on(CoreDb::open_history_complete_with_backend_attribution(
+                    db_config,
+                ))
+            }
         } else {
             core_block_on(CoreDb::open_history_complete(db_config))
         }
@@ -3468,7 +3474,9 @@ where
         Ok(db)
     } else {
         let db = if trusted_backend {
-            core_block_on(CoreDb::open_with_backend_attribution(db_config))
+            // SAFETY: see the history-complete branch above. The credential
+            // gate is checked before this unsafe core opt-in.
+            unsafe { core_block_on(CoreDb::open_with_backend_attribution(db_config)) }
         } else {
             core_block_on(CoreDb::open(db_config))
         }

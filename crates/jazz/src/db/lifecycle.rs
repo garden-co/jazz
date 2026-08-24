@@ -68,12 +68,22 @@ where
         })
     }
 
-    /// Native bindings call this only after accepting their backend credential.
-    /// It is deliberately separate from the SYSTEM author string: normal Db
-    /// construction, including a Rust Db using SYSTEM for internal work, has
-    /// no cross-author attribution capability.
+    /// Open a Db allowed to record external provenance while admitting writes
+    /// as its own identity.
+    ///
+    /// This is a trusted in-process boundary, deliberately separate from the
+    /// SYSTEM author string: normal Db construction, including a Rust Db using
+    /// SYSTEM for internal work, cannot opt into cross-author attribution.
+    ///
+    /// # Safety
+    /// The caller must already have authenticated authority to act as a trusted
+    /// backend for this Db. Calling this for an untrusted runtime lets that
+    /// runtime record arbitrary external row provenance while policies admit
+    /// the write as this Db's identity. Native bindings must perform their
+    /// credential gate before this call and keep this constructor unreachable
+    /// from ordinary application-facing APIs.
     #[doc(hidden)]
-    pub async fn open_with_backend_attribution(config: DbConfig<S>) -> Result<Self, Error> {
+    pub async unsafe fn open_with_backend_attribution(config: DbConfig<S>) -> Result<Self, Error> {
         let mut db = Self::open(config).await?;
         db.backend_attribution = true;
         Ok(db)
@@ -147,10 +157,15 @@ where
         })
     }
 
-    /// Native bindings call this only after accepting their backend credential
-    /// when opening an authoritative, history-complete database.
+    /// History-complete counterpart to [`Db::open_with_backend_attribution`].
+    ///
+    /// # Safety
+    /// The same trusted-backend authority contract as
+    /// [`Db::open_with_backend_attribution`] applies. In particular, callers
+    /// must authenticate that authority before opening the Db and must not
+    /// expose this opt-in to ordinary application code.
     #[doc(hidden)]
-    pub async fn open_history_complete_with_backend_attribution(
+    pub async unsafe fn open_history_complete_with_backend_attribution(
         config: DbConfig<S>,
     ) -> Result<Self, Error> {
         let mut db = Self::open_history_complete(config).await?;
