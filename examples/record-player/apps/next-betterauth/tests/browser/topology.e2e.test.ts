@@ -143,6 +143,11 @@ const relationalRecipientPermissions = s.definePermissions(
 );
 
 describe("RecordPlayer authenticated playlist topology", () => {
+  it("compiles the phased recipient control identically to RecordPlayer", () => {
+    expect(relationalRecipientApp.wasmSchema).toEqual(app.wasmSchema);
+    expect(relationalRecipientPermissions).toEqual(permissions);
+  });
+
   it("delivers RecordPlayer pending invitations outside the scenario envelope", async () => {
     const server = await getJazzServerInfo(uniqueDbName("record-player-recipient-settlement"));
     await deploy({
