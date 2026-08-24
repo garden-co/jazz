@@ -2062,6 +2062,8 @@ fn relation_snapshot_filters_unreadable_children_and_required_parents() {
     let child = row(0x11);
     let alice = user(0xa1);
     let bob = user(0xb1);
+    install_test_uuid_sub_claim(&mut node, alice);
+    install_test_uuid_sub_claim(&mut node, bob);
 
     node.commit_mergeable_settled(
         MergeableCommit::new("users", parent, 10).cells(BTreeMap::from([(
@@ -2134,6 +2136,8 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
     let (_temp_dir, mut node) = open_node_with_schema(node(0x46), schema.clone());
     let alice = user(0xa1);
     let bob = user(0xb1);
+    install_test_uuid_sub_claim(&mut node, alice);
+    install_test_uuid_sub_claim(&mut node, bob);
     let alice_parent = row(0xa1);
     let bob_parent = row(0xb1);
     let visible_child = row(0x11);
