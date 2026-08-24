@@ -909,8 +909,7 @@ fn db_sync_surface_edge_session_read_policy_filters_private_table_query() {
 /// resource that grant authorizes.  The second subscription must publish a
 /// result membership even when the first subscription already delivered the
 /// resource as policy support.
-#[test]
-fn db_sync_surface_membership_grant_then_parent_query_keeps_disjunctive_read_proof() {
+fn membership_grant_then_parent_query_keeps_disjunctive_read_proof(indexed: bool) {
     let member_exists = public_exists(
         "members",
         [
@@ -918,41 +917,47 @@ fn db_sync_surface_membership_grant_then_parent_query_keeps_disjunctive_read_pro
             public_session_eq("subject", &["claims", "user_id"]),
         ],
     );
-    let schema = build_public_db_test_schema(
-        PublicSchemaBuilder::new()
-            .table(
-                PublicTableSchemaBuilder::new("workspaces")
-                    .column("owner_subject", PublicColumnType::Text)
-                    .policies(
-                        PublicTablePolicies::new()
-                            .with_select(PublicPolicyExpr::Or(vec![
-                                public_session_eq("owner_subject", &["claims", "user_id"]),
-                                member_exists,
-                            ]))
-                            .with_insert(PublicPolicyExpr::True),
-                    ),
-            )
-            .table(
-                PublicTableSchemaBuilder::new("members")
-                    .fk_column("workspace_id", "workspaces")
-                    .column("subject", PublicColumnType::Text)
-                    .policies(
-                        PublicTablePolicies::new()
-                            .with_select(PublicPolicyExpr::Or(vec![
-                                public_session_eq("subject", &["claims", "user_id"]),
-                                PublicPolicyExpr::Inherits {
-                                    operation: PublicOperation::Select,
-                                    via_column: "workspace_id".to_owned(),
-                                    max_depth: None,
-                                },
-                            ]))
-                            .with_insert(PublicPolicyExpr::True),
-                    ),
-            ),
-    );
-    let manager = AuthorId::from_bytes([0xa1; 16]);
-    let owner = AuthorId::from_bytes([0xb2; 16]);
-    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let workspaces = PublicTableSchemaBuilder::new("workspaces")
+        .column("owner_subject", PublicColumnType::Text)
+        .policies(
+            PublicTablePolicies::new()
+                .with_select(PublicPolicyExpr::Or(vec![
+                    public_session_eq("owner_subject", &["claims", "user_id"]),
+                    member_exists,
+                ]))
+                .with_insert(PublicPolicyExpr::True),
+        );
+    let members = PublicTableSchemaBuilder::new("members")
+        .fk_column("workspace_id", "workspaces")
+        .column("subject", PublicColumnType::Text)
+        .column("role", PublicColumnType::Text)
+        .policies(
+            PublicTablePolicies::new()
+                .with_select(PublicPolicyExpr::Or(vec![
+                    public_session_eq("subject", &["claims", "user_id"]),
+                    PublicPolicyExpr::Inherits {
+                        operation: PublicOperation::Select,
+                        via_column: "workspace_id".to_owned(),
+                        max_depth: None,
+                    },
+                ]))
+                .with_insert(PublicPolicyExpr::True),
+        );
+    let workspaces = if indexed {
+        workspaces.index_only(["owner_subject"])
+    } else {
+        workspaces
+    };
+    let members = if indexed {
+        members.index_only(["workspace_id", "subject", "role"])
+    } else {
+        members
+    };
+    let schema =
+        build_public_db_test_schema(PublicSchemaBuilder::new().table(workspaces).table(members));
+    let manager = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let owner = AuthorSubject::for_test_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
     let client = open_db(0xa1, manager, &schema);
     let owner_client = open_db(0xb2, owner, &schema);
     let (owner_transport, server_owner_transport) = duplex();
@@ -960,21 +965,27 @@ fn db_sync_surface_membership_grant_then_parent_query_keeps_disjunctive_read_pro
     let _owner_subscriber = server.accept_subscriber_with_claims(
         server_owner_transport,
         owner,
-        BTreeMap::from([("user_id".to_owned(), Value::String(owner.0.to_string()))]),
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(owner.test_uuid().to_string()),
+        )]),
     );
     let (client_transport, server_transport) = duplex();
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
     let _subscriber = server.accept_subscriber_with_claims(
         server_transport,
         manager,
-        BTreeMap::from([("user_id".to_owned(), Value::String(manager.0.to_string()))]),
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(manager.test_uuid().to_string()),
+        )]),
     );
     let workspace = owner_client
         .insert(
             "workspaces",
             BTreeMap::from([(
                 "owner_subject".to_owned(),
-                Value::String(owner.0.to_string()),
+                Value::String(owner.test_uuid().to_string()),
             )]),
         )
         .unwrap();
@@ -986,7 +997,11 @@ fn db_sync_surface_membership_grant_then_parent_query_keeps_disjunctive_read_pro
                     "workspace_id".to_owned(),
                     Value::Uuid(workspace.row_uuid().0),
                 ),
-                ("subject".to_owned(), Value::String(manager.0.to_string())),
+                (
+                    "subject".to_owned(),
+                    Value::String(manager.test_uuid().to_string()),
+                ),
+                ("role".to_owned(), Value::String("member".to_owned())),
             ]),
         )
         .unwrap();
@@ -1038,6 +1053,16 @@ fn db_sync_surface_membership_grant_then_parent_query_keeps_disjunctive_read_pro
         vec![workspace.row_uuid()],
     );
     assert!(workspace_subscription.try_next_event().is_some());
+}
+
+#[test]
+fn db_sync_surface_membership_grant_then_parent_query_keeps_disjunctive_read_proof() {
+    membership_grant_then_parent_query_keeps_disjunctive_read_proof(false);
+}
+
+#[test]
+fn db_sync_surface_indexed_membership_grant_then_parent_query_keeps_disjunctive_read_proof() {
+    membership_grant_then_parent_query_keeps_disjunctive_read_proof(true);
 }
 
 /// A prepared trusted-serving read binds each request session's text `user_id`

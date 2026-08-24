@@ -1392,18 +1392,28 @@ fn edge_rehydrate_member_grant_unlocks_parent_through_disjunctive_policy() {
             ),
     );
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    core.set_session_claims(
+        manager,
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(manager.test_uuid().to_string()),
+        )]),
+    );
     let workspace_tx = accept_global(
         &mut core,
         MergeableCommit::new("workspaces", workspace, 10).cells(BTreeMap::from([(
             "owner_subject".to_owned(),
-            Value::String(owner.0.to_string()),
+            Value::String(owner.test_uuid().to_string()),
         )])),
     );
     let _grant_tx = accept_global(
         &mut core,
         MergeableCommit::new("members", grant, 11).cells(BTreeMap::from([
             ("workspace_id".to_owned(), Value::Uuid(workspace.0)),
-            ("subject".to_owned(), Value::String(manager.0.to_string())),
+            (
+                "subject".to_owned(),
+                Value::String(manager.test_uuid().to_string()),
+            ),
         ])),
     );
     let shape = Query::from("workspaces")
