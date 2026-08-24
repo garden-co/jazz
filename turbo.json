@@ -72,6 +72,7 @@
         "$TURBO_ROOT$/pnpm-workspace.yaml",
         "$TURBO_ROOT$/turbo.json"
       ],
+      "passThroughEnv": ["JAZZ_ARTIFACT_BUILD_LEASE", "JAZZ_ARTIFACT_BUILD_LOCK_PATH"],
       "cache": false,
       "outputs": []
     },
@@ -93,6 +94,7 @@
         "$TURBO_ROOT$/pnpm-workspace.yaml",
         "$TURBO_ROOT$/turbo.json"
       ],
+      "passThroughEnv": ["JAZZ_ARTIFACT_BUILD_LEASE", "JAZZ_ARTIFACT_BUILD_LOCK_PATH"],
       "cache": false,
       "outputs": []
     },
