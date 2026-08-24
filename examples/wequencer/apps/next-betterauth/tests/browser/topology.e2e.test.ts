@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { applySubscriptionDelta } from "jazz-tools";
 import { createDb, type Db } from "../../../../../../packages/jazz-tools/src/runtime/db.js";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
   TestCleanup,
   uniqueDbName,
+  waitForCondition,
   waitForQuery,
 } from "../../../../../../packages/jazz-tools/tests/browser/support.js";
 import {
@@ -16,7 +18,7 @@ import {
   getJazzServerJwtForUser,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import permissions from "../../permissions.js";
-import { app } from "../../schema.js";
+import { app, type Step } from "../../schema.js";
 
 const ctx = new TestCleanup();
 afterEach(async () => ctx.cleanup());
@@ -49,7 +51,7 @@ describe("Wequencer cross-topology recovery", () => {
     let tracks: Array<{ id: string }>;
     let offlineStep: { id: string };
     let transport: { id: string } | undefined;
-    let subscribedStepIds: string[] = [];
+    let subscribedTrackSteps: Step[] = [];
 
     const receipt = await runTopologyScenario(
       {
@@ -183,16 +185,28 @@ describe("Wequencer cross-topology recovery", () => {
                 owner.all(trackSteps(tracks[0].id), { tier: "edge" }),
                 editor.all(trackSteps(tracks[1].id), { tier: "edge" }),
               ]);
+              const ownerStepId = ownerSteps[1]!.id;
               // Subscribe before either writer commits. This is the exact
-              // ordered TrackLane query rendered by a collaborator, so its
-              // first snapshot and its later delivery must agree.
+              // ordered TrackLane query rendered by a collaborator. Reduce
+              // its stream exactly as a consumer does, so this receipt proves
+              // both its pre-write false snapshot and the later remote update.
               ctx.trackSubscription(
-                editor.subscribeAll(trackSteps(tracks[0].id), (snapshot) => {
-                  subscribedStepIds = (snapshot.all ?? []).map((step) => step.id);
+                editor.subscribeAll(trackSteps(tracks[0].id), (delta) => {
+                  subscribedTrackSteps = applySubscriptionDelta<Step>(subscribedTrackSteps, delta);
                 }),
               );
+              await waitForCondition(
+                () =>
+                  Promise.resolve(
+                    subscribedTrackSteps.some(
+                      (step) => step.id === ownerStepId && step.enabled === false,
+                    ),
+                  ),
+                15_000,
+                "TrackLane subscription receives the pre-write owner step",
+              );
               await Promise.all([
-                owner.update(app.steps, ownerSteps[1].id, { enabled: true }).wait({ tier: "edge" }),
+                owner.update(app.steps, ownerStepId, { enabled: true }).wait({ tier: "edge" }),
                 editor
                   .update(app.steps, editorSteps[2].id, { enabled: true })
                   .wait({ tier: "edge" }),
@@ -225,6 +239,16 @@ describe("Wequencer cross-topology recovery", () => {
               );
               expect(ownerTrackSteps.map((step) => step.position)).toEqual(
                 Array.from({ length: stepsPerTrack }, (_, position) => position),
+              );
+              await waitForCondition(
+                () =>
+                  Promise.resolve(
+                    subscribedTrackSteps.some(
+                      (step) => step.id === ownerStepId && step.enabled === true,
+                    ),
+                  ),
+                15_000,
+                "TrackLane subscription receives the owner's post-write update",
               );
               await waitForQuery(
                 owner,
@@ -309,22 +333,15 @@ describe("Wequencer cross-topology recovery", () => {
                 "edge",
               );
               expect(replayedSteps).toHaveLength(stepsPerTrack);
-              const subscribedSteps = await waitForQuery(
-                editor,
-                trackSteps(tracks[0].id),
-                (rows) =>
-                  rows.length === stepsPerTrack && subscribedStepIds.length === stepsPerTrack,
-                "ordered TrackLane subscription receives a complete snapshot",
-                20_000,
-                "edge",
-              );
-              expect(subscribedStepIds).toEqual(subscribedSteps.map((step) => step.id));
+              expect(subscribedTrackSteps).toHaveLength(stepsPerTrack);
               expect(
                 await editor.all(sessionQueries(session.id).presence, { tier: "edge" }),
               ).toHaveLength(2);
-              // A reconnect/reopen must retain the writer's durable presence
-              // row and publish the next bounded heartbeat as an update, not
-              // leave a growing trail of presence rows behind.
+              // This directly exercises the durable row/sync contract used by
+              // the app heartbeat. Its cadence and timer cleanup have a
+              // separate deterministic unit receipt; this proves that a
+              // post-reopen heartbeat is an update, not a growing trail of
+              // presence rows.
               await owner
                 .update(app.presence, ownerPresence.id, {
                   cursor_step: 7,
