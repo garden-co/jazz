@@ -905,6 +905,141 @@ fn db_sync_surface_edge_session_read_policy_filters_private_table_query() {
     assert!(prepared_all(&reader, &query, edge_subscribe_opts()).is_empty());
 }
 
+/// A real client commonly reads its self-membership grant before querying the
+/// resource that grant authorizes.  The second subscription must publish a
+/// result membership even when the first subscription already delivered the
+/// resource as policy support.
+#[test]
+fn db_sync_surface_membership_grant_then_parent_query_keeps_disjunctive_read_proof() {
+    let member_exists = public_exists(
+        "members",
+        [
+            public_outer_eq("workspace_id", "id"),
+            public_session_eq("subject", &["claims", "user_id"]),
+        ],
+    );
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new()
+            .table(
+                PublicTableSchemaBuilder::new("workspaces")
+                    .column("owner_subject", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::Or(vec![
+                                public_session_eq("owner_subject", &["claims", "user_id"]),
+                                member_exists,
+                            ]))
+                            .with_insert(PublicPolicyExpr::True),
+                    ),
+            )
+            .table(
+                PublicTableSchemaBuilder::new("members")
+                    .fk_column("workspace_id", "workspaces")
+                    .column("subject", PublicColumnType::Text)
+                    .policies(
+                        PublicTablePolicies::new()
+                            .with_select(PublicPolicyExpr::Or(vec![
+                                public_session_eq("subject", &["claims", "user_id"]),
+                                PublicPolicyExpr::Inherits {
+                                    operation: PublicOperation::Select,
+                                    via_column: "workspace_id".to_owned(),
+                                    max_depth: None,
+                                },
+                            ]))
+                            .with_insert(PublicPolicyExpr::True),
+                    ),
+            ),
+    );
+    let manager = AuthorId::from_bytes([0xa1; 16]);
+    let owner = AuthorId::from_bytes([0xb2; 16]);
+    let server = open_core(0x5e, AuthorId::SYSTEM, &schema);
+    let client = open_db(0xa1, manager, &schema);
+    let owner_client = open_db(0xb2, owner, &schema);
+    let (owner_transport, server_owner_transport) = duplex();
+    let _owner_upstream = crate::db::block_on(owner_client.connect_upstream(owner_transport));
+    let _owner_subscriber = server.accept_subscriber_with_claims(
+        server_owner_transport,
+        owner,
+        BTreeMap::from([("user_id".to_owned(), Value::String(owner.0.to_string()))]),
+    );
+    let (client_transport, server_transport) = duplex();
+    let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
+    let _subscriber = server.accept_subscriber_with_claims(
+        server_transport,
+        manager,
+        BTreeMap::from([("user_id".to_owned(), Value::String(manager.0.to_string()))]),
+    );
+    let workspace = owner_client
+        .insert(
+            "workspaces",
+            BTreeMap::from([(
+                "owner_subject".to_owned(),
+                Value::String(owner.0.to_string()),
+            )]),
+        )
+        .unwrap();
+    let grant = owner_client
+        .insert(
+            "members",
+            BTreeMap::from([
+                (
+                    "workspace_id".to_owned(),
+                    Value::Uuid(workspace.row_uuid().0),
+                ),
+                ("subject".to_owned(), Value::String(manager.0.to_string())),
+            ]),
+        )
+        .unwrap();
+    for _ in 0..16 {
+        owner_client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        if server.read(&server.table("members")).unwrap().len() == 1 {
+            break;
+        }
+    }
+    assert_eq!(server.read(&server.table("workspaces")).unwrap().len(), 1);
+    assert_eq!(server.read(&server.table("members")).unwrap().len(), 1);
+    let grant_query =
+        Query::from("members").filter(eq(col("id"), lit(Value::Uuid(grant.row_uuid().0))));
+    let mut grant_subscription =
+        prepared_subscribe(&client, &grant_query, edge_subscribe_opts()).unwrap();
+    for _ in 0..16 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        if !prepared_all(&client, &grant_query, edge_subscribe_opts()).is_empty() {
+            break;
+        }
+    }
+    assert_eq!(
+        prepared_all(&client, &grant_query, edge_subscribe_opts()).len(),
+        1
+    );
+    while grant_subscription.try_next_event().is_some() {}
+
+    let workspace_query =
+        Query::from("workspaces").filter(eq(col("id"), lit(Value::Uuid(workspace.row_uuid().0))));
+    let mut workspace_subscription =
+        prepared_subscribe(&client, &workspace_query, edge_subscribe_opts()).unwrap();
+    for _ in 0..16 {
+        client.tick().unwrap();
+        server.tick().unwrap();
+        client.tick().unwrap();
+        if !prepared_all(&client, &workspace_query, edge_subscribe_opts()).is_empty() {
+            break;
+        }
+    }
+    assert_eq!(
+        prepared_all(&client, &workspace_query, edge_subscribe_opts())
+            .iter()
+            .map(CurrentRow::row_uuid)
+            .collect::<Vec<_>>(),
+        vec![workspace.row_uuid()],
+    );
+    assert!(workspace_subscription.try_next_event().is_some());
+}
+
 /// A prepared trusted-serving read binds each request session's text `user_id`
 /// independently: Alice receives her seeded message while Bob receives none.
 ///
