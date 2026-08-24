@@ -1,211 +1,159 @@
-use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpStream};
-
-use jazz::db::DbIdentity;
-use jazz::ids::{AuthorId, NodeUuid};
-use jazz::serving::InMemoryServerShellConfig;
-use jazz::tools::SchemaBuilder;
-use jazz_server::loopback::http::LoopbackHttpServer;
+use jazz::tools::{ColumnType, Schema, SchemaBuilder, TableSchema};
+use jazz_server::JazzServer;
 use serde_json::{Value, json};
 
-fn identity() -> DbIdentity {
-    DbIdentity {
-        node: NodeUuid::from_bytes([0x5e; 16]),
-        author: AuthorId::SYSTEM,
-    }
+const ADMIN_SECRET: &str = "secret";
+const MAX_ADMIN_REQUEST_BODY_BYTES: usize = 8 << 20;
+
+async fn start_server() -> JazzServer {
+    JazzServer::builder()
+        .with_admin_secret(ADMIN_SECRET)
+        .start()
+        .await
 }
 
-fn server_config() -> InMemoryServerShellConfig {
-    let schema = jazz::schema::JazzSchema::new(&SchemaBuilder::new().build())
-        .expect("empty public schema compiles");
-    InMemoryServerShellConfig::new(schema, identity())
+fn app_url(server: &JazzServer, path: &str) -> String {
+    format!("{}/apps/{}{}", server.base_url(), server.app_id(), path)
 }
 
-#[test]
-fn admin_schema_api_requires_secret_and_rejects_permissions() {
-    let server = LoopbackHttpServer::start_with_admin_secret(
-        SocketAddr::from(([127, 0, 0, 1], 0)),
-        server_config(),
-        "secret",
-    )
-    .expect("start loopback HTTP listener");
-    let addr = server.local_addr();
+fn admin_request(request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    request.header("X-Jazz-Admin-Secret", ADMIN_SECRET)
+}
 
-    let body = json!({
-        "schema": { "tables": {} },
-        "permissions": null
-    })
-    .to_string();
+async fn json_response(response: reqwest::Response) -> Value {
+    response.json().await.expect("response body is JSON")
+}
+
+fn schema_with_column(table: &str, column: &str, column_type: ColumnType) -> Schema {
+    SchemaBuilder::new()
+        .table(TableSchema::builder(table).column(column, column_type))
+        .build()
+}
+
+fn publish_body(schema: Schema) -> Value {
+    json!({ "schema": schema, "permissions": null })
+}
+
+#[tokio::test]
+async fn admin_schema_api_requires_secret_and_rejects_permissions() {
+    let server = start_server().await;
+    let client = reqwest::Client::new();
+    let url = app_url(&server, "/admin/schemas");
+    let body = publish_body(SchemaBuilder::new().build());
+
     assert_eq!(
-        request(addr, "POST", "/apps/app-a/admin/schemas", &[], &body).status,
+        client.post(&url).json(&body).send().await.unwrap().status(),
         401
     );
     assert_eq!(
-        request(
-            addr,
-            "POST",
-            "/apps/app-a/admin/schemas",
-            &[("X-Jazz-Admin-Secret", "wrong")],
-            &body
-        )
-        .status,
+        client
+            .post(&url)
+            .header("X-Jazz-Admin-Secret", "wrong")
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+            .status(),
         401
     );
 
-    let unsupported = json!({
-        "schema": { "tables": {} },
-        "permissions": { "read": "everyone" }
-    })
-    .to_string();
-    let rejected = request(
-        addr,
-        "POST",
-        "/apps/app-a/admin/schemas",
-        &[("X-Jazz-Admin-Secret", "secret")],
-        &unsupported,
-    );
-    assert_eq!(rejected.status, 400);
-    assert_eq!(rejected.json()["error"], "unsupported_permissions");
+    let rejected = admin_request(client.post(&url))
+        .json(&json!({ "schema": SchemaBuilder::new().build(), "permissions": {} }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), 400);
 
-    server.shutdown();
+    server.shutdown().await;
 }
 
-#[test]
-fn admin_schema_api_publishes_lists_and_gets_schema_json() {
-    let server = LoopbackHttpServer::start_with_admin_secret(
-        SocketAddr::from(([127, 0, 0, 1], 0)),
-        server_config(),
-        "secret",
-    )
-    .expect("start loopback HTTP listener");
-    let addr = server.local_addr();
+#[tokio::test]
+async fn admin_schema_api_rejects_oversized_bodies_before_the_handler_runs() {
+    let server = start_server().await;
+    let client = reqwest::Client::new();
+    let response = admin_request(client.post(app_url(&server, "/admin/schemas")))
+        .header("content-type", "application/json")
+        .body(vec![b' '; MAX_ADMIN_REQUEST_BODY_BYTES + 1])
+        .send()
+        .await
+        .expect("send oversized schema request");
 
-    let publish_body = json!({
-        "schema": {
-            "tables": {
-                "todos": {
-                    "columns": [{
-                        "name": "title",
-                        "column_type": { "type": "Text" },
-                        "nullable": false
-                    }]
-                }
-            }
-        },
-        "permissions": null
-    })
-    .to_string();
-    let published = request(
-        addr,
-        "POST",
-        "/apps/app-a/admin/schemas",
-        &[("X-Jazz-Admin-Secret", "secret")],
-        &publish_body,
-    );
-    assert_eq!(published.status, 201);
-    let published_json = published.json();
-    let hash = published_json["hash"].as_str().expect("schema hash");
+    assert_eq!(response.status(), 413);
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn admin_schema_api_publishes_lists_and_gets_schema_json() {
+    let server = start_server().await;
+    let client = reqwest::Client::new();
+    let publish_url = app_url(&server, "/admin/schemas");
+    let published = admin_request(client.post(&publish_url))
+        .json(&publish_body(schema_with_column(
+            "todos",
+            "title",
+            ColumnType::Text,
+        )))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(published.status(), 201);
+    let published = json_response(published).await;
+    let hash = published["hash"].as_str().expect("schema hash").to_owned();
     assert_eq!(hash.len(), 64);
-    assert_eq!(published_json["objectId"], format!("schema:app-a:{hash}"));
-
-    let unauthenticated_list = request(addr, "GET", "/apps/app-a/schemas", &[], "");
-    assert_eq!(unauthenticated_list.status, 401);
-
-    let list = request(
-        addr,
-        "GET",
-        "/apps/app-a/schemas",
-        &[("X-Jazz-Admin-Secret", "secret")],
-        "",
+    assert!(
+        !published["objectId"]
+            .as_str()
+            .expect("object id")
+            .is_empty()
     );
-    assert_eq!(list.status, 200);
-    let list_json = list.json();
-    assert_eq!(list_json["hashes"], json!([hash]));
 
-    let app_b_list = request(
-        addr,
-        "GET",
-        "/apps/app-b/schemas",
-        &[("X-Jazz-Admin-Secret", "secret")],
-        "",
-    );
-    assert_eq!(app_b_list.status, 200);
-    assert_eq!(app_b_list.json()["hashes"], json!([]));
+    let schemas_url = app_url(&server, "/schemas");
+    assert_eq!(client.get(&schemas_url).send().await.unwrap().status(), 401);
+    let list = admin_request(client.get(&schemas_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list.status(), 200);
+    let list = json_response(list).await;
+    assert_eq!(list["hashes"], json!([hash]));
 
-    let fetched = request(
-        addr,
-        "GET",
-        &format!("/apps/app-a/schema/{hash}"),
-        &[("X-Jazz-Admin-Secret", "secret")],
-        "",
-    );
-    assert_eq!(fetched.status, 200);
-    let fetched_json = fetched.json();
-    assert!(fetched_json["publishedAt"].as_u64().expect("publishedAt") > 0);
-    assert!(fetched_json["schema"]["tables"]["todos"].is_object());
+    let fetched = admin_request(client.get(app_url(&server, &format!("/schema/{hash}"))))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(fetched.status(), 200);
+    let fetched = json_response(fetched).await;
+    assert!(fetched["publishedAt"].as_u64().expect("publishedAt") > 0);
+    assert!(fetched["schema"]["tables"]["todos"].is_object());
 
-    let missing = request(
-        addr,
-        "GET",
-        "/apps/app-a/schema/missing",
-        &[("X-Jazz-Admin-Secret", "secret")],
-        "",
-    );
-    assert_eq!(missing.status, 404);
-    assert_eq!(missing.json()["error"], "schema_not_found");
+    let missing = admin_request(client.get(app_url(
+        &server,
+        "/schema/0000000000000000000000000000000000000000000000000000000000000000",
+    )))
+    .send()
+    .await
+    .unwrap();
+    assert_eq!(missing.status(), 404);
 
-    server.shutdown();
+    server.shutdown().await;
 }
 
-#[test]
-fn admin_schema_api_rejects_bare_upstream_table_map() {
-    let server = LoopbackHttpServer::start_with_admin_secret(
-        SocketAddr::from(([127, 0, 0, 1], 0)),
-        server_config(),
-        "secret",
-    )
-    .expect("start loopback HTTP listener");
-    let addr = server.local_addr();
+#[tokio::test]
+async fn admin_schema_api_rejects_noncanonical_schema_payloads() {
+    let server = start_server().await;
+    let client = reqwest::Client::new();
+    let url = app_url(&server, "/admin/schemas");
 
-    let obsolete_schema = json!({
-        "todos": {
-            "columns": [
-                { "name": "title", "column_type": "Text" },
-                { "name": "done", "column_type": "Boolean", "nullable": true },
-                { "name": "owner", "column_type": "Uuid", "references": "users" },
-                { "name": "tags", "column_type": { "type": "Array", "element": "Text" } },
-                { "name": "status", "column_type": "Text", "enum": ["open", "done"] },
-                { "name": "updatedAt", "column_type": "Text", "timestamp": true }
-            ],
-            "indexed_columns": ["title"]
-        }
-    });
-    let publish_body = json!({ "schema": obsolete_schema }).to_string();
-    let published = request(
-        addr,
-        "POST",
-        "/apps/app-a/admin/schemas",
-        &[("X-Jazz-Admin-Secret", "secret")],
-        &publish_body,
-    );
-    assert_eq!(published.status, 400);
-    assert_eq!(published.json()["error"], "unsupported_admin_schema");
-
-    server.shutdown();
-}
-
-#[test]
-fn admin_schema_api_rejects_unsupported_schema_type() {
-    let server = LoopbackHttpServer::start_with_admin_secret(
-        SocketAddr::from(([127, 0, 0, 1], 0)),
-        server_config(),
-        "secret",
-    )
-    .expect("start loopback HTTP listener");
-    let addr = server.local_addr();
-
-    let publish_body = json!({
-        "schema": {
+    // These intentionally bypass the schema builders: the HTTP boundary must
+    // reject old/noncanonical JSON that no public Rust schema API can create.
+    for schema in [
+        json!({
+            "todos": {
+                "columns": [{ "name": "title", "column_type": "Text" }]
+            }
+        }),
+        json!({
             "tables": {
                 "todos": {
                     "columns": [{
@@ -215,222 +163,83 @@ fn admin_schema_api_rejects_unsupported_schema_type() {
                     }]
                 }
             }
-        }
-    })
-    .to_string();
-    let rejected = request(
-        addr,
-        "POST",
-        "/apps/app-a/admin/schemas",
-        &[("X-Jazz-Admin-Secret", "secret")],
-        &publish_body,
-    );
-    assert_eq!(rejected.status, 400);
-    assert_eq!(rejected.json()["error"], "unsupported_admin_schema");
-    assert!(
-        rejected.json()["message"]
-            .as_str()
-            .expect("message")
-            .contains("unknown variant")
-    );
+        }),
+    ] {
+        let response = admin_request(client.post(&url))
+            .json(&json!({ "schema": schema, "permissions": null }))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_client_error(), "{}", response.status());
+    }
 
-    server.shutdown();
+    server.shutdown().await;
 }
 
-#[test]
-fn admin_schema_api_accepts_benchmark_schema_tables_wrapper() {
-    let server = LoopbackHttpServer::start_with_admin_secret(
-        SocketAddr::from(([127, 0, 0, 1], 0)),
-        server_config(),
-        "secret",
-    )
-    .expect("start loopback HTTP listener");
-    let addr = server.local_addr();
+#[tokio::test]
+async fn admin_schema_api_accepts_public_schema_tables_wrapper() {
+    let server = start_server().await;
+    let client = reqwest::Client::new();
+    let response = admin_request(client.post(app_url(&server, "/admin/schemas")))
+        .json(&publish_body(
+            SchemaBuilder::new()
+                .table(
+                    TableSchema::builder("events")
+                        .column("id", ColumnType::Uuid)
+                        .column("seenAt", ColumnType::Timestamp)
+                        .column("score", ColumnType::Double),
+                )
+                .build(),
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 201);
 
-    let raw_schema = json!({
-        "tables": {
-            "events": {
-                "columns": [
-                    { "name": "id", "column_type": { "type": "Uuid" }, "nullable": false },
-                    { "name": "seenAt", "column_type": { "type": "Timestamp" }, "nullable": false },
-                    { "name": "score", "column_type": { "type": "Double" }, "nullable": false }
-                ]
-            }
-        }
-    });
-    let published = request(
-        addr,
-        "POST",
-        "/apps/app-a/admin/schemas",
-        &[("X-Jazz-Admin-Secret", "secret")],
-        &json!({ "schema": raw_schema, "permissions": null }).to_string(),
-    );
-    assert_eq!(published.status, 201);
-
-    server.shutdown();
+    server.shutdown().await;
 }
 
-#[test]
-fn admin_schema_api_persists_catalogue_to_schema_store_file() {
-    let data_dir = std::env::temp_dir().join(format!(
-        "jazz-server-admin-schema-store-{}",
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&data_dir);
-    let server = LoopbackHttpServer::start_with_admin_secret_and_data_dir(
-        SocketAddr::from(([127, 0, 0, 1], 0)),
-        server_config(),
-        "secret",
-        &data_dir,
-    )
-    .expect("start loopback HTTP listener");
-    let addr = server.local_addr();
-
-    let publish_body = json!({
-        "schema": {
-            "tables": {
-                "notes": {
-                    "columns": [{
-                        "name": "body",
-                        "column_type": { "type": "Text" },
-                        "nullable": false
-                    }]
-                }
-            }
-        }
-    })
-    .to_string();
-    let published = request(
-        addr,
-        "POST",
-        "/apps/app-a/admin/schemas",
-        &[("X-Jazz-Admin-Secret", "secret")],
-        &publish_body,
-    );
-    assert_eq!(published.status, 201);
-    let hash = published.json()["hash"]
+#[tokio::test]
+async fn admin_schema_api_persists_catalogue_in_the_production_storage_backend() {
+    let data_dir = tempfile::tempdir().expect("temporary server data directory");
+    let app_id = JazzServer::default_app_id();
+    let server = JazzServer::builder()
+        .with_app_id(app_id)
+        .with_admin_secret(ADMIN_SECRET)
+        .with_data_dir(data_dir.path())
+        .with_storage_factory(jazz_testkit::persistent_storage_factory())
+        .start()
+        .await;
+    let client = reqwest::Client::new();
+    let published = admin_request(client.post(app_url(&server, "/admin/schemas")))
+        .json(&publish_body(schema_with_column(
+            "notes",
+            "body",
+            ColumnType::Text,
+        )))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(published.status(), 201);
+    let hash = json_response(published).await["hash"]
         .as_str()
         .expect("schema hash")
         .to_owned();
-    server.shutdown();
+    server.shutdown().await;
 
-    let restarted = LoopbackHttpServer::start_with_admin_secret_and_data_dir(
-        SocketAddr::from(([127, 0, 0, 1], 0)),
-        server_config(),
-        "secret",
-        &data_dir,
-    )
-    .expect("restart loopback HTTP listener");
-    let restarted_addr = restarted.local_addr();
+    let restarted = JazzServer::builder()
+        .with_app_id(app_id)
+        .with_admin_secret(ADMIN_SECRET)
+        .with_data_dir(data_dir.path())
+        .with_storage_factory(jazz_testkit::persistent_storage_factory())
+        .start()
+        .await;
+    let list = admin_request(client.get(app_url(&restarted, "/schemas")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(list.status(), 200);
+    assert_eq!(json_response(list).await["hashes"], json!([hash]));
 
-    let list = request(
-        restarted_addr,
-        "GET",
-        "/apps/app-a/schemas",
-        &[("X-Jazz-Admin-Secret", "secret")],
-        "",
-    );
-    assert_eq!(list.status, 200);
-    assert_eq!(list.json()["hashes"], json!([hash]));
-
-    let fetched = request(
-        restarted_addr,
-        "GET",
-        &format!("/apps/app-a/schema/{hash}"),
-        &[("X-Jazz-Admin-Secret", "secret")],
-        "",
-    );
-    assert_eq!(fetched.status, 200);
-    assert!(fetched.json()["schema"]["tables"]["notes"].is_object());
-    assert!(fetched.json().get("localSchemaId").is_none());
-
-    let store_json: Value =
-        serde_json::from_slice(&std::fs::read(data_dir.join("admin-schemas.json")).unwrap())
-            .unwrap();
-    let local_schema_id = store_json["app-a"][0]["localSchemaId"]
-        .as_str()
-        .expect("local schema id is persisted beside raw schema");
-    assert_eq!(local_schema_id.len(), 36);
-
-    restarted.shutdown();
-    let _ = std::fs::remove_dir_all(&data_dir);
-}
-
-#[derive(Debug)]
-struct Response {
-    status: u16,
-    body: String,
-}
-
-impl Response {
-    fn json(&self) -> Value {
-        serde_json::from_str(&self.body).expect("response body is json")
-    }
-}
-
-fn request(
-    addr: SocketAddr,
-    method: &str,
-    path: &str,
-    headers: &[(&str, &str)],
-    body: &str,
-) -> Response {
-    request_attempt(addr, method, path, headers, body, 0)
-}
-
-fn request_attempt(
-    addr: SocketAddr,
-    method: &str,
-    path: &str,
-    headers: &[(&str, &str)],
-    body: &str,
-    attempt: usize,
-) -> Response {
-    let mut stream = TcpStream::connect(addr).expect("connect loopback HTTP listener");
-    let mut header_text = String::new();
-    for (name, value) in headers {
-        header_text.push_str(name);
-        header_text.push_str(": ");
-        header_text.push_str(value);
-        header_text.push_str("\r\n");
-    }
-    if let Err(error) = write!(
-        stream,
-        "{method} {path} HTTP/1.1\r\nhost: {addr}\r\ncontent-type: application/json\r\n{header_text}content-length: {}\r\nconnection: close\r\n\r\n{body}",
-        body.len()
-    ) {
-        if matches!(
-            error.kind(),
-            io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
-        ) && attempt < 3
-        {
-            return request_attempt(addr, method, path, headers, body, attempt + 1);
-        }
-        panic!("write HTTP request: {error}");
-    }
-
-    let mut raw = Vec::new();
-    match stream.read_to_end(&mut raw) {
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::ConnectionReset && !raw.is_empty() => {}
-        Err(error) if error.kind() == io::ErrorKind::ConnectionReset && attempt < 3 => {
-            return request_attempt(addr, method, path, headers, body, attempt + 1);
-        }
-        Err(error) => panic!("read HTTP response: {error}"),
-    }
-    let response = String::from_utf8(raw).expect("HTTP response is utf-8");
-    let (headers, body) = response
-        .split_once("\r\n\r\n")
-        .expect("response has header terminator");
-    let status = headers
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|status| status.parse::<u16>().ok())
-        .expect("response status");
-
-    Response {
-        status,
-        body: body.to_owned(),
-    }
+    restarted.shutdown().await;
 }

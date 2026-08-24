@@ -17,7 +17,7 @@ use std::sync::Arc;
 use axum::{
     Router,
     body::Body,
-    extract::{OriginalUri, State},
+    extract::{DefaultBodyLimit, OriginalUri, State},
     http::{Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -36,6 +36,12 @@ use http::{
 };
 use utils::parse_app_id_param;
 use websocket::ws_handler;
+
+/// Admin catalogue uploads are ordinary JSON requests and must be bounded
+/// before an extractor buffers their bodies. Eight MiB accommodates large
+/// schemas and migration bundles without leaving an unauthenticated memory
+/// amplification path.
+const MAX_ADMIN_REQUEST_BODY_BYTES: usize = 8 << 20;
 
 async fn app_id_gate(
     State(state): State<Arc<ServerState>>,
@@ -95,7 +101,8 @@ pub fn create_router(state: Arc<ServerState>) -> Router {
         .route(
             "/introspection/subscriptions",
             get(admin_subscription_introspection_handler),
-        );
+        )
+        .layer(DefaultBodyLimit::max(MAX_ADMIN_REQUEST_BODY_BYTES));
     let traced_routes = Router::new()
         .route("/ws", axum::routing::any(ws_handler))
         .route("/schema/{hash}", get(schema_handler))
