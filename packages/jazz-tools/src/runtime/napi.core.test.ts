@@ -260,13 +260,13 @@ it("runs every supported backend-attributed mutation family through real NAPI pr
     { backendCredential: "test-backend-credential" },
   );
   const provenance = JSON.stringify(["https://issuer.example", "matrix-author"]);
-  const context = (batchId?: string) =>
+  const context = (attribution: string | null = provenance, batchId?: string) =>
     JSON.stringify({
       session: {
         ...SYSTEM_READ_SESSION,
         [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: trustedReservedSessionToken(SYSTEM_READ_SESSION),
       },
-      attribution: provenance,
+      ...(attribution ? { attribution } : {}),
       ...(batchId ? { batch_id: batchId } : {}),
     });
   const direct = "00000000-0000-0000-0000-000000000121";
@@ -313,12 +313,23 @@ it("runs every supported backend-attributed mutation family through real NAPI pr
   await runtime.waitForTransaction(await committedBatchId(restore), "local");
 
   const batch = createOpenBatchId();
-  runtime.beginTransaction("mergeable", batch, context(batch));
+  runtime.beginTransaction("mergeable", batch, context(provenance, batch));
   runtime.insert(
     "todos",
     { title: { type: "Text", value: "transactional" }, done: { type: "Boolean", value: false } },
-    context(batch),
+    context(provenance, batch),
     transactional,
+  );
+  expect(() =>
+    runtime.update(
+      "todos",
+      transactional,
+      { done: { type: "Boolean", value: true } },
+      context(JSON.stringify(["https://issuer.example", "other-author"]), batch),
+    ),
+  ).toThrow("cannot mix provenance attributions");
+  expect(() => runtime.delete("todos", transactional, context(null, batch))).toThrow(
+    "cannot mix provenance attributions",
   );
   const committed = runtime.commitTransaction(batch);
   await runtime.waitForTransaction(committed, "local");
@@ -335,6 +346,53 @@ it("runs every supported backend-attributed mutation family through real NAPI pr
       values: [{ type: "Text", value: title }, expectedAuthor, expectedAuthor],
     });
   }
+  await runtime.close();
+});
+
+it("retains trusted-process attribution when a real NAPI schema view is registered", async () => {
+  const { NapiDb } = await loadNapiModule();
+  const runtime = new NativeRuntimeAdapter(
+    { openMemory: (schema, config) => NapiDb.openMemory(schema, config) as never },
+    TEST_SCHEMA,
+    deterministicBytes("napi-attribution:view-node"),
+    testAuthorBytes("napi-attribution:view-owner"),
+    1,
+    true,
+    { backendCredential: "test-backend-credential" },
+  );
+  const view = runtime.registerSchemaView(TEST_SCHEMA);
+  const provenance = JSON.stringify(["https://issuer.example", "view-author"]);
+  const context = JSON.stringify({
+    session: {
+      ...SYSTEM_READ_SESSION,
+      [TRUSTED_RESERVED_SESSION_TOKEN_FIELD]: trustedReservedSessionToken(SYSTEM_READ_SESSION),
+    },
+    attribution: provenance,
+  });
+  const inserted = view.insert(
+    "todos",
+    { title: { type: "Text", value: "view-attributed" }, done: { type: "Boolean", value: false } },
+    context,
+    "00000000-0000-0000-0000-000000000125",
+  );
+  await view.waitForTransaction(await committedBatchId(inserted), "local");
+  await expect(
+    view.query(
+      JSON.stringify({ table: "todos", select_columns: ["title", "$createdBy", "$updatedBy"] }),
+      null,
+      "local",
+    ),
+  ).resolves.toEqual([
+    {
+      table: "todos",
+      id: "00000000-0000-0000-0000-000000000125",
+      values: [
+        { type: "Text", value: "view-attributed" },
+        { type: "Text", value: provenance },
+        { type: "Text", value: provenance },
+      ],
+    },
+  ]);
   await runtime.close();
 });
 
