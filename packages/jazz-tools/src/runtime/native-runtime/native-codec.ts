@@ -67,6 +67,13 @@ export type SubscriptionStreamChunk =
   | SubscriptionDeltaChunk
   | SubscriptionRejectedChunk;
 
+/** A self-signed proof may derive a Jazz-owned client author only at DB open. */
+export type NativeSelfSignedClientProof = {
+  token: string;
+  appId: string;
+  claimedAuthor: string;
+};
+
 export async function readSubscriptionSnapshot(
   reader: ReadableStreamDefaultReader<SubscriptionStreamChunk>,
 ): Promise<SubscriptionSnapshotChunk> {

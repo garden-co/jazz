@@ -1,3 +1,4 @@
+use crate::ids::AuthorSubject;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
@@ -154,6 +155,46 @@ pub fn verify_jazz_self_signed_proof_at(
         expected_audience,
         DEFAULT_MAX_TTL_SECONDS,
         now_seconds,
+    )
+}
+
+/// Verify a self-signed client proof and bind it to the exact author the
+/// native runtime will use for locally authored rows.
+///
+/// `claimed_author` is not trusted on its own: it must be the canonical
+/// author derived from the signed issuer and public-key-bound subject. This
+/// lets public native open configuration keep its ordinary author field on
+/// the untrusted parser while admitting the two client-owned Jazz issuers only
+/// through a proof that is valid for this app and instant.
+pub fn verify_client_runtime_author_at(
+    token: &str,
+    expected_audience: &str,
+    claimed_author: &str,
+    now_seconds: u64,
+) -> Result<AuthorSubject, String> {
+    let verified = verify_jazz_self_signed_proof_at(token, expected_audience, now_seconds)?;
+    let author = AuthorSubject::reserved(verified.issuer, &verified.user_id)
+        .map_err(|error| error.to_string())?;
+    if author.canonical() != claimed_author {
+        return Err(format!(
+            "self-signed author mismatch: expected {:?}, got {claimed_author:?}",
+            author.canonical()
+        ));
+    }
+    Ok(author)
+}
+
+/// Verify a self-signed client proof using the current system time.
+pub fn verify_client_runtime_author(
+    token: &str,
+    expected_audience: &str,
+    claimed_author: &str,
+) -> Result<AuthorSubject, String> {
+    verify_client_runtime_author_at(
+        token,
+        expected_audience,
+        claimed_author,
+        current_unix_timestamp_secs()?,
     )
 }
 
@@ -341,6 +382,18 @@ mod tests {
         seed
     }
 
+    fn flip_signature_bit(token: &str) -> String {
+        let (signing_input, signature_b64) = token
+            .rsplit_once('.')
+            .expect("minted JWT must contain a signature");
+        let mut signature = URL_SAFE_NO_PAD
+            .decode(signature_b64)
+            .expect("minted JWT signature must be base64url");
+        assert_eq!(signature.len(), 64, "Ed25519 signature length");
+        signature[0] ^= 1;
+        format!("{signing_input}.{}", URL_SAFE_NO_PAD.encode(signature))
+    }
+
     #[test]
     fn same_seed_produces_same_user_id() {
         let id1 = derive_user_id(&alice_seed());
@@ -500,5 +553,92 @@ mod tests {
         let err = verify_jazz_self_signed_proof_at(&token, "test-app", 1_000_050)
             .expect_err("unknown issuer must be rejected");
         assert!(err.contains("issuer"), "expected issuer error, got {err}");
+    }
+
+    #[test]
+    fn client_runtime_author_proof_is_exact_and_fail_closed() {
+        // This is deliberately an internal receipt: malformed signed proofs
+        // are rejected before a database exists, so only the verifier boundary
+        // can demonstrate that raw open configuration cannot select an author.
+        const APP_ID: &str = "proof-app";
+        const NOW: u64 = 1_000_100;
+
+        for (issuer, seed) in [
+            (LOCAL_FIRST_ISSUER, alice_seed()),
+            (ANONYMOUS_ISSUER, bob_seed()),
+        ] {
+            let token =
+                mint_jazz_self_signed_token_at(&seed, issuer, APP_ID, 60, 1_000_050).unwrap();
+            let verified = verify_jazz_self_signed_proof_at(&token, APP_ID, NOW).unwrap();
+            let claimed = AuthorSubject::reserved(issuer, &verified.user_id)
+                .unwrap()
+                .canonical()
+                .to_owned();
+            assert_eq!(
+                verify_client_runtime_author_at(&token, APP_ID, &claimed, NOW)
+                    .unwrap()
+                    .canonical(),
+                claimed,
+                "{issuer} derives only its signed subject"
+            );
+            assert!(
+                verify_client_runtime_author_at(
+                    &token,
+                    APP_ID,
+                    r#"["urn:jazz:local-first","different-subject"]"#,
+                    NOW,
+                )
+                .is_err(),
+                "the extra claimed author must be exact"
+            );
+        }
+
+        let token = mint_jazz_self_signed_token_at(
+            &alice_seed(),
+            LOCAL_FIRST_ISSUER,
+            APP_ID,
+            60,
+            1_000_050,
+        )
+        .unwrap();
+        let verified = verify_jazz_self_signed_proof_at(&token, APP_ID, NOW).unwrap();
+        let claimed = AuthorSubject::reserved(LOCAL_FIRST_ISSUER, &verified.user_id)
+            .unwrap()
+            .canonical()
+            .to_owned();
+        assert!(
+            verify_client_runtime_author_at(&flip_signature_bit(&token), APP_ID, &claimed, NOW)
+                .is_err(),
+            "a same-length, valid-base64 signature bit flip must fail strict Ed25519 verification"
+        );
+        assert!(
+            verify_client_runtime_author_at(&token, "other-app", &claimed, NOW).is_err(),
+            "wrong audience must fail"
+        );
+
+        let expired =
+            mint_jazz_self_signed_token_at(&alice_seed(), LOCAL_FIRST_ISSUER, APP_ID, 1, 1_000_000)
+                .unwrap();
+        assert!(
+            verify_client_runtime_author_at(&expired, APP_ID, &claimed, NOW).is_err(),
+            "expired proof must fail"
+        );
+
+        let parts: Vec<&str> = token.split('.').collect();
+        let mut claims: serde_json::Value =
+            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(parts[1]).unwrap()).unwrap();
+        claims["sub"] = serde_json::Value::String("not-the-public-key-subject".to_owned());
+        let header_b64 = parts[0];
+        let claims_b64 = URL_SAFE_NO_PAD.encode(claims.to_string().as_bytes());
+        let signing_input = format!("{header_b64}.{claims_b64}");
+        let signature =
+            derive_signing_key(&alice_seed(), SIGN_DOMAIN).sign(signing_input.as_bytes());
+        let mismatched_sub = format!(
+            "{signing_input}.{}",
+            URL_SAFE_NO_PAD.encode(signature.to_bytes())
+        );
+        let error = verify_client_runtime_author_at(&mismatched_sub, APP_ID, &claimed, NOW)
+            .expect_err("a signed token with a mismatched sub must fail");
+        assert!(error.contains("sub mismatch"), "unexpected error: {error}");
     }
 }
