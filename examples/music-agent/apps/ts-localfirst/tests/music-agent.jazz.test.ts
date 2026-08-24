@@ -80,4 +80,33 @@ describe("MusicAgent Jazz persistence E2E", () => {
     ]);
     expect(new Set(transcript.map((turn) => turn.id)).size).toBe(3);
   });
+
+  test("does not publish a partial attachment when its app stream is cancelled", async () => {
+    const store = await openMusicStore("cancelled-attachment");
+    const conversation = await store.createConversation("Interrupted upload");
+    const turnId = await store.addTurn({
+      conversationId: conversation,
+      role: "user",
+      ordinal: 0,
+      body: "identify this clip",
+    });
+
+    async function* cancelledUpload(): AsyncIterable<Uint8Array> {
+      yield new TextEncoder().encode("first chunk");
+      throw new Error("upload cancelled");
+    }
+
+    await expect(
+      store.addAttachment(
+        {
+          turnId,
+          filename: "cancelled.raw",
+          mediaType: "audio/raw",
+          byteLength: 32,
+        },
+        cancelledUpload(),
+      ),
+    ).rejects.toThrow("upload cancelled");
+    expect(await db!.all(app.attachments)).toEqual([]);
+  });
 });
