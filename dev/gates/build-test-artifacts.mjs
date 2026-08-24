@@ -342,16 +342,22 @@ export function command(command, args, label = [command, ...args].join(" "), opt
   });
 }
 
-export async function buildTestArtifacts(run = command, scope = createBuildScope(), lease = undefined) {
+export async function buildTestArtifacts(
+  run = command,
+  scope = createBuildScope(),
+  lease = undefined,
+) {
   let firstBuildError;
   const guardedRun = (command, args, label, env) =>
-    scope.track(run(command, args, label, { env: { ...env, ...lease }, signal: scope.signal })).catch((error) => {
-      if (!firstBuildError) {
-        firstBuildError = error;
-        scope.abort(error);
-      }
-      throw error;
-    });
+    scope
+      .track(run(command, args, label, { env: { ...env, ...lease }, signal: scope.signal }))
+      .catch((error) => {
+        if (!firstBuildError) {
+          firstBuildError = error;
+          scope.abort(error);
+        }
+        throw error;
+      });
 
   // Keep every Cargo invocation in the default target directory restored by
   // Swatinem/rust-cache. On the 4-vCPU CI runner, separate target directories
@@ -439,8 +445,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.error("test-artifacts: expected no argument or `unlock`");
     process.exitCode = 1;
   } else
-    withArtifactBuildLock((scope, lease) => buildTestArtifacts(command, scope, lease)).catch((error) => {
-      console.error(`test-artifacts: ${error.message}`);
-      process.exitCode = 1;
-    });
+    withArtifactBuildLock((scope, lease) => buildTestArtifacts(command, scope, lease)).catch(
+      (error) => {
+        console.error(`test-artifacts: ${error.message}`);
+        process.exitCode = 1;
+      },
+    );
 }
