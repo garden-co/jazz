@@ -24,11 +24,7 @@ import { createSmokeScenario } from "../../src/scenario.js";
 import { bandChatBrowserCommands } from "./browser-commands.js";
 
 const ctx = new TestCleanup();
-const blockedServerUrls = new Set<string>();
-afterEach(async () => {
-  await unblockTrackedServerNetworks();
-  await ctx.cleanup();
-});
+afterEach(async () => ctx.cleanup());
 
 /**
  * Adopter-level receipt for two public browser clients connected to one core.
@@ -335,14 +331,15 @@ describe("BandChat cross-topology recovery", () => {
         replay: `JAZZ_EXAMPLE_TOPOLOGY_SEED=${seed} pnpm --dir examples/band-chat/apps/nextjs-betterauth test:browser:focused -- tests/browser/topology.e2e.test.tsx`,
         targets: {
           member: {
-            disconnect: async () => {
+            disconnect: async ({ defer }) => {
+              defer("unblock BandChat member route", async () => {
+                await unblockJazzServerNetwork(server!.serverUrl);
+              });
               await blockJazzServerNetwork(server!.serverUrl);
-              blockedServerUrls.add(server!.serverUrl);
               await peer!.disconnect();
             },
             reconnect: async () => {
               await unblockJazzServerNetwork(server!.serverUrl);
-              blockedServerUrls.delete(server!.serverUrl);
               await peer!.reconnect();
             },
           },
@@ -538,10 +535,7 @@ describe("BandChat cross-topology recovery", () => {
             },
           },
         ],
-        cleanup: async () => {
-          await unblockTrackedServerNetworks();
-          await ctx.cleanup();
-        },
+        cleanup: async () => ctx.cleanup(),
         cleanupTimeoutMs: 10_000,
       },
       browserTopologyReporter,
@@ -626,21 +620,6 @@ async function openClient(
       serverUrl: server.serverUrl,
       jwtToken,
       driver: { type: "persistent", dbName },
-    }),
-  );
-}
-
-async function unblockTrackedServerNetworks(): Promise<void> {
-  await Promise.all(
-    [...blockedServerUrls].map(async (serverUrl) => {
-      try {
-        await unblockJazzServerNetwork(serverUrl);
-      } catch {
-        // Cleanup must not replace the scenario's primary failure. The browser
-        // context teardown remains the final backstop for an unavailable route.
-      } finally {
-        blockedServerUrls.delete(serverUrl);
-      }
     }),
   );
 }
