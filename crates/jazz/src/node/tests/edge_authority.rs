@@ -91,6 +91,8 @@ fn edge_accepted_mergeable_promotes_to_global_without_revalidating_write_policy(
     let (_edge_dir, mut edge) = open_node_with_schema(node(0xe2), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(0xe3), schema.clone());
     let (_reader_dir, mut reader) = open_node_with_schema(node(0xe4), schema);
+    install_test_uuid_sub_claim(&mut writer, owner);
+    install_test_uuid_sub_claim(&mut edge, owner);
 
     let unit = writer
         .commit_mergeable_unit_settled(
