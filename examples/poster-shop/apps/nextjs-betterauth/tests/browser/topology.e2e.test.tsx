@@ -3,6 +3,7 @@ import { createDb, type Db } from "../../../../../../packages/jazz-tools/src/run
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
   TestCleanup,
+  sleep,
   waitForCondition,
   uniqueDbName,
   waitForQuery,
@@ -12,8 +13,10 @@ import {
   runTopologyScenario,
 } from "../../../../../../packages/jazz-tools/tests/browser/topology-harness.js";
 import {
+  blockJazzServerNetwork,
   getJazzServerInfo,
   getJazzServerJwtForUser,
+  unblockJazzServerNetwork,
 } from "../../../../../../packages/jazz-tools/tests/browser/testing-server.js";
 import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
@@ -41,6 +44,7 @@ describe("PosterShop cross-topology recovery", () => {
     let ownerShape: { id: string };
     let editorShape: { id: string };
     let offlineShape: { id: string };
+    let overflowShape: { id: string };
     let editorMembership: { id: string };
     const editorWindowSnapshots: Array<Array<{ id: string; zIndex: number }>> = [];
     const receipt = await runTopologyScenario(
@@ -53,8 +57,16 @@ describe("PosterShop cross-topology recovery", () => {
         replay: `JAZZ_EXAMPLE_TOPOLOGY_SEED=${seed} pnpm --dir examples/poster-shop/apps/nextjs-betterauth test:browser -- tests/browser/topology.e2e.test.tsx`,
         targets: {
           owner: {
-            disconnect: async () => owner.disconnect(),
-            reconnect: async () => owner.reconnect(),
+            disconnect: async () => {
+              await blockJazzServerNetwork(server.serverUrl);
+              // Browser route interception only applies to new WebSockets, so
+              // explicitly close the writer's existing transport first.
+              await owner.disconnect();
+            },
+            reconnect: async () => {
+              await unblockJazzServerNetwork(server.serverUrl);
+              await owner.reconnect();
+            },
             restart: async () => {
               await owner.shutdown();
               ctx.untrack(owner);
@@ -156,6 +168,9 @@ describe("PosterShop cross-topology recovery", () => {
               ]);
               ownerShape = createdOwner;
               editorShape = createdEditor;
+              overflowShape = await owner
+                .insert(app.shapes, shape(canvas.id, layer.id, 3))
+                .wait({ tier: "edge" });
               await owner
                 .insert(app.cursors, {
                   canvasId: canvas.id,
@@ -200,36 +215,47 @@ describe("PosterShop cross-topology recovery", () => {
                   (row) => row.id,
                 ),
               ).toContain(offlineShape.id);
+              // Keep an online observer as a negative control throughout the
+              // blocked interval. One immediate read could race an in-flight
+              // send; repeated edge reads prove the local write did not leak.
+              for (let attempt = 0; attempt < 5; attempt += 1) {
+                expect(
+                  (await editor.all(canvasQueries(canvas.id).shapes, { tier: "edge" })).map(
+                    (row) => row.id,
+                  ),
+                ).not.toContain(offlineShape.id);
+                await sleep(150);
+              }
             },
-            faultsAfter: [
-              { kind: "reconnect", target: "owner" },
-              { kind: "restart", target: "owner" },
-            ],
+            faultsAfter: [{ kind: "restart", target: "owner" }],
           },
           {
-            name: "persistent reopen and peer convergence",
+            name: "persistent reopen while still offline",
             run: async () => {
               // These are the same parent-scoped, ordered reads used by the
               // rendered PosterShop components. Keeping the queries literal
               // here makes this a regression receipt for the app, not a
               // generic table-sync smoke test.
               const queries = canvasQueries(canvas.id);
-              const reopened = await waitForQuery(
-                owner,
-                queries.shapes,
-                (rows) => rows.some((row) => row.id === offlineShape.id),
-                "persistent owner reopen retains offline shape",
-                20_000,
-                "edge",
-              );
+              const reopened = await owner.all(queries.shapes, { tier: "local" });
               expect(reopened.map((row) => [row.id, row.zIndex])).toContainEqual([
                 offlineShape.id,
                 2,
               ]);
+              expect(
+                (await editor.all(queries.shapes, { tier: "edge" })).map((row) => row.id),
+              ).not.toContain(offlineShape.id);
+            },
+            faultsAfter: [{ kind: "reconnect", target: "owner" }],
+          },
+          {
+            name: "peer convergence after reconnect",
+            run: async () => {
+              const queries = canvasQueries(canvas.id);
               const shapes = await waitForQuery(
                 editor,
                 queries.shapes,
-                (rows) => rows.length === 3,
+                (rows) => rows.length === 4,
                 "editor receives replay",
                 20_000,
                 "edge",
@@ -238,6 +264,7 @@ describe("PosterShop cross-topology recovery", () => {
                 [ownerShape.id, 0],
                 [editorShape.id, 1],
                 [offlineShape.id, 2],
+                [overflowShape.id, 3],
               ]);
               // The canvas surface is intentionally unbounded, but consumers
               // that render a viewport can subscribe to a stable operation
@@ -306,8 +333,8 @@ describe("PosterShop cross-topology recovery", () => {
     expect(receipt.faults.map((fault) => [fault.kind, fault.status])).toEqual([
       ["failure", "completed"],
       ["disconnect", "completed"],
-      ["reconnect", "completed"],
       ["restart", "completed"],
+      ["reconnect", "completed"],
     ]);
   }, 75_000);
 });
