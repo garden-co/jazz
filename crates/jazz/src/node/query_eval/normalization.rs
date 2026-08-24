@@ -113,8 +113,8 @@ fn app_row_payload_projection(
         .map(|select| {
             let mut fields = select
                 .iter()
-                .filter(|field| !is_implicit_row_id_alias(schema, &query.table, field))
-                .cloned()
+                .filter(|field| !is_implicit_row_id_alias(schema, &query.table, field.column()))
+                .map(|field| field.column().to_owned())
                 .collect::<BTreeSet<_>>();
             for include in &query.includes {
                 if let Some(root_field) = include.path.split('.').next() {

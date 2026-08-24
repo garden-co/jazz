@@ -3010,11 +3010,14 @@ fn local_maintained_view_content_witness<'a>(
 fn current_row_has_required_subscription_cells(
     row: &CurrentRow,
     table: &TableSchema,
-    projection: Option<&[String]>,
+    projection: Option<&[crate::query::SelectProjection]>,
 ) -> bool {
     table.columns.iter().all(|column| {
-        projection.is_some_and(|columns| !columns.contains(&column.name))
-            || matches!(column.column_type, ValueType::Nullable(_))
+        projection.is_some_and(|columns| {
+            !columns
+                .iter()
+                .any(|selected| selected.column() == column.name)
+        }) || matches!(column.column_type, ValueType::Nullable(_))
             || row.cell(table, &column.name).is_some()
     })
 }

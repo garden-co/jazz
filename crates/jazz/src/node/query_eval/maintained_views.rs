@@ -17,7 +17,7 @@ pub(crate) struct LocalMaintainedViewSubscription {
     pub(super) result_table: String,
     pub(super) result_schema_version: SchemaVersionId,
     pub(super) binding_view_key: BindingViewKey,
-    pub(super) result_select: Option<Vec<String>>,
+    pub(super) result_select: Option<Vec<crate::query::SelectProjection>>,
     pub(super) result_set: BTreeSet<ResultMemberEntry>,
     pub(super) authoritative_result_generation: u64,
     pub(super) authoritative_reconciliation_deferred: bool,
@@ -126,7 +126,12 @@ impl LocalMaintainedViewSubscription {
             + self
                 .result_select
                 .as_ref()
-                .map(|columns| columns.iter().map(String::len).sum::<usize>())
+                .map(|columns| {
+                    columns
+                        .iter()
+                        .map(|column| column.column().len())
+                        .sum::<usize>()
+                })
                 .unwrap_or_default()
             + result_set_bytes
             + result_payloads_bytes

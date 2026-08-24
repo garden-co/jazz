@@ -299,7 +299,7 @@ fn validate_query_canonical_parts(
     )?;
     if let Some(select) = &query.select {
         for column in select {
-            validate_select_column(&root, column)?;
+            validate_select_projection(&root, column)?;
         }
     }
     if let Some(aggregate) = &query.aggregate {
@@ -769,6 +769,18 @@ fn validate_select_column(table: &TableSchema, column: &str) -> Result<(), Query
             column: name.to_owned(),
         }),
         name => column_type(table, name).map(|_| ()),
+    }
+}
+
+fn validate_select_projection(table: &TableSchema, projection: &SelectProjection) -> Result<(), QueryError> {
+    validate_select_column(table, projection.column())?;
+    match projection {
+        SelectProjection::Full { .. } => Ok(()),
+        SelectProjection::Bytes { from, to, .. }
+        | SelectProjection::TextUtf16 { from, to, .. }
+        | SelectProjection::TextUtf8 { from, to, .. } if from <= to => Ok(()),
+        SelectProjection::JsonPointer { at, .. } if at.is_empty() || at.starts_with('/') => Ok(()),
+        _ => Err(QueryError::OperandTypeMismatch),
     }
 }
 

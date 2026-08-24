@@ -575,8 +575,14 @@ impl Query {
     /// query.validate(&doctest_support::schema())?;
     /// # Ok::<(), jazz::query::QueryError>(())
     /// ```
-    pub fn select(mut self, columns: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn select(mut self, columns: impl IntoIterator<Item = impl Into<SelectProjection>>) -> Self {
         self.select = Some(columns.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Select one typed large-value projection.
+    pub fn select_projection(mut self, projection: SelectProjection) -> Self {
+        self.select.get_or_insert_default().push(projection);
         self
     }
 

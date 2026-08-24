@@ -526,7 +526,13 @@ where
         {
             let mut row = self.current_row_from_result_payload(&table, payload)?;
             if let Some(columns) = &local.result_select {
-                row = row.project(&table, columns)?;
+                row = row.project(
+                    &table,
+                    &columns
+                        .iter()
+                        .map(|projection| projection.column().to_owned())
+                        .collect::<Vec<_>>(),
+                )?;
             }
             return Ok(Some(row));
         }
@@ -578,7 +584,13 @@ where
                 "maintained result witness does not project into the read schema",
             ))?;
         if let Some(columns) = &local.result_select {
-            row = row.project(&table, columns)?;
+            row = row.project(
+                &table,
+                &columns
+                    .iter()
+                    .map(|projection| projection.column().to_owned())
+                    .collect::<Vec<_>>(),
+            )?;
         }
         Ok(Some(row))
     }
@@ -1340,7 +1352,13 @@ where
         };
         let table = self.table_in_schema(&query.table, schema_version)?;
         for row in rows {
-            *row = row.project(&table, columns)?;
+            *row = row.project(
+                &table,
+                &columns
+                    .iter()
+                    .map(|projection| projection.column().to_owned())
+                    .collect::<Vec<_>>(),
+            )?;
         }
         Ok(())
     }

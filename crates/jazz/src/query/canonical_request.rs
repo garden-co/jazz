@@ -225,6 +225,16 @@ fn canonical_array_subquery_key(subquery: &ArraySubquery) -> Vec<u8> {
     bytes
 }
 
+fn put_select_projection(bytes: &mut Vec<u8>, projection: &SelectProjection) {
+    match projection {
+        SelectProjection::Full { column } => { bytes.push(b'f'); put_str(bytes, column); }
+        SelectProjection::Bytes { column, from, to } => { bytes.push(b'b'); put_str(bytes, column); bytes.extend_from_slice(&from.to_be_bytes()); bytes.extend_from_slice(&to.to_be_bytes()); }
+        SelectProjection::TextUtf16 { column, from, to } => { bytes.push(b'6'); put_str(bytes, column); bytes.extend_from_slice(&from.to_be_bytes()); bytes.extend_from_slice(&to.to_be_bytes()); }
+        SelectProjection::TextUtf8 { column, from, to } => { bytes.push(b'8'); put_str(bytes, column); bytes.extend_from_slice(&from.to_be_bytes()); bytes.extend_from_slice(&to.to_be_bytes()); }
+        SelectProjection::JsonPointer { column, at } => { bytes.push(b'j'); put_str(bytes, column); put_str(bytes, at); }
+    }
+}
+
 fn canonical_reachable_key(reachable: &ReachableVia) -> Vec<u8> {
     canonical_reachable_key_with_seed_type(reachable, None)
 }
@@ -549,8 +559,8 @@ fn canonical_query_bytes_for_schema(
     if let Some(select) = &query.select {
         bytes.push(b's');
         put_len(&mut bytes, select.len());
-        for column in select {
-            put_str(&mut bytes, column);
+        for projection in select {
+            put_select_projection(&mut bytes, projection);
         }
     }
     if !query.order_by.is_empty() {

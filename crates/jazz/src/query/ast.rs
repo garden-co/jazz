@@ -31,7 +31,7 @@ pub struct Query {
     pub array_subqueries: Vec<ArraySubquery>,
     /// Selected application columns. Row id is always included.
     #[serde(default)]
-    pub select: Option<Vec<String>>,
+    pub select: Option<Vec<SelectProjection>>,
     /// Result-level ordering keys, applied in order before pagination.
     #[serde(default)]
     pub order_by: Vec<OrderBy>,
@@ -47,6 +47,36 @@ pub struct Query {
     #[serde(default)]
     pub offset: usize,
 }
+
+/// A selected application column, optionally narrowed to a large-value subset.
+///
+/// The descriptor is part of the query shape (and therefore subscription
+/// identity), rather than a client-side post-processing hint.
+#[allow(missing_docs)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SelectProjection {
+    Full { column: String },
+    Bytes { column: String, from: u64, to: u64 },
+    TextUtf16 { column: String, from: u64, to: u64 },
+    TextUtf8 { column: String, from: u64, to: u64 },
+    JsonPointer { column: String, at: String },
+}
+
+impl SelectProjection {
+    /// Select a byte range using half-open byte offsets.
+    pub fn bytes(column: impl Into<String>, from: u64, to: u64) -> Self { Self::Bytes { column: column.into(), from, to } }
+    /// Select a string range using half-open UTF-16 code-unit offsets.
+    pub fn text_utf16(column: impl Into<String>, from: u64, to: u64) -> Self { Self::TextUtf16 { column: column.into(), from, to } }
+    /// Select a string range using half-open UTF-8 byte offsets.
+    pub fn text_utf8(column: impl Into<String>, from: u64, to: u64) -> Self { Self::TextUtf8 { column: column.into(), from, to } }
+    /// Select the JSON value addressed by an RFC 6901 pointer.
+    pub fn json_pointer(column: impl Into<String>, at: impl Into<String>) -> Self { Self::JsonPointer { column: column.into(), at: at.into() } }
+    pub(crate) fn column(&self) -> &str { match self { Self::Full { column } | Self::Bytes { column, .. } | Self::TextUtf16 { column, .. } | Self::TextUtf8 { column, .. } | Self::JsonPointer { column, .. } => column } }
+}
+
+impl From<String> for SelectProjection { fn from(column: String) -> Self { Self::Full { column } } }
+impl From<&str> for SelectProjection { fn from(column: &str) -> Self { Self::Full { column: column.to_owned() } } }
 
 /// Output-changing relational join syntax.
 ///

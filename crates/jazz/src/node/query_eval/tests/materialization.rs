@@ -70,7 +70,7 @@ fn required_cell_guard_resolves_a_later_projected_column_by_name() {
     assert!(current_row_has_required_subscription_cells(
         &complete,
         &table,
-        Some(&["third".to_owned()]),
+        Some(&[crate::query::SelectProjection::from("third")]),
     ));
 
     let missing = current_row_from_cells(
@@ -87,7 +87,7 @@ fn required_cell_guard_resolves_a_later_projected_column_by_name() {
     assert!(!current_row_has_required_subscription_cells(
         &missing,
         &table,
-        Some(&["third".to_owned()]),
+        Some(&[crate::query::SelectProjection::from("third")]),
     ));
 }
 

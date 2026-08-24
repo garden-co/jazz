@@ -375,9 +375,9 @@ mod tests {
             validated.query().select.as_deref(),
             Some(
                 [
-                    "$createdAt".to_owned(),
-                    "state".to_owned(),
-                    "title".to_owned()
+                    SelectProjection::from("$createdAt"),
+                    SelectProjection::from("state"),
+                    SelectProjection::from("title")
                 ]
                 .as_slice()
             )
@@ -459,7 +459,7 @@ mod tests {
         query.flat_join.as_mut().unwrap().sources.clear();
         cases.push(query);
         let mut query = flat();
-        query.select = Some(vec!["title".to_owned()]);
+        query.select = Some(vec![SelectProjection::from("title")]);
         cases.push(query);
         let mut query = flat();
         query.order_by.push(OrderBy {

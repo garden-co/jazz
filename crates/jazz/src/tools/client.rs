@@ -2184,14 +2184,23 @@ impl PublicQueryDecoder {
                 })
                 .collect();
         }
-        let columns = query.select.clone().unwrap_or_else(|| {
-            table_schema
-                .columns
-                .columns
-                .iter()
-                .map(|column| column.name.as_str().to_string())
-                .collect()
-        });
+        let columns: Vec<String> = query
+            .select
+            .as_ref()
+            .map(|columns| {
+                columns
+                    .iter()
+                    .map(|column| column.column().to_owned())
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                table_schema
+                    .columns
+                    .columns
+                    .iter()
+                    .map(|column| column.name.as_str().to_string())
+                    .collect()
+            });
         let rows = rows
             .into_iter()
             .map(|row| {
@@ -2321,14 +2330,23 @@ impl PublicQueryDecoder {
             }
             return Ok(names);
         }
-        let mut names = query.select.clone().unwrap_or_else(|| {
-            table_schema
-                .columns
-                .columns
-                .iter()
-                .map(|column| column.name.as_str().to_owned())
-                .collect()
-        });
+        let mut names: Vec<String> = query
+            .select
+            .as_ref()
+            .map(|columns| {
+                columns
+                    .iter()
+                    .map(|column| column.column().to_owned())
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                table_schema
+                    .columns
+                    .columns
+                    .iter()
+                    .map(|column| column.name.as_str().to_owned())
+                    .collect()
+            });
         names.extend(
             query
                 .array_subqueries
