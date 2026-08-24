@@ -187,12 +187,17 @@ describe("BigLabel browser edge/core topology", () => {
         })
         .wait({ tier: "edge" });
     });
+    // Keep this stable across the explicit close/reopen phases below. A fresh
+    // `uniqueDbName()` on every `createDb()` would only prove a cold edge
+    // fetch, not that the browser's persisted application cache rehydrates.
+    const readerDbName = uniqueDbName("big-label-reader");
     let reader = await browserTopologyPhase("open authenticated editor edge", () =>
       openDb({
         appId,
         serverUrl,
         jwtToken: editorToken,
         label: "big-label-reader",
+        dbName: readerDbName,
       }),
     );
     await browserTopologyPhase("writer seeds initial artist", async () => {
@@ -351,6 +356,7 @@ describe("BigLabel browser edge/core topology", () => {
                 serverUrl,
                 jwtToken: editorToken,
                 label: "big-label-reader",
+                dbName: readerDbName,
               });
               await expect(reader.all(roster, { tier: "local" })).resolves.toMatchObject([
                 { name: "Aster", organizationId: org.id },
@@ -402,6 +408,34 @@ describe("BigLabel browser edge/core topology", () => {
                 "revoked editor retained a BigLabel tenant query or included artist",
               );
             },
+            faultsAfter: [{ kind: "disconnect", target: "browser-edge" }],
+          },
+          {
+            name: "revocation survives an offline persistent-cache reopen",
+            async run() {
+              // Reopen the same IndexedDB cache while its route remains
+              // blocked. This catches stale authorized rows which disappear
+              // from a live query but are not durably removed from the cache.
+              ctx.untrack(reader);
+              await reader.close();
+              reader = await openDb({
+                appId,
+                serverUrl,
+                jwtToken: editorToken,
+                label: "big-label-reader",
+                dbName: readerDbName,
+              });
+              await expect(reader.all(roster, { tier: "local" })).resolves.toEqual([]);
+              await expect(reader.all(releasePipeline, { tier: "local" })).resolves.toEqual([]);
+            },
+            faultsAfter: [{ kind: "reconnect", target: "browser-edge" }],
+          },
+          {
+            name: "reconnected reopened editor remains unable to read revoked tenant data",
+            async run() {
+              await expect(reader.all(roster, { tier: "edge" })).resolves.toEqual([]);
+              await expect(reader.all(releasePipeline, { tier: "edge" })).resolves.toEqual([]);
+            },
           },
         ],
       },
@@ -418,6 +452,7 @@ async function openDb(input: {
   secret?: string;
   jwtToken?: string;
   label: string;
+  dbName?: string;
 }): Promise<Db> {
   return ctx.track(
     await createDb({
@@ -426,7 +461,7 @@ async function openDb(input: {
       ...(input.adminSecret
         ? { adminSecret: input.adminSecret, secret: input.secret! }
         : { jwtToken: input.jwtToken! }),
-      driver: { type: "persistent", dbName: uniqueDbName(input.label) },
+      driver: { type: "persistent", dbName: input.dbName ?? uniqueDbName(input.label) },
     }),
   );
 }
