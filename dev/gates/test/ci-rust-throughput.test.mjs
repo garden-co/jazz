@@ -30,6 +30,14 @@ const realisticWorkflow = fs.readFileSync(
   path.join(root, ".github/workflows/benchmarks.yml"),
   "utf8",
 );
+const rustShadowWorkflow = fs.readFileSync(
+  path.join(root, ".github/workflows/ci-rust-shadow.yml"),
+  "utf8",
+);
+const rustShadowLauncher = fs.readFileSync(
+  path.join(root, "dev/gates/rust-shadow-matrix.mjs"),
+  "utf8",
+);
 const benchmarkSmokeGate = fs.readFileSync(path.join(root, "dev/gates/benchmark-smoke.sh"), "utf8");
 const otherWorkflows = fs
   .readdirSync(path.join(root, ".github/workflows"))
@@ -577,6 +585,46 @@ test("Rust CI splits a bounded real differential-oracle smoke behind a stable ag
           .replace("__M3_STEP_SWAP__", runStepName),
       ),
     /compile the M3 libtest before its semantic execution/,
+  );
+});
+
+test("the non-required Rust throughput shadow proves two exact hash partitions and folds M3 once", () => {
+  const document = parse(rustShadowWorkflow);
+  const shard = document.jobs.shard;
+  const aggregate = document.jobs.aggregate;
+  assert.deepEqual(document.permissions, { contents: "read", packages: "read" });
+  assert.deepEqual(shard.strategy.matrix.index, [1, 2]);
+  assert.equal(shard.strategy["max-parallel"], 2);
+  assert.equal(shard["runs-on"], "blacksmith-8vcpu-ubuntu-2404");
+  assert.equal(aggregate.needs[0], "shard");
+  assert.match(aggregate.if, /always/);
+  assert.match(
+    rustShadowWorkflow,
+    /node dev\/gates\/rust-shadow-matrix\.mjs shard \$\{\{ matrix\.index \}\} 2/,
+  );
+  assert.match(
+    rustShadowWorkflow,
+    /node dev\/gates\/rust-shadow-matrix\.mjs aggregate rust-shadow-receipts 2/,
+  );
+  assert.match(rustShadowWorkflow, /merge-multiple: true/);
+  assert.match(rustShadowLauncher, /--require-nextest/);
+  assert.match(rustShadowLauncher, /RUST_MIN_STACK.*4 \* 1024 \* 1024/);
+  assert.match(rustShadowLauncher, /"--workspace",\s*"--lib",\s*"--bins",\s*"--tests"/);
+  assert.match(rustShadowLauncher, /"--kill-after=30s",\s*"60s",\s*"env",\s*"JAZZ_SEED=11"/);
+  assert.match(rustShadowLauncher, /m3\.length !== 1.*shard\.index !== 1/);
+  assert.match(rustShadowLauncher, /test belongs to more than one shard/);
+  assert.match(rustShadowLauncher, /hash shards do not cover the exact executable inventory/);
+  assert.throws(
+    () => assert.match(rustShadowLauncher.replace("JAZZ_SEED=11", "JAZZ_SEED=12"), /JAZZ_SEED=11/),
+    /JAZZ_SEED/,
+  );
+  assert.throws(
+    () =>
+      assert.match(
+        rustShadowLauncher.replace("--require-nextest", "--nextest-optional"),
+        /--require-nextest/,
+      ),
+    /require-nextest/,
   );
 });
 
