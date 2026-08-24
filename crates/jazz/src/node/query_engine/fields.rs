@@ -13,6 +13,7 @@ pub(crate) const CLOSURE_REQUIRED_ELEMENT: &str = "__closure_required_element";
 
 const ROUTE_PARAM_PREFIX: &str = "__jazz_route_";
 const CLAIM_PARAM_PREFIX: &str = "__jazz_claim_";
+const CLAIM_ROUTE_TOKEN_PREFIX: &str = "__jazz_claim_route_v1:";
 
 pub(crate) fn user_column_field(column: &str) -> String {
     format!("{USER_COLUMN_PREFIX}{column}")
@@ -70,6 +71,19 @@ pub(crate) fn claim_param_field(path: &ClaimPath) -> String {
         return format!("{CLAIM_PARAM_PREFIX}{segment}");
     }
     let mut field = format!("{CLAIM_PARAM_PREFIX}v1:");
+    for segment in &path.0 {
+        field.push_str(&segment.len().to_string());
+        field.push(':');
+        field.push_str(segment);
+    }
+    field
+}
+
+/// Hidden scalar route carrier for a typed claim. The path encoding is
+/// length-delimited so nested paths cannot collide with underscore-separated
+/// legacy claim parameter names.
+pub(crate) fn claim_route_token_field(path: &ClaimPath) -> String {
+    let mut field = CLAIM_ROUTE_TOKEN_PREFIX.to_owned();
     for segment in &path.0 {
         field.push_str(&segment.len().to_string());
         field.push(':');
