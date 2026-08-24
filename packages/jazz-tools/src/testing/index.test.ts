@@ -374,6 +374,34 @@ describe("createPolicyTestApp", () => {
     }
   }, 10_000);
 
+  it("limits backend SYSTEM bootstrap to the configured authority credential", async () => {
+    const noCredential = await createPolicyTestApp(testApp, testPermissions, expect, {
+      clientBackendSecret: null,
+    });
+    try {
+      await expect(
+        noCredential.seed((db) =>
+          db.insert(testApp.todos, { title: "no credential", done: false }),
+        ),
+      ).rejects.toThrow(/backendSecret required/);
+    } finally {
+      await noCredential.shutdown();
+    }
+
+    const wrongCredential = await createPolicyTestApp(testApp, testPermissions, expect, {
+      clientBackendSecret: "wrong-backend-secret",
+    });
+    try {
+      await expect(
+        wrongCredential.seed((db) =>
+          db.insert(testApp.todos, { title: "wrong credential", done: false }),
+        ),
+      ).rejects.toThrow(/authorization|credential|backend|rejected/i);
+    } finally {
+      await wrongCredential.shutdown();
+    }
+  }, 10_000);
+
   it("exposes expectAllowed and expectDenied on session-scoped test dbs", async () => {
     const policyTestApp = await createPolicyTestApp(testApp, testPermissions, expect);
 
