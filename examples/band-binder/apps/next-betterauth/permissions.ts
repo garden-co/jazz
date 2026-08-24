@@ -1,23 +1,16 @@
 import { definePermissions, type RowContext } from "jazz-tools/permissions";
 import { app } from "./schema.js";
 
-export default definePermissions(app, ({ policy, session, anyOf }) => {
+export default definePermissions(app, ({ policy, session, anyOf, allowedTo }) => {
   type WorkspaceScoped = { workspaceId: string };
   const membership = (row: RowContext<WorkspaceScoped>) =>
     policy.members.exists.where({ workspaceId: row.workspaceId, subject: session.user_id });
   const management = (row: RowContext<WorkspaceScoped>) =>
-    anyOf([
-      policy.members.exists.where({
-        workspaceId: row.workspaceId,
-        subject: session.user_id,
-        role: "owner",
-      }),
-      policy.members.exists.where({
-        workspaceId: row.workspaceId,
-        subject: session.user_id,
-        role: "stage_manager",
-      }),
-    ]);
+    policy.members.exists.where({
+      workspaceId: row.workspaceId,
+      subject: session.user_id,
+      role: { in: ["owner", "stage_manager"] },
+    });
 
   policy.workspaces.allowRead.where((workspace) =>
     anyOf([
@@ -29,17 +22,10 @@ export default definePermissions(app, ({ policy, session, anyOf }) => {
   policy.workspaces.allowUpdate.where({ ownerSubject: session.user_id });
   policy.workspaces.allowDelete.where({ ownerSubject: session.user_id });
 
-  const ownsMembershipWorkspace = (member: RowContext<WorkspaceScoped>) =>
-    policy.workspaces.exists.where({
-      id: member.workspaceId,
-      ownerSubject: session.user_id,
-    });
-  policy.members.allowRead.where((member) =>
-    anyOf([membership(member), ownsMembershipWorkspace(member)]),
-  );
-  policy.members.allowInsert.where(ownsMembershipWorkspace);
-  policy.members.allowUpdate.where(ownsMembershipWorkspace);
-  policy.members.allowDelete.where(ownsMembershipWorkspace);
+  policy.members.allowRead.where(allowedTo.read("workspaceId"));
+  policy.members.allowInsert.where(allowedTo.update("workspaceId"));
+  policy.members.allowUpdate.where(allowedTo.update("workspaceId"));
+  policy.members.allowDelete.where(allowedTo.update("workspaceId"));
 
   policy.pages.allowRead.where(membership);
   policy.pages.allowInsert.where(management);

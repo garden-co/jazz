@@ -11,17 +11,12 @@
 - Suggestions are ordinary member-authored rows which only owners and stage
   managers settle. This does not claim draft branches or conflict resolution;
   those semantics remain deliberately absent.
-- On base `af0d892f0`, the exact compiled-policy receipt reaches the authority
-  but triggers `Storage: graph field not found: __root_join_row_0` while
-  evaluating a correlated membership policy. The later core fix is
-  `84bc4f441` (`retain correlated policy join inputs internally`); restacking
-  this example onto current main is required before treating the receipt as a
-  BandBinder failure.
-- The shared topology harness is not present on this branch's base. After the
-  app is stacked on its PR, add one `tests/browser/topology.e2e.test.tsx`
-  consumer importing `runTopologyScenario` and `browserTopologyReporter`, plus
-  the standard browser Vitest config/manifest entry. Its phases should admit a
-  stage manager, create concurrent ordered blocks, revoke them, write locally
-  while disconnected, reconnect, and compare exact ids/order on both clients.
+- Revocation prevents new authority receipts and future sync; it cannot erase
+  rows already learned by an offline-capable client. The topology receipt tests
+  rejected-write rollback and absence at the owner, not impossible remote
+  deletion of a former member's local knowledge.
+- The correlated membership receipt depends on the core carrying outer join
+  inputs through maintained policy relations. This branch includes that fix and
+  keeps the authority-level test as a regression receipt.
 - Large rich text and large attachment streaming remain tracked by #1833,
   #1839, and #1844. Small attachment bytes are represented directly today.
