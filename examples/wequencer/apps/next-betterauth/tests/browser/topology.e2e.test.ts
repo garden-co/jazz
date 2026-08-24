@@ -43,6 +43,8 @@ describe("Wequencer cross-topology recovery", () => {
     let session: { id: string };
     let ownerProfile: { id: string };
     let editorProfile: { id: string };
+    let ownerPresence: { id: string };
+    let editorPresence: { id: string };
     let editorMembership: { id: string };
     let tracks: Array<{ id: string }>;
     let offlineStep: { id: string };
@@ -181,6 +183,14 @@ describe("Wequencer cross-topology recovery", () => {
                 owner.all(trackSteps(tracks[0].id), { tier: "edge" }),
                 editor.all(trackSteps(tracks[1].id), { tier: "edge" }),
               ]);
+              // Subscribe before either writer commits. This is the exact
+              // ordered TrackLane query rendered by a collaborator, so its
+              // first snapshot and its later delivery must agree.
+              ctx.trackSubscription(
+                editor.subscribeAll(trackSteps(tracks[0].id), (snapshot) => {
+                  subscribedStepIds = (snapshot.all ?? []).map((step) => step.id);
+                }),
+              );
               await Promise.all([
                 owner.update(app.steps, ownerSteps[1].id, { enabled: true }).wait({ tier: "edge" }),
                 editor
@@ -193,7 +203,8 @@ describe("Wequencer cross-topology recovery", () => {
                     cursor_step: 1,
                     heartbeat_at: new Date(),
                   })
-                  .wait({ tier: "edge" }),
+                  .wait({ tier: "edge" })
+                  .then((row) => (ownerPresence = row)),
                 editor
                   .insert(app.presence, {
                     session_id: session.id,
@@ -201,13 +212,39 @@ describe("Wequencer cross-topology recovery", () => {
                     cursor_step: 2,
                     heartbeat_at: new Date(),
                   })
-                  .wait({ tier: "edge" }),
+                  .wait({ tier: "edge" })
+                  .then((row) => (editorPresence = row)),
               ]);
-              ctx.trackSubscription(
-                editor.subscribeAll(trackSteps(tracks[0].id), (snapshot) => {
-                  subscribedStepIds = (snapshot.all ?? []).map((step) => step.id);
-                }),
+              const ownerTrackSteps = await waitForQuery(
+                editor,
+                trackSteps(tracks[0].id),
+                (rows) => rows.length === stepsPerTrack && rows[1]?.enabled === true,
+                "editor receives owner's ordered step edit",
+                15_000,
+                "edge",
               );
+              expect(ownerTrackSteps.map((step) => step.position)).toEqual(
+                Array.from({ length: stepsPerTrack }, (_, position) => position),
+              );
+              await waitForQuery(
+                owner,
+                trackSteps(tracks[1].id),
+                (rows) => rows.length === stepsPerTrack && rows[2]?.enabled === true,
+                "owner receives editor's ordered step edit",
+                15_000,
+                "edge",
+              );
+              const presence = await waitForQuery(
+                editor,
+                sessionQueries(session.id).presence,
+                (rows) => rows.some((row) => row.id === ownerPresence.id && row.cursor_step === 1),
+                "editor receives concurrent owner presence",
+                15_000,
+                "edge",
+              );
+              expect(presence.find((row) => row.id === editorPresence.id)).toMatchObject({
+                cursor_step: 2,
+              });
             },
             faultsAfter: [{ kind: "disconnect", target: "owner" }],
           },
@@ -272,10 +309,37 @@ describe("Wequencer cross-topology recovery", () => {
                 "edge",
               );
               expect(replayedSteps).toHaveLength(stepsPerTrack);
-              expect(subscribedStepIds).toHaveLength(stepsPerTrack);
+              const subscribedSteps = await waitForQuery(
+                editor,
+                trackSteps(tracks[0].id),
+                (rows) =>
+                  rows.length === stepsPerTrack && subscribedStepIds.length === stepsPerTrack,
+                "ordered TrackLane subscription receives a complete snapshot",
+                20_000,
+                "edge",
+              );
+              expect(subscribedStepIds).toEqual(subscribedSteps.map((step) => step.id));
               expect(
                 await editor.all(sessionQueries(session.id).presence, { tier: "edge" }),
               ).toHaveLength(2);
+              // A reconnect/reopen must retain the writer's durable presence
+              // row and publish the next bounded heartbeat as an update, not
+              // leave a growing trail of presence rows behind.
+              await owner
+                .update(app.presence, ownerPresence.id, {
+                  cursor_step: 7,
+                  heartbeat_at: new Date(),
+                })
+                .wait({ tier: "edge" });
+              const refreshedPresence = await waitForQuery(
+                editor,
+                sessionQueries(session.id).presence,
+                (rows) => rows.some((row) => row.id === ownerPresence.id && row.cursor_step === 7),
+                "editor receives reopened owner's heartbeat update",
+                20_000,
+                "edge",
+              );
+              expect(refreshedPresence).toHaveLength(2);
               const observations = await waitForQuery(
                 editor,
                 sessionQueries(session.id).observations,
