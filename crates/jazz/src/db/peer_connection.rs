@@ -1658,14 +1658,11 @@ where
                                         .map(|(_, cut, _)| *cut)
                                         .min()
                                 };
-                                let observed = self.node.borrow();
-                                let observed_claims =
-                                    observed.session_claim_revision(expected.link);
-                                let observed_policy = observed.active_catalogue_seq();
-                                drop(observed);
                                 // Context components are monotonic per admitted
-                                // connection. A receipt may advance an otherwise
-                                // opaque authority revision, but it can never
+                                // connection. Claims and policy revisions belong
+                                // to the authority: do not compare their opaque
+                                // wire domains to this client's local revisions.
+                                // A receipt may advance one, but can never
                                 // decrease a component already admitted.
                                 let applied_progress = request
                                     .applied_clauses
@@ -1679,16 +1676,10 @@ where
                                     || receipt.authorization_progress
                                         < expected.authorization_progress
                                     || receipt.settled_through.0 < expected.settled_through;
-                                if observed_claims > expected.claims_revision {
-                                    expected.claims_revision = observed_claims;
-                                } else if observed_claims == 0 {
-                                    expected.claims_revision = receipt.claims_revision;
-                                }
-                                if observed_policy > expected.policy_epoch {
-                                    expected.policy_epoch = observed_policy;
-                                } else if observed_policy == 0 {
-                                    expected.policy_epoch = receipt.policy_epoch;
-                                }
+                                expected.claims_revision =
+                                    expected.claims_revision.max(receipt.claims_revision);
+                                expected.policy_epoch =
+                                    expected.policy_epoch.max(receipt.policy_epoch);
                                 expected.authorization_progress =
                                     expected.authorization_progress.max(applied_progress);
                                 expected.settled_through =
