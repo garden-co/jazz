@@ -22,7 +22,7 @@ fn settled_edge_authority_preserves_an_ordinary_local_content_update() {
     register_query_shape(&mut client, &shape, opts.clone());
     subscribe_query_binding(&mut client, &shape, &binding);
 
-    let initial_tx = commit_global_issue(&mut server, 0, "open", AuthorSubject::SYSTEM, 1);
+    let initial_tx = commit_global_issue(&mut server, 0, "open", author(0), 1);
     let mut peer = PeerState::edge_client(AuthorSubject::SYSTEM);
     let initial = peer
         .rehydrate_query_with_opts(&mut server, &shape, &binding, opts.clone())

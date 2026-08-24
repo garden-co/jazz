@@ -2129,7 +2129,7 @@ fn nested_binding_value_source_keeps_sibling_nullable_claim_route() {
 }
 
 #[test]
-fn built_in_sub_claim_lowers_to_permission_subject() {
+fn missing_sub_claim_lowers_to_deny_predicate() {
     let subject = author(0xa5);
     let request = QueryProgramRequest {
         authorization_mode: QueryAuthorizationMode::TrustedServing,
@@ -2145,9 +2145,10 @@ fn built_in_sub_claim_lowers_to_permission_subject() {
     };
 
     let program = lower_query_program(request, &mut FakeSourceResolver::default())
-        .expect("built-in sub claim lowers");
+        .expect("missing sub claim lowers");
     let graph = format!("{:?}", program.lowered.terminals[0].graph);
-    assert!(graph.contains(&subject.test_uuid().to_string()), "{graph}");
+    assert!(graph.contains("Filter"), "{graph}");
+    assert!(graph.contains("Or([])"), "{graph}");
 }
 
 #[test]
