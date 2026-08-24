@@ -123,6 +123,39 @@ fn ordinary_oversized_json_uses_json_tree_and_rejects_text_descriptors() {
 }
 
 #[test]
+fn ordinary_oversized_bytea_uses_a_bytes_tree() {
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("blobs").column("body", PublicColumnType::Bytea),
+    ));
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x7c), schema);
+    let body = vec![0_u8, 0xff, 0x80, 0x01]
+        .into_iter()
+        .cycle()
+        .take(80_000)
+        .collect::<Vec<_>>();
+    node.commit_mergeable_settled(
+        MergeableCommit::new("blobs", row(0x7c), 10).cell("body", Value::Bytes(body.clone())),
+    )
+    .unwrap();
+
+    let stored = node.query_table_versions("blobs").unwrap();
+    let value_ref = match stored[0]
+        .cell(node.table("blobs").unwrap(), "body")
+        .unwrap()
+        .unwrap()
+    {
+        Value::Large(value_ref) => value_ref,
+        other => panic!("expected a bytes large-value descriptor, got {other:?}"),
+    };
+    assert_eq!(value_ref.kind, groove::large_values::LargeValueKind::Bytes);
+    assert_eq!(
+        crate::db::block_on(node.read_large_value_range(&value_ref, 0..value_ref.byte_length))
+            .unwrap(),
+        body
+    );
+}
+
+#[test]
 fn failed_large_scalar_staging_publishes_no_row() {
     #[derive(Clone)]
     struct FailingStage;
