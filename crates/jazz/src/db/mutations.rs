@@ -404,7 +404,11 @@ where
                 .cells(cells)
                 .authored_columns(BTreeSet::from([column.to_owned()]));
             let commit = node
-                .seal_large_value_update(commit, column, staged, self.schema_version_id)
+                .seal_large_value_updates(
+                    commit,
+                    &[(column.to_owned(), staged)],
+                    self.schema_version_id,
+                )
                 .await?;
             node.commit_mergeable_in_schema(self.schema_version_id, commit)
                 .await?
