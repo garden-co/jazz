@@ -121,7 +121,7 @@ export function openConfig(
 ): Uint8Array {
   const writer = new PostcardWriter();
   writer.bytes(node);
-  writer.bytes(author);
+  writer.string(canonicalOpenAuthor(author));
   if (sourceId == null) {
     writer.none();
   } else {
@@ -134,6 +134,39 @@ export function openConfig(
     writer.some((value) => value.u64(initialSyncFlushEvery));
   }
   return writer.finish();
+}
+
+/**
+ * Core open configuration now carries a portable author subject rather than a
+ * bare UUID. Keep the old 16-byte fixture/runtime identity shape compatible by
+ * mapping it to the exact deterministic test subject used by Rust. External
+ * callers already supply canonical `[issuer, subject]` JSON and keep it
+ * byte-for-byte unchanged.
+ */
+function canonicalOpenAuthor(author: Uint8Array): string {
+  try {
+    const canonical = new TextDecoder("utf-8", { fatal: true }).decode(author);
+    const parsed = JSON.parse(canonical);
+    if (
+      Array.isArray(parsed) &&
+      parsed.length === 2 &&
+      typeof parsed[0] === "string" &&
+      typeof parsed[1] === "string" &&
+      JSON.stringify(parsed) === canonical
+    ) {
+      return canonical;
+    }
+  } catch {
+    // Legacy UUID bytes are intentionally handled below.
+  }
+  if (author.byteLength !== 16) {
+    throw new Error(
+      "native open config author must be canonical UTF-8 JSON or 16 legacy UUID bytes",
+    );
+  }
+  const hex = Array.from(author, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const uuid = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  return JSON.stringify(["urn:jazz:test", uuid]);
 }
 
 export function queryFromTable(table: string): Uint8Array {
