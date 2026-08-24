@@ -3875,6 +3875,35 @@ mod tests {
     }
 
     #[test]
+    fn compiles_update_using_as_the_default_delete_policy() {
+        let owner_policy = PolicyExpr::Cmp {
+            column: "owner_id".to_owned(),
+            op: CmpOp::Eq,
+            value: PolicyValue::SessionRef(vec!["user_id".to_owned()]),
+        };
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchemaBuilder::new("documents")
+                    .column("owner_id", ColumnType::Text)
+                    .policies(
+                        TablePolicies::new().with_update(Some(owner_policy), PolicyExpr::True),
+                    ),
+            )
+            .build();
+
+        let converted = convert_public_schema(&schema).unwrap();
+        let documents = converted
+            .tables
+            .iter()
+            .find(|table| table.name == "documents")
+            .unwrap();
+        assert_eq!(
+            documents.write_policies.delete_using, documents.write_policies.update_using,
+            "DELETE must inherit UPDATE USING when no explicit DELETE USING is declared"
+        );
+    }
+
+    #[test]
     fn preserves_operation_specific_inherits_for_complex_child_write_policy() {
         let schema = SchemaBuilder::new()
             .table(
