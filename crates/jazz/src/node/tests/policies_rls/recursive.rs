@@ -373,6 +373,20 @@ fn reverse_referencing_select_policy_allows_root_row_through_source_row() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let alice = user(0xa1);
     let bob = user(0xb2);
+    core.set_session_claims(
+        alice,
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(alice.test_uuid().to_string()),
+        )]),
+    );
+    core.set_session_claims(
+        bob,
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(bob.test_uuid().to_string()),
+        )]),
+    );
     let alice_file = row(0xf1);
     let unlinked_file = row(0xf2);
 
