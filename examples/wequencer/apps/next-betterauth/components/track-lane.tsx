@@ -1,5 +1,6 @@
 "use client";
 
+import { PersistedWriteRejectedError } from "jazz-tools";
 import { useAll, useDb } from "jazz-tools/react";
 import { useState } from "react";
 import { app } from "@/schema";
@@ -23,11 +24,15 @@ export function TrackLane({
     setWriteError(null);
     try {
       await db.update(app.steps, step.id, { enabled: !step.enabled }).wait({ tier: "edge" });
-    } catch {
+    } catch (error) {
       // Local visibility remains optimistic. The receipt makes a server-side
       // permission rejection observable instead of silently looking like a
       // conflicting edit.
-      setWriteError("Pad update was rejected by session permissions.");
+      setWriteError(
+        error instanceof PersistedWriteRejectedError && error.code === "permission_denied"
+          ? "Pad update was rejected by session permissions."
+          : "Pad update could not be confirmed. Check your connection and try again.",
+      );
     }
   }
 

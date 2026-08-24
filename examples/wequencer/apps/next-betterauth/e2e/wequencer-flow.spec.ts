@@ -4,6 +4,29 @@ const TIMEOUT = 30_000;
 
 type Credentials = { name: string; email: string; password: string };
 
+const TRACKS = ["Kick", "Snare", "Closed hat", "Bass"];
+const STEPS_PER_TRACK = 16;
+
+function expectedPattern() {
+  return TRACKS.flatMap((name, track) =>
+    Array.from({ length: STEPS_PER_TRACK }, (_, step) => ({
+      label: `${name}, step ${step + 1}`,
+      // The three edits below start on disabled pads, so the final state is
+      // fixed even though their delivery timing is not.
+      pressed: step % (track + 2) === 0 || (step === 1 && track < 3),
+    })),
+  );
+}
+
+async function patternOn(page: Page) {
+  return page.locator(".track-lane .pad").evaluateAll((pads) =>
+    pads.map((pad) => ({
+      label: pad.getAttribute("aria-label"),
+      pressed: pad.getAttribute("aria-pressed") === "true",
+    })),
+  );
+}
+
 async function signUp(page: Page, credentials: Credentials) {
   await page.goto("http://localhost:3000/");
   await page.getByRole("button", { name: "Create an account" }).click();
@@ -66,6 +89,11 @@ test("two clients converge ordered pads and transport after a bounded offline ph
       "true",
       { timeout: TIMEOUT },
     );
+    await expect(editor.page.getByRole("button", { name: "Kick, step 2" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+      { timeout: TIMEOUT },
+    );
 
     // Phase 2: a bounded partition. Only the disjoint editor pad is asserted;
     // same-field conflict resolution remains Jazz's documented merge behavior.
@@ -81,6 +109,10 @@ test("two clients converge ordered pads and transport after a bounded offline ph
       "true",
       { timeout: TIMEOUT },
     );
+    await expect.poll(() => patternOn(owner.page), { timeout: TIMEOUT }).toEqual(expectedPattern());
+    await expect
+      .poll(() => patternOn(editor.page), { timeout: TIMEOUT })
+      .toEqual(expectedPattern());
 
     // Phase 3: playback is an ordinary transport receipt, visible through the
     // same ordered query on the second client.
@@ -121,6 +153,11 @@ test("viewer pad writes receive an authorization rejection receipt", async ({ br
     await viewer.page.getByRole("button", { name: "Kick, step 2" }).click();
     await expect(viewer.page.getByRole("status")).toContainText(
       "Pad update was rejected by session permissions.",
+      { timeout: TIMEOUT },
+    );
+    await expect(viewer.page.getByRole("button", { name: "Kick, step 2" })).toHaveAttribute(
+      "aria-pressed",
+      "false",
       { timeout: TIMEOUT },
     );
   } finally {
