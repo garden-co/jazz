@@ -4,8 +4,10 @@ import topLevelAwait from "vite-plugin-top-level-await";
 import react from "@vitejs/plugin-react";
 import { playwright } from "@vitest/browser-playwright";
 import {
+  blockJazzServerNetwork,
   jazzServerInfo,
   jazzServerJwtForUser,
+  unblockJazzServerNetwork,
 } from "../../../../packages/jazz-tools/tests/browser/testing-server-node.js";
 
 function jazzBrowserTopologyLog(
@@ -34,6 +36,10 @@ export default defineConfig({
       commands: {
         jazzBrowserTopologyLog,
         jazzServerInfo: async (_context, appId, schema) => jazzServerInfo(appId, schema),
+        jazzServerBlockNetwork: async ({ context }, serverUrl) =>
+          blockJazzServerNetwork(context, serverUrl),
+        jazzServerUnblockNetwork: async ({ context }, serverUrl) =>
+          unblockJazzServerNetwork(context, serverUrl),
         jazzServerJwtForUser: async (_context, userId, claims, appId) =>
           jazzServerJwtForUser(userId, claims, appId),
       },
