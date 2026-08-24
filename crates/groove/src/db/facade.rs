@@ -268,6 +268,8 @@ impl Database {
         } else {
             crate::large_values::PendingLargeValueUpload {
                 id: upload_id,
+                descriptor: None,
+                receipt_id: None,
                 accounting: crate::large_values::StagedLargeValueAccounting::default(),
                 created_at_ms: web_time::SystemTime::now()
                     .duration_since(web_time::UNIX_EPOCH)
@@ -391,7 +393,55 @@ impl Database {
         let upload_id = Self::descriptor_upload_id(&value_ref)?;
         self.stage_large_value_chunk_batch(upload_id, value_ref.kind, Vec::new())
             .await?;
+        self.bind_pending_upload_descriptor(upload_id, &value_ref)
+            .await?;
         self.large_value_upload_progress(upload_id, value_ref).await
+    }
+
+    /// Bind a descriptor-keyed peer upload before the first authenticated
+    /// frontier is disclosed. Raw chunk staging deliberately has no such
+    /// authority; its finalizer must prove exact chunk membership instead.
+    async fn bind_pending_upload_descriptor(
+        &self,
+        upload_id: crate::large_values::StagedLargeValueId,
+        value_ref: &crate::large_values::LargeValueRef,
+    ) -> Result<(), Error> {
+        let _lifecycle = self.large_value_lifecycle.lock().await;
+        let key = pending_large_value_upload_key(upload_id);
+        let encoded = self
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
+            .await?
+            .ok_or_else(|| {
+                Error::InvalidLargeValueMetadata("pending upload is missing".to_owned())
+            })?;
+        let mut upload: crate::large_values::PendingLargeValueUpload =
+            postcard::from_bytes(&encoded).map_err(|error| {
+                Error::InvalidLargeValueMetadata(format!(
+                    "cannot decode pending large-value upload: {error}"
+                ))
+            })?;
+        if let Some(bound) = &upload.descriptor {
+            if bound == value_ref {
+                return Ok(());
+            }
+            return Err(Error::InvalidLargeValueMetadata(
+                "pending upload is bound to a different descriptor".to_owned(),
+            ));
+        }
+        upload.descriptor = Some(value_ref.clone());
+        self.storage
+            .write_many(vec![OwnedWriteOperation::Set {
+                cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                key,
+                value: postcard::to_allocvec(&upload).map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot encode bound pending large-value upload: {error}"
+                    ))
+                })?,
+            }])
+            .await?;
+        Ok(())
     }
 
     /// Install receiver-requested nodes and derive the next missing frontier.
@@ -489,6 +539,8 @@ impl Database {
             }
             return Err(error);
         }
+        self.bind_pending_upload_descriptor(upload_id, &value_ref)
+            .await?;
         self.large_value_upload_progress(upload_id, value_ref).await
     }
 
@@ -600,8 +652,55 @@ impl Database {
                 "cannot decode pending large-value upload: {error}"
             ))
         })?;
+        if let Some(bound) = &upload.descriptor
+            && bound != &value_ref
+        {
+            return Err(Error::InvalidLargeValueMetadata(
+                "pending upload is bound to a different descriptor".to_owned(),
+            ));
+        }
+        let uploaded_chunks = upload.chunks.iter().cloned().collect();
+        crate::large_values::validate_finalized_upload(
+            &value_ref,
+            self.local_chunk_reader(),
+            &uploaded_chunks,
+            upload.descriptor.is_some(),
+        )
+        .await
+        .map_err(|error| match error {
+            crate::large_values::ReachabilityError::LargeValue(error) => {
+                crate::ivm::runtime::IvmRuntimeError::from(error)
+            }
+            crate::large_values::ReachabilityError::Chunk(error) => {
+                crate::ivm::runtime::IvmRuntimeError::from(error)
+            }
+        })?;
+        self.validate_completed_large_value(&value_ref).await?;
+
+        // Persist the exact descriptor before creating a receipt. A crash in
+        // the following receipt write is retryable only with this descriptor,
+        // never with another descriptor that happens to have reachable chunks.
+        let receipt_id = upload.receipt_id.unwrap_or_else(|| {
+            crate::large_values::StagedLargeValueId(*uuid::Uuid::new_v4().as_bytes())
+        });
+        if upload.descriptor.is_none() || upload.receipt_id.is_none() {
+            let mut bound_upload = upload.clone();
+            bound_upload.descriptor = Some(value_ref.clone());
+            bound_upload.receipt_id = Some(receipt_id);
+            self.storage
+                .write_many(vec![OwnedWriteOperation::Set {
+                    cf: LARGE_VALUE_METADATA_CF.to_owned(),
+                    key: key.clone(),
+                    value: postcard::to_allocvec(&bound_upload).map_err(|error| {
+                        Error::InvalidLargeValueMetadata(format!(
+                            "cannot encode bound pending large-value upload: {error}"
+                        ))
+                    })?,
+                }])
+                .await?;
+        }
         let staged = self
-            .register_staged_large_value(value_ref, upload.accounting)
+            .register_staged_large_value_with_id(receipt_id, value_ref, upload.accounting)
             .await?;
         self.release_pending_large_value_upload(key, upload).await?;
         Ok(staged)
@@ -708,25 +807,31 @@ impl Database {
         Ok(true)
     }
 
-    async fn register_staged_large_value(
-        &self,
-        value_ref: crate::large_values::LargeValueRef,
-        accounting: crate::large_values::StagedLargeValueAccounting,
-    ) -> Result<crate::large_values::StagedLargeValue, Error> {
-        self.register_staged_large_value_with_id(
-            crate::large_values::StagedLargeValueId(*uuid::Uuid::new_v4().as_bytes()),
-            value_ref,
-            accounting,
-        )
-        .await
-    }
-
     async fn register_staged_large_value_with_id(
         &self,
         id: crate::large_values::StagedLargeValueId,
         value_ref: crate::large_values::LargeValueRef,
         accounting: crate::large_values::StagedLargeValueAccounting,
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
+        let staged_key = staged_large_value_key(id);
+        if let Some(encoded) = self
+            .storage
+            .get(LARGE_VALUE_METADATA_CF.to_owned(), staged_key.clone())
+            .await?
+        {
+            let existing: crate::large_values::StagedLargeValue = postcard::from_bytes(&encoded)
+                .map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot decode existing staged root: {error}"
+                    ))
+                })?;
+            if existing.value_ref == value_ref && existing.accounting == accounting {
+                return Ok(existing);
+            }
+            return Err(Error::InvalidLargeValueMetadata(
+                "staged receipt id is already bound to a different descriptor".to_owned(),
+            ));
+        }
         let kind = value_ref.kind;
         let staged = crate::large_values::StagedLargeValue {
             id,
@@ -766,7 +871,7 @@ impl Database {
         let mut operations = vec![
             OwnedWriteOperation::Set {
                 cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                key: staged_large_value_key(staged.id),
+                key: staged_key,
                 value: encoded,
             },
             OwnedWriteOperation::Set {
