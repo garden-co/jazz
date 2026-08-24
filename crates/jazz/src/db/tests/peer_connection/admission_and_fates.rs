@@ -337,14 +337,29 @@ fn distinct_advice_actions_with_one_compiled_scope_hydrate_once() {
 
 #[test]
 fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
-    let schema = owner_read_schema();
+    // Keep the provider subject distinct from the canonical author. This is an
+    // internal test because trusted host-side claim refresh is not public API.
+    let schema = build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("owner", &["claims", "user_id"])),
+                ),
+        ),
+    );
     let alice = AuthorSubject::for_test_bytes([0xa1; 16]);
+    let provider_user_id = uuid::Uuid::from_bytes([0x17; 16]);
     let server = open_core(0x5e, AuthorSubject::SYSTEM, &schema);
-    let target = server
-        .insert("todos", cells("owned", false, alice))
-        .unwrap()
-        .row_uuid();
+    let mut target_cells = cells("owned", false, alice);
+    target_cells.insert("owner".to_owned(), Value::Uuid(provider_user_id));
+    let target = server.insert("todos", target_cells).unwrap().row_uuid();
     let client = open_db(0xa1, alice, &schema);
+    let session_claims = BTreeMap::from([("user_id".to_owned(), Value::Uuid(provider_user_id))]);
+    client.set_identity_claims(alice, session_claims.clone());
     let (client_transport, server_transport) = duplex_with_admitted_session_context(
         alice,
         NodeUuid::from_bytes([0xa1; 16]),
@@ -353,7 +368,7 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
         1,
     );
     let _upstream = crate::db::block_on(client.connect_upstream(client_transport));
-    let subscriber = server.accept_subscriber(server_transport, alice);
+    let subscriber = server.accept_subscriber_with_claims(server_transport, alice, session_claims);
 
     let first = client.request_permission_advice(PermissionAdviceAction::Read {
         table: "todos".to_owned(),
@@ -364,10 +379,12 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
     client.tick().unwrap();
     assert_eq!(block_on(first), PermissionAdvice::Allowed);
 
-    server.node().borrow_mut().set_session_claims(
-        alice,
-        BTreeMap::from([("fresh".to_owned(), Value::Bool(true))]),
-    );
+    let mut refreshed_claims =
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(provider_user_id))]);
+    refreshed_claims.insert("fresh".to_owned(), Value::Bool(true));
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(refreshed_claims);
     server.tick().unwrap();
     client.tick().unwrap();
 
@@ -380,10 +397,12 @@ fn authority_claim_revision_invalidates_cached_scope_and_rehydrates() {
     client.tick().unwrap();
     assert_eq!(block_on(refreshed), PermissionAdvice::Allowed);
 
-    server.node().borrow_mut().set_session_claims(
-        alice,
-        BTreeMap::from([("fresh".to_owned(), Value::Bool(false))]),
-    );
+    let mut advanced_claims =
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(provider_user_id))]);
+    advanced_claims.insert("fresh".to_owned(), Value::Bool(false));
+    subscriber
+        .borrow_mut()
+        .update_authenticated_session_claims(advanced_claims);
     server.tick().unwrap();
     client.tick().unwrap();
     let advanced = client.request_permission_advice(PermissionAdviceAction::Read {
