@@ -541,14 +541,10 @@ function terminalLayoutValueTypeMatchesColumn(
   // public value. Rust collector descriptors have already removed it.
   const logicalColumn = logicalStorageColumns([column])[0]!;
   // Provenance lives in fixed CurrentRow system fields, not nullable user_
-  // carriers. Authors are UUIDs internally and public strings; timestamps
-  // retain their native scalar storage type.
+  // carriers. Author subjects are already canonical text at the native/public
+  // boundary; timestamps retain their native scalar storage type.
   if (isProvenanceMagicColumn(column.name)) {
-    const storageColumn =
-      column.name === "$createdBy" || column.name === "$updatedBy"
-        ? { ...logicalColumn, column_type: { type: "Uuid" as const } }
-        : logicalColumn;
-    return terminalValueTypeMatchesColumn(valueType, storageColumn, false);
+    return terminalValueTypeMatchesColumn(valueType, logicalColumn, false);
   }
   if (carrier === "Logical") {
     return terminalValueTypeMatchesColumn(valueType, logicalColumn, false);
@@ -646,12 +642,6 @@ function terminalValueTypeMatchesColumn(
       terminalValueTypeMatchesColumn(valueType.inner, { ...column, nullable: false }, false)
     );
   }
-  if (
-    (column.name === "$createdBy" || column.name === "$updatedBy") &&
-    column.column_type.type === "Text"
-  ) {
-    return valueType.tag === 10;
-  }
   switch (column.column_type.type) {
     case "Boolean":
       return valueType.tag === 7;
@@ -732,11 +722,11 @@ function decodeTerminalColumnBytes(
   let storageType = valueType;
   while (storageType?.tag === 14) storageType = storageType.inner;
   if (
-    (column.name === "$createdBy" || column.name === "$updatedBy") &&
+    isProvenanceMagicColumn(column.name) &&
     column.column_type.type === "Text" &&
-    storageType?.tag === 10
+    storageType?.tag === 8
   ) {
-    return { type: "Text", value: formatUuid(bytes) };
+    return { type: "Text", value: textDecoder.decode(bytes) };
   }
   return decodeTerminalBytes(column.column_type, bytes);
 }

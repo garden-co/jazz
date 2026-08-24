@@ -354,9 +354,8 @@ fn column_type_for_operand(
     column_types: &BTreeMap<String, BTreeMap<String, TypedLiteralTarget>>,
 ) -> Option<TypedLiteralTarget> {
     match column {
-        "id" | "$createdBy" | "$updatedBy" => {
-            Some(TypedLiteralTarget::Core(GrooveColumnType::Uuid))
-        }
+        "id" => Some(TypedLiteralTarget::Core(GrooveColumnType::Uuid)),
+        "$createdBy" | "$updatedBy" => Some(TypedLiteralTarget::Core(GrooveColumnType::String)),
         "$createdAt" | "$updatedAt" => Some(TypedLiteralTarget::Core(GrooveColumnType::U64)),
         _ => column_types
             .get(table)
@@ -3342,6 +3341,57 @@ mod tests {
                 Operand::Claim("authMode".to_owned()),
                 Operand::Literal(GrooveValue::String("external".to_owned())),
             )]
+        );
+    }
+
+    #[test]
+    fn magic_author_literals_are_text_while_row_id_literals_remain_uuid() {
+        let column_types = BTreeMap::new();
+        let mut filters = vec![
+            Predicate::Eq(
+                Operand::Column("id".to_owned()),
+                Operand::Literal(GrooveValue::String(
+                    "00000000-0000-4000-8000-000000000001".to_owned(),
+                )),
+            ),
+            Predicate::Eq(
+                Operand::Column("$createdBy".to_owned()),
+                Operand::Literal(GrooveValue::String(
+                    r#"["https://issuer.example","alice"]"#.to_owned(),
+                )),
+            ),
+            Predicate::Eq(
+                Operand::Column("$updatedBy".to_owned()),
+                Operand::Literal(GrooveValue::String(
+                    r#"["https://issuer.example","alice"]"#.to_owned(),
+                )),
+            ),
+        ];
+
+        coerce_predicates_typed_literals("todos", &mut filters, &column_types);
+
+        assert_eq!(
+            filters,
+            vec![
+                Predicate::Eq(
+                    Operand::Column("id".to_owned()),
+                    Operand::Literal(GrooveValue::Uuid(
+                        Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap()
+                    )),
+                ),
+                Predicate::Eq(
+                    Operand::Column("$createdBy".to_owned()),
+                    Operand::Literal(GrooveValue::String(
+                        r#"["https://issuer.example","alice"]"#.to_owned(),
+                    )),
+                ),
+                Predicate::Eq(
+                    Operand::Column("$updatedBy".to_owned()),
+                    Operand::Literal(GrooveValue::String(
+                        r#"["https://issuer.example","alice"]"#.to_owned(),
+                    )),
+                ),
+            ]
         );
     }
 
