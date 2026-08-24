@@ -1654,6 +1654,32 @@ fn lower_value_source(
                         .filter(|param| !projected.contains(*param))
                         .map(ProjectField::named),
                 )
+                .chain(
+                    domain
+                        .claim_route_tokens
+                        .iter()
+                        .map(|(claim, token)| {
+                            let parameter = domain
+                                .claim_params
+                                .get(claim)
+                                .expect("claim token has parameter");
+                            let value = claim_value(&parameter.path, &request.policy)?;
+                            let bytes = crate::groove::records::encode_value_canonical(
+                                &value,
+                                &parameter.ty,
+                            )
+                            .map_err(|error| {
+                                UnsupportedReason::Runtime(format!(
+                                    "canonical claim route token: {error}"
+                                ))
+                            })?;
+                            Ok(ProjectField::literal(
+                                token.clone(),
+                                Value::String(hex::encode(bytes)),
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, UnsupportedReason>>()?,
+                )
                 .collect::<Vec<_>>();
             Ok(
                 GraphBuilder::binding_source(shape.to_owned(), input_descriptor).project_fields(

@@ -42,6 +42,8 @@ pub(crate) struct ParameterDomain {
     pub(crate) user_params: BTreeMap<String, ColumnType>,
     /// Trusted claim parameters supplied by the runtime policy context.
     pub(crate) claim_params: BTreeMap<String, ClaimParameter>,
+    /// Scalar, hidden routing carriers for typed claim values.
+    pub(crate) claim_route_tokens: BTreeMap<String, String>,
     /// Parameters retained in terminal rows for usage-site routing.
     pub(crate) routing_params: BTreeSet<String>,
 }
@@ -510,7 +512,9 @@ fn parameter_domain(shape: &NormalizedRowSetShape) -> ParameterDomain {
                                 ty: column.ty.clone(),
                             },
                         );
-                        domain.routing_params.insert(param);
+                        let token = claim_route_token_field(path);
+                        domain.claim_route_tokens.insert(param, token.clone());
+                        domain.routing_params.insert(token);
                     }
                 }
             }
@@ -649,10 +653,14 @@ fn collect_binding_source_params(graph: &GraphBuilder, domain: &mut ParameterDom
                         .claim_params
                         .entry(name.to_owned())
                         .or_insert_with(|| ClaimParameter {
-                            path,
+                            path: path.clone(),
                             ty: field.value_type.clone(),
                         });
-                    domain.routing_params.insert(name.to_owned());
+                    let token = claim_route_token_field(&path);
+                    domain
+                        .claim_route_tokens
+                        .insert(name.to_owned(), token.clone());
+                    domain.routing_params.insert(token);
                 } else {
                     domain
                         .user_params

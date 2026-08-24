@@ -1737,6 +1737,24 @@ pub(super) fn route_literal_project_field(
     request: &QueryProgramRequest,
 ) -> Result<ProjectField, UnsupportedReason> {
     let domain = parameter_domain_for_request(request)?;
+    if let Some((claim, _)) = domain
+        .claim_route_tokens
+        .iter()
+        .find(|(_, token)| token.as_str() == route_field)
+    {
+        let parameter = domain
+            .claim_params
+            .get(claim)
+            .expect("claim token has parameter");
+        let value = claim_value(&parameter.path, &request.policy)?;
+        let bytes = crate::groove::records::encode_value_canonical(&value, &parameter.ty).map_err(
+            |error| UnsupportedReason::Runtime(format!("canonical claim route token: {error}")),
+        )?;
+        return Ok(ProjectField::literal(
+            route_field.to_owned(),
+            Value::String(hex::encode(bytes)),
+        ));
+    }
     if let Some(path) = claim_path_from_param_field(route_field) {
         let value = claim_value(&path, &request.policy)?;
         let literal = domain
