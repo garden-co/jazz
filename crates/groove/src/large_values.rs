@@ -1872,19 +1872,6 @@ pub fn prepare(kind: LargeValueKind, logical_bytes: &[u8]) -> Result<PreparedLar
     prepare_with_locator(kind, logical_bytes, |_| Locator::random())
 }
 
-/// Deterministic preparation for cross-crate protocol fixtures.
-///
-/// This is deliberately available only through Groove's test feature: normal
-/// callers must not be able to choose or derive retrieval capabilities.
-#[doc(hidden)]
-#[cfg(feature = "test")]
-pub fn prepare_for_test(
-    kind: LargeValueKind,
-    logical_bytes: &[u8],
-) -> Result<PreparedLargeValue, Error> {
-    prepare_with_locator(kind, logical_bytes, |hash| Locator(hash.0))
-}
-
 /// Rebuild while preserving the exact retrieval identity of every byte-equal
 /// node from a previous preparation. Local consolidation uses the same reuse
 /// rule while avoiding traversal of unaffected subtrees.
