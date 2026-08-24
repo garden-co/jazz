@@ -36,7 +36,9 @@ describe("WorldTour cross-topology itinerary recovery", () => {
     let bob: Db | undefined;
     let tour: { id: string } | undefined;
     let firstStop: { id: string } | undefined;
+    let protectedStop: { id: string } | undefined;
     let observedWindow: string[] = [];
+    const aliceDbName = uniqueDbName("world-tour-alice");
 
     const receipt = await runTopologyScenario(
       {
@@ -50,10 +52,25 @@ describe("WorldTour cross-topology itinerary recovery", () => {
           alice: {
             disconnect: async () => alice!.disconnect(),
             reconnect: async () => alice!.reconnect(),
+            restart: async () => {
+              // A browser refresh must retain the same persisted namespace,
+              // while creating a fresh client and connection.
+              ctx.untrack(alice!);
+              await alice!.shutdown();
+              alice = await openClient(server!, "alice-reopened", "world-tour-alice", aliceDbName);
+            },
           },
           authorization: {
             failure: async () => {
               const outsider = await openClient(server!, "outsider", "world-tour-outsider");
+              await expect(
+                outsider.one(app.stops.where({ id: firstStop!.id }), { tier: "edge" }),
+              ).resolves.toMatchObject({ id: firstStop!.id, status: "confirmed" });
+              // The third stop is tentative, hence visible to a band member
+              // but not to a client which has no membership row.
+              await expect(
+                outsider.one(app.stops.where({ id: protectedStop!.id }), { tier: "edge" }),
+              ).resolves.toBeNull();
               await expect(
                 outsider
                   .update(app.stops, firstStop!.id, { status: "cancelled" })
@@ -74,7 +91,7 @@ describe("WorldTour cross-topology itinerary recovery", () => {
                 schema: app,
                 permissions,
               });
-              alice = await openClient(server, "alice", "world-tour-alice");
+              alice = await openClient(server, "alice", "world-tour-alice", aliceDbName);
               bob = await openClient(server, "bob", "world-tour-bob");
 
               const createdTour = await alice
@@ -109,7 +126,7 @@ describe("WorldTour cross-topology itinerary recovery", () => {
                   })
                   .wait({ tier: "edge" }),
               ]);
-              const [first, second] = await Promise.all([
+              const [first, second, third] = await Promise.all([
                 alice
                   .insert(app.stops, {
                     bandId: createdTour.id,
@@ -128,8 +145,18 @@ describe("WorldTour cross-topology itinerary recovery", () => {
                     publicDescription: "second night",
                   })
                   .wait({ tier: "edge" }),
+                alice
+                  .insert(app.stops, {
+                    bandId: createdTour.id,
+                    venueId: paris.id,
+                    date: new Date("2026-08-02"),
+                    status: "tentative",
+                    publicDescription: "members-only routing detail",
+                  })
+                  .wait({ tier: "edge" }),
               ]);
               firstStop = first;
+              protectedStop = third;
 
               const itinerary = app.stops
                 .where({
@@ -153,8 +180,11 @@ describe("WorldTour cross-topology itinerary recovery", () => {
                 15_000,
                 "edge",
               );
-              expect(rows.map((stop) => stop.id)).toEqual([first.id, second.id]);
+              // Three matching stops exist; this verifies the app's actual
+              // ordered, bounded query rather than an unbounded happy path.
+              expect(rows.map((stop) => stop.id)).toEqual([first.id, third.id]);
               expect(rows.map((stop) => stop.venue?.name)).toEqual(["London Hall", "Paris Club"]);
+              expect(second.id).not.toBe(third.id);
             },
             faultsAfter: [{ kind: "failure", target: "authorization" }],
           },
@@ -231,6 +261,31 @@ describe("WorldTour cross-topology itinerary recovery", () => {
               );
               expect(rows.map((stop) => stop.venue?.name)).toEqual(["London Hall", "Paris Club"]);
             },
+            faultsAfter: [{ kind: "restart", target: "alice" }],
+          },
+          {
+            name: "persistent client restart retains the current local itinerary window",
+            run: async () => {
+              const itinerary = app.stops
+                .where({
+                  bandId: tour!.id,
+                  date: { gte: new Date("2026-08-01"), lte: new Date("2026-08-07") },
+                })
+                .include({ venue: true })
+                .orderBy("date", "asc")
+                .limit(2);
+              const rows = await waitForQuery(
+                alice!,
+                itinerary,
+                (value) =>
+                  value.length === 2 && value[0]?.publicDescription === "offline routing note",
+                "reopened client rehydrates its bounded itinerary from IndexedDB",
+                15_000,
+                "local",
+              );
+              expect(rows.map((stop) => stop.id)).toEqual([firstStop!.id, protectedStop!.id]);
+              expect(rows.map((stop) => stop.venue?.name)).toEqual(["London Hall", "Paris Club"]);
+            },
           },
         ],
       },
@@ -242,6 +297,7 @@ describe("WorldTour cross-topology itinerary recovery", () => {
       ["failure", "completed"],
       ["disconnect", "completed"],
       ["reconnect", "completed"],
+      ["restart", "completed"],
     ]);
   }, 90_000);
 });
@@ -250,6 +306,7 @@ async function openClient(
   server: { appId: string; serverUrl: string; adminSecret: string },
   label: string,
   userId: string,
+  dbName = uniqueDbName(`world-tour-${label}`),
 ): Promise<Db> {
   return ctx.track(
     await createDb({
@@ -257,7 +314,7 @@ async function openClient(
       serverUrl: server.serverUrl,
       adminSecret: server.adminSecret,
       jwtToken: await getJazzServerJwtForUser(userId, undefined, server.appId),
-      driver: { type: "persistent", dbName: uniqueDbName(`world-tour-${label}`) },
+      driver: { type: "persistent", dbName },
     }),
   );
 }
