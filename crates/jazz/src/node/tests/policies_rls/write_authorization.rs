@@ -937,6 +937,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
 #[test]
 fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_and_update() {
     let owner = user(0xa1);
+    let owner_claim_subject = owner.test_uuid();
     let workspace_a = row(0xb1);
     let workspace_b = row(0xb2);
     let owner_membership_a = row(0xc1);
@@ -1038,7 +1039,7 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
             3,
             BTreeMap::from([
                 ("workspace".to_owned(), Value::Uuid(workspace_a.0)),
-                ("subject".to_owned(), Value::Uuid(owner.0)),
+                ("subject".to_owned(), Value::Uuid(owner_claim_subject)),
             ]),
         ),
         (
@@ -1047,7 +1048,7 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
             4,
             BTreeMap::from([
                 ("workspace".to_owned(), Value::Uuid(workspace_b.0)),
-                ("subject".to_owned(), Value::Uuid(owner.0)),
+                ("subject".to_owned(), Value::Uuid(owner_claim_subject)),
             ]),
         ),
         (
@@ -1065,7 +1066,10 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
     ] {
         accept_global(&mut core, MergeableCommit::new(table, row_uuid, time).cells(cells));
     }
-    core.set_session_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.0))]));
+    core.set_session_claims(
+        owner,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(owner_claim_subject))]),
+    );
 
     let accepted = core
         .commit_mergeable_settled(

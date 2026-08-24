@@ -16,10 +16,9 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{ArraySubquery, Query};
 use jazz::schema::JazzSchema;
-use jazz::serving::auth_admission::author_id_from_subject;
 use jazz::tools::{
     ColumnType as PublicColumnType, SchemaBuilder as PublicSchemaBuilder,
     TableSchemaBuilder as PublicTableSchemaBuilder,
@@ -171,7 +170,8 @@ fn empty_schema() -> JazzSchema {
 fn identity_for_subject(node: u8, subject: &str) -> DbIdentity {
     DbIdentity {
         node: NodeUuid::from_bytes([node; 16]),
-        author: author_id_from_subject(subject),
+        author: AuthorSubject::authenticated("urn:jazz:test", subject)
+            .expect("test subject uses the external test issuer"),
     }
 }
 
