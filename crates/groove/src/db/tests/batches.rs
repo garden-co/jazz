@@ -889,13 +889,9 @@ async fn bounded_upload_start_caps_new_pending_metadata_and_allows_resume() {
     let database = Database::new(schema, storage).await.unwrap();
     let value_refs = (0_u8..3)
         .map(|seed| {
-            crate::large_values::prepare(
-                crate::large_values::LargeValueKind::Bytes,
-                &[seed],
-                |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
-            )
-            .unwrap()
-            .value_ref
+            crate::large_values::prepare(crate::large_values::LargeValueKind::Bytes, &[seed])
+                .unwrap()
+                .value_ref
         })
         .collect::<Vec<_>>();
 

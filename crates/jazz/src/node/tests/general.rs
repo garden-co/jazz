@@ -129,7 +129,6 @@ fn upload_start_is_rate_admitted_before_pending_metadata_is_written() {
     let prepared = groove::large_values::prepare(
         groove::large_values::LargeValueKind::String,
         b"rate-admitted upload start",
-        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
     )
     .unwrap();
     let outcome = receiver

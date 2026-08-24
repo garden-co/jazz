@@ -1405,7 +1405,7 @@ impl Database {
         bytes: Vec<u8>,
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
         let prepared = self.append_large_value(value, bytes).await?;
-        self.stage_large_value_preparation(prepared).await
+        self.stage_derived_large_value_preparation(prepared).await
     }
 
     /// Prepare an arbitrary byte-coordinate splice. Text boundary/UTF-16 and
