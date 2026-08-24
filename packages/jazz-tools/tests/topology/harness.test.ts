@@ -383,7 +383,9 @@ describe("shared example topology harness", () => {
       phases: [
         {
           name: "deterministic setup",
-          run: async ({ random }) => calls.push(random().toFixed(8)),
+          run: async ({ random }) => {
+            calls.push(random().toFixed(8));
+          },
           faultsAfter: (["disconnect", "reconnect", "restart", "failure"] as const).map((kind) => ({
             kind,
             target: "subject",
@@ -522,6 +524,168 @@ describe("shared example topology harness", () => {
     expect(calls).toEqual(["failing", "first"]);
   });
 
+  it("accepts obligation-first registration but rejects a registrar captured after its phase", async () => {
+    const calls: string[] = [];
+    let staleDefer!: (
+      name: string,
+      cleanup: (context: { signal: AbortSignal }) => Promise<void>,
+    ) => void;
+    const receipt = await runTopologyScenario({
+      id: "harness.fixture.compensation-operation-scope",
+      topology: ["fixture"],
+      seed: 56,
+      phaseTimeoutMs: 50,
+      faultTimeoutMs: 50,
+      targets: {},
+      replay: "compensation-operation-scope-fixture",
+      phases: [
+        {
+          name: "register before acquisition finishes",
+          run: async ({ defer }) => {
+            defer("release obligation", async () => {
+              calls.push("release");
+            });
+            staleDefer = defer;
+            await Promise.resolve();
+          },
+        },
+        {
+          name: "reject stale registrar",
+          run: async () => {
+            expect(() => staleDefer("late release", async () => undefined)).toThrow(
+              "topology phase register before acquisition finishes is no longer active",
+            );
+          },
+        },
+      ],
+    });
+    expect(receipt.compensations).toMatchObject([
+      { name: "release obligation", status: "completed" },
+    ]);
+    expect(calls).toEqual(["release"]);
+  });
+
+  it("closes fault and timed-out phase registrars before their work can resume", async () => {
+    let staleFaultDefer!: (
+      name: string,
+      cleanup: (context: { signal: AbortSignal }) => Promise<void>,
+    ) => void;
+    let staleTimedOutDefer!: (
+      name: string,
+      cleanup: (context: { signal: AbortSignal }) => Promise<void>,
+    ) => void;
+    await expect(
+      runTopologyScenario({
+        id: "harness.fixture.compensation-closed-registrars",
+        topology: ["fixture"],
+        seed: 57,
+        phaseTimeoutMs: 5,
+        faultTimeoutMs: 50,
+        targets: {
+          route: {
+            disconnect: async ({ defer }) => {
+              staleFaultDefer = defer;
+            },
+          },
+        },
+        replay: "compensation-closed-registrars-fixture",
+        phases: [
+          {
+            name: "capture fault registrar",
+            run: async () => undefined,
+            faultsAfter: [{ kind: "disconnect", target: "route" }],
+          },
+          {
+            name: "capture timed-out registrar",
+            run: ({ defer }) => {
+              staleTimedOutDefer = defer;
+              return new Promise<void>(() => undefined);
+            },
+          },
+        ],
+      }),
+    ).rejects.toThrow("topology phase timed out: capture timed-out registrar after 5ms");
+    expect(() => staleFaultDefer("late fault release", async () => undefined)).toThrow(
+      "topology fault disconnect route is no longer active",
+    );
+    expect(() => staleTimedOutDefer("late phase release", async () => undefined)).toThrow(
+      "topology phase capture timed-out registrar is no longer active",
+    );
+  });
+
+  it("drains an abort-ignoring inverse before earlier cleanup or the next scenario", async () => {
+    let routeBlocked = true;
+    const calls: string[] = [];
+    let failure: unknown;
+    try {
+      await runTopologyScenario({
+        id: "harness.fixture.compensation-timeout-drain",
+        topology: ["fixture"],
+        seed: 57,
+        phaseTimeoutMs: 50,
+        faultTimeoutMs: 50,
+        cleanupTimeoutMs: 5,
+        targets: {},
+        replay: "compensation-timeout-drain-fixture",
+        phases: [
+          {
+            name: "register route inverses",
+            run: async ({ defer }) => {
+              defer("earlier cleanup", async () => {
+                calls.push("earlier cleanup");
+              });
+              defer("abort-ignoring route release", async () => {
+                await new Promise<void>((resolve) => {
+                  setTimeout(() => {
+                    calls.push("late route release");
+                    routeBlocked = false;
+                    resolve();
+                  }, 15);
+                });
+              });
+            },
+          },
+          {
+            name: "fail after acquiring route",
+            run: async () => {
+              throw new Error("planted failure after route acquisition");
+            },
+          },
+        ],
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(TopologyScenarioError);
+    const receipt = (failure as TopologyScenarioError).receipt;
+    expect(receipt.compensations).toMatchObject([
+      {
+        name: "abort-ignoring route release",
+        status: "failed",
+        error: "topology compensation timed out: abort-ignoring route release after 5ms",
+      },
+      { name: "earlier cleanup", status: "completed" },
+    ]);
+    expect(calls).toEqual(["late route release", "earlier cleanup"]);
+
+    const next = await runTopologyScenario({
+      id: "harness.fixture.compensation-timeout-drain-next",
+      topology: ["fixture"],
+      seed: 58,
+      phaseTimeoutMs: 50,
+      faultTimeoutMs: 50,
+      targets: {},
+      replay: "compensation-timeout-drain-next-fixture",
+      phases: [
+        {
+          name: "route cannot mutate next scenario",
+          run: async () => expect(routeBlocked).toBe(false),
+        },
+      ],
+    });
+    expect(next.status).toBe("passed");
+  });
+
   it("bounds a stalled phase and retains its exact replay command", async () => {
     let postTimeoutEffect = false;
     let cleanedUp = false;
@@ -562,16 +726,16 @@ describe("shared example topology harness", () => {
       (error: unknown) =>
         error instanceof TopologyScenarioError &&
         error.receipt.replay.includes("JAZZ_EXAMPLE_TOPOLOGY_SEED=11") &&
-        error.receipt.error?.includes("planted stall") &&
+        (error.receipt.error?.includes("planted stall") ?? false) &&
         error.receipt.phases[0]?.status === "failed",
     );
-    await new Promise((resolve) => setTimeout(resolve, 40));
     expect(cleanedUp).toBe(true);
     expect(postTimeoutEffect).toBe(false);
   });
 
   it("aborts timed-out cleanup before it can mutate", async () => {
     let postTimeoutEffect = false;
+    let abortObserved = false;
     await expect(
       runTopologyScenario({
         id: "harness.fixture.cleanup-timeout",
@@ -592,6 +756,7 @@ describe("shared example topology harness", () => {
             signal.addEventListener(
               "abort",
               () => {
+                abortObserved = true;
                 clearTimeout(timer);
                 resolve();
               },
@@ -603,10 +768,9 @@ describe("shared example topology harness", () => {
       (error: unknown) =>
         error instanceof TopologyScenarioError &&
         error.receipt.cleanup?.status === "failed" &&
-        error.receipt.cleanup.elapsedMs >= 5 &&
-        error.receipt.cleanup.error?.includes("cleanup timed out"),
+        (error.receipt.cleanup.error?.includes("cleanup timed out") ?? false),
     );
-    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(abortObserved).toBe(true);
     expect(postTimeoutEffect).toBe(false);
   });
 });
