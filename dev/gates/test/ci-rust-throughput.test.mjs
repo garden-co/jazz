@@ -955,12 +955,10 @@ test("realistic benchmark compilation has an explicit guarded trigger matrix", (
   const native = document.jobs.native;
   assert.deepEqual(native["runs-on"], ["self-hosted", "linux", "x64", "jazz-bench"]);
   assert.equal(native["timeout-minutes"], 180);
-  assert.match(native.if, /github\.actor != 'github-actions\[bot\]'/);
-  assert.match(native.if, /contains\(github\.event\.pull_request\.labels\.\*\.name, 'benchmark'\)/);
-  assert.match(
-    native.if,
-    /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
-  );
+  const expectedNativeCondition =
+    "${{ (github.event_name != 'push' || github.actor != 'github-actions[bot]') && ( github.event_name != 'pull_request' || ( contains(github.event.pull_request.labels.*.name, 'benchmark') && github.event.pull_request.head.repo.full_name == github.repository ) ) }}";
+  const normalizeCondition = (condition) => condition.replace(/\s+/g, " ").trim();
+  assert.equal(normalizeCondition(native.if), expectedNativeCondition);
 
   assert.throws(() => {
     const unsafe = parse(realisticWorkflow.replace('  schedule:\n    - cron: "0 5 * * *"\n', ""));
@@ -973,11 +971,17 @@ test("realistic benchmark compilation has an explicit guarded trigger matrix", (
         "true",
       ),
     );
-    assert.match(
-      unsafe.jobs.native.if,
-      /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
+    assert.equal(normalizeCondition(unsafe.jobs.native.if), expectedNativeCondition);
+  }, /true/);
+  assert.throws(() => {
+    const unsafe = parse(
+      realisticWorkflow.replace(
+        "        )\n      }}\n    runs-on:",
+        "        ) || true\n      }}\n    runs-on:",
+      ),
     );
-  }, /repo/);
+    assert.equal(normalizeCondition(unsafe.jobs.native.if), expectedNativeCondition);
+  }, /true/);
 });
 
 test("realistic timing retains every retired legacy smoke suite", () => {

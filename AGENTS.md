@@ -103,9 +103,10 @@ Benchmark work has three deliberately separate gates:
 - CodSpeed currently compares the example benchmark crates only. Apply the
   `benchmark` label when that coverage is relevant; it refreshes nightly on the
   default branch. Native `jazz` and `jazz-sim` timing remains in the
-  realistic benchmark workflow (labeled PRs plus scheduled/default-branch
-  runs) until those suites are ported to CodSpeed. Do not run a repository-wide
-  benchmark suite before push.
+  realistic benchmark workflow (same-repository benchmark-labeled PRs,
+  non-bot default-branch pushes, manual runs, and nightly) until those suites
+  are ported to CodSpeed. Do not run a repository-wide benchmark suite before
+  push.
 
 Any change to a public `jazz` type additionally gates the full workspace,
 including examples.
