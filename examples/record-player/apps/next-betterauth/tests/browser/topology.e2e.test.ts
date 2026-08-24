@@ -36,8 +36,10 @@ const acknowledgementPermissions = s.definePermissions(acknowledgementApp, ({ po
 const recipientApp = s.defineApp({
   invitations: s.table({ subject: s.string(), label: s.string() }),
 });
-const recipientPermissions = s.definePermissions(recipientApp, ({ policy, session }) => {
-  policy.invitations.allowRead.where({ subject: session.user_id });
+const recipientPermissions = s.definePermissions(recipientApp, ({ policy, session, anyOf }) => {
+  policy.invitations.allowRead.where(
+    anyOf([{ subject: session.user_id }, { label: "unmatched control branch" }]),
+  );
   policy.invitations.allowInsert.always();
 });
 
