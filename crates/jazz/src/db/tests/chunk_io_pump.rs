@@ -253,7 +253,7 @@ fn retryable_chunk_response_preserves_retry_delay_and_allows_a_later_fulfillment
         );
         let request = groove::chunks::ChunkRequest {
             object_hash: [0x41; 32],
-            locator: vec![0x42; 16],
+            locator: groove::large_values::Locator::random(),
         };
 
         let first = resolver.resolve(request.clone());
