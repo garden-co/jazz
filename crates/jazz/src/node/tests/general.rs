@@ -472,6 +472,85 @@ fn pending_upload_expires_under_the_mandatory_finite_staging_age() {
         .is_empty());
 }
 
+/// An authenticated sender starts a large upload, then waits past the receiver
+/// policy deadline. The receiver rejects the delayed final batch without a
+/// maintenance call, so the old pending journal cannot become a fresh staged
+/// receipt.
+///
+/// ```text
+/// alice ──start──► receiver ──Need(root)──► alice
+/// alice ──delay──► receiver ──nodes──► Rejected + journal evicted
+/// ```
+#[test]
+fn delayed_chunk_upload_is_rejected_before_it_can_refresh_pending_stage_age() {
+    let schema = two_column_schema();
+    let (_temp_dir, mut receiver) = open_node_with_schema(node(0x82), schema);
+    let prepared = groove::large_values::prepare(
+        groove::large_values::LargeValueKind::String,
+        "delayed finalization/".repeat(20_000).as_bytes(),
+        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
+    )
+    .unwrap();
+    let context = Some(CommitUnitIngestContext {
+        identity: AuthorId::SYSTEM,
+        trust: CommitUnitTrust::Session,
+        edge_authority: false,
+    });
+    let started = receiver
+        .apply_sync_message_with_ingest_context(
+            SyncMessage::ChunkUploadStart(crate::protocol::ChunkUploadStart {
+                value_ref: prepared.value_ref.clone(),
+            }),
+            context,
+        )
+        .resolve()
+        .unwrap()
+        .value;
+    let root = match started.as_slice() {
+        [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+            status: crate::protocol::ChunkUploadStatus::Need(nodes),
+            ..
+        })] => nodes[0].clone(),
+        other => panic!("unexpected upload start: {other:?}"),
+    };
+    receiver.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: u64::MAX,
+        window_ms: 1_000,
+        max_age_ms: 0,
+    });
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let root_chunk = prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == root)
+        .unwrap()
+        .clone();
+    let rejected = receiver
+        .apply_sync_message_with_ingest_context(
+            SyncMessage::ChunkUploadNodes(crate::protocol::ChunkUploadNodes {
+                value_ref: prepared.value_ref.clone(),
+                chunks: vec![root_chunk],
+            }),
+            context,
+        )
+        .resolve()
+        .unwrap()
+        .value;
+    assert!(matches!(
+        rejected.as_slice(),
+        [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+            status: crate::protocol::ChunkUploadStatus::Rejected,
+            ..
+        })]
+    ));
+    assert!(crate::db::block_on(receiver.database.pending_large_value_uploads())
+        .unwrap()
+        .is_empty());
+    assert!(crate::db::block_on(receiver.database.staged_large_values())
+        .unwrap()
+        .is_empty());
+}
+
 #[test]
 fn synced_descriptor_reads_through_shared_opaque_chunk_backend() {
     let schema = two_column_schema();
