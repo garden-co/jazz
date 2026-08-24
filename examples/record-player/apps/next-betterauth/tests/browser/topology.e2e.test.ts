@@ -4,6 +4,7 @@ import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.
 import {
   TestCleanup,
   uniqueDbName,
+  withTimeout,
   waitForQuery,
 } from "../../../../../../packages/jazz-tools/tests/browser/support.js";
 import {
@@ -76,14 +77,33 @@ describe("RecordPlayer authenticated playlist topology", () => {
               console.info("[record-player-topology] open listener edge");
               listener = await openClient(server, "listener", listenerToken);
               console.info("[record-player-topology] create playlist");
-              playlist = (
-                await owner
-                  .insert(app.playlists, {
-                    name: "Road tape",
-                    owner_subject: "record-player-owner",
-                  })
-                  .wait({ tier: "edge" })
-              ).value;
+              const mutationErrors: unknown[] = [];
+              const stopMutationErrors = owner.onMutationError((event) =>
+                mutationErrors.push(event),
+              );
+              const playlistWrite = owner.insert(app.playlists, {
+                name: "Road tape",
+                owner_subject: "record-player-owner",
+              });
+              await withTimeout(
+                playlistWrite.wait({ tier: "local" }),
+                5_000,
+                "playlist write did not settle locally",
+              );
+              console.info("[record-player-topology] playlist local settlement", {
+                id: playlistWrite.value.id,
+              });
+              try {
+                playlist = (
+                  await withTimeout(
+                    playlistWrite.wait({ tier: "edge" }),
+                    10_000,
+                    `playlist edge settlement mutationErrors=${JSON.stringify(mutationErrors)}`,
+                  )
+                ).value;
+              } finally {
+                stopMutationErrors();
+              }
               editorInvite = (
                 await owner
                   .insert(app.invitations, {
