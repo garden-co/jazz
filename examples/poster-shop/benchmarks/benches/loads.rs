@@ -20,3 +20,12 @@ fn cursor_presence_fanout(bencher: divan::Bencher<'_, '_>, shapes: usize) {
         divan::black_box(fixture.cursor_fanout_count())
     });
 }
+
+#[divan::bench(args = [512, 4096])]
+fn metadata_and_checkpoint_shelves(bencher: divan::Bencher<'_, '_>, shapes: usize) {
+    let fixture = Fixture::new(shapes);
+    bencher.bench_local(|| {
+        divan::black_box(fixture.asset_metadata_count());
+        divan::black_box(fixture.checkpoint_count())
+    });
+}

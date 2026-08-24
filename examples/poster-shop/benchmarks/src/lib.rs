@@ -25,6 +25,8 @@ pub struct Fixture {
     ordered_shapes: PreparedQuery,
     cursor_fanout: PreparedQuery,
     layer_shapes: PreparedQuery,
+    asset_metadata: PreparedQuery,
+    checkpoints: PreparedQuery,
 }
 
 impl Fixture {
@@ -58,6 +60,32 @@ impl Fixture {
                     ("editor".into(), Value::I32(editor as i32)),
                     ("x".into(), Value::I32(editor as i32)),
                     ("y".into(), Value::I32((editor * 2) as i32)),
+                ]),
+            );
+        }
+        for asset in 0..4 {
+            insert(
+                &db,
+                "assets",
+                row_id(5, asset),
+                BTreeMap::from([
+                    ("canvas".into(), Value::Uuid(row_id(1, 0).0)),
+                    ("name".into(), Value::String(format!("asset-{asset:02}"))),
+                    ("byte_length".into(), Value::I32((asset + 1) as i32 * 1024)),
+                ]),
+            );
+        }
+        for checkpoint in 0..3 {
+            insert(
+                &db,
+                "checkpoints",
+                row_id(6, checkpoint),
+                BTreeMap::from([
+                    ("canvas".into(), Value::Uuid(row_id(1, 0).0)),
+                    (
+                        "label".into(),
+                        Value::String(format!("checkpoint-{checkpoint:02}")),
+                    ),
                 ]),
             );
         }
@@ -97,12 +125,28 @@ impl Fixture {
                     .order_by("z_index", OrderDirection::Asc),
             )
             .expect("prepare layer shapes");
+        let asset_metadata = db
+            .prepare_query(
+                &Query::from("assets")
+                    .filter(eq(col("canvas"), lit(row_id(1, 0).0)))
+                    .order_by("name", OrderDirection::Asc),
+            )
+            .expect("prepare asset metadata");
+        let checkpoints = db
+            .prepare_query(
+                &Query::from("checkpoints")
+                    .filter(eq(col("canvas"), lit(row_id(1, 0).0)))
+                    .order_by("label", OrderDirection::Asc),
+            )
+            .expect("prepare checkpoints");
         Self {
             db,
             shapes,
             ordered_shapes,
             cursor_fanout,
             layer_shapes,
+            asset_metadata,
+            checkpoints,
         }
     }
 
@@ -123,6 +167,12 @@ impl Fixture {
                 value => panic!("unexpected z_index: {value:?}"),
             })
             .collect()
+    }
+    pub fn asset_metadata_count(&self) -> usize {
+        self.read(&self.asset_metadata).len()
+    }
+    pub fn checkpoint_count(&self) -> usize {
+        self.read(&self.checkpoints).len()
     }
     fn read(&self, query: &PreparedQuery) -> Vec<CurrentRow> {
         self.db.read(query).expect("PosterShop benchmark read")
@@ -156,6 +206,19 @@ fn schema() -> JazzSchema {
                     .column("x", ColumnType::Integer)
                     .column("y", ColumnType::Integer)
                     .index_only(["canvas", "editor"]),
+            )
+            .table(
+                TableSchemaBuilder::new("assets")
+                    .fk_column("canvas", "canvases")
+                    .column("name", ColumnType::Text)
+                    .column("byte_length", ColumnType::Integer)
+                    .index_only(["canvas", "name"]),
+            )
+            .table(
+                TableSchemaBuilder::new("checkpoints")
+                    .fk_column("canvas", "canvases")
+                    .column("label", ColumnType::Text)
+                    .index_only(["canvas", "label"]),
             )
             .build(),
     )
