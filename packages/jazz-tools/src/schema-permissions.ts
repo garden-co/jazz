@@ -238,6 +238,15 @@ function normalizeRelationPredicateForWasm(predicate: RelPredicateExpr): RelPred
     };
   }
 
+  if ("EnumMatch" in predicate) {
+    return {
+      EnumMatch: {
+        ...predicate.EnumMatch,
+        payload: normalizeRelationPredicateForWasm(predicate.EnumMatch.payload),
+      },
+    };
+  }
+
   if ("In" in predicate) {
     return {
       In: {

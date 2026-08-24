@@ -148,6 +148,52 @@ describe("normalizePermissionsForWasm", () => {
     });
   });
 
+  it("encodes relation literals nested in EnumMatch payloads", () => {
+    const normalized = normalizePermissionsForWasm({
+      resources: {
+        select: {
+          using: {
+            type: "ExistsRel",
+            rel: {
+              Filter: {
+                input: { TableScan: { table: "resource_access_edges" } },
+                predicate: {
+                  EnumMatch: {
+                    column: { column: "subject" },
+                    case: "individual",
+                    payload: {
+                      Cmp: {
+                        left: { column: "expiresAt" },
+                        op: "Gt",
+                        right: { Literal: new Date("2026-01-02T03:04:05.000Z") },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    expect(normalized.resources?.select?.using).toMatchObject({
+      rel: {
+        Filter: {
+          predicate: {
+            EnumMatch: {
+              payload: {
+                Cmp: {
+                  right: { Literal: { type: "Timestamp", value: 1_767_323_045_000 } },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+  });
+
   it.each([
     ["Date", new Date("2026-01-02T03:04:05.000Z"), { type: "Timestamp", value: 1_767_323_045_000 }],
     ["fractional number", 1.5, { type: "Double", value: 1.5 }],
@@ -248,6 +294,38 @@ describe("normalizePermissionsForWasm", () => {
               column: "ratio",
               op: "Eq",
               value: { type: "Literal", value },
+            },
+          },
+        },
+      }),
+    ).toThrowError("Permissions policy floating-point literals must be finite numbers.");
+  });
+
+  it("rejects non-finite literals nested in EnumMatch payloads", () => {
+    expect(() =>
+      normalizePermissionsForWasm({
+        resources: {
+          select: {
+            using: {
+              type: "ExistsRel",
+              rel: {
+                Filter: {
+                  input: { TableScan: { table: "resource_access_edges" } },
+                  predicate: {
+                    EnumMatch: {
+                      column: { column: "subject" },
+                      case: "individual",
+                      payload: {
+                        Cmp: {
+                          left: { column: "ratio" },
+                          op: "Eq",
+                          right: { Literal: Number.NaN },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
             },
           },
         },
