@@ -146,6 +146,16 @@ describe("BigLabel browser edge/core topology", () => {
         .wait({ tier: "edge" });
     });
     const roster = app.artists.where({ organizationId: org.id }).orderBy("name", "asc").limit(2);
+    // This is the application's other primary read shape: a bounded release
+    // pipeline whose included artist must remain tenant-scoped throughout
+    // offline recovery. Keep it separate from the roster so the receipt
+    // catches a regression in include delivery even if the base artist query
+    // still converges.
+    const releasePipeline = app.releases
+      .where({ organizationId: org.id })
+      .orderBy("releaseDate", "asc")
+      .limit(1)
+      .include({ artist: true });
     const snapshots: string[][] = [];
     await runTopologyScenario(
       {
@@ -226,6 +236,19 @@ describe("BigLabel browser edge/core topology", () => {
                   role: "owner",
                 })
                 .wait({ tier: "edge" });
+              // A second authorized release is a planted positive for the
+              // query's bound below. If lowering drops `limit(1)`, the edge
+              // and reopened-local assertions must expose it instead of
+              // merely proving eventual include delivery.
+              await writer
+                .insert(app.releases, {
+                  organizationId: org.id,
+                  artistId: artist.id,
+                  title: "Second Light",
+                  releaseDate: new Date("2027-01-01"),
+                  status: "scheduled",
+                })
+                .wait({ tier: "edge" });
             },
           },
           {
@@ -238,7 +261,7 @@ describe("BigLabel browser edge/core topology", () => {
             faultsAfter: [{ kind: "reconnect", target: "browser-edge" }],
           },
           {
-            name: "editor subscription converges after reconnect",
+            name: "editor subscription and bounded release include converge after reconnect",
             async run() {
               await waitForCondition(
                 async () =>
@@ -248,10 +271,14 @@ describe("BigLabel browser edge/core topology", () => {
                 15_000,
                 "reader did not retain the ordered bounded BigLabel roster after reconnect",
               );
+              await expect(reader.all(releasePipeline, { tier: "edge" })).resolves.toMatchObject([
+                { title: "First Light", artist: { name: "Blue Hour" } },
+              ]);
+              await expect(reader.all(releasePipeline, { tier: "edge" })).resolves.toHaveLength(1);
             },
           },
           {
-            name: "editor reopens persistent cache without refetching the roster",
+            name: "editor reopens persistent cache without refetching bounded app queries",
             async run() {
               ctx.untrack(reader);
               await reader.close();
@@ -266,10 +293,28 @@ describe("BigLabel browser edge/core topology", () => {
                 { name: "Blue Hour" },
               ]);
               await expect(reader.all(roster, { tier: "local" })).resolves.toHaveLength(2);
+              await expect(reader.all(releasePipeline, { tier: "local" })).resolves.toMatchObject([
+                { title: "First Light", artist: { name: "Blue Hour" } },
+              ]);
+              await expect(reader.all(releasePipeline, { tier: "local" })).resolves.toHaveLength(1);
             },
           },
           {
-            name: "revoking editor membership removes the roster",
+            name: "unaffiliated external edge cannot read either tenant query shape",
+            async run() {
+              const outsiderToken = await getJazzServerJwtForUser("outsider", {}, appId);
+              const outsider = await openDb({
+                appId,
+                serverUrl,
+                jwtToken: outsiderToken,
+                label: "big-label-outsider",
+              });
+              await expect(outsider.all(roster, { tier: "edge" })).resolves.toEqual([]);
+              await expect(outsider.all(releasePipeline, { tier: "edge" })).resolves.toEqual([]);
+            },
+          },
+          {
+            name: "revoking editor membership removes bounded tenant queries and includes",
             async run() {
               const editorMembership = await writer.all(
                 app.memberships.where({ organizationId: org.id, userId: "editor" }).limit(1),
@@ -278,9 +323,15 @@ describe("BigLabel browser edge/core topology", () => {
               expect(editorMembership).toHaveLength(1);
               await writer.delete(app.memberships, editorMembership[0]!.id).wait({ tier: "edge" });
               await waitForCondition(
-                async () => (await reader.all(roster, { tier: "edge" })).length === 0,
+                async () => {
+                  const [artists, releases] = await Promise.all([
+                    reader.all(roster, { tier: "edge" }),
+                    reader.all(releasePipeline, { tier: "edge" }),
+                  ]);
+                  return artists.length === 0 && releases.length === 0;
+                },
                 15_000,
-                "revoked editor retained BigLabel roster",
+                "revoked editor retained a BigLabel tenant query or included artist",
               );
             },
           },
