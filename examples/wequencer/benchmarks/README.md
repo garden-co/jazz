@@ -10,7 +10,9 @@ The first workloads are intentionally small but realistic:
 - read one full track pattern ordered by step;
 - apply a burst of independent editor writes, then prove the final values; and
 - open the UI-shaped ordered subscription, edit one pad, and wait for its
-  public subscription event.
+  public subscription event; and
+- fan that one edit out to 1, 8, or 32 independently maintained pattern-grid
+  subscriptions.
 
 Fixture setup is outside measured closures. Correctness tests assert exact
 window ordering and convergence before CodSpeed measures the same APIs.

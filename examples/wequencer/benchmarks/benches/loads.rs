@@ -28,3 +28,8 @@ fn concurrent_edit_burst(bencher: divan::Bencher<'_, '_>, editors: usize) {
 fn subscribed_step_edit(bencher: divan::Bencher<'_, '_>) {
     bencher.bench_local(|| divan::black_box(Fixture::new().subscribed_step_edit()));
 }
+
+#[divan::bench(args = [1, 8, 32])]
+fn subscribed_step_fanout(bencher: divan::Bencher<'_, '_>, listeners: usize) {
+    bencher.bench_local(|| divan::black_box(Fixture::new().subscribed_step_fanout(listeners)));
+}
