@@ -346,6 +346,7 @@ impl AppliedBatch {
             },
             receipt: PersistenceReceipt {
                 lifecycle: Rc::clone(&self.lifecycle),
+                order: Rc::clone(&self.order),
                 abandoned_application: Rc::clone(&self.abandoned_application),
             },
         }
@@ -392,6 +393,7 @@ pub struct PersistedBatch {
 
 struct PersistenceReceipt {
     lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
+    order: Rc<RefCell<PersistenceOrder>>,
     abandoned_application: Rc<Cell<bool>>,
 }
 

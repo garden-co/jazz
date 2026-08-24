@@ -2484,3 +2484,54 @@ async fn same_batch_same_key_operations_emit_only_the_consolidated_final_delta()
         )]
     );
 }
+
+#[futures_test::test]
+async fn persistence_receipts_cannot_settle_another_database() {
+    let mut first = Database::new(albums_schema(), MemoryStorage::new(&["albums"]))
+        .await
+        .unwrap();
+    let mut second = Database::new(albums_schema(), MemoryStorage::new(&["albums"]))
+        .await
+        .unwrap();
+
+    let mut first_batch = first.open_batch();
+    first_batch.insert(
+        "albums",
+        vec![Value::U64(1), Value::String("first".to_owned())],
+    );
+    let first_applied = first.apply_batch(first_batch).await.unwrap();
+
+    let mut second_batch = second.open_batch();
+    second_batch.insert(
+        "albums",
+        vec![Value::U64(2), Value::String("second".to_owned())],
+    );
+    let second_applied = second.apply_batch(second_batch).await.unwrap();
+
+    let foreign_persistence = first_applied.persist().await;
+    assert!(matches!(
+        second.finish_persistence(foreign_persistence),
+        Err(Error::PublicationNotFound(PublicationId(1)))
+    ));
+    assert_eq!(first.durable_publication_frontier(), None);
+    assert_eq!(second.durable_publication_frontier(), None);
+
+    let second_persistence = second_applied.persist().await;
+    assert_eq!(
+        second.finish_persistence(second_persistence).unwrap(),
+        PublicationId(1)
+    );
+    assert_eq!(
+        second.durable_publication_frontier(),
+        Some(PublicationId(1))
+    );
+    assert_eq!(
+        second
+            .query_graph(GraphBuilder::table("albums"))
+            .await
+            .unwrap()
+            .to_values()
+            .unwrap(),
+        [(vec![Value::U64(2), Value::String("second".to_owned())], 1)]
+    );
+}
