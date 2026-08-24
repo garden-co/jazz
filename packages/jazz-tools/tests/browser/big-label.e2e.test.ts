@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createDb, generateAuthSecret, type Db } from "../../src/index.js";
+import { createDb, type Db } from "../../src/index.js";
 import {
   fetchPermissionsHead,
   publishStoredPermissions,
   publishStoredSchema,
 } from "../../src/runtime/schema-fetch.js";
 import { TestCleanup, uniqueDbName, waitForCondition } from "./support.js";
-import { getJazzServerInfo, getJazzServerJwtForUser } from "./testing-server.js";
+import {
+  bootstrapBigLabelOrganization,
+  getJazzServerInfo,
+  getJazzServerJwtForUser,
+} from "./testing-server.js";
 import { browserTopologyPhase } from "./topology-harness.js";
 
 const ctx = new TestCleanup();
@@ -20,7 +24,7 @@ describe("BigLabel browser edge/core topology", () => {
         import("../../../../examples/big-label/permissions.js").then((module) => module.default),
       ]),
     );
-    const { appId, serverUrl, adminSecret } = await browserTopologyPhase(
+    const { appId, serverUrl, adminSecret, backendSecret } = await browserTopologyPhase(
       "start BigLabel core",
       () => getJazzServerInfo(uniqueDbName("big-label-topology")),
     );
@@ -39,45 +43,62 @@ describe("BigLabel browser edge/core topology", () => {
         expectedParentBundleObjectId: head?.bundleObjectId ?? null,
       });
     });
-    // Backend provisioning still needs a concrete local identity so the
-    // browser worker can complete its authenticated transport bootstrap.
-    const core = await browserTopologyPhase("open authenticated provisioning edge", () =>
-      openDb({
-        appId,
-        serverUrl,
-        adminSecret,
-        secret: generateAuthSecret(),
-        label: "big-label-core",
-      }),
+    const org = await browserTopologyPhase(
+      "bootstrap BigLabel admin through backend authority",
+      () =>
+        bootstrapBigLabelOrganization(
+          { appId, serverUrl, adminSecret, backendSecret },
+          "admin",
+          "Admin",
+        ),
     );
-    const org = await core
-      .insert(app.organizations, { name: "Night Shift", slug: "night-shift" })
-      .wait({ tier: "edge" });
-    const adminPerson = core.insert(app.people, { userId: "admin", name: "Admin" }).value;
-    const editorPerson = core.insert(app.people, { userId: "editor", name: "Editor" }).value;
-    const adminMembership = core.insert(app.memberships, {
-      organizationId: org.id,
-      personId: adminPerson.id,
-      userId: "admin",
-      role: "admin",
-    }).value;
-    await core
-      .insert(app.memberships, {
-        organizationId: org.id,
-        personId: editorPerson.id,
-        userId: "editor",
-        role: "editor",
-      })
-      .wait({ tier: "edge" });
+    // A user legitimately provisions their own person record before an
+    // organization admin admits them to this label. This keeps the role grant
+    // on the same public policy path used by the app instead of making a test
+    // authority bypass.
+    await browserTopologyPhase("bootstrap BigLabel editor through backend authority", () =>
+      bootstrapBigLabelOrganization(
+        { appId, serverUrl, adminSecret, backendSecret },
+        "editor",
+        "Editor",
+      ),
+    );
     const [adminToken, editorToken] = await Promise.all([
       getJazzServerJwtForUser("admin", {}, appId),
       getJazzServerJwtForUser("editor", {}, appId),
     ]);
-    const writer = await openDb({
-      appId,
-      serverUrl,
-      jwtToken: adminToken,
-      label: "big-label-writer",
+    const writer = await browserTopologyPhase("open authenticated admin edge", () =>
+      openDb({
+        appId,
+        serverUrl,
+        jwtToken: adminToken,
+        label: "big-label-writer",
+      }),
+    );
+    const adminMembership = await browserTopologyPhase(
+      "read bootstrapped admin membership",
+      async () => {
+        const memberships = await writer.all(app.memberships.where({ organizationId: org.id }), {
+          tier: "edge",
+        });
+        expect(memberships).toHaveLength(1);
+        return memberships[0]!;
+      },
+    );
+    const editorPerson = await browserTopologyPhase("read bootstrapped editor person", async () => {
+      const people = await writer.all(app.people.where({ userId: "editor" }), { tier: "edge" });
+      expect(people).toHaveLength(1);
+      return people[0]!;
+    });
+    await browserTopologyPhase("admit editor through admin membership grant", async () => {
+      await writer
+        .insert(app.memberships, {
+          organizationId: org.id,
+          personId: editorPerson.id,
+          userId: "editor",
+          role: "editor",
+        })
+        .wait({ tier: "edge" });
     });
     const reader = await openDb({
       appId,

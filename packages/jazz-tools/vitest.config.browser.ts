@@ -96,6 +96,14 @@ export default defineConfig({
           console.info(`[jazz-browser-topology] ${status} ${label} (${elapsedMs}ms)`);
         },
         jazzServerInfo: async (_context, appId, schema) => jazzServerInfo(appId, schema),
+        bigLabelBootstrap: async (_context, info, userId, name) => {
+          process.env.NEXT_PUBLIC_JAZZ_APP_ID = info.appId;
+          process.env.NEXT_PUBLIC_JAZZ_SERVER_URL = info.serverUrl;
+          process.env.BACKEND_SECRET = info.backendSecret;
+          const { ensurePersonalOrganization } =
+            await import("../../examples/big-label/src/lib/bootstrap.js");
+          return ensurePersonalOrganization(userId, name);
+        },
         jazzServerBlockNetwork: async ({ context }, serverUrl) =>
           blockJazzServerNetwork(context, serverUrl),
         jazzServerUnblockNetwork: async ({ context }, serverUrl) =>

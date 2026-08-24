@@ -21,6 +21,11 @@ export interface JazzTopologyBrowserCommands {
   ): Promise<void>;
 }
 
+/** Browser command contract used only by the BigLabel topology receipt. */
+export interface BigLabelBrowserCommands {
+  bigLabelBootstrap(info: JazzServerInfo, userId: string, name: string): Promise<{ id: string }>;
+}
+
 function hasFunction(value: object, key: string): boolean {
   return key in value && typeof Reflect.get(value, key) === "function";
 }
@@ -40,6 +45,10 @@ function isJazzTopologyBrowserCommands(value: unknown): value is JazzTopologyBro
   return (
     typeof value === "object" && value !== null && hasFunction(value, "jazzBrowserTopologyLog")
   );
+}
+
+function isBigLabelBrowserCommands(value: unknown): value is BigLabelBrowserCommands {
+  return typeof value === "object" && value !== null && hasFunction(value, "bigLabelBootstrap");
 }
 
 /**
@@ -62,6 +71,15 @@ export function jazzServerBrowserCommands(): JazzServerBrowserCommands {
 export function jazzTopologyBrowserCommands(): JazzTopologyBrowserCommands {
   if (!isJazzTopologyBrowserCommands(commands)) {
     throw new Error("Browser test project is missing the jazzBrowserTopologyLog command.");
+  }
+  return commands;
+}
+
+export function bigLabelBrowserCommands(): BigLabelBrowserCommands {
+  if (!isBigLabelBrowserCommands(commands)) {
+    throw new Error(
+      "Browser test project is missing the BigLabel bootstrap command. Configure bigLabelBootstrap.",
+    );
   }
   return commands;
 }

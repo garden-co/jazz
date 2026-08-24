@@ -1,9 +1,10 @@
-import { jazzServerBrowserCommands } from "./browser-commands.js";
+import { bigLabelBrowserCommands, jazzServerBrowserCommands } from "./browser-commands.js";
 
 export interface JazzServerInfo {
   appId: string;
   serverUrl: string;
   adminSecret: string;
+  backendSecret: string;
 }
 
 export interface JazzServerNetworkDebugState {
@@ -13,6 +14,13 @@ export interface JazzServerNetworkDebugState {
   activePatterns: string[];
 }
 
+export function bootstrapBigLabelOrganization(
+  info: JazzServerInfo,
+  userId: string,
+  name: string,
+): Promise<{ id: string }> {
+  return bigLabelBrowserCommands().bigLabelBootstrap(info, userId, name);
+}
 export function getJazzServerInfo(appId?: string, schema?: Uint8Array): Promise<JazzServerInfo> {
   return jazzServerBrowserCommands().jazzServerInfo(appId, schema ? [...schema] : undefined);
 }

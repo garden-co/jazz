@@ -12,6 +12,7 @@ interface StartedJazzServer {
   appId: string;
   serverUrl: string;
   adminSecret: string;
+  backendSecret: string;
 }
 
 const DEFAULT_JAZZ_SERVER_KEY = "__default__";
@@ -49,6 +50,7 @@ async function startJazzServer(
     appId: server.appId,
     serverUrl: server.url,
     adminSecret: server.adminSecret,
+    backendSecret: server.backendSecret,
   };
 }
 
@@ -89,12 +91,14 @@ export async function jazzServerInfo(
   appId: string;
   serverUrl: string;
   adminSecret: string;
+  backendSecret: string;
 }> {
   const started = await getOrStartJazzServer(appId, schema);
   return {
     appId: started.appId,
     serverUrl: started.serverUrl,
     adminSecret: started.adminSecret,
+    backendSecret: started.backendSecret,
   };
 }
 

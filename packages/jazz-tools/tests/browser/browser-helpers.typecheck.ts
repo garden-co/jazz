@@ -1,5 +1,6 @@
 import {
   blockJazzServerNetwork,
+  bootstrapBigLabelOrganization,
   getJazzServerInfo,
   getJazzServerJwtForUser,
   unblockJazzServerNetwork,
@@ -10,4 +11,5 @@ void getJazzServerInfo;
 void getJazzServerJwtForUser;
 void blockJazzServerNetwork;
 void unblockJazzServerNetwork;
+void bootstrapBigLabelOrganization;
 void browserTopologyReporter;
