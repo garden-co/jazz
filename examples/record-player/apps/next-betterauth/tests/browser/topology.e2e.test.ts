@@ -437,6 +437,10 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 uniqueDbName("record-player-phase-recipient-persistent"),
               );
               await openClient(server, "phase-listener", listenerToken);
+              const mutationErrors: unknown[] = [];
+              const stopMutationErrors = owner.onMutationError((event) =>
+                mutationErrors.push(event),
+              );
               const playlistWrite = owner.insert(relationalRecipientApp.playlists, {
                 name: "phase relation receipt",
                 owner_subject: "record-player-phase-owner",
@@ -446,11 +450,17 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 5_000,
                 "relational playlist did not settle locally",
               );
-              const playlist = await withTimeout(
-                playlistWrite.wait({ tier: "edge" }),
-                10_000,
-                "relational playlist did not settle at edge",
-              );
+              let playlist: { id: string };
+              try {
+                playlist = await withTimeout(
+                  playlistWrite.wait({ tier: "edge" }),
+                  10_000,
+                  `relational playlist did not settle at edge: ${JSON.stringify(mutationErrors)}`,
+                );
+                expect(playlist).toEqual(playlistWrite.value);
+              } finally {
+                stopMutationErrors();
+              }
               const invite = await owner
                 .insert(relationalRecipientApp.invitations, {
                   playlist_id: playlist.id,
