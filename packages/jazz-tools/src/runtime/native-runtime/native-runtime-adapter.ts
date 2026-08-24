@@ -319,7 +319,7 @@ export type Transport = {
   setOutboundScheduler?(callback: () => void): void;
   clearOutboundScheduler?(): void;
   routeAuxiliaryWireFrame?(frame: Uint8Array): unknown | Promise<unknown>;
-  recvAuxiliaryWireFrames?(): unknown[];
+  recvAuxiliaryWireFrames?(maxFrames?: number, maxBytes?: number): unknown[];
   auxiliaryOutboundReady?(): boolean | Promise<void>;
   tick(): number | Promise<number>;
   updateAuthenticatedClaims?(claims: Record<string, unknown>): void | Promise<void>;
