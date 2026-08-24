@@ -8,8 +8,6 @@ export default definePermissions(app, ({ policy, session, anyOf, allOf, allowedT
     policy.canvasMembers.exists.where({ canvasId: canvas.id, userId: session.user_id, role });
   const canRead = (canvas: RowContext<Canvas>) =>
     policy.canvasMembers.exists.where({ canvasId: canvas.id, userId: session.user_id });
-  const canEdit = (canvas: RowContext<Canvas>) =>
-    anyOf([hasRole(canvas, "editor"), hasRole(canvas, "admin")]);
   const isAdmin = (canvas: RowContext<Canvas>) => hasRole(canvas, "admin");
 
   policy.canvases.allowRead.where((canvas) => canRead(canvas));
@@ -27,7 +25,7 @@ export default definePermissions(app, ({ policy, session, anyOf, allOf, allowedT
     ]),
   );
   policy.canvasMembers.allowUpdate.where(allowedTo.update("canvasId"));
-  policy.canvasMembers.allowDelete.where((member) =>
+  policy.canvasMembers.allowDelete.where(
     anyOf([allowedTo.update("canvasId"), { userId: session.user_id }]),
   );
   for (const table of [
