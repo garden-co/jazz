@@ -222,6 +222,7 @@ describe("BigLabel browser edge/core topology", () => {
       .limit(1)
       .include({ artist: true });
     const snapshots: string[][] = [];
+    let serverNetworkBlocked = false;
     await runTopologyScenario(
       {
         id: "big-label.admin-roster.reconnect-reopen-revocation",
@@ -234,6 +235,7 @@ describe("BigLabel browser edge/core topology", () => {
           "browser-edge": {
             async disconnect() {
               await blockJazzServerNetwork(serverUrl);
+              serverNetworkBlocked = true;
               // Route blocking applies only to future WebSocket connections.
               // Close the live reader connection so this phase exercises the
               // actual offline cache path rather than a still-open socket.
@@ -242,6 +244,7 @@ describe("BigLabel browser edge/core topology", () => {
             },
             async reconnect() {
               await unblockJazzServerNetwork(serverUrl);
+              serverNetworkBlocked = false;
               await reader.reconnect();
               await sleep(100);
             },
@@ -345,10 +348,15 @@ describe("BigLabel browser edge/core topology", () => {
               ]);
               await expect(reader.all(releasePipeline, { tier: "edge" })).resolves.toHaveLength(1);
             },
+            faultsAfter: [{ kind: "disconnect", target: "browser-edge" }],
           },
           {
-            name: "editor reopens persistent cache without refetching bounded app queries",
+            name: "editor reopens the same persistent cache while physically offline",
             async run() {
+              // Route blocking remains active across close/open, so the new Db
+              // cannot refill from edge. These local reads therefore prove the
+              // bounded roster and include were durably stored in this exact
+              // IndexedDB database by the preceding online subscription/read.
               ctx.untrack(reader);
               await reader.close();
               reader = await openDb({
@@ -372,6 +380,7 @@ describe("BigLabel browser edge/core topology", () => {
               ]);
               await expect(reader.all(releasePipeline, { tier: "local" })).resolves.toHaveLength(1);
             },
+            faultsAfter: [{ kind: "reconnect", target: "browser-edge" }],
           },
           {
             name: "unaffiliated external edge cannot read either tenant query shape",
@@ -438,6 +447,23 @@ describe("BigLabel browser edge/core topology", () => {
             },
           },
         ],
+        cleanup: async () => {
+          let unblockError: unknown;
+          if (serverNetworkBlocked) {
+            try {
+              await unblockJazzServerNetwork(serverUrl);
+              serverNetworkBlocked = false;
+            } catch (error) {
+              // Preserve this as a cleanup error after all Db resources have
+              // still been released. The harness retains an earlier scenario
+              // error and appends cleanup failure context rather than hiding it.
+              unblockError = error;
+            }
+          }
+          await ctx.cleanup();
+          if (unblockError) throw unblockError;
+        },
+        cleanupTimeoutMs: 10_000,
       },
       browserTopologyReporter,
     );
