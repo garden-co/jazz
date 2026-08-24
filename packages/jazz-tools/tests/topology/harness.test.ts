@@ -773,4 +773,58 @@ describe("shared example topology harness", () => {
     expect(abortObserved).toBe(true);
     expect(postTimeoutEffect).toBe(false);
   });
+
+  it("drains an abort-ignoring scenario cleanup before the next scenario", async () => {
+    let routeBlocked = true;
+    const calls: string[] = [];
+    let failure: unknown;
+    try {
+      await runTopologyScenario({
+        id: "harness.fixture.scenario-cleanup-timeout-drain",
+        topology: ["fixture"],
+        seed: 59,
+        phaseTimeoutMs: 50,
+        faultTimeoutMs: 50,
+        cleanupTimeoutMs: 5,
+        targets: {},
+        replay: "scenario-cleanup-timeout-drain-fixture",
+        phases: [],
+        cleanup: async () => {
+          await new Promise<void>((resolve) => {
+            setTimeout(() => {
+              calls.push("late scenario cleanup");
+              routeBlocked = false;
+              resolve();
+            }, 15);
+          });
+        },
+      });
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(TopologyScenarioError);
+    const receipt = (failure as TopologyScenarioError).receipt;
+    expect(receipt.cleanup).toMatchObject({
+      status: "failed",
+      error: "topology scenario cleanup timed out after 5ms",
+    });
+    expect(calls).toEqual(["late scenario cleanup"]);
+
+    const next = await runTopologyScenario({
+      id: "harness.fixture.scenario-cleanup-timeout-drain-next",
+      topology: ["fixture"],
+      seed: 60,
+      phaseTimeoutMs: 50,
+      faultTimeoutMs: 50,
+      targets: {},
+      replay: "scenario-cleanup-timeout-drain-next-fixture",
+      phases: [
+        {
+          name: "scenario cleanup cannot mutate next scenario",
+          run: async () => expect(routeBlocked).toBe(false),
+        },
+      ],
+    });
+    expect(next.status).toBe("passed");
+  });
 });
