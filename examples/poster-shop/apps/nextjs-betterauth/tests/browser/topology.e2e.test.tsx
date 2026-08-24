@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createDb, type Db } from "jazz-tools";
+import { createDb, type Db } from "../../../../../../packages/jazz-tools/src/runtime/db.js";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
   TestCleanup,
@@ -18,6 +18,8 @@ import permissions from "../../permissions.js";
 import { app } from "../../schema.js";
 import { posterShopScenario } from "../../src/scenario.js";
 
+declare const __JAZZ_EXAMPLE_TOPOLOGY_SEED__: string;
+
 const ctx = new TestCleanup();
 afterEach(async () => ctx.cleanup());
 
@@ -26,10 +28,13 @@ afterEach(async () => ctx.cleanup());
 describe("PosterShop cross-topology recovery", () => {
   it("converges ordered canvas edits, presence and a local replay while enforcing revocation", async () => {
     const workload = posterShopScenario;
-    const seed = Number(process.env.JAZZ_EXAMPLE_TOPOLOGY_SEED ?? 47);
+    const requestedSeed = Number(__JAZZ_EXAMPLE_TOPOLOGY_SEED__);
+    const seed = Number.isSafeInteger(requestedSeed) ? requestedSeed : 47;
     let server: Awaited<ReturnType<typeof getJazzServerInfo>>;
     let owner: Db;
     let editor: Db;
+    let ownerToken: string;
+    let ownerDbName: string;
     let canvas: { id: string };
     let layer: { id: string };
     let ownerShape: { id: string };
@@ -40,7 +45,7 @@ describe("PosterShop cross-topology recovery", () => {
       {
         id: workload.id,
         topology: ["browser", "edge", "core"],
-        seed: Number.isSafeInteger(seed) ? seed : 47,
+        seed,
         phaseTimeoutMs: 25_000,
         faultTimeoutMs: 15_000,
         replay: `JAZZ_EXAMPLE_TOPOLOGY_SEED=${seed} pnpm --dir examples/poster-shop/apps/nextjs-betterauth test:browser -- tests/browser/topology.e2e.test.tsx`,
@@ -48,6 +53,11 @@ describe("PosterShop cross-topology recovery", () => {
           owner: {
             disconnect: async () => owner.disconnect(),
             reconnect: async () => owner.reconnect(),
+            restart: async () => {
+              await owner.shutdown();
+              ctx.untrack(owner);
+              owner = await openClient(server, "owner", ownerToken, ownerDbName);
+            },
           },
           authorization: {
             failure: async () => {
@@ -75,11 +85,13 @@ describe("PosterShop cross-topology recovery", () => {
                 schema: app,
                 permissions,
               });
-              const [ownerToken, editorToken] = await Promise.all([
+              const [issuedOwnerToken, editorToken] = await Promise.all([
                 getJazzServerJwtForUser("poster-owner", undefined, server.appId),
                 getJazzServerJwtForUser("poster-editor", undefined, server.appId),
               ]);
-              owner = await openClient(server, "owner", ownerToken);
+              ownerToken = issuedOwnerToken;
+              ownerDbName = uniqueDbName("poster-shop-owner");
+              owner = await openClient(server, "owner", ownerToken, ownerDbName);
               editor = await openClient(server, "editor", editorToken);
               canvas = await owner
                 .insert(app.canvases, { title: "Midnight", width: 1080, height: 1350 })
@@ -108,7 +120,7 @@ describe("PosterShop cross-topology recovery", () => {
                 .wait({ tier: "edge" });
               await waitForQuery(
                 editor,
-                app.layers.where({ canvasId: canvas.id }),
+                canvasQueries(canvas.id).layers,
                 (rows) => rows.length === 1,
                 "editor receives canvas",
                 15_000,
@@ -135,6 +147,23 @@ describe("PosterShop cross-topology recovery", () => {
                   color: "#f50",
                 })
                 .wait({ tier: "edge" });
+              await editor
+                .insert(app.cursors, {
+                  canvasId: canvas.id,
+                  userId: "poster-editor",
+                  x: 17,
+                  y: 19,
+                  color: "#58f",
+                })
+                .wait({ tier: "edge" });
+              await owner
+                .insert(app.assets, {
+                  canvasId: canvas.id,
+                  name: "headline.svg",
+                  mimeType: "image/svg+xml",
+                  byteLength: 512,
+                })
+                .wait({ tier: "edge" });
               await owner
                 .insert(app.checkpoints, { canvasId: canvas.id, label: "Approved", branch: "main" })
                 .wait({ tier: "edge" });
@@ -148,17 +177,39 @@ describe("PosterShop cross-topology recovery", () => {
                 .insert(app.shapes, shape(canvas.id, layer.id, 2))
                 .wait({ tier: "local" });
               expect(
-                (await owner.all(app.shapes.where({ canvasId: canvas.id }))).map((row) => row.id),
+                (await owner.all(canvasQueries(canvas.id).shapes, { tier: "local" })).map(
+                  (row) => row.id,
+                ),
               ).toContain(offlineShape.id);
             },
-            faultsAfter: [{ kind: "reconnect", target: "owner" }],
+            faultsAfter: [
+              { kind: "reconnect", target: "owner" },
+              { kind: "restart", target: "owner" },
+            ],
           },
           {
-            name: "peer convergence and revocation",
+            name: "persistent reopen and peer convergence",
             run: async () => {
+              // These are the same parent-scoped, ordered reads used by the
+              // rendered PosterShop components. Keeping the queries literal
+              // here makes this a regression receipt for the app, not a
+              // generic table-sync smoke test.
+              const queries = canvasQueries(canvas.id);
+              const reopened = await waitForQuery(
+                owner,
+                queries.shapes,
+                (rows) => rows.some((row) => row.id === offlineShape.id),
+                "persistent owner reopen retains offline shape",
+                20_000,
+                "edge",
+              );
+              expect(reopened.map((row) => [row.id, row.zIndex])).toContainEqual([
+                offlineShape.id,
+                2,
+              ]);
               const shapes = await waitForQuery(
                 editor,
-                app.shapes.where({ canvasId: canvas.id }).orderBy("zIndex", "asc"),
+                queries.shapes,
                 (rows) => rows.length === 3,
                 "editor receives replay",
                 20_000,
@@ -170,15 +221,29 @@ describe("PosterShop cross-topology recovery", () => {
                 [offlineShape.id, 2],
               ]);
               expect(
-                (
-                  await editor.all(app.cursors.where({ canvasId: canvas.id }), { tier: "edge" })
-                ).map((row) => row.userId),
-              ).toEqual(["poster-owner"]);
+                (await editor.all(queries.cursors, { tier: "edge" })).map((row) => [
+                  row.userId,
+                  row.x,
+                  row.y,
+                ]),
+              ).toEqual([
+                ["poster-editor", 17, 19],
+                ["poster-owner", 5, 6],
+              ]);
               expect(
-                (
-                  await editor.all(app.checkpoints.where({ canvasId: canvas.id }), { tier: "edge" })
-                ).map((row) => row.label),
+                (await editor.all(queries.assets, { tier: "edge" })).map((row) => row.name),
+              ).toEqual(["headline.svg"]);
+              expect(
+                (await editor.all(queries.checkpoints, { tier: "edge" })).map((row) => row.label),
               ).toEqual(["Approved"]);
+              expect(
+                (await editor.all(queries.layers, { tier: "edge" })).map((row) => row.name),
+              ).toEqual(["Artwork"]);
+            },
+          },
+          {
+            name: "revocation blocks a former editor",
+            run: async () => {
               await owner.delete(app.canvasMembers, editorMembership.id).wait({ tier: "edge" });
               await expect(
                 editor.insert(app.shapes, shape(canvas.id, layer.id, 3)).wait({ tier: "edge" }),
@@ -196,6 +261,7 @@ describe("PosterShop cross-topology recovery", () => {
       ["failure", "completed"],
       ["disconnect", "completed"],
       ["reconnect", "completed"],
+      ["restart", "completed"],
     ]);
   }, 75_000);
 });
@@ -214,17 +280,29 @@ function shape(canvasId: string, layerId: string, zIndex: number) {
     fill: "#ff5a36",
   };
 }
+
+function canvasQueries(canvasId: string) {
+  return {
+    layers: app.layers.where({ canvasId }).orderBy("zIndex", "asc"),
+    shapes: app.shapes.where({ canvasId }).orderBy("zIndex", "asc"),
+    assets: app.assets.where({ canvasId }).orderBy("name", "asc"),
+    cursors: app.cursors.where({ canvasId }).orderBy("userId", "asc"),
+    checkpoints: app.checkpoints.where({ canvasId }).orderBy("label", "asc"),
+  };
+}
+
 async function openClient(
   server: { appId: string; serverUrl: string },
   label: string,
   jwtToken: string,
+  dbName = uniqueDbName(`poster-shop-${label}`),
 ): Promise<Db> {
   return ctx.track(
     await createDb({
       appId: server.appId,
       serverUrl: server.serverUrl,
       jwtToken,
-      driver: { type: "persistent", dbName: uniqueDbName(`poster-shop-${label}`) },
+      driver: { type: "persistent", dbName },
     }),
   );
 }

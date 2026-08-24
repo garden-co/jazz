@@ -13,9 +13,10 @@ export const posterShopScenario = {
     "publish-cursors",
     "save-checkpoint",
     "offline-replay",
+    "persistent-reopen",
     "revoke-editor",
   ],
   queries: ["canvas-layers", "ordered-shapes", "asset-metadata", "cursor-fanout", "checkpoints"],
-  faults: ["authorization", "disconnect", "reconnect"],
+  faults: ["authorization", "disconnect", "reconnect", "restart"],
   soak: { editors: 8, transformsPerEditor: 40, cursorHz: 20, rounds: 3 },
 } as const;

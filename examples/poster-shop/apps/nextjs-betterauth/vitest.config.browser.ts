@@ -9,6 +9,9 @@ import {
 } from "../../../../packages/jazz-tools/tests/browser/testing-server-node.js";
 
 export default defineConfig({
+  define: {
+    __JAZZ_EXAMPLE_TOPOLOGY_SEED__: JSON.stringify(process.env.JAZZ_EXAMPLE_TOPOLOGY_SEED ?? "47"),
+  },
   plugins: [wasm(), topLevelAwait(), react()],
   worker: { plugins: () => [wasm(), topLevelAwait()] },
   test: {
@@ -22,6 +25,9 @@ export default defineConfig({
         jazzServerInfo: async (_context, appId, schema) => jazzServerInfo(appId, schema),
         jazzServerJwtForUser: async (_context, userId, claims, appId) =>
           jazzServerJwtForUser(userId, claims, appId),
+        jazzBrowserTopologyLog: async (_context, status, label, elapsedMs) => {
+          console.info(`[jazz-browser-topology] ${status} ${label} (${elapsedMs}ms)`);
+        },
       },
     },
     testTimeout: 30_000,
