@@ -430,12 +430,20 @@ describe("RecordPlayer authenticated playlist topology", () => {
               ]);
               const owner = await openClient(server, "phase-owner", ownerToken);
               const recipient = await openClient(server, "phase-recipient", recipientToken);
-              const playlist = await owner
-                .insert(relationalRecipientApp.playlists, {
-                  name: "phase relation receipt",
-                  owner_subject: "record-player-phase-owner",
-                })
-                .wait({ tier: "edge" });
+              const playlistWrite = owner.insert(relationalRecipientApp.playlists, {
+                name: "phase relation receipt",
+                owner_subject: "record-player-phase-owner",
+              });
+              await withTimeout(
+                playlistWrite.wait({ tier: "local" }),
+                5_000,
+                "relational playlist did not settle locally",
+              );
+              const playlist = await withTimeout(
+                playlistWrite.wait({ tier: "edge" }),
+                10_000,
+                "relational playlist did not settle at edge",
+              );
               const invite = await owner
                 .insert(relationalRecipientApp.invitations, {
                   playlist_id: playlist.id,
