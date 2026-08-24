@@ -64,7 +64,9 @@ jobs:
           merge-multiple: true
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
       - name: Require exact partition receipts and folded M3 coverage
-        run: node dev/gates/rust-shadow-matrix.mjs aggregate rust-shadow-receipts 2 rust-shadow-receipts/aggregate.json
+        # This catches accidental checkout/worktree drift across runners. It is
+        # not intended to attest against a malicious artifact producer.
+        run: node dev/gates/rust-shadow-matrix.mjs aggregate rust-shadow-receipts 2 rust-shadow-receipts/aggregate.json "${{ github.sha }}"
       - name: Upload shadow aggregate receipt
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

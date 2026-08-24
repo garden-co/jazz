@@ -605,7 +605,7 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
   );
   assert.match(
     rustShadowWorkflow,
-    /node dev\/gates\/rust-shadow-matrix\.mjs aggregate rust-shadow-receipts 2/,
+    /node dev\/gates\/rust-shadow-matrix\.mjs aggregate rust-shadow-receipts 2 rust-shadow-receipts\/aggregate\.json "\$\{\{ github\.sha \}\}"/,
   );
   assert.match(rustShadowWorkflow, /merge-multiple: true/);
   assert.match(rustShadowLauncher, /--require-nextest/);
@@ -616,6 +616,8 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
   assert.match(rustShadowLauncher, /test belongs to more than one shard/);
   assert.match(rustShadowLauncher, /hash shards do not cover the exact executable inventory/);
   assert.match(rustShadowLauncher, /sourceIdentity\(root\)/);
+  assert.match(rustShadowLauncher, /shards disagree on the checked-out source identity/);
+  assert.match(rustShadowLauncher, /workflow event commit/);
   assert.match(
     rustShadowLauncher,
     /partition test receipt command does not match the exact shard selector/,
@@ -641,14 +643,16 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
     untracked: "d".repeat(64),
     dirty: false,
   };
-  source.fingerprint = crypto
-    .createHash("sha256")
-    .update(
-      ["headTree", "indexTree", "unstaged", "untracked"]
-        .map((field) => `${field}\0${source[field]}\0`)
-        .join(""),
-    )
-    .digest("hex");
+  const sourceFingerprint = (value) =>
+    crypto
+      .createHash("sha256")
+      .update(
+        ["headTree", "indexTree", "unstaged", "untracked"]
+          .map((field) => `${field}\0${value[field]}\0`)
+          .join(""),
+      )
+      .digest("hex");
+  source.fingerprint = sourceFingerprint(source);
   const expectedCommand = (index) => [
     "cargo",
     "nextest",
@@ -694,7 +698,14 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
       fs.writeFileSync(path.join(directory, `shard-${index + 1}.json`), JSON.stringify(receipt));
     const result = spawnSync(
       "node",
-      [rustShadowLauncherPath, "aggregate", directory, "2", path.join(directory, "aggregate.json")],
+      [
+        rustShadowLauncherPath,
+        "aggregate",
+        directory,
+        "2",
+        path.join(directory, "aggregate.json"),
+        source.commit,
+      ],
       { encoding: "utf8" },
     );
     fs.rmSync(directory, { recursive: true, force: true });
@@ -730,6 +741,23 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
       /exact shard selector/,
     ],
     ["test arguments", (shards) => shards[0].testArgs.pop(), /test arguments/],
+    [
+      "cross-shard source identity",
+      (shards) => {
+        shards[1].source.untracked = "e".repeat(64);
+        shards[1].source.fingerprint = sourceFingerprint(shards[1].source);
+        shards[1].testReceipt.source = structuredClone(shards[1].source);
+      },
+      /shards disagree on the checked-out source identity/,
+    ],
+    [
+      "workflow event commit",
+      (shards) => {
+        shards[0].source.commit = "f".repeat(40);
+        shards[0].testReceipt.source = structuredClone(shards[0].source);
+      },
+      /workflow event commit/,
+    ],
   ]) {
     const result = runAggregate(mutate);
     assert.notEqual(result.status, 0, `planted ${name} mismatch must fail`);

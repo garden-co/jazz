@@ -217,8 +217,15 @@ function aggregate(argv) {
   const directory = argv[0];
   const count = Number(argv[1]);
   const receipt = argv[2];
-  if (!directory || !Number.isInteger(count) || count < 1 || !receipt)
-    fail("usage: aggregate DIRECTORY COUNT RECEIPT");
+  const expectedCommit = argv[3];
+  if (
+    !directory ||
+    !Number.isInteger(count) ||
+    count < 1 ||
+    !receipt ||
+    !/^[0-9a-f]{40}$/.test(expectedCommit)
+  )
+    fail("usage: aggregate DIRECTORY COUNT RECEIPT EXPECTED_COMMIT");
   const files = fs
     .readdirSync(directory, { recursive: true })
     .filter((file) => file.endsWith(".json") && !file.endsWith(".test.json"));
@@ -241,6 +248,7 @@ function aggregate(argv) {
     ...testArgs,
   ];
   const sourceFields = ["commit", "headTree", "indexTree", "unstaged", "untracked", "fingerprint"];
+  let source;
   for (const shardReceipt of shards) {
     if (shardReceipt?.kind !== "rust-shadow-shard-receipt" || shardReceipt.status !== "passed")
       fail("shard receipt is missing or failed");
@@ -288,6 +296,13 @@ function aggregate(argv) {
         fail(`partition test receipt source ${field} does not match its inventory receipt`);
     if (!validSourceIdentity(shardReceipt.source) || !validSourceIdentity(ran.source))
       fail("partition receipts must contain a clean checked-out source fingerprint");
+    if (shardReceipt.source.commit !== expectedCommit)
+      fail("shard source commit does not match the workflow event commit");
+    if (source === undefined) source = shardReceipt.source;
+    else if (sourceFields.some((field) => shardReceipt.source[field] !== source[field]))
+      // This detects accidental checkout or worktree drift between matrix
+      // runners; it is measurement integrity, not an adversarial attestation.
+      fail("shards disagree on the checked-out source identity");
     if (ran.environment?.rustMinStack !== String(4 * 1024 * 1024))
       fail("partition test receipt did not preserve the 4 MiB Rust stack");
   }
