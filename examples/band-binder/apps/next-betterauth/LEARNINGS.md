@@ -16,7 +16,15 @@
   rejected-write rollback and absence at the owner, not impossible remote
   deletion of a former member's local knowledge.
 - The correlated membership receipt depends on the core carrying outer join
-  inputs through maintained policy relations. This branch includes that fix and
-  keeps the authority-level test as a regression receipt.
+  inputs through maintained policy relations. The strict policy and its exact
+  authority receipts are preserved here, but remain expected failures until the
+  core carrier repair is in this branch's stack; BandBinder must not be treated
+  as securely runnable before that restack.
 - Large rich text and large attachment streaming remain tracked by #1833,
   #1839, and #1844. Small attachment bytes are represented directly today.
+- The Rust root-query builder accepts `$createdAt` in `select(...)`, but a
+  filtered root query ordered by it currently fails capability lowering because
+  the provenance key is absent from the root projection. Both the TS live query
+  and native benchmark preserve the intended `$createdAt` ordering; the native
+  receipt remains an expected failure until the provenance projection repair is
+  in this branch's stack.

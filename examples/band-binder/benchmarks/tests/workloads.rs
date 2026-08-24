@@ -5,5 +5,12 @@ fn ordered_siblings_and_one_recursive_step_are_bounded() {
     let fixture = Fixture::new(128);
     assert_eq!(fixture.sibling_window_count(), 16);
     assert_eq!(fixture.child_page_count(), 16);
-    assert_eq!(fixture.surface_window_counts(), [12, 12, 12, 12, 12]);
+    assert_eq!(fixture.surface_window_counts(), [12, 12, 12, 12]);
+}
+
+// Remove should_panic when the root provenance ordering fix is in this stack.
+#[test]
+#[should_panic(expected = "root window key Provenance")]
+fn live_suggestion_window_orders_by_created_at() {
+    Fixture::new(128).suggestion_window_count();
 }
