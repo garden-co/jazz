@@ -29,7 +29,6 @@ import {
   createBrowserWorkerFingerprint,
 } from "./browser-worker-config.js";
 import { getRuntimeSchemaCacheKey } from "../drivers/schema-wire.js";
-import { bundledWasmUrl } from "jazz-wasm/wasm-url.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
@@ -85,7 +84,12 @@ function browserWorkerRuntimeSources(config: DbConfig): DbConfig["runtimeSources
   if (sources?.wasmModule || sources?.wasmSource || sources?.wasmUrl || sources?.baseUrl) {
     return sources;
   }
-  return { ...sources, wasmUrl: bundledWasmUrl };
+  // The bundled SharedWorker contains wasm-bindgen glue and ships its matching
+  // binary beside that glue. Let wasm-bindgen resolve that worker-local pair.
+  // Passing the page bundle's `jazz-wasm` URL here can cross versions during a
+  // rebuild or cache transition, leaving a new binary to instantiate against
+  // old worker glue.
+  return sources;
 }
 
 export class DefaultRuntimeSource extends RuntimeSource<DbConfig> {
