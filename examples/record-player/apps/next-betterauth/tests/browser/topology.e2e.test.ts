@@ -53,7 +53,9 @@ describe("RecordPlayer authenticated playlist topology", () => {
           {
             name: "publish authority and admit independent sessions",
             run: async () => {
+              console.info("[record-player-topology] start server");
               server = await getJazzServerInfo(uniqueDbName("record-player-topology"));
+              console.info("[record-player-topology] deploy authority");
               await deploy({
                 appId: server.appId,
                 serverUrl: server.serverUrl,
@@ -61,14 +63,19 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 schema: app,
                 permissions,
               });
+              console.info("[record-player-topology] issue session JWTs");
               const [ownerToken, editorToken, listenerToken] = await Promise.all([
                 getJazzServerJwtForUser("record-player-owner", undefined, server.appId),
                 getJazzServerJwtForUser("record-player-editor", undefined, server.appId),
                 getJazzServerJwtForUser("record-player-listener", undefined, server.appId),
               ]);
+              console.info("[record-player-topology] open owner edge");
               owner = await openClient(server, "owner", ownerToken);
+              console.info("[record-player-topology] open editor edge");
               editor = await openClient(server, "editor", editorToken);
+              console.info("[record-player-topology] open listener edge");
               listener = await openClient(server, "listener", listenerToken);
+              console.info("[record-player-topology] create playlist");
               playlist = (
                 await owner
                   .insert(app.playlists, {

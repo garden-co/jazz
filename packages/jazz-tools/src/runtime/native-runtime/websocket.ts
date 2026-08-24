@@ -242,8 +242,22 @@ export class WebSocketCarrier {
             this.close();
             return;
           }
+          this.rejectNegotiation(
+            new Error(
+              `websocket received ${error.code}/${error.retry} before server hello: ${error.message}`,
+            ),
+          );
+          this.close();
+          return;
         }
-        this.rejectNegotiation(new Error("websocket received semantic frame before server hello"));
+        // Keep the protocol guard strict, but preserve the postcard discriminant
+        // in diagnostics. A real peer must send Hello first; knowing the first
+        // unexpected tag makes a browser/server ordering failure actionable.
+        this.rejectNegotiation(
+          new Error(
+            `websocket received semantic frame before server hello (wire tag=${frame[0] ?? "empty"})`,
+          ),
+        );
         this.close();
         return;
       }

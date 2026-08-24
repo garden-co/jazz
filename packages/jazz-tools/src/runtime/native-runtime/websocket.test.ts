@@ -433,7 +433,9 @@ describe("websocket frame carrier", () => {
       encodeWebSocketFrameBatch([encodeWireError(5, 3, "conflicting commit unit")]),
     );
 
-    await expect(carrier.ready()).rejects.toThrow("semantic frame before server hello");
+    await expect(carrier.ready()).rejects.toThrow(
+      "websocket received internal/later before server hello: conflicting commit unit",
+    );
     expect(errors).toEqual([]);
     expect(socket!.closed).toBe(true);
   });
