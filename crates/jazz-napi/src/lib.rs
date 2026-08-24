@@ -36,13 +36,15 @@ use serde_json::Value as JsonValue;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Mutex;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use futures::future::LocalBoxFuture;
 use futures::lock::Mutex as LocalMutex;
 use jazz::db::StreamingMutationKind as CoreStreamingMutationKind;
 use jazz::db::{
@@ -215,6 +217,61 @@ pub struct Transport {
     auxiliary_pump: jazz::db::PeerIoPump,
     protocol_version: u16,
     features: u64,
+}
+
+/// A JS-thread-owned read that suspended on async storage or a peer chunk.
+///
+/// napi-rs promises run on a Send Tokio executor, while Jazz's database is
+/// deliberately `Rc`/thread-affine.  This small pull object keeps the local
+/// future alive across JS turns without ever blocking the Node event loop.
+#[napi]
+pub struct PendingNativeRead {
+    future: Rc<RefCell<Option<LocalBoxFuture<'static, napi::Result<Uint8Array>>>>>,
+}
+
+impl PendingNativeRead {
+    fn new(future: LocalBoxFuture<'static, napi::Result<Uint8Array>>) -> Self {
+        Self {
+            future: Rc::new(RefCell::new(Some(future))),
+        }
+    }
+
+    fn poll_once(&self) -> napi::Result<Option<Uint8Array>> {
+        let Some(mut future) = self.future.borrow_mut().take() else {
+            return Err(napi::Error::from_reason(
+                "native pending read is already complete",
+            ));
+        };
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        match Pin::new(&mut future).poll(&mut context) {
+            Poll::Ready(result) => result.map(Some),
+            Poll::Pending => {
+                *self.future.borrow_mut() = Some(future);
+                Ok(None)
+            }
+        }
+    }
+}
+
+#[napi]
+impl PendingNativeRead {
+    /// Advance this read once. `null` means its concrete storage/peer wake has
+    /// not fired yet; callers must await transport work before asking again.
+    #[napi]
+    pub fn poll(&self) -> napi::Result<Option<Uint8Array>> {
+        self.poll_once()
+    }
+}
+
+fn native_read_or_pending(
+    future: LocalBoxFuture<'static, napi::Result<Uint8Array>>,
+) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
+    let pending = PendingNativeRead::new(future);
+    match pending.poll_once()? {
+        Some(bytes) => Ok(Either::A(bytes)),
+        None => Ok(Either::B(pending)),
+    }
 }
 
 #[napi(js_name = "Subscription")]
@@ -1528,20 +1585,39 @@ impl NapiDb {
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
-    ) -> napi::Result<Uint8Array> {
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
         let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let rows = match db {
-            NapiDbInnerStorage::Memory(db) => core_block_on(db.all(&query.inner, opts)),
-            NapiDbInnerStorage::Persistent(db) => core_block_on(db.all(&query.inner, opts)),
+        let query = query.inner.clone();
+        match db {
+            NapiDbInnerStorage::Memory(db) => {
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    let rows = db
+                        .all(&query, opts)
+                        .await
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }))
+            }
+            NapiDbInnerStorage::Persistent(db) => {
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    let rows = db
+                        .all(&query, opts)
+                        .await
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }))
+            }
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        encode_core_rows(&rows)
-            .map(Uint8Array::new)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     /// Read through an open transaction using the identity bound at begin.
@@ -1554,7 +1630,7 @@ impl NapiDb {
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
-    ) -> napi::Result<Uint8Array> {
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
         let db = self.inner.borrow();
         let db = db
             .as_ref()
@@ -1566,28 +1642,61 @@ impl NapiDb {
         }
         let opts = core_read_opts_from_json(opts)?;
         let open_tx = tx.open_tx()?;
-        let rows = match (db, tx.kind) {
-            (NapiDbInnerStorage::Memory(db), NapiTxKind::Mergeable) => core_block_on(
-                db.mergeable_tx_ref(open_tx)
-                    .all_prepared_with_opts(&query.inner, opts),
-            ),
-            (NapiDbInnerStorage::Persistent(db), NapiTxKind::Mergeable) => core_block_on(
-                db.mergeable_tx_ref(open_tx)
-                    .all_prepared_with_opts(&query.inner, opts),
-            ),
-            (NapiDbInnerStorage::Memory(db), NapiTxKind::Exclusive) => core_block_on(
-                db.exclusive_tx_ref(open_tx)
-                    .all_prepared_with_opts(&query.inner, opts),
-            ),
-            (NapiDbInnerStorage::Persistent(db), NapiTxKind::Exclusive) => core_block_on(
-                db.exclusive_tx_ref(open_tx)
-                    .all_prepared_with_opts(&query.inner, opts),
-            ),
+        let query = query.inner.clone();
+        match (db, tx.kind) {
+            (NapiDbInnerStorage::Memory(db), NapiTxKind::Mergeable) => {
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    let rows = db
+                        .mergeable_tx_ref(open_tx)
+                        .all_prepared_with_opts(&query, opts)
+                        .await
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }))
+            }
+            (NapiDbInnerStorage::Persistent(db), NapiTxKind::Mergeable) => {
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    let rows = db
+                        .mergeable_tx_ref(open_tx)
+                        .all_prepared_with_opts(&query, opts)
+                        .await
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }))
+            }
+            (NapiDbInnerStorage::Memory(db), NapiTxKind::Exclusive) => {
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    let rows = db
+                        .exclusive_tx_ref(open_tx)
+                        .all_prepared_with_opts(&query, opts)
+                        .await
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }))
+            }
+            (NapiDbInnerStorage::Persistent(db), NapiTxKind::Exclusive) => {
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    let rows = db
+                        .exclusive_tx_ref(open_tx)
+                        .all_prepared_with_opts(&query, opts)
+                        .await
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }))
+            }
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        encode_core_rows(&rows)
-            .map(Uint8Array::new)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     #[napi(js_name = "setIdentityClaims")]
@@ -1620,25 +1729,40 @@ impl NapiDb {
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
-    ) -> napi::Result<Uint8Array> {
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
         let author = core_author_id_from_bytes(&author)?;
         let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let rows = match db {
+        let query = query.inner.clone();
+        match db {
             NapiDbInnerStorage::Memory(db) => {
-                core_block_on(db.all_for_identity(&query.inner, opts, author))
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    let rows = db
+                        .all_for_identity(&query, opts, author)
+                        .await
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }))
             }
             NapiDbInnerStorage::Persistent(db) => {
-                core_block_on(db.all_for_identity(&query.inner, opts, author))
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    let rows = db
+                        .all_for_identity(&query, opts, author)
+                        .await
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    encode_core_rows(&rows)
+                        .map(Uint8Array::new)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }))
             }
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        encode_core_rows(&rows)
-            .map(Uint8Array::new)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     #[napi(js_name = "allRelationSnapshot")]
@@ -1649,33 +1773,45 @@ impl NapiDb {
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
-    ) -> napi::Result<Uint8Array> {
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
         let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let mut snapshot = match db {
-            NapiDbInnerStorage::Memory(db) => {
-                core_block_on(db.all_relation_snapshot(&query.inner, opts))
-            }
-            NapiDbInnerStorage::Persistent(db) => {
-                core_block_on(db.all_relation_snapshot(&query.inner, opts))
-            }
-        }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let query = query.inner.clone();
         match db {
             NapiDbInnerStorage::Memory(db) => {
-                core_block_on(db.hydrate_relation_snapshot_for_binding(&mut snapshot))
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    let mut snapshot = db
+                        .all_relation_snapshot(&query, opts)
+                        .await
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    db.hydrate_relation_snapshot_for_binding(&mut snapshot)
+                        .await
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    encode_core_relation_snapshot(&snapshot)
+                        .map(Uint8Array::new)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }))
             }
             NapiDbInnerStorage::Persistent(db) => {
-                core_block_on(db.hydrate_relation_snapshot_for_binding(&mut snapshot))
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    let mut snapshot = db
+                        .all_relation_snapshot(&query, opts)
+                        .await
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    db.hydrate_relation_snapshot_for_binding(&mut snapshot)
+                        .await
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    encode_core_relation_snapshot(&snapshot)
+                        .map(Uint8Array::new)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }))
             }
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        encode_core_relation_snapshot(&snapshot)
-            .map(Uint8Array::new)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     #[napi(js_name = "allRelationSnapshotForIdentity")]
@@ -1687,34 +1823,46 @@ impl NapiDb {
             ts_arg_type = "{ tier?: string; local_updates?: string; propagation?: string; include_deleted?: boolean } | undefined | null"
         )]
         opts: Option<JsonValue>,
-    ) -> napi::Result<Uint8Array> {
+    ) -> napi::Result<Either<Uint8Array, PendingNativeRead>> {
         let author = core_author_id_from_bytes(&author)?;
         let opts = core_read_opts_from_json(opts)?;
         let db = self.inner.borrow();
         let db = db
             .as_ref()
             .ok_or_else(|| napi::Error::from_reason("database is closed"))?;
-        let mut snapshot = match db {
-            NapiDbInnerStorage::Memory(db) => {
-                core_block_on(db.all_relation_snapshot_for_identity(&query.inner, opts, author))
-            }
-            NapiDbInnerStorage::Persistent(db) => {
-                core_block_on(db.all_relation_snapshot_for_identity(&query.inner, opts, author))
-            }
-        }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+        let query = query.inner.clone();
         match db {
             NapiDbInnerStorage::Memory(db) => {
-                core_block_on(db.hydrate_relation_snapshot_for_binding(&mut snapshot))
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    let mut snapshot = db
+                        .all_relation_snapshot_for_identity(&query, opts, author)
+                        .await
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    db.hydrate_relation_snapshot_for_binding(&mut snapshot)
+                        .await
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    encode_core_relation_snapshot(&snapshot)
+                        .map(Uint8Array::new)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }))
             }
             NapiDbInnerStorage::Persistent(db) => {
-                core_block_on(db.hydrate_relation_snapshot_for_binding(&mut snapshot))
+                let db = Rc::clone(db);
+                native_read_or_pending(Box::pin(async move {
+                    let mut snapshot = db
+                        .all_relation_snapshot_for_identity(&query, opts, author)
+                        .await
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    db.hydrate_relation_snapshot_for_binding(&mut snapshot)
+                        .await
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
+                    encode_core_relation_snapshot(&snapshot)
+                        .map(Uint8Array::new)
+                        .map_err(|error| napi::Error::from_reason(error.to_string()))
+                }))
             }
         }
-        .map_err(|error| napi::Error::from_reason(error.to_string()))?;
-        encode_core_relation_snapshot(&snapshot)
-            .map(Uint8Array::new)
-            .map_err(|error| napi::Error::from_reason(error.to_string()))
     }
 
     #[napi(js_name = "allRelationQuery")]

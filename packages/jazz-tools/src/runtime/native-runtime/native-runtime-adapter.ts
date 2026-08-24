@@ -84,6 +84,16 @@ type NativeDbConstructor = {
   openPersistent?(dataPath: string, schema: Uint8Array, config: Uint8Array): NativeDb;
 };
 
+type PendingNativeRead = {
+  poll(): Uint8Array | null;
+};
+
+type NativeReadResult = Uint8Array | PendingNativeRead;
+
+function isPendingNativeRead(value: NativeReadResult): value is PendingNativeRead {
+  return typeof (value as PendingNativeRead).poll === "function";
+}
+
 type NativeDb = {
   // Native runtime adapters may close synchronously or asynchronously and may
   // report whether they transitioned state. The adapter awaits either form and
@@ -95,20 +105,23 @@ type NativeDb = {
   rollbackTransaction(openBatchId: string): void;
   attachMergeableTx(openBatchId: string): Tx;
   attachExclusiveTx?(openBatchId: string): Tx;
-  all(query: PreparedQuery, opts: unknown): Uint8Array;
-  allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): Uint8Array;
+  all(query: PreparedQuery, opts: unknown): NativeReadResult;
+  allForIdentity(query: PreparedQuery, author: Uint8Array, opts: unknown): NativeReadResult;
   allRelationQuery?(queryJson: string, opts: unknown): Uint8Array | Promise<Uint8Array>;
   allRelationQueryForIdentity?(
     queryJson: string,
     author: Uint8Array,
     opts: unknown,
   ): Uint8Array | Promise<Uint8Array>;
-  allRelationSnapshot?(query: PreparedQuery, opts: unknown): Uint8Array | Promise<Uint8Array>;
+  allRelationSnapshot?(
+    query: PreparedQuery,
+    opts: unknown,
+  ): NativeReadResult | Promise<NativeReadResult>;
   allRelationSnapshotForIdentity?(
     query: PreparedQuery,
     author: Uint8Array,
     opts: unknown,
-  ): Uint8Array | Promise<Uint8Array>;
+  ): NativeReadResult | Promise<NativeReadResult>;
   setIdentityClaims?(author: Uint8Array, claims: Record<string, unknown> | undefined | null): void;
   attachQuery?(query: PreparedQuery, opts: unknown): unknown;
   attachQueryForIdentity?(query: PreparedQuery, author: Uint8Array, opts: unknown): unknown;
@@ -273,7 +286,7 @@ type NativeDb = {
   mergeableTx(openBatchId: OpenBatchId): Tx;
   mergeableTxForIdentity?(openBatchId: OpenBatchId, author: Uint8Array): Tx;
   exclusiveTx?(openBatchId: OpenBatchId): Tx;
-  allInTransaction?(query: PreparedQuery, tx: Tx, opts: unknown): Uint8Array;
+  allInTransaction?(query: PreparedQuery, tx: Tx, opts: unknown): NativeReadResult;
   setTickScheduler(
     callback:
       | ((urgency: "immediate" | "deferred") => void)
@@ -1525,10 +1538,12 @@ export class NativeRuntimeAdapter implements Runtime {
           if (!this.db.allRelationSnapshotForIdentity) {
             throw new Error("Native runtime does not support trusted-serving relation snapshots");
           }
-          const payload = await this.db.allRelationSnapshotForIdentity(
-            query,
-            session?.identity ?? this.peerIdentity,
-            opts,
+          const payload = await this.awaitNativeRead(
+            await this.db.allRelationSnapshotForIdentity(
+              query,
+              session?.identity ?? this.peerIdentity,
+              opts,
+            ),
           );
           return rowsFromRelationSnapshot(
             readRelationSnapshot(payload),
@@ -1539,7 +1554,7 @@ export class NativeRuntimeAdapter implements Runtime {
         if (!this.db.allRelationSnapshot) {
           throw new Error("Native runtime does not support relation snapshots");
         }
-        const payload = await this.db.allRelationSnapshot(query, opts);
+        const payload = await this.awaitNativeRead(await this.db.allRelationSnapshot(query, opts));
         return rowsFromRelationSnapshot(
           readRelationSnapshot(payload),
           this.schema,
@@ -1547,12 +1562,12 @@ export class NativeRuntimeAdapter implements Runtime {
         );
       }
       const pendingTx = pendingTxFromOptions(optionsJson, this.pendingTxs);
-      let rows = this.readPlainRows(query, opts, session ?? undefined, pendingTx);
+      let rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
       let rowStates = rowsFromBatches(readRowBatches(rows), this.schema);
       if (!pendingTx && (tier === "edge" || tier === "global") && rowStates.length > 0) {
         await this.refreshRowsFromEdge(session, rowStates);
         if (this.closed) return [];
-        rows = this.readPlainRows(query, opts, session ?? undefined, pendingTx);
+        rows = await this.readPlainRows(query, opts, session ?? undefined, pendingTx);
         rowStates = rowsFromBatches(readRowBatches(rows), this.schema);
       }
       return rowStates;
@@ -1868,7 +1883,12 @@ export class NativeRuntimeAdapter implements Runtime {
   private readRow(table: string, rowId: Uint8Array, identity?: Uint8Array): RowState | undefined {
     if (!identity) return this.readRowForWriteMerge(table, rowId);
     const query = this.prepareQuery(JSON.stringify({ table }));
-    const rows = this.readRowsForHost(query, readOptions(), identity);
+    const rows = this.db.allForIdentity(query, identity, readOptions());
+    if (isPendingNativeRead(rows)) {
+      throw new Error(
+        "write result inspection cannot synchronously hydrate a remote large value; read it after transport progress",
+      );
+    }
     return rowsFromBatches(readRowBatches(rows), this.schema).find(
       (row) => row.table === table && row.id === formatUuid(rowId),
     );
@@ -1887,6 +1907,11 @@ export class NativeRuntimeAdapter implements Runtime {
     }
     const query = this.prepareQuery(JSON.stringify({ table }));
     const rows = this.db.all(query, readOptions());
+    if (isPendingNativeRead(rows)) {
+      throw new Error(
+        "write merge cannot synchronously hydrate a remote large value; use the exact local row reader",
+      );
+    }
     return rowsFromBatches(readRowBatches(rows), this.schema).find(
       (row) => row.table === table && row.id === formatUuid(rowId),
     );
@@ -1934,17 +1959,17 @@ export class NativeRuntimeAdapter implements Runtime {
     return this.rowStateFromValues(table, rowId, merged);
   }
 
-  private readPlainRows(
+  private async readPlainRows(
     query: PreparedQuery,
     opts: unknown,
     session: RuntimeSession | undefined,
     pendingTx: PendingTx | undefined,
-  ): Uint8Array {
+  ): Promise<Uint8Array> {
     if (!pendingTx) return this.readRowsForHost(query, opts, session?.identity);
     if (!this.db.allInTransaction) {
       throw new Error("Native runtime does not support transaction reads");
     }
-    return this.db.allInTransaction(query, this.txForRead(pendingTx), opts);
+    return this.awaitNativeRead(this.db.allInTransaction(query, this.txForRead(pendingTx), opts));
   }
 
   /**
@@ -1952,10 +1977,51 @@ export class NativeRuntimeAdapter implements Runtime {
    * explicitly configured serving host may select the policy-enforcing entry
    * point, with a request session supplying its subject when present.
    */
-  private readRowsForHost(query: PreparedQuery, opts: unknown, identity?: Uint8Array): Uint8Array {
-    return this.readAuthorizationHost === "trusted-serving"
-      ? this.db.allForIdentity(query, identity ?? this.peerIdentity, opts)
-      : this.db.all(query, opts);
+  private async readRowsForHost(
+    query: PreparedQuery,
+    opts: unknown,
+    identity?: Uint8Array,
+  ): Promise<Uint8Array> {
+    return this.awaitNativeRead(
+      this.readAuthorizationHost === "trusted-serving"
+        ? this.db.allForIdentity(query, identity ?? this.peerIdentity, opts)
+        : this.db.all(query, opts),
+    );
+  }
+
+  private async awaitNativeRead(result: NativeReadResult): Promise<Uint8Array> {
+    if (!isPendingNativeRead(result)) return result;
+    const pending = result;
+    for (;;) {
+      const value = pending.poll();
+      if (value) return value;
+      const transport = this.serverTransport;
+      const carrier = this.serverCarrier;
+      if (!transport || !carrier || this.closed) {
+        throw new Error("large-value hydration is waiting for an unavailable upstream transport");
+      }
+      const generation = this.serverConnectionGeneration;
+      const observedWork = this.serverTransportWorkEpoch;
+      const work = this.waitForServerTransportWork("edge", observedWork);
+      try {
+        this.flushAuxiliaryOutbound(transport, carrier, generation);
+        void this.pumpServerTransport();
+        if (!work) {
+          throw new Error("large-value hydration has no concrete transport wake");
+        }
+        await work.promise;
+      } finally {
+        work?.cancel();
+      }
+      if (
+        this.closed ||
+        generation !== this.serverConnectionGeneration ||
+        transport !== this.serverTransport ||
+        carrier !== this.serverCarrier
+      ) {
+        throw new Error("large-value hydration transport was replaced before completion");
+      }
+    }
   }
 
   /**
