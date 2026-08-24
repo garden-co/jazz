@@ -1879,6 +1879,23 @@ fn authorization_subplan_with_correlated_allowed_to_joins_lowers_without_occurre
         .iter()
         .find(|terminal| matches!(terminal.output, OutputTerminalSchema::AppRows(_)))
         .expect("public app-rows terminal");
+    let public_graph = format!("{:#?}", public_terminal.graph);
+    assert!(
+        !public_graph.contains("__policy_join_source_"),
+        "policy-proof carriers must not reach a public query terminal: {public_graph}"
+    );
+    let OutputTerminalSchema::AppRows(public_schema) = &public_terminal.output else {
+        panic!("public app-rows terminal must retain its public descriptor");
+    };
+    assert!(
+        public_schema
+            .descriptor
+            .fields()
+            .iter()
+            .filter_map(|field| field.name.as_deref())
+            .all(|field| !field.starts_with("__policy_join_source_")),
+        "private policy carriers must not appear in the public descriptor: {public_schema:#?}"
+    );
     let collector_inputs = BTreeSet::from([
         "__collect_root___flat_join_source_0_row_uuid".to_owned(),
         "__collect_root___flat_join_source_1_row_uuid".to_owned(),
