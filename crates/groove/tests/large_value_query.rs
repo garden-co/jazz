@@ -43,7 +43,7 @@ async fn count_star_does_not_fetch_an_unused_indirect_column() {
         descriptor,
         [
             vec![Value::Large(prepared.value_ref.clone())],
-            vec![Value::Large(prepared.value_ref.clone())],
+            vec![Value::Large(prepared.value_ref)],
         ],
     )
     .unwrap();
@@ -93,10 +93,7 @@ async fn projection_does_not_fetch_an_unselected_indirect_column() {
     let descriptor = RecordDescriptor::new([("id", ValueType::U64), ("body", ValueType::Bytes)]);
     let graph = GraphBuilder::values(
         descriptor,
-        [vec![
-            Value::U64(7),
-            Value::Large(prepared.value_ref.clone()),
-        ]],
+        [vec![Value::U64(7), Value::Large(prepared.value_ref)]],
     )
     .unwrap()
     .project(["id"]);
@@ -136,10 +133,7 @@ async fn filter_does_not_fetch_an_indirect_column_the_predicate_does_not_referen
     let descriptor = RecordDescriptor::new([("id", ValueType::U64), ("body", ValueType::Bytes)]);
     let graph = GraphBuilder::values(
         descriptor,
-        [vec![
-            Value::U64(7),
-            Value::Large(prepared.value_ref.clone()),
-        ]],
+        [vec![Value::U64(7), Value::Large(prepared.value_ref)]],
     )
     .unwrap()
     .filter(PredicateExpr::eq("id", Value::U64(7)))
@@ -179,10 +173,7 @@ async fn join_fetches_only_key_and_selected_large_fields() {
     database.set_chunk_provider(Rc::new(provider));
     let left = GraphBuilder::values(
         RecordDescriptor::new([("id", ValueType::U64), ("body", ValueType::String)]),
-        [vec![
-            Value::U64(7),
-            Value::Large(prepared.value_ref.clone()),
-        ]],
+        [vec![Value::U64(7), Value::Large(prepared.value_ref)]],
     )
     .unwrap();
     let right = GraphBuilder::values(
@@ -253,10 +244,7 @@ async fn subscription_materializes_large_insert_and_update_deltas_atomically() {
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
-    batch.insert(
-        "docs",
-        vec![Value::U64(1), Value::Large(first.value_ref.clone())],
-    );
+    batch.insert("docs", vec![Value::U64(1), Value::Large(first.value_ref)]);
     let publication = database.apply_batch(batch).await.unwrap();
     database
         .finish_persistence(publication.persist().await)
@@ -270,10 +258,7 @@ async fn subscription_materializes_large_insert_and_update_deltas_atomically() {
     assert_eq!(inserted[0].1, 1);
 
     let mut batch = database.open_batch();
-    batch.update(
-        "docs",
-        vec![Value::U64(1), Value::Large(second.value_ref.clone())],
-    );
+    batch.update("docs", vec![Value::U64(1), Value::Large(second.value_ref)]);
     let publication = database.apply_batch(batch).await.unwrap();
     database
         .finish_persistence(publication.persist().await)
@@ -338,10 +323,7 @@ async fn streaming_checksum_subscription_retracts_old_source_and_installs_new_so
     assert!(subscription.recv().unwrap().is_empty());
 
     let mut batch = database.open_batch();
-    batch.insert(
-        "files",
-        vec![Value::U64(1), Value::Large(first.value_ref.clone())],
-    );
+    batch.insert("files", vec![Value::U64(1), Value::Large(first.value_ref)]);
     let publication = database.apply_batch(batch).await.unwrap();
     database
         .finish_persistence(publication.persist().await)
@@ -358,10 +340,7 @@ async fn streaming_checksum_subscription_retracts_old_source_and_installs_new_so
     );
 
     let mut batch = database.open_batch();
-    batch.update(
-        "files",
-        vec![Value::U64(1), Value::Large(second.value_ref.clone())],
-    );
+    batch.update("files", vec![Value::U64(1), Value::Large(second.value_ref)]);
     let publication = database.apply_batch(batch).await.unwrap();
     database
         .finish_persistence(publication.persist().await)
@@ -407,8 +386,7 @@ async fn indirect_string_materializes_as_the_ordinary_logical_query_value() {
         .unwrap();
     database.set_chunk_provider(Rc::new(provider));
     let descriptor = RecordDescriptor::new([("body", ValueType::String)]);
-    let graph =
-        GraphBuilder::values(descriptor, [vec![Value::Large(prepared.value_ref.clone())]]).unwrap();
+    let graph = GraphBuilder::values(descriptor, [vec![Value::Large(prepared.value_ref)]]).unwrap();
 
     let rows = database
         .query_graph(graph)
@@ -450,8 +428,7 @@ fn query_future_stays_pending_while_required_chunks_are_paused() {
         database.set_chunk_provider(Rc::new(provider));
         let descriptor = RecordDescriptor::new([("body", ValueType::String)]);
         let graph =
-            GraphBuilder::values(descriptor, [vec![Value::Large(prepared.value_ref.clone())]])
-                .unwrap();
+            GraphBuilder::values(descriptor, [vec![Value::Large(prepared.value_ref)]]).unwrap();
         let mut query = Box::pin(database.query_graph(graph));
         let waker = noop_waker();
         let mut context = Context::from_waker(&waker);
@@ -492,8 +469,7 @@ async fn chunk_failure_is_reported_without_publishing_a_partial_result() {
         .unwrap();
     database.set_chunk_provider(Rc::new(provider));
     let descriptor = RecordDescriptor::new([("body", ValueType::String)]);
-    let graph =
-        GraphBuilder::values(descriptor, [vec![Value::Large(prepared.value_ref.clone())]]).unwrap();
+    let graph = GraphBuilder::values(descriptor, [vec![Value::Large(prepared.value_ref)]]).unwrap();
 
     let error = database.query_graph(graph).await.unwrap_err();
 
@@ -529,7 +505,7 @@ async fn indirect_scalars_materialize_inside_composite_values() {
     let graph = GraphBuilder::values(
         descriptor,
         [vec![Value::Array(vec![Value::Nullable(Some(Box::new(
-            Value::Large(prepared.value_ref.clone()),
+            Value::Large(prepared.value_ref),
         )))])]],
     )
     .unwrap();
@@ -575,7 +551,7 @@ async fn predicates_compare_indirect_strings_by_logical_value() {
         .unwrap();
     database.set_chunk_provider(Rc::new(provider));
     let descriptor = RecordDescriptor::new([("body", ValueType::String)]);
-    let graph = GraphBuilder::values(descriptor, [vec![Value::Large(prepared.value_ref.clone())]])
+    let graph = GraphBuilder::values(descriptor, [vec![Value::Large(prepared.value_ref)]])
         .unwrap()
         .filter(PredicateExpr::eq("body", Value::String(logical.clone())));
 
@@ -612,7 +588,7 @@ async fn predicates_compare_present_nullable_indirect_strings_logically() {
     let graph = GraphBuilder::values(
         descriptor,
         [vec![Value::Nullable(Some(Box::new(Value::Large(
-            prepared.value_ref.clone(),
+            prepared.value_ref,
         ))))]],
     )
     .unwrap()
@@ -658,7 +634,7 @@ async fn lexical_predicate_stops_chunk_requests_after_decisive_prefix_mismatch()
     database.set_chunk_provider(Rc::new(provider));
     let graph = GraphBuilder::values(
         RecordDescriptor::new([("body", ValueType::String)]),
-        [vec![Value::Large(prepared.value_ref.clone())]],
+        [vec![Value::Large(prepared.value_ref)]],
     )
     .unwrap()
     .filter(PredicateExpr::gt("body", Value::String(literal)));
@@ -1067,11 +1043,8 @@ async fn cached_streaming_checksum_obeys_cooperative_work_budget() {
     );
     let provider_reads_after_warmup = control.observed().len();
 
-    let mut checksum = Box::pin(database.checksum_large_value_streaming(
-        prepared.value_ref.clone(),
-        16 * 1024,
-        32 * 1024,
-    ));
+    let mut checksum =
+        Box::pin(database.checksum_large_value_streaming(prepared.value_ref, 16 * 1024, 32 * 1024));
     let waker = noop_waker();
     let mut context = Context::from_waker(&waker);
     assert!(matches!(
@@ -1133,10 +1106,7 @@ async fn graph_streaming_checksum_yields_and_publishes_one_complete_row() {
     let descriptor = RecordDescriptor::new([("id", ValueType::U64), ("body", ValueType::Bytes)]);
     let graph = GraphBuilder::values(
         descriptor,
-        [vec![
-            Value::U64(7),
-            Value::Large(prepared.value_ref.clone()),
-        ]],
+        [vec![Value::U64(7), Value::Large(prepared.value_ref)]],
     )
     .unwrap()
     .streaming_checksum("body", "body_checksum", 16 * 1024, 32 * 1024);
@@ -1185,7 +1155,7 @@ async fn graph_streaming_checksum_failure_publishes_nothing_and_can_retry() {
     let owned = OwnedChunkProvider::new_with_budget(Rc::new(provider), 128 * 1024);
     database.set_owned_chunk_provider(owned.clone());
     let descriptor = RecordDescriptor::new([("body", ValueType::Bytes)]);
-    let graph = GraphBuilder::values(descriptor, [vec![Value::Large(prepared.value_ref.clone())]])
+    let graph = GraphBuilder::values(descriptor, [vec![Value::Large(prepared.value_ref)]])
         .unwrap()
         .streaming_checksum("body", "checksum", 16 * 1024, 32 * 1024);
 

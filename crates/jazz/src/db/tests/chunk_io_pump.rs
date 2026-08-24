@@ -32,7 +32,7 @@ fn auxiliary_pump_completes_a_suspended_groove_chunk_read_without_a_semantic_tic
             &vec![7; 32 * 1024],
         )
         .unwrap();
-        source.stage(prepared.staged_chunks.to_vec()).await.unwrap();
+        source.stage(prepared.staged_chunks.clone()).await.unwrap();
 
         let resolver = PeerChunkResolver::default();
         let downstream = PeerIoPump::new(

@@ -809,8 +809,7 @@ where
             self.database.evict_staged_large_value(newest.id).await?;
             return Err(Error::LargeValueIngressRateLimited);
         }
-        self.evict_expired_large_value_stages_except(newest.id)
-            .await
+        self.evict_expired_large_value_stages_except(newest.id).await
     }
 
     async fn evict_expired_large_value_stages_except(
@@ -985,16 +984,14 @@ where
         kind: groove::large_values::LargeValueKind,
         chunks: Vec<groove::large_values::StagedChunk>,
     ) -> Result<(), Error> {
-        let encoded_bytes =
-            chunks.iter().try_fold(0_u64, |total, chunk| {
-                total
-                    .checked_add(u64::try_from(chunk.encoded.len()).map_err(|_| {
-                        Error::InvalidStoredValue("large-value chunk size exceeds u64")
-                    })?)
-                    .ok_or(Error::InvalidStoredValue(
-                        "large-value chunk batch accounting overflow",
-                    ))
-            })?;
+        let encoded_bytes = chunks.iter().try_fold(0_u64, |total, chunk| {
+            total.checked_add(u64::try_from(chunk.encoded.len()).map_err(|_| {
+                Error::InvalidStoredValue("large-value chunk size exceeds u64")
+            })?)
+            .ok_or(Error::InvalidStoredValue(
+                "large-value chunk batch accounting overflow",
+            ))
+        })?;
         if !self.admit_large_value_ingress(encoded_bytes) {
             self.database.evict_staged_large_value(upload_id).await?;
             return Err(Error::LargeValueIngressRateLimited);
