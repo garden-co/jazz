@@ -29,12 +29,12 @@ export default definePermissions(app, ({ policy, session, allOf, anyOf, allowedT
 
   // The creator must be able to recover the room before its bootstrap
   // membership row has replicated; other identities require membership.
-  policy.rooms.allowRead.where((room) => anyOf([{ $createdBy: session.user_id }, isMember(room)]));
+  policy.rooms.allowRead.where((room) => anyOf([{ $createdBy: session.author }, isMember(room)]));
   policy.rooms.allowInsert.always();
   policy.rooms.allowUpdate
-    .whereOld({ $createdBy: session.user_id })
-    .whereNew({ $createdBy: session.user_id });
-  policy.rooms.allowDelete.where({ $createdBy: session.user_id });
+    .whereOld({ $createdBy: session.author })
+    .whereNew({ $createdBy: session.author });
+  policy.rooms.allowDelete.where({ $createdBy: session.author });
 
   policy.roomMembers.allowRead.where(allowedTo.read("roomId"));
   // The creating identity bootstraps its own membership and is the sole
