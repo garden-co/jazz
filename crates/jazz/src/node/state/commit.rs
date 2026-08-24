@@ -500,13 +500,26 @@ where
                 BTreeMap::new()
             };
             for (column, value) in commit.cells.iter_mut() {
+                let expected_kind = self.large_value_kind_for_column(
+                    *schema_version,
+                    &commit.table,
+                    column,
+                );
+                if !large_value_kind_matches(value, expected_kind) {
+                    return Err(Error::InvalidMergeableCommit(
+                        "large-value descriptor kind does not match its logical column",
+                    ));
+                }
                 if value_contains_indirect_descriptor(value)
                     && inherited.get(column) == Some(value)
                 {
                     commit.prepared_large_columns.insert(column.clone());
                     continue;
                 }
-                let Some(staged) = self.prepare_and_stage_large_scalar(value).await? else {
+                let Some(staged) = self
+                    .prepare_and_stage_large_scalar(value, expected_kind)
+                    .await?
+                else {
                     continue;
                 };
                 commit.staged_large_values.push(staged.id);
@@ -521,33 +534,57 @@ where
     pub(crate) async fn prepare_and_stage_large_scalar(
         &mut self,
         value: &mut Value,
+        expected_kind: Option<groove::large_values::LargeValueKind>,
     ) -> Result<Option<groove::large_values::StagedLargeValue>, Error> {
         use groove::large_values::{INLINE_VALUE_MAX_BYTES, LargeValueKind};
 
-        let candidate = match value {
+        fn candidate(value: &Value) -> Option<(LargeValueKind, &[u8], bool)> {
+            match value {
             Value::String(text) if text.len() > INLINE_VALUE_MAX_BYTES => {
-                Some((LargeValueKind::String, text.as_bytes().to_vec(), false))
+                Some((LargeValueKind::String, text.as_bytes(), false))
             }
             Value::Bytes(bytes) if bytes.len() > INLINE_VALUE_MAX_BYTES => {
-                Some((LargeValueKind::Bytes, bytes.clone(), false))
+                Some((LargeValueKind::Bytes, bytes.as_slice(), false))
             }
             Value::Nullable(Some(inner)) => match inner.as_ref() {
                 Value::String(text) if text.len() > INLINE_VALUE_MAX_BYTES => {
-                    Some((LargeValueKind::String, text.as_bytes().to_vec(), true))
+                    Some((LargeValueKind::String, text.as_bytes(), true))
                 }
                 Value::Bytes(bytes) if bytes.len() > INLINE_VALUE_MAX_BYTES => {
-                    Some((LargeValueKind::Bytes, bytes.clone(), true))
+                    Some((LargeValueKind::Bytes, bytes.as_slice(), true))
                 }
                 _ => None,
             },
             _ => None,
-        };
-        let Some((kind, bytes, nullable)) = candidate else {
+            }
+        }
+        let candidate = candidate(value);
+        let Some((inferred_kind, bytes, nullable)) = candidate else {
             return Ok(None);
+        };
+        let kind = match expected_kind {
+            Some(groove::large_values::LargeValueKind::Bytes)
+                if inferred_kind != groove::large_values::LargeValueKind::Bytes =>
+            {
+                return Err(Error::InvalidMergeableCommit(
+                    "oversized scalar value does not match its logical column",
+                ));
+            }
+            Some(
+                expected @ (groove::large_values::LargeValueKind::String
+                | groove::large_values::LargeValueKind::Json),
+            ) if inferred_kind == groove::large_values::LargeValueKind::String => expected,
+            Some(_) if inferred_kind == groove::large_values::LargeValueKind::Bytes => {
+                return Err(Error::InvalidMergeableCommit(
+                    "oversized scalar value does not match its logical column",
+                ));
+            }
+            Some(expected) => expected,
+            None => inferred_kind,
         };
         let staged = self
             .database
-            .prepare_and_stage_large_value(kind, &bytes)
+            .prepare_and_stage_large_value(kind, bytes)
             .await?;
         self.enforce_large_value_staging_policy(&staged).await?;
         let descriptor = Value::Large(staged.value_ref.clone());
@@ -557,6 +594,30 @@ where
             descriptor
         };
         Ok(Some(staged))
+    }
+
+    pub(crate) fn large_value_kind_for_column(
+        &self,
+        schema_version: SchemaVersionId,
+        table: &str,
+        column: &str,
+    ) -> Option<groove::large_values::LargeValueKind> {
+        use crate::tools::ColumnType;
+        use groove::large_values::LargeValueKind;
+
+        let schema = self.catalogue.catalogue_schemas.get(&schema_version)?;
+        let table = schema
+            .schema
+            .public_schema()
+            .iter()
+            .find(|(name, _)| name.as_str() == table)?
+            .1;
+        match &table.columns.column(column)?.column_type {
+            ColumnType::Text => Some(LargeValueKind::String),
+            ColumnType::Json { .. } => Some(LargeValueKind::Json),
+            ColumnType::Bytea => Some(LargeValueKind::Bytes),
+            _ => None,
+        }
     }
 
     /// Commit a local mergeable write and return its sync commit unit.

@@ -418,6 +418,11 @@ where
             ) {
                 return Some(reason);
             }
+            if let Some(reason) =
+                Self::malformed_authored_large_value_kind_reason(&schema.schema, table, version)
+            {
+                return Some(reason);
+            }
         }
         None
     }
@@ -459,6 +464,46 @@ where
         None
     }
 
+    fn malformed_authored_large_value_kind_reason(
+        schema: &JazzSchema,
+        table: &TableSchema,
+        version: &VersionRecord,
+    ) -> Option<String> {
+        let public_table = schema
+            .public_schema()
+            .iter()
+            .find(|(name, _)| name.as_str() == version.table())?
+            .1;
+        for public_column in &public_table.columns.columns {
+            let expected = match &public_column.column_type {
+                crate::tools::ColumnType::Text => groove::large_values::LargeValueKind::String,
+                crate::tools::ColumnType::Json { .. } => {
+                    groove::large_values::LargeValueKind::Json
+                }
+                crate::tools::ColumnType::Bytea => groove::large_values::LargeValueKind::Bytes,
+                _ => continue,
+            };
+            let Some(position) = table
+                .columns
+                .iter()
+                .position(|column| column.name == public_column.name.as_str())
+            else {
+                continue;
+            };
+            let Some(value) = version.cell_at(position) else {
+                continue;
+            };
+            if !large_value_kind_matches(&value, Some(expected)) {
+                return Some(format!(
+                    "row version for table '{}' carries the wrong large-value kind for column '{}'",
+                    version.table(),
+                    public_column.name.as_str()
+                ));
+            }
+        }
+        None
+    }
+
     /// Validate row versions carried by a view or repair payload before that
     /// payload may advance local receiver state. View payloads cannot park for
     /// a missing catalogue entry: unlike an authored commit unit, they have no
@@ -491,6 +536,13 @@ where
             if Self::malformed_authored_branch_key_reason(&schema.schema, table, version).is_some() {
                 return Err(Error::MalformedViewUpdate(
                     "row version does not carry a valid authored branch key",
+                ));
+            }
+            if Self::malformed_authored_large_value_kind_reason(&schema.schema, table, version)
+                .is_some()
+            {
+                return Err(Error::MalformedViewUpdate(
+                    "row version carries a large-value kind that disagrees with its authored schema",
                 ));
             }
         }

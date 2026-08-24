@@ -954,6 +954,60 @@ async fn malformed_json_tail_upload_is_rejected_and_reclaimed_before_staging() {
     assert_eq!(chunks.len(), 0);
 }
 
+#[futures_test::test]
+async fn malformed_direct_json_creation_cleans_incrementally_staged_chunks() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let malformed = format!(
+        "[{{\"body\":\"{}\"}}, invalid]",
+        "x".repeat(crate::large_values::LEAF_MAX_BYTES * 4)
+    );
+
+    assert!(matches!(
+        database
+            .prepare_and_stage_large_value(
+                crate::large_values::LargeValueKind::Json,
+                malformed.as_bytes(),
+            )
+            .await,
+        Err(Error::IvmRuntime(
+            crate::ivm::runtime::IvmRuntimeError::LargeValue(
+                crate::large_values::Error::InvalidJson
+            )
+        ))
+    ));
+    assert!(
+        !chunks.is_empty(),
+        "the fixture must stage before its invalid tail"
+    );
+    assert!(
+        database
+            .pending_large_value_uploads()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(database.staged_large_values().await.unwrap().is_empty());
+    assert!(
+        database
+            .reclaim_orphaned_large_value_chunks(usize::MAX)
+            .await
+            .unwrap()
+            > 0
+    );
+    assert_eq!(chunks.len(), 0);
+}
+
 // This facade-level test uses a deliberately malformed physical child because
 // only the peer upload path receives untrusted pre-chunked bytes. The root
 // remains authenticated while one requested child is a hash-valid invalid

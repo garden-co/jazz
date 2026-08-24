@@ -759,8 +759,16 @@ where
                     ));
                 }
             }
-            for value in cells.values_mut() {
-                self.prepare_and_stage_large_scalar(value).await?;
+            for (column, value) in cells.iter_mut() {
+                let expected_kind =
+                    self.large_value_kind_for_column(write.schema_version, &write.table, column);
+                if !large_value_kind_matches(value, expected_kind) {
+                    return Err(Error::InvalidMergeableCommit(
+                        "large-value descriptor kind does not match its logical column",
+                    ));
+                }
+                self.prepare_and_stage_large_scalar(value, expected_kind)
+                    .await?;
             }
             let cells = positional_cells_from_map(&table_schema, &cells)?;
             let provenance_at = TxTime(write.now_ms.unwrap_or(now_ms));

@@ -745,7 +745,11 @@ pub(super) fn encode_value(value: &Value, value_type: &ValueType) -> Result<Vec<
             )?)
         }
         (Value::Large(value), ValueType::String)
-            if value.kind == crate::large_values::LargeValueKind::String =>
+            if matches!(
+                value.kind,
+                crate::large_values::LargeValueKind::String
+                    | crate::large_values::LargeValueKind::Json
+            ) =>
         {
             bytes.extend(crate::large_values::encode_stored_scalar(
                 &crate::large_values::StoredScalar::Large(value.clone()),
@@ -861,7 +865,11 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
                 .map(Value::String)
                 .map_err(|_| Error::InvalidUtf8),
             crate::large_values::StoredScalar::Large(value)
-                if value.kind == crate::large_values::LargeValueKind::String =>
+                if matches!(
+                    value.kind,
+                    crate::large_values::LargeValueKind::String
+                        | crate::large_values::LargeValueKind::Json
+                ) =>
             {
                 Ok(Value::Large(value))
             }
@@ -1055,7 +1063,11 @@ pub(super) fn ensure_value_type(value: &Value, value_type: &ValueType) -> Result
         | (Value::Bytes(_), ValueType::Bytes)
         | (Value::Uuid(_), ValueType::Uuid) => Ok(()),
         (Value::Large(value), ValueType::String)
-            if value.kind == crate::large_values::LargeValueKind::String =>
+            if matches!(
+                value.kind,
+                crate::large_values::LargeValueKind::String
+                    | crate::large_values::LargeValueKind::Json
+            ) =>
         {
             Ok(())
         }

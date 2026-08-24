@@ -1,5 +1,28 @@
 use super::*;
 
+async fn yield_once() {
+    struct YieldOnce(bool);
+
+    impl std::future::Future for YieldOnce {
+        type Output = ();
+
+        fn poll(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            if self.0 {
+                std::task::Poll::Ready(())
+            } else {
+                self.0 = true;
+                cx.waker().wake_by_ref();
+                std::task::Poll::Pending
+            }
+        }
+    }
+
+    YieldOnce(false).await;
+}
+
 fn is_retryable_upload_error(error: &Error) -> bool {
     matches!(
         error,
@@ -227,9 +250,52 @@ impl Database {
         kind: crate::large_values::LargeValueKind,
         bytes: &[u8],
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
-        let prepared = crate::large_values::prepare(kind, bytes, Self::fresh_chunk_locator)
-            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
-        self.stage_large_value_preparation(prepared).await
+        const INPUT_WINDOW_BYTES: usize = 64 * 1024;
+
+        let upload_id = crate::large_values::StagedLargeValueId(*uuid::Uuid::new_v4().as_bytes());
+        let emitted = Rc::new(RefCell::new(Vec::new()));
+        let stage_target = emitted.clone();
+        let mut preparation = crate::large_values::PushStreamingPreparation::new(
+            kind,
+            Self::fresh_chunk_locator,
+            move |chunk| {
+                stage_target.borrow_mut().push(chunk);
+                Ok(())
+            },
+        );
+
+        let result = async {
+            for window in bytes.chunks(INPUT_WINDOW_BYTES) {
+                preparation
+                    .push(window)
+                    .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+                let chunks = std::mem::take(&mut *emitted.borrow_mut());
+                if !chunks.is_empty() {
+                    self.stage_large_value_chunk_batch(upload_id, kind, chunks)
+                        .await?;
+                }
+                // Hosts such as WASM must be able to return control to their
+                // executor while constructing a value supplied synchronously.
+                yield_once().await;
+            }
+            let (value_ref, _) = preparation
+                .finish()
+                .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+            let chunks = std::mem::take(&mut *emitted.borrow_mut());
+            if !chunks.is_empty() {
+                self.stage_large_value_chunk_batch(upload_id, kind, chunks)
+                    .await?;
+            }
+            self.finalize_large_value_upload(upload_id, value_ref).await
+        }
+        .await;
+
+        if result.is_err() {
+            // Pending uploads are invisible to rows, but clean them eagerly so
+            // malformed input and storage errors do not await TTL collection.
+            let _ = self.evict_pending_large_value_upload(upload_id).await;
+        }
+        result
     }
 
     /// Persist all immutable nodes emitted by a Groove preparation.

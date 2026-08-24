@@ -36,6 +36,93 @@ fn ordinary_oversized_scalar_write_is_staged_indirect_and_reads_logically_inline
 }
 
 #[test]
+fn ordinary_oversized_json_uses_json_tree_and_rejects_text_descriptors() {
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("documents")
+            .column("body", PublicColumnType::Json { schema: None }),
+    ));
+    let (_temp_dir, mut node) = open_node_with_schema(node(0x79), schema);
+    let body = format!("{{\"selected\":{{\"answer\":42}},\"padding\":\"{}\"}}", "x".repeat(80_000));
+    node.commit_mergeable_settled(
+        MergeableCommit::new("documents", row(0x79), 10)
+            .cell("body", Value::String(body.clone())),
+    )
+    .unwrap();
+
+    let stored = node.query_table_versions("documents").unwrap();
+    let value_ref = match stored[0]
+        .cell(node.table("documents").unwrap(), "body")
+        .unwrap()
+        .unwrap()
+    {
+        Value::Large(value_ref) => value_ref,
+        other => panic!("expected a JSON large-value descriptor, got {other:?}"),
+    };
+    assert_eq!(value_ref.kind, groove::large_values::LargeValueKind::Json);
+    assert_eq!(
+        crate::db::block_on(node.read_large_json_pointer(&value_ref, "/selected/answer")).unwrap(),
+        Some(serde_json::json!(42))
+    );
+
+    let text = groove::large_values::prepare(
+        groove::large_values::LargeValueKind::String,
+        body.as_bytes(),
+        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
+    )
+    .unwrap();
+    let commit = crate::db::block_on(node.attach_prepared_large_cell(
+        MergeableCommit::new("documents", row(0x7a), 11),
+        "body",
+        &text,
+    ))
+    .unwrap();
+    assert!(matches!(
+        node.commit_mergeable_settled(commit),
+        Err(Error::InvalidMergeableCommit(
+            "large-value descriptor kind does not match its logical column"
+        ))
+    ));
+    assert_eq!(
+        node.current_rows("documents", DurabilityTier::Local)
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(
+        crate::db::block_on(node.database.pending_large_value_uploads())
+            .unwrap()
+            .is_empty()
+    );
+
+    let json = groove::large_values::prepare(
+        groove::large_values::LargeValueKind::Json,
+        body.as_bytes(),
+        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
+    )
+    .unwrap();
+    let (_text_dir, mut text_node) =
+        open_node_with_schema(NodeUuid::from_bytes([0x7b; 16]), two_column_schema());
+    let commit = crate::db::block_on(text_node.attach_prepared_large_cell(
+        MergeableCommit::new("todos", row(0x7b), 12)
+            .cell("title", Value::String("wrong kind".to_owned())),
+        "body",
+        &json,
+    ))
+    .unwrap();
+    assert!(matches!(
+        text_node.commit_mergeable_settled(commit),
+        Err(Error::InvalidMergeableCommit(
+            "large-value descriptor kind does not match its logical column"
+        ))
+    ));
+    assert!(
+        crate::db::block_on(text_node.database.pending_large_value_uploads())
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn failed_large_scalar_staging_publishes_no_row() {
     #[derive(Clone)]
     struct FailingStage;
