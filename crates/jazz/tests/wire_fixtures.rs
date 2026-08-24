@@ -194,7 +194,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
             "chunk_upload_nodes_requested_root",
             "ChunkUploadNodes",
             SyncMessage::ChunkUploadNodes(jazz::protocol::ChunkUploadNodes {
-                value_ref: large_value.value_ref,
+                value_ref: large_value.value_ref.clone(),
                 chunks: vec![root_chunk],
             }),
         ),

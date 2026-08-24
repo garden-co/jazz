@@ -796,21 +796,6 @@ where
         self.local_chunk_reader.clone()
     }
 
-    /// Stage the immutable chunks from a Groove preparation. This does not
-    /// publish an owning Jazz row; normal commit authorization and publication
-    /// remain a separate boundary.
-    pub async fn stage_large_value(
-        &self,
-        prepared: &groove::large_values::PreparedLargeValue,
-    ) -> Result<groove::large_values::StagedLargeValue, Error> {
-        let staged = self
-            .database
-            .stage_large_value_preparation(prepared.clone())
-            .await?;
-        self.enforce_large_value_staging_policy(&staged).await?;
-        Ok(staged)
-    }
-
     /// Replace Jazz's policy for unpublished Groove staging receipts.
     pub fn set_large_value_staging_policy(&mut self, policy: LargeValueStagingPolicy) {
         self.large_value_staging_policy = policy;
@@ -824,7 +809,8 @@ where
             self.database.evict_staged_large_value(newest.id).await?;
             return Err(Error::LargeValueIngressRateLimited);
         }
-        self.evict_expired_large_value_stages_except(newest.id).await
+        self.evict_expired_large_value_stages_except(newest.id)
+            .await
     }
 
     async fn evict_expired_large_value_stages_except(
@@ -999,14 +985,16 @@ where
         kind: groove::large_values::LargeValueKind,
         chunks: Vec<groove::large_values::StagedChunk>,
     ) -> Result<(), Error> {
-        let encoded_bytes = chunks.iter().try_fold(0_u64, |total, chunk| {
-            total.checked_add(u64::try_from(chunk.encoded.len()).map_err(|_| {
-                Error::InvalidStoredValue("large-value chunk size exceeds u64")
-            })?)
-            .ok_or(Error::InvalidStoredValue(
-                "large-value chunk batch accounting overflow",
-            ))
-        })?;
+        let encoded_bytes =
+            chunks.iter().try_fold(0_u64, |total, chunk| {
+                total
+                    .checked_add(u64::try_from(chunk.encoded.len()).map_err(|_| {
+                        Error::InvalidStoredValue("large-value chunk size exceeds u64")
+                    })?)
+                    .ok_or(Error::InvalidStoredValue(
+                        "large-value chunk batch accounting overflow",
+                    ))
+            })?;
         if !self.admit_large_value_ingress(encoded_bytes) {
             self.database.evict_staged_large_value(upload_id).await?;
             return Err(Error::LargeValueIngressRateLimited);
@@ -1043,23 +1031,28 @@ where
         Ok(staged)
     }
 
-    /// Stage one Groove-owned preparation and attach its physical descriptor
-    /// to an otherwise ordinary authorized Jazz commit. The private marker is
-    /// admission provenance, not canonical row state.
-    pub async fn attach_prepared_large_cell(
+    /// Test helper exercising the same internally allocated admission path as
+    /// production writes.
+    #[cfg(test)]
+    pub(crate) async fn attach_large_cell_for_test(
         &self,
         mut commit: MergeableCommit,
         column: impl Into<String>,
-        prepared: &groove::large_values::PreparedLargeValue,
-    ) -> Result<MergeableCommit, Error> {
-        let staged = self.stage_large_value(prepared).await?;
+        kind: groove::large_values::LargeValueKind,
+        bytes: &[u8],
+    ) -> Result<(MergeableCommit, groove::large_values::LargeValueRef), Error> {
+        let staged = self
+            .database
+            .prepare_and_stage_large_value(kind, bytes)
+            .await?;
+        self.enforce_large_value_staging_policy(&staged).await?;
         let column = column.into();
         commit
             .cells
-            .insert(column.clone(), Value::Large(prepared.value_ref.clone()));
+            .insert(column.clone(), Value::Large(staged.value_ref.clone()));
         commit.prepared_large_columns.insert(column);
         commit.staged_large_values.push(staged.id);
-        Ok(commit)
+        Ok((commit, staged.value_ref))
     }
 
     /// Consolidate through Groove-owned storage. Jazz receives only the

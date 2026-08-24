@@ -448,7 +448,7 @@ impl ChunkKvStorage for OrderedChunkStorage {
             let Some(value) = storage
                 .get(
                     crate::db::LARGE_VALUE_METADATA_CF.to_owned(),
-                    Self::key(&locator.0),
+                    Self::key(locator.as_bytes()),
                 )
                 .await
                 .map_err(|error| ChunkStorageError::Backend(error.to_string()))?
@@ -467,7 +467,7 @@ impl ChunkKvStorage for OrderedChunkStorage {
     ) -> ChunkFuture<'_, Result<Option<(ContentHash, Bytes)>, ChunkStorageError>> {
         Box::pin(async move {
             let storage = self.storage()?;
-            let key = Self::key(&locator.0);
+            let key = Self::key(locator.as_bytes());
             if let Some(existing) = storage
                 .get(crate::db::LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
                 .await
@@ -494,7 +494,7 @@ impl ChunkKvStorage for OrderedChunkStorage {
     ) -> ChunkFuture<'_, Result<(), ChunkStorageError>> {
         Box::pin(async move {
             let storage = self.storage()?;
-            let key = Self::key(&locator.0);
+            let key = Self::key(locator.as_bytes());
             let Some(existing) = storage
                 .get(crate::db::LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
                 .await
@@ -1080,7 +1080,7 @@ mod tests {
         let result = block_on(storage.stage(vec![StagedChunk {
             node_ref: crate::large_values::NodeRef {
                 object_hash: hash,
-                locator: crate::large_values::Locator([9; 32]),
+                locator: crate::large_values::Locator::random(),
             },
             encoded,
         }]));

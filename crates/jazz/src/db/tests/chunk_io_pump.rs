@@ -32,7 +32,7 @@ fn auxiliary_pump_completes_a_suspended_groove_chunk_read_without_a_semantic_tic
             &vec![7; 32 * 1024],
         )
         .unwrap();
-        source.stage(prepared.staged_chunks.clone()).await.unwrap();
+        source.stage(prepared.staged_chunks.to_vec()).await.unwrap();
 
         let resolver = PeerChunkResolver::default();
         let downstream = PeerIoPump::new(
@@ -130,7 +130,7 @@ fn dropping_the_last_suspended_consumer_cancels_unsent_chunk_demand() {
     );
     let request = groove::chunks::ChunkRequest {
         object_hash: [4; 32],
-        locator: groove::large_values::Locator([5; 32]),
+        locator: groove::large_values::Locator::random(),
     };
     let mut pending = resolver.resolve(request);
     let waker = futures::task::noop_waker();
@@ -169,7 +169,7 @@ fn five_concurrent_chunk_demands_are_delivered_in_two_decodable_batches() {
         let requests = (0_u8..5)
             .map(|index| groove::chunks::ChunkRequest {
                 object_hash: groove::large_values::object_hash(&[index]).0,
-                locator: groove::large_values::Locator([index; 32]),
+                locator: groove::large_values::Locator::random(),
             })
             .collect::<Vec<_>>();
         for (index, request) in requests.iter().enumerate() {
@@ -259,7 +259,7 @@ fn a_late_response_from_a_disconnected_upstream_cannot_complete_reassigned_deman
         );
         let request = groove::chunks::ChunkRequest {
             object_hash: [6; 32],
-            locator: groove::large_values::Locator([7; 32]),
+            locator: groove::large_values::Locator::random(),
         };
         let mut pending = resolver.resolve(request);
         let waker = futures::task::noop_waker();

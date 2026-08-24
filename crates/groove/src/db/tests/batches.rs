@@ -877,7 +877,7 @@ async fn malformed_later_upload_child_has_no_durable_partial_write_after_reopen(
         let mut mutated_children = children;
         mutated_children[1].node_ref = crate::large_values::NodeRef {
             object_hash: crate::large_values::object_hash(&malformed),
-            locator: crate::large_values::Locator([0xee; 32]),
+            locator: crate::large_values::Locator::random(),
         };
         root.encoded = postcard::to_allocvec(&crate::large_values::ChunkNode::Branch {
             format: crate::large_values::FORMAT_VERSION,

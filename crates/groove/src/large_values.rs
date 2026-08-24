@@ -40,8 +40,14 @@ pub const LOCATOR_BYTES: usize = 32;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ContentHash(pub [u8; 32]);
 
+/// An opaque retrieval capability allocated by Groove.
+///
+/// ```compile_fail
+/// use groove::large_values::Locator;
+/// let forged = Locator([0_u8; 32]);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Locator(pub [u8; LOCATOR_BYTES]);
+pub struct Locator([u8; LOCATOR_BYTES]);
 
 impl Locator {
     /// Allocate a fresh random 256-bit retrieval capability.
@@ -49,6 +55,10 @@ impl Locator {
         let mut locator = [0_u8; LOCATOR_BYTES];
         getrandom::fill(&mut locator).expect("OS CSPRNG unavailable for chunk capability");
         Self(locator)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; LOCATOR_BYTES] {
+        &self.0
     }
 
     /// Deterministically derive a capability for crate-internal fixtures.
@@ -152,7 +162,16 @@ pub struct StagedChunk {
     pub encoded: Vec<u8>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A read-only preparation returned by Groove's graph builder.
+///
+/// ```compile_fail
+/// use groove::large_values::{LargeValueRef, PreparedLargeValue, StagedChunk};
+/// fn forge(value_ref: LargeValueRef, staged_chunks: Vec<StagedChunk>) {
+///     let _ = PreparedLargeValue { value_ref, staged_chunks };
+/// }
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PreparedLargeValue {
     pub value_ref: LargeValueRef,
     pub staged_chunks: Vec<StagedChunk>,

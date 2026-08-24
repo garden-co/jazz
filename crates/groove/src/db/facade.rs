@@ -220,7 +220,7 @@ impl Database {
     }
 
     /// Persist all immutable nodes emitted by a Groove preparation.
-    pub async fn stage_large_value_preparation(
+    pub(crate) async fn stage_large_value_preparation(
         &self,
         prepared: crate::large_values::PreparedLargeValue,
     ) -> Result<crate::large_values::StagedLargeValue, Error> {

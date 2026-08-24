@@ -860,7 +860,7 @@ mod tests {
     fn oversized_chunk_request_batches_are_rejected_during_decode() {
         let request = |request_id| ChunkRequestEntry {
             request_id,
-            locator: groove::large_values::Locator([0x11; 32]),
+            locator: groove::large_values::Locator::random(),
             expected_hash: [0x22; 32],
             remaining_hops: 1,
         };
