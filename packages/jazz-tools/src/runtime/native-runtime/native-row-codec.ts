@@ -6,6 +6,7 @@ import type {
   WasmRow,
 } from "../../drivers/types.js";
 import { isProvenanceMagicColumn, isProvenanceMagicTimestampColumn } from "../../magic-columns.js";
+import { decodeCanonicalAuthorSubjectBytes } from "../author-id.js";
 
 const textDecoder = new TextDecoder();
 const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
@@ -730,10 +731,7 @@ function decodeTerminalColumnBytes(
 }
 
 function decodeProvenanceText(bytes: Uint8Array): string {
-  // Producers may hand terminal/public provenance across either as Groove's
-  // stored-scalar String bytes or as already-unwrapped logical Text.  Canonical
-  // AuthorSubject JSON begins with `[`, so a leading NUL is only the scalar tag.
-  return textDecoder.decode(bytes[0] === 0 ? bytes.subarray(1) : bytes);
+  return decodeCanonicalAuthorSubjectBytes(bytes);
 }
 
 function nonNullableValueType(valueType: ValueType | undefined): ValueType | undefined {

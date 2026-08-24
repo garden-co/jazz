@@ -25,7 +25,13 @@ import type {
 } from "../client.js";
 import type { Session } from "../context.js";
 import { SYSTEM_AUTHOR_ID, SYSTEM_READ_SESSION } from "../system-identity.js";
-import { authorBytesForSession, canonicalAuthorSubject, isUsableSubject } from "../author-id.js";
+import {
+  authorBytesForSession,
+  canonicalAuthorSubject,
+  decodeCanonicalAuthorSubjectBytes,
+  isUsableSubject,
+  parseCanonicalAuthorSubject,
+} from "../author-id.js";
 import {
   PostcardReader,
   PostcardWriter,
@@ -3058,22 +3064,8 @@ function sessionFromWriteContext(writeContext?: string | null): RuntimeSession |
 }
 
 function parseCanonicalAuthor(value: string): { issuer: string; user_id: string } | null {
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    if (!Array.isArray(parsed) || parsed.length !== 2) return null;
-    const [issuer, userId] = parsed;
-    if (
-      typeof issuer !== "string" ||
-      typeof userId !== "string" ||
-      !isUsableSubject(issuer) ||
-      !isUsableSubject(userId)
-    ) {
-      return null;
-    }
-    return { issuer, user_id: userId };
-  } catch {
-    return null;
-  }
+  const parsed = parseCanonicalAuthorSubject(value);
+  return parsed ? { issuer: parsed.issuer, user_id: parsed.user_id } : null;
 }
 
 function updatedAtMsFromWriteContext(writeContext?: string | null): number | undefined {
@@ -5082,10 +5074,7 @@ function decodeBytes(
 }
 
 function decodeProvenanceText(bytes: Uint8Array): string {
-  // NAPI CurrentRow batches retain Groove's stored-scalar String wrapper while
-  // WASM public query rows arrive as already-unwrapped logical Text. Canonical
-  // AuthorSubject JSON begins with `[`, so a leading NUL is only the scalar tag.
-  return textDecoder.decode(bytes[0] === 0 ? bytes.subarray(1) : bytes);
+  return decodeCanonicalAuthorSubjectBytes(bytes);
 }
 
 function decodePayloadEnumBytes(
