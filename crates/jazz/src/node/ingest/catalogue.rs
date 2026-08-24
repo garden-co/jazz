@@ -1,3 +1,6 @@
+// Global restart-persistent metadata ceiling across every connected peer.
+const MAX_PENDING_LARGE_VALUE_UPLOADS: usize = 1024;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CatalogueActivationMode {
     ColdOpen,
@@ -78,12 +81,35 @@ where
                 .map_err(|_| Error::UnsupportedSyncMessage("malformed version-bundle run"))?;
             match message {
                 SyncMessage::ChunkUploadStart(start) => {
+                    if !self.admit_large_value_ingress(
+                        super::LARGE_VALUE_UPLOAD_START_INGRESS_CHARGE_BYTES,
+                    ) {
+                        return Ok(PublicationOutcome::settled(vec![
+                            SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+                                value_ref: start.value_ref,
+                                status: crate::protocol::ChunkUploadStatus::RateLimited,
+                            }),
+                        ]));
+                    }
                     let progress = match self
                         .database
-                        .begin_large_value_upload(start.value_ref.clone())
+                        .begin_large_value_upload_with_pending_limit(
+                            start.value_ref.clone(),
+                            MAX_PENDING_LARGE_VALUE_UPLOADS,
+                        )
                         .await
                     {
                         Ok(progress) => progress,
+                        Err(groove::db::Error::PendingLargeValueUploadLimitExceeded { .. }) => {
+                            return Ok(PublicationOutcome::settled(vec![
+                                SyncMessage::ChunkUploadResult(
+                                    crate::protocol::ChunkUploadResult {
+                                        value_ref: start.value_ref,
+                                        status: crate::protocol::ChunkUploadStatus::RateLimited,
+                                    },
+                                ),
+                            ]));
+                        }
                         Err(error) if large_value_upload_is_rejected(&error) => {
                             return Ok(PublicationOutcome::settled(vec![
                                 SyncMessage::ChunkUploadResult(

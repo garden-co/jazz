@@ -42,7 +42,7 @@ fn failed_large_scalar_staging_publishes_no_row() {
     impl groove::chunks::ChunkStorage for FailingStage {
         fn get(
             &self,
-            _locator: Vec<u8>,
+            _locator: groove::large_values::Locator,
             _expected_hash: groove::large_values::ContentHash,
         ) -> groove::chunks::ChunkFuture<'_, Result<bytes::Bytes, groove::chunks::ChunkStorageError>> {
             Box::pin(async { Err(groove::chunks::ChunkStorageError::Unavailable) })
@@ -118,6 +118,50 @@ fn default_large_value_staging_policy_is_finite() {
 }
 
 #[test]
+fn upload_start_is_rate_admitted_before_pending_metadata_is_written() {
+    let schema = two_column_schema();
+    let (_temp_dir, mut receiver) = open_node_with_schema(node(0x82), schema);
+    receiver.set_large_value_staging_policy(LargeValueStagingPolicy {
+        incoming_bytes_per_window: 0,
+        window_ms: 60_000,
+        max_age_ms: 10 * 60 * 1_000,
+    });
+    let prepared = groove::large_values::prepare(
+        groove::large_values::LargeValueKind::String,
+        b"rate-admitted upload start",
+    )
+    .unwrap();
+    let outcome = receiver
+        .apply_sync_message_with_ingest_context(
+            SyncMessage::ChunkUploadStart(crate::protocol::ChunkUploadStart {
+                value_ref: prepared.value_ref,
+            }),
+            Some(CommitUnitIngestContext {
+                identity: AuthorId::SYSTEM,
+                trust: CommitUnitTrust::Session,
+                edge_authority: false,
+            }),
+        )
+        .resolve()
+        .unwrap()
+        .value;
+
+    assert!(matches!(
+        outcome.as_slice(),
+        [SyncMessage::ChunkUploadResult(crate::protocol::ChunkUploadResult {
+            status: crate::protocol::ChunkUploadStatus::RateLimited,
+            ..
+        })]
+    ));
+    assert!(
+        crate::db::block_on(receiver.database.pending_large_value_uploads())
+            .unwrap()
+            .is_empty(),
+        "rate-limited starts must not create durable pending metadata"
+    );
+}
+
+#[test]
 fn expired_staged_tree_requires_reupload_before_row_publication() {
     let schema = two_column_schema();
     let (_temp_dir, mut node) = open_node_with_schema(node(0x7b), schema);
@@ -127,19 +171,14 @@ fn expired_staged_tree_requires_reupload_before_row_publication() {
         max_age_ms: 1,
     });
     let logical = "expired staged body/".repeat(8_000);
-    let prepared = groove::large_values::prepare(
-        groove::large_values::LargeValueKind::String,
-        logical.as_bytes(),
-        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
-    )
-    .unwrap();
-    let commit = crate::db::block_on(node.attach_prepared_large_cell(
+    let (commit, _) = crate::db::block_on(node.attach_large_cell_for_test(
         MergeableCommit::new("todos", row(0x7b), 10).cells(BTreeMap::from([(
             "title".to_owned(),
             Value::String("title".to_owned()),
         )])),
         "body",
-        &prepared,
+        groove::large_values::LargeValueKind::String,
+        logical.as_bytes(),
     ))
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(3));
@@ -168,19 +207,15 @@ fn delayed_staged_tree_publishes_while_receipt_remains_present() {
         window_ms: 1_000,
         max_age_ms: 0,
     });
-    let prepared = groove::large_values::prepare(
-        groove::large_values::LargeValueKind::String,
-        "delayed staged body/".repeat(8_000).as_bytes(),
-        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
-    )
-    .unwrap();
-    let commit = crate::db::block_on(node.attach_prepared_large_cell(
+    let logical = "delayed staged body/".repeat(8_000);
+    let (commit, _) = crate::db::block_on(node.attach_large_cell_for_test(
         MergeableCommit::new("todos", row(0x7c), 10).cells(BTreeMap::from([(
             "title".to_owned(),
             Value::String("title".to_owned()),
         )])),
         "body",
-        &prepared,
+        groove::large_values::LargeValueKind::String,
+        logical.as_bytes(),
     ))
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(2));
@@ -196,19 +231,15 @@ fn pushed_chunks_must_be_staged_before_the_referencing_authority_commit() {
     let (_writer_dir, mut writer) = open_node_with_schema(node(0x7c), schema.clone());
     let (_receiver_dir, mut receiver) = open_node_with_schema(node(0x7d), schema.clone());
     let (_missing_dir, mut missing) = open_node_with_schema(node(0x7e), schema);
-    let prepared = groove::large_values::prepare(
-        groove::large_values::LargeValueKind::String,
-        "pushed body/".repeat(8_000).as_bytes(),
-        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
-    )
-    .unwrap();
-    let commit = crate::db::block_on(writer.attach_prepared_large_cell(
+    let logical = "pushed body/".repeat(8_000);
+    let (commit, value_ref) = crate::db::block_on(writer.attach_large_cell_for_test(
         MergeableCommit::new("todos", row(0x7c), 10).cells(BTreeMap::from([(
             "title".to_owned(),
             Value::String("title".to_owned()),
         )])),
         "body",
-        &prepared,
+        groove::large_values::LargeValueKind::String,
+        logical.as_bytes(),
     ))
     .unwrap();
     let (_, unit) = writer.commit_mergeable_unit_settled(commit).unwrap();
@@ -224,7 +255,6 @@ fn pushed_chunks_must_be_staged_before_the_referencing_authority_commit() {
         Err(Error::LargeValueStageExpired)
     ));
 
-    let value_ref = prepared.value_ref.clone();
     let mut upload_result = receiver
         .apply_sync_message_with_ingest_context(
             SyncMessage::ChunkUploadStart(crate::protocol::ChunkUploadStart {
@@ -248,12 +278,15 @@ fn pushed_chunks_must_be_staged_before_the_referencing_authority_commit() {
                 let chunks = nodes
                     .into_iter()
                     .map(|node_ref| {
-                        prepared
-                            .staged_chunks
-                            .iter()
-                            .find(|chunk| chunk.node_ref == node_ref)
-                            .expect("receiver requests a reachable prepared node")
-                            .clone()
+                        let encoded = crate::db::block_on(writer.local_chunk(
+                            node_ref.locator,
+                            node_ref.object_hash,
+                        ))
+                        .expect("writer retains each requested immutable node");
+                        groove::large_values::StagedChunk {
+                            node_ref,
+                            encoded: encoded.to_vec(),
+                        }
                     })
                     .collect();
                 upload_result = receiver
@@ -286,7 +319,6 @@ fn corrupt_root_first_upload_is_rejected_without_poisoning_the_receiver() {
     let prepared = groove::large_values::prepare(
         groove::large_values::LargeValueKind::String,
         "corrupt upload/".repeat(8_000).as_bytes(),
-        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
     )
     .unwrap();
     let context = Some(CommitUnitIngestContext {
@@ -347,7 +379,6 @@ fn rate_limited_upload_preserves_pending_claim_for_retry() {
     let prepared = groove::large_values::prepare(
         groove::large_values::LargeValueKind::String,
         "terminal cleanup/".repeat(20_000).as_bytes(),
-        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
     )
     .unwrap();
     let context = Some(CommitUnitIngestContext {
@@ -471,7 +502,6 @@ fn maintenance_evicts_pending_upload_after_the_configured_age() {
     let prepared = groove::large_values::prepare(
         groove::large_values::LargeValueKind::String,
         "pending expiry/".repeat(20_000).as_bytes(),
-        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
     )
     .unwrap();
     let context = Some(CommitUnitIngestContext {
@@ -519,7 +549,6 @@ fn delayed_chunk_upload_succeeds_while_pending_journal_remains_present() {
     let prepared = groove::large_values::prepare(
         groove::large_values::LargeValueKind::String,
         "delayed finalization/".repeat(20_000).as_bytes(),
-        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
     )
     .unwrap();
     let context = Some(CommitUnitIngestContext {
@@ -631,7 +660,6 @@ fn handcrafted_large_descriptor_is_rejected_but_node_staged_preparation_can_publ
     let prepared = groove::large_values::prepare(
         groove::large_values::LargeValueKind::String,
         logical.as_bytes(),
-        |hash| groove::large_values::Locator(hash.0[..24].to_vec()),
     )
     .unwrap();
     let forged = MergeableCommit::new("todos", row(0x75), 10).cells(BTreeMap::from([
@@ -647,10 +675,11 @@ fn handcrafted_large_descriptor_is_rejected_but_node_staged_preparation_can_publ
         "title".to_owned(),
         Value::String("title".to_owned()),
     )]));
-    let admitted = crate::db::block_on(node.attach_prepared_large_cell(
+    let (admitted, _) = crate::db::block_on(node.attach_large_cell_for_test(
         logical_commit,
         "body",
-        &prepared,
+        groove::large_values::LargeValueKind::String,
+        logical.as_bytes(),
     ))
     .unwrap();
     node.commit_mergeable_settled(admitted).unwrap();

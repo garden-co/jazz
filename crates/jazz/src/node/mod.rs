@@ -595,10 +595,15 @@ pub struct NodeState<S> {
     initial_sync_flush_completed: bool,
 }
 
+// A descriptor-only start performs durable work despite carrying no chunk
+// bytes. Charge one MiB of the existing ingress budget to bound that work rate.
+pub(crate) const LARGE_VALUE_UPLOAD_START_INGRESS_CHARGE_BYTES: u64 = 1 << 20;
+
 /// Jazz-owned limits for unpublished Groove staging roots.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LargeValueStagingPolicy {
-    /// Incoming upload bytes admitted during one fixed window.
+    /// Incoming upload-work budget. Chunk batches charge encoded bytes;
+    /// descriptor-only starts charge a fixed nonzero amount.
     pub incoming_bytes_per_window: u64,
     /// Fixed rate-limit window duration.
     pub window_ms: u64,

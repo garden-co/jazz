@@ -799,7 +799,7 @@ where
     /// fallback. Peer forwarding uses this to avoid recursive request loops.
     pub async fn local_chunk(
         &self,
-        locator: Vec<u8>,
+        locator: groove::large_values::Locator,
         expected_hash: groove::large_values::ContentHash,
     ) -> Result<bytes::Bytes, groove::chunks::ChunkStorageError> {
         self.local_chunk_reader.get(locator, expected_hash).await
@@ -807,21 +807,6 @@ where
 
     pub(crate) fn local_chunk_reader_handle(&self) -> groove::chunks::LocalChunkReader {
         self.local_chunk_reader.clone()
-    }
-
-    /// Stage the immutable chunks from a Groove preparation. This does not
-    /// publish an owning Jazz row; normal commit authorization and publication
-    /// remain a separate boundary.
-    pub async fn stage_large_value(
-        &self,
-        prepared: &groove::large_values::PreparedLargeValue,
-    ) -> Result<groove::large_values::StagedLargeValue, Error> {
-        let staged = self
-            .database
-            .stage_large_value_preparation(prepared.clone())
-            .await?;
-        self.enforce_large_value_staging_policy(&staged).await?;
-        Ok(staged)
     }
 
     /// Replace Jazz's policy for unpublished Groove staging receipts.
@@ -1034,23 +1019,28 @@ where
         Ok(staged)
     }
 
-    /// Stage one Groove-owned preparation and attach its physical descriptor
-    /// to an otherwise ordinary authorized Jazz commit. The private marker is
-    /// admission provenance, not canonical row state.
-    pub async fn attach_prepared_large_cell(
+    /// Test helper exercising the same internally allocated admission path as
+    /// production writes.
+    #[cfg(test)]
+    pub(crate) async fn attach_large_cell_for_test(
         &self,
         mut commit: MergeableCommit,
         column: impl Into<String>,
-        prepared: &groove::large_values::PreparedLargeValue,
-    ) -> Result<MergeableCommit, Error> {
-        let staged = self.stage_large_value(prepared).await?;
+        kind: groove::large_values::LargeValueKind,
+        bytes: &[u8],
+    ) -> Result<(MergeableCommit, groove::large_values::LargeValueRef), Error> {
+        let staged = self
+            .database
+            .prepare_and_stage_large_value(kind, bytes)
+            .await?;
+        self.enforce_large_value_staging_policy(&staged).await?;
         let column = column.into();
         commit
             .cells
-            .insert(column.clone(), Value::Large(prepared.value_ref.clone()));
+            .insert(column.clone(), Value::Large(staged.value_ref.clone()));
         commit.prepared_large_columns.insert(column);
         commit.staged_large_values.push(staged.id);
-        Ok(commit)
+        Ok((commit, staged.value_ref))
     }
 
     /// Consolidate through Groove-owned storage. Jazz receives only the

@@ -208,23 +208,19 @@ impl Database {
         self.chunk_resolver = resolver;
     }
 
-    fn fresh_chunk_locator(_: crate::large_values::ContentHash) -> crate::large_values::Locator {
-        crate::large_values::Locator(uuid::Uuid::new_v4().as_bytes().to_vec())
-    }
-
     /// Prepare and stage a complete logical value entirely inside Groove.
     pub async fn prepare_and_stage_large_value(
         &self,
         kind: crate::large_values::LargeValueKind,
         bytes: &[u8],
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
-        let prepared = crate::large_values::prepare(kind, bytes, Self::fresh_chunk_locator)
+        let prepared = crate::large_values::prepare(kind, bytes)
             .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
         self.stage_large_value_preparation(prepared).await
     }
 
     /// Persist all immutable nodes emitted by a Groove preparation.
-    pub async fn stage_large_value_preparation(
+    pub(crate) async fn stage_large_value_preparation(
         &self,
         prepared: crate::large_values::PreparedLargeValue,
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
@@ -269,8 +265,10 @@ impl Database {
         kind: crate::large_values::LargeValueKind,
         chunks: Vec<crate::large_values::StagedChunk>,
     ) -> Result<(), Error> {
-        self.stage_large_value_chunk_batch_with_presence(upload_id, kind, chunks, false)
-            .await?;
+        self.stage_large_value_chunk_batch_with_presence_and_pending_limit(
+            upload_id, kind, chunks, false, None,
+        )
+        .await?;
         Ok(())
     }
 
@@ -283,16 +281,19 @@ impl Database {
         kind: crate::large_values::LargeValueKind,
         chunks: Vec<crate::large_values::StagedChunk>,
     ) -> Result<bool, Error> {
-        self.stage_large_value_chunk_batch_with_presence(upload_id, kind, chunks, true)
-            .await
+        self.stage_large_value_chunk_batch_with_presence_and_pending_limit(
+            upload_id, kind, chunks, true, None,
+        )
+        .await
     }
 
-    async fn stage_large_value_chunk_batch_with_presence(
+    async fn stage_large_value_chunk_batch_with_presence_and_pending_limit(
         &self,
         upload_id: crate::large_values::StagedLargeValueId,
         kind: crate::large_values::LargeValueKind,
         chunks: Vec<crate::large_values::StagedChunk>,
         require_existing: bool,
+        pending_limit: Option<usize>,
     ) -> Result<bool, Error> {
         let _lifecycle = self.large_value_lifecycle.lock().await;
         // This must precede both chunk staging and metadata mutation. In
@@ -316,6 +317,11 @@ impl Database {
         } else {
             if require_existing {
                 return Ok(false);
+            }
+            if let Some(limit) = pending_limit
+                && self.pending_large_value_upload_limit_reached(limit).await?
+            {
+                return Err(Error::PendingLargeValueUploadLimitExceeded { limit });
             }
             crate::large_values::PendingLargeValueUpload {
                 id: upload_id,
@@ -424,6 +430,27 @@ impl Database {
         Ok(true)
     }
 
+    async fn pending_large_value_upload_limit_reached(&self, limit: usize) -> Result<bool, Error> {
+        if limit == 0 {
+            return Ok(true);
+        }
+        let mut cursor = self
+            .storage
+            .scan(crate::storage::ScanRequest::prefix(
+                LARGE_VALUE_METADATA_CF.to_owned(),
+                b"upload/".to_vec(),
+            ))
+            .await?;
+        let mut count = 0_usize;
+        while let Some(batch) = cursor.next_batch().await? {
+            count = count.saturating_add(batch.len());
+            if count >= limit {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn descriptor_upload_id(
         value_ref: &crate::large_values::LargeValueRef,
     ) -> Result<crate::large_values::StagedLargeValueId, Error> {
@@ -441,9 +468,34 @@ impl Database {
         &self,
         value_ref: crate::large_values::LargeValueRef,
     ) -> Result<crate::large_values::LargeValueUploadProgress, Error> {
+        self.begin_large_value_upload_inner(value_ref, None).await
+    }
+
+    /// Start or resume an upload without creating more than `pending_limit`
+    /// restart-persistent incomplete-upload records.
+    pub async fn begin_large_value_upload_with_pending_limit(
+        &self,
+        value_ref: crate::large_values::LargeValueRef,
+        pending_limit: usize,
+    ) -> Result<crate::large_values::LargeValueUploadProgress, Error> {
+        self.begin_large_value_upload_inner(value_ref, Some(pending_limit))
+            .await
+    }
+
+    async fn begin_large_value_upload_inner(
+        &self,
+        value_ref: crate::large_values::LargeValueRef,
+        pending_limit: Option<usize>,
+    ) -> Result<crate::large_values::LargeValueUploadProgress, Error> {
         let upload_id = Self::descriptor_upload_id(&value_ref)?;
-        self.stage_large_value_chunk_batch(upload_id, value_ref.kind, Vec::new())
-            .await?;
+        self.stage_large_value_chunk_batch_with_presence_and_pending_limit(
+            upload_id,
+            value_ref.kind,
+            Vec::new(),
+            false,
+            pending_limit,
+        )
+        .await?;
         self.bind_pending_upload_descriptor(upload_id, &value_ref)
             .await?;
         self.large_value_upload_progress(upload_id, value_ref, false)
@@ -580,7 +632,7 @@ impl Database {
             // is idempotent only when it is byte-for-byte the stored node.
             let already_stored = self
                 .local_chunk_reader()
-                .get(chunk.node_ref.locator.0.clone(), chunk.node_ref.object_hash)
+                .get(chunk.node_ref.locator, chunk.node_ref.object_hash)
                 .await
                 .is_ok_and(|encoded| encoded.as_ref() == chunk.encoded.as_slice());
             if !already_stored {
@@ -1022,7 +1074,7 @@ impl Database {
             } else {
                 let encoded = self
                     .chunk_storage
-                    .get(node_ref.locator.0.clone(), node_ref.object_hash)
+                    .get(node_ref.locator, node_ref.object_hash)
                     .await
                     .map_err(crate::chunks::ChunkError::from)
                     .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
@@ -1259,7 +1311,7 @@ impl Database {
                     continue;
                 }
                 self.chunk_storage
-                    .delete(node_ref.locator.0.clone(), node_ref.object_hash)
+                    .delete(node_ref.locator, node_ref.object_hash)
                     .await
                     .map_err(crate::chunks::ChunkError::from)
                     .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
@@ -1282,19 +1334,18 @@ impl Database {
     }
 
     /// Consolidate a bounded edit tail inside one Groove-owned resumable
-    /// preparation. The host supplies fresh opaque locators but never drives a
-    /// missing-chunk retry loop; this future retains completed local splices.
+    /// preparation. Groove allocates fresh capabilities and retains completed
+    /// local splices while it drives any missing-chunk retry loop.
     pub async fn consolidate_large_value(
         &self,
         value: crate::large_values::LargeValueRef,
-        mut fresh_locator: impl FnMut(crate::large_values::ContentHash) -> crate::large_values::Locator,
     ) -> Result<crate::large_values::PreparedLargeValue, Error> {
         let mut continuation = crate::large_values::ConsolidationContinuation::new(value)
             .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
         let mut inputs = crate::ivm::runtime::evaluation_session::EvaluationInputs::default();
         let provider = self.ivm_runtime.chunk_provider();
         loop {
-            match continuation.step(&mut inputs, &mut fresh_locator) {
+            match continuation.step(&mut inputs) {
                 Ok(Some(prepared)) => return Ok(prepared),
                 Ok(None) => continue,
                 Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked) => {
@@ -1321,9 +1372,10 @@ impl Database {
         &self,
         value: crate::large_values::LargeValueRef,
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
-        let prepared = self
-            .consolidate_large_value(value, Self::fresh_chunk_locator)
-            .await?;
+        let prepared = self.consolidate_large_value(value).await?;
+        // Consolidation retains authenticated unchanged base nodes. Keep the
+        // derived-receipt distinction here, where this local provenance is
+        // still known, rather than weakening raw peer-upload admission.
         self.stage_derived_large_value_preparation(prepared).await
     }
 
@@ -1333,7 +1385,6 @@ impl Database {
         &self,
         value: crate::large_values::LargeValueRef,
         bytes: Vec<u8>,
-        fresh_locator: impl FnMut(crate::large_values::ContentHash) -> crate::large_values::Locator,
     ) -> Result<crate::large_values::PreparedLargeValue, Error> {
         match crate::large_values::append_tail(&value, bytes)
             .map_err(crate::ivm::runtime::IvmRuntimeError::from)?
@@ -1345,7 +1396,7 @@ impl Database {
                 })
             }
             crate::large_values::TailAppendOutcome::ConsolidationRequired(transient) => {
-                self.consolidate_large_value(transient, fresh_locator).await
+                self.consolidate_large_value(transient).await
             }
         }
     }
@@ -1356,9 +1407,7 @@ impl Database {
         value: crate::large_values::LargeValueRef,
         bytes: Vec<u8>,
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
-        let prepared = self
-            .append_large_value(value, bytes, Self::fresh_chunk_locator)
-            .await?;
+        let prepared = self.append_large_value(value, bytes).await?;
         self.stage_derived_large_value_preparation(prepared).await
     }
 
@@ -1371,7 +1420,6 @@ impl Database {
         offset: u64,
         delete_length: u64,
         insert_bytes: Vec<u8>,
-        fresh_locator: impl FnMut(crate::large_values::ContentHash) -> crate::large_values::Locator,
     ) -> Result<crate::large_values::PreparedLargeValue, Error> {
         let mut inputs = crate::ivm::runtime::evaluation_session::EvaluationInputs::default();
         let provider = self.ivm_runtime.chunk_provider();
@@ -1408,7 +1456,7 @@ impl Database {
                 })
             }
             crate::large_values::TailEditOutcome::ConsolidationRequired(transient) => {
-                self.consolidate_large_value(transient, fresh_locator).await
+                self.consolidate_large_value(transient).await
             }
         }
     }
@@ -1422,13 +1470,7 @@ impl Database {
         insert_bytes: Vec<u8>,
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
         let prepared = self
-            .edit_large_value(
-                value,
-                offset,
-                delete_length,
-                insert_bytes,
-                Self::fresh_chunk_locator,
-            )
+            .edit_large_value(value, offset, delete_length, insert_bytes)
             .await?;
         self.stage_derived_large_value_preparation(prepared).await
     }

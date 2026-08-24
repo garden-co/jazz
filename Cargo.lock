@@ -1492,6 +1492,7 @@ dependencies = [
  "bytes",
  "futures",
  "futures-test",
+ "getrandom 0.3.4",
  "hdrhistogram",
  "idb-tree",
  "internment",
