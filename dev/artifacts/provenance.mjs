@@ -81,6 +81,15 @@ const isStagedNapiBinding = (repoPath) =>
 // directory must not be part of the inputs it validates.  This is deliberately
 // scoped to the NAPI package; root turbo.json remains an input.
 const isNapiTurboOutputDirectory = (repoPath) => repoPath === "crates/jazz-napi/.turbo";
+const isNapiGeneratedOutput = (repoPath) =>
+  repoPath === "crates/jazz-napi/index.js" ||
+  repoPath === "crates/jazz-napi/index.d.ts" ||
+  repoPath === "crates/jazz-napi/native-binding.cjs" ||
+  repoPath === "crates/jazz-napi/native-binding.d.ts" ||
+  repoPath === "crates/jazz-napi/native-loader.cjs" ||
+  repoPath === "crates/jazz-napi/native-artifact-fingerprint.cjs" ||
+  repoPath.startsWith("crates/jazz-napi/.napi-stage-") ||
+  repoPath.startsWith("crates/jazz-napi/.native-artifacts/");
 
 function files(root, paths) {
   const found = [];
@@ -101,8 +110,9 @@ function files(root, paths) {
         repoPath.endsWith(".jazz-artifact-manifest.json") ||
         // These tracked files are generated from packageInputs below. Including
         // them would make the artifact fingerprint self-referential.
-        repoPath.endsWith("native-artifact-fingerprint.cjs") ||
-        repoPath.endsWith("native-artifact-fingerprints.ts") ||
+        isNapiGeneratedOutput(repoPath) ||
+        repoPath.endsWith("native-artifact-fingerprint-napi.ts") ||
+        repoPath.endsWith("native-artifact-fingerprint-wasm.ts") ||
         isStagedNapiBinding(repoPath)
       )
         return;
@@ -163,13 +173,26 @@ function artifactHashes(root, kind, options = {}) {
             "jazz_wasm_bg.wasm.d.ts",
           ),
         ]
-      : readdirSync(join(root, "crates/jazz-napi"), { withFileTypes: true })
+      : (options.napiBindings ?? activeNapiBindings(root) ?? readdirSync(join(root, "crates/jazz-napi"), { withFileTypes: true })
           .filter((entry) => entry.isFile() && entry.name.endsWith(".node"))
-          .map((entry) => join(root, "crates/jazz-napi", entry.name));
+          .map((entry) => join(root, "crates/jazz-napi", entry.name)));
   return paths
     .filter(existsSync)
     .sort()
     .map((path) => ({ file: basename(path), sha256: sha256(readFileSync(path)) }));
+}
+
+function activeNapiBindings(root) {
+  const packageDir = join(root, "crates", "jazz-napi");
+  const pointer = join(packageDir, "native-binding.cjs");
+  if (!existsSync(pointer)) return undefined;
+  const match = /\.native-artifacts\/(generation-[A-Za-z0-9.-]+)\/index\.js/.exec(readFileSync(pointer, "utf8"));
+  if (!match) return undefined;
+  const generation = join(packageDir, ".native-artifacts", match[1]);
+  if (!existsSync(generation) || !statSync(generation).isDirectory()) return undefined;
+  return readdirSync(generation, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".node"))
+    .map((entry) => join(generation, entry.name));
 }
 
 export function expectedManifest(root, kind, profile, targetOverride, options = {}) {
@@ -211,7 +234,7 @@ export function expectedManifest(root, kind, profile, targetOverride, options = 
       dirtyDiff: injectedGit
         ? process.env.JAZZ_ARTIFACT_GIT_DIRTY_DIFF
         : sha256(
-            `${run(root, "git", ["diff", "--binary", "HEAD"])}\n${run(root, "git", ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude)crates/jazz-wasm/pkg/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-wasm/.pkg-stage-*", ":(exclude)crates/jazz-wasm/.pkg-backup-*", ":(exclude)crates/jazz-wasm/.pkg-transaction.json*", ":(exclude)crates/jazz-napi/.jazz-artifact-manifest.json"])}`,
+            `${run(root, "git", ["diff", "--binary", "HEAD", "--", ".", ":(exclude)crates/jazz-wasm/pkg/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-wasm/.pkg-stage-*", ":(exclude)crates/jazz-wasm/.pkg-backup-*", ":(exclude)crates/jazz-wasm/.pkg-transaction.json*", ":(exclude)crates/jazz-napi/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-napi/native-binding.cjs", ":(exclude)crates/jazz-napi/native-binding.d.ts", ":(exclude)crates/jazz-napi/native-artifact-fingerprint.cjs", ":(exclude)crates/jazz-napi/native-loader.cjs", ":(exclude)crates/jazz-napi/.native-artifacts/**"])}\n${run(root, "git", ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude)crates/jazz-wasm/pkg/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-wasm/.pkg-stage-*", ":(exclude)crates/jazz-wasm/.pkg-backup-*", ":(exclude)crates/jazz-wasm/.pkg-transaction.json*", ":(exclude)crates/jazz-napi/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-napi/native-binding.cjs", ":(exclude)crates/jazz-napi/native-binding.d.ts", ":(exclude)crates/jazz-napi/native-artifact-fingerprint.cjs", ":(exclude)crates/jazz-napi/native-loader.cjs", ":(exclude)crates/jazz-napi/.native-artifacts/**"])}`,
           ),
     },
     cargoLock: existsSync(cargoLock) ? sha256(readFileSync(cargoLock)) : "missing",
@@ -231,13 +254,17 @@ export function expectedManifest(root, kind, profile, targetOverride, options = 
 
 /**
  * ABI identity for generated bindings. Unlike the transport protocol this
- * covers the exact package inputs plus the checked-in JS/TS binding surface.
+ * covers the exact package inputs plus the tracked package wrappers. Generated
+ * napi-rs JS/declaration outputs are intentionally excluded from packageInputs:
+ * the producer writes those only inside a staged generation, and the Rust input
+ * closure already determines them. Including them would create a pre-build vs
+ * post-build circular fingerprint.
  */
 export function nativeArtifactFingerprint(root, kind, profile, targetOverride) {
   const manifest = expectedManifest(root, kind, profile, targetOverride);
   const surface =
     kind === "napi"
-      ? ["crates/jazz-napi/index.d.ts", "crates/jazz-napi/index.cjs"]
+      ? ["crates/jazz-napi/index.cjs", "crates/jazz-napi/index.mjs"]
       : ["packages/jazz-tools/src/types/jazz-wasm.d.ts"];
   const surfaceHash = createHash("sha256");
   for (const path of surface) {
@@ -257,8 +284,8 @@ export const manifestPath = (root, kind) =>
   );
 
 export function writeManifest(root, kind, profile, targetOverride, options = {}) {
-  const path = options.wasmPackageDir
-    ? join(options.wasmPackageDir, ".jazz-artifact-manifest.json")
+  const path = options.wasmPackageDir || options.napiManifestDir
+    ? join(options.wasmPackageDir ?? options.napiManifestDir, ".jazz-artifact-manifest.json")
     : manifestPath(root, kind);
   writeFileSync(
     path,

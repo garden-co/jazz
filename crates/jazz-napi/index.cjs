@@ -1,8 +1,7 @@
 // This tracked package entrypoint deliberately runs before napi-rs's ignored
 // generated loader. It gives a fresh checkout the same deterministic failure
 // as a rebuilt checkout.
-const { expectedNativeArtifactFingerprint } = require("./native-artifact-fingerprint.cjs");
-const nativeBinding = require("./index.js");
+const { nativeBinding, expectedNativeArtifactFingerprint } = require("./native-binding.cjs");
 
 if (typeof nativeBinding.nativeArtifactFingerprint !== "function") {
   throw new Error(

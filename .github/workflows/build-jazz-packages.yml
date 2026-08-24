@@ -201,6 +201,11 @@ jobs:
         run: |
           node dev/artifacts/build.mjs napi release --target ${{ matrix.target }}
           node dev/artifacts/provenance.mjs verify napi release --target ${{ matrix.target }}
+          binding="$(find crates/jazz-napi/.native-artifacts -name 'jazz-napi.${{ matrix.platform }}.node' -type f -print -quit)"
+          test -n "$binding"
+          cp "$binding" "crates/jazz-napi/jazz-napi.${{ matrix.platform }}.node"
+          cp "$(dirname "$binding")/index.js" crates/jazz-napi/native-loader.cjs
+          cp "$(dirname "$binding")/index.d.ts" crates/jazz-napi/native-binding.d.ts
           cp crates/jazz-napi/.jazz-artifact-manifest.json crates/jazz-napi/jazz-napi.${{ matrix.platform }}.manifest.json
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -218,6 +223,9 @@ jobs:
           path: |
             crates/jazz-napi/index.js
             crates/jazz-napi/index.d.ts
+            crates/jazz-napi/native-loader.cjs
+            crates/jazz-napi/native-binding.d.ts
+            crates/jazz-napi/native-artifact-fingerprint.cjs
           if-no-files-found: error
 
   assemble-packages:

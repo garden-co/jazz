@@ -81,13 +81,14 @@ check_layer \
   "cargo build -p jazz-cli --bin jazz-tools" \
   target/debug/jazz-tools
 
-# index.js and index.d.ts are outputs of napi build, not inputs.
-source_roots=(crates/jazz-napi/src crates/jazz-napi/build.rs crates/jazz-napi/Cargo.toml crates/jazz-napi/package.json crates/jazz-napi/scripts crates/jazz-otel/src crates/jazz-otel/Cargo.toml crates/jazz/src crates/groove/src crates/jazz/Cargo.toml crates/groove/Cargo.toml Cargo.toml Cargo.lock)
+# napi-rs's generated loader/declarations live in an immutable staged
+# generation; the tracked CJS/ESM wrappers are ABI inputs.
+source_roots=(crates/jazz-napi/src crates/jazz-napi/build.rs crates/jazz-napi/Cargo.toml crates/jazz-napi/package.json crates/jazz-napi/index.cjs crates/jazz-napi/index.mjs crates/jazz-napi/index.d.ts crates/jazz-napi/scripts crates/jazz-otel/src crates/jazz-otel/Cargo.toml crates/jazz/src crates/groove/src crates/jazz/Cargo.toml crates/groove/Cargo.toml Cargo.toml Cargo.lock)
 shopt -s nullglob
-napi_artifacts=(crates/jazz-napi/*.node)
+napi_artifacts=(crates/jazz-napi/.native-artifacts/*/*.node)
 shopt -u nullglob
 check_layer \
-  "crates/jazz-napi/*.node" \
+  "crates/jazz-napi/.native-artifacts/*/*.node" \
   "pnpm --filter jazz-napi build:debug" \
   "${napi_artifacts[@]}"
 
