@@ -212,6 +212,52 @@ describe("RecordPlayer authenticated playlist topology", () => {
     ]);
   });
 
+  it("settles an observed recipient pending-to-accepted transition at edge", async () => {
+    const server = await getJazzServerInfo(uniqueDbName("record-player-acceptance-settlement"));
+    await deploy({
+      appId: server.appId,
+      serverUrl: server.serverUrl,
+      adminSecret: server.adminSecret,
+      schema: app,
+      permissions,
+    });
+    const [ownerToken, recipientToken] = await Promise.all([
+      getJazzServerJwtForUser("record-player-acceptance-owner", undefined, server.appId),
+      getJazzServerJwtForUser("record-player-acceptance-recipient", undefined, server.appId),
+    ]);
+    const owner = await openClient(server, "acceptance-owner", ownerToken);
+    const recipient = await openClient(server, "acceptance-recipient", recipientToken);
+    const playlist = await owner
+      .insert(app.playlists, {
+        name: "acceptance settlement receipt",
+        owner_subject: "record-player-acceptance-owner",
+      })
+      .wait({ tier: "edge" });
+    const invitation = await owner
+      .insert(app.invitations, {
+        playlist_id: playlist.id,
+        subject: "record-player-acceptance-recipient",
+        role: "editor",
+        status: "pending",
+      })
+      .wait({ tier: "edge" });
+    await waitForQuery(
+      recipient,
+      app.invitations.where({ subject: "record-player-acceptance-recipient" }),
+      (rows) => rows[0]?.id === invitation.id && rows[0]?.status === "pending",
+      "recipient observes pending invitation before accepting it",
+      15_000,
+      "edge",
+    );
+    const acceptance = recipient.update(app.invitations, invitation.id, { status: "accepted" });
+    await expect(acceptance.batchId).resolves.toEqual(expect.any(String));
+    await withTimeout(
+      acceptance.wait({ tier: "edge" }),
+      10_000,
+      "recipient pending-to-accepted transition did not settle at edge",
+    );
+  });
+
   it("settles a RecordPlayer owner playlist at edge outside the scenario envelope", async () => {
     const server = await getJazzServerInfo(uniqueDbName("record-player-owner-settlement"));
     await deploy({
@@ -555,12 +601,21 @@ describe("RecordPlayer authenticated playlist topology", () => {
               listener = await openClient(server, "listener", listenerToken);
               console.info("[record-player-topology] create playlist");
               const mutationErrors: unknown[] = [];
-              const stopMutationErrors = owner.onMutationError((event) =>
-                mutationErrors.push(event),
-              );
+              const stopMutationErrors = owner.onMutationError((event) => {
+                mutationErrors.push(event);
+                console.info("[record-player-topology] playlist mutation error", {
+                  transactionId: event.transaction.transactionId,
+                  code: event.code,
+                  reason: event.reason,
+                });
+              });
               const playlistWrite = owner.insert(app.playlists, {
                 name: "Road tape",
                 owner_subject: "record-player-owner",
+              });
+              const playlistBatchId = await playlistWrite.batchId;
+              console.info("[record-player-topology] playlist transaction", {
+                transactionId: playlistBatchId,
               });
               await withTimeout(
                 playlistWrite.wait({ tier: "local" }),
@@ -571,8 +626,20 @@ describe("RecordPlayer authenticated playlist topology", () => {
                 id: playlistWrite.value.id,
               });
               try {
+                const edgeSettlement = playlistWrite.wait({ tier: "edge" });
+                void edgeSettlement.then(
+                  () =>
+                    console.info("[record-player-topology] playlist edge settlement resolved", {
+                      transactionId: playlistBatchId,
+                    }),
+                  (error) =>
+                    console.info("[record-player-topology] playlist edge settlement rejected", {
+                      transactionId: playlistBatchId,
+                      error: String(error),
+                    }),
+                );
                 const settledPlaylist = await withTimeout(
-                  playlistWrite.wait({ tier: "edge" }),
+                  edgeSettlement,
                   10_000,
                   `playlist edge settlement mutationErrors=${JSON.stringify(mutationErrors)}`,
                 );
@@ -584,26 +651,35 @@ describe("RecordPlayer authenticated playlist topology", () => {
               } finally {
                 stopMutationErrors();
               }
-              editorInvite = await owner
-                .insert(app.invitations, {
-                  playlist_id: playlist.id,
-                  subject: "record-player-editor",
-                  role: "editor",
-                  status: "pending",
-                })
-                .wait({ tier: "edge" });
-              listenerInvite = await owner
-                .insert(app.invitations, {
-                  playlist_id: playlist.id,
-                  subject: "record-player-listener",
-                  role: "listener",
-                  status: "pending",
-                })
-                .wait({ tier: "edge" });
+              console.info("[record-player-topology] create editor invitation");
+              const editorInviteWrite = owner.insert(app.invitations, {
+                playlist_id: playlist.id,
+                subject: "record-player-editor",
+                role: "editor",
+                status: "pending",
+              });
+              console.info("[record-player-topology] editor invitation transaction", {
+                transactionId: await editorInviteWrite.batchId,
+              });
+              editorInvite = await editorInviteWrite.wait({ tier: "edge" });
+              console.info("[record-player-topology] editor invitation edge settlement");
+              console.info("[record-player-topology] create listener invitation");
+              const listenerInviteWrite = owner.insert(app.invitations, {
+                playlist_id: playlist.id,
+                subject: "record-player-listener",
+                role: "listener",
+                status: "pending",
+              });
+              console.info("[record-player-topology] listener invitation transaction", {
+                transactionId: await listenerInviteWrite.batchId,
+              });
+              listenerInvite = await listenerInviteWrite.wait({ tier: "edge" });
+              console.info("[record-player-topology] listener invitation edge settlement");
               // Edge settlement acknowledges the owner's write; it does not
               // imply either recipient has received the row yet. A recipient
               // accepts an invitation only after its normal read path observes
               // the pending row.
+              console.info("[record-player-topology] wait for recipient invitations");
               await Promise.all([
                 waitForQuery(
                   editor,
@@ -622,24 +698,79 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   "edge",
                 ),
               ]);
-              await Promise.all([
-                editor
-                  .update(app.invitations, editorInvite.id, { status: "accepted" })
-                  .wait({ tier: "edge" }),
-                listener
-                  .update(app.invitations, listenerInvite.id, { status: "accepted" })
-                  .wait({ tier: "edge" }),
-              ]);
+              console.info("[record-player-topology] recipient invitations observed");
+              console.info("[record-player-topology] accept editor invitation");
+              const editorAcceptance = editor.update(app.invitations, editorInvite.id, {
+                status: "accepted",
+              });
+              const editorAcceptanceBatchId = await editorAcceptance.batchId;
+              console.info("[record-player-topology] editor acceptance transaction", {
+                transactionId: editorAcceptanceBatchId,
+              });
+              console.info("[record-player-topology] accept listener invitation");
+              const listenerAcceptance = listener.update(app.invitations, listenerInvite.id, {
+                status: "accepted",
+              });
+              const listenerAcceptanceBatchId = await listenerAcceptance.batchId;
+              console.info("[record-player-topology] listener acceptance transaction", {
+                transactionId: listenerAcceptanceBatchId,
+              });
+              const stopEditorMutationErrors = editor.onMutationError((event) => {
+                console.info("[record-player-topology] editor acceptance error", {
+                  transactionId: event.transaction.transactionId,
+                  code: event.code,
+                  reason: event.reason,
+                });
+              });
+              const stopListenerMutationErrors = listener.onMutationError((event) => {
+                console.info("[record-player-topology] listener acceptance error", {
+                  transactionId: event.transaction.transactionId,
+                  code: event.code,
+                  reason: event.reason,
+                });
+              });
+              try {
+                const editorAcceptanceSettlement = editorAcceptance.wait({ tier: "edge" });
+                const listenerAcceptanceSettlement = listenerAcceptance.wait({ tier: "edge" });
+                void editorAcceptanceSettlement.then(
+                  () =>
+                    console.info("[record-player-topology] editor acceptance settled", {
+                      transactionId: editorAcceptanceBatchId,
+                    }),
+                  (error) =>
+                    console.info("[record-player-topology] editor acceptance rejected", {
+                      transactionId: editorAcceptanceBatchId,
+                      error: String(error),
+                    }),
+                );
+                void listenerAcceptanceSettlement.then(
+                  () =>
+                    console.info("[record-player-topology] listener acceptance settled", {
+                      transactionId: listenerAcceptanceBatchId,
+                    }),
+                  (error) =>
+                    console.info("[record-player-topology] listener acceptance rejected", {
+                      transactionId: listenerAcceptanceBatchId,
+                      error: String(error),
+                    }),
+                );
+                await Promise.all([editorAcceptanceSettlement, listenerAcceptanceSettlement]);
+              } finally {
+                stopEditorMutationErrors();
+                stopListenerMutationErrors();
+              }
+              console.info("[record-player-topology] invitation acceptances settled");
 
               // This uses precisely the public streaming API that the app's
               // persistence adapter uses. The list screens must remain useful
               // without eagerly materializing the audio field.
+              console.info("[record-player-topology] create streamed track album");
+              const streamedTrackAlbum = await owner
+                .insert(app.albums, { title: "A streamed record", artist: "Jazz" })
+                .wait({ tier: "edge" });
+              console.info("[record-player-topology] create streamed track");
               const streamedTrack = await owner.insertStreaming(app.tracks, {
-                album_id: (
-                  await owner
-                    .insert(app.albums, { title: "A streamed record", artist: "Jazz" })
-                    .wait({ tier: "edge" })
-                ).id,
+                album_id: streamedTrackAlbum.id,
                 title: "Streaming receipt",
                 ordinal: 0,
                 duration_ms: 2,
@@ -652,6 +783,7 @@ describe("RecordPlayer authenticated playlist topology", () => {
                   "streamed audio track did not settle at edge",
                 )
               ).id;
+              console.info("[record-player-topology] streamed track settled");
             },
           },
           {
