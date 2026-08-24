@@ -12,7 +12,7 @@ use crate::schema::ColumnSchema;
 use groove::schema::TableSchema as GrooveTableSchema;
 
 groove::define_record! {
-    pub(super) struct HistoryRowRecord {
+pub(super) struct HistoryRowRecord {
         0 => branch_key: Vec<u8>,
         1 => row_uuid: RowUuid,
         2 => tx_time: TxTime,
@@ -28,7 +28,7 @@ groove::define_record! {
 }
 
 groove::define_record! {
-    pub(super) struct RegisterRowRecord {
+pub(super) struct RegisterRowRecord {
         0 => branch_key: Vec<u8>,
         1 => row_uuid: RowUuid,
         2 => tx_time: TxTime,
@@ -64,7 +64,7 @@ groove::define_record! {
 }
 
 groove::define_record! {
-    pub(super) struct GlobalCurrentRowRecord {
+pub(super) struct GlobalCurrentRowRecord {
         0 => branch_key: Vec<u8>,
         1 => row_uuid: RowUuid,
         2 => tx_time: TxTime,
@@ -72,16 +72,16 @@ groove::define_record! {
         4 => schema_version: SchemaVersionAlias,
         5 => parents: ParentRefs,
         6 => created_by: AuthorId,
-        7 => created_at: TxTime,
+        7 => created_at: u64,
         8 => updated_by: AuthorId,
-        9 => updated_at: TxTime,
+        9 => updated_at: u64,
         10 => global_time: Option<GlobalTime>,
         .. user_cells,
     }
 }
 
 groove::define_record! {
-    pub(super) struct RegisterGlobalCurrentRowRecord {
+pub(super) struct RegisterGlobalCurrentRowRecord {
         0 => branch_key: Vec<u8>,
         1 => row_uuid: RowUuid,
         2 => tx_time: TxTime,
@@ -89,9 +89,9 @@ groove::define_record! {
         4 => schema_version: SchemaVersionAlias,
         5 => parents: ParentRefs,
         6 => created_by: AuthorId,
-        7 => created_at: TxTime,
+        7 => created_at: u64,
         8 => updated_by: AuthorId,
-        9 => updated_at: TxTime,
+        9 => updated_at: u64,
         10 => global_time: Option<GlobalTime>,
         11 => _deletion: DeletionEvent,
     }
@@ -1448,6 +1448,13 @@ pub(super) fn global_current_values(
     global_time: Option<GlobalTime>,
 ) -> Result<Vec<Value>, Error> {
     let mut values = stored_version_prefix_values(version);
+    // Global-current rows are the source for app-facing reads. Keep their
+    // provenance in public physical milliseconds; transaction HLC ordering is
+    // carried independently by `tx_time`.
+    values[GlobalCurrentRowRecord::FIELD_CREATED_AT_IDX] =
+        Value::U64(version.created_at().physical_ms());
+    values[GlobalCurrentRowRecord::FIELD_UPDATED_AT_IDX] =
+        Value::U64(version.updated_at().physical_ms());
     values.push(Value::Nullable(
         global_time.map(|seq| Box::new(Value::U64(seq.0))),
     ));
@@ -1471,6 +1478,12 @@ pub(super) fn register_global_current_values(
     global_time: Option<GlobalTime>,
 ) -> Vec<Value> {
     let mut values = stored_version_prefix_values(version);
+    // Register winners participate in include-deleted app reads and have the
+    // same public-provenance contract as content winners.
+    values[RegisterGlobalCurrentRowRecord::FIELD_CREATED_AT_IDX] =
+        Value::U64(version.created_at().physical_ms());
+    values[RegisterGlobalCurrentRowRecord::FIELD_UPDATED_AT_IDX] =
+        Value::U64(version.updated_at().physical_ms());
     values.push(Value::Nullable(
         global_time.map(|seq| Box::new(Value::U64(seq.0))),
     ));
@@ -1757,9 +1770,9 @@ pub(super) fn current_row_from_materialized_cells_with_layer_provenance(
         ));
     }
     values.push(Value::Uuid(created.created_by().0));
-    values.push(Value::U64(created.created_at().0));
+    values.push(Value::U64(created.created_at().physical_ms()));
     values.push(Value::Uuid(updated.updated_by().0));
-    values.push(Value::U64(updated.updated_at().0));
+    values.push(Value::U64(updated.updated_at().physical_ms()));
     values.push(Value::U64(updated.tx_time().0));
     values.push(Value::U64(updated.tx_node_alias().0));
     let raw = descriptor.create(&values)?;
@@ -1785,9 +1798,9 @@ pub(super) fn current_row_from_cells_with_explicit_provenance(
         ));
     }
     values.push(Value::Uuid(provenance.created_by.0));
-    values.push(Value::U64(provenance.created_at.0));
+    values.push(Value::U64(provenance.created_at));
     values.push(Value::Uuid(provenance.updated_by.0));
-    values.push(Value::U64(provenance.updated_at.0));
+    values.push(Value::U64(provenance.updated_at));
     let (tx_time, tx_node_alias) = projected_tx.unwrap_or((TxTime(0), NodeAlias(0)));
     values.push(Value::U64(tx_time.0));
     values.push(Value::U64(tx_node_alias.0));
@@ -1819,9 +1832,9 @@ fn current_row_prefix_and_cells_from_version(
 
 fn append_current_row_provenance(values: &mut Vec<Value>, provenance: &VersionRow) {
     values.push(Value::Uuid(provenance.created_by().0));
-    values.push(Value::U64(provenance.created_at().0));
+    values.push(Value::U64(provenance.created_at().physical_ms()));
     values.push(Value::Uuid(provenance.updated_by().0));
-    values.push(Value::U64(provenance.updated_at().0));
+    values.push(Value::U64(provenance.updated_at().physical_ms()));
     values.push(Value::U64(provenance.tx_time().0));
     values.push(Value::U64(provenance.tx_node_alias().0));
 }

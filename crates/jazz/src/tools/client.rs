@@ -1907,21 +1907,18 @@ fn core_row_provenance_to_public(
 ) -> crate::tools::metadata::RowProvenance {
     crate::tools::metadata::RowProvenance {
         created_by: provenance.created_by.0.to_string(),
-        // `TxTime` is an internal HLC: the low logical bits are meaningful for
-        // storage ordering, but are not part of the public timestamp value.
-        created_at: provenance.created_at.physical_ms(),
+        created_at: provenance.created_at,
         updated_by: provenance.updated_by.0.to_string(),
-        updated_at: provenance.updated_at.physical_ms(),
+        updated_at: provenance.updated_at,
     }
 }
 
 /// Re-encode a subscription row for the public/native boundary.
 ///
-/// Current-row records retain packed `TxTime` values so core can use their
-/// logical bits for ordering. Native consumers, however, decode provenance as
-/// public physical milliseconds. Normalize only the two provenance fields
-/// here; application `Timestamp` columns and the internal `tx_time` alias
-/// deliberately remain unchanged.
+/// Current-row records encode provenance as public physical milliseconds.
+/// The tools wire timestamp representation uses microseconds, so normalize
+/// only the two provenance fields at that boundary. Application `Timestamp`
+/// columns and the internal `tx_time` alias deliberately remain unchanged.
 fn public_subscription_record(row: &crate::node::CurrentRow) -> Result<Vec<u8>> {
     let (descriptor, raw) = row.encoded_record();
     let mut values = BorrowedRecord::new(raw, descriptor)
@@ -1997,7 +1994,11 @@ fn normalize_public_subscription_value(
         (CoreValueType::U64, CoreValue::U64(timestamp))
             if matches!(field_name, Some("$createdAt" | "$updatedAt")) =>
         {
-            *timestamp = crate::time::TxTime(*timestamp).physical_ms();
+            *timestamp = timestamp.checked_mul(1_000).ok_or_else(|| {
+                JazzError::Query(
+                    "subscription provenance timestamp exceeds u64 microseconds".to_owned(),
+                )
+            })?;
             Ok(())
         }
         (_, _) if matches!(field_name, Some("$createdAt" | "$updatedAt")) => {
@@ -2880,8 +2881,20 @@ impl PublicQueryDecoder {
                     )));
                 };
                 match column {
-                    "$createdAt" => Value::Timestamp(provenance.created_at.physical_ms()),
-                    "$updatedAt" => Value::Timestamp(provenance.updated_at.physical_ms()),
+                    "$createdAt" => Value::Timestamp(
+                        provenance.created_at.checked_mul(1_000).ok_or_else(|| {
+                            JazzError::Query(
+                                "provenance created_at exceeds u64 microseconds".to_owned(),
+                            )
+                        })?,
+                    ),
+                    "$updatedAt" => Value::Timestamp(
+                        provenance.updated_at.checked_mul(1_000).ok_or_else(|| {
+                            JazzError::Query(
+                                "provenance updated_at exceeds u64 microseconds".to_owned(),
+                            )
+                        })?,
+                    ),
                     "$createdBy" => Value::Text(provenance.created_by.0.to_string()),
                     "$updatedBy" => Value::Text(provenance.updated_by.0.to_string()),
                     _ => unreachable!("matched provenance magic column"),
@@ -3524,26 +3537,21 @@ mod tests {
     }
 
     #[test]
-    fn public_provenance_strips_hlc_bits_without_touching_other_timestamps() {
+    fn public_provenance_uses_physical_milliseconds_and_wire_microseconds() {
         use crate::groove::records::ValueType;
         use crate::time::TxTime;
 
-        // This must remain an internal boundary test: public client writes do
-        // not let a caller choose HLC logical bits, and JavaScript cannot
-        // faithfully construct this packed value above its safe-integer range.
-        // This is intentionally above JavaScript's safe-integer range while
-        // still a valid packed 48-bit physical HLC. The public/native
-        // boundary must strip its logical bits before JavaScript observes it.
+        // HLC bits are retained only on `tx_time`; public provenance is
+        // physical milliseconds before crossing the tools wire boundary.
         let physical_ms = 1_777_777_777_777;
         let created = TxTime::new(physical_ms, 17);
-        let updated = TxTime::new(physical_ms + 1, u16::MAX.into());
         assert!(created.0 > (1_u64 << 53));
 
         let provenance = core_row_provenance_to_public(crate::node::RowProvenance {
             created_by: CoreAuthorId::SYSTEM,
-            created_at: created,
+            created_at: physical_ms,
             updated_by: CoreAuthorId::SYSTEM,
-            updated_at: updated,
+            updated_at: physical_ms + 1,
         });
         assert_eq!(provenance.created_at, physical_ms);
         assert_eq!(provenance.updated_at, physical_ms + 1);
@@ -3563,8 +3571,8 @@ mod tests {
             .create(&[
                 CoreValue::Uuid(row_id),
                 CoreValue::U64(ordinary_timestamp_ms),
-                CoreValue::U64(created.0),
-                CoreValue::U64(updated.0),
+                CoreValue::U64(physical_ms),
+                CoreValue::U64(physical_ms + 1),
                 CoreValue::U64(created.0),
             ])
             .expect("encode current row");
@@ -3574,8 +3582,8 @@ mod tests {
             .to_values()
             .expect("decode public row");
         assert_eq!(values[1], CoreValue::U64(ordinary_timestamp_ms));
-        assert_eq!(values[2], CoreValue::U64(physical_ms));
-        assert_eq!(values[3], CoreValue::U64(physical_ms + 1));
+        assert_eq!(values[2], CoreValue::U64(physical_ms * 1_000));
+        assert_eq!(values[3], CoreValue::U64((physical_ms + 1) * 1_000));
         assert_eq!(
             values[4],
             CoreValue::U64(created.0),
@@ -3590,8 +3598,8 @@ mod tests {
         use crate::time::TxTime;
 
         // This exercises the actual structured-terminal reconstruction path,
-        // rather than a flat synthetic wire row. Public APIs cannot choose
-        // these nonzero HLC bits or represent the packed value exactly in JS.
+        // rather than a flat synthetic wire row. HLC ordering remains only on
+        // each record's `tx_time`; provenance is physical milliseconds.
         let physical_ms = 1_777_777_777_777;
         let root_created = TxTime::new(physical_ms, 17);
         let child_updated = TxTime::new(physical_ms + 1, 23);
@@ -3609,7 +3617,7 @@ mod tests {
             child_descriptor
                 .create(&[
                     CoreValue::Uuid(child_id),
-                    CoreValue::U64(child_updated.0),
+                    CoreValue::U64(physical_ms + 1),
                     CoreValue::U64(42),
                     CoreValue::U64(child_updated.0),
                 ])
@@ -3631,7 +3639,7 @@ mod tests {
         let raw = root_descriptor
             .create(&[
                 CoreValue::Uuid(root_id),
-                CoreValue::U64(root_created.0),
+                CoreValue::U64(physical_ms),
                 CoreValue::Nullable(Some(Box::new(CoreValue::Array(vec![
                     CoreValue::Nullable(Some(Box::new(CoreValue::Record(child)))),
                     CoreValue::Nullable(None),
@@ -3673,7 +3681,7 @@ mod tests {
         let root_values = BorrowedRecord::new(&encoded, &root_descriptor)
             .to_values()
             .expect("decode public terminal root");
-        assert_eq!(root_values[1], CoreValue::U64(physical_ms));
+        assert_eq!(root_values[1], CoreValue::U64(physical_ms * 1_000));
         assert_eq!(root_values[3], CoreValue::U64(41));
         assert_eq!(root_values[4], CoreValue::U64(root_created.0));
 
@@ -3690,7 +3698,7 @@ mod tests {
             panic!("first terminal child must remain a record")
         };
         let child_values = child.to_values().expect("decode public terminal child");
-        assert_eq!(child_values[1], CoreValue::U64(physical_ms + 1));
+        assert_eq!(child_values[1], CoreValue::U64((physical_ms + 1) * 1_000));
         assert_eq!(child_values[2], CoreValue::U64(42));
         assert_eq!(child_values[3], CoreValue::U64(child_updated.0));
         assert_eq!(children[1], CoreValue::Nullable(None));

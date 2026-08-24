@@ -82,9 +82,9 @@ fn row_provenance_preserves_created_fields_and_advances_updated_at() {
         .expect("row has provenance");
 
     assert_eq!(provenance.created_by, alice);
-    assert_eq!(provenance.created_at.0, 1_000);
+    assert_eq!(provenance.created_at, 1_000);
     assert_eq!(provenance.updated_by, alice);
-    assert_eq!(provenance.updated_at.0, 2_000);
+    assert_eq!(provenance.updated_at, 2_000);
     assert!(provenance.created_at < provenance.updated_at);
 
     let (descriptor, raw) = rows[0].encoded_record();
@@ -152,9 +152,9 @@ fn deletion_advances_updated_provenance_without_replacing_creation_provenance() 
         .expect("resolve provenance")
         .expect("row has provenance");
     assert_eq!(provenance.created_by, alice);
-    assert_eq!(provenance.created_at.0, 1_000);
+    assert_eq!(provenance.created_at, 1_000);
     assert_eq!(provenance.updated_by, alice);
-    assert_eq!(provenance.updated_at.0, 3_000);
+    assert_eq!(provenance.updated_at, 3_000);
 }
 
 /// Empty mergeable-batch updates remain no-ops only after validating both the
