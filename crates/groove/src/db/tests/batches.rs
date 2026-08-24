@@ -4,6 +4,7 @@ use super::*;
 
 use bytes::Bytes;
 use std::cell::Cell;
+use std::task::{Poll, Waker};
 
 #[derive(Clone)]
 struct CrashAfterChunkPut {
@@ -60,6 +61,80 @@ impl crate::chunks::ChunkKvStorage for CrashAfterChunkPut {
         self.successful_puts
             .set(self.successful_puts.get().saturating_add(1));
         crate::chunks::ChunkKvStorage::put_if_absent(&*self.storage, locator, hash, bytes)
+    }
+
+    fn delete_exact(
+        &self,
+        locator: Vec<u8>,
+        expected_hash: crate::large_values::ContentHash,
+    ) -> crate::chunks::ChunkFuture<'_, Result<(), crate::chunks::ChunkStorageError>> {
+        crate::chunks::ChunkKvStorage::delete_exact(&*self.storage, locator, expected_hash)
+    }
+}
+
+#[derive(Clone)]
+struct BlockedChunkPut {
+    storage: Rc<crate::chunks::MemoryChunkStorage>,
+    blocked: Rc<Cell<bool>>,
+    waiters: Rc<RefCell<Vec<Waker>>>,
+}
+
+impl BlockedChunkPut {
+    fn new() -> Self {
+        Self {
+            storage: Rc::new(crate::chunks::MemoryChunkStorage::new()),
+            blocked: Rc::new(Cell::new(true)),
+            waiters: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+
+    fn release(&self) {
+        self.blocked.set(false);
+        for waiter in std::mem::take(&mut *self.waiters.borrow_mut()) {
+            waiter.wake();
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.storage.len()
+    }
+}
+
+impl crate::chunks::ChunkKvStorage for BlockedChunkPut {
+    fn get_exact(
+        &self,
+        locator: Vec<u8>,
+    ) -> crate::chunks::ChunkFuture<
+        '_,
+        Result<Option<(crate::large_values::ContentHash, Bytes)>, crate::chunks::ChunkStorageError>,
+    > {
+        crate::chunks::ChunkKvStorage::get_exact(&*self.storage, locator)
+    }
+
+    fn put_if_absent(
+        &self,
+        locator: Vec<u8>,
+        hash: crate::large_values::ContentHash,
+        bytes: Bytes,
+    ) -> crate::chunks::ChunkFuture<
+        '_,
+        Result<Option<(crate::large_values::ContentHash, Bytes)>, crate::chunks::ChunkStorageError>,
+    > {
+        let blocked = self.blocked.clone();
+        let waiters = self.waiters.clone();
+        let storage = self.storage.clone();
+        Box::pin(async move {
+            std::future::poll_fn(|cx| {
+                if blocked.get() {
+                    waiters.borrow_mut().push(cx.waker().clone());
+                    Poll::Pending
+                } else {
+                    Poll::Ready(())
+                }
+            })
+            .await;
+            crate::chunks::ChunkKvStorage::put_if_absent(&*storage, locator, hash, bytes).await
+        })
     }
 
     fn delete_exact(
@@ -342,6 +417,96 @@ async fn upload_intent_reclaims_crash_window_chunks_and_promotes_completed_uploa
             .unwrap()
             .contains(&staged)
     );
+}
+
+#[test]
+fn eviction_and_reclamation_wait_for_an_inflight_blob_stage() {
+    use futures::channel::oneshot;
+    use futures::executor::LocalPool;
+    use futures::task::LocalSpawnExt;
+
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![3; crate::large_values::INLINE_VALUE_MAX_BYTES + 1],
+        |hash| crate::large_values::Locator(hash.0[..16].to_vec()),
+    )
+    .unwrap();
+    let mut pool = LocalPool::new();
+    let backend = Rc::new(BlockedChunkPut::new());
+    let mut opened = pool
+        .run_until(Database::new(
+            schema.clone(),
+            MemoryStorage::new(&schema.column_families()),
+        ))
+        .unwrap();
+    opened.set_chunk_storage(Rc::new(crate::chunks::ManagedChunkStorage::new(
+        backend.clone(),
+    )));
+    let database = Rc::new(opened);
+    let upload_id = crate::large_values::StagedLargeValueId([0x73; 16]);
+    let (stage_tx, stage_rx) = oneshot::channel();
+    let stage_database = database.clone();
+    pool.spawner()
+        .spawn_local(async move {
+            let _ = stage_tx.send(
+                stage_database
+                    .stage_large_value_chunk_batch(
+                        upload_id,
+                        prepared.value_ref.kind,
+                        prepared.staged_chunks,
+                    )
+                    .await,
+            );
+        })
+        .unwrap();
+    pool.run_until_stalled();
+    assert_eq!(backend.len(), 0);
+    assert_eq!(
+        pool.run_until(database.pending_large_value_uploads())
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let (evict_tx, mut evict_rx) = oneshot::channel();
+    let evict_database = database.clone();
+    pool.spawner()
+        .spawn_local(async move {
+            let _ = evict_tx.send(
+                evict_database
+                    .evict_pending_large_value_upload(upload_id)
+                    .await,
+            );
+        })
+        .unwrap();
+    let (reclaim_tx, mut reclaim_rx) = oneshot::channel();
+    let reclaim_database = database.clone();
+    pool.spawner()
+        .spawn_local(async move {
+            let _ = reclaim_tx.send(
+                reclaim_database
+                    .reclaim_orphaned_large_value_chunks(usize::MAX)
+                    .await,
+            );
+        })
+        .unwrap();
+    pool.run_until_stalled();
+    assert!(evict_rx.try_recv().unwrap().is_none());
+    assert!(reclaim_rx.try_recv().unwrap().is_none());
+
+    backend.release();
+    assert!(pool.run_until(stage_rx).unwrap().is_ok());
+    assert!(pool.run_until(evict_rx).unwrap().unwrap());
+    assert!(pool.run_until(reclaim_rx).unwrap().unwrap() > 0);
+    assert_eq!(backend.len(), 0);
 }
 
 #[futures_test::test]

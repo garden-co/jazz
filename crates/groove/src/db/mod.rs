@@ -15,6 +15,7 @@ use std::rc::Rc;
 use std::str;
 use std::task::{Poll, Waker};
 
+use futures::lock::Mutex as AsyncMutex;
 use web_time::{Duration, Instant};
 
 use crate::ivm::runtime::{durable_index_key_prefix, encode_key_part};
@@ -235,6 +236,11 @@ pub struct Database {
     persisted_publications: BTreeSet<PublicationId>,
     resident_writes: Rc<RefCell<StagedWriteState>>,
     publication_persistence: Rc<RefCell<PersistenceOrder>>,
+    /// Serializes the durable upload journal, separate blob staging, expiry,
+    /// promotion, and reclamation lifecycle. The blob backend may be separate
+    /// from metadata storage, so this boundary prevents both intent eviction
+    /// during an in-flight put and lost reference-count updates across uploads.
+    large_value_lifecycle: Rc<AsyncMutex<()>>,
     abandoned_application: Rc<Cell<bool>>,
     poisoned: bool,
 }

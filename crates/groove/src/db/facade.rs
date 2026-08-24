@@ -99,6 +99,7 @@ impl Database {
                 waiters: BTreeMap::new(),
                 failure: None,
             })),
+            large_value_lifecycle: Rc::new(futures::lock::Mutex::new(())),
             abandoned_application: Rc::new(Cell::new(false)),
             poisoned: false,
         })
@@ -247,6 +248,7 @@ impl Database {
         kind: crate::large_values::LargeValueKind,
         chunks: Vec<crate::large_values::StagedChunk>,
     ) -> Result<(), Error> {
+        let _lifecycle = self.large_value_lifecycle.lock().await;
         // This must precede both chunk staging and metadata mutation. In
         // particular, a valid first child followed by a malformed second child
         // cannot strand the first in durable chunk storage.
@@ -583,6 +585,7 @@ impl Database {
         upload_id: crate::large_values::StagedLargeValueId,
         value_ref: crate::large_values::LargeValueRef,
     ) -> Result<crate::large_values::StagedLargeValue, Error> {
+        let _lifecycle = self.large_value_lifecycle.lock().await;
         let key = pending_large_value_upload_key(upload_id);
         let encoded = self
             .storage
@@ -687,6 +690,7 @@ impl Database {
         &self,
         id: crate::large_values::StagedLargeValueId,
     ) -> Result<bool, Error> {
+        let _lifecycle = self.large_value_lifecycle.lock().await;
         let key = pending_large_value_upload_key(id);
         let Some(encoded) = self
             .storage
@@ -871,6 +875,7 @@ impl Database {
         &self,
         id: crate::large_values::StagedLargeValueId,
     ) -> Result<bool, Error> {
+        let _lifecycle = self.large_value_lifecycle.lock().await;
         let staged_key = staged_large_value_key(id);
         let Some(encoded) = self
             .storage
@@ -979,6 +984,7 @@ impl Database {
     /// produced by an atomic reference-count transition; deletion is exact and
     /// idempotent, so a crash leaves the queue entry available for retry.
     pub async fn reclaim_orphaned_large_value_chunks(&self, limit: usize) -> Result<usize, Error> {
+        let _lifecycle = self.large_value_lifecycle.lock().await;
         // A request may have authenticated a branch but not yet fetched all of
         // its descendants. Treat the whole provider request/lease population
         // as one coarse ephemeral retainer: reclamation is maintenance work,
