@@ -4825,6 +4825,68 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     );
   });
 
+  it("uses the explicit backend NAPI ABI for provenance without passing it as admission", () => {
+    const insertWithIdEncodedAttributed = vi.fn(() => fakeWrite());
+    const beginTransaction = vi.fn();
+    const beginStreamingMutationEncoded = vi.fn(() => ({
+      push: () => undefined,
+      finish: () => fakeWrite(),
+      abort: () => undefined,
+    }));
+    const nativeDb = fakeDb({
+      insertWithIdEncodedAttributed,
+      beginTransaction,
+      beginStreamingMutationEncoded,
+    });
+    const runtime = new NativeRuntimeAdapter(
+      {
+        openMemory: () => {
+          throw new Error("ordinary open must not be selected for a backend runtime");
+        },
+        openMemoryAsBackend: () => nativeDb,
+        openBrowser: async () => {
+          throw new Error("not used");
+        },
+      } as never,
+      testSchema,
+      new Uint8Array(16),
+      TEST_RUNTIME_AUTHOR,
+      1,
+      true,
+      { backendMode: true, readAuthorizationHost: "trusted-serving" },
+    );
+    const attribution = JSON.stringify(["https://issuer.example", "alice"]);
+    const context = JSON.stringify({ attribution });
+
+    runtime.insert(
+      "todos",
+      { title: { type: "Text", value: "credited to alice" } },
+      context,
+      "00000000-0000-0000-0000-000000000123",
+    );
+    const insertCall = insertWithIdEncodedAttributed.mock.calls[0];
+    expect(insertCall?.[0]).toBe("todos");
+    expect(new TextDecoder().decode(insertCall?.[3])).toBe(attribution);
+
+    runtime.beginTransaction("mergeable", "attributed-batch", context);
+    const transactionCall = beginTransaction.mock.calls[0];
+    expect(transactionCall?.[0]).toBe("attributed-batch");
+    expect(transactionCall?.[1]).toBe("mergeable");
+    expect(transactionCall?.[2]).toBeUndefined();
+    expect(new TextDecoder().decode(transactionCall?.[3])).toBe(attribution);
+
+    const branched = JSON.stringify({ attribution, branch_view: { head: { values: {} } } });
+    expect(() =>
+      runtime.insert(
+        "todos",
+        { title: { type: "Text", value: "must not fall back to root" } },
+        branched,
+        "00000000-0000-0000-0000-000000000124",
+      ),
+    ).toThrow("do not support branch views");
+    expect(insertWithIdEncodedAttributed).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects reserved public write-context sessions and attributions", async () => {
     const beginStreamingMutationEncoded = vi.fn(() => ({
       push: () => undefined,
