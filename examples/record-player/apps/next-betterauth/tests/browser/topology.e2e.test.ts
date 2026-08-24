@@ -62,6 +62,11 @@ const relationalRecipientApp = s.defineApp({
     track_id: s.ref("tracks"),
     label: s.string(),
   }),
+  playback_positions: s.table({
+    playlist_id: s.ref("playlists"),
+    track_id: s.ref("tracks"),
+    position_ms: s.int(),
+  }),
 });
 const relationalRecipientPermissions = s.definePermissions(
   relationalRecipientApp,
@@ -95,6 +100,8 @@ const relationalRecipientPermissions = s.definePermissions(
     policy.playlist_entries.allowInsert.where((entry) => canEditPlaylist(entry.playlist_id));
     policy.playlist_entries.allowUpdate.where((entry) => canEditPlaylist(entry.playlist_id));
     policy.playlist_entries.allowDelete.where((entry) => canEditPlaylist(entry.playlist_id));
+    policy.playback_positions.allowRead.where({ $createdBy: session.author });
+    policy.playback_positions.allowInsert.always();
     policy.invitations.allowRead.where((invite) =>
       anyOf([
         { subject: session.user_id },
