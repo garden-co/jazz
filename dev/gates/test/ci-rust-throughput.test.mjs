@@ -742,6 +742,14 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
     ],
     ["test arguments", (shards) => shards[0].testArgs.pop(), /test arguments/],
     [
+      "nested receipt source identity",
+      (shards) => {
+        shards[0].testReceipt.source.untracked = "e".repeat(64);
+        shards[0].testReceipt.source.fingerprint = sourceFingerprint(shards[0].testReceipt.source);
+      },
+      /partition test receipt source untracked does not match its inventory receipt/,
+    ],
+    [
       "cross-shard source identity",
       (shards) => {
         shards[1].source.untracked = "e".repeat(64);
