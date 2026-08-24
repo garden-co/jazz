@@ -355,15 +355,23 @@ async fn drive_upstream_wire(
             }
         }
 
-        let external_wake = wake_rx.next();
-        let auxiliary_wake = io.pump.outbound_ready();
-        futures::pin_mut!(external_wake, auxiliary_wake);
-        match futures::future::select(external_wake, auxiliary_wake).await {
-            futures::future::Either::Left((Some(()), _))
-            | futures::future::Either::Right(((), _)) => {}
-            futures::future::Either::Left((None, _)) => {
-                io.pump.disconnect();
-                return;
+        if let Some(delay) = io.pump.next_retry_delay() {
+            tokio::select! {
+                wake = wake_rx.next() => if wake.is_none() { io.pump.disconnect(); return; },
+                _ = io.pump.outbound_ready() => {},
+                _ = tokio::time::sleep(delay) => { io.pump.tick(); },
+            }
+        } else {
+            let external_wake = wake_rx.next();
+            let auxiliary_wake = io.pump.outbound_ready();
+            futures::pin_mut!(external_wake, auxiliary_wake);
+            match futures::future::select(external_wake, auxiliary_wake).await {
+                futures::future::Either::Left((Some(()), _))
+                | futures::future::Either::Right(((), _)) => {}
+                futures::future::Either::Left((None, _)) => {
+                    io.pump.disconnect();
+                    return;
+                }
             }
         }
     }
