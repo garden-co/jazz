@@ -4923,6 +4923,8 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
   it("keeps backend policy admission separate from attributed provenance", () => {
     const insertWithIdEncodedAttributed = vi.fn(() => fakeWrite());
     const updateEncodedAttributed = vi.fn(() => fakeWrite());
+    const upsertEncodedAttributed = vi.fn(() => fakeWrite());
+    const restoreEncodedAttributed = vi.fn(() => fakeWrite());
     const deleteAttributed = vi.fn(() => fakeWrite());
     const runtime = new NativeRuntimeAdapter(
       {
@@ -4930,7 +4932,11 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
           fakeDb({
             insertWithIdEncodedAttributed,
             updateEncodedAttributed,
+            upsertEncodedAttributed,
+            restoreEncodedAttributed,
             deleteAttributed,
+            prepareQuery: () => ({}),
+            all: () => encodeRows([]),
             tick: () => undefined,
           }),
       } as never,
@@ -4957,12 +4963,26 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       id,
     );
     runtime.update("todos", id, { title: { type: "Text", value: "updated" } }, context);
+    runtime.upsert(
+      "todos",
+      id,
+      { title: { type: "Text", value: "upserted" }, done: false },
+      context,
+    );
+    runtime.restore(
+      "todos",
+      id,
+      { title: { type: "Text", value: "restored" }, done: false },
+      context,
+    );
     runtime.delete("todos", id, context);
 
     const expected = JSON.stringify(["https://issuer.example", "attributed-user"]);
     for (const call of [
       insertWithIdEncodedAttributed.mock.calls[0],
       updateEncodedAttributed.mock.calls[0],
+      upsertEncodedAttributed.mock.calls[0],
+      restoreEncodedAttributed.mock.calls[0],
       deleteAttributed.mock.calls[0],
     ]) {
       const author = call?.at(-1);

@@ -212,6 +212,12 @@ type NativeDb = {
     author: Uint8Array,
     updatedAtMs?: number | null,
   ): Write;
+  restoreEncodedAttributed?(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    author: Uint8Array,
+  ): Write;
   restoreEncoded(
     table: string,
     rowId: Uint8Array,
@@ -280,6 +286,12 @@ type NativeDb = {
     cells: Uint8Array,
     author: Uint8Array,
     updatedAtMs?: number | null,
+  ): Write;
+  upsertEncodedAttributed?(
+    table: string,
+    rowId: Uint8Array,
+    cells: Uint8Array,
+    author: Uint8Array,
   ): Write;
   upsertEncoded(
     table: string,
@@ -1131,7 +1143,6 @@ export class NativeRuntimeAdapter implements Runtime {
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = this.trustedWriteIdentity(writeSession);
-    const attribution = this.backendAttribution(writeContext, writeSession);
     const branchView = branchViewFromWriteContext(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
 
@@ -1251,9 +1262,14 @@ export class NativeRuntimeAdapter implements Runtime {
               cells,
               branchView.head,
             )
-        : writeIdentity
-          ? this.db.restoreEncodedForIdentity(table, rowId, cells, writeIdentity, updatedAtMs)
-          : this.db.restoreEncoded(table, rowId, cells, updatedAtMs),
+        : attribution
+          ? requireAttributionMethod(
+              this.db.restoreEncodedAttributed,
+              "backend-attributed restores",
+            ).call(this.db, table, rowId, cells, attribution)
+          : writeIdentity
+            ? this.db.restoreEncodedForIdentity(table, rowId, cells, writeIdentity, updatedAtMs)
+            : this.db.restoreEncoded(table, rowId, cells, updatedAtMs),
     );
     return this.finishInsert(table, rowId, values, write);
   }
@@ -1340,6 +1356,7 @@ export class NativeRuntimeAdapter implements Runtime {
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = this.trustedWriteIdentity(writeSession);
+    const attribution = this.backendAttribution(writeContext, writeSession);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     const tx = this.currentTx(writeContext, "Upsert");
     const existing = tx
@@ -1365,9 +1382,14 @@ export class NativeRuntimeAdapter implements Runtime {
       return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
     }
     const write = writeOrNormalizeRejection("Upsert", () =>
-      writeIdentity
-        ? this.db.upsertEncodedForIdentity(table, rowId, cells, writeIdentity, updatedAtMs)
-        : this.db.upsertEncoded(table, rowId, cells, updatedAtMs),
+      attribution
+        ? requireAttributionMethod(
+            this.db.upsertEncodedAttributed,
+            "backend-attributed upserts",
+          ).call(this.db, table, rowId, cells, attribution)
+        : writeIdentity
+          ? this.db.upsertEncodedForIdentity(table, rowId, cells, writeIdentity, updatedAtMs)
+          : this.db.upsertEncoded(table, rowId, cells, updatedAtMs),
     );
     return this.finishMutation(write);
   }
