@@ -242,7 +242,7 @@ describe("BandChat cross-topology recovery", () => {
       ["disconnect", "completed"],
       ["reconnect", "completed"],
     ]);
-  }, 90_000);
+  }, 75_000);
 
   // #1844 (reproducing PRs #1830 and #1838): do not convert this to an inline
   // fixture or skip it. It is the adopter-facing receipt for indirect large-value
