@@ -1630,9 +1630,9 @@ fn apply_subscription_event(rows: &mut BTreeSet<(String, RowUuid)>, event: Subsc
 }
 
 fn collect_result_rows(update: &SyncMessage, rows: &mut BTreeSet<(String, RowUuid)>) {
-    if let SyncMessage::ViewUpdate {
+    if let SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
         result_member_adds, ..
-    } = update
+    }) = update
     {
         for entry in result_member_adds {
             if let Some((table, row_uuid, _)) = entry.as_row() {
@@ -1644,9 +1644,9 @@ fn collect_result_rows(update: &SyncMessage, rows: &mut BTreeSet<(String, RowUui
 
 fn result_output_count(update: &SyncMessage, table: &str) -> usize {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             result_member_adds, ..
-        } => result_member_adds
+        }) => result_member_adds
             .iter()
             .filter_map(|entry| entry.as_row())
             .filter(|entry| entry.0.as_str() == table)
@@ -1657,13 +1657,13 @@ fn result_output_count(update: &SyncMessage, table: &str) -> usize {
 
 fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             ..
-        } => {
+        }) => {
             let bundle_bytes = version_bundles
                 .iter()
                 .flat_map(|bundle| bundle.versions.iter())
@@ -1680,9 +1680,9 @@ fn view_update_bytes(update: &SyncMessage) -> u64 {
 
 fn bytes_floor(update: &SyncMessage) -> u64 {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_bundles, ..
-        } => version_bundles
+        }) => version_bundles
             .iter()
             .flat_map(|bundle| bundle.versions.iter())
             .map(|version| version.record().raw().len() as u64)

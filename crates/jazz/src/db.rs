@@ -2073,7 +2073,7 @@ fn subscriber_inbound_message_is_authority_only(
         SyncMessage::FateUpdate { .. }
             | SyncMessage::SubscribeRejected { .. }
             | SyncMessage::CatalogueAck(_)
-            | SyncMessage::ViewUpdate { .. }
+            | SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. })
             | SyncMessage::RowVersionPayloads { .. }
             | SyncMessage::CatalogueSnapshot(_)
             | SyncMessage::PermissionAdviceResponse { .. }

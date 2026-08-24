@@ -92,12 +92,12 @@ fn declared_known_state_view_update_repairs_withheld_row_version_body() {
         .unwrap();
 
     let mut update = core.view_update_for_current_rows("todos").unwrap();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         version_carriers,
         version_bundles,
         result_member_adds,
         ..
-    } = &mut update
+    }) = &mut update
     else {
         panic!("expected view update");
     };
@@ -250,7 +250,7 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     let (shape, binding) = core.whole_table_shape_binding("tasks").unwrap();
     register_shape_binding(&mut reader, &shape, &binding);
 
-    let update = SyncMessage::ViewUpdate {
+    let update = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: crate::protocol::SubscriptionKey {
             shape_id: shape.shape_id(),
             binding_id: binding.binding_id(),
@@ -266,11 +266,11 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
         terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
-    };
-    let SyncMessage::ViewUpdate {
+    });
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         result_member_adds,
         ..
-    } = &update
+    }) = &update
     else {
         panic!("expected view update");
     };
@@ -305,10 +305,10 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
     assert_eq!(version_bundles[0].versions[0].table(), "todos");
     assert_eq!(version_bundles[0].versions[0].schema_version(), base_version);
     let mut inline_update = update.clone();
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         version_bundles: inline_bundles,
         ..
-    } = &mut inline_update
+    }) = &mut inline_update
     else {
         unreachable!();
     };
@@ -524,7 +524,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
         None,
     )
     .unwrap();
-    let update = SyncMessage::ViewUpdate {
+    let update = SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         subscription: crate::protocol::SubscriptionKey {
             shape_id: shape.shape_id(),
             binding_id: binding.binding_id(),
@@ -547,7 +547,7 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
         terminal_operations: Vec::new(),
         program_fact_adds: Vec::new(),
         program_fact_removes: Vec::new(),
-    };
+    });
     assert_eq!(
         receiver.missing_known_state_row_version_refs(&update).unwrap(),
         vec![RowVersionRef::new("tasks", task_row, tx_id)],

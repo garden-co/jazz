@@ -113,52 +113,7 @@ pub enum SyncMessage {
     /// Catalogue-lane acknowledgement.
     CatalogueAck(CatalogueAck),
     /// Downstream current-row view update.
-    ViewUpdate {
-        /// Query binding result set addressed by this update.
-        subscription: SubscriptionKey,
-        /// Core-assigned `GlobalTime` through which the canonical binding view
-        /// was evaluated. It is durable known-state evidence, reusable after
-        /// reconnecting to an edge serving the same authoritative database
-        /// lineage for payload dedup/repair; it is not evidence that an
-        /// upstream connection is currently live and cannot alone settle a
-        /// subscription.
-        settled_through: GlobalTime,
-        /// Whether receiver result_set should be reset first.
-        reset_result_set: bool,
-        /// General carrier stream for singleton bundles and packed runs.
-        ///
-        /// Receivers validate this stream and apply packed runs directly.
-        /// Legacy/test paths may still expand carriers into `version_bundles`.
-        version_carriers: Vec<VersionCarrier>,
-        /// Version bundles not previously shipped on the peer.
-        ///
-        /// Partial bundles may contain only the versions that contribute to this
-        /// update. Exclusive bundles are view-atomic: they contain all versions
-        /// required by this subscription view, not necessarily all transaction writes.
-        version_bundles: Vec<VersionBundle>,
-        /// Peer-scoped payload coverage that may be referenced instead of
-        /// resending bytes.
-        ///
-        /// The currently implemented tier is complete transaction payload
-        /// coverage only. It does not mean the peer knows every concrete row
-        /// version relevant to a partial transaction, nor that an exclusive
-        /// transaction is complete for this subscription view. Partial/view-
-        /// scoped payloads remain explicit bundles until the protocol grows
-        /// finer coverage refs.
-        peer_payload_inventory: PeerPayloadInventory,
-        /// Typed result membership additions for the subscription.
-        result_member_adds: Vec<ResultMemberEntry>,
-        /// Typed result membership removals for the subscription.
-        result_member_removes: Vec<ResultMemberEntry>,
-        /// Terminal-owned structural edits, addressed by stable result keys and
-        /// typed paths. These are applied after an authoritative reset or the
-        /// preceding update on this FIFO link.
-        terminal_operations: Vec<groove::ivm::TerminalOperation>,
-        /// Non-row program fact additions, such as relation edges.
-        program_fact_adds: Vec<ProgramFactEntry>,
-        /// Non-row program fact removals, such as relation edges.
-        program_fact_removes: Vec<ProgramFactEntry>,
-    },
+    ViewUpdate(ViewUpdatePayload),
     /// Repair-lane request for exact row-version payloads referenced by known-state dedup.
     FetchRowVersions {
         /// Exact version identities requested by the receiver.
@@ -230,7 +185,11 @@ pub enum SyncMessage {
         /// Total number of authority clauses in this hydration.
         clause_count: u16,
         /// Ordinary settlement-bearing `ViewUpdate` payload.
-        view: Box<SyncMessage>,
+        ///
+        /// This deliberately is not a `SyncMessage`: an authority scope view
+        /// has exactly one wrapper around a view update, never another scope
+        /// wrapper.
+        view: ViewUpdatePayload,
     },
     /// Aggregate proof for every clause sent in an authority scope view set.
     AuthorizationScopeAggregateReceipt {
@@ -260,6 +219,53 @@ pub enum SyncMessage {
     ChunkUploadNodes(ChunkUploadNodes),
     /// Receiver acknowledgement for a pushed upload.
     ChunkUploadResult(ChunkUploadResult),
+}
+
+/// Shared payload for ordinary and authorization-scope view updates.
+///
+/// [`SyncMessage::ViewUpdate`] carries it directly, while
+/// [`SyncMessage::AuthorizationScopeView`] adds scope metadata around the same
+/// payload. Keeping the payload separate from `SyncMessage` makes recursive
+/// authorization-scope wrappers impossible to construct and decode.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct ViewUpdatePayload {
+    /// Target subscription whose result set this update changes.
+    pub subscription: SubscriptionKey,
+    /// Authority cut through which this view has settled.
+    pub settled_through: GlobalTime,
+    /// Whether the receiver must replace its current result membership.
+    pub reset_result_set: bool,
+    /// Compact carriers for versions referenced by this update.
+    pub version_carriers: Vec<VersionCarrier>,
+    /// Explicit version bundles required by this update.
+    pub version_bundles: Vec<VersionBundle>,
+    /// Per-peer payload coverage and authorization progress.
+    pub peer_payload_inventory: PeerPayloadInventory,
+    /// Result members added by the update.
+    pub result_member_adds: Vec<ResultMemberEntry>,
+    /// Result members removed by the update.
+    pub result_member_removes: Vec<ResultMemberEntry>,
+    /// Terminal-owned structural result edits.
+    pub terminal_operations: Vec<groove::ivm::TerminalOperation>,
+    /// Program facts added by this update.
+    pub program_fact_adds: Vec<ProgramFactEntry>,
+    /// Program facts removed by this update.
+    pub program_fact_removes: Vec<ProgramFactEntry>,
+}
+
+impl ViewUpdatePayload {
+    /// Extracts the shared payload from an ordinary view-update message.
+    pub fn from_view_update(message: SyncMessage) -> Option<Self> {
+        match message {
+            SyncMessage::ViewUpdate(payload) => Some(payload),
+            _ => None,
+        }
+    }
+
+    /// Wraps this payload in an ordinary view-update message.
+    pub fn into_view_update(self) -> SyncMessage {
+        SyncMessage::ViewUpdate(self)
+    }
 }
 
 /// Bounded batch of exact immutable-chunk requests on one peer link.
@@ -569,34 +575,42 @@ impl SyncMessage {
 
     /// Validate any packed view-update carrier runs in this message.
     pub fn validate_version_carriers(&self) -> Result<(), VersionBundleRunError> {
+        self.carried_view_update().map_or(Ok(()), |view| {
+            validate_version_carrier_runs(&view.version_carriers)
+        })
+    }
+
+    fn carried_view_update(&self) -> Option<&ViewUpdatePayload> {
         match self {
-            Self::ViewUpdate {
-                version_carriers, ..
-            } => {
-                for carrier in version_carriers {
-                    if let VersionCarrier::Run(run) = carrier {
-                        run.validate()?;
-                    }
-                }
-                Ok(())
-            }
-            _ => Ok(()),
+            Self::ViewUpdate(view) | Self::AuthorizationScopeView { view, .. } => Some(view),
+            _ => None,
         }
     }
 
     /// Expand packed view-update carriers into `version_bundles` for legacy paths/tests.
     pub fn expand_version_carriers_for_receive(mut self) -> Result<Self, VersionBundleRunError> {
-        if let Self::ViewUpdate {
+        if let Self::ViewUpdate(ViewUpdatePayload {
             version_carriers,
             version_bundles,
             ..
-        } = &mut self
+        }) = &mut self
         {
             version_bundles.extend(expand_version_carriers(version_carriers)?);
             version_carriers.clear();
         }
         Ok(self)
     }
+}
+
+fn validate_version_carrier_runs(
+    version_carriers: &[VersionCarrier],
+) -> Result<(), VersionBundleRunError> {
+    for carrier in version_carriers {
+        if let VersionCarrier::Run(run) = carrier {
+            run.validate()?;
+        }
+    }
+    Ok(())
 }
 
 /// Exact row-version identity used by known-state repair requests.

@@ -279,7 +279,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
         (
             "view_update_reset_with_row_add",
             "ViewUpdate",
-            SyncMessage::ViewUpdate {
+            SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through: GlobalTime(7),
                 reset_result_set: true,
@@ -295,12 +295,12 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
-            },
+            }),
         ),
         (
             "view_update_mixed_version_carrier_runs",
             "ViewUpdate",
-            SyncMessage::ViewUpdate {
+            SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through: GlobalTime(8),
                 reset_result_set: false,
@@ -312,12 +312,12 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 terminal_operations: Vec::new(),
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
-            },
+            }),
         ),
         (
             "view_update_terminal_patch",
             "ViewUpdate",
-            SyncMessage::ViewUpdate {
+            SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
                 subscription,
                 settled_through: GlobalTime(9),
                 reset_result_set: false,
@@ -337,7 +337,7 @@ fn wire_fixture_messages() -> Vec<(&'static str, &'static str, SyncMessage)> {
                 }],
                 program_fact_adds: Vec::new(),
                 program_fact_removes: Vec::new(),
-            },
+            }),
         ),
         (
             "commit_unit_mergeable_empty",

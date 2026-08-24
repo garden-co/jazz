@@ -14,7 +14,7 @@ fn view_updates_drop_unknown_usage_site_bindings() {
     // in-flight traffic by design, so unknown per-subscription packets are
     // benign drops, not protocol corruption.
     reader
-        .apply_sync_message_settled(SyncMessage::ViewUpdate {
+        .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription: unknown_usage_site,
             settled_through: GlobalTime(0),
             reset_result_set: false,
@@ -26,7 +26,7 @@ fn view_updates_drop_unknown_usage_site_bindings() {
             terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
-        })
+        }))
         .unwrap();
 
     assert_eq!(
@@ -519,7 +519,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
     let bad_tx = TxId::new(TxTime::from(10), node(8));
     let subscription = receiver.whole_table_subscription_key("todos").unwrap();
     receiver
-        .apply_sync_message_settled(SyncMessage::ViewUpdate {
+        .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through: GlobalTime(0),
             reset_result_set: true,
@@ -534,7 +534,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
             terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
-        })
+        }))
         .unwrap();
     let binding_view = receiver
         .binding_view_key_for_subscription(subscription)
@@ -542,7 +542,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
     let before_generation = receiver.applied_view_update_generation(binding_view);
     assert!(receiver.opening_pending_for_binding_view(binding_view));
     let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        receiver.apply_sync_message_settled(SyncMessage::ViewUpdate {
+        receiver.apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through: GlobalTime(0),
             reset_result_set: true,
@@ -576,7 +576,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
             terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
-        })
+        }))
     }));
     assert!(received.is_ok(), "a peer view must not panic the receiver");
     assert!(matches!(
@@ -592,7 +592,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
         before_generation
     );
     receiver
-        .apply_sync_message_settled(SyncMessage::ViewUpdate {
+        .apply_sync_message_settled(SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
             subscription,
             settled_through: GlobalTime(1),
             reset_result_set: true,
@@ -604,7 +604,7 @@ fn peer_rejects_sequenced_non_global_view_bundle_before_persisting_it() {
             terminal_operations: Vec::new(),
             program_fact_adds: Vec::new(),
             program_fact_removes: Vec::new(),
-        })
+        }))
         .unwrap();
     assert!(!receiver.opening_pending_for_binding_view(binding_view));
     assert_eq!(
