@@ -29,6 +29,11 @@ Run `pnpm --dir examples/big-label test` for the deterministic fixture and isola
 
 - `jazz-sim s1_saas`: tenant cold load, indexed owned-slice filtering, relations/includes, write churn.
 - Policy-graph fixture: organization → membership → team/assignment authorization shape.
+- CB-012: the valid release-owner assignment path is covered by both the
+  deployed authority receipt and browser topology phase. It currently exposes
+  a core correlated-`allowedTo.insert()` lowering fault
+  (`__flat_join_source_0_row_uuid`), rather than an app policy denial; see
+  `tests/correlated-assignment.repro.test.ts`.
 - Future blocker: schema migrations/versioned reconnect are recorded for a shared migration/topology lane. This example does not invent a migration mechanism.
 
 All identities, names, and IDs are generated public fixtures; no adopter data is used.

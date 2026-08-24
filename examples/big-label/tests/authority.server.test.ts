@@ -46,6 +46,18 @@ describe("BigLabel deployed tenant authority", () => {
         role: "editor",
       })
       .wait({ tier: "edge" });
+    // Planted positive: the release owner assignment takes its write authority
+    // from the parent release, then proves that both referenced rows belong to
+    // this tenant. A timeout/rejection here is a propagation or policy-engine
+    // defect, not an intentionally denied cross-tenant case below.
+    await admin
+      .insert(app.releaseAssignments, {
+        organizationId: seeded.org.id,
+        releaseId: seeded.release.id,
+        membershipId: seeded.adminMembership.id,
+        role: "owner",
+      })
+      .wait({ tier: "edge" });
     await member.expectDenied((db) =>
       db.update(app.memberships, seeded.memberMembership.id, { role: "admin" }),
     );
