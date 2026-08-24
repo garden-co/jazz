@@ -307,8 +307,7 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
         };
         let table = if let Some(column) = read_column {
             table.policies(
-                PublicTablePolicies::new()
-                    .with_select(public_session_eq(column, &["claims", "sub"])),
+                PublicTablePolicies::new().with_select(public_session_eq(column, &["user_id"])),
             )
         } else {
             table
@@ -322,6 +321,8 @@ fn live_subscription_rebuilds_when_non_genesis_permissions_head_changes() {
     assert_eq!(owner_payload.id, editor_head.version_id());
 
     let db = open_db(0xa0, AuthorSubject::SYSTEM, &structural);
+    db.set_identity_claims(alice, test_provider_claims(alice));
+    db.set_identity_claims(bob, test_provider_claims(bob));
     db.publish_schema_with_lens(
         1,
         SchemaLineagePublication::new(

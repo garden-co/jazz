@@ -1020,6 +1020,9 @@ fn array_subquery_policy_oracle_filters_child_array_contents_per_identity() {
     let other = AuthorSubject::for_test_bytes([0xb1; 16]);
     let spy = AuthorSubject::for_test_bytes([0xc1; 16]);
     let db = open_db(0xc4, AuthorSubject::SYSTEM, &schema);
+    db.set_identity_claims(member, test_provider_claims(member));
+    db.set_identity_claims(other, test_provider_claims(other));
+    db.set_identity_claims(spy, test_provider_claims(spy));
     db.insert_with_id(
         "todos",
         row(0x41),

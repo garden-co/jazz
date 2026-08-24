@@ -1897,6 +1897,8 @@ fn client_read_advice_is_unknown_even_when_a_local_winner_exists() {
 
     let owner_db = open_db(0xa1, owner, &schema);
     let other_db = open_db(0xb2, other, &schema);
+    owner_db.set_identity_claims(owner, test_provider_claims(owner));
+    other_db.set_identity_claims(other, test_provider_claims(other));
     let unit = core
         .node()
         .borrow_mut()
