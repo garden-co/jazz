@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { createDb, type Db } from "jazz-tools";
+import { createDb, schema as s, type Db } from "jazz-tools";
 import { deploy } from "../../../../../../packages/jazz-tools/src/dev/catalogue.js";
 import {
   TestCleanup,
@@ -21,7 +21,45 @@ import { app } from "../../schema.js";
 const ctx = new TestCleanup();
 afterEach(async () => ctx.cleanup());
 
+const acknowledgementApp = s.defineApp({
+  receipts: s.table({ label: s.string() }),
+});
+const acknowledgementPermissions = s.definePermissions(acknowledgementApp, ({ policy }) => {
+  policy.receipts.allowRead.always();
+  policy.receipts.allowInsert.always();
+});
+
 describe("RecordPlayer authenticated playlist topology", () => {
+  it("settles an identical one-table write at edge", async () => {
+    const server = await getJazzServerInfo(uniqueDbName("record-player-ack-probe"));
+    await deploy({
+      appId: server.appId,
+      serverUrl: server.serverUrl,
+      adminSecret: server.adminSecret,
+      schema: acknowledgementApp,
+      permissions: acknowledgementPermissions,
+    });
+    const token = await getJazzServerJwtForUser("record-player-probe", undefined, server.appId);
+    const db = await openClient(server, "ack-probe", token);
+    const errors: unknown[] = [];
+    const stop = db.onMutationError((event) => errors.push(event));
+    const write = db.insert(acknowledgementApp.receipts, { label: "one-table receipt" });
+    await withTimeout(
+      write.wait({ tier: "local" }),
+      5_000,
+      "one-table write did not settle locally",
+    );
+    try {
+      await withTimeout(
+        write.wait({ tier: "edge" }),
+        10_000,
+        `one-table edge settlement mutationErrors=${JSON.stringify(errors)}`,
+      );
+    } finally {
+      stop();
+    }
+  }, 30_000);
+
   it("rejects forged acceptance and converges two offline playlist editors exactly", async () => {
     let server: Awaited<ReturnType<typeof getJazzServerInfo>>;
     let owner: Db;
