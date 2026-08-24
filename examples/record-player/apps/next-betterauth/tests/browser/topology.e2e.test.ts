@@ -91,16 +91,16 @@ const relationalRecipientPermissions = s.definePermissions(
           status: "accepted",
         }),
       ]);
-    policy.playlists.allowRead.where((playlist) =>
+    const canReadPlaylist = (playlistId: RowRefValue) =>
       anyOf([
         { $createdBy: session.author },
         policy.invitations.exists.where({
-          playlist_id: playlist.id,
+          playlist_id: playlistId,
           subject: session.user_id,
           status: "accepted",
         }),
-      ]),
-    );
+      ]);
+    policy.playlists.allowRead.where((playlist) => canReadPlaylist(playlist.id));
     policy.playlists.allowInsert.always();
     policy.playlists.allowUpdate.where({ $createdBy: session.author });
     policy.playlist_entries.allowRead.where(allowedTo.read("playlist_id"));
