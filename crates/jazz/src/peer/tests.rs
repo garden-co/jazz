@@ -622,7 +622,7 @@ fn access_policy_schema() -> JazzSchema {
         "docAccess",
         vec![
             public_session_eq("doc", &["__jazz_outer_row", "id"]),
-            public_session_eq("userID", &["claims", "sub"]),
+            public_session_eq("userID", &["user_id"]),
         ],
     );
     public_peer_schema(
@@ -660,7 +660,7 @@ fn aggregate_access_policy_schema() -> JazzSchema {
         "docAccess",
         vec![
             public_session_eq("doc", &["__jazz_outer_row", "id"]),
-            public_session_eq("userID", &["claims", "sub"]),
+            public_session_eq("userID", &["user_id"]),
         ],
     );
     public_peer_schema(
@@ -2604,6 +2604,10 @@ fn aggregate_policy_oracle_matches_visible_rows_per_identity() {
     for (identity, expected_count, expected_sum) in
         [(admin, 2, Some(30)), (member, 2, Some(40)), (spy, 0, None)]
     {
+        core.set_session_claims(
+            identity,
+            BTreeMap::from([("user_id".to_owned(), Value::Uuid(identity.test_uuid()))]),
+        );
         let rows = core
             .query_rows_with_prepared_plan_for_identity(
                 &shape,
@@ -3397,6 +3401,10 @@ fn maintained_subscription_view_policy_view_exclusive_delta_ships_identity_scope
     accept_global(&mut core, grant_b, 3);
 
     let mut peer = PeerState::client_link(user_a);
+    core.set_session_claims(
+        user_a,
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(user_a.test_uuid()))]),
+    );
     peer.set_ship_complete_exclusive_payloads(true);
     core.reset_query_engine_read_metrics();
     let update = peer.current_rows_update(&mut core, "docs").unwrap();
@@ -3626,6 +3634,10 @@ fn current_rows_update_installs_maintained_subscription_for_relay_and_edge_clien
     assert!(view_update_added_rows(relay_update).contains(&doc));
 
     let mut edge_owner = PeerState::edge_client(owner);
+    core.set_session_claims(
+        owner,
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(owner.test_uuid()))]),
+    );
     let edge_update = edge_owner.current_rows_update(&mut core, "docs").unwrap();
     assert!(maintained_subscription_id(&edge_owner, subscription).is_some());
     assert_eq!(
@@ -3635,6 +3647,10 @@ fn current_rows_update_installs_maintained_subscription_for_relay_and_edge_clien
     assert!(view_update_added_rows(edge_update).contains(&doc));
 
     let mut edge_other = PeerState::edge_client(other);
+    core.set_session_claims(
+        other,
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(other.test_uuid()))]),
+    );
     let other_update = edge_other.current_rows_update(&mut core, "docs").unwrap();
     assert!(maintained_subscription_id(&edge_other, subscription).is_some());
     assert_eq!(
@@ -3681,6 +3697,10 @@ fn grant_later_exclusive_tx_extends_view_scoped_partial_bundle_after_policy_gran
     accept_global(&mut core, first_grant, 2);
 
     let mut peer = PeerState::client_link(user);
+    core.set_session_claims(
+        user,
+        BTreeMap::from([("user_id".to_owned(), Value::Uuid(user.test_uuid()))]),
+    );
     let first_update = peer.current_rows_update(&mut core, "docs").unwrap();
     let version_bundles = version_bundles_for_update(&first_update);
     let SyncMessage::ViewUpdate {
