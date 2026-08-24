@@ -186,6 +186,13 @@ claim, or subscription delta. Once durable promotion starts, the existing
 ordered-persistence failure rules apply; the database poisons only if it can no
 longer prove that resident state was restored.
 
+If the final owner-row write itself reports failure, Groove eagerly reverses
+the just-created receipt and its reference retainers before it retracts the
+resident publication; safe blob deletion then uses the normal reclaim queue.
+That differs from a process crash between receipt creation and owner-row
+acceptance: recovery deliberately retains that otherwise-unowned receipt for
+Jazz's ordinary bounded TTL policy, while never treating it as a row.
+
 This lifecycle is an internal Groove publication primitive, shared by any
 future asynchronous storage preparation. It is not a TypeScript overlay, a
 second evaluator, or a new asynchronous form of the ordinary mutation API.

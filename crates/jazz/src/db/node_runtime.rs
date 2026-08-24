@@ -226,17 +226,19 @@ where
             let tx_id = published.tx_id();
             let retract_on_failure = published.retracts_on_failed_persistence();
             let persistence = published.persist().await;
-            self.node
+            let settlement = self
+                .node
                 .lock()
                 .await
                 .settle_published_transaction(tx_id, persistence, retract_on_failure)
-                .await?;
+                .await;
             let settled = self
                 .pending_local_publications
                 .borrow_mut()
                 .pop_front()
                 .expect("settled local publication remains at queue front");
             debug_assert_eq!(settled.published.tx_id(), tx_id);
+            settlement?;
             self.queue_pending_upload(tx_id, upload_unit);
         }
     }
