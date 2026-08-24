@@ -1174,13 +1174,13 @@ fn storage_bytes(path: &std::path::Path) -> u64 {
 
 fn view_update_bytes(update: &SyncMessage) -> u64 {
     match update {
-        SyncMessage::ViewUpdate {
+        SyncMessage::ViewUpdate(jazz::protocol::ViewUpdatePayload {
             version_bundles,
             peer_payload_inventory,
             result_member_adds,
             result_member_removes,
             ..
-        } => {
+        }) => {
             version_bundles
                 .iter()
                 .flat_map(|bundle| bundle.versions.iter())

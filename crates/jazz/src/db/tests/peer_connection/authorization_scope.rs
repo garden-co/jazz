@@ -117,7 +117,7 @@ fn assert_delayed_duplicate_usage_reset(replacement_row: bool) {
         if server_sent.borrow().iter().any(|message| {
             matches!(
                 message,
-                SyncMessage::ViewUpdate { subscription, .. }
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { subscription, .. })
                     if *subscription == second_subscription
             )
         }) {
@@ -131,21 +131,19 @@ fn assert_delayed_duplicate_usage_reset(replacement_row: bool) {
         .iter()
         .rev()
         .find_map(|message| match message {
-            SyncMessage::ViewUpdate { subscription, .. }
-                if *subscription == second_subscription =>
-            {
-                Some(message.clone())
-            }
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+                subscription, ..
+            }) if *subscription == second_subscription => Some(message.clone()),
             _ => None,
         })
         .expect("duplicate usage site must receive its own ViewUpdate");
-    let SyncMessage::ViewUpdate {
+    let SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
         reset_result_set,
         peer_payload_inventory,
         result_member_adds,
         result_member_removes,
         ..
-    } = &second_update
+    }) = &second_update
     else {
         unreachable!();
     };
@@ -219,10 +217,10 @@ fn legacy_authorization_scope_subscribe_is_rejected_before_shape_admission() {
     while let Some(message) = client_transport.try_recv() {
         match message {
             SyncMessage::CatalogueSnapshot(_) => {}
-            SyncMessage::ViewUpdate {
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                 subscription: received,
                 ..
-            } => {
+            }) => {
                 assert_eq!(received, subscription);
                 received_view = true;
             }
@@ -255,7 +253,7 @@ fn legacy_authorization_scope_subscribe_refreshes_claims() {
     let mut refreshed_receipt = None;
     while let Some(message) = client_transport.try_recv() {
         match message {
-            SyncMessage::ViewUpdate { .. } => refreshed_view = true,
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) => refreshed_view = true,
             SyncMessage::AuthorizationScopeReceipt { receipt, .. } => {
                 assert!(
                     refreshed_view,
@@ -409,7 +407,9 @@ fn legacy_authorization_scope_subscribe_never_assembles_multiple_clauses() {
     let mut saw_receipt = false;
     while let Some(message) = client_transport.try_recv() {
         match message {
-            SyncMessage::ViewUpdate { .. } => saw_second_view = true,
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) => {
+                saw_second_view = true
+            }
             SyncMessage::AuthorizationScopeReceipt { receipt, .. } => {
                 assert!(
                     saw_second_view,
@@ -692,7 +692,7 @@ fn legacy_authorization_scope_subscribe_rejects_every_read_view() {
     while let Some(message) = canonical_client.try_recv() {
         match message {
             SyncMessage::CatalogueSnapshot(_) => {}
-            SyncMessage::ViewUpdate { .. } => saw_view = true,
+            SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload { .. }) => saw_view = true,
             SyncMessage::AuthorizationScopeReceipt { .. } => {
                 assert!(saw_view, "canonical receipt follows its support view");
                 saw_receipt = true;
@@ -765,21 +765,23 @@ fn subscriber_cannot_spoof_authority_view_updates() {
             _ => continue,
         }
     };
-    let view_update = |opening_pending, settled_through| SyncMessage::ViewUpdate {
-        subscription,
-        settled_through: GlobalTime(settled_through),
-        reset_result_set: true,
-        version_carriers: Vec::new(),
-        version_bundles: Vec::new(),
-        peer_payload_inventory: crate::protocol::PeerPayloadInventory {
-            opening_pending,
-            ..Default::default()
-        },
-        result_member_adds: Vec::new(),
-        result_member_removes: Vec::new(),
-        terminal_operations: Vec::new(),
-        program_fact_adds: Vec::new(),
-        program_fact_removes: Vec::new(),
+    let view_update = |opening_pending, settled_through| {
+        SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
+            subscription,
+            settled_through: GlobalTime(settled_through),
+            reset_result_set: true,
+            version_carriers: Vec::new(),
+            version_bundles: Vec::new(),
+            peer_payload_inventory: crate::protocol::PeerPayloadInventory {
+                opening_pending,
+                ..Default::default()
+            },
+            result_member_adds: Vec::new(),
+            result_member_removes: Vec::new(),
+            terminal_operations: Vec::new(),
+            program_fact_adds: Vec::new(),
+            program_fact_removes: Vec::new(),
+        })
     };
     authority_transport.send(view_update(true, 1)).unwrap();
     edge.tick().unwrap();

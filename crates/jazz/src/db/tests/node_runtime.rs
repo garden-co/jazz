@@ -632,11 +632,11 @@ fn core_later_client_upload_refreshes_earlier_peer_subscription_in_same_tick() {
         .filter(|message| {
             matches!(
                 message,
-                SyncMessage::ViewUpdate {
+                SyncMessage::ViewUpdate(crate::protocol::ViewUpdatePayload {
                     result_member_adds,
                     settled_through,
                     ..
-                } if *settled_through > GlobalTime(0)
+                }) if *settled_through > GlobalTime(0)
                     && result_member_adds.iter().any(|member| {
                         member.as_row().is_some_and(|(table, row_uuid, tx_id)| {
                             table.as_str() == "todos"
