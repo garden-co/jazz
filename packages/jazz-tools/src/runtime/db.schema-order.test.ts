@@ -4,6 +4,7 @@ import type { InsertValues, WasmRow, WasmSchema } from "../drivers/types.js";
 import { WriteHandle, WriteResult, JazzClient, type BatchId, type InsertResult } from "./client.js";
 import type { Session } from "./context.js";
 import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
+import { schema as s } from "../index.js";
 
 class TestRuntimeSource extends RuntimeSource<DbConfig> {
   constructor(private readonly client: JazzClient) {
@@ -48,6 +49,59 @@ function makeWriteHandle(transactionId: string): WriteHandle {
 }
 
 describe("Db runtime schema order", () => {
+  it("exposes typed byte and UTF-16 large-value operations through Db", async () => {
+    const app = s.defineApp({
+      notes: s.table({
+        body: s.string(),
+        attachment: s.bytes(),
+      }),
+    });
+    const append = makeWriteHandle("append-value");
+    const splice = makeWriteHandle("splice-value");
+    const client = {
+      readValueRange: vi.fn(async () => Uint8Array.from([2, 3])),
+      readTextUtf16Range: vi.fn(async () => "🙂"),
+      appendValue: vi.fn(async () => append),
+      spliceValue: vi.fn(async () => splice),
+    } as unknown as JazzClient;
+    const db = new TestDb(client);
+    const id = "00000000-0000-0000-0000-0000000000a1";
+
+    await expect(db.readValueRange(app.notes, id, "attachment", 2, 4)).resolves.toEqual(
+      Uint8Array.from([2, 3]),
+    );
+    await expect(db.readTextUtf16Range(app.notes, id, "body", 5, 7)).resolves.toBe("🙂");
+    await expect(db.appendValue(app.notes, id, "attachment", Uint8Array.of(4))).resolves.toBe(
+      append,
+    );
+    await expect(
+      db.spliceValue(app.notes, id, "attachment", 9, 3, Uint8Array.of(5, 6)),
+    ).resolves.toBe(splice);
+
+    expect(client.readValueRange).toHaveBeenCalledWith("notes", id, "attachment", 2, 4);
+    expect(client.readTextUtf16Range).toHaveBeenCalledWith("notes", id, "body", 5, 7);
+    expect(client.appendValue).toHaveBeenCalledWith("notes", id, "attachment", Uint8Array.of(4));
+    expect(client.spliceValue).toHaveBeenCalledWith(
+      "notes",
+      id,
+      "attachment",
+      9,
+      3,
+      Uint8Array.of(5, 6),
+    );
+
+    void (() => {
+      // @ts-expect-error byte ranges accept only `bytes` columns.
+      void db.readValueRange(app.notes, id, "body", 0, 1);
+      // @ts-expect-error UTF-16 ranges accept only `string` columns.
+      void db.readTextUtf16Range(app.notes, id, "attachment", 0, 1);
+      // @ts-expect-error byte append accepts only `bytes` columns.
+      void db.appendValue(app.notes, id, "body", Uint8Array.of(1));
+      // @ts-expect-error byte splice accepts only `bytes` columns.
+      void db.spliceValue(app.notes, id, "body", 0, 0, Uint8Array.of(1));
+    });
+  });
+
   it("derives a streaming insert branch selector from branchBy cells", async () => {
     const runtimeSchema: WasmSchema = {
       documents: {

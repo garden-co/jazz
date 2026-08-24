@@ -134,6 +134,8 @@ export type {
   TableInit,
   TableStreamingInit,
   TableStreamingUpdate,
+  TableBytesColumn,
+  TableTextColumn,
   TableWhereInput,
   TableSelectableColumn,
   TableOrderableColumn,

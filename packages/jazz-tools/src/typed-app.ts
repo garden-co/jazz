@@ -251,6 +251,24 @@ type StreamingColumnName<TSchema extends SchemaLike, TTable extends TableName<TS
     : never;
 }[ColumnName<TSchema, TTable>];
 
+/** Column names whose declared storage type is `BYTEA`. */
+export type TableBytesColumn<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
+  [TColumn in ColumnName<TSchema, TTable>]: ColumnBuilderSqlType<
+    BuilderForColumn<TSchema, TTable, TColumn>
+  > extends "BYTEA"
+    ? TColumn
+    : never;
+}[ColumnName<TSchema, TTable>];
+
+/** Column names whose declared storage type is `TEXT`. */
+export type TableTextColumn<TSchema extends SchemaLike, TTable extends TableName<TSchema>> = {
+  [TColumn in ColumnName<TSchema, TTable>]: ColumnBuilderSqlType<
+    BuilderForColumn<TSchema, TTable, TColumn>
+  > extends "TEXT"
+    ? TColumn
+    : never;
+}[ColumnName<TSchema, TTable>];
+
 /**
  * Input for a streaming insert. Exactly one Text, JSON, or Bytea column is
  * replaced by an asynchronous source; every other column retains its ordinary

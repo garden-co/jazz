@@ -51,6 +51,13 @@ import { SubscriptionManager, type SubscriptionDelta } from "./subscription-mana
 import { createAuthStateStore, type AuthState, type AuthStateStoreOptions } from "./auth-state.js";
 import { resolveClientSessionSync } from "./client-session.js";
 import { analyzeRelations } from "../codegen/relation-analyzer.js";
+import type {
+  Schema as TypedSchema,
+  SchemaDefinition as TypedSchemaDefinition,
+  Table as TypedTable,
+  TableBytesColumn,
+  TableTextColumn,
+} from "../typed-app.js";
 import { isPermissionIntrospectionColumn, magicColumnType } from "../magic-columns.js";
 import {
   normalizeBuiltQuery,
@@ -1616,6 +1623,78 @@ export class Db {
       normalizeUpdateOptions(table._schema, table._table, options),
       context?.session,
       context?.attribution,
+    );
+  }
+
+  /**
+   * Read a byte range from a `bytes` column without materializing its complete value.
+   * `start` and `end` are byte offsets, with `end` exclusive.
+   */
+  async readValueRange<
+    TSchema extends TypedSchema<any> | TypedSchemaDefinition,
+    TTable extends string,
+  >(
+    table: TypedTable<TTable, TSchema>,
+    id: string,
+    column: TableBytesColumn<TSchema, Extract<TTable, string>>,
+    start: number,
+    end: number,
+  ): Promise<Uint8Array> {
+    const client = this.getClient(table._schema);
+    return await client.readValueRange(table._table, id, column, start, end);
+  }
+
+  /**
+   * Read a UTF-16 range from a `string` column without materializing its complete value.
+   * `start` and `end` are UTF-16 code-unit offsets, with `end` exclusive; positions
+   * that split a surrogate pair are rejected.
+   */
+  async readTextUtf16Range<
+    TSchema extends TypedSchema<any> | TypedSchemaDefinition,
+    TTable extends string,
+  >(
+    table: TypedTable<TTable, TSchema>,
+    id: string,
+    column: TableTextColumn<TSchema, Extract<TTable, string>>,
+    start: number,
+    end: number,
+  ): Promise<string> {
+    const client = this.getClient(table._schema);
+    return await client.readTextUtf16Range(table._table, id, column, start, end);
+  }
+
+  /** Append bytes to a `bytes` column without materializing its existing value. */
+  async appendValue<
+    TSchema extends TypedSchema<any> | TypedSchemaDefinition,
+    TTable extends string,
+  >(
+    table: TypedTable<TTable, TSchema>,
+    id: string,
+    column: TableBytesColumn<TSchema, Extract<TTable, string>>,
+    bytes: Uint8Array,
+  ): Promise<WriteHandle<{ id: string }>> {
+    const client = this.getClient(table._schema);
+    return this.wrapWriteWait(await client.appendValue(table._table, id, column, bytes));
+  }
+
+  /**
+   * Replace a byte range in a `bytes` column without materializing its complete value.
+   * `offset` and `deleteLength` are byte offsets.
+   */
+  async spliceValue<
+    TSchema extends TypedSchema<any> | TypedSchemaDefinition,
+    TTable extends string,
+  >(
+    table: TypedTable<TTable, TSchema>,
+    id: string,
+    column: TableBytesColumn<TSchema, Extract<TTable, string>>,
+    offset: number,
+    deleteLength: number,
+    insert: Uint8Array,
+  ): Promise<WriteHandle<{ id: string }>> {
+    const client = this.getClient(table._schema);
+    return this.wrapWriteWait(
+      await client.spliceValue(table._table, id, column, offset, deleteLength, insert),
     );
   }
 
