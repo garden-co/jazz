@@ -1614,6 +1614,8 @@ mod lifecycle;
 mod mutations;
 pub use mutations::{StreamingMutationKind, StreamingValueUpload};
 mod reads;
+#[doc(hidden)]
+pub use reads::BindingHydrationError;
 mod subscriptions;
 mod transactions;
 

@@ -2,6 +2,37 @@
 
 use super::*;
 
+/// Binding-only classification for a value whose referenced immutable content
+/// has not arrived locally yet. This deliberately preserves the distinction
+/// between an ordinary, retryable chunk absence and corrupted/permanent
+/// storage errors before they are flattened into a public [`Error`].
+#[doc(hidden)]
+pub enum BindingHydrationError {
+    ChunkUnavailable,
+    Error(Error),
+}
+
+fn binding_hydration_error(error: crate::node::Error) -> BindingHydrationError {
+    use groove::chunks::ChunkError;
+    use groove::ivm::runtime::IvmRuntimeError;
+
+    let unavailable = matches!(
+        &error,
+        crate::node::Error::ChunkStorage(groove::chunks::ChunkStorageError::Unavailable)
+            | crate::node::Error::LargeValueReachability(
+                groove::large_values::ReachabilityError::Chunk(ChunkError::Unavailable)
+            )
+            | crate::node::Error::Groove(groove::db::Error::IvmRuntime(IvmRuntimeError::Chunk(
+                ChunkError::Unavailable
+            )))
+    );
+    if unavailable {
+        BindingHydrationError::ChunkUnavailable
+    } else {
+        BindingHydrationError::Error(error.into())
+    }
+}
+
 impl<S> Db<S>
 where
     S: OrderedKvStorage + ReopenableStorage + 'static,
@@ -351,6 +382,83 @@ where
             }
         }
         .map_err(Into::into)
+    }
+
+    /// Resolve physical indirect scalars before a subscription event crosses
+    /// a language binding boundary.
+    #[doc(hidden)]
+    pub async fn hydrate_subscription_event_for_binding(
+        &self,
+        event: &mut SubscriptionEvent,
+    ) -> Result<(), Error> {
+        self.hydrate_subscription_event_for_binding_outcome(event)
+            .await
+            .map_err(|error| match error {
+                BindingHydrationError::ChunkUnavailable => Error::new(
+                    ErrorCode::NotObserved,
+                    "large-value chunk is not locally available",
+                ),
+                BindingHydrationError::Error(error) => error,
+            })
+    }
+
+    /// Like [`Self::hydrate_subscription_event_for_binding`], but retains the
+    /// sole retryable cause for host bindings that can await chunk delivery.
+    #[doc(hidden)]
+    pub async fn hydrate_subscription_event_for_binding_outcome(
+        &self,
+        event: &mut SubscriptionEvent,
+    ) -> Result<(), BindingHydrationError> {
+        let SubscriptionEvent::Delta {
+            added,
+            updated,
+            terminal_operations,
+            ..
+        } = event
+        else {
+            return Ok(());
+        };
+        let node = self.node.node.lock().await;
+        for output in added.iter_mut().chain(updated.iter_mut()) {
+            node.hydrate_current_rows(std::slice::from_mut(&mut output.row))
+                .await
+                .map_err(binding_hydration_error)?;
+        }
+        for operation in terminal_operations {
+            let value = match &mut operation.edit {
+                groove::ivm::TerminalEdit::Insert { value, .. }
+                | groove::ivm::TerminalEdit::Update { value, .. } => value,
+                groove::ivm::TerminalEdit::Remove { .. }
+                | groove::ivm::TerminalEdit::Move { .. } => continue,
+            };
+            node.hydrate_encoded_record(&operation.root_descriptor, value)
+                .await
+                .map_err(binding_hydration_error)?;
+        }
+        Ok(())
+    }
+
+    /// Resolve physical indirect scalars in ordinary row output immediately
+    /// before a language binding encodes it.
+    #[doc(hidden)]
+    pub async fn hydrate_rows_for_binding(&self, rows: &mut [CurrentRow]) -> Result<(), Error> {
+        self.node
+            .node
+            .lock()
+            .await
+            .hydrate_current_rows(rows)
+            .await?;
+        Ok(())
+    }
+
+    /// Resolve physical indirect scalars in a relation snapshot immediately
+    /// before a language binding encodes it.
+    #[doc(hidden)]
+    pub async fn hydrate_relation_snapshot_for_binding(
+        &self,
+        snapshot: &mut RelationSnapshot,
+    ) -> Result<(), Error> {
+        self.hydrate_rows_for_binding(&mut snapshot.rows).await
     }
 
     /// Tier-gated one-shot relation read evaluated as the database identity.

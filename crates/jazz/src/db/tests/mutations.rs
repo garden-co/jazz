@@ -259,7 +259,119 @@ fn high_level_large_value_apis_keep_descriptors_private_and_publish_edits() {
         .unwrap();
     assert_eq!(
         rows[0].cell(&doctest_support::schema().tables[0], "title"),
-        Some(Value::String(title))
+        Some(Value::String(title.clone()))
+    );
+
+    // This deliberately plants the internal descriptor immediately before
+    // the binding-only hydrator. The corresponding public WASM receipt covers the
+    // full encode/decode path; this focused lower-level assertion proves the
+    // boundary still rejects a regression even if a maintained terminal
+    // happens to materialize the same row earlier in the pipeline.
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    let mut subscription = block_on(db.subscribe(&prepared, ReadOpts::default())).unwrap();
+    let mut event = block_on(subscription.next_raw()).unwrap();
+    let SubscriptionEvent::Delta { added, .. } = &mut event else {
+        panic!("expected opening subscription delta");
+    };
+    let (descriptor, record) = added[0].row.encoded_record();
+    let descriptor = descriptor.clone();
+    let mut values = descriptor.bind(record).to_values().unwrap();
+    let title_index = values
+        .iter()
+        .position(|value| {
+            matches!(value, Value::String(value) if value == &title)
+                || matches!(value, Value::Nullable(Some(value)) if matches!(value.as_ref(), Value::String(value) if value == &title))
+        })
+        .expect("opening row contains the logical title");
+    values[title_index] = match &values[title_index] {
+        Value::Nullable(_) => Value::Nullable(Some(Box::new(Value::Large(edited_ref.clone())))),
+        _ => Value::Large(edited_ref.clone()),
+    };
+    added[0].row = CurrentRow::new(
+        "todos",
+        OwnedRecord::new(descriptor.create(&values).unwrap(), descriptor.clone()),
+    );
+    assert!(
+        matches!(
+            added[0]
+                .row
+                .cell(&doctest_support::schema().tables[0], "title"),
+            Some(Value::Large(_))
+        ),
+        "planted positive: the maintained event reaches the binding with a physical descriptor"
+    );
+    let terminal_value = added[0].row.encoded_record().1.to_vec();
+    let SubscriptionEvent::Delta {
+        terminal_operations,
+        ..
+    } = &mut event
+    else {
+        unreachable!("opening subscription event is a delta");
+    };
+    terminal_operations.push(groove::ivm::TerminalOperation {
+        root_descriptor: descriptor.clone(),
+        root_key: Vec::new(),
+        path: Vec::new(),
+        edit: groove::ivm::TerminalEdit::Update {
+            key: Vec::new(),
+            value: terminal_value,
+        },
+    });
+    block_on(db.hydrate_subscription_event_for_binding(&mut event)).unwrap();
+    let SubscriptionEvent::Delta {
+        added,
+        terminal_operations,
+        ..
+    } = event
+    else {
+        panic!("expected opening subscription delta");
+    };
+    assert_eq!(
+        added[0]
+            .row
+            .cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String(title.clone())),
+        "the subscription binding boundary must materialize the indirect text scalar"
+    );
+    let groove::ivm::TerminalEdit::Update { value, .. } = &terminal_operations[0].edit else {
+        unreachable!("planted terminal operation is an update");
+    };
+    let terminal_values = descriptor.bind(value).to_values().unwrap();
+    assert!(
+        matches!(&terminal_values[title_index], Value::String(value) if value == &title)
+            || matches!(
+                &terminal_values[title_index],
+                Value::Nullable(Some(value))
+                    if matches!(value.as_ref(), Value::String(value) if value == &title)
+            ),
+        "structured terminal operations must not encode physical indirect scalars for bindings"
+    );
+
+    let mut snapshot = RelationSnapshot {
+        root_count: 1,
+        rows: vec![added[0].row.clone()],
+        edges: Vec::new(),
+    };
+    let (descriptor, record) = snapshot.rows[0].encoded_record();
+    let descriptor = descriptor.clone();
+    let mut values = descriptor.bind(record).to_values().unwrap();
+    values[title_index] = match &values[title_index] {
+        Value::Nullable(_) => Value::Nullable(Some(Box::new(Value::Large(edited_ref.clone())))),
+        _ => Value::Large(edited_ref.clone()),
+    };
+    snapshot.rows[0] = CurrentRow::new(
+        "todos",
+        OwnedRecord::new(descriptor.create(&values).unwrap(), descriptor),
+    );
+    assert!(matches!(
+        snapshot.rows[0].cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::Large(_))
+    ));
+    block_on(db.hydrate_relation_snapshot_for_binding(&mut snapshot)).unwrap();
+    assert_eq!(
+        snapshot.rows[0].cell(&doctest_support::schema().tables[0], "title"),
+        Some(Value::String(title.clone())),
+        "relation snapshots must not encode physical indirect scalars for bindings"
     );
 
     let json = format!(

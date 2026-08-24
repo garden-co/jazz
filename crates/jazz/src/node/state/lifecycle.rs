@@ -1135,6 +1135,19 @@ where
         Ok(())
     }
 
+    /// Materialize physical indirect scalars in one encoded record before a
+    /// language binding exposes that record outside Jazz.
+    pub(crate) async fn hydrate_encoded_record(
+        &self,
+        descriptor: &groove::records::RecordDescriptor,
+        raw: &mut Vec<u8>,
+    ) -> Result<(), Error> {
+        let mut values = descriptor.bind(raw).to_values()?;
+        self.hydrate_large_value_values(values.iter_mut()).await?;
+        *raw = descriptor.create(&values)?;
+        Ok(())
+    }
+
     async fn hydrate_large_value_values<'a>(
         &self,
         values: impl IntoIterator<Item = &'a mut Value>,
