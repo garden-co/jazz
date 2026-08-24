@@ -30,10 +30,13 @@ claiming an impossible distributed clock guarantee.
 ## Reliability surface
 
 [`SCENARIOS.md`](./SCENARIOS.md) fixes the seed, topology, fault, and expected
-outcome for the 16-track, 64-step soak profiles. The native benchmark already
-covers ordered cursor-window reads, local subscription delivery, and
-deterministic edit bursts. Browser E2E will add the specified real-topology
-profiles; networked convergence is intentionally not claimed before then.
+outcome for the 16-track, 64-step soak profiles. The native benchmark covers
+ordered cursor-window reads, local subscription delivery, deterministic edit
+bursts, and the same latest-transport receipt query used by the UI. The browser
+E2E covers two authenticated browser clients, disjoint concurrent edits, a
+bounded offline/reconnect phase, transport receipt delivery, and a viewer
+authorization rejection. It deliberately does not name a winner for
+simultaneous writes to the same field.
 
 Run the native checks with:
 

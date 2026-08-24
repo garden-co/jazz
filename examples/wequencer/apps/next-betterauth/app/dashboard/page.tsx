@@ -21,6 +21,7 @@ export default function DashboardPage() {
         </div>
         <div className="auth-nav">
           <p>Hello, {session.user.name}</p>
+          <p data-testid="member-id">Your member ID: {session.user.id}</p>
           <button type="button" onClick={handleSignOut}>
             Sign out
           </button>

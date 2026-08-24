@@ -12,7 +12,9 @@ The first workloads are intentionally small but realistic:
 - open the UI-shaped ordered subscription, edit one pad, and wait for its
   public subscription event; and
 - fan that one edit out to 1, 8, or 32 independently maintained pattern-grid
-  subscriptions.
+  subscriptions; and
+- read the latest transport observation through the session-scoped ordered
+  query used by a second collaborator.
 
 Fixture setup is outside measured closures. Correctness tests assert exact
 window ordering and convergence before CodSpeed measures the same APIs.
