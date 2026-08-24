@@ -64,12 +64,15 @@ describe("BandBinder cross-topology recovery", () => {
     let pageId = "";
     let taskBlockId = "";
     let offlineTaskId = "";
+    let offlineChildPageId = "";
     let nestedPageId = "";
     let nestedBlockId = "";
     let nestedAttachmentId = "";
     const expectedChildPages: { id: string; title: string }[] = [];
     const ownerMutationErrors: unknown[] = [];
     const taskSubscriptionSnapshots: string[][] = [];
+    const childPageWindowSubscriptionSnapshots: { id: string; title: string }[][] = [];
+    const managerChildPageWindowSubscriptionSnapshots: { id: string; title: string }[][] = [];
     const expectedBlockIds = new Set<string>();
     const isExpectedChildPageWindow = (rows: { id: string; title: string }[]) =>
       rows.length === PAGE_SIZE &&
@@ -94,6 +97,7 @@ describe("BandBinder cross-topology recovery", () => {
             // A browser-runtime restart is deliberately distinct from a
             // transport reconnect: this exercises IndexedDB rehydration.
             restart: async () => {
+              managerChildPageWindowSubscriptionSnapshots.length = 0;
               cleanup.untrack(manager!);
               await manager!.shutdown();
               manager = await openClient(server!, "manager", managerJwt, managerDbName);
@@ -448,6 +452,33 @@ describe("BandBinder cross-topology recovery", () => {
                   "edge",
                 ),
               ).toHaveLength(PAGE_SIZE);
+              // Keep a second, independently shaped subscriber alive across
+              // the manager's partition. Its window is exactly the page
+              // navigation shape, while the task subscriber below exercises
+              // a separate collection and mutation stream.
+              cleanup.trackSubscription(
+                owner!.subscribeAll(childPageWindow(workspaceId, pageId), (delta) => {
+                  childPageWindowSubscriptionSnapshots.push(
+                    delta.all.map(({ id, title }) => ({ id, title })),
+                  );
+                }),
+              );
+              cleanup.trackSubscription(
+                manager!.subscribeAll(childPageWindow(workspaceId, pageId), (delta) => {
+                  managerChildPageWindowSubscriptionSnapshots.push(
+                    delta.all.map(({ id, title }) => ({ id, title })),
+                  );
+                }),
+              );
+              await waitForCondition(
+                async () =>
+                  [
+                    childPageWindowSubscriptionSnapshots,
+                    managerChildPageWindowSubscriptionSnapshots,
+                  ].every((snapshots) => snapshots.some(isExpectedChildPageWindow)),
+                15_000,
+                "both child-page subscriptions start with the exact bounded window",
+              );
               const [stagePlot] = await waitForQuery(
                 owner!,
                 app.attachments.where({
@@ -545,6 +576,25 @@ describe("BandBinder cross-topology recovery", () => {
                 .wait({ tier: "local" });
               offlineTaskId = task.id;
               expect(await manager!.all(app.tasks.where({ id: offlineTaskId }))).toHaveLength(1);
+              // This alphabetically precedes the existing visible window.
+              // Updating the expected sequence now gives the reconnect phase
+              // an exact shifting-window oracle rather than a weak length
+              // assertion.
+              const childPage = await manager!
+                .insert(app.pages, {
+                  workspaceId,
+                  parentPageId: pageId,
+                  title: "Child page -1",
+                })
+                .wait({ tier: "local" });
+              offlineChildPageId = childPage.id;
+              expectedChildPages.unshift({ id: childPage.id, title: childPage.title });
+              expectedChildPages.pop();
+              expect(
+                (await manager!.all(childPageWindow(workspaceId, pageId), { tier: "local" })).map(
+                  ({ id, title }) => ({ id, title }),
+                ),
+              ).toEqual(expectedChildPages);
             },
             faultsAfter: [{ kind: "reconnect", target: "manager" }],
           },
@@ -564,6 +614,26 @@ describe("BandBinder cross-topology recovery", () => {
                 async () => taskSubscriptionSnapshots.some((ids) => ids.includes(offlineTaskId)),
                 15_000,
                 "owner task subscription publishes the converged offline task",
+              );
+              const shiftedChildWindow = await waitForQuery(
+                owner!,
+                childPageWindow(workspaceId, pageId),
+                isExpectedChildPageWindow,
+                "offline child page shifts the owner bounded navigation window",
+                20_000,
+                "edge",
+              );
+              expect(shiftedChildWindow[0]).toMatchObject({ id: offlineChildPageId });
+              await waitForCondition(
+                async () => childPageWindowSubscriptionSnapshots.some(isExpectedChildPageWindow),
+                15_000,
+                "owner child-page subscription publishes the recovered bounded-window shift",
+              );
+              await waitForCondition(
+                async () =>
+                  managerChildPageWindowSubscriptionSnapshots.some(isExpectedChildPageWindow),
+                15_000,
+                "manager child-page subscription publishes the recovered bounded-window shift",
               );
             },
             faultsAfter: [{ kind: "restart", target: "manager" }],
@@ -607,6 +677,22 @@ describe("BandBinder cross-topology recovery", () => {
               );
               expect(persistedChildPages.map(({ id, title }) => ({ id, title }))).toEqual(
                 expectedChildPages,
+              );
+              // Restart creates a new client instance, so this is a fresh
+              // subscription on its rehydrated cache. It must observe the
+              // same window before revocation and then receive the removal.
+              cleanup.trackSubscription(
+                manager!.subscribeAll(childPageWindow(workspaceId, pageId), (delta) => {
+                  managerChildPageWindowSubscriptionSnapshots.push(
+                    delta.all.map(({ id, title }) => ({ id, title })),
+                  );
+                }),
+              );
+              await waitForCondition(
+                async () =>
+                  managerChildPageWindowSubscriptionSnapshots.some(isExpectedChildPageWindow),
+                15_000,
+                "rehydrated manager subscription starts with the exact bounded window",
               );
               await owner!.delete(app.members, managerMembershipId).wait({ tier: "edge" });
               const rejected = manager!.insert(app.pages, {
@@ -670,6 +756,12 @@ describe("BandBinder cross-topology recovery", () => {
                   "edge",
                 ),
               ]);
+              await waitForCondition(
+                async () =>
+                  managerChildPageWindowSubscriptionSnapshots.some((rows) => rows.length === 0),
+                15_000,
+                "revocation publishes an empty bounded child-page subscription to the manager",
+              );
             },
           },
         ],
@@ -702,4 +794,12 @@ async function openClient(
       driver: { type: "persistent", dbName },
     }),
   );
+}
+
+function childPageWindow(workspaceId: string, parentPageId: string) {
+  return app.pages
+    .where({ workspaceId, parentPageId })
+    .orderBy("title", "asc")
+    .offset(1)
+    .limit(PAGE_SIZE);
 }
