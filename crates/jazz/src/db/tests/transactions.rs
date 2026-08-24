@@ -931,8 +931,8 @@ fn exclusive_tx_ref_survives_handle_reconstruction_until_explicit_commit() {
 #[test]
 fn identity_bound_exclusive_transaction_rejects_cross_identity_reads_and_commits_as_bound_author() {
     let db = doctest_support::block_on(doctest_support::open_todos_db()).unwrap();
-    let alice = AuthorId::from_bytes([0xc1; 16]);
-    let bob = AuthorId::from_bytes([0xb2; 16]);
+    let alice = AuthorSubject::for_test_bytes([0xc1; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb2; 16]);
     let open = OpenTransactionId::new();
     let row = row(0xa1);
     assert_ne!(alice, db.identity.author);
@@ -982,9 +982,9 @@ fn identity_bound_exclusive_transaction_rejects_cross_identity_reads_and_commits
 #[test]
 fn mergeable_transaction_identity_reads_are_not_forced_to_begin_author() {
     let schema = owner_read_schema();
-    let db = open_db(0xd3, AuthorId::SYSTEM, &schema);
-    let alice = AuthorId::from_bytes([0xa3; 16]);
-    let bob = AuthorId::from_bytes([0xb3; 16]);
+    let db = open_db(0xd3, AuthorSubject::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa3; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb3; 16]);
     let open = OpenTransactionId::new();
     let prepared = db
         .prepare_query(&db.table("todos").filter(eq(col("owner"), claim("user_id"))))

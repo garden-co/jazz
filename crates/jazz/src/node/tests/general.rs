@@ -624,7 +624,7 @@ fn delayed_chunk_upload_is_rejected_before_it_can_refresh_pending_stage_age() {
     )
     .unwrap();
     let context = Some(CommitUnitIngestContext {
-        identity: AuthorId::SYSTEM,
+        identity: AuthorSubject::SYSTEM,
         trust: CommitUnitTrust::Session,
         edge_authority: false,
     });

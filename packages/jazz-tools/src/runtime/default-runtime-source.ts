@@ -20,7 +20,11 @@ import { SharedBrowserWorkerConnection } from "./native-runtime/browser-shared-w
 import { AttachedBrowserWorkerConnection } from "./native-runtime/attached-browser-worker-connection.js";
 import { MessagePortBrowserFollowerConnection } from "./native-runtime/browser-follower-connection.js";
 import { installWasmTelemetry } from "./sync-telemetry.js";
-import { ANONYMOUS_JWT_ISSUER, resolveClientSessionSync } from "./client-session.js";
+import {
+  ANONYMOUS_JWT_ISSUER,
+  isReservedJazzIssuer,
+  resolveClientSessionSync,
+} from "./client-session.js";
 import type { WasmSchema } from "../drivers/types.js";
 import { httpUrlToWs } from "./url.js";
 import { authorBytesForSession, canonicalAuthorSubject } from "./author-id.js";
@@ -64,12 +68,13 @@ function sessionFromConfig(config: DbConfig) {
 }
 
 function runtimeAuthorFromConfig(config: DbConfig) {
-  return (
-    sessionFromConfig(config) ?? {
-      issuer: ANONYMOUS_JWT_ISSUER,
-      user_id: `${config.appId}:${config.env ?? "dev"}:unauthenticated`,
-    }
-  );
+  const session = sessionFromConfig(config);
+  return session && !isReservedJazzIssuer(session.issuer)
+    ? session
+    : {
+        issuer: "urn:jazz:runtime-host",
+        user_id: `${config.appId}:${config.env ?? "dev"}:${session?.user_id ?? "unauthenticated"}`,
+      };
 }
 
 function persistentIdentitySeed(
