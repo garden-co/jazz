@@ -166,6 +166,11 @@ export async function* chunks(parts: readonly string[]): AsyncIterable<string> {
   for (const part of parts) yield part;
 }
 
+/** Use this for Bytea attachment streams; Jazz deliberately rejects text chunks for bytes. */
+export async function* byteChunks(parts: readonly Uint8Array[]): AsyncIterable<Uint8Array> {
+  for (const part of parts) yield part;
+}
+
 /** Deterministic in-memory E2E store; it models materialization and ranges. */
 export class MemoryMusicStore implements MusicStore {
   private readonly turns: TranscriptTurn[] = [];
