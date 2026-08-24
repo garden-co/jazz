@@ -304,8 +304,8 @@ test("test artifact pipeline overlaps independent bindings and repairs NAPI only
     "release NAPI",
     "CLI",
     "fast WASM",
-    "seal fast WASM provenance",
     "jazz-tools",
+    "verify fast WASM provenance",
   ]);
   assert.equal(labels.filter((label) => label === "release NAPI").length, 1);
   assert.equal(labels.filter((label) => label === "repair release NAPI").length, 1);
@@ -440,15 +440,15 @@ test("CI uses the correctness artifact path while package builds keep release WA
   );
   assert.match(
     packageJson,
-    /"build:ci": "turbo run build:crates.*jazz-wasm.*provenance\.mjs write wasm release.*jazz-napi.*jazz-tools/,
+    /"build:ci": "turbo run build:crates.*jazz-wasm.*jazz-napi.*jazz-tools/,
   );
   for (const script of ["build", "build:core", "build:ci"])
     assert.match(
       packageJson,
       new RegExp(
-        `"${script.replace(":", "\\:")}": "turbo run build:crates.*jazz-wasm.*provenance\\.mjs write wasm release.*turbo run build`,
+        `"${script.replace(":", "\\:")}": "turbo run build:crates.*jazz-wasm.*turbo run build`,
       ),
-      `${script} must reseal cache-restored WASM provenance before consumers build`,
+      `${script} must leave atomic WASM publication as the sole provenance writer`,
     );
   assert.doesNotMatch(workflow, /CARGO_TARGET_DIR/);
   assert.doesNotMatch(pipeline, /target\/test-artifacts-(?:wasm|napi)/);
