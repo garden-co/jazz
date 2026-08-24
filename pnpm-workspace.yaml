@@ -4,6 +4,7 @@ packages:
   - crates/jazz-rn
   - starters/*
   - examples/*
+  - examples/*/apps/*
   # React Native/Expo surfaces are paused; keep their source archived but out of active workspace installs.
   - "!examples/todo-client-localfirst-expo"
   - examples/docs/*
