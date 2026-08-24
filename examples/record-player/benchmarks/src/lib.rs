@@ -63,9 +63,10 @@ impl Fixture {
                 "tracks",
                 track,
                 BTreeMap::from([
-                    ("album".into(), Value::Uuid(album.0)),
+                    ("album_id".into(), Value::Uuid(album.0)),
                     ("title".into(), Value::String(format!("Track {index:05}"))),
                     ("ordinal".into(), Value::I32((index % 8) as i32)),
+                    ("duration_ms".into(), Value::I32(180_000)),
                 ]),
             );
             insert(
@@ -73,8 +74,8 @@ impl Fixture {
                 "playlist_entries",
                 row_id(4, index),
                 BTreeMap::from([
-                    ("playlist".into(), Value::Uuid(playlist.0)),
-                    ("track".into(), Value::Uuid(track.0)),
+                    ("playlist_id".into(), Value::Uuid(playlist.0)),
+                    ("track_id".into(), Value::Uuid(track.0)),
                     ("position".into(), Value::F64(index as f64)),
                 ]),
             );
@@ -89,7 +90,7 @@ impl Fixture {
         let playlist_window = db
             .prepare_query(
                 &Query::from("playlist_entries")
-                    .filter(eq(col("playlist"), lit(playlist.0)))
+                    .filter(eq(col("playlist_id"), lit(playlist.0)))
                     .order_by("position", OrderDirection::Asc)
                     .offset(8)
                     .limit(16),
@@ -123,18 +124,19 @@ fn schema() -> JazzSchema {
             )
             .table(
                 TableSchemaBuilder::new("tracks")
-                    .fk_column("album", "albums")
+                    .fk_column("album_id", "albums")
                     .column("title", ColumnType::Text)
                     .column("ordinal", ColumnType::Integer)
-                    .index_only(["album", "ordinal"]),
+                    .column("duration_ms", ColumnType::Integer)
+                    .index_only(["album_id", "ordinal"]),
             )
             .table(TableSchemaBuilder::new("playlists").column("name", ColumnType::Text))
             .table(
                 TableSchemaBuilder::new("playlist_entries")
-                    .fk_column("playlist", "playlists")
-                    .fk_column("track", "tracks")
+                    .fk_column("playlist_id", "playlists")
+                    .fk_column("track_id", "tracks")
                     .column("position", ColumnType::Double)
-                    .index_only(["playlist", "position"]),
+                    .index_only(["playlist_id", "position"]),
             )
             .build(),
     )

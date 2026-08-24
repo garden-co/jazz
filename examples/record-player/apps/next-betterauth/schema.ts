@@ -7,8 +7,9 @@ const schema = {
     title: s.string(),
     ordinal: s.int(),
     duration_ms: s.int(),
-    // Streaming bytes/range reads are covered by expected-red integration work (#1833/#1839/#1844).
-    audio_locator: s.string().optional(),
+    // `insertStreaming` accepts this field today. Playback/range reads remain
+    // intentionally outside this adapter until the typed Db gains that API.
+    audio_bytes: s.bytes().optional(),
   }),
   playlists: s.table({ name: s.string(), owner_subject: s.string() }),
   playlist_entries: s.table({
