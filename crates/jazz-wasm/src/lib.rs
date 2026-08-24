@@ -3324,8 +3324,12 @@ impl WasmTransport {
     #[wasm_bindgen(js_name = tick)]
     pub fn tick(&self) -> js_sys::Promise {
         let inner = self.inner.clone();
+        let auxiliary_pump = self.auxiliary_pump.clone();
         future_to_promise(async move {
-            let work = inner.tick().await?;
+            let work = inner
+                .tick()
+                .await?
+                .saturating_add(auxiliary_pump.tick() as u32);
             Ok(JsValue::from_f64(work as f64))
         })
     }
