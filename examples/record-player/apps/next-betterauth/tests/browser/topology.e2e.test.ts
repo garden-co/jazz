@@ -48,7 +48,13 @@ const recipientPermissions = s.definePermissions(recipientApp, ({ policy, sessio
 // scalar control: a correlated owner path through a referenced playlist.
 const relationalRecipientApp = s.defineApp({
   albums: s.table({ title: s.string() }),
-  tracks: s.table({ album_id: s.ref("albums"), title: s.string() }),
+  tracks: s.table({
+    album_id: s.ref("albums"),
+    title: s.string(),
+    ordinal: s.int(),
+    duration_ms: s.int(),
+    audio_bytes: s.bytes().optional(),
+  }),
   playlists: s.table({ name: s.string(), owner_subject: s.string() }),
   invitations: s.table({
     playlist_id: s.ref("playlists"),
