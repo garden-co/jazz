@@ -6,7 +6,18 @@ import { fileURLToPath } from "node:url";
 const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const read = (path) => JSON.parse(readFileSync(path, "utf8"));
 const wasm = read(join(root, "crates/jazz-wasm/pkg/.jazz-artifact-manifest.json"));
-const napi = read(join(root, "crates/jazz-napi/provenance/jazz-napi.linux-x64-gnu.manifest.json"));
+const napi = process.argv.includes("--local")
+  ? read(
+      join(
+        root,
+        "crates/jazz-napi/.native-artifacts",
+        /generation-[A-Za-z0-9.-]+/.exec(
+          readFileSync(join(root, "crates/jazz-napi/native-binding.cjs"), "utf8"),
+        )?.[0] ?? "missing",
+        ".jazz-artifact-manifest.json",
+      ),
+    )
+  : read(join(root, "crates/jazz-napi/provenance/jazz-napi.linux-x64-gnu.manifest.json"));
 for (const [name, manifest] of [
   ["wasm", wasm],
   ["napi", napi],
