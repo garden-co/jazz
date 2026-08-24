@@ -249,12 +249,19 @@ impl PeerChunkResolver {
         state.outbound.drain(..count).collect()
     }
 
-    fn take_relay_responses(&self, connection: u64) -> Vec<ChunkResponseEntry> {
-        self.state
-            .borrow_mut()
-            .relay_responses
-            .remove(&connection)
-            .unwrap_or_default()
+    fn take_relay_responses(&self, connection: u64, limit: usize) -> Vec<ChunkResponseEntry> {
+        let mut state = self.state.borrow_mut();
+        let (responses, exhausted) = match state.relay_responses.get_mut(&connection) {
+            Some(queued) => {
+                let count = limit.min(queued.len());
+                (queued.drain(..count).collect(), queued.is_empty())
+            }
+            None => return Vec::new(),
+        };
+        if exhausted {
+            state.relay_responses.remove(&connection);
+        }
+        responses
     }
 
     fn is_active_upstream(&self, connection: u64) -> bool {
@@ -575,7 +582,7 @@ impl PeerIoPump {
                 ))
             }
             PeerIoPumpRole::Subscriber => {
-                let responses = self.resolver.take_relay_responses(self.connection);
+                let responses = self.resolver.take_relay_responses(self.connection, limit);
                 (!responses.is_empty()).then_some(SyncMessage::ChunkResponseBatch(
                     ChunkResponseBatch { responses },
                 ))
