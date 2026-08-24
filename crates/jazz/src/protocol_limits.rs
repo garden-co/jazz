@@ -32,6 +32,13 @@ pub const MAX_INFLIGHT_LOGICAL_MESSAGE_BYTES: usize = MAX_LOGICAL_MESSAGE_BYTES;
 /// Per-peer fairness bound for concurrently incomplete logical messages.
 pub const MAX_INFLIGHT_LOGICAL_MESSAGES: usize = 4;
 
+/// Maximum recursively wrapped semantic messages decoded from one peer payload.
+///
+/// Production authorization-scope messages contain exactly one wrapper around
+/// a `ViewUpdate`; this extra headroom keeps forward-compatible nesting bounded
+/// before serde can exhaust the process stack.
+pub const MAX_SYNC_MESSAGE_NESTING_DEPTH: usize = 8;
+
 /// Maximum postcard-encoded query shape registration payload.
 ///
 /// Source: existing wire fixtures use tiny shapes; 64 KiB leaves headroom for

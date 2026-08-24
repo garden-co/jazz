@@ -229,6 +229,7 @@ pub enum SyncMessage {
         /// Total number of authority clauses in this hydration.
         clause_count: u16,
         /// Ordinary settlement-bearing `ViewUpdate` payload.
+        #[serde(deserialize_with = "deserialize_authorization_scope_view")]
         view: Box<SyncMessage>,
     },
     /// Aggregate proof for every clause sent in an authority scope view set.
@@ -259,6 +260,45 @@ pub enum SyncMessage {
     ChunkUploadNodes(ChunkUploadNodes),
     /// Receiver acknowledgement for a pushed upload.
     ChunkUploadResult(ChunkUploadResult),
+}
+
+thread_local! {
+    static AUTHORIZATION_SCOPE_VIEW_DEPTH: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+struct AuthorizationScopeViewDepthGuard;
+
+impl Drop for AuthorizationScopeViewDepthGuard {
+    fn drop(&mut self) {
+        AUTHORIZATION_SCOPE_VIEW_DEPTH.with(|depth| {
+            depth.set(depth.get().saturating_sub(1));
+        });
+    }
+}
+
+fn deserialize_authorization_scope_view<'de, D>(
+    deserializer: D,
+) -> Result<Box<SyncMessage>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let admitted = AUTHORIZATION_SCOPE_VIEW_DEPTH.with(|depth| {
+        let current = depth.get();
+        if current >= crate::protocol_limits::MAX_SYNC_MESSAGE_NESTING_DEPTH {
+            return false;
+        }
+        depth.set(current + 1);
+        true
+    });
+    if !admitted {
+        return Err(<D::Error as serde::de::Error>::custom(
+            "sync message nesting depth exceeds limit",
+        ));
+    }
+    let _guard = AuthorizationScopeViewDepthGuard;
+    <Box<SyncMessage> as serde::Deserialize>::deserialize(deserializer)
 }
 
 /// Bounded batch of exact immutable-chunk requests on one peer link.
