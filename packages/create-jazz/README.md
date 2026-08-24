@@ -46,9 +46,12 @@ zero-config local sync.
 
 ## A note on versioning
 
-Every version of `create-jazz` fetches the starter, the workspace config, and
-package versions from the `main` branch of
-[`garden-co/jazz2`](https://github.com/garden-co/jazz2) at scaffold time —
-regardless of which CLI version you install. In other words, `npm create
-jazz@0.0.1` and `npm create jazz@latest` will produce the same output on any
-given day, and that output tracks whatever is on `main` right now.
+New `create-jazz` releases fetch their starter, workspace config, and package
+versions from an immutable `v<create-jazz-version>` source tag in
+[`garden-co/jazz`](https://github.com/garden-co/jazz). That keeps an installed
+CLI and the generated app on the same release snapshot.
+
+Releases from before immutable source snapshots retain their historical
+behaviour of reading `main`. Snapshot-aware releases never fall back to `main`:
+if their matching tag is unavailable, the CLI fails with an upgrade hint rather
+than silently scaffolding a potentially incompatible app.
