@@ -145,9 +145,14 @@ function cleanSourceBaseline(argv) {
   const expectedCommit = argv[1];
   if (!receipt || !/^[0-9a-f]{40}$/.test(expectedCommit))
     fail("usage: clean-source-baseline RECEIPT EXPECTED_COMMIT");
-  const source = { commit: run("git", ["rev-parse", "HEAD"]).stdout.trim(), ...sourceIdentity(root) };
-  if (!validSourceIdentity(source)) fail("checkout contains source changes before dependency setup");
-  if (source.commit !== expectedCommit) fail("checkout source commit does not match workflow event commit");
+  const source = {
+    commit: run("git", ["rev-parse", "HEAD"]).stdout.trim(),
+    ...sourceIdentity(root),
+  };
+  if (!validSourceIdentity(source))
+    fail("checkout contains source changes before dependency setup");
+  if (source.commit !== expectedCommit)
+    fail("checkout source commit does not match workflow event commit");
   writeJson(receipt, source);
 }
 
@@ -156,7 +161,10 @@ function shadowSourceBaseline() {
   if (!baselinePath) return null;
   const source = JSON.parse(fs.readFileSync(baselinePath, "utf8"));
   if (!validSourceIdentity(source)) fail("shadow source baseline is not a clean checkout");
-  const observed = { commit: run("git", ["rev-parse", "HEAD"]).stdout.trim(), ...sourceIdentity(root) };
+  const observed = {
+    commit: run("git", ["rev-parse", "HEAD"]).stdout.trim(),
+    ...sourceIdentity(root),
+  };
   if (!sameTrackedSource(source, observed))
     fail("dependency setup changed the checked-out source after the shadow baseline");
   return source;
@@ -186,7 +194,10 @@ function shard(argv) {
     testArgs,
     phases,
     status: "failed",
-    source: baseline ?? { commit: run("git", ["rev-parse", "HEAD"]).stdout.trim(), ...sourceIdentity(root) },
+    source: baseline ?? {
+      commit: run("git", ["rev-parse", "HEAD"]).stdout.trim(),
+      ...sourceIdentity(root),
+    },
     environment: {
       platform: process.platform,
       arch: process.arch,
@@ -228,10 +239,10 @@ function shard(argv) {
     value.testReceipt = JSON.parse(fs.readFileSync(testReceipt, "utf8"));
     if (
       baseline &&
-      !sameTrackedSource(
-        baseline,
-        { commit: run("git", ["rev-parse", "HEAD"]).stdout.trim(), ...sourceIdentity(root) },
-      )
+      !sameTrackedSource(baseline, {
+        commit: run("git", ["rev-parse", "HEAD"]).stdout.trim(),
+        ...sourceIdentity(root),
+      })
     )
       fail("shadow execution changed the checked-out source after the baseline");
     if (index === 1) {
