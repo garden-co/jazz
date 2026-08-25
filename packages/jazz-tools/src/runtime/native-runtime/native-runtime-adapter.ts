@@ -5285,8 +5285,7 @@ function decodeBytes(
 }
 
 function decodeProvenanceText(bytes: Uint8Array): string {
-  if (bytes[0] !== 2) throw new Error("invalid canonical author subject scalar encoding");
-  return decodeCanonicalAuthorSubjectBytes(bytes.subarray(1));
+  return decodeCanonicalAuthorSubjectBytes(bytes);
 }
 
 function decodePayloadEnumBytes(
