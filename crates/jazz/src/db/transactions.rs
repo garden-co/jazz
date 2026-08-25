@@ -1,6 +1,7 @@
 //! Mergeable and exclusive transaction handles and staging.
 
 use super::*;
+use crate::query::{col, eq, lit};
 
 impl<S> Db<S>
 where
@@ -733,22 +734,25 @@ where
         updated_at_ms: Option<u64>,
     ) -> Result<(), Error> {
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
-        let mut node = self.node.node.lock().await;
-        let mut cells = node
-            .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
+        let mut cells = self
+            .exclusive_transaction_target_for_write(tx_id, table, row, "UPDATE", false)
             .await?
-            .unwrap_or_default();
+            .expect("exclusive UPDATE requires a visible target");
         cells.extend(patch);
-        node.tx_write_in_schema_at_ms(
-            tx_id,
-            self.schema_version_id,
-            table,
-            row,
-            cells,
-            None,
-            Some(now_ms),
-        )
-        .await?;
+        self.node
+            .node
+            .lock()
+            .await
+            .tx_write_in_schema_at_ms(
+                tx_id,
+                self.schema_version_id,
+                table,
+                row,
+                cells,
+                None,
+                Some(now_ms),
+            )
+            .await?;
         Ok(())
     }
 
@@ -761,24 +765,79 @@ where
         updated_at_ms: Option<u64>,
     ) -> Result<(), Error> {
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
-        let mut node = self.node.node.lock().await;
-        let mut cells = node
-            .tx_read_in_schema(tx_id, self.schema_version_id, table, row)
+        let mut cells = self
+            .exclusive_transaction_target_for_write(tx_id, table, row, "UPSERT", true)
             .await?
             .unwrap_or_default();
         cells.extend(patch);
         let cells = self.apply_insert_defaults(table, cells)?;
-        node.tx_write_in_schema_at_ms(
-            tx_id,
-            self.schema_version_id,
-            table,
-            row,
-            cells,
-            None,
-            Some(now_ms),
-        )
-        .await?;
+        self.node
+            .node
+            .lock()
+            .await
+            .tx_write_in_schema_at_ms(
+                tx_id,
+                self.schema_version_id,
+                table,
+                row,
+                cells,
+                None,
+                Some(now_ms),
+            )
+            .await?;
         Ok(())
+    }
+
+    /// Resolve an exclusive mutation target through the identity fixed when
+    /// the transaction opened, then record the corresponding snapshot row or
+    /// absence read used by optimistic conflict validation.
+    async fn exclusive_transaction_target_for_write(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row: RowUuid,
+        operation: &str,
+        allow_absent: bool,
+    ) -> Result<Option<RowCells>, Error> {
+        let identity = self
+            .node
+            .node
+            .lock()
+            .await
+            .exclusive_transaction_bound_author(tx_id)?;
+        let read_policy = self.table_schema(table)?.read_policy.clone();
+        let predicate_query = read_policy
+            .clone()
+            .unwrap_or_else(|| Query::from(table))
+            .filter(eq(col("id"), lit(Value::Uuid(row.0))));
+        let predicate = self.prepare_query(&predicate_query)?;
+        // Record the exact policy-shaped predicate read used by the mutation.
+        // The dedicated authorization subplan below remains the decision
+        // boundary so dependency sources are raw evidence under INV-RLS-21.
+        self.transaction_all_for_identity(tx_id, &predicate, identity, ReadOpts::default())
+            .await?;
+
+        // This authoritative point read distinguishes a hidden target from a
+        // genuinely absent one and records the exact snapshot/absence read for
+        // conflict detection. Its result is never returned to the session.
+        let target = self.transaction_read(tx_id, table, row).await?;
+        let visible = match (&target, read_policy) {
+            (Some(_), _) if identity == AuthorSubject::SYSTEM => true,
+            (Some(_), None) => true,
+            (Some(_), Some(policy)) => {
+                self.node
+                    .node
+                    .lock()
+                    .await
+                    .read_policy_query_allows_open_tx_row(tx_id, &policy, row, identity)
+                    .await?
+            }
+            (None, _) => false,
+        };
+        if target.is_some() && !visible || target.is_none() && !allow_absent {
+            return Err(read_for_write_denied(operation, table));
+        }
+        Ok(target)
     }
 
     pub(super) async fn stage_exclusive_delete(

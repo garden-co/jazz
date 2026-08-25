@@ -1367,6 +1367,196 @@ fn identity_bound_exclusive_transaction_rejects_cross_identity_reads_and_commits
     assert_eq!(committed_provenance.updated_by, alice);
 }
 
+fn exclusive_read_for_write_schema() -> JazzSchema {
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("title", PublicColumnType::Text)
+                .column("done", PublicColumnType::Boolean)
+                .column("owner", PublicColumnType::Uuid)
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_session_eq("owner", &["user_id"]))
+                        .with_insert(PublicPolicyExpr::True)
+                        .with_update(Some(PublicPolicyExpr::True), PublicPolicyExpr::True),
+                ),
+        ),
+    )
+}
+
+/// Alice's exclusive transaction cannot update or upsert Bob's read-hidden
+/// snapshot row. Full and partial updates return the same non-disclosing error.
+///
+/// alice tx ──full/partial UPDATE or UPSERT──► bob row ──► denied
+#[test]
+fn exclusive_session_mutations_deny_hidden_existing_targets_without_disclosure() {
+    let schema = exclusive_read_for_write_schema();
+    let db = open_db(0xd4, AuthorSubject::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa4; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb4; 16]);
+    let target = row(0xc4);
+    db.set_identity_claims(alice, test_provider_claims(alice));
+    db.insert(
+        "todos",
+        cells("bob secret", false, bob),
+        InsertOptions {
+            row_id: Some(target),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let prepared = db.prepare_query(&db.table("todos")).unwrap();
+    assert!(
+        block_on(db.all_for_identity(&prepared, ReadOpts::default(), alice))
+            .unwrap()
+            .is_empty(),
+        "the planted target must be read-hidden from Alice"
+    );
+
+    for (label, patch) in [
+        ("full", cells("replacement", true, alice)),
+        (
+            "partial",
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+        ),
+    ] {
+        let open = OpenTransactionId::new();
+        db.begin_exclusive_for_identity(open, alice).unwrap();
+        let error = db
+            .exclusive_tx_ref(open)
+            .update("todos", target, patch, Default::default())
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::WriteRejected, "{label} update");
+        assert_eq!(
+            error.message,
+            "read policy denied UPDATE on table todos: the operation requires read permission on the target row"
+        );
+        db.abandon_exclusive_handle(open).unwrap();
+    }
+
+    let open = OpenTransactionId::new();
+    db.begin_exclusive_for_identity(open, alice).unwrap();
+    let error = db
+        .exclusive_tx_ref(open)
+        .upsert(
+            "todos",
+            target,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            Default::default(),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::WriteRejected);
+    assert_eq!(
+        error.message,
+        "read policy denied UPSERT on table todos: the operation requires read permission on the target row"
+    );
+    db.abandon_exclusive_handle(open).unwrap();
+}
+
+/// Exclusive upsert distinguishes hidden-existing from absent internally: an
+/// absent row is inserted, while an intervening insert conflicts with the
+/// recorded absence rather than silently overwriting it.
+///
+/// alice tx ──upsert(absent)──► overlay; concurrent insert ──► commit conflict
+#[test]
+fn exclusive_session_absent_upsert_records_absence_and_observes_its_overlay() {
+    let schema = exclusive_read_for_write_schema();
+    let db = open_db(0xd5, AuthorSubject::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa5; 16]);
+    db.set_identity_claims(alice, test_provider_claims(alice));
+
+    let successful = row(0xc5);
+    let success_open = OpenTransactionId::new();
+    db.begin_exclusive_for_identity(success_open, alice)
+        .unwrap();
+    let success = db.exclusive_tx_ref(success_open);
+    success
+        .upsert(
+            "todos",
+            successful,
+            cells("new", false, alice),
+            Default::default(),
+        )
+        .unwrap();
+    success
+        .update(
+            "todos",
+            successful,
+            BTreeMap::from([("done".to_owned(), Value::Bool(true))]),
+            Default::default(),
+        )
+        .expect("the session can read and update its visible overlay row");
+    db.commit_exclusive_handle(success_open).unwrap();
+
+    let conflicted = row(0xc6);
+    let conflict_open = OpenTransactionId::new();
+    db.begin_exclusive_for_identity(conflict_open, alice)
+        .unwrap();
+    db.exclusive_tx_ref(conflict_open)
+        .upsert(
+            "todos",
+            conflicted,
+            cells("pending", false, alice),
+            Default::default(),
+        )
+        .unwrap();
+    db.insert(
+        "todos",
+        cells("concurrent", false, alice),
+        InsertOptions {
+            row_id: Some(conflicted),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let error = db.commit_exclusive_handle(conflict_open).unwrap_err();
+    assert_eq!(error.code, ErrorCode::TransactionConflict);
+}
+
+/// Read-for-update authorization uses the exclusive transaction's fixed
+/// snapshot. A concurrent owner change cannot retroactively hide the snapshot
+/// row, but the recorded row/predicate reads make commit fail.
+///
+/// alice tx snapshot(readable) ──concurrent owner change──► stage ✓, commit ✗
+#[test]
+fn exclusive_session_update_authorizes_snapshot_then_conflicts_on_toctou_change() {
+    let schema = exclusive_read_for_write_schema();
+    let db = open_db(0xd6, AuthorSubject::SYSTEM, &schema);
+    let alice = AuthorSubject::for_test_bytes([0xa6; 16]);
+    let bob = AuthorSubject::for_test_bytes([0xb6; 16]);
+    let target = row(0xc7);
+    db.set_identity_claims(alice, test_provider_claims(alice));
+    db.insert(
+        "todos",
+        cells("snapshot", false, alice),
+        InsertOptions {
+            row_id: Some(target),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let open = OpenTransactionId::new();
+    db.begin_exclusive_for_identity(open, alice).unwrap();
+    db.update(
+        "todos",
+        target,
+        BTreeMap::from([("owner".to_owned(), Value::Uuid(bob.test_uuid()))]),
+        Default::default(),
+    )
+    .unwrap();
+    db.exclusive_tx_ref(open)
+        .update(
+            "todos",
+            target,
+            BTreeMap::from([("title".to_owned(), Value::String("staged".to_owned()))]),
+            Default::default(),
+        )
+        .expect("the fixed snapshot still exposes Alice's target");
+    let error = db.commit_exclusive_handle(open).unwrap_err();
+    assert_eq!(error.code, ErrorCode::TransactionConflict);
+}
+
 /// Mergeable serving reads retain their existing per-call identity semantics.
 #[test]
 fn mergeable_transaction_identity_reads_are_not_forced_to_begin_author() {
