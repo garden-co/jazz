@@ -196,6 +196,17 @@ byte-for-byte canonical re-encoding, including metadata-only traversal before
 the caller has an expected logical kind. Evaluation additionally verifies the
 expected object hash, format, kind, logical hash, and metrics.
 
+The authenticated structure is a DAG, not necessarily a tree physically: one
+exact `NodeRef` may occur repeatedly in a branch or beneath several parents.
+Physical reachability, upload-frontier, admission and collection walks visit
+that immutable node once while validating that every incoming edge agrees on
+its logical hash and metrics. They still retain the exact active path needed to
+reject a cycle. Logical evaluation is different: each edge occurrence denotes
+bytes at a distinct logical position and therefore remains observable. Every
+synchronous materialization or range attempt charges both visited occurrences
+and expanded child edges against a deterministic work budget; exceeding it is a
+typed failure rather than an unbounded allocation or CPU loop.
+
 The encoded-node size ceiling is checked before hashing or deserialization, so
 an authenticated transport envelope cannot turn one malicious node into an
 unbounded hashing or allocation operation.
