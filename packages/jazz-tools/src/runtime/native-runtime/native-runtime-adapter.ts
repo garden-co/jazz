@@ -3253,7 +3253,7 @@ function updatedAtMsFromWriteContext(writeContext?: string | null): number | und
   if (!Number.isSafeInteger(parsed.updated_at) || parsed.updated_at < 0) {
     throw new Error("updatedAt must be a nonnegative safe integer");
   }
-  return Math.trunc(parsed.updated_at / 1_000);
+  return parsed.updated_at;
 }
 
 function effectiveUpdatedAtMs(writeContext?: string | null): number | null {
@@ -5237,9 +5237,9 @@ function decodeBytes(
     case "Timestamp":
       return {
         type: "Timestamp",
-        value:
-          Number(view.getBigUint64(0, true)) *
-          (fieldName && isProvenanceMagicColumn(fieldName) ? 1_000 : 1),
+        // Current-row provenance and ordinary timestamp columns both cross the
+        // public binding boundary as Unix milliseconds.
+        value: Number(view.getBigUint64(0, true)),
       };
     case "Text":
     case "Json":

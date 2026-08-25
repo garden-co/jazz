@@ -512,7 +512,7 @@ describe("Db runtime schema order", () => {
         ],
       },
     };
-    const updatedAt = 1_764_000_000_000_000;
+    const updatedAt = 1_764_000_000_000;
     const insert = vi.fn<
       (...args: [string, InsertValues, { updatedAt: number }]) => WriteResult<InsertResult>
     >(() =>
@@ -594,7 +594,7 @@ describe("Db runtime schema order", () => {
         ],
       },
     };
-    const updatedAt = 1_764_000_000_000_000;
+    const updatedAt = 1_764_000_000_000;
     const insert = vi.fn(() =>
       makeWriteResult({
         id: "todo-1",

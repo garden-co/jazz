@@ -363,9 +363,9 @@ fn renamed_known_state_repair_round_trips_canonical_authored_payload() {
         row_uuid,
         Vec::new(),
         AuthorSubject::SYSTEM,
-        tx_id.time,
+        tx_id.time.physical_ms(),
         AuthorSubject::SYSTEM,
-        tx_id.time,
+        tx_id.time.physical_ms(),
         &BTreeMap::from([("body".to_owned(), v("wrong physical table"))]),
         None,
     )
@@ -519,9 +519,9 @@ fn inline_known_state_witness_rejects_reused_logical_table_name() {
         task_row,
         Vec::new(),
         AuthorSubject::SYSTEM,
-        tx_id.time,
+        tx_id.time.physical_ms(),
         AuthorSubject::SYSTEM,
-        tx_id.time,
+        tx_id.time.physical_ms(),
         &BTreeMap::from([("name".to_owned(), v("old physical task"))]),
         None,
     )

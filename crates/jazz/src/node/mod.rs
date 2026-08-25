@@ -705,8 +705,7 @@ struct Clock {
 
 impl Clock {
     fn allocate_global_time(&mut self, now_ms: u64) -> Result<GlobalTime, Error> {
-        let global_time = GlobalTime::tick(self.global_time_register, now_ms)
-            .ok_or(Error::InvalidStoredValue("global HLC exhausted"))?;
+        let global_time = GlobalTime::tick(self.global_time_register, now_ms)?;
         self.global_time_register = global_time;
         self.locally_minted_global_times.insert(global_time);
         Ok(global_time)
@@ -1048,12 +1047,12 @@ struct PendingTransactionScan {
 pub struct RowProvenance {
     /// Principal that created the row.
     pub created_by: AuthorSubject,
-    /// Commit time of the row's first retained content version.
-    pub created_at: TxTime,
+    /// Unix milliseconds of the row's first retained content version.
+    pub created_at: u64,
     /// Principal that authored the visible row version.
     pub updated_by: AuthorSubject,
-    /// Commit time of the visible row version.
-    pub updated_at: TxTime,
+    /// Unix milliseconds of the visible row version.
+    pub updated_at: u64,
 }
 
 /// Directed relation edge emitted for an array-subquery payload.
@@ -1187,10 +1186,10 @@ impl CurrentRow {
         Ok(Some(RowProvenance {
             created_by: AuthorSubject::from_canonical(borrowed.get_str(created_by_idx)?)
                 .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
-            created_at: TxTime(borrowed.get_u64(created_at_idx)?),
+            created_at: borrowed.get_u64(created_at_idx)?,
             updated_by: AuthorSubject::from_canonical(borrowed.get_str(updated_by_idx)?)
                 .map_err(|_| groove::records::Error::NonCanonicalRecord)?,
-            updated_at: TxTime(borrowed.get_u64(updated_at_idx)?),
+            updated_at: borrowed.get_u64(updated_at_idx)?,
         }))
     }
 
@@ -1236,9 +1235,9 @@ impl CurrentRow {
         }
         if let Some(provenance) = self.provenance()? {
             values.push(Value::String(provenance.created_by.canonical().to_owned()));
-            values.push(Value::U64(provenance.created_at.0));
+            values.push(Value::U64(provenance.created_at));
             values.push(Value::String(provenance.updated_by.canonical().to_owned()));
-            values.push(Value::U64(provenance.updated_at.0));
+            values.push(Value::U64(provenance.updated_at));
         } else {
             values.push(Value::String(AuthorSubject::SYSTEM.canonical().to_owned()));
             values.push(Value::U64(0));
@@ -1978,6 +1977,9 @@ pub enum Error {
     /// Error returned by storage.
     #[error(transparent)]
     Storage(#[from] storage::Error),
+    /// The internal packed HLC exhausted its final physical/logical position.
+    #[error(transparent)]
+    ClockOverflow(#[from] crate::time::HlcOverflow),
     /// Error returned by query validation or binding.
     #[error("{0}")]
     Query(#[source] Box<QueryError>),

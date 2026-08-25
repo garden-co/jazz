@@ -3371,7 +3371,10 @@ fn core_insert_options(options: Option<InsertOptions>) -> napi::Result<jazz::db:
             .transpose()?
             .map(jazz::db::ExactWriteTarget::Branch)
             .unwrap_or_default(),
-        updated_at_ms: options.updated_at_ms.map(|value| value as u64),
+        updated_at_ms: options
+            .updated_at_ms
+            .map(|value| checked_u64(value, "updatedAtMs"))
+            .transpose()?,
     })
 }
 
@@ -3394,7 +3397,10 @@ fn core_update_options(options: Option<UpdateOptions>) -> napi::Result<jazz::db:
     Ok(jazz::db::UpdateOptions {
         identity: core_write_identity(options.author)?,
         target,
-        updated_at_ms: options.updated_at_ms.map(|value| value as u64),
+        updated_at_ms: options
+            .updated_at_ms
+            .map(|value| checked_u64(value, "updatedAtMs"))
+            .transpose()?,
     })
 }
 
@@ -3410,7 +3416,10 @@ fn core_upsert_options(options: Option<UpsertOptions>) -> napi::Result<jazz::db:
             .transpose()?
             .map(jazz::db::ExactWriteTarget::Branch)
             .unwrap_or_default(),
-        updated_at_ms: options.updated_at_ms.map(|value| value as u64),
+        updated_at_ms: options
+            .updated_at_ms
+            .map(|value| checked_u64(value, "updatedAtMs"))
+            .transpose()?,
     })
 }
 
@@ -3441,7 +3450,10 @@ fn core_restore_options(options: Option<RestoreOptions>) -> napi::Result<jazz::d
             .transpose()?
             .map(jazz::db::ExactWriteTarget::Branch)
             .unwrap_or_default(),
-        updated_at_ms: options.updated_at_ms.map(|value| value as u64),
+        updated_at_ms: options
+            .updated_at_ms
+            .map(|value| checked_u64(value, "updatedAtMs"))
+            .transpose()?,
     })
 }
 
@@ -4117,10 +4129,12 @@ mod tests {
 
     use crate::{
         CoreOpenDbConfig, CoreSelfSignedClientProof, InsertOptions, NapiDb, NapiDbInnerStorage,
-        NapiTxKind, PreparedQuery, Tx, authority_epoch_from_bigint, core_author_id_from_bytes,
-        core_block_on, core_claim_value_from_json, core_open_backend_identity, core_open_identity,
-        core_read_opts_from_json, core_read_tier_from_str, core_subscription_event_to_napi,
-        encode_core_subscription_delta, terminal_bytes_to_numbers,
+        NapiTxKind, PreparedQuery, RestoreOptions, Tx, UpdateOptions, UpsertOptions,
+        authority_epoch_from_bigint, core_author_id_from_bytes, core_block_on,
+        core_claim_value_from_json, core_insert_options, core_open_backend_identity,
+        core_open_identity, core_read_opts_from_json, core_read_tier_from_str,
+        core_restore_options, core_subscription_event_to_napi, core_update_options,
+        core_upsert_options, encode_core_subscription_delta, terminal_bytes_to_numbers,
         unknown_transaction_kind_message,
     };
 
@@ -4672,6 +4686,44 @@ mod tests {
         ] {
             assert!(super::checked_u64(value, "value").is_err(), "{value:?}");
         }
+    }
+
+    #[test]
+    fn write_option_timestamps_reject_lossy_javascript_numbers() {
+        assert!(
+            core_insert_options(Some(InsertOptions {
+                row_id: None,
+                author: None,
+                branch: None,
+                updated_at_ms: Some(1.5),
+            }))
+            .is_err()
+        );
+        assert!(
+            core_update_options(Some(UpdateOptions {
+                author: None,
+                head: None,
+                base: None,
+                updated_at_ms: Some(f64::NAN),
+            }))
+            .is_err()
+        );
+        assert!(
+            core_upsert_options(Some(UpsertOptions {
+                author: None,
+                branch: None,
+                updated_at_ms: Some(-1.0),
+            }))
+            .is_err()
+        );
+        assert!(
+            core_restore_options(Some(RestoreOptions {
+                author: None,
+                branch: None,
+                updated_at_ms: Some((jazz::tools::policy_claims::MAX_SAFE_JS_INTEGER + 1) as f64),
+            }))
+            .is_err()
+        );
     }
 
     #[test]

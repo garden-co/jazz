@@ -37,7 +37,7 @@ fn test_current_timestamp() {
     let ts2 = current_timestamp();
 
     // Timestamps should be reasonable (after 2024)
-    assert!(ts1 > 1704067200000000); // 2024-01-01 in microseconds
+    assert!(ts1 > 1_704_067_200_000); // 2024-01-01 in milliseconds
 
     // Second timestamp should be >= first
     assert!(ts2 >= ts1);
