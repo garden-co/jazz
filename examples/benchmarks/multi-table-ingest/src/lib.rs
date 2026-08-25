@@ -8,7 +8,8 @@ use jazz::groove::storage::{MemoryStorage, OrderedKvStorage, ReopenableStorage};
 use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::schema::JazzSchema;
 use jazz::tools::{
-    CmpOp, ColumnType, PolicyExpr, PolicyValue, SchemaBuilder, TablePolicies, TableSchemaBuilder,
+    CmpOp, ColumnType, PolicyExpr, PolicyValue, Schema, SchemaBuilder, TablePolicies,
+    TableSchemaBuilder,
 };
 use jazz::tx::DurabilityTier;
 use jazz_storage_rocksdb::{Durability, RocksDbStorage};
@@ -17,10 +18,14 @@ use tempfile::TempDir;
 const GROUPS: usize = 32;
 const RESOURCES: usize = 1_000;
 
+mod public_client;
+pub use public_client::ClientIngestFixture;
+
 pub struct IngestFixture<S: OrderedKvStorage> {
     db: Db<S>,
     next_job: usize,
     write_identity: WriteIdentity,
+    check_write_state: bool,
 }
 
 impl IngestFixture<MemoryStorage> {
@@ -36,14 +41,39 @@ impl IngestFixture<MemoryStorage> {
         let schema = schema(true);
         let families = schema.column_families();
         let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-        Self::new(schema, MemoryStorage::new(&refs), existing_jobs, true)
+        Self::new(
+            schema,
+            MemoryStorage::new(&refs),
+            existing_jobs,
+            true,
+            false,
+        )
+    }
+
+    pub fn memory_with_write_state_check(existing_jobs: usize) -> Self {
+        let schema = schema(false);
+        let families = schema.column_families();
+        let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
+        Self::new(
+            schema,
+            MemoryStorage::new(&refs),
+            existing_jobs,
+            false,
+            true,
+        )
     }
 
     fn memory_with_attribution(existing_jobs: usize, attributed: bool) -> Self {
         let schema = schema(false);
         let families = schema.column_families();
         let refs = families.iter().map(String::as_str).collect::<Vec<_>>();
-        Self::new(schema, MemoryStorage::new(&refs), existing_jobs, attributed)
+        Self::new(
+            schema,
+            MemoryStorage::new(&refs),
+            existing_jobs,
+            attributed,
+            false,
+        )
     }
 }
 
@@ -56,12 +86,18 @@ impl IngestFixture<RocksDbStorage> {
         let storage =
             RocksDbStorage::open_with_durability(dir.path(), &refs, Durability::WalNoSync)
                 .expect("open ingest benchmark RocksDB");
-        (dir, Self::new(schema, storage, existing_jobs, false))
+        (dir, Self::new(schema, storage, existing_jobs, false, false))
     }
 }
 
 impl<S: OrderedKvStorage + ReopenableStorage + 'static> IngestFixture<S> {
-    fn new(schema: JazzSchema, storage: S, existing_jobs: usize, attributed: bool) -> Self {
+    fn new(
+        schema: JazzSchema,
+        storage: S,
+        existing_jobs: usize,
+        attributed: bool,
+        check_write_state: bool,
+    ) -> Self {
         let config = DbConfig::new(
             schema,
             storage,
@@ -90,6 +126,7 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> IngestFixture<S> {
             db,
             next_job: 0,
             write_identity,
+            check_write_state,
         };
         fixture.seed_dimensions();
         fixture.insert_jobs(existing_jobs);
@@ -213,12 +250,21 @@ impl<S: OrderedKvStorage + ReopenableStorage + 'static> IngestFixture<S> {
             },
         ))
         .unwrap_or_else(|error| panic!("insert synthetic {table} row: {error}"));
+        if self.check_write_state {
+            self.db
+                .write_state(write.mergeable_tx_id())
+                .unwrap_or_else(|error| panic!("inspect synthetic {table} write fate: {error}"));
+        }
         block_on(write.wait(DurabilityTier::Local))
             .unwrap_or_else(|error| panic!("wait for synthetic {table} row: {error}"));
     }
 }
 
 fn schema(with_exists_policy: bool) -> JazzSchema {
+    JazzSchema::new(&public_schema(with_exists_policy)).expect("multi-table ingest schema compiles")
+}
+
+fn public_schema(with_exists_policy: bool) -> Schema {
     let jobs_policies = if with_exists_policy {
         TablePolicies::new().with_insert(PolicyExpr::Exists {
             table: "groups".to_owned(),
@@ -234,7 +280,7 @@ fn schema(with_exists_policy: bool) -> JazzSchema {
     } else {
         TablePolicies::new()
     };
-    let public = SchemaBuilder::new()
+    SchemaBuilder::new()
         .table(
             TableSchemaBuilder::new("groups")
                 .column("tenant", ColumnType::Text)
@@ -286,8 +332,7 @@ fn schema(with_exists_policy: bool) -> JazzSchema {
                 .column("user", ColumnType::Text)
                 .column("started_at", ColumnType::Timestamp),
         )
-        .build();
-    JazzSchema::new(&public).expect("multi-table ingest schema compiles")
+        .build()
 }
 
 fn string_enum<const N: usize>(variants: [&str; N]) -> ColumnType {

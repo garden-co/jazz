@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-jazz = { workspace = true }
+jazz = { workspace = true, features = ["runtime"] }
 jazz-storage-rocksdb = { workspace = true }
 tempfile = "3.27.0"
 
