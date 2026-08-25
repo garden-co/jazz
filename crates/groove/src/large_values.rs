@@ -2332,6 +2332,60 @@ fn validate_descriptor_shape(value: &LargeValueRef) -> Result<(), Error> {
     }
 }
 
+/// Reconstruct and replay an untrusted descriptor's tail against its immutable
+/// base tree. Shape validation alone cannot prove that text UTF-16 coordinates
+/// describe the same byte splice, or that a JSON edit is a whole-value replace.
+pub(crate) fn validate_edit_tail_attempt(
+    value: &LargeValueRef,
+    inputs: &mut EvaluationInputs,
+) -> Result<(), IvmRuntimeError> {
+    validate_descriptor(value)?;
+    let mut replay = value.clone();
+    for edit in value.edit_tail.iter().rev() {
+        let inserted = u64::try_from(edit.insert_bytes.len()).map_err(|_| Error::MetricOverflow)?;
+        replay.byte_length = replay
+            .byte_length
+            .checked_sub(inserted)
+            .and_then(|length| length.checked_add(edit.delete_length))
+            .ok_or(Error::MetricOverflow)?;
+        replay.utf16_length = match replay.kind {
+            LargeValueKind::Bytes => None,
+            LargeValueKind::String | LargeValueKind::Json => Some(
+                replay
+                    .utf16_length
+                    .ok_or(Error::MalformedScalar)?
+                    .checked_sub(edit.insert_utf16_length)
+                    .and_then(|length| length.checked_add(edit.delete_utf16_length))
+                    .ok_or(Error::MetricOverflow)?,
+            ),
+        };
+    }
+    replay.edit_tail.clear();
+    validate_descriptor(&replay)?;
+
+    for expected in &value.edit_tail {
+        let outcome = replace_tail_with_bounds_attempt(
+            &replay,
+            expected.offset,
+            expected.delete_length,
+            expected.insert_bytes.clone(),
+            inputs,
+            false,
+        )?;
+        let next = match outcome {
+            TailEditOutcome::Updated(next) | TailEditOutcome::ConsolidationRequired(next) => next,
+        };
+        if next.edit_tail.last() != Some(expected) {
+            return Err(Error::DescriptorMismatch.into());
+        }
+        replay = next;
+    }
+    if &replay != value {
+        return Err(Error::DescriptorMismatch.into());
+    }
+    Ok(())
+}
+
 fn stage_node(
     node: ChunkNode,
     metrics: NodeMetrics,
