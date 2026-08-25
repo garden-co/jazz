@@ -911,6 +911,11 @@ pub enum StoredScalar {
     Large(LargeValueRef),
 }
 
+pub(crate) enum BorrowedStoredScalar<'a> {
+    Inline(&'a [u8]),
+    Large(LargeValueRef),
+}
+
 /// Append bytes without reading the immutable base tree. The descriptor's
 /// logical hash identifies that base; the canonical tail is the remaining
 /// part of final logical identity until consolidation produces a new base.
@@ -1907,9 +1912,18 @@ pub fn encode_stored_scalar(value: &StoredScalar) -> Result<Vec<u8>, Error> {
 }
 
 pub fn decode_stored_scalar(encoded: &[u8]) -> Result<StoredScalar, Error> {
+    match decode_borrowed_stored_scalar(encoded)? {
+        BorrowedStoredScalar::Inline(bytes) => Ok(StoredScalar::Inline(bytes.to_vec())),
+        BorrowedStoredScalar::Large(value) => Ok(StoredScalar::Large(value)),
+    }
+}
+
+pub(crate) fn decode_borrowed_stored_scalar(
+    encoded: &[u8],
+) -> Result<BorrowedStoredScalar<'_>, Error> {
     let (&tag, payload) = encoded.split_first().ok_or(Error::MalformedScalar)?;
     match tag {
-        0 => Ok(StoredScalar::Inline(payload.to_vec())),
+        0 => Ok(BorrowedStoredScalar::Inline(payload)),
         1 => {
             let value: LargeValueRef =
                 postcard::from_bytes(payload).map_err(|_| Error::MalformedScalar)?;
@@ -1917,7 +1931,7 @@ pub fn decode_stored_scalar(encoded: &[u8]) -> Result<StoredScalar, Error> {
             if postcard::to_allocvec(&value).map_err(|_| Error::MalformedScalar)? != payload {
                 return Err(Error::MalformedScalar);
             }
-            Ok(StoredScalar::Large(value))
+            Ok(BorrowedStoredScalar::Large(value))
         }
         _ => Err(Error::MalformedScalar),
     }

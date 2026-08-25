@@ -45,7 +45,7 @@ pub(super) fn resolve_variant_record(
             version: u64::from(variant_tag),
         });
     }
-    record.record().to_values()?;
+    record.record().validate()?;
     Ok((variant_tag, descriptor, record.record().raw().to_vec()))
 }
 

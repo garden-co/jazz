@@ -1180,6 +1180,33 @@ impl<'a> BorrowedRecord<'a> {
             .collect()
     }
 
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        self.validate_inner(false)
+    }
+
+    pub(crate) fn validate_canonical(&self) -> Result<(), Error> {
+        self.validate_inner(true)
+    }
+
+    fn validate_inner(&self, canonical: bool) -> Result<(), Error> {
+        validate_record_header(self.raw, &self.descriptor)?;
+        self.descriptor
+            .fields
+            .iter()
+            .zip(&self.descriptor.layout.fields)
+            .try_for_each(|(field, layout)| {
+                let span = record_value_span_for_layout(self.raw, &self.descriptor, *layout)?;
+                if canonical {
+                    values::validate_canonical_value(
+                        &self.raw[span.start..span.end],
+                        &field.value_type,
+                    )
+                } else {
+                    values::validate_value(&self.raw[span.start..span.end], &field.value_type)
+                }
+            })
+    }
+
     pub fn get_u64(&self, field_idx: usize) -> Result<u64, Error> {
         let bytes = self.field_bytes(field_idx, &ValueType::U64)?;
         read_exact_array::<8>(bytes).map(u64::from_le_bytes)
@@ -1791,6 +1818,10 @@ impl OwnedRecord {
 
     pub fn to_values(&self) -> Result<Vec<Value>, Error> {
         self.borrowed().to_values()
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        self.borrowed().validate()
     }
 }
 
