@@ -977,7 +977,7 @@ impl PeerIoPump {
         }
     }
 
-    fn is_disconnected(&self) -> bool {
+    pub(crate) fn is_disconnected(&self) -> bool {
         self.resolver
             .state
             .borrow()
