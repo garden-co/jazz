@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ReadTier, type JazzClient } from "./client.js";
 import { createDbWithRuntimeSource, type Db, type DbConfig, type QueryBuilder } from "./db.js";
 import { RuntimeSource, type RuntimeClientContext } from "./runtime-source.js";
-import type { NativeRowDelta, WasmSchema } from "../drivers/types.js";
+import type { RuntimeSubscriptionDelta, WasmSchema } from "../drivers/types.js";
 
 const schema: WasmSchema = {
   todos: {
@@ -31,13 +31,13 @@ class TestRuntimeSource extends RuntimeSource<DbConfig> {
 
 function makeClient() {
   let nextSubscription = 1;
-  const subscriptionCallbacks = new Map<number, (delta: NativeRowDelta) => void>();
+  const subscriptionCallbacks = new Map<number, (delta: RuntimeSubscriptionDelta) => void>();
   return {
     connectTransport: vi.fn(),
     disconnectTransport: vi.fn(async () => undefined),
     onMutationError: vi.fn(),
     query: vi.fn(async () => []),
-    subscribe: vi.fn((_query, callback: (delta: NativeRowDelta) => void) => {
+    subscribe: vi.fn((_query, callback: (delta: RuntimeSubscriptionDelta) => void) => {
       const id = nextSubscription++;
       subscriptionCallbacks.set(id, callback);
       return id;
@@ -51,7 +51,7 @@ function makeClient() {
     query: ReturnType<typeof vi.fn>;
     subscribe: ReturnType<typeof vi.fn>;
     unsubscribe: ReturnType<typeof vi.fn>;
-    subscriptionCallbacks: Map<number, (delta: NativeRowDelta) => void>;
+    subscriptionCallbacks: Map<number, (delta: RuntimeSubscriptionDelta) => void>;
   };
 }
 
@@ -65,23 +65,25 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function added(id: string, title: string): NativeRowDelta {
+function added(id: string, title: string): RuntimeSubscriptionDelta {
   const rowId = new Uint8Array(16);
   rowId.set(new TextEncoder().encode(id).subarray(0, rowId.length));
-  const raw = Uint8Array.from([0, ...new TextEncoder().encode(title)]);
-  const added = new Uint8Array(16 + 4 + 4 + raw.byteLength);
-  added.set(rowId);
-  const view = new DataView(added.buffer);
-  view.setUint32(16, 0, true);
-  view.setUint32(20, raw.byteLength, true);
-  added.set(raw, 24);
+  const hex = Array.from(rowId, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  const sourceId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(
+    16,
+    20,
+  )}-${hex.slice(20)}`;
   return {
-    added,
-    removed: new Uint8Array(),
-    updated: new Uint8Array(),
-    addedCount: 1,
-    removedCount: 0,
-    updatedCount: 0,
+    added: [
+      {
+        sourceId,
+        occurrenceKey: Uint8Array.from([1, ...rowId]),
+        index: 0,
+        row: { id: sourceId, values: [{ type: "Text", value: title }] },
+      },
+    ],
+    removed: [],
+    updated: [],
   };
 }
 

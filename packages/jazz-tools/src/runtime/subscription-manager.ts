@@ -7,17 +7,13 @@
 
 import type {
   ColumnDescriptor,
-  NativeRowDelta,
   NativeTerminalOperation,
+  RuntimeSubscriptionDelta,
   Value,
   WasmRow,
 } from "../drivers/types.js";
 import { HIDDEN_INCLUDE_COLUMN_PREFIX } from "./select-projection.js";
-import {
-  decodeNativeRow,
-  decodeNativeTerminalRow,
-  logicalStorageColumns,
-} from "./native-runtime/native-row-codec.js";
+import { decodeNativeTerminalRow } from "./native-runtime/native-row-codec.js";
 
 const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -268,18 +264,18 @@ export class SubscriptionManager<T extends { id: string }> {
   /**
    * Process a row delta and return typed object delta.
    *
-   * @param delta Packed row delta from the native runtime
+   * @param delta Structured root delta from the runtime adapter
    * @param transform Function to convert WasmRow to typed object T
    * @returns Typed delta with full state and changes
    */
   handleDelta(
-    delta: NativeRowDelta,
+    delta: RuntimeSubscriptionDelta,
     transform: (row: WasmRow) => T,
     nativeColumns?: readonly ColumnDescriptor[],
   ): SubscriptionDelta<T> {
     const reset = delta.reset === true;
     if (!nativeColumns) {
-      throw new Error("Native subscription delta requires output columns for decoding");
+      throw new Error("Runtime subscription delta requires output columns");
     }
     const snapshot = this.snapshot(nativeColumns);
     try {
@@ -287,11 +283,9 @@ export class SubscriptionManager<T extends { id: string }> {
         this.clearRows();
         this.deferredTerminalOperations = [];
       }
-      for (const key of [
-        ...(delta.addedOccurrenceKeys ?? []),
-        ...(delta.updatedOccurrenceKeys ?? []),
-        ...(delta.removedOccurrenceKeys ?? []),
-      ]) {
+      for (const key of [...delta.added, ...delta.updated, ...delta.removed].map(
+        (change) => change.occurrenceKey,
+      )) {
         const orderedKey = orderedTerminalKeyForTypedOccurrence(key);
         if (orderedKey) {
           this.registerTerminalOccurrenceAddress(orderedKey, publicResultKey(key));
@@ -299,45 +293,52 @@ export class SubscriptionManager<T extends { id: string }> {
           throw new Error("malformed or noncanonical typed terminal occurrence key");
         }
       }
-      // Packed row deltas have already been normalized to the public logical
-      // record layout. Only Groove terminal edit payloads retain the outer
-      // sparse current-row carrier described by `sparse`.
-      const decoded = decodeNativeDelta(delta, logicalStorageColumns(nativeColumns));
-      // Packed row removals are applied before terminal operations. Keep their
+      const decoded: DecodedRowDelta[] = [
+        ...delta.updated.map((change) => ({
+          kind: RowChangeKind.Updated,
+          id: publicResultKey(change.occurrenceKey),
+          index: change.index,
+          row: change.row,
+        })),
+        ...delta.added.map((change) => ({
+          kind: RowChangeKind.Added,
+          id: publicResultKey(change.occurrenceKey),
+          index: change.index,
+          row: change.row,
+        })),
+        ...delta.removed.map((change) => ({
+          kind: RowChangeKind.Removed,
+          id: publicResultKey(change.occurrenceKey),
+          index: change.index,
+        })),
+      ];
+      // Root removals are applied before terminal operations. Keep their
       // full public occurrence identities so a later descendant teardown in
       // this frame can be recognized as subsumed by its root removal.
-      const packedRemovedRoots = new Set<string>();
+      const removedRoots = new Set<string>();
       for (const [index, change] of decoded
         .filter((change) => change.kind === RowChangeKind.Removed)
         .entries()) {
-        packedRemovedRoots.add(change.id);
-        const terminalKey = terminalKeyForPackedOccurrence(delta.removedOccurrenceKeys?.[index]);
+        removedRoots.add(change.id);
+        const terminalKey = terminalKeyForOccurrence(delta.removed[index]?.occurrenceKey);
         if (!terminalKey) continue;
         const rootId = this.terminalAddress(Array.from(terminalKey));
-        packedRemovedRoots.add(rootId);
+        removedRoots.add(rootId);
         change.id = rootId;
       }
       for (const change of decoded) {
         if (change.kind === RowChangeKind.Removed) {
-          for (const rootId of packedRemovedRoots) this.terminalRows.delete(rootId);
+          for (const rootId of removedRoots) this.terminalRows.delete(rootId);
         } else if (change.row) {
-          // The plain native decoder exposes both positional values and a
-          // name map, but decodes them independently. Terminal edits mutate
-          // the positional tree, so normalize the retained terminal copy to
-          // one shared value graph before accepting descendant operations.
+          // Terminal edits mutate the positional tree, so retain a private
+          // copy whose positional and named values share one value graph.
           this.terminalRows.set(change.id, cloneTerminalRow(change.row, nativeColumns));
         }
       }
-      const packedMaterializedRoots = new Set(
-        decoded
-          .filter((change) => change.kind !== RowChangeKind.Removed)
-          .map((change) => change.id),
-      );
       const wireResult = this.handleDecodedDelta(decoded, transform, reset);
       const terminalOperations = this.readyTerminalOperations(
         delta.terminalOperations ?? [],
-        packedRemovedRoots,
-        packedMaterializedRoots,
+        removedRoots,
       );
       if (terminalOperations.length > 0) {
         const terminalResult = this.handleTerminalOperations(
@@ -379,11 +380,10 @@ export class SubscriptionManager<T extends { id: string }> {
     this.deferredTerminalOperations = snapshot.deferredTerminalOperations;
   }
 
-  /** Preserve a child splice that raced ahead of its native root hydration. */
+  /** Preserve a child splice that raced ahead of its root hydration. */
   private readyTerminalOperations(
     incoming: NativeTerminalOperation[],
-    packedRemovedRoots: ReadonlySet<string>,
-    packedMaterializedRoots: ReadonlySet<string>,
+    removedRoots: ReadonlySet<string>,
   ): NativeTerminalOperation[] {
     const operations = [
       ...this.deferredTerminalOperations.map((operation) => ({ operation, deferred: true })),
@@ -396,12 +396,9 @@ export class SubscriptionManager<T extends { id: string }> {
         throw new Error("native producer emitted a root terminal operation");
       }
       const rootAddress = this.terminalAddress(operation.root_key);
-      // A packed root is the producer's complete post-frame value. Applying
-      // this frame's child edits again would double-apply removals and moves.
-      if (!deferred && packedMaterializedRoots.has(rootAddress)) continue;
-      if (packedRemovedRoots.has(rootAddress)) {
+      if (removedRoots.has(rootAddress)) {
         if ("Remove" in operation.edit) continue;
-        throw new Error("terminal child edit addressed a root removed in the same packed frame");
+        throw new Error("terminal child edit addressed a root removed in the same frame");
       }
       if (!this.terminalRows.has(rootAddress)) {
         this.deferredTerminalOperations.push(operation);
@@ -729,8 +726,8 @@ function orderedTerminalKeyForTypedOccurrence(sidecar: Uint8Array): Uint8Array |
   return Uint8Array.from(ordered);
 }
 
-/** Reconstruct a terminal key for either supported packed occurrence carrier. */
-function terminalKeyForPackedOccurrence(sidecar: Uint8Array | undefined): Uint8Array | undefined {
+/** Reconstruct a terminal key from either supported occurrence-key carrier. */
+function terminalKeyForOccurrence(sidecar: Uint8Array | undefined): Uint8Array | undefined {
   if (!sidecar) return undefined;
   const typed = orderedTerminalKeyForTypedOccurrence(sidecar);
   if (typed) return typed;
@@ -905,87 +902,6 @@ function readUuid(bytes: Uint8Array, offset: number): string {
     16,
     20,
   )}-${hex.slice(20)}`;
-}
-
-export function decodeNativeDelta(
-  native: NativeRowDelta,
-  columns: readonly ColumnDescriptor[],
-): DecodedRowDelta[] {
-  const delta: DecodedRowDelta[] = [];
-
-  {
-    const bytes = native.updated;
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    let offset = 0;
-    for (let i = 0; i < native.updatedCount; i++) {
-      const sourceId = readUuid(bytes, offset);
-      const id = native.updatedOccurrenceKeys?.[i]
-        ? publicResultKey(native.updatedOccurrenceKeys[i]!)
-        : sourceId;
-      offset += 16;
-      const index = view.getUint32(offset, true);
-      offset += 4;
-      const flags = bytes[offset] ?? 0;
-      offset += 1;
-      if (flags & 1) {
-        const len = view.getUint32(offset, true);
-        offset += 4;
-        const data = bytes.subarray(offset, offset + len);
-        offset += len;
-        delta.push({
-          kind: RowChangeKind.Updated,
-          id,
-          index,
-          row: decodeNativeRow(sourceId, columns, data),
-        });
-      } else {
-        delta.push({ kind: RowChangeKind.Updated, id, index });
-      }
-    }
-  }
-
-  {
-    const bytes = native.added;
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    let offset = 0;
-    for (let i = 0; i < native.addedCount; i++) {
-      const sourceId = readUuid(bytes, offset);
-      const id = native.addedOccurrenceKeys?.[i]
-        ? publicResultKey(native.addedOccurrenceKeys[i]!)
-        : sourceId;
-      offset += 16;
-      const index = view.getUint32(offset, true);
-      offset += 4;
-      const len = view.getUint32(offset, true);
-      offset += 4;
-      const data = bytes.subarray(offset, offset + len);
-      offset += len;
-      delta.push({
-        kind: RowChangeKind.Added,
-        id,
-        index,
-        row: decodeNativeRow(sourceId, columns, data),
-      });
-    }
-  }
-
-  {
-    const bytes = native.removed;
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    let offset = 0;
-    for (let i = 0; i < native.removedCount; i++) {
-      const sourceId = readUuid(bytes, offset);
-      const id = native.removedOccurrenceKeys?.[i]
-        ? publicResultKey(native.removedOccurrenceKeys[i]!)
-        : sourceId;
-      offset += 16;
-      const index = view.getUint32(offset, true);
-      offset += 4;
-      delta.push({ kind: RowChangeKind.Removed, id, index });
-    }
-  }
-
-  return delta;
 }
 
 function publicResultKey(bytes: Uint8Array): string {

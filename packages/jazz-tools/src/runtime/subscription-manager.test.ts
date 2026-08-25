@@ -3,7 +3,14 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { ColumnDescriptor, NativeRowDelta, Value, WasmRow } from "../drivers/types.js";
+import type {
+  ColumnDescriptor,
+  RuntimeSubscriptionAddedRow,
+  RuntimeSubscriptionDelta,
+  RuntimeSubscriptionRemovedRow,
+  Value,
+  WasmRow,
+} from "../drivers/types.js";
 import { applySubscriptionDelta, SubscriptionManager } from "./subscription-manager.js";
 import type { SubscriptionDelta } from "./subscription-manager.js";
 
@@ -72,10 +79,6 @@ function uuidBytes(id: string): Uint8Array {
   );
 }
 
-function pushU32(target: number[], value: number): void {
-  target.push(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff);
-}
-
 function pushU32Be(target: number[], value: number): void {
   target.push((value >>> 24) & 0xff, (value >>> 16) & 0xff, (value >>> 8) & 0xff, value & 0xff);
 }
@@ -98,54 +101,54 @@ function typedResultKey(
   return Uint8Array.from(bytes);
 }
 
-function nativeRowData(name: string, count: number): Uint8Array {
-  const text = new TextEncoder().encode(name);
-  const data = new Uint8Array(5 + text.byteLength);
-  new DataView(data.buffer).setInt32(0, count, true);
-  data[4] = 0;
-  data.set(text, 5);
-  return data;
+function occurrenceKey(id: string): Uint8Array {
+  return Uint8Array.from([1, ...uuidBytes(id)]);
 }
 
-function nativeAddedRawRecord(id: string, index: number, data: Uint8Array): Uint8Array {
-  const bytes: number[] = [...uuidBytes(id)];
-  pushU32(bytes, index);
-  pushU32(bytes, data.byteLength);
-  bytes.push(...data);
-  return Uint8Array.from(bytes);
+function runtimeAddedRecord(
+  id: string,
+  index: number,
+  name: string,
+  count: number,
+  key = occurrenceKey(id),
+): RuntimeSubscriptionAddedRow {
+  return { sourceId: id, occurrenceKey: key, index, row: makeRow(id, name, count) };
 }
 
-function nativeAddedRecord(id: string, index: number, name: string, count: number): Uint8Array {
-  return nativeAddedRawRecord(id, index, nativeRowData(name, count));
+function runtimeRemovedRecord(id: string, index: number): RuntimeSubscriptionRemovedRow {
+  return { sourceId: id, occurrenceKey: occurrenceKey(id), index };
 }
 
-function nativeRemovedRecord(id: string, index: number): Uint8Array {
-  const bytes: number[] = [...uuidBytes(id)];
-  pushU32(bytes, index);
-  return Uint8Array.from(bytes);
+function includedRootRow(id: string, title: string): WasmRow {
+  const values: Value[] = [
+    { type: "Text", value: title },
+    { type: "Array", value: [] },
+  ];
+  const row = { id, values };
+  Object.defineProperty(row, "valuesByColumn", {
+    value: new Map([
+      ["title", values[0]!],
+      ["children", values[1]!],
+    ]),
+  });
+  return row;
 }
 
-function nativeRootWithEmptyChildren(title: string): Uint8Array {
-  const text = new TextEncoder().encode(title);
-  const bytes: number[] = [];
-  pushU32(bytes, 5 + text.byteLength);
-  bytes.push(0, ...text);
-  pushU32(bytes, 0);
-  return Uint8Array.from(bytes);
+function runtimeAddedRoot(id: string, index: number, title: string): RuntimeSubscriptionAddedRow {
+  return { sourceId: id, occurrenceKey: occurrenceKey(id), index, row: includedRootRow(id, title) };
 }
 
 function terminalTextChild(id: string, name: string): Uint8Array {
   return Uint8Array.from([...uuidBytes(id), 0, ...new TextEncoder().encode(name)]);
 }
 
-function emptyNativeDelta(overrides: Partial<NativeRowDelta> = {}): NativeRowDelta {
+function emptyRuntimeDelta(
+  overrides: Partial<RuntimeSubscriptionDelta> = {},
+): RuntimeSubscriptionDelta {
   return {
-    added: new Uint8Array(),
-    removed: new Uint8Array(),
-    updated: new Uint8Array(),
-    addedCount: 0,
-    removedCount: 0,
-    updatedCount: 0,
+    added: [],
+    removed: [],
+    updated: [],
     ...overrides,
   };
 }
@@ -188,7 +191,7 @@ function transformIncluded(row: WasmRow): IncludedRoot {
 }
 
 describe("SubscriptionManager", () => {
-  it("transforms wire deltas into typed deltas", () => {
+  it("transforms decoded root deltas into typed deltas", () => {
     const manager = new SubscriptionManager<TestItem>();
     const input: DecodedRowDelta = [{ kind: 0, id: "1", index: 0, row: makeRow("1", "item1", 10) }];
 
@@ -271,14 +274,11 @@ describe("SubscriptionManager", () => {
     expect(result.all?.map((item) => item.id)).toEqual(["C", "A", "B"]);
   });
 
-  it("decodes native subscription additions", () => {
+  it("transforms runtime subscription additions", () => {
     const manager = new SubscriptionManager<TestItem>();
     const id = "00000000-0000-4000-8000-000000000001";
     const result = manager.handleDelta(
-      emptyNativeDelta({
-        added: nativeAddedRecord(id, 0, "native", -42),
-        addedCount: 1,
-      }),
+      emptyRuntimeDelta({ added: [runtimeAddedRecord(id, 0, "native", -42)] }),
       transform,
       nativeColumns,
     );
@@ -294,14 +294,14 @@ describe("SubscriptionManager", () => {
     const id = "00000000-0000-4000-8000-000000000001";
     const key = [10, ...uuidBytes(id)];
     manager.handleDelta(
-      emptyNativeDelta({ added: nativeAddedRecord(id, 0, "before", 1), addedCount: 1 }),
+      emptyRuntimeDelta({ added: [runtimeAddedRecord(id, 0, "before", 1)] }),
       transform,
       nativeColumns,
     );
 
     expect(() =>
       manager.handleDelta(
-        emptyNativeDelta({
+        emptyRuntimeDelta({
           terminalOperations: [{ root_key: key, path: [], edit: { Update: { key, value: [] } } }],
         }),
         transform,
@@ -322,11 +322,7 @@ describe("SubscriptionManager", () => {
       const manager = new SubscriptionManager<TestItem>();
       expect(() =>
         manager.handleDelta(
-          emptyNativeDelta({
-            added: nativeAddedRecord(id, 0, "typed", 1),
-            addedCount: 1,
-            addedOccurrenceKeys: [sidecar],
-          }),
+          emptyRuntimeDelta({ added: [runtimeAddedRecord(id, 0, "typed", 1, sidecar)] }),
           transform,
           nativeColumns,
         ),
@@ -367,7 +363,7 @@ describe("SubscriptionManager", () => {
     );
   });
 
-  it("applies descendant terminal edits to a retained native root", () => {
+  it("applies descendant terminal edits to a retained root", () => {
     const manager = new SubscriptionManager<IncludedRoot>();
     const rootId = "00000000-0000-4000-8000-000000000001";
     const firstId = "00000000-0000-4000-8000-000000000002";
@@ -376,16 +372,13 @@ describe("SubscriptionManager", () => {
     const firstKey = [10, ...uuidBytes(firstId)];
     const secondKey = [10, ...uuidBytes(secondId)];
     manager.handleDelta(
-      emptyNativeDelta({
-        added: nativeAddedRawRecord(rootId, 0, nativeRootWithEmptyChildren("root")),
-        addedCount: 1,
-      }),
+      emptyRuntimeDelta({ added: [runtimeAddedRoot(rootId, 0, "root")] }),
       transformIncluded,
       includedRootColumns,
     );
 
     const inserted = manager.handleDelta(
-      emptyNativeDelta({
+      emptyRuntimeDelta({
         terminalOperations: [
           {
             root_key: rootKey,
@@ -409,7 +402,7 @@ describe("SubscriptionManager", () => {
     expect(inserted.all?.[0]?.children.map((child) => child.name)).toEqual(["one", "two"]);
 
     const edited = manager.handleDelta(
-      emptyNativeDelta({
+      emptyRuntimeDelta({
         terminalOperations: [
           {
             root_key: rootKey,
@@ -438,7 +431,7 @@ describe("SubscriptionManager", () => {
     ]);
   });
 
-  it("replays a descendant edit that arrives before its native root", () => {
+  it("replays a descendant edit that arrives before its root", () => {
     const manager = new SubscriptionManager<IncludedRoot>();
     const rootId = "00000000-0000-4000-8000-000000000001";
     const childId = "00000000-0000-4000-8000-000000000002";
@@ -446,7 +439,7 @@ describe("SubscriptionManager", () => {
     const childKey = [10, ...uuidBytes(childId)];
 
     const deferred = manager.handleDelta(
-      emptyNativeDelta({
+      emptyRuntimeDelta({
         terminalOperations: [
           {
             root_key: rootKey,
@@ -463,10 +456,7 @@ describe("SubscriptionManager", () => {
     expect(deferred.all).toEqual([]);
 
     const result = manager.handleDelta(
-      emptyNativeDelta({
-        added: nativeAddedRawRecord(rootId, 0, nativeRootWithEmptyChildren("root")),
-        addedCount: 1,
-      }),
+      emptyRuntimeDelta({ added: [runtimeAddedRoot(rootId, 0, "root")] }),
       transformIncluded,
       includedRootColumns,
     );
@@ -482,18 +472,14 @@ describe("SubscriptionManager", () => {
     const rootKey = [10, ...uuidBytes(rootId)];
     const childKey = [10, ...uuidBytes(childId)];
     manager.handleDelta(
-      emptyNativeDelta({
-        added: nativeAddedRawRecord(rootId, 0, nativeRootWithEmptyChildren("original")),
-        addedCount: 1,
-      }),
+      emptyRuntimeDelta({ added: [runtimeAddedRoot(rootId, 0, "original")] }),
       transformIncluded,
       includedRootColumns,
     );
 
     const removed = manager.handleDelta(
-      emptyNativeDelta({
-        removed: nativeRemovedRecord(rootId, 0),
-        removedCount: 1,
+      emptyRuntimeDelta({
+        removed: [runtimeRemovedRecord(rootId, 0)],
         terminalOperations: [
           {
             root_key: rootKey,
@@ -508,10 +494,7 @@ describe("SubscriptionManager", () => {
     expect(removed.all).toEqual([]);
 
     const reopened = manager.handleDelta(
-      emptyNativeDelta({
-        added: nativeAddedRawRecord(rootId, 0, nativeRootWithEmptyChildren("reopened")),
-        addedCount: 1,
-      }),
+      emptyRuntimeDelta({ added: [runtimeAddedRoot(rootId, 0, "reopened")] }),
       transformIncluded,
       includedRootColumns,
     );
@@ -519,9 +502,8 @@ describe("SubscriptionManager", () => {
 
     expect(() =>
       manager.handleDelta(
-        emptyNativeDelta({
-          removed: nativeRemovedRecord(rootId, 0),
-          removedCount: 1,
+        emptyRuntimeDelta({
+          removed: [runtimeRemovedRecord(rootId, 0)],
           terminalOperations: [
             {
               root_key: rootKey,
@@ -539,25 +521,24 @@ describe("SubscriptionManager", () => {
         transformIncluded,
         includedRootColumns,
       ),
-    ).toThrow(/terminal child edit addressed a root removed in the same packed frame/);
+    ).toThrow(/terminal child edit addressed a root removed in the same frame/);
     expect(manager.all()).toEqual([{ id: rootId, title: "reopened", children: [] }]);
   });
 
-  it("clears tracked state before applying native reset frames", () => {
+  it("clears tracked state before applying reset frames", () => {
     const manager = new SubscriptionManager<TestItem>();
     const first = "00000000-0000-4000-8000-000000000001";
     const second = "00000000-0000-4000-8000-000000000002";
     manager.handleDelta(
-      emptyNativeDelta({ added: nativeAddedRecord(first, 0, "first", 1), addedCount: 1 }),
+      emptyRuntimeDelta({ added: [runtimeAddedRecord(first, 0, "first", 1)] }),
       transform,
       nativeColumns,
     );
 
     const result = manager.handleDelta(
-      emptyNativeDelta({
+      emptyRuntimeDelta({
         reset: true,
-        added: nativeAddedRecord(second, 0, "second", 2),
-        addedCount: 1,
+        added: [runtimeAddedRecord(second, 0, "second", 2)],
       }),
       transform,
       nativeColumns,

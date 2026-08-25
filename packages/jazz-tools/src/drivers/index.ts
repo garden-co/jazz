@@ -8,5 +8,8 @@ export type {
   TableSchema,
   WasmSchema,
   WasmRow,
-  NativeRowDelta,
+  RuntimeSubscriptionDelta,
+  RuntimeSubscriptionAddedRow,
+  RuntimeSubscriptionUpdatedRow,
+  RuntimeSubscriptionRemovedRow,
 } from "./types.js";

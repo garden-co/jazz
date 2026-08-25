@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { performance } from "node:perf_hooks";
-import type { ColumnDescriptor, NativeRowDelta, WasmSchema } from "../../drivers/types.js";
+import type {
+  ColumnDescriptor,
+  RuntimeSubscriptionDelta,
+  WasmSchema,
+} from "../../drivers/types.js";
 import {
   createRecord,
   PostcardReader,
@@ -19,15 +23,11 @@ import {
 import {
   formatUuid,
   NativeRuntimeAdapter,
-  applySubscriptionDeltaWithWireDelta,
+  applySubscriptionDeltaWithRootDelta,
   type Transport,
 } from "./native-runtime-adapter.js";
 import { encodeSchema } from "./schema-codec.js";
-import {
-  applySubscriptionDelta,
-  decodeNativeDelta,
-  SubscriptionManager,
-} from "../subscription-manager.js";
+import { applySubscriptionDelta, SubscriptionManager } from "../subscription-manager.js";
 import { setNamedRowValuesEnumerable } from "./row-values-transport.js";
 import { encodeNativeNullValue, storageColumnValueType } from "./native-row-codec.js";
 import { type BatchId, type WriteReceipt } from "../client.js";
@@ -68,9 +68,36 @@ function decodeSchemaSource(bytes: Uint8Array) {
 
 function decodeTestDeltas(
   deltas: unknown[],
-  columns: readonly ColumnDescriptor[] = testSchema.todos.columns,
+  _columns: readonly ColumnDescriptor[] = testSchema.todos.columns,
 ) {
-  return deltas.map((delta) => decodeNativeDelta(delta as never, columns));
+  return deltas.map((delta) => runtimeDeltaChanges(delta as RuntimeSubscriptionDelta));
+}
+
+function runtimeDeltaChanges(delta: RuntimeSubscriptionDelta) {
+  return [
+    ...delta.updated.map((change) => ({
+      kind: 2 as const,
+      id: runtimeResultId(change.sourceId, change.occurrenceKey),
+      index: change.index,
+      row: change.row,
+    })),
+    ...delta.added.map((change) => ({
+      kind: 0 as const,
+      id: runtimeResultId(change.sourceId, change.occurrenceKey),
+      index: change.index,
+      row: change.row,
+    })),
+    ...delta.removed.map((change) => ({
+      kind: 1 as const,
+      id: runtimeResultId(change.sourceId, change.occurrenceKey),
+      index: change.index,
+    })),
+  ];
+}
+
+function runtimeResultId(sourceId: string, occurrenceKey: Uint8Array): string {
+  if (occurrenceKey.length === 17 && occurrenceKey[0] === 1) return sourceId;
+  return `result:${Array.from(occurrenceKey, (byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
 async function waitForFakeWebSocketNegotiation(): Promise<void> {
@@ -432,7 +459,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     expect(updates).toHaveBeenCalledTimes(1);
     expect(updates.mock.calls[0]![0]).toBeInstanceOf(Error);
     expect((updates.mock.calls[0]![0] as Error).message).toBe("server died");
-    expect(updates.mock.calls[0]![1]).toBeNull();
+    expect(updates.mock.calls[0]).toHaveLength(1);
   });
 
   it("settle-gates global native subscription chunks before app callbacks", () => {
@@ -3810,15 +3837,15 @@ describe("NativeRuntimeAdapter server transport", () => {
       }),
     };
     const runtime = runtimeWithNativeSubscriptionChunk(chunk);
-    const deltas: NativeRowDelta[] = [];
+    const deltas: RuntimeSubscriptionDelta[] = [];
     const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, null, null);
 
-    runtime.executeSubscription(handle, (delta: NativeRowDelta) => {
+    runtime.executeSubscription(handle, (delta: RuntimeSubscriptionDelta) => {
       deltas.push(delta);
     });
 
     expect(deltas).toHaveLength(1);
-    const decoded = decodeNativeDelta(deltas[0]!, testSchema.todos.columns);
+    const decoded = runtimeDeltaChanges(deltas[0]!);
     expect(decoded).toEqual([
       {
         kind: 0,
@@ -3864,10 +3891,10 @@ describe("NativeRuntimeAdapter server transport", () => {
         addedOccurrenceKeys: [key(1), key(2)],
       }),
     });
-    const deltas: NativeRowDelta[] = [];
+    const deltas: RuntimeSubscriptionDelta[] = [];
     const handle = runtime.createSubscription(JSON.stringify({ table: "todos" }), null, null, null);
-    runtime.executeSubscription(handle, (delta: NativeRowDelta) => deltas.push(delta));
-    const decoded = decodeNativeDelta(deltas[0]!, testSchema.todos.columns);
+    runtime.executeSubscription(handle, (delta: RuntimeSubscriptionDelta) => deltas.push(delta));
+    const decoded = runtimeDeltaChanges(deltas[0]!);
     expect(decoded).toHaveLength(2);
     expect(decoded[0]!.id).not.toBe(decoded[1]!.id);
     expect(decoded.map((change) => change.id)).toEqual([
@@ -3897,7 +3924,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       }),
     ];
     const runtime = runtimeWithNativeRelationSubscriptionChunks(chunks);
-    const deltas: NativeRowDelta[] = [];
+    const deltas: RuntimeSubscriptionDelta[] = [];
     const handle = runtime.createSubscription(
       JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
       null,
@@ -3905,7 +3932,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       null,
     );
 
-    runtime.executeSubscription(handle, (delta: NativeRowDelta) => deltas.push(delta));
+    runtime.executeSubscription(handle, (delta: RuntimeSubscriptionDelta) => deltas.push(delta));
 
     expect(deltas).toHaveLength(4);
     expect(decodeTestDeltas([deltas[0]!])[0]).toMatchObject([
@@ -3935,9 +3962,9 @@ describe("NativeRuntimeAdapter server transport", () => {
         rootAdded: [{ table: "todos", rowId: first, title: "ordinary" }],
       }),
     );
-    const ordinaryDeltas: NativeRowDelta[] = [];
+    const ordinaryDeltas: RuntimeSubscriptionDelta[] = [];
     const ordinaryHandle = ordinary.createSubscription(JSON.stringify({ table: "todos" }));
-    ordinary.executeSubscription(ordinaryHandle, (delta: NativeRowDelta) =>
+    ordinary.executeSubscription(ordinaryHandle, (delta: RuntimeSubscriptionDelta) =>
       ordinaryDeltas.push(delta),
     );
     expect(decodeTestDeltas(ordinaryDeltas)[0]).toMatchObject([
@@ -3961,7 +3988,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       },
       relationSubscriptionChunk({ settled: true }),
     ]);
-    const deltas: NativeRowDelta[] = [];
+    const deltas: RuntimeSubscriptionDelta[] = [];
     const handle = runtime.createSubscription(
       JSON.stringify({ table: "todos", relation_ir: { Gather: {} } }),
       null,
@@ -3969,7 +3996,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       null,
     );
 
-    runtime.executeSubscription(handle, (delta: NativeRowDelta) => deltas.push(delta));
+    runtime.executeSubscription(handle, (delta: RuntimeSubscriptionDelta) => deltas.push(delta));
 
     expect(deltas).toHaveLength(1);
     expect(deltas[0]!.reset).toBe(true);
@@ -4011,7 +4038,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       ],
       teamsSchema,
     );
-    const deltas: NativeRowDelta[] = [];
+    const deltas: RuntimeSubscriptionDelta[] = [];
     const handle = runtime.createSubscription(
       JSON.stringify({ table: "teams", relation_ir: { Gather: {} } }),
       null,
@@ -4019,11 +4046,11 @@ describe("NativeRuntimeAdapter server transport", () => {
       null,
     );
 
-    runtime.executeSubscription(handle, (delta: NativeRowDelta) => deltas.push(delta));
+    runtime.executeSubscription(handle, (delta: RuntimeSubscriptionDelta) => deltas.push(delta));
 
     expect(deltas).toHaveLength(1);
     expect(deltas[0]!.reset).toBe(true);
-    expect(decodeNativeDelta(deltas[0]!, teamsSchema.teams.columns)).toEqual([
+    expect(runtimeDeltaChanges(deltas[0]!)).toEqual([
       {
         kind: 0,
         id: `result:${Array.from(resultKey, (byte) => byte.toString(16).padStart(2, "0")).join("")}`,
@@ -4222,15 +4249,15 @@ describe("NativeRuntimeAdapter server transport", () => {
       }),
     };
     const runtime = runtimeWithNativeSubscriptionChunk(chunk, schema);
-    const deltas: NativeRowDelta[] = [];
+    const deltas: RuntimeSubscriptionDelta[] = [];
     const handle = runtime.createSubscription(JSON.stringify({ table: "notes" }), null, null, null);
 
-    runtime.executeSubscription(handle, (delta: NativeRowDelta) => {
+    runtime.executeSubscription(handle, (delta: RuntimeSubscriptionDelta) => {
       deltas.push(delta);
     });
 
     expect(deltas).toHaveLength(1);
-    const decoded = decodeNativeDelta(deltas[0]!, schema.notes.columns);
+    const decoded = runtimeDeltaChanges(deltas[0]!);
     expect(decoded).toEqual([
       {
         kind: 0,
@@ -4273,7 +4300,7 @@ describe("NativeRuntimeAdapter server transport", () => {
       ],
       schema,
     );
-    const deltas: NativeRowDelta[] = [];
+    const deltas: RuntimeSubscriptionDelta[] = [];
     const handle = runtime.createSubscription(
       JSON.stringify({ table: "notes", relation_ir: { Gather: {} } }),
       null,
@@ -4281,10 +4308,10 @@ describe("NativeRuntimeAdapter server transport", () => {
       null,
     );
 
-    runtime.executeSubscription(handle, (delta: NativeRowDelta) => deltas.push(delta));
+    runtime.executeSubscription(handle, (delta: RuntimeSubscriptionDelta) => deltas.push(delta));
 
     expect(deltas).toHaveLength(1);
-    expect(decodeNativeDelta(deltas[0]!, schema.notes.columns)).toEqual([
+    expect(runtimeDeltaChanges(deltas[0]!)).toEqual([
       {
         kind: 0,
         id: "00000000-0000-0000-0000-000000000322",
@@ -4326,12 +4353,12 @@ describe("NativeRuntimeAdapter server transport", () => {
       ),
     );
 
-    const applied = applySubscriptionDeltaWithWireDelta([], nativeDelta, schema, true, {
+    const applied = applySubscriptionDeltaWithRootDelta([], nativeDelta, schema, true, {
       rootTable: "notes",
       rootColumns: publicColumns,
     });
 
-    const [change] = decodeNativeDelta(applied.wireDelta, publicColumns);
+    const [change] = runtimeDeltaChanges(applied.rootDelta);
     expect(change?.kind).toBe(0);
     if (!change || change.kind !== 0) throw new Error("expected inserted row");
     expect(change.row.values).toEqual([
@@ -4389,7 +4416,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     expect(() =>
-      applySubscriptionDeltaWithWireDelta([], nativeDelta, schema, true, {
+      applySubscriptionDeltaWithRootDelta([], nativeDelta, schema, true, {
         rootTable: "notes",
         rootColumns: publicColumns,
       }),
@@ -4423,7 +4450,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     );
 
     expect(() =>
-      applySubscriptionDeltaWithWireDelta([], nativeDelta, schema, true, {
+      applySubscriptionDeltaWithRootDelta([], nativeDelta, schema, true, {
         rootTable: "notes",
         rootColumns: publicColumns,
       }),
@@ -5247,9 +5274,8 @@ describe("NativeRuntimeAdapter TS adapter perf canary", () => {
           null,
         );
         const started = performance.now();
-        runtime.executeSubscription(handle, (delta: NativeRowDelta) => {
-          subscriptionFrameBuffersForTest(delta);
-          addedCount += delta.addedCount;
+        runtime.executeSubscription(handle, (delta: RuntimeSubscriptionDelta) => {
+          addedCount += delta.added.length;
           callbackCount += 1;
         });
         const ms = performance.now() - started;
@@ -5397,21 +5423,6 @@ function indexedUuidBytes(index: number): Uint8Array {
   const bytes = new Uint8Array(16);
   new DataView(bytes.buffer).setUint32(12, index, false);
   return bytes;
-}
-
-function subscriptionFrameBuffersForTest(delta: NativeRowDelta): ArrayBuffer[] {
-  return [
-    transferableBufferForTest(delta.added),
-    transferableBufferForTest(delta.removed),
-    transferableBufferForTest(delta.updated),
-  ];
-}
-
-function transferableBufferForTest(bytes: Uint8Array): ArrayBuffer {
-  if (bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
-    return bytes.buffer as ArrayBuffer;
-  }
-  return bytes.slice().buffer;
 }
 
 function readPreparedComparison(query: Uint8Array): {
@@ -6043,8 +6054,8 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
       addedOccurrenceKeys: [direct, inherited],
     }),
   );
-  const first = applySubscriptionDeltaWithWireDelta([], initial, testSchema);
-  const firstDelta = decodeNativeDelta(first.wireDelta, testSchema.todos.columns);
+  const first = applySubscriptionDeltaWithRootDelta([], initial, testSchema);
+  const firstDelta = runtimeDeltaChanges(first.rootDelta);
   expect(first.rows).toHaveLength(2);
   expect(firstDelta.map((change) => change.id)).toEqual([
     expect.stringContaining("result:02"),
@@ -6053,7 +6064,7 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
   expect(firstDelta[0]!.id).not.toBe(firstDelta[1]!.id);
   const manager = new SubscriptionManager<{ id: string; title: string }>();
   const transformed = manager.handleDelta(
-    first.wireDelta,
+    first.rootDelta,
     (row) => ({
       id: row.id,
       title: row.values[0]?.type === "Text" ? row.values[0].value : "",
@@ -6074,13 +6085,13 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
       updatedOccurrenceKeys: [inherited],
     }),
   );
-  const afterUpdate = applySubscriptionDeltaWithWireDelta(first.rows, update, testSchema);
-  const updatedDelta = decodeNativeDelta(afterUpdate.wireDelta, testSchema.todos.columns);
+  const afterUpdate = applySubscriptionDeltaWithRootDelta(first.rows, update, testSchema);
+  const updatedDelta = runtimeDeltaChanges(afterUpdate.rootDelta);
   expect(updatedDelta).toHaveLength(1);
   expect(updatedDelta[0]!.id).toBe(firstDelta[1]!.id);
   expect(afterUpdate.rows).toHaveLength(2);
   const publicUpdate = manager.handleDelta(
-    afterUpdate.wireDelta,
+    afterUpdate.rootDelta,
     (row) => ({
       id: row.id,
       title: row.values[0]?.type === "Text" ? row.values[0].value : "",
@@ -6099,13 +6110,11 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
       removedOccurrenceKeys: [direct],
     }),
   );
-  const second = applySubscriptionDeltaWithWireDelta(afterUpdate.rows, removal, testSchema);
+  const second = applySubscriptionDeltaWithRootDelta(afterUpdate.rows, removal, testSchema);
   expect(second.rows).toHaveLength(1);
-  expect(decodeNativeDelta(second.wireDelta, testSchema.todos.columns)[0]!.id).toBe(
-    firstDelta[0]!.id,
-  );
+  expect(runtimeDeltaChanges(second.rootDelta)[0]!.id).toBe(firstDelta[0]!.id);
   const publicRemoval = manager.handleDelta(
-    second.wireDelta,
+    second.rootDelta,
     (row) => ({ id: row.id, title: "" }),
     testSchema.todos.columns,
   );
@@ -6113,7 +6122,7 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
   applySubscriptionDelta(publicRows, publicRemoval);
   expect(publicRows).toHaveLength(1);
 
-  const reopened = applySubscriptionDeltaWithWireDelta(
+  const reopened = applySubscriptionDeltaWithRootDelta(
     [],
     decode(
       encodeSubscriptionDelta({
@@ -6127,9 +6136,7 @@ it("keeps same-row union occurrences distinct through apply, removal, and reopen
     true,
   );
   expect(reopened.rows).toHaveLength(1);
-  expect(decodeNativeDelta(reopened.wireDelta, testSchema.todos.columns)[0]!.id).toBe(
-    firstDelta[1]!.id,
-  );
+  expect(runtimeDeltaChanges(reopened.rootDelta)[0]!.id).toBe(firstDelta[1]!.id);
 });
 
 it("uses Rust's explicit indices for root replacement and movement", () => {
@@ -6139,7 +6146,7 @@ it("uses Rust's explicit indices for root replacement and movement", () => {
     return bytes;
   });
   const decode = (bytes: Uint8Array) => readNativeSubscriptionDelta(new PostcardReader(bytes));
-  const initial = applySubscriptionDeltaWithWireDelta(
+  const initial = applySubscriptionDeltaWithRootDelta(
     [],
     decode(
       encodeSubscriptionDelta({
@@ -6151,7 +6158,7 @@ it("uses Rust's explicit indices for root replacement and movement", () => {
     testSchema,
   );
   const replaced = ids[0]!;
-  const afterTitleOnlyReplacement = applySubscriptionDeltaWithWireDelta(
+  const afterTitleOnlyReplacement = applySubscriptionDeltaWithRootDelta(
     initial.rows,
     decode(
       encodeSubscriptionDelta({
@@ -6168,11 +6175,11 @@ it("uses Rust's explicit indices for root replacement and movement", () => {
   expect(afterTitleOnlyReplacement.rows.map((row) => row.id)).toEqual(
     ids.map((id) => formatUuid(id)),
   );
-  expect(decodeNativeDelta(afterTitleOnlyReplacement.wireDelta, testSchema.todos.columns)).toEqual([
+  expect(runtimeDeltaChanges(afterTitleOnlyReplacement.rootDelta)).toEqual([
     expect.objectContaining({ id: formatUuid(replaced), index: 0 }),
   ]);
 
-  const afterSortReplacement = applySubscriptionDeltaWithWireDelta(
+  const afterSortReplacement = applySubscriptionDeltaWithRootDelta(
     afterTitleOnlyReplacement.rows,
     decode(
       encodeSubscriptionDelta({
@@ -6192,7 +6199,7 @@ it("uses Rust's explicit indices for root replacement and movement", () => {
   ]);
 
   const moved = ids[2]!;
-  const afterExplicitMove = applySubscriptionDeltaWithWireDelta(
+  const afterExplicitMove = applySubscriptionDeltaWithRootDelta(
     afterSortReplacement.rows,
     decode(
       encodeSubscriptionDelta({
@@ -6216,7 +6223,7 @@ it("preserves the producer's explicit position over lazy relation state", () => 
   const rowId = new Uint8Array(16);
   rowId[15] = 3;
   const decode = (bytes: Uint8Array) => readNativeSubscriptionDelta(new PostcardReader(bytes));
-  const applied = applySubscriptionDeltaWithWireDelta(
+  const applied = applySubscriptionDeltaWithRootDelta(
     [],
     decode(
       encodeSubscriptionDelta({
@@ -6231,7 +6238,7 @@ it("preserves the producer's explicit position over lazy relation state", () => 
     null,
   );
 
-  expect(decodeNativeDelta(applied.wireDelta, testSchema.todos.columns)).toEqual([
+  expect(runtimeDeltaChanges(applied.rootDelta)).toEqual([
     expect.objectContaining({ id: formatUuid(rowId), index: 2 }),
   ]);
 });

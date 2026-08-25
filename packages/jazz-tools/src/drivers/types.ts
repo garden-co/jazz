@@ -60,18 +60,32 @@ export interface NativeTerminalOperation {
   edit: NativeTerminalEdit;
 }
 
-export interface NativeRowDelta {
+export interface RuntimeSubscriptionAddedRow {
+  sourceId: string;
+  occurrenceKey: Uint8Array;
+  index: number;
+  row: WasmRow;
+}
+
+export interface RuntimeSubscriptionUpdatedRow {
+  sourceId: string;
+  occurrenceKey: Uint8Array;
+  index: number;
+  row?: WasmRow;
+}
+
+export interface RuntimeSubscriptionRemovedRow {
+  sourceId: string;
+  occurrenceKey: Uint8Array;
+  index: number;
+}
+
+/** Structured root changes published by a runtime adapter to the TS facade. */
+export interface RuntimeSubscriptionDelta {
   reset?: boolean;
-  added: Uint8Array;
-  removed: Uint8Array;
-  updated: Uint8Array;
-  addedCount: number;
-  removedCount: number;
-  updatedCount: number;
-  addedOccurrenceKeys?: Uint8Array[];
-  updatedOccurrenceKeys?: Uint8Array[];
-  removedOccurrenceKeys?: Uint8Array[];
-  terminalLayouts?: NativeTerminalRootLayout[];
+  added: RuntimeSubscriptionAddedRow[];
+  removed: RuntimeSubscriptionRemovedRow[];
+  updated: RuntimeSubscriptionUpdatedRow[];
   terminalOperations?: NativeTerminalOperation[];
 }
 
