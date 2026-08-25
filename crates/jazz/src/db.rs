@@ -3747,6 +3747,32 @@ fn apply_maintained_update_to_snapshot(
         .filter(|operation| operation.path.is_empty())
         .cloned()
         .collect::<Vec<_>>();
+    if !terminal_rows {
+        let mut event = apply_maintained_membership_update_to_snapshot(
+            snapshot,
+            snapshot_index,
+            update,
+            tier,
+            settled,
+            terminal_rows,
+        );
+        // A flat join can have several public occurrences for one root even
+        // though Groove's app-row terminal deliberately addresses that root
+        // only once. Membership owns the rows; terminal root edits order the
+        // root groups, and occurrence identity provides the stable tie-break.
+        apply_membership_terminal_root_order(snapshot, snapshot_index, &root_operations)?;
+        let SubscriptionEvent::Delta { added, updated, .. } = &mut event else {
+            unreachable!("maintained updates always emit deltas")
+        };
+        for output in added.iter_mut().chain(updated.iter_mut()) {
+            let Some(index) = snapshot_index.roots.get(&output.occurrence_id).copied() else {
+                continue;
+            };
+            output.row = snapshot.rows[index].clone();
+            output.index = index;
+        }
+        return Ok(event);
+    }
     if root_operations.is_empty() {
         return Ok(apply_maintained_membership_update_to_snapshot(
             snapshot,
@@ -3961,6 +3987,75 @@ fn apply_maintained_update_to_snapshot(
     Ok(event)
 }
 
+/// Apply Groove's root order to membership-owned output occurrences.
+///
+/// Groove app rows are keyed by root row, while flat joins can expose several
+/// occurrences of that root. Treat those occurrences as one ordered group and
+/// keep their exact identities in deterministic order within the group.
+fn apply_membership_terminal_root_order(
+    snapshot: &mut RelationSnapshot,
+    snapshot_index: &mut RelationSnapshotIndex,
+    operations: &[groove::ivm::TerminalOperation],
+) -> Result<(), Error> {
+    let occurrences = snapshot_root_occurrences(snapshot, snapshot_index)?;
+    let roots = snapshot.rows[..snapshot.root_count].to_vec();
+    let mut groups = Vec::<([u8; 16], Vec<(OutputOccurrenceId, CurrentRow)>)>::new();
+    let mut group_positions = BTreeMap::<[u8; 16], usize>::new();
+    for (occurrence, row) in occurrences.into_iter().zip(roots) {
+        let root = occurrence_root_bytes(&occurrence);
+        if let Some(position) = group_positions.get(&root).copied() {
+            groups[position].1.push((occurrence, row));
+        } else {
+            group_positions.insert(root, groups.len());
+            groups.push((root, vec![(occurrence, row)]));
+        }
+    }
+    for (_, entries) in &mut groups {
+        entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+    }
+
+    for operation in operations {
+        let root = terminal_occurrence_root_bytes(&operation.root_key)?;
+        let Some(previous_index) = groups.iter().position(|(candidate, _)| *candidate == root)
+        else {
+            // Membership may have filtered an operation emitted for another
+            // binding sharing the maintained graph.
+            continue;
+        };
+        let target_index = match operation.edit {
+            groove::ivm::TerminalEdit::Insert { index, .. }
+            | groove::ivm::TerminalEdit::Move { index, .. } => index,
+            groove::ivm::TerminalEdit::Update { .. } | groove::ivm::TerminalEdit::Remove { .. } => {
+                continue;
+            }
+        };
+        let group = groups.remove(previous_index);
+        groups.insert(target_index.min(groups.len()), group);
+    }
+
+    let mut ordered_occurrences = Vec::with_capacity(snapshot.root_count);
+    let mut ordered_roots = Vec::with_capacity(snapshot.root_count);
+    for (_, entries) in groups {
+        for (occurrence, row) in entries {
+            ordered_occurrences.push(occurrence);
+            ordered_roots.push(row);
+        }
+    }
+    snapshot.rows[..snapshot.root_count].clone_from_slice(&ordered_roots);
+    snapshot_index.roots = root_occurrence_positions(&ordered_occurrences);
+    Ok(())
+}
+
+fn occurrence_root_bytes(occurrence: &OutputOccurrenceId) -> [u8; 16] {
+    occurrence.canonical_bytes()[..16]
+        .try_into()
+        .expect("an output occurrence always begins with its root UUID")
+}
+
+fn terminal_occurrence_root_bytes(encoded: &[u8]) -> Result<[u8; 16], Error> {
+    terminal_root_occurrence_id(encoded).map(|occurrence| occurrence_root_bytes(&occurrence))
+}
+
 fn apply_maintained_membership_update_to_snapshot(
     snapshot: &mut RelationSnapshot,
     snapshot_index: &mut RelationSnapshotIndex,
@@ -3978,10 +4073,9 @@ fn apply_maintained_membership_update_to_snapshot(
         terminal_operations,
         terminal_layout: _,
     } = update;
-    // Root edits have already been applied to the retained snapshot by the
-    // wrapper. The parallel membership rows keep edge and authoritative
-    // reconciliation state current; only descendant edits may cross the
-    // binding boundary.
+    // Root edits were applied by the wrapper either as complete terminal rows
+    // or as ordering for membership-owned root groups. Only descendant edits
+    // may cross the binding boundary.
     let terminal_operations = terminal_operations
         .into_iter()
         .filter(|operation| terminal_rows && !operation.path.is_empty())
