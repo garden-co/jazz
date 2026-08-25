@@ -370,7 +370,7 @@ where
             let (created_by, created_at) = creator_source
                 .as_ref()
                 .map(|version| (version.created_by(), version.created_at()))
-                .unwrap_or((commit.made_by, TxTime(commit.now_ms)));
+                .unwrap_or((commit.made_by, TxTime::from(commit.now_ms)));
 
             let parents = if commit.parents.is_empty() {
                 Vec::new()
@@ -407,7 +407,7 @@ where
                     created_by,
                     created_at,
                     updated_by: commit.made_by,
-                    updated_at: TxTime(commit.now_ms),
+                    updated_at: TxTime::from(commit.now_ms),
                     cells,
                     authored_columns,
                     deletion: commit.deletion,
