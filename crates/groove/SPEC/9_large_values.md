@@ -58,8 +58,11 @@ LargeValueRef {
 }
 ```
 
-The enum case tags are stable: `Primitive = 0`, `Chunked = 1`. Its payloads use
-only Groove's canonical primitive, record, array, nullable, and enum codecs;
+The enum case tags are stable: `Primitive = 2`, `Chunked = 3`. Tags 0 and 1
+are permanently reserved so persisted values from the superseded private
+`[tag] + payload` codec fail closed instead of colliding with a canonical
+length-prefixed record. Its payloads use only Groove's canonical primitive,
+record, array, nullable, and enum codecs;
 there is no private tag byte or postcard envelope for a scalar descriptor.
 `bytes` uses the bytes primitive and `string` uses the string primitive. JSON
 retains Groove's existing canonical JSON-as-string logical representation, so

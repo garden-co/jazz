@@ -767,7 +767,7 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
             groove::schema::ColumnType::String => Value::String(format!("fixture-value-{seed}")),
             groove::schema::ColumnType::Bytes => Value::Bytes(vec![seed, seed.wrapping_add(1)]),
             groove::schema::ColumnType::Internal(_) => {
-                panic!("public Jazz schemas must not contain Groove internal storage types")
+                panic!("logical fixture values cannot target internal physical columns")
             }
             groove::schema::ColumnType::Uuid => Value::Uuid(uuid::Uuid::from_bytes([seed; 16])),
             groove::schema::ColumnType::EnumTag(_) => Value::EnumTag(0),
@@ -824,12 +824,21 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
                 .iter()
                 .enumerate()
                 .map(|(idx, column)| {
+                    let seed = seed.wrapping_add((idx as u8).wrapping_add(4));
+                    // JSON remains string-shaped in the public schema, but
+                    // its schema-derived storage descriptor uses the sealed
+                    // kind-witnessed scalar representation. Feed it valid
+                    // JSON so the physical codec can construct that record.
+                    let value = if column.large_value_kind
+                        == crate::schema::LargeValueSemanticKind::Json
+                    {
+                        Value::String(format!(r#"{{"fixture":{seed}}}"#))
+                    } else {
+                        sample_value(&column.column_type, seed)
+                    };
                     (
                         column.name.clone(),
-                        sample_value(
-                            &column.column_type,
-                            seed.wrapping_add((idx as u8).wrapping_add(4)),
-                        ),
+                        value,
                     )
                 })
                 .collect(),

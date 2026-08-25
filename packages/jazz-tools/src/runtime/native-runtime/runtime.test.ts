@@ -3394,7 +3394,7 @@ describe("NativeRuntimeAdapter server transport", () => {
     const descriptor = [
       {
         name: "assigneesIds",
-        valueType: { tag: 14, inner: { tag: 13, inner: { tag: 10 } } },
+        valueType: { tag: 15, inner: { tag: 14, inner: { tag: 11 } } },
       },
     ];
     const writer = new PostcardWriter();
@@ -4341,18 +4341,18 @@ describe("NativeRuntimeAdapter server transport", () => {
   it.each([
     {
       name: "arbitrary text",
-      provenanceBytes: new TextEncoder().encode("not-json"),
+      provenanceBytes: inlineScalar("not-json"),
     },
     {
       name: "double stored-scalar wrapper",
       provenanceBytes: Uint8Array.from([
-        0,
+        2,
         ...inlineScalar(JSON.stringify(["https://issuer.example", "user-1"])),
       ]),
     },
     {
       name: "noncanonical JSON whitespace",
-      provenanceBytes: new TextEncoder().encode(`[ "https://issuer.example", "user-1" ]`),
+      provenanceBytes: inlineScalar(`[ "https://issuer.example", "user-1" ]`),
     },
     {
       name: "ASCII-blank component",
@@ -5898,14 +5898,14 @@ function encodeTerminalRelationSnapshot(schema: WasmSchema): Uint8Array {
     },
   ];
   const childDescriptor = [
-    { name: "row_uuid", valueType: { tag: 10 } },
+    { name: "row_uuid", valueType: { tag: 11 } },
     { name: "title", valueType: storageColumnValueType(childColumns[0]!) },
   ];
   const descriptor = [
     { name: "title", valueType: storageColumnValueType(rootColumns[0]!) },
     {
       name: "todosViaOwner",
-      valueType: { tag: 13, inner: { tag: 15, record: childDescriptor } },
+      valueType: { tag: 14, inner: { tag: 16, record: childDescriptor } },
     },
   ];
   const childRecord = concatBytes([
@@ -6266,9 +6266,9 @@ function encodeUserWrappedSubscriptionDelta(row: {
   provenanceBytes?: Uint8Array;
 }): Uint8Array {
   const descriptor = [
-    { name: "row_uuid", valueType: { tag: 10 } },
-    { name: "user_title", valueType: { tag: 14, inner: { tag: 8 } } },
-    { name: "user_note", valueType: { tag: 14, inner: { tag: 14, inner: { tag: 8 } } } },
+    { name: "row_uuid", valueType: { tag: 11 } },
+    { name: "user_title", valueType: { tag: 15, inner: { tag: 8 } } },
+    { name: "user_note", valueType: { tag: 15, inner: { tag: 15, inner: { tag: 8 } } } },
     { name: "$createdBy", valueType: { tag: 8 } },
     { name: "$createdAt", valueType: { tag: 3 } },
   ];
@@ -6305,10 +6305,10 @@ function encodeTeamGatherSubscriptionDelta(delta: {
   updatedOccurrenceKeys?: Uint8Array[];
 }): Uint8Array {
   const descriptor = [
-    { name: "row_uuid", valueType: { tag: 10 } },
-    { name: "user_name", valueType: { tag: 14, inner: { tag: 8 } } },
-    { name: "user_org_id", valueType: { tag: 14, inner: { tag: 10 } } },
-    { name: "user_parent_id", valueType: { tag: 14, inner: { tag: 10 } } },
+    { name: "row_uuid", valueType: { tag: 11 } },
+    { name: "user_name", valueType: { tag: 15, inner: { tag: 8 } } },
+    { name: "user_org_id", valueType: { tag: 15, inner: { tag: 11 } } },
+    { name: "user_parent_id", valueType: { tag: 15, inner: { tag: 11 } } },
     { name: "$createdBy", valueType: { tag: 8 } },
     { name: "$createdAt", valueType: { tag: 3 } },
     { name: "$updatedBy", valueType: { tag: 8 } },
@@ -6385,13 +6385,13 @@ function presentBytes(bytes: Uint8Array): Uint8Array {
 }
 
 function inlineScalar(value: string): Uint8Array {
-  return Uint8Array.from([0, ...new TextEncoder().encode(value)]);
+  return Uint8Array.from([2, ...new TextEncoder().encode(value)]);
 }
 
 function encodeArrayRows(): Uint8Array {
   const descriptor = [
-    { name: "chunk_refs", valueType: { tag: 13, inner: { tag: 10 } } },
-    { name: "chunk_sizes", valueType: { tag: 13, inner: { tag: 6 } } },
+    { name: "chunk_refs", valueType: { tag: 14, inner: { tag: 11 } } },
+    { name: "chunk_sizes", valueType: { tag: 14, inner: { tag: 6 } } },
   ];
   const writer = new PostcardWriter();
   writer.vec((batch) => {

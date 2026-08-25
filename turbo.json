@@ -7,7 +7,8 @@
     "build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**", "pkg/**"],
-      "env": ["JAZZ_NAPI_RELEASE"]
+      "env": ["JAZZ_NAPI_RELEASE"],
+      "passThroughEnv": ["JAZZ_TEST_SEALED_TOOLS_DIST"]
     },
     "inspector#build": {
       "dependsOn": ["^build"],
@@ -59,7 +60,8 @@
       "passThroughEnv": [
         "JAZZ_TEST_ARTIFACT_LOCK_PATH",
         "JAZZ_ARTIFACT_BUILD_LEASE",
-        "JAZZ_ARTIFACT_BUILD_LOCK_PATH"
+        "JAZZ_ARTIFACT_BUILD_LOCK_PATH",
+        "JAZZ_TEST_SEALED_TOOLS_DIST"
       ],
       "outputs": [
         "native-binding.pointer.cjs",
@@ -88,7 +90,8 @@
       "passThroughEnv": [
         "JAZZ_TEST_ARTIFACT_LOCK_PATH",
         "JAZZ_ARTIFACT_BUILD_LEASE",
-        "JAZZ_ARTIFACT_BUILD_LOCK_PATH"
+        "JAZZ_ARTIFACT_BUILD_LOCK_PATH",
+        "JAZZ_TEST_SEALED_TOOLS_DIST"
       ],
       "cache": false,
       "outputs": []
@@ -114,7 +117,8 @@
       "passThroughEnv": [
         "JAZZ_TEST_ARTIFACT_LOCK_PATH",
         "JAZZ_ARTIFACT_BUILD_LEASE",
-        "JAZZ_ARTIFACT_BUILD_LOCK_PATH"
+        "JAZZ_ARTIFACT_BUILD_LOCK_PATH",
+        "JAZZ_TEST_SEALED_TOOLS_DIST"
       ],
       "cache": false,
       "outputs": []
@@ -133,7 +137,8 @@
         "$TURBO_ROOT$/pnpm-workspace.yaml",
         "$TURBO_ROOT$/turbo.json"
       ],
-      "outputs": ["dist/**"]
+      "outputs": ["dist/**"],
+      "passThroughEnv": ["JAZZ_TEST_SEALED_TOOLS_DIST"]
     },
     "build:crates": {
       "dependsOn": ["^build:crates"],
@@ -164,7 +169,8 @@
     },
     "test": {
       "dependsOn": ["^build"],
-      "cache": false
+      "cache": false,
+      "passThroughEnv": ["JAZZ_TEST_SEALED_TOOLS_DIST"]
     }
   }
 }

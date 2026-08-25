@@ -769,7 +769,7 @@ fn encodes_nullable_variable_size_null_as_only_flag_byte() {
 
     let mut expected = Vec::new();
     expected.extend(9_u32.to_le_bytes());
-    expected.extend([1, 0]);
+    expected.extend([1, 2]);
     expected.extend(b"yes");
     expected.extend([0]);
     assert_eq!(record, expected);
@@ -1065,9 +1065,9 @@ fn encodes_record_offsets_relative_to_record_start() {
 
     let mut expected = vec![9];
     expected.extend(9_u32.to_le_bytes());
-    expected.extend([0]);
+    expected.extend([2]);
     expected.extend(b"abc");
-    expected.extend([0, 4, 5]);
+    expected.extend([2, 4, 5]);
 
     assert_eq!(record, expected);
 }
@@ -1135,9 +1135,9 @@ fn encodes_variable_array_offsets_relative_to_array_start() {
     let mut expected = Vec::new();
     expected.extend(2_u32.to_le_bytes());
     expected.extend(11_u32.to_le_bytes());
-    expected.extend([0]);
+    expected.extend([2]);
     expected.extend(b"hi");
-    expected.extend([0]);
+    expected.extend([2]);
     expected.extend(b"j");
 
     assert_eq!(record, expected);
@@ -1738,7 +1738,7 @@ fn lookup_rejects_invalid_utf8_string() {
     let descriptor = descriptor([ValueType::String]);
 
     assert_eq!(
-        descriptor.get_idx(&[0, 0xff], 0).unwrap_err(),
+        descriptor.get_idx(&[2, 0xff], 0).unwrap_err(),
         Error::InvalidUtf8
     );
 }

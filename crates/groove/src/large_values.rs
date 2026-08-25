@@ -1917,8 +1917,8 @@ pub fn encode_stored_scalar(kind: LargeValueKind, value: &StoredScalar) -> Resul
         StoredScalar::Primitive(bytes) => {
             validate_logical(kind, bytes)?;
             EnumValue::create(
-                0,
-                schema.case(0).map_err(|_| Error::MalformedScalar)?.payload,
+                2,
+                schema.case(2).map_err(|_| Error::MalformedScalar)?.payload,
                 &[primitive_value(kind, bytes.clone())],
             )
             .map_err(|_| Error::MalformedScalar)?
@@ -1929,8 +1929,8 @@ pub fn encode_stored_scalar(kind: LargeValueKind, value: &StoredScalar) -> Resul
             }
             validate_descriptor(value)?;
             EnumValue::create(
-                1,
-                schema.case(1).map_err(|_| Error::MalformedScalar)?.payload,
+                3,
+                schema.case(3).map_err(|_| Error::MalformedScalar)?.payload,
                 &chunked_values(value),
             )
             .map_err(|_| Error::MalformedScalar)?
@@ -1973,13 +1973,13 @@ pub fn decode_stored_scalar(kind: LargeValueKind, encoded: &[u8]) -> Result<Stor
         .to_values()
         .map_err(|_| Error::MalformedScalar)?;
     match value.tag() {
-        0 => {
+        2 => {
             if values.len() != 1 {
                 return Err(Error::MalformedScalar);
             }
             primitive_bytes(kind, &values[0]).map(StoredScalar::Primitive)
         }
-        1 => decode_chunked_values(kind, &values).map(StoredScalar::Chunked),
+        3 => decode_chunked_values(kind, &values).map(StoredScalar::Chunked),
         _ => Err(Error::MalformedScalar),
     }
 }
@@ -1989,8 +1989,8 @@ pub fn inline_scalar_bytes(kind: LargeValueKind, encoded: &[u8]) -> Result<&[u8]
     let (tag, payload) =
         crate::records::split_variant_record(encoded).map_err(|_| Error::MalformedScalar)?;
     match tag {
-        0 => {
-            let descriptor = schema.case(0).map_err(|_| Error::MalformedScalar)?.payload;
+        2 => {
+            let descriptor = schema.case(2).map_err(|_| Error::MalformedScalar)?.payload;
             let values = descriptor
                 .bind(payload)
                 .to_values()
@@ -2009,7 +2009,7 @@ pub fn inline_scalar_bytes(kind: LargeValueKind, encoded: &[u8]) -> Result<&[u8]
                 .map_err(|_| Error::MalformedScalar)?;
             Ok(&payload[span])
         }
-        1 => {
+        3 => {
             // Validate the complete descriptor before reporting that materialization is needed.
             let _ = decode_stored_scalar(kind, encoded)?;
             Err(Error::RequiresEvaluation)
@@ -2064,6 +2064,19 @@ fn stored_scalar_schema(kind: LargeValueKind) -> EnumSchema {
             LargeValueKind::Json => "groove.internal.stored_scalar.json",
         },
         [
+            // Tags 0 and 1 belonged to the pre-v13 private scalar codec. Keep
+            // them reserved and reject them at the scalar boundary so no
+            // legacy byte sequence can be accepted with a different meaning. In particular, legacy
+            // inline bytes were `[0] + payload`, which can otherwise collide
+            // exactly with a length-prefixed canonical record.
+            EnumCase::new(
+                "ReservedLegacyPrimitive",
+                RecordDescriptor::new(Vec::<(String, ValueType)>::new()),
+            ),
+            EnumCase::new(
+                "ReservedLegacyChunked",
+                RecordDescriptor::new(Vec::<(String, ValueType)>::new()),
+            ),
             EnumCase::new("Primitive", primitive),
             EnumCase::new("Chunked", chunked),
         ],
@@ -3691,6 +3704,53 @@ mod tests {
         Locator(hash.0)
     }
 
+    fn encode_v12_chunked_scalar(value: &LargeValueRef) -> Vec<u8> {
+        let primitive = RecordDescriptor::new([("value", ValueType::raw_bytes())]);
+        let root = RecordDescriptor::new([
+            ("object_hash", ValueType::raw_bytes()),
+            ("locator", ValueType::raw_bytes()),
+        ]);
+        let edit = RecordDescriptor::new([
+            ("offset", ValueType::U64),
+            ("delete_length", ValueType::U64),
+            ("insert_bytes", ValueType::raw_bytes()),
+            ("utf16_offset", ValueType::U64),
+            ("delete_utf16_length", ValueType::U64),
+            ("insert_utf16_length", ValueType::U64),
+        ]);
+        let chunked = RecordDescriptor::new([
+            ("format_version", ValueType::U8),
+            ("logical_hash", ValueType::raw_bytes()),
+            ("root", ValueType::Record(Box::new(root))),
+            ("byte_length", ValueType::U64),
+            (
+                "utf16_length",
+                ValueType::Nullable(Box::new(ValueType::U64)),
+            ),
+            (
+                "edit_tail",
+                ValueType::Array(Box::new(ValueType::Record(Box::new(edit)))),
+            ),
+        ]);
+        let schema = EnumSchema::new(
+            "groove.internal.stored_scalar.bytes",
+            [
+                EnumCase::new("Primitive", primitive),
+                EnumCase::new("Chunked", chunked),
+            ],
+        )
+        .unwrap();
+        let mut values = chunked_values(value);
+        let witness = values.remove(1);
+        assert_eq!(witness, Value::U8(large_value_kind_tag(value.kind)));
+        let value = EnumValue::create(1, schema.case(1).unwrap().payload, &values).unwrap();
+        crate::records::encode_single_field_value(
+            &Value::Enum(value),
+            &ValueType::Enum(Box::new(schema)),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn public_preparation_allocates_fresh_full_width_capabilities() {
         let prepare_signature: fn(LargeValueKind, &[u8]) -> Result<PreparedLargeValue, Error> =
@@ -4617,7 +4677,7 @@ mod tests {
                 &ValueType::Enum(Box::new(stored_scalar_schema(LargeValueKind::Bytes))),
             )
             .unwrap();
-            assert!(matches!(generic, Value::Enum(ref value) if value.tag() == 0));
+            assert!(matches!(generic, Value::Enum(ref value) if value.tag() == 2));
         }
         for (kind, primitive) in [
             (
@@ -4637,7 +4697,44 @@ mod tests {
             Err(Error::MalformedScalar)
         );
         assert_eq!(
-            decode_stored_scalar(LargeValueKind::Bytes, &[2, 0]),
+            decode_stored_scalar(LargeValueKind::Bytes, &[4, 0]),
+            Err(Error::MalformedScalar)
+        );
+        // The v12 generic enum used tag 0 for Primitive. Its payload is byte-for-byte
+        // the v13 Primitive payload; only the tag changed to 2.
+        let current = encode_stored_scalar(
+            LargeValueKind::Bytes,
+            &StoredScalar::Primitive(b"abc".to_vec()),
+        )
+        .unwrap();
+        assert_eq!(current[0], 2);
+        let mut legacy_primitive = current;
+        legacy_primitive[0] = 0;
+        assert_eq!(
+            decode_stored_scalar(LargeValueKind::Bytes, &legacy_primitive),
+            Err(Error::MalformedScalar)
+        );
+        assert_eq!(
+            inline_scalar_bytes(LargeValueKind::Bytes, &legacy_primitive),
+            Err(Error::MalformedScalar)
+        );
+
+        // The v12 generic Chunked case used tag 1 and the same ordinary record
+        // payload except that it had no schema-kind witness.
+        let prepared = prepare_with_locator(
+            LargeValueKind::Bytes,
+            &vec![7; LEAF_MAX_BYTES + 1],
+            deterministic_locator,
+        )
+        .unwrap();
+        let legacy_chunked = encode_v12_chunked_scalar(&prepared.value_ref);
+        assert_eq!(legacy_chunked[0], 1);
+        assert_eq!(
+            decode_stored_scalar(LargeValueKind::Bytes, &legacy_chunked),
+            Err(Error::MalformedScalar)
+        );
+        assert_eq!(
+            inline_scalar_bytes(LargeValueKind::Bytes, &legacy_chunked),
             Err(Error::MalformedScalar)
         );
     }
@@ -4684,7 +4781,7 @@ mod tests {
                 &ValueType::Enum(Box::new(stored_scalar_schema(kind))),
             )
             .unwrap();
-            assert!(matches!(generic, Value::Enum(ref value) if value.tag() == 1));
+            assert!(matches!(generic, Value::Enum(ref value) if value.tag() == 3));
         }
     }
 
