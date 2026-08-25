@@ -245,6 +245,14 @@ describe("shared example topology harness", () => {
     expect(() => scheduler.reorderNext()).toThrow("only one envelope fault kind");
   });
 
+  it("rejects non-numeric virtual-time requests before they can schedule a delivery", async () => {
+    const scheduler = new TopologyEnvelopeScheduler(42);
+    await expect(scheduler.advance("one" as never)).rejects.toThrow("positive safe integer");
+    expect(() => scheduler.delayNext(Number.NaN)).toThrow("positive safe integer");
+    expect(() => scheduler.dropNextThenRetry(1.5)).toThrow("positive safe integer");
+    expect(scheduler.receipt()).toMatchObject({ tick: 0, pending: 0 });
+  });
+
   it("fail-stops after a callback failure and discards remaining duplicate deliveries", async () => {
     const scheduler = new TopologyEnvelopeScheduler(43);
     scheduler.duplicateNext(2);

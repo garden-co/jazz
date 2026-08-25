@@ -660,9 +660,9 @@ export class TopologyEnvelopeScheduler {
     return this.#partitions.has(linkKey(envelope.from, envelope.to));
   }
 
-  private recordPending(
+  private recordPending<T>(
     action: TopologyEnvelopeAction,
-    pending: PendingEnvelope<unknown>,
+    pending: PendingEnvelope<T>,
     error?: unknown,
   ): void {
     this.record({
@@ -801,7 +801,12 @@ function assertEndpoint(name: string, value: unknown): asserts value is string {
 }
 
 function assertTopologyTicks(name: string, ticks: unknown): asserts ticks is number {
-  if (!Number.isSafeInteger(ticks) || ticks < 1 || ticks > MAX_TOPOLOGY_TICKS) {
+  if (
+    typeof ticks !== "number" ||
+    !Number.isSafeInteger(ticks) ||
+    ticks < 1 ||
+    ticks > MAX_TOPOLOGY_TICKS
+  ) {
     throw new Error(`${name} ticks must be a positive safe integer at most ${MAX_TOPOLOGY_TICKS}`);
   }
 }
