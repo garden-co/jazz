@@ -529,22 +529,31 @@ impl VersionRow {
         table: &TableSchema,
         parts: VersionRowParts,
         _storage_schema_version: Option<SchemaVersionId>,
+        history_descriptor: Option<records::RecordDescriptor>,
     ) -> Result<Self, Error> {
-        let (storage_table, values) = if parts.deletion.is_some() {
-            (
-                table.register_storage_table(),
-                register_values_from_parts(&parts)?,
-            )
+        let is_deletion = parts.deletion.is_some();
+        let values = if is_deletion {
+            register_values_from_parts(&parts)?
         } else {
-            (
-                table.authored_history_storage_table(),
-                history_values_from_parts(table, &parts)?,
-            )
+            history_values_from_parts(table, &parts)?
+        };
+        let record = if is_deletion {
+            owned_record_from_storage_values(&table.register_storage_table(), values)?
+        } else {
+            match history_descriptor {
+                Some(descriptor) => {
+                    owned_record_from_storage_values_with_descriptor(descriptor, values)?
+                }
+                None => owned_record_from_storage_values(
+                    &table.authored_history_storage_table(),
+                    values,
+                )?,
+            }
         };
         Ok(Self {
             table: groove::Intern::new(parts.table),
             branch_key: parts.branch_key,
-            record: owned_record_from_storage_values(&storage_table, values)?,
+            record,
         })
     }
 

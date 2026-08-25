@@ -13,3 +13,7 @@ divan = { workspace = true }
 [[bench]]
 name = "loads"
 harness = false
+
+[[bench]]
+name = "ingest_walltime"
+harness = false

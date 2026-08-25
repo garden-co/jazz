@@ -1080,7 +1080,7 @@ test("CodSpeed caches the root-workspace Cargo target", () => {
     () =>
       assert.match(
         codspeedWorkflow.replace(
-          "workspaces: . -> target",
+          /workspaces: \. -> target/g,
           "workspaces: examples/benchmarks/smoke -> target",
         ),
         rootTarget,

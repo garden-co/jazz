@@ -760,6 +760,7 @@ where
             .insert(staged.publication.schema.id, staged.mapping.clone());
         self.catalogue.lens_path_cache.clear();
         self.catalogue.compiled_lens_cache.clear();
+        self.catalogue.physical_write_plan_cache.clear();
         self.query.version_storage_sources_cache.clear();
         self.query.query_shape_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
@@ -781,6 +782,7 @@ where
             .remove(&staged.publication.schema.id);
         self.catalogue.lens_path_cache.clear();
         self.catalogue.compiled_lens_cache.clear();
+        self.catalogue.physical_write_plan_cache.clear();
         self.query.version_storage_sources_cache.clear();
         self.query.query_shape_cache.clear();
         self.query.read_policy_authorization_request_cache.clear();
