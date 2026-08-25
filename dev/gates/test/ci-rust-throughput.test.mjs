@@ -594,6 +594,13 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
   const shard = document.jobs.shard;
   const aggregate = document.jobs.aggregate;
   assert.deepEqual(document.permissions, { contents: "read", packages: "read" });
+  assert.deepEqual(
+    document.on.pull_request,
+    { types: ["opened", "reopened", "synchronize", "labeled", "unlabeled"] },
+    "adding benchmark must start its shadow without a new push, while removing it cancels queued work",
+  );
+  assert.deepEqual(document.on.push, { branches: ["main"] });
+  assert.equal(document.on.workflow_dispatch, null);
   assert.match(
     shard.if,
     /github\.event_name != 'pull_request' \|\| contains\(github\.event\.pull_request\.labels\.\*\.name, 'benchmark'\)/,
