@@ -36,6 +36,10 @@ export type NativeSubscriptionDelta = {
   addedOccurrenceKeys: Uint8Array[];
   updatedOccurrenceKeys: Uint8Array[];
   removedOccurrenceKeys: Uint8Array[];
+  addedIndices: number[];
+  updatedPreviousIndices: number[];
+  updatedIndices: number[];
+  removedIndices: number[];
 };
 export type NativeRelationSubscriptionSnapshot = {
   rootCount: number;
@@ -82,13 +86,21 @@ export function readNativeSubscriptionDelta(reader: PostcardReaderLike): NativeS
     addedOccurrenceKeys: reader.readVec((keyReader) => readResultKey(keyReader)),
     updatedOccurrenceKeys: reader.readVec((keyReader) => readResultKey(keyReader)),
     removedOccurrenceKeys: reader.readVec((keyReader) => readResultKey(keyReader)),
+    addedIndices: reader.readVec((indexReader) => indexReader.u64()),
+    updatedPreviousIndices: reader.readVec((indexReader) => indexReader.u64()),
+    updatedIndices: reader.readVec((indexReader) => indexReader.u64()),
+    removedIndices: reader.readVec((indexReader) => indexReader.u64()),
   };
   const rowCount = (batches: NativeRowBatch[]) =>
     batches.reduce((count, batch) => count + batch.rows.length, 0);
   if (
     delta.addedOccurrenceKeys.length !== rowCount(delta.added) ||
     delta.updatedOccurrenceKeys.length !== rowCount(delta.updated) ||
-    delta.removedOccurrenceKeys.length !== delta.removed.length
+    delta.removedOccurrenceKeys.length !== delta.removed.length ||
+    delta.addedIndices.length !== rowCount(delta.added) ||
+    delta.updatedPreviousIndices.length !== rowCount(delta.updated) ||
+    delta.updatedIndices.length !== rowCount(delta.updated) ||
+    delta.removedIndices.length !== delta.removed.length
   ) {
     throw new Error("subscription occurrence sidecar length mismatch");
   }
