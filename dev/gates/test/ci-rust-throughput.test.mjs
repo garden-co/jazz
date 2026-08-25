@@ -555,6 +555,20 @@ test("the non-required Rust throughput shadow proves two exact hash partitions a
   assert.match(rustShadowLauncher, /test belongs to more than one shard/);
   assert.match(rustShadowLauncher, /hash shards do not cover the exact executable inventory/);
   assert.match(rustShadowLauncher, /sourceIdentity\(root\)/);
+  assert.match(rustShadowLauncher, /clean-source-baseline RECEIPT EXPECTED_COMMIT/);
+  assert.match(
+    rustShadowLauncher,
+    /dependency setup changed the checked-out source after the shadow baseline/,
+  );
+  assert.match(
+    rustShadowLauncher,
+    /shadow execution changed the checked-out source after the baseline/,
+  );
+  assert.match(rustShadowWorkflow, /Seal clean checked-out source baseline/);
+  assert.match(
+    rustShadowWorkflow,
+    /RUST_SHADOW_SOURCE_BASELINE: \$\{\{ runner\.temp \}\}\/rust-shadow-source\.json/,
+  );
   assert.match(rustShadowLauncher, /shards disagree on the checked-out source identity/);
   assert.match(rustShadowLauncher, /workflow event commit/);
   assert.match(
