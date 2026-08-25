@@ -78,6 +78,27 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     expect(client.query.mock.calls[0]?.[1]).toMatchObject({ tier: "local" });
   });
 
+  it("does not fall back to local when an edge read fails or times out", async () => {
+    const client = makeClient();
+    const db = await createDbWithRuntimeSource(
+      {
+        appId: "read-tier-transport-error",
+        serverUrl: "https://example.test",
+        adminSecret: "test-admin-secret",
+      },
+      new TestRuntimeSource(client),
+    );
+    dbs.push(db);
+    const connection = (
+      db as unknown as { connection: { ensureReady: (tier?: string) => Promise<void> } }
+    ).connection;
+    const timeout = new Error("edge transport timed out");
+    vi.spyOn(connection, "ensureReady").mockRejectedValue(timeout);
+
+    await expect(db.all(query(), { tier: ReadTier.RemoteIfPossible })).rejects.toBe(timeout);
+    expect(client.query).not.toHaveBeenCalled();
+  });
+
   it("replaces an explicitly-offline local subscription with edge exactly on reconnect", async () => {
     const client = makeClient();
     const db = await createDbWithRuntimeSource(
