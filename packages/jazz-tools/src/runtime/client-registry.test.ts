@@ -7,6 +7,7 @@ function fakeClient() {
 
 afterEach(() => {
   resetClientRegistryForTest();
+  vi.useRealTimers();
 });
 
 describe("client-registry", () => {
@@ -95,6 +96,61 @@ describe("client-registry", () => {
     finishShutdown();
     await expect(replacement).resolves.toBe(second);
     await releasing;
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a failed shutdown as the closing barrier for later acquires", async () => {
+    let failShutdown!: (error: Error) => void;
+    const shutdownFinished = new Promise<void>((_, reject) => {
+      failShutdown = reject;
+    });
+    const shutdownError = new Error("shutdown failed");
+    const first = { shutdown: vi.fn(() => shutdownFinished) };
+    const second = fakeClient();
+    const create = vi.fn(async () => (create.mock.calls.length === 1 ? first : second));
+    const holder = {};
+    await acquireClient("persistent:k", create, holder);
+
+    const releasing = releaseClient("persistent:k", holder);
+    await vi.waitFor(() => expect(first.shutdown).toHaveBeenCalledOnce());
+
+    const waitingAcquire = acquireClient("persistent:k", create, {});
+    expect(create).toHaveBeenCalledTimes(1);
+
+    failShutdown(shutdownError);
+    await expect(releasing).resolves.toBeUndefined();
+    await expect(waitingAcquire).rejects.toBe(shutdownError);
+    await expect(acquireClient("persistent:k", create, {})).rejects.toBe(shutdownError);
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries after a pending creation fails during release and re-acquire", async () => {
+    vi.useFakeTimers();
+    let failCreate!: (error: Error) => void;
+    const pendingCreate = new Promise<{ shutdown(): Promise<void> }>((_, reject) => {
+      failCreate = reject;
+    });
+    const recovered = fakeClient();
+    const create = vi
+      .fn<() => Promise<{ shutdown(): Promise<void> }>>()
+      .mockReturnValueOnce(pendingCreate)
+      .mockResolvedValueOnce(recovered);
+    const holder = {};
+
+    const initial = acquireClient("pending:k", create, holder);
+    const releasing = releaseClient("pending:k", holder);
+    await vi.runOnlyPendingTimersAsync();
+
+    const overlappingAcquire = acquireClient("pending:k", create, {});
+    expect(create).toHaveBeenCalledTimes(1);
+
+    const createError = new Error("create failed");
+    failCreate(createError);
+    await expect(initial).rejects.toBe(createError);
+    await expect(releasing).resolves.toBeUndefined();
+    await expect(overlappingAcquire).rejects.toBe(createError);
+
+    await expect(acquireClient("pending:k", create, {})).resolves.toBe(recovered);
     expect(create).toHaveBeenCalledTimes(2);
   });
 
