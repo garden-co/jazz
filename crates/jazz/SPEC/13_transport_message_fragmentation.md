@@ -36,6 +36,16 @@ replay remains the retry mechanism. An otherwise legal message remains
 admissible while it makes progress inside the inactivity window and completes
 before the maximum age.
 
+Completion deduplication is intentionally bounded rather than an exactly-once
+delivery guarantee. Each live adapter retains the 64 most recently completed
+message ids and digests, in completion order. A replay whose completion is
+still retained is ignored when its digest matches and rejected when its digest
+conflicts. Completing the next message evicts the oldest retained completion;
+after that eviction, an otherwise valid replay of the old message may assemble
+and be delivered again. This bounded horizon permits older active or expired
+message ids to finish after a later id on a reordering transport without an
+unbounded per-connection completed-id set.
+
 Implementations also bound physical frames, concurrent incomplete messages,
 aggregate staged bytes, advertised logical length, and recent-completion
 deduplication. These are configurable/resource-defense budgets, not query

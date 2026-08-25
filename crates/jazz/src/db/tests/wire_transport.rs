@@ -587,6 +587,50 @@ fn expired_lower_id_restarts_after_higher_id_completion() {
 }
 
 #[test]
+fn completed_replay_delivers_only_after_exact_recent_completion_eviction() {
+    fn complete(
+        reassembler: &mut LogicalMessageReassembler,
+        message_id: u64,
+    ) -> Option<WireEnvelope> {
+        let payload = vec![message_id as u8];
+        reassembler
+            .push(
+                test_message_fragment(
+                    message_id,
+                    *blake3::hash(&payload).as_bytes(),
+                    payload.len() as u64,
+                    0,
+                    payload,
+                ),
+                0,
+            )
+            .unwrap()
+    }
+
+    assert_eq!(RECENT_COMPLETED_LOGICAL_MESSAGES, 64);
+    let mut reassembler = LogicalMessageReassembler::default();
+    assert!(complete(&mut reassembler, 0).is_some());
+    for message_id in 1..RECENT_COMPLETED_LOGICAL_MESSAGES as u64 {
+        assert!(complete(&mut reassembler, message_id).is_some());
+    }
+
+    assert_eq!(
+        complete(&mut reassembler, 0),
+        None,
+        "the oldest completion remains deduplicated at the exact cache bound"
+    );
+    let first_message_after_horizon = RECENT_COMPLETED_LOGICAL_MESSAGES as u64;
+    assert!(
+        complete(&mut reassembler, first_message_after_horizon).is_some(),
+        "the next completion evicts the oldest retained completion"
+    );
+    assert!(
+        complete(&mut reassembler, 0).is_some(),
+        "an exact old replay may deliver again only after its completion is evicted"
+    );
+}
+
+#[test]
 fn fragmented_message_survives_mid_send_backpressure_without_semantic_retry() {
     let staged = Rc::new(RefCell::new(std::collections::VecDeque::new()));
     let receiver_inbound = Rc::clone(&staged);

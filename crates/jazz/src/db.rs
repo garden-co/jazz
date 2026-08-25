@@ -77,9 +77,9 @@ use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKi
 use crate::wire::{TransportError, WireAuthorityEndpoint, WireFeatures, encode_sync_message};
 
 mod wire_transport;
-#[cfg(test)]
-use wire_transport::LogicalMessageReassembler;
 pub use wire_transport::WireTransportAdapter;
+#[cfg(test)]
+use wire_transport::{LogicalMessageReassembler, RECENT_COMPLETED_LOGICAL_MESSAGES};
 
 /// Pragmatic single-threaded serialization boundary for canonical Jazz state.
 ///

@@ -22,7 +22,7 @@ use crate::wire::{
 };
 
 const WIRE_FRAGMENT_PAYLOAD_BYTES: usize = 512 * 1024;
-const RECENT_COMPLETED_LOGICAL_MESSAGES: usize = 64;
+pub(super) const RECENT_COMPLETED_LOGICAL_MESSAGES: usize = 64;
 
 /// Adapter from postcard wire frames to the internal sync-message transport.
 pub(super) struct IncompleteLogicalMessage {
