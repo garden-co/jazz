@@ -224,6 +224,13 @@ where
 struct MetadataChunkInstallObserver {
     storage: std::rc::Weak<LayoutStorage>,
     lifecycle: Weak<AsyncMutex<()>>,
+    resident_install: Option<ResidentLifecycleInstall>,
+}
+
+#[derive(Clone)]
+struct ResidentLifecycleInstall {
+    storage: OwnedStorage<'static>,
+    staged: Rc<RefCell<StagedWriteState>>,
 }
 
 impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
@@ -238,12 +245,25 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
                     "database storage closed during chunk installation".to_owned(),
                 )
             })?;
-            let lifecycle = self.lifecycle.upgrade().ok_or_else(|| {
-                crate::chunks::ChunkError::Backend(
-                    "database lifecycle closed during chunk installation".to_owned(),
+            let resident_install = self.resident_install.clone();
+            let _lifecycle = if resident_install.is_none() {
+                Some(
+                    self.lifecycle
+                        .upgrade()
+                        .ok_or_else(|| {
+                            crate::chunks::ChunkError::Backend(
+                                "database lifecycle closed during chunk installation".to_owned(),
+                            )
+                        })?
+                        .lock_owned()
+                        .await,
                 )
-            })?;
-            let _lifecycle = lifecycle.lock().await;
+            } else {
+                None
+            };
+            let read_storage: &dyn OrderedKvStorage = resident_install
+                .as_ref()
+                .map_or(storage.as_ref(), |install| install.storage.as_ref());
             let node = crate::large_values::decode_node_untyped_authenticated(
                 node_ref.object_hash,
                 &encoded,
@@ -252,7 +272,7 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
             let children = unique_large_value_children(&node);
             let node_key = large_value_node_key(&node_ref)
                 .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
-            let existing = storage
+            let existing = read_storage
                 .get(LARGE_VALUE_METADATA_CF.to_owned(), node_key.clone())
                 .await
                 .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
@@ -273,7 +293,7 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
 
             let root_key = large_value_root_key(&node_ref)
                 .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
-            let root_encoded = storage
+            let root_encoded = read_storage
                 .get(LARGE_VALUE_METADATA_CF.to_owned(), root_key.clone())
                 .await
                 .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?;
@@ -300,7 +320,7 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
                 transitions.extend(children.into_iter().map(|child| (child, 1)));
             }
             let mut operations = large_value_node_transition_operations(
-                &storage,
+                read_storage,
                 std::mem::take(&mut initial),
                 transitions,
                 true,
@@ -315,10 +335,15 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
                         .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?,
                 });
             }
-            storage
-                .write_many(operations)
-                .await
-                .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))
+            if let Some(install) = resident_install {
+                install.staged.borrow_mut().extend(operations);
+                Ok(())
+            } else {
+                storage
+                    .write_many(operations)
+                    .await
+                    .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))
+            }
         })
     }
 }

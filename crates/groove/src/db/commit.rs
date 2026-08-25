@@ -236,6 +236,19 @@ impl Database {
             resident_overlay,
             Rc::clone(&staged_state),
         ));
+        let resident_install_observer =
+            self.large_value_publication_lifecycle_guard
+                .as_ref()
+                .map(|_| {
+                    Rc::new(MetadataChunkInstallObserver {
+                        storage: Rc::downgrade(&self.storage),
+                        lifecycle: std::sync::Arc::downgrade(&self.large_value_lifecycle),
+                        resident_install: Some(ResidentLifecycleInstall {
+                            storage: OwnedStorage::new(Rc::clone(&storage)),
+                            staged: Rc::clone(&staged_state),
+                        }),
+                    }) as Rc<dyn crate::chunks::ChunkInstallObserver>
+                });
         let tick_start = Instant::now();
         let resident_tick = match self
             .ivm_runtime
@@ -243,6 +256,7 @@ impl Database {
                 table_deltas,
                 OwnedStorage::new(Rc::clone(&storage)),
                 defer_notifications_until_durable,
+                resident_install_observer,
             )
             .await
         {

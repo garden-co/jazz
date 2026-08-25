@@ -1759,6 +1759,112 @@ async fn missing_chunk_observer_completes_during_tick_before_lifecycle_lock() {
     database.finish_persistence(persisted).unwrap();
 }
 
+/// A's unpersisted root transition owns lifecycle serialization while B's
+/// resident tick resolves the same now-cold root. The observer must join A's
+/// serialized resident pipeline instead of waiting for the mutex that A keeps
+/// until the caller can persist it.
+#[futures_test::test]
+async fn sequential_cold_large_value_publications_do_not_deadlock_observer() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks.clone());
+    let first_prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![7; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+    )
+    .unwrap();
+    let first_staged = database
+        .stage_large_value_preparation(first_prepared)
+        .await
+        .unwrap();
+    let second_prepared = crate::large_values::prepare(
+        crate::large_values::LargeValueKind::Bytes,
+        &vec![8; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+    )
+    .unwrap();
+    let second_staged = database
+        .stage_large_value_preparation(second_prepared.clone())
+        .await
+        .unwrap();
+    let root = second_prepared
+        .staged_chunks
+        .iter()
+        .find(|chunk| chunk.node_ref == second_prepared.value_ref.root)
+        .unwrap()
+        .clone();
+    let resolver_calls = Rc::new(Cell::new(0));
+    database.set_missing_chunk_resolver(Rc::new(CountingFixtureChunkResolver {
+        chunks: Rc::new(std::collections::BTreeMap::from([(
+            crate::chunks::ChunkRequest {
+                object_hash: root.node_ref.object_hash.0,
+                locator: root.node_ref.locator,
+            },
+            Bytes::from(root.encoded.clone()),
+        )])),
+        calls: Rc::clone(&resolver_calls),
+    }));
+    let subscription = database
+        .subscribe_one_sink(GraphBuilder::table("objects"))
+        .await
+        .unwrap();
+    assert!(subscription.recv().unwrap().is_empty());
+
+    let mut first = database.open_batch();
+    first.insert(
+        "objects",
+        vec![Value::U64(1), Value::Large(first_staged.value_ref)],
+    );
+    first.accept_large_value(first_staged.id);
+    let first = database.apply_batch(first).await.unwrap();
+    assert!(database.large_value_publication_lifecycle_guard.is_some());
+    assert_eq!(resolver_calls.get(), 0);
+    assert_eq!(
+        subscription
+            .try_recv_with_publication()
+            .unwrap()
+            .publication,
+        Some(first.publication())
+    );
+
+    crate::chunks::ChunkStorage::delete(&*chunks, root.node_ref.locator, root.node_ref.object_hash)
+        .await
+        .unwrap();
+    let mut second = database.open_batch();
+    second.insert(
+        "objects",
+        vec![Value::U64(2), Value::Large(second_staged.value_ref)],
+    );
+    second.accept_large_value(second_staged.id);
+    let mut second_application = Box::pin(database.apply_batch(second));
+    let second = match futures::poll!(second_application.as_mut()) {
+        Poll::Ready(result) => result.unwrap(),
+        Poll::Pending => panic!("B waited on A's durability-held lifecycle mutex"),
+    };
+    drop(second_application);
+    assert!(resolver_calls.get() > 0, "B's tick invoked the resolver");
+    assert_eq!(
+        subscription
+            .try_recv_with_publication()
+            .expect("B's observer completed during its resident tick")
+            .publication,
+        Some(second.publication())
+    );
+
+    let first = first.persist().await;
+    let second = second.persist().await;
+    database.finish_persistence(first).unwrap();
+    database.finish_persistence(second).unwrap();
+}
+
 #[futures_test::test]
 async fn root_first_upload_requests_only_authenticated_missing_frontier() {
     let schema = DatabaseSchema::new([TableSchema::new(

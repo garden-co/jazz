@@ -67,6 +67,7 @@ struct PendingResidentPublication {
     notifications: Rc<RefCell<Vec<(SubscriptionId, QueuedMultisinkDeltas)>>>,
     completed: Rc<Cell<bool>>,
     defer_notifications_until_durable: bool,
+    chunk_provider: Option<crate::chunks::OwnedChunkProvider>,
 }
 
 pub(crate) struct ResidentTick {
@@ -560,7 +561,12 @@ impl IncrementalEvaluation<'_> {
                         registered_requests |= self.requests.request(
                             request,
                             &self.storage,
-                            Some(&runtime.chunk_provider),
+                            Some(
+                                self.pending_resident_publication
+                                    .as_ref()
+                                    .and_then(|pending| pending.chunk_provider.as_ref())
+                                    .unwrap_or(&runtime.chunk_provider),
+                            ),
                             &runtime.schema,
                         );
                     }
@@ -679,7 +685,12 @@ impl IncrementalEvaluation<'_> {
                             self.requests.request(
                                 request,
                                 &self.storage,
-                                Some(&runtime.chunk_provider),
+                                Some(
+                                    self.pending_resident_publication
+                                        .as_ref()
+                                        .and_then(|pending| pending.chunk_provider.as_ref())
+                                        .unwrap_or(&runtime.chunk_provider),
+                                ),
                                 &runtime.schema,
                             );
                         }
@@ -1318,12 +1329,15 @@ impl IvmRuntime {
         table_deltas: Vec<TableDelta>,
         storage: OwnedStorage<'static>,
         defer_notifications_until_durable: bool,
+        install_observer: Option<Rc<dyn crate::chunks::ChunkInstallObserver>>,
     ) -> Result<ResidentTick, IvmRuntimeError> {
         let publication = PendingResidentPublication {
             publication: Rc::new(Cell::new(None)),
             notifications: Rc::new(RefCell::new(Vec::new())),
             completed: Rc::new(Cell::new(false)),
             defer_notifications_until_durable,
+            chunk_provider: install_observer
+                .map(|observer| self.chunk_provider.with_install_observer(observer)),
         };
         let temporal_blockers = {
             let pending = self.pending_incremental.0.borrow();

@@ -81,6 +81,7 @@ impl Database {
                 Rc::new(MetadataChunkInstallObserver {
                     storage: Rc::downgrade(&storage),
                     lifecycle: std::sync::Arc::downgrade(&large_value_lifecycle),
+                    resident_install: None,
                 }),
             ),
         ));
@@ -192,6 +193,7 @@ impl Database {
                 Rc::new(MetadataChunkInstallObserver {
                     storage: Rc::downgrade(&self.storage),
                     lifecycle: std::sync::Arc::downgrade(&self.large_value_lifecycle),
+                    resident_install: None,
                 }),
             ),
         ));
@@ -209,6 +211,7 @@ impl Database {
                 Rc::new(MetadataChunkInstallObserver {
                     storage: Rc::downgrade(&self.storage),
                     lifecycle: std::sync::Arc::downgrade(&self.large_value_lifecycle),
+                    resident_install: None,
                 }),
             ),
         ));

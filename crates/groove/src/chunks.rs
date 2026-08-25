@@ -558,6 +558,14 @@ where
     S: ChunkStorage,
 {
     fn get(&self, request: ChunkRequest) -> ChunkFuture<'_, Result<Bytes, ChunkError>> {
+        self.get_with_install_observer(request, Rc::clone(&self.observer))
+    }
+
+    fn get_with_install_observer(
+        &self,
+        request: ChunkRequest,
+        observer: Rc<dyn ChunkInstallObserver>,
+    ) -> ChunkFuture<'_, Result<Bytes, ChunkError>> {
         Box::pin(async move {
             match self
                 .storage
@@ -577,7 +585,7 @@ where
                         }])
                         .await
                         .map_err(ChunkError::from)?;
-                    self.observer
+                    observer
                         .installed(
                             crate::large_values::NodeRef {
                                 object_hash: ContentHash(request.object_hash),
@@ -625,6 +633,14 @@ impl From<ChunkStorageError> for ChunkError {
 /// maintaining mutable authorization state in this provider.
 pub trait ChunkProvider {
     fn get(&self, request: ChunkRequest) -> ChunkFuture<'_, Result<Bytes, ChunkError>>;
+
+    fn get_with_install_observer(
+        &self,
+        request: ChunkRequest,
+        _observer: Rc<dyn ChunkInstallObserver>,
+    ) -> ChunkFuture<'_, Result<Bytes, ChunkError>> {
+        self.get(request)
+    }
 }
 
 #[derive(Default)]
@@ -642,6 +658,7 @@ pub struct OwnedChunkProvider {
     leases: Rc<RefCell<ChunkLeaseStats>>,
     activity: Rc<RefCell<ChunkActivityState>>,
     in_flight: Rc<RefCell<InFlightChunks>>,
+    install_observer: Option<Rc<dyn ChunkInstallObserver>>,
 }
 
 #[derive(Default, Debug)]
@@ -956,6 +973,18 @@ impl OwnedChunkProvider {
             leases: Rc::new(RefCell::new(ChunkLeaseStats::default())),
             activity: Rc::new(RefCell::new(ChunkActivityState::default())),
             in_flight: Rc::new(RefCell::new(InFlightChunks::default())),
+            install_observer: None,
+        }
+    }
+
+    pub(crate) fn with_install_observer(&self, observer: Rc<dyn ChunkInstallObserver>) -> Self {
+        Self {
+            provider: Rc::clone(&self.provider),
+            cache: Rc::clone(&self.cache),
+            leases: Rc::clone(&self.leases),
+            activity: Rc::clone(&self.activity),
+            in_flight: Rc::new(RefCell::new(InFlightChunks::default())),
+            install_observer: Some(observer),
         }
     }
 
@@ -999,6 +1028,7 @@ impl OwnedChunkProvider {
         let leases = Rc::clone(&self.leases);
         let activity = Rc::clone(&self.activity);
         let in_flight = Rc::clone(&self.in_flight);
+        let install_observer = self.install_observer.clone();
         Box::pin(async move {
             // Admission must precede even a verified-cache hit. A reclamation
             // pass may start after the last lease is dropped, and every new
@@ -1029,7 +1059,12 @@ impl OwnedChunkProvider {
                     entries.entries.insert(
                         request.clone(),
                         InFlightChunk {
-                            future: Some(load_and_verify_chunk(provider, cache, request.clone())),
+                            future: Some(load_and_verify_chunk(
+                                provider,
+                                cache,
+                                request.clone(),
+                                install_observer,
+                            )),
                             result: None,
                             waiters: Vec::new(),
                             consumers: 1,
@@ -1055,9 +1090,16 @@ fn load_and_verify_chunk(
     provider: Rc<dyn ChunkProvider>,
     cache: Rc<RefCell<VerifiedChunkCache>>,
     request: ChunkRequest,
+    install_observer: Option<Rc<dyn ChunkInstallObserver>>,
 ) -> ChunkFuture<'static, Result<Bytes, ChunkError>> {
     Box::pin(async move {
-        let bytes = provider.get(request.clone()).await?;
+        let bytes = if let Some(observer) = install_observer {
+            provider
+                .get_with_install_observer(request.clone(), observer)
+                .await?
+        } else {
+            provider.get(request.clone()).await?
+        };
         if bytes.len() > crate::large_values::MAX_ENCODED_NODE_BYTES
             || crate::large_values::object_hash(&bytes).0 != request.object_hash
         {
