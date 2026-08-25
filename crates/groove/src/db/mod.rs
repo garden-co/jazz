@@ -13,6 +13,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::str;
+use std::sync::{Arc, Weak};
 use std::task::{Poll, Waker};
 
 use futures::lock::Mutex as AsyncMutex;
@@ -204,7 +205,7 @@ async fn large_value_node_transition_operations(
 #[derive(Clone)]
 struct MetadataChunkInstallObserver {
     storage: std::rc::Weak<LayoutStorage>,
-    lifecycle: std::rc::Weak<AsyncMutex<()>>,
+    lifecycle: Weak<AsyncMutex<()>>,
 }
 
 impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
@@ -328,7 +329,7 @@ pub struct Database {
     /// promotion, and reclamation lifecycle. The blob backend may be separate
     /// from metadata storage, so this boundary prevents both intent eviction
     /// during an in-flight put and lost reference-count updates across uploads.
-    large_value_lifecycle: Rc<AsyncMutex<()>>,
+    large_value_lifecycle: Arc<AsyncMutex<()>>,
     abandoned_application: Rc<Cell<bool>>,
     poisoned: bool,
 }
@@ -355,6 +356,10 @@ pub struct AppliedBatch {
     tick: TickMetrics,
     notifications_deferred: bool,
     lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
+    /// Retains the large-value metadata lifecycle through the matching
+    /// ordered storage write. This is acquired after the IVM tick, whose
+    /// chunk resolution may itself install metadata through that lifecycle.
+    large_value_lifecycle_guard: Rc<RefCell<Option<futures::lock::OwnedMutexGuard<()>>>>,
     abandoned_application: Rc<Cell<bool>>,
 }
 
@@ -371,6 +376,8 @@ impl AppliedBatch {
         );
         let mut attempt = PersistenceAttempt {
             lifecycle: Rc::clone(&self.lifecycle),
+            large_value_lifecycle_guard: self.large_value_lifecycle_guard.borrow_mut().take(),
+            large_value_lifecycle_guard_slot: Rc::clone(&self.large_value_lifecycle_guard),
             completed: false,
         };
         let turn = std::future::poll_fn(|cx| {
@@ -443,6 +450,8 @@ impl AppliedBatch {
 
 struct PersistenceAttempt {
     lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
+    large_value_lifecycle_guard: Option<futures::lock::OwnedMutexGuard<()>>,
+    large_value_lifecycle_guard_slot: Rc<RefCell<Option<futures::lock::OwnedMutexGuard<()>>>>,
     completed: bool,
 }
 
@@ -450,6 +459,8 @@ impl Drop for PersistenceAttempt {
     fn drop(&mut self) {
         if !self.completed && self.lifecycle.get() == AppliedBatchLifecycle::Persisting {
             self.lifecycle.set(AppliedBatchLifecycle::Applied);
+            *self.large_value_lifecycle_guard_slot.borrow_mut() =
+                self.large_value_lifecycle_guard.take();
         }
     }
 }
