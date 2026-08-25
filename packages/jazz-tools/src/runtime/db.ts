@@ -35,6 +35,7 @@ import {
   type QueryVisibility,
   resolveEffectiveQueryExecutionOptions,
   resolveReadTier,
+  ReadTier,
   type BranchSelector,
   type BranchView,
   type OpenBatchId,
@@ -1925,7 +1926,7 @@ export class Db {
     const outputSchema = requireSchemaWithTable(query._schema, outputTable);
     const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
     const remoteIfPossibleOffline =
-      options?.tier === "remote-if-possible" && this.connection.isExplicitlyOffline();
+      options?.tier === ReadTier.RemoteIfPossible && this.connection.isExplicitlyOffline();
     if (remoteIfPossibleOffline) queryOptions.tier = "local";
     const wasmQuery = translateQuery(builderJson, planningSchema);
     const usesRelationTraversal = queryUsesRelationTraversal(builtQuery);
@@ -2027,7 +2028,7 @@ export class Db {
 
     const queryOptions = nativeDbQueryOptions(query._schema, builtQuery.table, options);
     const remoteIfPossibleOffline =
-      options?.tier === "remote-if-possible" && this.connection.isExplicitlyOffline();
+      options?.tier === ReadTier.RemoteIfPossible && this.connection.isExplicitlyOffline();
     if (remoteIfPossibleOffline) queryOptions.tier = "local";
     const context = this.getRuntimeOperationContext();
     let subId: number | null = null;

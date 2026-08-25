@@ -319,8 +319,15 @@ export interface AuthConfig {
  * - `global`: Persisted at global server
  */
 export type DurabilityTier = "local" | "edge" | "global";
-/** Product-facing read tier names. Legacy durability names remain supported. */
-export type ReadTier = DurabilityTier | "local-first" | "remote" | "remote-if-possible";
+/** Product-facing policy for reads. It deliberately does not change write durability. */
+export enum ReadTier {
+  LocalFirst = "local-first",
+  Remote = "remote",
+  RemoteIfPossible = "remote-if-possible",
+}
+/** @deprecated Read APIs also accept these legacy durability names unchanged. */
+export type LegacyReadDurabilityTier = DurabilityTier;
+export type QueryReadTier = ReadTier | LegacyReadDurabilityTier;
 /**
  * Controls when a write is visible to subscriptions.
  *
@@ -362,8 +369,8 @@ export interface BranchView {
 }
 
 export interface QueryExecutionOptions {
-  /** `local-first` = legacy `local`; `remote` = legacy `edge`; `remote-if-possible` falls back only after an explicit disconnect. */
-  tier?: ReadTier;
+  /** `ReadTier.RemoteIfPossible` falls back only after an explicit disconnect. @deprecated DurabilityTier values remain accepted with their old meaning. */
+  tier?: QueryReadTier;
   localUpdates?: LocalUpdatesMode;
   propagation?: QueryPropagation;
   visibility?: QueryVisibility;
@@ -528,10 +535,10 @@ export function resolveEffectiveQueryExecutionOptions(
 }
 
 /** @internal Low-level runtimes retain the legacy three-tier wire contract. */
-export function resolveReadTier(tier: ReadTier): DurabilityTier {
-  return tier === "local-first"
+export function resolveReadTier(tier: QueryReadTier): DurabilityTier {
+  return tier === ReadTier.LocalFirst
     ? "local"
-    : tier === "remote" || tier === "remote-if-possible"
+    : tier === ReadTier.Remote || tier === ReadTier.RemoteIfPossible
       ? "edge"
       : tier;
 }
