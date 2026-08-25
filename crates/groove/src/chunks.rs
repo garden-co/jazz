@@ -12,7 +12,7 @@ use bytes::Bytes;
 use thiserror::Error;
 
 use crate::large_values::{ContentHash, Locator, StagedChunk, object_hash};
-use crate::storage::{LayoutStorage, OrderedKvStorage, OwnedWriteOperation};
+use crate::storage::{LayoutStorage, OrderedKvStorage, OwnedWriteOperation, StorageDelta};
 
 /// Opaque retrieval identity paired with the hash Groove must verify.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -468,22 +468,33 @@ impl ChunkKvStorage for OrderedChunkStorage {
         Box::pin(async move {
             let storage = self.storage()?;
             let key = Self::key(locator.as_bytes());
-            if let Some(existing) = storage
-                .get(crate::db::LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
-                .await
-                .map_err(|error| ChunkStorageError::Backend(error.to_string()))?
-            {
-                return Self::decode(existing).map(Some);
-            }
+            let candidate = Self::encode(hash, &bytes);
+            // This must be a conditional storage transition rather than a
+            // get-then-set sequence.  A durable backend can be shared by
+            // independent database instances, so an executor-local lock would
+            // still allow the loser to overwrite the immutable winner.
             storage
-                .write_many(vec![OwnedWriteOperation::Set {
+                .write_many(vec![OwnedWriteOperation::Delta {
                     cf: crate::db::LARGE_VALUE_METADATA_CF.to_owned(),
-                    key,
-                    value: Self::encode(hash, &bytes),
+                    key: key.clone(),
+                    delta: StorageDelta::set_if_absent(candidate.clone()),
                 }])
                 .await
                 .map_err(|error| ChunkStorageError::Backend(error.to_string()))?;
-            Ok(None)
+            let existing = storage
+                .get(crate::db::LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
+                .await
+                .map_err(|error| ChunkStorageError::Backend(error.to_string()))?
+                .ok_or_else(|| {
+                    ChunkStorageError::Backend(
+                        "conditional chunk insert did not leave a winner".to_owned(),
+                    )
+                })?;
+            if existing == candidate {
+                Ok(None)
+            } else {
+                Self::decode(existing).map(Some)
+            }
         })
     }
 
@@ -1022,6 +1033,15 @@ mod tests {
 
     use super::*;
 
+    struct StaticResolver(Bytes);
+
+    impl MissingChunkResolver for StaticResolver {
+        fn resolve(&self, _request: ChunkRequest) -> ChunkFuture<'_, Result<Bytes, ChunkError>> {
+            let bytes = self.0.clone();
+            Box::pin(async move { Ok(bytes) })
+        }
+    }
+
     struct CountingProvider {
         calls: Cell<usize>,
         bytes: Bytes,
@@ -1159,5 +1179,69 @@ mod tests {
             block_on(managed.get(locator, ContentHash([7; 32]))),
             Err(ChunkStorageError::Integrity)
         );
+    }
+
+    #[test]
+    fn concurrent_remote_resolution_never_overwrites_an_immutable_locator() {
+        // This is intentionally an internal receipt: the race belongs to the
+        // Groove-owned blob plane below Database's row APIs. It nevertheless
+        // exercises the public-to-Jazz StorageChunkProvider remote-resolution
+        // path, which is where two independent requests meet that plane.
+        let (inner, _control) =
+            crate::storage::TestStorage::controlled(&[crate::db::LARGE_VALUE_METADATA_CF]);
+        let layout = Rc::new(
+            block_on(LayoutStorage::new(
+                inner,
+                crate::storage::StorageLayout::Identity,
+            ))
+            .unwrap(),
+        );
+        let backend = Rc::new(OrderedChunkStorage::new(Rc::downgrade(&layout)));
+        let managed = Rc::new(ManagedChunkStorage::new(backend.clone()));
+        let locator = Locator::from_seed(b"one-locator-two-remote-winners");
+        let first = Bytes::from_static(b"first authenticated remote chunk");
+        let second = Bytes::from_static(b"second authenticated remote chunk");
+        let first_request = ChunkRequest {
+            object_hash: object_hash(&first).0,
+            locator,
+        };
+        let second_request = ChunkRequest {
+            object_hash: object_hash(&second).0,
+            locator,
+        };
+        let first_provider = StorageChunkProvider::with_resolver(
+            managed.clone(),
+            Rc::new(StaticResolver(first.clone())),
+        );
+        let second_provider =
+            StorageChunkProvider::with_resolver(managed, Rc::new(StaticResolver(second.clone())));
+
+        // TestStorage makes the two initial absence reads, and then each
+        // conditional write, yield. The old get-then-Set implementation let
+        // both requests observe absence and overwrote the first bytes here.
+        let (first_result, second_result) = block_on(async {
+            futures::join!(
+                first_provider.get(first_request.clone()),
+                second_provider.get(second_request.clone()),
+            )
+        });
+
+        let winner = match (&first_result, &second_result) {
+            (Ok(bytes), Err(ChunkError::Backend(message))) => {
+                assert!(message.contains("opaque locator already names different content"));
+                bytes.clone()
+            }
+            (Err(ChunkError::Backend(message)), Ok(bytes)) => {
+                assert!(message.contains("opaque locator already names different content"));
+                bytes.clone()
+            }
+            other => panic!("exactly one remote resolution must win: {other:?}"),
+        };
+        let (stored_hash, stored_bytes) =
+            block_on(ChunkKvStorage::get_exact(backend.as_ref(), locator))
+                .unwrap()
+                .expect("the winner must remain durable");
+        assert_eq!(stored_bytes, winner);
+        assert_eq!(stored_hash, object_hash(&winner));
     }
 }

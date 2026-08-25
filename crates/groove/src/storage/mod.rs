@@ -203,6 +203,13 @@ pub struct StorageDelta {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StorageDeltaKind {
     CurrentWinnerV1,
+    /// Preserve the first value ever installed for a key.
+    ///
+    /// This is the storage-level conditional insertion primitive used for
+    /// immutable large-value chunks.  Keeping it as a merge delta matters for
+    /// RocksDB: separate database handles/processes may race, but RocksDB
+    /// serializes merge operands for one key while materializing the winner.
+    SetIfAbsentV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,6 +229,18 @@ impl StorageDelta {
             payload: postcard::to_allocvec(&delta)
                 .map_err(|error| Error::InvalidStorageDelta(error.to_string()))?,
         })
+    }
+
+    /// Atomically install `value` only when the key has no existing value.
+    ///
+    /// Callers read the key after committing this delta to learn the immutable
+    /// winner.  Backends that do not have a native merge operator apply the
+    /// same transition inside their atomic write batch.
+    pub fn set_if_absent(value: Vec<u8>) -> Self {
+        Self {
+            kind: StorageDeltaKind::SetIfAbsentV1,
+            payload: value,
+        }
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
@@ -264,6 +283,10 @@ pub fn compact_storage_delta_operand(
             })?
             .encode()
         }
+        // The first conditional-insert operand remains the correct compact
+        // representation: applying it to an absent base recreates the winner,
+        // while applying it to a present base keeps that older value.
+        StorageDeltaKind::SetIfAbsentV1 => Ok(template_operand.to_vec()),
     }
 }
 
@@ -277,6 +300,9 @@ pub fn apply_storage_delta(
             let candidate: CurrentWinnerDelta = postcard::from_bytes(&delta.payload)
                 .map_err(|error| Error::InvalidStorageDelta(error.to_string()))?;
             apply_current_winner_delta(existing, &candidate)
+        }
+        StorageDeltaKind::SetIfAbsentV1 => {
+            Ok(existing.map(<[u8]>::to_vec).unwrap_or(delta.payload))
         }
     }
 }

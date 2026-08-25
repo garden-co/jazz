@@ -735,6 +735,7 @@ mod tests {
         CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, RocksDbClassProfile, RocksDbStorage,
         any_available, rocksdb_class_profile, sum_available,
     };
+    use groove::storage::{OwnedWriteOperation, StorageDelta};
 
     fn ready<F: Future>(future: F) -> F::Output {
         let mut future = pin!(future);
@@ -783,6 +784,32 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
         assert!(storage.write_flush_cadence.borrow().is_none());
+    }
+
+    #[test]
+    fn conditional_insert_merge_keeps_the_first_durable_value() {
+        use groove::storage::OrderedKvStorage;
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["chunks"]).unwrap();
+        let key = b"same-opaque-locator".to_vec();
+        ready(storage.write_many(vec![OwnedWriteOperation::Delta {
+            cf: "chunks".to_owned(),
+            key: key.clone(),
+            delta: StorageDelta::set_if_absent(b"first authenticated bytes".to_vec()),
+        }]))
+        .unwrap();
+        ready(storage.write_many(vec![OwnedWriteOperation::Delta {
+            cf: "chunks".to_owned(),
+            key: key.clone(),
+            delta: StorageDelta::set_if_absent(b"second conflicting bytes".to_vec()),
+        }]))
+        .unwrap();
+
+        assert_eq!(
+            ready(storage.get("chunks".to_owned(), key)).unwrap(),
+            Some(b"first authenticated bytes".to_vec())
+        );
     }
 
     #[test]
