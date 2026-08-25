@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
+use std::task::Poll;
 
 use futures::lock::Mutex;
 use idb_tree::{IdbTree, Options, PageStore, WriteOperation};
@@ -12,6 +13,13 @@ use super::{
     ScanBounds, ScanDirection, ScanRequest, StorageFuture, StorageScan, Value, apply_storage_delta,
     key_codec,
 };
+
+// A noisy neighbouring tab must not turn a single logical write into an
+// unbounded request that holds this handle's mutation gate forever. Eight
+// replays accommodates ordinary tab races while keeping the worst case small
+// and observable to callers.
+const MAX_GENERATION_CONFLICT_RETRIES: usize = 8;
+const MAX_CONFLICT_BACKOFF_YIELDS: usize = 16;
 
 #[derive(Clone)]
 pub struct IdbStorage<S> {
@@ -93,6 +101,31 @@ where
         )
     }
 
+    async fn yield_once() {
+        let mut yielded = false;
+        futures::future::poll_fn(move |cx| {
+            if yielded {
+                Poll::Ready(())
+            } else {
+                yielded = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await;
+    }
+
+    async fn back_off_after_generation_conflict(retry: usize) {
+        // This is intentionally executor-cooperative rather than wall-clock
+        // sleeping: IDB is driven by the browser event loop, and yielding lets
+        // the winning tab finish without imposing a timer dependency on native
+        // test stores. The exponential schedule is capped with the retry cap.
+        let yields = (1usize << retry.min(4)).min(MAX_CONFLICT_BACKOFF_YIELDS);
+        for _ in 0..yields {
+            Self::yield_once().await;
+        }
+    }
+
     async fn write_many_once(
         &self,
         tree: &IdbTree<S>,
@@ -139,12 +172,23 @@ where
         &self,
         operations: &[OwnedWriteOperation],
     ) -> Result<(), Error> {
+        let mut retries = 0;
         loop {
             let tree = self.tree();
             match self.write_many_once(&tree, operations).await {
                 Ok(()) => return Ok(()),
                 Err(error) if Self::is_generation_conflict(&error) => {
+                    if retries == MAX_GENERATION_CONFLICT_RETRIES {
+                        // The failed attempt has staged writes in this tree's
+                        // cache. Reopen even on the terminal path so a caller
+                        // cannot observe a failed, non-durable write through a
+                        // later get on this handle.
+                        self.reopen_after_generation_conflict().await?;
+                        return Err(Error::IdbGenerationContention { retries });
+                    }
+                    retries += 1;
                     self.reopen_after_generation_conflict().await?;
+                    Self::back_off_after_generation_conflict(retries).await;
                 }
                 Err(error) => return Err(error),
             }
@@ -309,6 +353,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::task::Poll;
 
     use idb_tree::{BoxFuture, Commit, MemoryPageStore, Metadata};
@@ -344,6 +389,42 @@ mod tests {
                 })
                 .await;
                 self.inner.commit(commit).await
+            })
+        }
+    }
+
+    #[derive(Clone)]
+    struct ConflictInjectingPageStore {
+        inner: MemoryPageStore,
+        conflicts_remaining: Rc<Cell<usize>>,
+    }
+
+    impl ConflictInjectingPageStore {
+        fn with_conflicts(conflicts: usize) -> Self {
+            Self {
+                inner: MemoryPageStore::default(),
+                conflicts_remaining: Rc::new(Cell::new(conflicts)),
+            }
+        }
+    }
+
+    impl PageStore for ConflictInjectingPageStore {
+        fn load_metadata(&self) -> BoxFuture<'_, Result<Option<Metadata>, String>> {
+            self.inner.load_metadata()
+        }
+
+        fn read_page(&self, page_id: u64) -> BoxFuture<'_, Result<Option<Vec<u8>>, String>> {
+            self.inner.read_page(page_id)
+        }
+
+        fn commit<'a>(&'a self, commit: &'a Commit) -> BoxFuture<'a, Result<Metadata, String>> {
+            let remaining = self.conflicts_remaining.get();
+            if remaining == 0 {
+                return self.inner.commit(commit);
+            }
+            self.conflicts_remaining.set(remaining - 1);
+            Box::pin(async {
+                Err("generation changed: deterministic injected conflict".to_owned())
             })
         }
     }
@@ -551,6 +632,65 @@ mod tests {
             assert_eq!(
                 observer.get("records".into(), key).await.unwrap(),
                 Some(new)
+            );
+        });
+    }
+
+    #[test]
+    fn repeated_generation_conflicts_reopen_and_replay_the_logical_write() {
+        futures::executor::block_on(async {
+            let page_store = ConflictInjectingPageStore::with_conflicts(3);
+            let storage = IdbStorage::open(page_store.clone(), &["records"])
+                .await
+                .unwrap();
+
+            storage
+                .set(
+                    "records".into(),
+                    b"replayed-key".to_vec(),
+                    b"replayed-value".to_vec(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(page_store.conflicts_remaining.get(), 0);
+            assert_eq!(
+                storage
+                    .get("records".into(), b"replayed-key".to_vec())
+                    .await
+                    .unwrap(),
+                Some(b"replayed-value".to_vec())
+            );
+        });
+    }
+
+    #[test]
+    fn repeated_generation_conflicts_stop_at_the_retry_cap_without_leaking_writes() {
+        futures::executor::block_on(async {
+            let page_store =
+                ConflictInjectingPageStore::with_conflicts(MAX_GENERATION_CONFLICT_RETRIES + 1);
+            let storage = IdbStorage::open(page_store, &["records"]).await.unwrap();
+
+            let error = storage
+                .set(
+                    "records".into(),
+                    b"failed-key".to_vec(),
+                    b"failed-value".to_vec(),
+                )
+                .await
+                .expect_err("the conflict cap must return to the caller");
+            assert!(matches!(
+                error,
+                Error::IdbGenerationContention {
+                    retries: MAX_GENERATION_CONFLICT_RETRIES
+                }
+            ));
+            assert_eq!(
+                storage
+                    .get("records".into(), b"failed-key".to_vec())
+                    .await
+                    .unwrap(),
+                None,
+                "the stale cache from the final failed attempt must be discarded"
             );
         });
     }

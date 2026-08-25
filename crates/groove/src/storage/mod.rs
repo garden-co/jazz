@@ -322,11 +322,13 @@ pub fn compact_storage_delta_operand(
 
 /// Whether an operand's transition depends on the eventual durable base.
 /// RocksDB must defer these operands to a full merge rather than compacting
-/// them without that base.
+/// them without that base. Conditional inserts are base-dependent too: they
+/// can only be compacted safely with another conditional insert, and the
+/// generic ordered-KV seam permits later deltas of other kinds for the key.
 pub fn storage_delta_requires_full_merge(encoded_delta: &[u8]) -> Result<bool, Error> {
     Ok(matches!(
         StorageDelta::decode(encoded_delta)?.kind,
-        StorageDeltaKind::DeleteIfValueMatchesV1
+        StorageDeltaKind::SetIfAbsentV1 | StorageDeltaKind::DeleteIfValueMatchesV1
     ))
 }
 
@@ -1943,6 +1945,8 @@ pub enum Error {
     InvalidStorageKey(String),
     #[error("invalid storage delta: {0}")]
     InvalidStorageDelta(String),
+    #[error("IndexedDB storage remained contended after {retries} generation-conflict retries")]
+    IdbGenerationContention { retries: usize },
     #[error("record error: {0}")]
     Record(#[source] Box<crate::records::Error>),
     #[error("{backend} storage error: {message}")]

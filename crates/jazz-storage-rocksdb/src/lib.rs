@@ -748,7 +748,7 @@ mod tests {
         CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, RocksDbClassProfile, RocksDbStorage,
         any_available, rocksdb_class_profile, sum_available,
     };
-    use groove::storage::{OwnedWriteOperation, StorageDelta};
+    use groove::storage::{OwnedWriteOperation, StorageDelta, storage_delta_requires_full_merge};
 
     fn ready<F: Future>(future: F) -> F::Output {
         let mut future = pin!(future);
@@ -822,6 +822,26 @@ mod tests {
         assert_eq!(
             ready(storage.get("chunks".to_owned(), key)).unwrap(),
             Some(b"first authenticated bytes".to_vec())
+        );
+    }
+
+    #[test]
+    fn conditional_operands_defer_to_full_merges() {
+        assert!(
+            storage_delta_requires_full_merge(
+                &StorageDelta::set_if_absent(b"first authenticated bytes".to_vec())
+                    .encode()
+                    .unwrap()
+            )
+            .unwrap()
+        );
+        assert!(
+            storage_delta_requires_full_merge(
+                &StorageDelta::delete_if_value_matches(b"first authenticated bytes".to_vec())
+                    .encode()
+                    .unwrap()
+            )
+            .unwrap()
         );
     }
 
