@@ -173,13 +173,23 @@ test("a newly generated public export absent from the stable package declaration
       join(staged, "index.d.ts"),
       "export declare class NapiDb { tick(): void }\nexport declare function newlyGeneratedExport(): void\n",
     );
-    assert.throws(
-      () =>
-        validateNapiStage(staged, "jazz-napi.linux-x64-gnu.node", "next", "cross-target", {
-          stableDeclarationsPath: stableDeclarations,
-        }),
+    let error;
+    try {
+      validateNapiStage(staged, "jazz-napi.linux-x64-gnu.node", "next", "cross-target", {
+        stableDeclarationsPath: stableDeclarations,
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    assert.match(
+      error.message,
       /generated declarations that differ from the public package type surface/,
     );
+    assert.match(error.message, /checked-in declarations: /);
+    assert.match(error.message, /generated declarations: /);
+    assert.match(error.message, /first difference near line 2/);
+    assert.match(error.message, /--- checked-in/);
+    assert.match(error.message, /\+\s*2 \| export declare function newlyGeneratedExport/);
     assert.equal(existsSync(join(root, "native-binding.pointer.cjs")), false);
   } finally {
     rmSync(root, { recursive: true, force: true });

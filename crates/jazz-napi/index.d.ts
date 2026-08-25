@@ -17,12 +17,23 @@ export declare class NapiDb {
   upsertEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, options?: UpsertOptions | undefined | null): Write
   deleteEncoded(table: string, rowId: Uint8Array, options?: DeleteOptions | undefined | null): Write
   restoreEncoded(table: string, rowId: Uint8Array, cells?: Uint8Array | undefined | null, options?: RestoreOptions | undefined | null): Write
+  /**
+   * Backend-only root mutation entrypoints. They deliberately do not take
+   * branch selectors: attributed branch writes fail closed until #1881's
+   * split transaction/branch representation is designed.
+   */
   insertWithIdEncodedAttributed(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): Write
   updateEncodedAttributed(table: string, rowId: Uint8Array, patch: Uint8Array, author: Uint8Array): Write
   upsertEncodedAttributed(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): Write
   deleteAttributed(table: string, rowId: Uint8Array, author: Uint8Array): Write
   restoreEncodedAttributed(table: string, rowId: Uint8Array, cells: Uint8Array, author: Uint8Array): Write
   beginStreamingMutationEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, kind: string, mutation?: string | undefined | null, author?: Uint8Array | undefined | null, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
+  /**
+   * Trusted-backend streaming counterpart: SYSTEM remains the admission
+   * identity and `attribution` is retained only for final row provenance.
+   * Branch streaming is intentionally unsupported until its split state is
+   * designed, so it fails closed rather than silently losing attribution.
+   */
   beginStreamingMutationAttributedEncoded(table: string, rowId: Uint8Array, cells: Uint8Array, column: string, kind: string, mutation: string | undefined | null, author: Uint8Array | undefined | null, attribution: Uint8Array, updatedAtMs?: number | undefined | null, head?: JsonValue | undefined | null, base?: JsonValue | undefined | null): StreamingMutation
   static openMemory(schema: Uint8Array, config: Uint8Array): NapiDb
   /**
@@ -55,7 +66,11 @@ export declare class NapiDb {
   attachExclusiveTx(openBatchId: string): Tx
   /** Begin one owner-wide transaction without creating an owning per-schema Tx. */
   beginTransaction(openBatchId: string, kind: string, author?: Uint8Array | undefined | null): void
-  /** Begin the only supported backend-attributed transaction shape: mergeable root writes. */
+  /**
+   * Begin the only supported attributed transaction shape. Keeping this a
+   * distinct native ABI makes an older binding fail closed rather than
+   * silently treating provenance as ordinary SYSTEM authorship.
+   */
   beginTransactionAttributed(openBatchId: string, attribution: Uint8Array): void
   /** Commit an owner-wide transaction by id and optional kind. */
   commitTransaction(openBatchId: string, kind?: string | undefined | null): Write
