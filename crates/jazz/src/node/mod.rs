@@ -1489,7 +1489,8 @@ pub struct MergeableCommit {
     /// provenance prevents callers from handcrafting physical descriptors.
     prepared_large_columns: BTreeSet<String>,
     staged_large_values: Vec<groove::large_values::StagedLargeValueId>,
-    /// Construction-time proof that Jazz generated this insert's row id.
+    /// Construction-time proof that the production UUID source generated this
+    /// insert's row id.
     /// Kept private so direct commits and replicated writes cannot assert it.
     known_fresh_row: bool,
 }

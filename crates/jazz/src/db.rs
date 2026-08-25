@@ -998,6 +998,7 @@ where
     identity: DbIdentity,
     node: Rc<Node<S>>,
     row_id_source: Rc<RefCell<Box<dyn RowIdSource>>>,
+    row_id_source_guarantees_fresh: bool,
     next_now_ms: Rc<Cell<u64>>,
     // Minted only by the explicitly unsafe trusted-backend open path. SYSTEM
     // itself is an admission identity, not proof that a Db may forge external
@@ -2365,7 +2366,7 @@ where
         options: InsertOptions,
     ) -> Result<RowUuid, Error> {
         ensure_transaction_identity(options.identity)?;
-        let known_fresh_row = options.row_id.is_none();
+        let known_fresh_row = options.row_id.is_none() && self.db().row_id_source_guarantees_fresh;
         let row = options
             .row_id
             .unwrap_or_else(|| self.db().row_id_source.borrow_mut().next_row_id());

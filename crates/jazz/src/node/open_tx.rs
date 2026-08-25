@@ -1377,8 +1377,8 @@ pub(super) struct PendingWrite {
     pub(super) now_ms: Option<u64>,
     /// Whether restore parents must follow the current layer winner at commit time.
     pub(super) refresh_parents_at_commit: bool,
-    /// Jazz generated the id for this staged insert, so no prior row can share
-    /// its exact physical coordinate.
+    /// The production UUID source generated this staged insert's id, so it may
+    /// use the trusted fresh-coordinate fast path.
     pub(super) known_fresh_row: bool,
 }
 

@@ -293,7 +293,11 @@ where
                     batch.insert_raw(history_table.as_ref(), storage_key, groove_record);
                 }
             } else {
-                batch.insert_raw_fresh(history_table.as_ref(), storage_key, groove_record);
+                // SAFETY: a previously unknown transaction id uniquely addresses this immutable
+                // history row; duplicate transaction ids take the checked branch above.
+                unsafe {
+                    batch.insert_raw_fresh(history_table.as_ref(), storage_key, groove_record);
+                }
             }
             if update_current_indexes && !matches!(fate, Fate::Rejected(_)) && global_time.is_none()
             {
