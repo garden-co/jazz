@@ -59,6 +59,26 @@ fn branch_column_reference_policy_schema() -> JazzSchema {
     )
 }
 
+fn branch_update_read_policy_schema() -> JazzSchema {
+    let owner_write = public_session_eq("owner", &["user_id"]);
+    build_public_db_test_schema(
+        PublicSchemaBuilder::new().table(
+            PublicTableSchemaBuilder::new("todos")
+                .column("branch", PublicColumnType::Text)
+                .column("owner", PublicColumnType::Uuid)
+                .column("published", PublicColumnType::Boolean)
+                .column("secret", PublicColumnType::Text)
+                .branch_by("branch")
+                .policies(
+                    PublicTablePolicies::new()
+                        .with_select(public_literal_eq("published", PublicValue::Boolean(true)))
+                        .with_insert(owner_write.clone())
+                        .with_update(Some(owner_write.clone()), owner_write),
+                ),
+        ),
+    )
+}
+
 #[test]
 fn admitted_server_authorizes_branch_write_through_referenced_application_row() {
     let schema = branch_column_reference_policy_schema();
@@ -119,6 +139,91 @@ fn admitted_server_authorizes_branch_write_through_referenced_application_row() 
         )
         .unwrap();
     assert_authority_rejects_staged_write(&outsider_client, &server, &denied);
+}
+
+#[test]
+fn session_branch_update_does_not_copy_read_hidden_cells_when_write_policy_allows() {
+    let schema = branch_update_read_policy_schema();
+    let writer = AuthorSubject::for_test_bytes([0x7b; 16]);
+    let branch = BranchSelector::new([("branch", Value::String("draft".to_owned()))]);
+    let row_id = row(0x7c);
+    let db = block_on(Db::open_history_complete(DbConfig {
+        schema: schema.clone(),
+        storage: rocks_storage(&schema),
+        identity: DbIdentity {
+            node: NodeUuid::from_bytes([0x7a; 16]),
+            author: AuthorSubject::SYSTEM,
+        },
+        id_source: Some(Box::new(SeededRowIdSource::new(0x7a))),
+    }))
+    .expect("open history-complete authority");
+    db.set_identity_claims(writer, test_provider_claims(writer));
+
+    let seed = block_on(db.insert(
+        "todos",
+        BTreeMap::from([
+            ("owner".to_owned(), Value::Uuid(writer.test_uuid())),
+            ("published".to_owned(), Value::Bool(false)),
+            (
+                "secret".to_owned(),
+                Value::String("read-hidden source".to_owned()),
+            ),
+        ]),
+        crate::db::InsertOptions {
+            row_id: Some(row_id),
+            target: crate::db::ExactWriteTarget::Branch(branch.clone()),
+            ..Default::default()
+        },
+    ))
+    .expect("seed hidden branch row");
+    db.finalize_local_mergeable_commit_for_test(seed.mergeable_tx_id())
+        .expect("settle seed row");
+
+    let prepared = db
+        .prepare_query(&db.table("todos"))
+        .expect("prepare branch query");
+    let read_opts = ReadOpts {
+        propagation: Propagation::LocalOnly,
+        ..ReadOpts::default()
+    }
+    .branch_view(branch.clone(), None);
+    assert!(
+        block_on(db.all_for_identity(&prepared, read_opts.clone(), writer))
+            .expect("read hidden branch as writer")
+            .is_empty()
+    );
+
+    let update = block_on(db.update(
+        "todos",
+        row_id,
+        BTreeMap::from([("published".to_owned(), Value::Bool(true))]),
+        crate::db::UpdateOptions {
+            identity: crate::db::WriteIdentity::Session(writer),
+            target: crate::db::WriteTarget::BranchView {
+                head: branch,
+                base: None,
+            },
+            ..Default::default()
+        },
+    ))
+    .expect("stage write-authorised update");
+    db.finalize_local_mergeable_commit_for_test(update.mergeable_tx_id())
+        .expect("authoritative owner policy accepts the read-hidden update");
+
+    let table = &schema.tables[0];
+    let writer_rows = block_on(db.all_for_identity(&prepared, read_opts.clone(), writer))
+        .expect("read published branch as writer");
+    assert_eq!(writer_rows.len(), 1);
+    assert_eq!(
+        writer_rows[0].cell(table, "published"),
+        Some(Value::Bool(true))
+    );
+    assert_eq!(writer_rows[0].cell(table, "secret"), None);
+
+    let authority_rows = block_on(db.all_for_identity(&prepared, read_opts, AuthorSubject::SYSTEM))
+        .expect("read branch as authority");
+    assert_eq!(authority_rows.len(), 1);
+    assert_eq!(authority_rows[0].cell(table, "secret"), None);
 }
 
 #[test]
