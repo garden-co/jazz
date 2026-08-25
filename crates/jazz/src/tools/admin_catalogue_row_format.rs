@@ -1613,6 +1613,53 @@ mod tests {
     }
 
     #[test]
+    fn array_of_enum_payloads_in_row_roundtrip() {
+        let descriptor = RowDescriptor::new(vec![ColumnDescriptor::new(
+            "events",
+            ColumnType::Array {
+                element: Box::new(ColumnType::EnumPayload {
+                    cases: vec![
+                        EnumCaseDescriptor {
+                            name: "heartbeat".into(),
+                            fields: vec![],
+                        },
+                        EnumCaseDescriptor {
+                            name: "message".into(),
+                            fields: vec![
+                                ColumnDescriptor::new("body", ColumnType::Text),
+                                ColumnDescriptor::new("priority", ColumnType::Integer).nullable(),
+                            ],
+                        },
+                    ],
+                }),
+            },
+        )]);
+        let values = vec![Value::Array(vec![
+            Value::Enum {
+                case: "message".into(),
+                values: vec![Value::Text("hello".into()), Value::Null],
+            },
+            Value::Enum {
+                case: "heartbeat".into(),
+                values: vec![],
+            },
+        ])];
+
+        let encoded = encode_row(&descriptor, &values).unwrap();
+        assert_eq!(decode_row(&descriptor, &encoded).unwrap(), values);
+
+        let err = encode_row(
+            &descriptor,
+            &[Value::Array(vec![Value::Enum {
+                case: "missing".into(),
+                values: vec![],
+            }])],
+        )
+        .unwrap_err();
+        assert!(matches!(err, EncodingError::TypeMismatch { .. }));
+    }
+
+    #[test]
     fn encode_decode_bytea_roundtrip_with_nul_bytes() {
         let descriptor = RowDescriptor::new(vec![
             ColumnDescriptor::new("id", ColumnType::Integer),
