@@ -23,13 +23,23 @@ export interface ExpoAuthSecretStoreOptions {
   secureStore?: ExpoSecureStoreLike;
 }
 
-function normalizeScopeSegment(value?: string | null): string | null {
+function encodeScopeSegment(label: string, value?: string | null): string | null {
   if (typeof value !== "string") {
     return null;
   }
 
   const trimmed = value.trim();
-  return trimmed.length > 0 ? encodeURIComponent(trimmed) : null;
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  const bytes = new TextEncoder().encode(trimmed);
+  let binary = "";
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  const encoded = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return `${label}-${encoded}`;
 }
 
 function resolveExpoAuthSecretKey(options: ExpoAuthSecretStoreOptions = {}): string {
@@ -38,12 +48,12 @@ function resolveExpoAuthSecretKey(options: ExpoAuthSecretStoreOptions = {}): str
   }
 
   const scopeSegments = [
-    normalizeScopeSegment(options.appId),
-    normalizeScopeSegment(options.userId),
-    normalizeScopeSegment(options.sessionId),
+    encodeScopeSegment("app", options.appId),
+    encodeScopeSegment("user", options.userId),
+    encodeScopeSegment("session", options.sessionId),
   ].filter((segment): segment is string => segment !== null);
 
-  return scopeSegments.length === 0 ? DEFAULT_KEY : `${DEFAULT_KEY}:${scopeSegments.join(":")}`;
+  return scopeSegments.length === 0 ? DEFAULT_KEY : `${DEFAULT_KEY}.${scopeSegments.join(".")}`;
 }
 
 export class ExpoAuthSecretStore implements AuthSecretStore {
