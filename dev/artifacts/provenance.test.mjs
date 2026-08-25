@@ -34,8 +34,7 @@ function fixture() {
   ])
     mkdirSync(join(root, dir), { recursive: true });
   for (const [path, content] of Object.entries({
-    "Cargo.toml": "[workspace]\n",
-    "Cargo.lock": "lock-a\n",
+    "Cargo.toml": "[workspace]\nmembers = ['crates/*']\nresolver = '2'\n",
     "rust-toolchain.toml": "[toolchain]\nchannel = 'stable'\n",
     ".cargo/config.toml": "[build]\n",
     "package.json": "{}\n",
@@ -44,6 +43,50 @@ function fixture() {
     "crates/jazz-wasm/src/lib.rs": "// source\n",
   }))
     writeFileSync(join(root, path), content);
+  const dependencies = {
+    "jazz-wasm": ["jazz", "wasm-tracing", "idb-tree"],
+    "jazz-napi": [
+      "jazz",
+      "jazz-server",
+      "jazz-native-transport",
+      "jazz-storage-rocksdb",
+      "jazz-otel",
+    ],
+    jazz: ["groove", "jazz-compression", "benchmark-guard"],
+  };
+  for (const name of [
+    "jazz-napi",
+    "jazz-server",
+    "jazz-native-transport",
+    "jazz-storage-rocksdb",
+    "jazz-otel",
+    "jazz-compression",
+    "benchmark-guard",
+    "idb-tree",
+    "jazz",
+    "groove",
+    "wasm-tracing",
+  ]) {
+    const manifest = join(root, `crates/${name}/Cargo.toml`);
+    if (name === "jazz-wasm") continue;
+    const deps = (dependencies[name] ?? [])
+      .map((dependency) => `${dependency} = { path = '../${dependency}' }`)
+      .join("\n");
+    writeFileSync(
+      manifest,
+      `[package]\nname = '${name}'\nversion = '0.0.0'\nedition = '2021'\n[dependencies]\n${deps}\n`,
+    );
+    writeFileSync(join(root, `crates/${name}/src/lib.rs`), `// ${name}\n`);
+  }
+  writeFileSync(
+    join(root, "crates/jazz-wasm/Cargo.toml"),
+    `[package]\nname = 'jazz-wasm'\nversion = '0.0.0'\nedition = '2021'\n[dependencies]\n${dependencies[
+      "jazz-wasm"
+    ]
+      .map((dependency) => `${dependency} = { path = '../${dependency}' }`)
+      .join("\n")}\n`,
+  );
+  execFileSync("cargo", ["generate-lockfile"], { cwd: root, stdio: "ignore" });
   return root;
 }
 
@@ -90,9 +133,10 @@ test("provenance rejects stale tree, lock, toolchain, and profile", () => {
   assert.match(verifyManifest(root, "wasm", "fast"), /git.tree differs/);
 
   writeManifest(root, "wasm", "fast");
-  writeFileSync(join(root, "Cargo.lock"), "lock-b\n");
+  const cargoLock = readFileSync(join(root, "Cargo.lock"), "utf8");
+  writeFileSync(join(root, "Cargo.lock"), `${cargoLock}\n# planted drift\n`);
   assert.match(verifyManifest(root, "wasm", "fast"), /cargoLock differs/);
-  writeFileSync(join(root, "Cargo.lock"), "lock-a\n");
+  writeFileSync(join(root, "Cargo.lock"), cargoLock);
   writeFileSync(join(root, "rust-toolchain.toml"), "[toolchain]\nchannel = 'beta'\n");
   assert.match(verifyManifest(root, "wasm", "fast"), /rustToolchain differs/);
 });
@@ -226,13 +270,36 @@ test("NAPI provenance covers every reachable local Cargo dependency", () => {
     "jazz-otel",
     "jazz-compression",
     "benchmark-guard",
-    "idb-tree",
   ]) {
     const path = join(root, `crates/${crate}/src/lib.rs`);
     writeFileSync(path, "// planted dependency change\n");
     assert.match(verifyManifest(root, "napi", "release"), /packageInputs differs/, crate);
     writeManifest(root, "napi", "release");
   }
+});
+
+test("WASM provenance derives transitive workspace inputs and ignores local task logs", () => {
+  const root = fixture();
+  writeManifest(root, "wasm", "fast");
+
+  mkdirSync(join(root, "crates/jazz-wasm/.turbo"), { recursive: true });
+  writeFileSync(join(root, "crates/jazz-wasm/.turbo/build.log"), "lane-local noise\n");
+  assert.equal(verifyManifest(root, "wasm", "fast"), null);
+
+  writeFileSync(join(root, "crates/jazz-compression/src/lib.rs"), "// planted transitive change\n");
+  assert.match(verifyManifest(root, "wasm", "fast"), /packageInputs differs/);
+});
+
+test("native fingerprints agree across clean worktree locations", () => {
+  const first = fixture();
+  const second = fixture();
+  mkdirSync(join(second, "crates/jazz-wasm/.turbo"), { recursive: true });
+  writeFileSync(join(second, "crates/jazz-wasm/.turbo/build.log"), "different local receipt\n");
+  mkdirSync(join(second, "crates/jazz-napi/.turbo"), { recursive: true });
+  writeFileSync(join(second, "crates/jazz-napi/.turbo/test.log"), "different local receipt\n");
+
+  assert.equal(nativeArtifactFingerprint(first, "wasm"), nativeArtifactFingerprint(second, "wasm"));
+  assert.equal(nativeArtifactFingerprint(first, "napi"), nativeArtifactFingerprint(second, "napi"));
 });
 
 test("tracked NAPI bootstrap changes invalidate sealed provenance and its ABI fingerprint", () => {
