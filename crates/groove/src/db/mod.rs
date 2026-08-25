@@ -231,6 +231,7 @@ struct MetadataChunkInstallObserver {
 struct ResidentLifecycleInstall {
     storage: OwnedStorage<'static>,
     staged: Rc<RefCell<StagedWriteState>>,
+    sealed: Rc<Cell<bool>>,
 }
 
 impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
@@ -336,6 +337,12 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
                 });
             }
             if let Some(install) = resident_install {
+                if install.sealed.get() {
+                    return Err(crate::chunks::ChunkError::Backend(
+                        "resident publication persisted before chunk installation completed"
+                            .to_owned(),
+                    ));
+                }
                 install.staged.borrow_mut().extend(operations);
                 Ok(())
             } else {
@@ -366,7 +373,7 @@ pub struct Database {
     storage_read_metrics: Rc<RefCell<StorageReadMetrics>>,
     next_publication_id: u64,
     durable_publication_frontier: Option<PublicationId>,
-    resident_publications: BTreeMap<PublicationId, Vec<OwnedWriteOperation>>,
+    resident_publications: BTreeMap<PublicationId, Rc<RefCell<StagedWriteState>>>,
     persisted_publications: BTreeSet<PublicationId>,
     resident_writes: Rc<RefCell<StagedWriteState>>,
     publication_persistence: Rc<RefCell<PersistenceOrder>>,
@@ -401,10 +408,10 @@ enum AppliedBatchLifecycle {
 pub struct AppliedBatch {
     publication: PublicationId,
     storage: Rc<LayoutStorage>,
-    operations: Vec<OwnedWriteOperation>,
+    operations: Rc<RefCell<StagedWriteState>>,
+    resident_install_sealed: Option<Rc<Cell<bool>>>,
     order: Rc<RefCell<PersistenceOrder>>,
     ivm_tick_time: Duration,
-    storage_writes: StorageWriteMetrics,
     tick: TickMetrics,
     notifications_deferred: bool,
     lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
@@ -424,6 +431,7 @@ impl AppliedBatch {
         );
         let mut attempt = PersistenceAttempt {
             lifecycle: Rc::clone(&self.lifecycle),
+            resident_install_sealed: self.resident_install_sealed.clone(),
             completed: false,
         };
         let turn = std::future::poll_fn(|cx| {
@@ -441,9 +449,19 @@ impl AppliedBatch {
             Poll::Pending
         })
         .await;
+        if let Some(sealed) = &self.resident_install_sealed {
+            sealed.set(true);
+        }
+        let operations = self.operations.borrow().clone().into_operations();
+        let storage_writes = StorageWriteMetrics::from_operations(
+            &operations
+                .iter()
+                .map(OwnedWriteOperation::as_write_operation)
+                .collect::<Vec<_>>(),
+        );
         let storage_start = Instant::now();
         let result = match turn {
-            Ok(()) => self.storage.write_many(self.operations.clone()).await,
+            Ok(()) => self.storage.write_many(operations).await,
             Err(error) => Err(error),
         };
         let storage_write_time = storage_start.elapsed();
@@ -480,9 +498,9 @@ impl AppliedBatch {
             metrics: CommitMetrics {
                 storage_write_time,
                 ivm_tick_time: self.ivm_tick_time,
-                storage_write_count: self.storage_writes.total.count,
-                storage_write_bytes: self.storage_writes.total.bytes,
-                storage_writes: self.storage_writes,
+                storage_write_count: storage_writes.total.count,
+                storage_write_bytes: storage_writes.total.bytes,
+                storage_writes,
                 tick: self.tick.clone(),
             },
             receipt: PersistenceReceipt {
@@ -496,6 +514,7 @@ impl AppliedBatch {
 
 struct PersistenceAttempt {
     lifecycle: Rc<Cell<AppliedBatchLifecycle>>,
+    resident_install_sealed: Option<Rc<Cell<bool>>>,
     completed: bool,
 }
 
@@ -503,6 +522,9 @@ impl Drop for PersistenceAttempt {
     fn drop(&mut self) {
         if !self.completed && self.lifecycle.get() == AppliedBatchLifecycle::Persisting {
             self.lifecycle.set(AppliedBatchLifecycle::Applied);
+            if let Some(sealed) = &self.resident_install_sealed {
+                sealed.set(false);
+            }
         }
     }
 }

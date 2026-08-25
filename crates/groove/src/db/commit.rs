@@ -32,6 +32,7 @@ impl Database {
             .drive_pending_incremental()
             .await
             .map_err(Error::IvmRuntime)?;
+        self.refresh_resident_writes();
         let resident = StagedWriteOverlay::new(&self.storage, &self.resident_writes);
         let storage = MeteredStorage::new(&resident, &self.storage_read_metrics);
         let tick = self
@@ -236,6 +237,10 @@ impl Database {
             resident_overlay,
             Rc::clone(&staged_state),
         ));
+        let resident_install_sealed = self
+            .large_value_publication_lifecycle_guard
+            .as_ref()
+            .map(|_| Rc::new(Cell::new(false)));
         let resident_install_observer =
             self.large_value_publication_lifecycle_guard
                 .as_ref()
@@ -246,6 +251,11 @@ impl Database {
                         resident_install: Some(ResidentLifecycleInstall {
                             storage: OwnedStorage::new(Rc::clone(&storage)),
                             staged: Rc::clone(&staged_state),
+                            sealed: Rc::clone(
+                                resident_install_sealed
+                                    .as_ref()
+                                    .expect("resident observer has a publication seal"),
+                            ),
                         }),
                     }) as Rc<dyn crate::chunks::ChunkInstallObserver>
                 });
@@ -358,18 +368,13 @@ impl Database {
         let tick = self
             .ivm_runtime
             .assign_resident_publication(resident_tick, publication);
-        let staged_operations = std::mem::take(&mut *staged_state.borrow_mut()).into_operations();
-        let operations = staged_operations
-            .iter()
-            .map(OwnedWriteOperation::as_write_operation)
-            .collect::<Vec<_>>();
-        let storage_writes = StorageWriteMetrics::from_operations(&operations);
+        let staged_operations = staged_state.borrow().clone().into_operations();
 
         self.resident_writes
             .borrow_mut()
             .extend(staged_operations.iter().cloned());
         self.resident_publications
-            .insert(publication, staged_operations.clone());
+            .insert(publication, Rc::clone(&staged_state));
         if !roots.is_empty() {
             if let Some(guard) = lifecycle_guard {
                 self.large_value_publication_lifecycle_guard = Some(guard);
@@ -379,10 +384,10 @@ impl Database {
         Ok(AppliedBatch {
             publication,
             storage: Rc::clone(&self.storage),
-            operations: staged_operations,
+            operations: staged_state,
+            resident_install_sealed,
             order: Rc::clone(&self.publication_persistence),
             ivm_tick_time,
-            storage_writes,
             tick,
             notifications_deferred: defer_notifications_until_durable,
             lifecycle: Rc::new(Cell::new(AppliedBatchLifecycle::Applied)),
@@ -430,11 +435,7 @@ impl Database {
         if self.large_value_lifecycle_publications.is_empty() {
             self.large_value_publication_lifecycle_guard.take();
         }
-        let mut resident_writes = StagedWriteState::default();
-        for operations in self.resident_publications.values() {
-            resident_writes.extend(operations.iter().cloned());
-        }
-        *self.resident_writes.borrow_mut() = resident_writes;
+        self.refresh_resident_writes();
         if persistence.notifications_deferred {
             self.ivm_runtime
                 .settle_deferred_notifications(persistence.publication);
@@ -451,6 +452,14 @@ impl Database {
             pending_writes.push(self.pending_write_from_owned_operation(operation)?);
         }
         Ok(pending_writes)
+    }
+
+    pub(super) fn refresh_resident_writes(&mut self) {
+        let mut resident_writes = StagedWriteState::default();
+        for operations in self.resident_publications.values() {
+            resident_writes.extend(operations.borrow().clone().into_operations());
+        }
+        *self.resident_writes.borrow_mut() = resident_writes;
     }
 
     #[cfg(any(test, feature = "test"))]
