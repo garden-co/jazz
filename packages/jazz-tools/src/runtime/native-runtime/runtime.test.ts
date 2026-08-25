@@ -4826,9 +4826,13 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
   });
 
   it("uses the explicit backend NAPI ABI for provenance without passing it as admission", () => {
-    const insertWithIdEncodedAttributed = vi.fn(() => fakeWrite());
+    const insertWithIdEncodedAttributed = vi.fn(
+      (_table: string, _rowId: Uint8Array, _cells: Uint8Array, _author: Uint8Array) => fakeWrite(),
+    );
     const beginTransaction = vi.fn();
-    const beginTransactionAttributed = vi.fn();
+    const beginTransactionAttributed = vi.fn(
+      (_openBatchId: string, _author: Uint8Array) => undefined,
+    );
     const beginStreamingMutationEncoded = vi.fn(() => ({
       push: () => undefined,
       finish: () => fakeWrite(),
@@ -4870,7 +4874,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     expect(insertCall?.[0]).toBe("todos");
     expect(new TextDecoder().decode(insertCall?.[3])).toBe(attribution);
 
-    runtime.beginTransaction("mergeable", "attributed-batch", context);
+    runtime.beginTransaction("mergeable", "attributed-batch" as never, context);
     expect(beginTransaction).not.toHaveBeenCalled();
     const transactionCall = beginTransactionAttributed.mock.calls[0];
     expect(transactionCall?.[0]).toBe("attributed-batch");
@@ -4955,7 +4959,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         id,
       ),
     ).rejects.toThrow("backend-attributed streaming mutations");
-    expect(() => runtime.beginTransaction("mergeable", "missing-abi", context)).toThrow(
+    expect(() => runtime.beginTransaction("mergeable", "missing-abi" as never, context)).toThrow(
       "backend-attributed mergeable transactions",
     );
 
