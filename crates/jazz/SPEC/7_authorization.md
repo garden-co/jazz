@@ -36,8 +36,10 @@ Invariant digest:
   table's read policy for that reader; a parent whose required target is missing or
   unreadable MUST be dropped from the result set.
 - `INV-RLS-20`: Reads performed to execute a write MUST satisfy the target row's
-  read policy; partial updates and upserts therefore require read permission,
-  while full-row writes and row-id deletes do not.
+  read policy. Root partial updates and upserts therefore require read permission;
+  a session branch update that cannot read its source MUST author only its explicit
+  patch and MUST NOT copy omitted source cells. Full-row writes and row-id deletes
+  do not require read permission.
 - `INV-RLS-21`: A policy subplan MUST read its dependency tables as raw policy
   evidence without recursively applying those tables' own read policies, while
   still enforcing the complete outer policy under authenticated claims.
@@ -163,12 +165,15 @@ permission implies read permission. The policy unit is the target **row**: jazz
 read policies are row-level rather than column-level, so it does not make a
 PostgreSQL-style per-column `SELECT` decision.
 
-An update is **partial** when its input omits any schema-declared column. A
+An update is **partial** when its input omits any schema-declared column. A root
 partial update reads the current target row to merge its omitted cells and MUST
-be rejected with an authorization error unless the writer may read that row. An
-update that specifies every schema-declared column is a full-row write: it reads
-no user data and therefore requires only the applicable write policy. It remains
-available to a write-only principal.
+be rejected with an authorization error unless the writer may read that row. A
+session branch update MAY remain write-authorised when its effective branch-view
+source is unreadable, but it MUST then author only the explicit patch: omitted
+source cells cannot be copied into the branch result. An update that specifies
+every schema-declared column is a full-row write: it reads no user data and
+therefore requires only the applicable write policy. It remains available to a
+write-only principal.
 
 An upsert asks whether its target row exists. If there is a current target row,
 that is a read and an upsert MUST be rejected unless the writer may read it. If
