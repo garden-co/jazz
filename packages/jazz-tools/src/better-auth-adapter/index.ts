@@ -126,15 +126,23 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         const querySupportedByJazz = isQuerySupported(wasmSchema[table]!, options.where);
 
         if (querySupportedByJazz) {
+          // Preserve ordering semantics: until sorting is lowered, pagination
+          // must remain after the client-side sort. Predicate-only bounded reads
+          // (including mutation/uniqueness warmups) can be bounded in Groove.
+          const lowerPagination = options.sortBy === undefined;
           const qb = createQueryBuilder(table, wasmSchema, {
             conditions: (options.where ?? []).map((condition) =>
               toQueryCondition(model, condition),
             ),
+            limit: lowerPagination ? options.limit : undefined,
+            offset: lowerPagination ? options.offset : undefined,
           });
 
           let rows = (await readAll(qb)) as JazzRowRecord[];
           rows = sortListByField(rows, options.sortBy);
-          rows = paginateList(rows, options.limit, options.offset);
+          if (!lowerPagination) {
+            rows = paginateList(rows, options.limit, options.offset);
+          }
           return rows;
         } else {
           console.warn(
@@ -229,6 +237,26 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         }
       };
 
+      const assertRowIdAvailable = async (
+        model: string,
+        id: string,
+        readAll: (
+          query: QueryBuilder<Record<string, unknown>>,
+        ) => Promise<Record<string, unknown>[]> = (query) =>
+          config.db().all(query, { tier: "global" }),
+      ): Promise<void> => {
+        const table = getPrefixedModelName(model);
+        const existing = await readAll(
+          createQueryBuilder(table, wasmSchema, {
+            conditions: [{ column: "id", op: "eq", value: id }],
+            limit: 1,
+          }),
+        );
+        if (existing.length > 0) {
+          throw new Error(`Unique constraint violated: row "${table}.${id}" already exists`);
+        }
+      };
+
       const isRetryableExclusiveConflict = (error: unknown) =>
         error instanceof PersistedWriteRejectedError &&
         (error.code === "cascade_rejected" ||
@@ -309,6 +337,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
             // serializes the actual admission decision.
             await findAllRows(model, { limit: 1 });
             await assertUniqueConstraints(model, [{ id: "<new>", ...fields }]);
+            if (id) await assertRowIdAvailable(model, id);
 
             try {
               const result = await db.exclusiveTransaction(
@@ -319,6 +348,11 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
                     undefined,
                     (query) => tx.all(query, { tier: "local" }),
                   );
+                  if (id) {
+                    await assertRowIdAvailable(model, id, (query) =>
+                      tx.all(query, { tier: "local" }),
+                    );
+                  }
                   return tx.insert(qb, fields, id ? { id } : undefined);
                 },
               );

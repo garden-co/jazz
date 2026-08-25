@@ -3,7 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, test, vi } from "vitest";
 import { betterAuth, type BetterAuthOptions, type DBAdapter } from "better-auth";
 import { mintLocalFirstToken } from "jazz-napi";
 import { createJazzContext, type JazzContext } from "../backend/index.js";
-import { startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
+import {
+  startLocalJazzServer,
+  startTestJwtIssuer,
+  type LocalJazzServerHandle,
+} from "../testing/index.js";
 import { deploy as deployProject } from "../dev/catalogue-project.js";
 import {
   app as fixtureApp,
@@ -114,6 +118,141 @@ describe("jazzAdapter", () => {
     }
   }, 30_000);
 
+  it("applies generated deny-all policies to a verified external session", async () => {
+    const jwtIssuer = await startTestJwtIssuer();
+    const server = await startLocalJazzServer({
+      jwksUrl: jwtIssuer.jwksUrl,
+    });
+    await deployProject({
+      serverUrl: server.url,
+      appId: server.appId,
+      adminSecret: server.adminSecret,
+      schemaDir: join(import.meta.dirname, "fixtures"),
+    });
+    const context = createJazzContext({
+      appId: server.appId,
+      app: fixtureApp,
+      permissions: fixturePermissions,
+      driver: { type: "memory" },
+      serverUrl: server.url,
+      backendSecret: server.backendSecret,
+      jwksUrl: jwtIssuer.jwksUrl,
+    });
+
+    try {
+      const adapter = jazzAdapter({
+        db: () => context.asBackend(fixtureApp),
+        schema: fixtureApp.wasmSchema,
+      })({});
+      const user = await adapter.create<any>({
+        model: "user",
+        data: {
+          name: "Backend user",
+          email: "external-policy-backend@example.com",
+          emailVerified: false,
+          image: null,
+        },
+      });
+      const session = await adapter.create<any>({
+        model: "session",
+        data: {
+          expiresAt: new Date(Date.now() + 60_000),
+          token: "external-policy-session",
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          ipAddress: null,
+          userAgent: null,
+          userId: user.id,
+        },
+      });
+      const account = await adapter.create<any>({
+        model: "account",
+        data: {
+          issuer: "external-policy-issuer",
+          accountId: "external-policy-account",
+          providerId: "test",
+          userId: user.id,
+          accessToken: null,
+          refreshToken: null,
+          idToken: null,
+          accessTokenExpiresAt: null,
+          refreshTokenExpiresAt: null,
+          scope: null,
+          password: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      });
+      await adapter.create({
+        model: "verification",
+        data: {
+          identifier: "external-policy-verification",
+          value: "backend-only",
+          expiresAt: new Date(Date.now() + 60_000),
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      });
+      await context
+        .asBackend(fixtureApp)
+        .insert(fixtureApp.better_auth_jwks, {
+          publicKey: "external-policy-public-key",
+          privateKey: "external-policy-private-key",
+          createdAt: new Date(),
+          expiresAt: null,
+        })
+        .wait({ tier: "global" });
+
+      const token = jwtIssuer.jwtForUser("external-policy-user");
+      const sessionDb = await context.forRequest({
+        headers: { authorization: `Bearer ${token}` },
+      });
+      const generatedTables = [
+        fixtureApp.better_auth_user,
+        fixtureApp.better_auth_session,
+        fixtureApp.better_auth_account,
+        fixtureApp.better_auth_verification,
+        fixtureApp.better_auth_jwks,
+      ] as const;
+
+      for (const table of generatedTables) {
+        await expect(sessionDb.all(table, { tier: "edge" })).resolves.toEqual([]);
+      }
+
+      await expect(
+        sessionDb
+          .insert(fixtureApp.better_auth_user, {
+            name: "External user",
+            email: "external-policy-client@example.com",
+            emailVerified: false,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .wait({ tier: "edge" }),
+      ).rejects.toThrow(/AuthorizationDenied|Write rejected by server authorization/);
+      await expect(
+        Promise.resolve().then(() =>
+          sessionDb
+            .update(fixtureApp.better_auth_session, session.id, { userAgent: "changed" })
+            .wait({ tier: "edge" }),
+        ),
+      ).rejects.toThrow(
+        /AuthorizationDenied|Write rejected by server authorization|read policy denied/,
+      );
+      await expect(
+        Promise.resolve().then(() =>
+          sessionDb.delete(fixtureApp.better_auth_account, account.id).wait({ tier: "edge" }),
+        ),
+      ).rejects.toThrow(
+        /AuthorizationDenied|Write rejected by server authorization|read policy denied/,
+      );
+    } finally {
+      await context.shutdown();
+      await server.stop();
+      await jwtIssuer.stop();
+    }
+  }, 30_000);
+
   describe("adapter methods", () => {
     let adapter: DBAdapter<BetterAuthOptions>;
     let context: JazzContext;
@@ -147,6 +286,33 @@ describe("jazzAdapter", () => {
     afterEach(async () => {
       await context.shutdown();
       await server.stop();
+    });
+
+    it("lowers supported result bounds into the Jazz query", async () => {
+      const boundedDb = context.asBackend(wasmSchemaExample);
+      const allSpy = vi.spyOn(boundedDb, "all");
+      const boundedAdapter = jazzAdapter({
+        db: () => boundedDb,
+        schema: wasmSchemaExample,
+      })({});
+
+      await boundedAdapter.findMany({
+        model: "user",
+        where: [
+          {
+            field: "email",
+            operator: "eq",
+            value: "missing@example.com",
+            connector: "AND",
+          },
+        ],
+        limit: 2,
+        offset: 3,
+      });
+
+      expect(allSpy).toHaveBeenCalledTimes(1);
+      const query = allSpy.mock.calls[0]![0] as { _build(): string };
+      expect(JSON.parse(query._build())).toMatchObject({ limit: 2, offset: 3 });
     });
 
     it("backend access can insert and read despite deny-all client policies", async () => {
@@ -718,6 +884,26 @@ describe("jazzAdapter", () => {
         email: "preset@example.com",
         name: "Preset",
       });
+
+      await expect(
+        adapter.create({
+          model: "user",
+          data: {
+            id: presetId,
+            name: "Replacement",
+            email: "replacement@example.com",
+            emailVerified: false,
+            image: null,
+          },
+          forceAllowId: true,
+        }),
+      ).rejects.toThrow(/row .* already exists/);
+      await expect(
+        adapter.findOne<any>({
+          model: "user",
+          where: [{ field: "id", operator: "eq", value: presetId, connector: "AND" }],
+        }),
+      ).resolves.toMatchObject({ name: "Preset", email: "preset@example.com" });
 
       const updated = await adapter.update<any>({
         model: "user",
@@ -1469,6 +1655,34 @@ describe("jazzAdapter", () => {
           ]);
           expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
           expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+
+          const sharedId = "550e8400-e29b-51d4-a716-4466554400ac";
+          const idResults = await Promise.allSettled([
+            adapter1.create({
+              model: "user",
+              data: {
+                id: sharedId,
+                name: "ID race one",
+                email: "id-race-one@example.com",
+                emailVerified: false,
+                image: null,
+              },
+              forceAllowId: true,
+            }),
+            adapter2.create({
+              model: "user",
+              data: {
+                id: sharedId,
+                name: "ID race two",
+                email: "id-race-two@example.com",
+                emailVerified: false,
+                image: null,
+              },
+              forceAllowId: true,
+            }),
+          ]);
+          expect(idResults.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+          expect(idResults.filter((result) => result.status === "rejected")).toHaveLength(1);
         } finally {
           await ctx1.shutdown();
           await ctx2.shutdown();
