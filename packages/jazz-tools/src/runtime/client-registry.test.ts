@@ -160,6 +160,51 @@ describe("client-registry", () => {
     expect(create).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps a failed replacement shutdown as the barrier after a successful handoff", async () => {
+    vi.useFakeTimers();
+    let finishFirstShutdown!: () => void;
+    const firstShutdown = new Promise<void>((resolve) => {
+      finishFirstShutdown = resolve;
+    });
+    let failSecondShutdown!: (error: Error) => void;
+    const secondShutdown = new Promise<void>((_, reject) => {
+      failSecondShutdown = reject;
+    });
+    const shutdownError = new Error("replacement shutdown failed");
+    const first = { shutdown: vi.fn(() => firstShutdown) };
+    const second = { shutdown: vi.fn(() => secondShutdown) };
+    const create = vi
+      .fn<() => Promise<{ shutdown(): Promise<void> }>>()
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(second);
+    const firstHolder = {};
+    const secondHolder = {};
+    await acquireClient("persistent:replacement-chain", create, firstHolder);
+
+    const firstRelease = releaseClient("persistent:replacement-chain", firstHolder);
+    await vi.runOnlyPendingTimersAsync();
+    expect(first.shutdown).toHaveBeenCalledOnce();
+
+    const handoff = acquireClient("persistent:replacement-chain", create, secondHolder);
+    finishFirstShutdown();
+    await expect(handoff).resolves.toBe(second);
+    await expect(firstRelease).resolves.toBeUndefined();
+
+    const secondRelease = releaseClient("persistent:replacement-chain", secondHolder);
+    await vi.runOnlyPendingTimersAsync();
+    expect(second.shutdown).toHaveBeenCalledOnce();
+
+    const waitingAcquire = acquireClient("persistent:replacement-chain", create, {});
+    failSecondShutdown(shutdownError);
+
+    await expect(secondRelease).resolves.toBeUndefined();
+    await expect(waitingAcquire).rejects.toBe(shutdownError);
+    await expect(acquireClient("persistent:replacement-chain", create, {})).rejects.toBe(
+      shutdownError,
+    );
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+
   it("retains the failed shutdown barrier across the release timer's first microtask", async () => {
     vi.useFakeTimers();
     let failShutdown!: (error: Error) => void;

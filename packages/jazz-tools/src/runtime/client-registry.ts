@@ -28,7 +28,9 @@ interface Entry {
    * The immediately preceding closing entry. On a rejected handoff, walk this
    * chain to retain the first shutdown that actually started. Keeping the
    * direct predecessor is necessary because an acquire can observe `closing`
-   * before that entry's shutdown microtask marks it started.
+   * before that entry's shutdown microtask marks it started. Once this entry
+   * starts shutting down, this link is cleared: any later handoff can retain
+   * this entry directly, rather than keeping completed clients alive.
    */
   shutdownBarrier: Entry | null;
 }
@@ -144,6 +146,7 @@ export function releaseClient(key: string, holder: object): Promise<void> {
     }
     entry.closing = entry.promise.then((client) => {
       entry.shutdownStarted = true;
+      entry.shutdownBarrier = null;
       return client.shutdown();
     });
     entry.closing.then(
