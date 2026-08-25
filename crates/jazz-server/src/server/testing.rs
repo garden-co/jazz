@@ -15,7 +15,7 @@ use jazz::tools::AppContext;
 use jazz::tools::AppId;
 use jazz::tools::public_schema::Schema;
 
-use super::{BuiltServer, ServerBuilder, ServerState, StorageBackend};
+use super::{BuiltServer, ServerBuilder, ServerState, ShutdownPhase, StorageBackend};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
@@ -237,8 +237,8 @@ impl Drop for TestJwtIssuer {
 
 pub struct JazzServer {
     state: Arc<ServerState>,
-    task: Option<JoinHandle<()>>,
-    shutdown_task: Option<JoinHandle<()>>,
+    task: Option<JoinHandle<std::io::Result<()>>>,
+    shutdown_task: Option<JoinHandle<ShutdownPhase>>,
     port: u16,
     app_id: AppId,
     data_dir: ServerDataDir,
@@ -363,8 +363,9 @@ impl JazzServer {
         let shutdown_task = tokio::spawn(async move {
             shutdown_state.shutdown.wait_requested().await;
             tokio::time::sleep(Duration::from_millis(50)).await;
-            shutdown_state.run_shutdown_finalization().await;
+            let phase = shutdown_state.run_shutdown_finalization().await;
             let _ = serve_shutdown_tx.send(());
+            phase
         });
         let task = tokio::spawn(async move {
             axum::serve(listener, built.app)
@@ -372,7 +373,6 @@ impl JazzServer {
                     let _ = serve_shutdown_rx.await;
                 })
                 .await
-                .expect("serve jazz server");
         });
 
         let server = Self {
@@ -474,31 +474,50 @@ impl JazzServer {
         self.data_dir.path()
     }
 
-    pub async fn shutdown(mut self) {
+    pub async fn shutdown(mut self) -> ShutdownPhase {
         self.state.shutdown.request_shutdown();
         let shutdown_budget = self.state.shutdown.timeout() * 2 + Duration::from_secs(5);
 
-        let mut finalization_completed = false;
-        if let Some(mut shutdown_task) = self.shutdown_task.take()
-            && tokio::time::timeout(shutdown_budget, &mut shutdown_task)
-                .await
-                .is_ok()
-        {
-            finalization_completed = true;
+        let phase = if let Some(mut shutdown_task) = self.shutdown_task.take() {
+            match tokio::time::timeout(shutdown_budget, &mut shutdown_task).await {
+                Ok(Ok(phase)) => phase,
+                Ok(Err(error)) => {
+                    tracing::error!(%error, "embedded shutdown finalization task failed");
+                    return ShutdownPhase::Failed;
+                }
+                Err(_) => {
+                    shutdown_task.abort();
+                    tracing::error!("embedded shutdown finalization timed out");
+                    return ShutdownPhase::Failed;
+                }
+            }
+        } else {
+            self.state.shutdown.phase()
+        };
+        if phase != ShutdownPhase::StorageClosed {
+            return phase;
         }
 
-        if !finalization_completed {
-            return;
+        if let Some(mut task) = self.task.take() {
+            match tokio::time::timeout(shutdown_budget, &mut task).await {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(error))) => {
+                    tracing::error!(%error, "embedded server task failed during shutdown");
+                    return ShutdownPhase::Failed;
+                }
+                Ok(Err(error)) => {
+                    tracing::error!(%error, "embedded server task join failed during shutdown");
+                    return ShutdownPhase::Failed;
+                }
+                Err(_) => {
+                    task.abort();
+                    let _ = tokio::time::timeout(Duration::from_millis(50), task).await;
+                    tracing::error!("embedded server task timed out during shutdown");
+                    return ShutdownPhase::Failed;
+                }
+            }
         }
-
-        if let Some(mut task) = self.task.take()
-            && tokio::time::timeout(shutdown_budget, &mut task)
-                .await
-                .is_err()
-        {
-            task.abort();
-            let _ = tokio::time::timeout(Duration::from_millis(50), task).await;
-        }
+        ShutdownPhase::StorageClosed
     }
 
     async fn wait_ready(&self) {
@@ -682,7 +701,7 @@ mod tests {
         assert!(context.jwt_token.is_some());
         assert!(context.admin_secret.is_none());
 
-        server.shutdown().await;
+        assert_eq!(server.shutdown().await, ShutdownPhase::StorageClosed);
     }
 
     #[tokio::test]
@@ -716,6 +735,34 @@ mod tests {
             "JazzServer uses an external JWKS URL; built-in JWT helpers are unavailable. Mint JWTs from your external JWKS test fixture instead."
         );
 
-        server.shutdown().await;
+        assert_eq!(server.shutdown().await, ShutdownPhase::StorageClosed);
+    }
+
+    #[tokio::test]
+    async fn embedded_shutdown_reports_finalization_failure() {
+        let app_id = JazzServer::default_app_id();
+        let built = ServerBuilder::new(app_id)
+            .with_storage(StorageBackend::InMemory)
+            .with_shutdown_timeout(Duration::from_millis(1))
+            .build()
+            .await
+            .expect("build embedded server");
+        let active_request = built
+            .state
+            .shutdown
+            .try_enter_app_request()
+            .expect("enter active request");
+        let server = JazzServer::from_built(
+            built,
+            None,
+            app_id,
+            ServerDataDir::in_memory(),
+            JazzServer::ADMIN_SECRET.to_owned(),
+            JazzServer::BACKEND_SECRET.to_owned(),
+        )
+        .await;
+
+        assert_eq!(server.shutdown().await, ShutdownPhase::Failed);
+        drop(active_request);
     }
 }

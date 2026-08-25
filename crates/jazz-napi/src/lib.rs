@@ -4685,8 +4685,13 @@ impl JazzServer {
             .take();
 
         if let Some(server) = server {
-            match server {
+            let phase = match server {
                 JazzServerInner::Core(server) => server.shutdown().await,
+            };
+            if phase != jazz_server::ShutdownPhase::StorageClosed {
+                return Err(napi::Error::from_reason(format!(
+                    "JazzServer shutdown failed during phase {phase:?}"
+                )));
             }
         }
 
