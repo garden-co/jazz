@@ -145,7 +145,7 @@ mod tests {
     use axum::routing::{get, post};
     use futures::{SinkExt as _, StreamExt as _};
     use jazz::ids::AuthorSubject;
-    use jazz::tools::public_schema::{ColumnType, Schema, SchemaBuilder, TableSchema};
+    use jazz::tools::public_schema::{ColumnType, PolicyExpr, Schema, SchemaBuilder, TableSchema};
     use serde_json::Value;
     use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
     use tower::ServiceExt;
@@ -1425,6 +1425,144 @@ mod tests {
         assert_eq!(
             permissions_json["permissions"]["users"]["select"]["using"]["type"].as_str(),
             Some("False")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_permissions_publications_install_only_the_winning_runtime_head() {
+        let schema = SchemaBuilder::new()
+            .table(
+                TableSchema::builder("users")
+                    .column("id", ColumnType::Uuid)
+                    .column("name", ColumnType::Text),
+            )
+            .build();
+        let schema_hash = SchemaHash::compute(&schema);
+        let state = make_state_with_schema(schema).await;
+        let app = make_test_router(state.clone());
+        let start = Arc::new(tokio::sync::Barrier::new(2));
+
+        let publish =
+            |app: axum::Router, start: Arc<tokio::sync::Barrier>, policy_type: &'static str| {
+                let schema_hash = schema_hash.to_string();
+                tokio::spawn(async move {
+                    let request_body = serde_json::json!({
+                        "schemaHash": schema_hash,
+                        "permissions": {
+                            "users": {
+                                "select": { "using": { "type": policy_type } }
+                            }
+                        }
+                    });
+                    start.wait().await;
+                    app.oneshot(
+                        axum::http::Request::builder()
+                            .method("POST")
+                            .uri(test_app_route("/admin/permissions"))
+                            .header("Content-Type", "application/json")
+                            .header("X-Jazz-Admin-Secret", "admin-secret")
+                            .body(axum::body::Body::from(request_body.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .expect("publish permissions through admin route")
+                })
+            };
+
+        let allow_publish = publish(app.clone(), start.clone(), "True");
+        let deny_publish = publish(app, start, "False");
+        let (allow_response, deny_response) = tokio::join!(allow_publish, deny_publish);
+        let allow_response = allow_response.expect("allow publish task");
+        let deny_response = deny_response.expect("deny publish task");
+        let allow_status = allow_response.status();
+        let deny_status = deny_response.status();
+        assert_eq!(
+            [allow_status, deny_status]
+                .into_iter()
+                .filter(|status| *status == StatusCode::CREATED)
+                .count(),
+            1
+        );
+        assert_eq!(
+            [allow_status, deny_status]
+                .into_iter()
+                .filter(|status| *status == StatusCode::CONFLICT)
+                .count(),
+            1
+        );
+
+        let (winning_policy, created_response, conflict_response) =
+            if allow_status == StatusCode::CREATED {
+                (PolicyExpr::True, allow_response, deny_response)
+            } else {
+                (PolicyExpr::False, deny_response, allow_response)
+            };
+        let conflict_body = body::to_bytes(conflict_response.into_body(), usize::MAX)
+            .await
+            .expect("stale publish body");
+        let conflict_json: Value =
+            serde_json::from_slice(&conflict_body).expect("stale publish json");
+        assert!(
+            conflict_json["error"]
+                .as_str()
+                .is_some_and(|message| message.starts_with("stale permissions parent"))
+        );
+
+        let created_body = body::to_bytes(created_response.into_body(), usize::MAX)
+            .await
+            .expect("winning publish body");
+        let created_json: Value =
+            serde_json::from_slice(&created_body).expect("winning publish json");
+        let winning_bundle_object_id = created_json["head"]["bundleObjectId"]
+            .as_str()
+            .expect("winning bundle object id");
+        assert_eq!(created_json["head"]["version"].as_u64(), Some(1));
+        assert_eq!(created_json["head"]["parentBundleObjectId"], Value::Null);
+
+        let current = state
+            .catalogue
+            .current_permissions(&state.catalogue_store)
+            .expect("read winning permissions")
+            .expect("winning permissions head");
+        let users = TableName::new("users");
+        assert_eq!(current.head.schema_hash, schema_hash);
+        assert_eq!(
+            current.head.bundle_object_id.to_string(),
+            winning_bundle_object_id
+        );
+        assert_eq!(
+            current
+                .permissions
+                .get(&users)
+                .expect("winning users permissions")
+                .select
+                .using
+                .as_ref(),
+            Some(&winning_policy)
+        );
+
+        let runtime_snapshot = state
+            .runtime()
+            .expect("runtime shell started")
+            .trusted_catalogue_snapshot_for_test()
+            .await
+            .expect("read runtime catalogue");
+        let active_schema = runtime_snapshot
+            .schemas
+            .iter()
+            .find(|schema| schema.id == runtime_snapshot.current_write_schema.schema)
+            .expect("active runtime schema");
+        assert_eq!(
+            active_schema
+                .schema
+                .public_schema()
+                .get(&users)
+                .expect("runtime users table")
+                .policies
+                .select
+                .using
+                .as_ref(),
+            Some(&winning_policy)
         );
     }
 
