@@ -128,11 +128,18 @@ async fn large_value_node_transition_operations(
     mut pending: Vec<(crate::large_values::NodeRef, i8)>,
     allow_missing_positive_metadata: bool,
 ) -> Result<Vec<OwnedWriteOperation>, Error> {
+    let mut node_budget = crate::large_values::PhysicalTraversalNodeBudget::new();
+    node_budget
+        .consume_many(node_updates.len())
+        .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
     let mut reclaim_candidates = BTreeSet::new();
     while let Some((node_ref, delta)) = pending.pop() {
         let mut metadata = if let Some(metadata) = node_updates.remove(&node_ref) {
             metadata
         } else {
+            node_budget
+                .consume()
+                .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
             match storage
                 .get(
                     LARGE_VALUE_METADATA_CF.to_owned(),
