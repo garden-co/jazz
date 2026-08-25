@@ -2,11 +2,10 @@ name: React Native relay artifacts
 
 on:
   pull_request:
-    paths:
-      - "crates/jazz-native-relay/**"
-      - "crates/jazz-storage-sqlite/**"
-      - "crates/jazz-rn/**"
-      - ".github/workflows/rn-native-artifacts.yml"
+    # A label is the explicit opt-in for these expensive platform builds.
+    # Include removal so its no-op run joins the same concurrency group and
+    # cancels a previously queued or running artifact build for this PR.
+    types: [opened, reopened, synchronize, labeled, unlabeled]
   push:
     branches: [main]
     paths:
@@ -14,9 +13,28 @@ on:
       - "crates/jazz-storage-sqlite/**"
       - "crates/jazz-rn/**"
 
+permissions:
+  contents: read
+
+concurrency:
+  # An unlabeled run has no jobs, but still cancels stale work for this PR.
+  group: rn-native-artifacts-${{ github.event.pull_request.number || github.ref }}
+  # Keep each qualifying main push intact; PR label changes replace stale work.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   android:
     name: Android relay static libraries
+    # A label is maintainer-controlled but does not make a fork's checked-out
+    # code trusted. Keep artifact builds on same-repository PRs only.
+    if: >-
+      ${{
+        github.event_name != 'pull_request'
+        || (
+          contains(github.event.pull_request.labels.*.name, 'react-native')
+          && github.event.pull_request.head.repo.full_name == github.repository
+        )
+      }}
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -44,6 +62,14 @@ jobs:
 
   ios:
     name: iOS relay XCFramework
+    if: >-
+      ${{
+        github.event_name != 'pull_request'
+        || (
+          contains(github.event.pull_request.labels.*.name, 'react-native')
+          && github.event.pull_request.head.repo.full_name == github.repository
+        )
+      }}
     runs-on: blacksmith-6vcpu-macos-15
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6

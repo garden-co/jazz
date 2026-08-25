@@ -39,6 +39,10 @@ const rustShadowLauncher = fs.readFileSync(
   path.join(root, "dev/gates/rust-shadow-matrix.mjs"),
   "utf8",
 );
+const rnNativeArtifactsWorkflow = fs.readFileSync(
+  path.join(root, ".github/workflows/rn-native-artifacts.yml"),
+  "utf8",
+);
 const benchmarkSmokeGate = fs.readFileSync(path.join(root, "dev/gates/benchmark-smoke.sh"), "utf8");
 const otherWorkflows = fs
   .readdirSync(path.join(root, ".github/workflows"))
@@ -1203,6 +1207,62 @@ test("CodSpeed runs nightly on main and only for benchmark-labeled PRs", () => {
       "github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'benchmark')",
     );
   }, /strictly equal/);
+});
+
+test("React Native artifact builds are explicit same-repository label opt-ins", () => {
+  const document = parse(rnNativeArtifactsWorkflow);
+  assert.deepEqual(document.on.pull_request, {
+    types: ["opened", "reopened", "synchronize", "labeled", "unlabeled"],
+  });
+  assert.deepEqual(document.on.push, {
+    branches: ["main"],
+    paths: ["crates/jazz-native-relay/**", "crates/jazz-storage-sqlite/**", "crates/jazz-rn/**"],
+  });
+  assert.equal(document.on.workflow_dispatch, undefined);
+  assert.equal(document.on.schedule, undefined);
+  assert.deepEqual(document.permissions, { contents: "read" });
+  assert.equal(document.permissions["id-token"], undefined);
+  assert.doesNotMatch(rnNativeArtifactsWorkflow, /\bsecrets\./);
+  assert.doesNotMatch(rnNativeArtifactsWorkflow, /SCCACHE_(?:TRUSTED|PR)_/);
+  assert.deepEqual(document.concurrency, {
+    group: "rn-native-artifacts-${{ github.event.pull_request.number || github.ref }}",
+    "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+  });
+
+  const expectedCondition =
+    "${{ github.event_name != 'pull_request' || ( contains(github.event.pull_request.labels.*.name, 'react-native') && github.event.pull_request.head.repo.full_name == github.repository ) }}";
+  const normalizeCondition = (condition) => condition.replace(/\s+/g, " ").trim();
+  for (const jobName of ["android", "ios"]) {
+    const job = document.jobs[jobName];
+    assert.equal(normalizeCondition(job.if), expectedCondition, `${jobName} must be label-gated`);
+  }
+
+  assert.throws(() => {
+    const unsafe = parse(
+      rnNativeArtifactsWorkflow.replace(
+        "&& github.event.pull_request.head.repo.full_name == github.repository",
+        "",
+      ),
+    );
+    assert.equal(
+      normalizeCondition(unsafe.jobs.android.if),
+      expectedCondition,
+      "a labeled fork must not execute native artifact builds",
+    );
+  }, /a labeled fork/);
+  assert.throws(() => {
+    const unsafe = parse(
+      rnNativeArtifactsWorkflow.replace(
+        "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+        "cancel-in-progress: false",
+      ),
+    );
+    assert.equal(
+      unsafe.concurrency?.["cancel-in-progress"],
+      "${{ github.event_name == 'pull_request' }}",
+      "label removal must cancel queued artifact work",
+    );
+  }, /label removal/);
 });
 
 test("benchmark correctness stays on ordinary CI while API compilation uses realistic benchmarks", () => {
