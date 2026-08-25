@@ -2865,9 +2865,6 @@ where
                 transitions
                     .program_fact_removes
                     .extend(snapshot_transitions.program_fact_removes);
-                transitions
-                    .structured_app_row_changes
-                    .extend(snapshot_transitions.structured_app_row_changes);
                 true
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => false,
@@ -2901,9 +2898,6 @@ where
                         transitions
                             .program_fact_removes
                             .extend(delta_transitions.program_fact_removes);
-                        transitions
-                            .structured_app_row_changes
-                            .extend(delta_transitions.structured_app_row_changes);
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {

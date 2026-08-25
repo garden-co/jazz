@@ -514,7 +514,6 @@ where
             ),
         >::new();
         let mut fact_states = BTreeMap::<ProgramFactEntry, (bool, bool)>::new();
-        let mut structured_app_row_changes = BTreeSet::new();
         let mut terminal_operations = Vec::new();
         let mut authoritative_membership_changed = false;
         let mut authoritative_member_adds = BTreeSet::new();
@@ -647,7 +646,6 @@ where
                         &local.tables,
                         &self.node_aliases,
                     )?;
-                    structured_app_row_changes.extend(transitions.structured_app_row_changes);
                     terminal_operations.extend(transitions.terminal_operations);
                     for entry in transitions.adds {
                         let before = local.result_set.contains(&entry);
@@ -701,7 +699,6 @@ where
         if states.is_empty()
             && payload_states.is_empty()
             && fact_states.is_empty()
-            && structured_app_row_changes.is_empty()
             && terminal_operations.is_empty()
         {
             return Ok((None, suppressed_authoritative_change));
@@ -709,7 +706,6 @@ where
         let mut transitions = super::maintained_subscription_view::ResultTransitions {
             authoritative_membership_changed,
             authoritative_member_adds,
-            structured_app_row_changes,
             terminal_operations,
             ..Default::default()
         };
@@ -783,7 +779,6 @@ where
         let structured_output = !local.result_query.array_subqueries.is_empty();
         let authoritative_membership_changed = transitions.authoritative_membership_changed;
         let authoritative_member_adds = transitions.authoritative_member_adds;
-        let structured_app_row_changes = transitions.structured_app_row_changes.clone();
         let terminal_operations = transitions.terminal_operations.clone();
         let aggregate_replacements = transitions
             .adds
@@ -887,19 +882,6 @@ where
         }
         for fact in transitions.program_fact_adds {
             local.program_facts.insert(fact);
-        }
-        if materialize_update && structured_output {
-            for root in structured_app_row_changes {
-                match local.maintained.structured_app_row(root) {
-                    Some(record) => added.push((
-                        OutputOccurrenceId::single_source(ObjectId::from_uuid(root.0)),
-                        CurrentRow::new(local.result_table.clone(), record),
-                    )),
-                    None => removed.push(OutputOccurrenceId::single_source(ObjectId::from_uuid(
-                        root.0,
-                    ))),
-                }
-            }
         }
         Ok(LocalMaintainedViewSubscriptionUpdate {
             authoritative_membership_changed,

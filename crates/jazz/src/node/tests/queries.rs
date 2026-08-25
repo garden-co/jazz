@@ -2184,7 +2184,7 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
         .validate(&schema)
         .unwrap();
     let binding = shape.bind(BTreeMap::new()).unwrap();
-    let (subscription, mut maintained, terminal_schemas, transitions, tables, _incomplete) = node
+    let (subscription, mut maintained, terminal_schemas, _transitions, tables, _incomplete) = node
         .open_seeded_maintained_subscription_view(
             &shape,
             &binding,
@@ -2194,11 +2194,6 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
         )
         .unwrap();
 
-    assert_eq!(
-        transitions.structured_app_row_changes,
-        BTreeSet::from([alice_parent, bob_parent]),
-        "collector emits one retained tree per root"
-    );
     let alice_tree = maintained
         .structured_app_row(alice_parent)
         .expect("collector retained alice parent tree");
@@ -2246,18 +2241,23 @@ fn maintained_array_collector_retains_authorized_parent_trees_incrementally() {
     )
     .unwrap();
     crate::db::block_on(node.drive_query_runtime()).unwrap();
-    let mut changed_roots = BTreeSet::new();
+    let mut changed_root_keys = BTreeSet::new();
     while let Ok(deltas) = subscription.try_recv() {
         let transitions = maintained
             .apply_multisink_deltas(deltas, &terminal_schemas, &tables, &node.node_aliases)
             .unwrap();
-        changed_roots.extend(transitions.structured_app_row_changes);
+        changed_root_keys.extend(
+            transitions
+                .terminal_operations
+                .into_iter()
+                .map(|operation| operation.root_key),
+        );
     }
 
     assert_eq!(
-        changed_roots,
-        BTreeSet::from([alice_parent]),
-        "one child change identifies only its rendered parent"
+        changed_root_keys.len(),
+        1,
+        "one child change patches only its rendered parent"
     );
     let updated_alice_tree = maintained
         .structured_app_row(alice_parent)
@@ -2345,7 +2345,7 @@ fn maintained_nested_collector_keeps_two_route_keys_internal_across_sibling_arra
     let binding = shape
         .bind(BTreeMap::from([("rootName".to_owned(), v("alice"))]))
         .unwrap();
-    let (subscription, mut maintained, terminal_schemas, transitions, tables, _incomplete) = node
+    let (subscription, mut maintained, terminal_schemas, _transitions, tables, _incomplete) = node
         .open_seeded_maintained_subscription_view(
             &shape,
             &binding,
@@ -2354,8 +2354,6 @@ fn maintained_nested_collector_keeps_two_route_keys_internal_across_sibling_arra
             &crate::protocol::ReadViewSpec::default(),
         )
         .unwrap();
-    assert_eq!(transitions.structured_app_row_changes, BTreeSet::from([parent]));
-
     let root = maintained
         .structured_app_row(parent)
         .expect("collector retained routed root");
@@ -2396,16 +2394,18 @@ fn maintained_nested_collector_keeps_two_route_keys_internal_across_sibling_arra
     )
     .unwrap();
     crate::db::block_on(node.drive_query_runtime()).unwrap();
-    let mut changed_roots = BTreeSet::new();
+    let mut changed_root_keys = BTreeSet::new();
     while let Ok(deltas) = subscription.try_recv() {
-        changed_roots.extend(
+        changed_root_keys.extend(
             maintained
                 .apply_multisink_deltas(deltas, &terminal_schemas, &tables, &node.node_aliases)
                 .unwrap()
-                .structured_app_row_changes,
+                .terminal_operations
+                .into_iter()
+                .map(|operation| operation.root_key),
         );
     }
-    assert_eq!(changed_roots, BTreeSet::from([parent]));
+    assert_eq!(changed_root_keys.len(), 1);
     let root = maintained
         .structured_app_row(parent)
         .expect("updated routed root remains retained");
