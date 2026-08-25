@@ -29,6 +29,53 @@ pub(super) fn resolve_raw_record_input(
     }
 }
 
+pub(super) fn resolve_owned_record_input(
+    table: &TableSchema,
+    input: RecordInput,
+    descriptor: RecordDescriptor,
+) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
+    match input {
+        RecordInput::Values(values) => {
+            let variant_tag = 0;
+            let record = encode_record(table, descriptor, &values)?;
+            Ok((variant_tag, descriptor, record))
+        }
+        RecordInput::Record(record) => resolve_owned_variant_record(table, record, descriptor),
+    }
+}
+
+pub(super) fn resolve_owned_raw_record_input(
+    table: &TableSchema,
+    input: RawRecordInput,
+    descriptor: RecordDescriptor,
+) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
+    match input {
+        RawRecordInput::Payload(payload) => Ok((0, descriptor, payload)),
+        RawRecordInput::Record(record) => resolve_owned_variant_record(table, record, descriptor),
+    }
+}
+
+fn resolve_owned_variant_record(
+    table: &TableSchema,
+    record: VariantRecord,
+    descriptor: RecordDescriptor,
+) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
+    let variant_tag = record.variant_tag();
+    if !record
+        .record()
+        .descriptor()
+        .registry_compatible_with(&descriptor)
+    {
+        return Err(Error::SchemaVersionDescriptorMismatch {
+            table: table.name.clone(),
+            version: u64::from(variant_tag),
+        });
+    }
+    record.record().validate()?;
+    let (_, record) = record.into_parts();
+    Ok((variant_tag, descriptor, record.into_raw()))
+}
+
 pub(super) fn resolve_variant_record(
     table: &TableSchema,
     record: &VariantRecord,

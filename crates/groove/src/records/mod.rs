@@ -1743,6 +1743,10 @@ impl VariantRecord {
         self.record
     }
 
+    pub(crate) fn into_parts(self) -> (u32, OwnedRecord) {
+        (self.variant_tag, self.record)
+    }
+
     pub fn into_stored_bytes(self) -> Vec<u8> {
         encode_variant_record(self.variant_tag, self.record.raw())
     }

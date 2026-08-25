@@ -462,9 +462,14 @@ impl Database {
         &self,
         batch: DatabaseBatch,
     ) -> Result<Vec<PendingTableWrite>, Error> {
-        self.pending_writes_from_operations(&batch.operations)
+        let mut pending_writes = Vec::with_capacity(batch.operations.len());
+        for operation in batch.operations {
+            pending_writes.push(self.pending_write_from_owned_operation(operation)?);
+        }
+        Ok(pending_writes)
     }
 
+    #[cfg(any(test, feature = "test"))]
     pub(super) fn pending_writes_from_operations(
         &self,
         operations: &[BatchOperation],
@@ -591,6 +596,94 @@ impl Database {
                     table: table.clone(),
                     key: key.clone().into_bytes(),
                     descriptor: table_schema.record_schema(),
+                })
+            }
+        }
+    }
+
+    fn pending_write_from_owned_operation(
+        &self,
+        operation: BatchOperation,
+    ) -> Result<PendingTableWrite, Error> {
+        match operation {
+            BatchOperation::Insert { table, record } => {
+                let table_schema = self.table(&table)?;
+                let descriptor = self.record_descriptor_for_input(&table, &record)?;
+                let (variant_tag, descriptor, record) =
+                    resolve_owned_record_input(table_schema, record, descriptor)?;
+                let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
+                Ok(PendingTableWrite::Set {
+                    mode: WriteMode::Insert,
+                    table,
+                    key,
+                    variant_tag,
+                    descriptor,
+                    record,
+                })
+            }
+            BatchOperation::InsertRaw { table, key, record } => {
+                let table_schema = self.table(&table)?;
+                let descriptor = self.record_descriptor_for_raw_input(&table, &record)?;
+                let (variant_tag, descriptor, record) =
+                    resolve_owned_raw_record_input(table_schema, record, descriptor)?;
+                Ok(PendingTableWrite::Set {
+                    mode: WriteMode::Insert,
+                    table,
+                    key: key.into_bytes(),
+                    variant_tag,
+                    descriptor,
+                    record,
+                })
+            }
+            BatchOperation::InsertRawFresh { table, key, record } => {
+                let table_schema = self.table(&table)?;
+                let descriptor = self.record_descriptor_for_raw_input(&table, &record)?;
+                let (variant_tag, descriptor, record) =
+                    resolve_owned_raw_record_input(table_schema, record, descriptor)?;
+                Ok(PendingTableWrite::Set {
+                    mode: WriteMode::InsertFresh,
+                    table,
+                    key: key.into_bytes(),
+                    variant_tag,
+                    descriptor,
+                    record,
+                })
+            }
+            BatchOperation::Update { table, record } => {
+                let table_schema = self.table(&table)?;
+                let descriptor = self.record_descriptor_for_input(&table, &record)?;
+                let (variant_tag, descriptor, record) =
+                    resolve_owned_record_input(table_schema, record, descriptor)?;
+                let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
+                Ok(PendingTableWrite::Set {
+                    mode: WriteMode::Update,
+                    table,
+                    key,
+                    variant_tag,
+                    descriptor,
+                    record,
+                })
+            }
+            BatchOperation::UpdateRaw { table, key, record } => {
+                let table_schema = self.table(&table)?;
+                let descriptor = self.record_descriptor_for_raw_input(&table, &record)?;
+                let (variant_tag, descriptor, record) =
+                    resolve_owned_raw_record_input(table_schema, record, descriptor)?;
+                Ok(PendingTableWrite::Set {
+                    mode: WriteMode::Update,
+                    table,
+                    key: key.into_bytes(),
+                    variant_tag,
+                    descriptor,
+                    record,
+                })
+            }
+            BatchOperation::Delete { table, key } => {
+                let descriptor = self.table(&table)?.record_schema();
+                Ok(PendingTableWrite::Delete {
+                    table,
+                    key: key.into_bytes(),
+                    descriptor,
                 })
             }
         }
