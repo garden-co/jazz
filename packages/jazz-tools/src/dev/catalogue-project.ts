@@ -753,7 +753,7 @@ async function resolveHistoricalSchemaForCreateMigration(
   );
 }
 
-export async function createMigration(
+async function createMigrationUnlocked(
   options: CreateMigrationOptions,
 ): Promise<CreateMigrationResult> {
   const explicitHashFlow = Boolean(options.fromHash || options.toHash);
@@ -867,6 +867,42 @@ export async function createMigration(
       ? await ensureCommittedSnapshot(options.migrationsDir, toSchema, timestamp)
       : null,
   };
+}
+
+async function withMigrationDirectoryLock<T>(
+  migrationsDir: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const lockDir = join(migrationsDir, ".jazz-create-migration.lock");
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    try {
+      // mkdir is the cross-process compare-and-set. Holding the lock across
+      // baseline discovery and both output writes makes timestamp allocation
+      // and committing the new baseline one operation.
+      await mkdir(lockDir);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for another migration generator to release ${lockDir}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+
+  try {
+    return await operation();
+  } finally {
+    await rm(lockDir, { recursive: true, force: true });
+  }
+}
+
+export async function createMigration(
+  options: CreateMigrationOptions,
+): Promise<CreateMigrationResult> {
+  await mkdir(options.migrationsDir, { recursive: true });
+  return withMigrationDirectoryLock(options.migrationsDir, () => createMigrationUnlocked(options));
 }
 
 function isDefinedMigration(value: unknown): value is DefinedMigration {

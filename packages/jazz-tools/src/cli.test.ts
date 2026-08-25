@@ -1,4 +1,4 @@
-import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { constants } from "node:fs";
 import {
   access,
@@ -936,6 +936,57 @@ describe("cli schema hash", () => {
 });
 
 describe("cli migrations", () => {
+  it("serializes simultaneous migration generation against one directory", async () => {
+    const { root } = await createWorkspace();
+    const migrationsDir = join(root, "migrations");
+    await writeFile(join(root, "schema.ts"), rootSchemaWithoutInlinePermissions());
+    await mkdir(migrationsDir, { recursive: true });
+    const externalLock = join(migrationsDir, ".jazz-create-migration.lock");
+    await mkdir(externalLock);
+
+    const resultsPromise = Promise.all(
+      Array.from(
+        { length: 4 },
+        () =>
+          new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve) => {
+            const child = spawn(process.execPath, [
+              distCliPath,
+              "migrations",
+              "create",
+              "--schema-dir",
+              root,
+              "--migrations-dir",
+              migrationsDir,
+            ]);
+            let stdout = "";
+            let stderr = "";
+            child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk));
+            child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk));
+            child.on("close", (code) => resolve({ code, stdout, stderr }));
+          }),
+      ),
+    );
+
+    // The lock is a filesystem boundary, not an in-process mutex: independently
+    // launched CLI processes must all wait for an external owner.
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await expect(access(join(migrationsDir, "snapshots"))).rejects.toThrow();
+    await rm(externalLock, { recursive: true });
+    const results = await resultsPromise;
+
+    expect(results.map((result) => result.code)).toEqual([0, 0, 0, 0]);
+    expect(
+      results.filter((result) => result.stdout.includes("Wrote initial schema snapshot:")),
+    ).toHaveLength(1);
+    expect(
+      results.filter((result) => result.stdout.includes("No structural schema changes")),
+    ).toHaveLength(3);
+    expect(
+      (await readdir(join(migrationsDir, "snapshots"))).filter((name) => name.endsWith(".json")),
+    ).toHaveLength(1);
+    await expect(access(join(migrationsDir, ".jazz-create-migration.lock"))).rejects.toThrow();
+  });
+
   it("writes an initial committed snapshot on first run", async () => {
     const { root } = await createWorkspace();
     const migrationsDir = join(root, "migrations");
