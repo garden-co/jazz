@@ -76,6 +76,11 @@ function added(id: string, title: string): SubscriptionWireDelta {
   ];
 }
 
+function publicationTitles(delta: { all?: Array<{ title: string }> }): string[] {
+  if (!delta.all) throw new Error("expected subscription publication to include complete results");
+  return delta.all.map((row) => row.title);
+}
+
 const dbs: Db[] = [];
 
 afterEach(async () => {
@@ -357,7 +362,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     const publications: string[][] = [];
     const unsubscribe = db.subscribeAll(
       query(),
-      (delta) => publications.push(delta.all.map((row) => row.title)),
+      (delta) => publications.push(publicationTitles(delta)),
       { tier: ReadTier.RemoteIfPossible },
     );
     const localCallback = client.subscriptionCallbacks.get(1)!;
@@ -406,7 +411,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     const publications: string[][] = [];
     const unsubscribe = db.subscribeAll(
       query(),
-      (delta) => publications.push(delta.all.map((row) => row.title)),
+      (delta) => publications.push(publicationTitles(delta)),
       { tier: ReadTier.RemoteIfPossible },
     );
     client.subscribe.mockImplementationOnce((_query, callback) => {
@@ -437,7 +442,7 @@ describe("Db ReadTier.RemoteIfPossible", () => {
     const publications: string[][] = [];
     const unsubscribe = db.subscribeAll(
       query(),
-      (delta) => publications.push(delta.all.map((row) => row.title)),
+      (delta) => publications.push(publicationTitles(delta)),
       { tier: ReadTier.RemoteIfPossible },
     );
     const localCallback = client.subscriptionCallbacks.get(1)!;
