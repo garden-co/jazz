@@ -1,8 +1,9 @@
 /**
  * Jazz permission-DSL tests for auth-betterauth-chat.
  *
- * Mints role-tagged JWTs against a local JWKS and asserts that generic-chat
- * updates and deletes remain bound to the original message creator.
+ * Mints role-tagged JWTs against a local JWKS and asserts that only an
+ * `admin` may insert, update, or delete Announcements while generic-chat
+ * updates and deletes remain bound to the message creator.
  *
  * NOT covered by `pnpm test`: Better Auth's sign-up / sign-in API
  * (`src/lib/auth.ts`), the JWKS endpoint at `/api/auth/jwks`, the
@@ -66,12 +67,17 @@ describe("auth-betterauth-chat permissions", () => {
     }
   });
 
-  it("authenticated JWT can post to Announcements and General", async () => {
-    const client = await makeClient(__MEMBER_JWT__);
-    await expect(send(client, __ANNOUNCEMENTS_CHAT_ID__, "member-ann")).resolves.toEqual(
-      expect.any(String),
-    );
-    await expect(send(client, __CHAT_ID__, "member-gen")).resolves.toEqual(expect.any(String));
+  it("allows only admins to mutate Announcements", async () => {
+    const admin = await makeClient(__ADMIN_JWT__);
+    const member = await makeClient(__MEMBER_JWT__);
+
+    await expect(send(member, __ANNOUNCEMENTS_CHAT_ID__, "member-ann")).rejects.toThrow();
+
+    const messageId = await send(admin, __ANNOUNCEMENTS_CHAT_ID__, "admin-ann");
+    await expect(update(member, messageId, "member edit")).rejects.toThrow();
+    await expect(update(admin, messageId, "admin edit")).resolves.toBeUndefined();
+    await expect(remove(member, messageId)).rejects.toThrow();
+    await expect(remove(admin, messageId)).resolves.toBeUndefined();
   });
 
   it("keeps generic-chat updates and deletes bound to the creator", async () => {
