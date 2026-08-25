@@ -639,6 +639,7 @@ pub struct OwnedChunkProvider {
     cache: Rc<RefCell<VerifiedChunkCache>>,
     leases: Rc<RefCell<ChunkLeaseStats>>,
     activity: Rc<RefCell<ChunkActivityState>>,
+    in_flight: Rc<RefCell<InFlightChunks>>,
 }
 
 #[derive(Default, Debug)]
@@ -704,6 +705,105 @@ struct ChunkActivityState {
     active_requests: usize,
     reclaiming: bool,
     waiters: Vec<Waker>,
+}
+
+/// The durable evaluation-request registry is per database rather than per
+/// evaluation session. Keep the provider future here too: two independently
+/// installed terminals can discover the same cold immutable node before either
+/// session has a result to cache.
+#[derive(Default)]
+struct InFlightChunks {
+    entries: BTreeMap<ChunkRequest, InFlightChunk>,
+}
+
+struct InFlightChunk {
+    future: ChunkFuture<'static, Result<Bytes, ChunkError>>,
+    result: Option<Result<Bytes, ChunkError>>,
+    waiters: Vec<Waker>,
+    consumers: usize,
+}
+
+/// One caller's lease-producing view of a shared exact chunk request.
+///
+/// The wrapper owns its consumer count. If every blocked evaluation is
+/// cancelled, dropping the last wrapper removes and drops the backing request,
+/// so a later evaluation creates a fresh request instead of joining a future
+/// that no executor will ever poll.
+struct CoalescedChunkGet {
+    request: ChunkRequest,
+    in_flight: Rc<RefCell<InFlightChunks>>,
+    leases: Rc<RefCell<ChunkLeaseStats>>,
+    done: bool,
+}
+
+impl CoalescedChunkGet {
+    fn finish(&mut self) {
+        if self.done {
+            return;
+        }
+        self.done = true;
+        let mut in_flight = self.in_flight.borrow_mut();
+        let remove = in_flight
+            .entries
+            .get_mut(&self.request)
+            .is_some_and(|entry| {
+                entry.consumers = entry.consumers.saturating_sub(1);
+                entry.consumers == 0
+            });
+        if remove {
+            in_flight.entries.remove(&self.request);
+        }
+    }
+}
+
+impl Future for CoalescedChunkGet {
+    type Output = Result<ChunkLease, ChunkError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        let mut wake = Vec::new();
+        let result = {
+            let mut in_flight = self.in_flight.borrow_mut();
+            let entry = in_flight
+                .entries
+                .get_mut(&self.request)
+                .expect("coalesced chunk request remains registered while a consumer exists");
+            if let Some(result) = &entry.result {
+                Some(result.clone())
+            } else {
+                match entry.future.as_mut().poll(cx) {
+                    Poll::Pending => {
+                        if !entry
+                            .waiters
+                            .iter()
+                            .any(|waiter| waiter.will_wake(cx.waker()))
+                        {
+                            entry.waiters.push(cx.waker().clone());
+                        }
+                        None
+                    }
+                    Poll::Ready(result) => {
+                        entry.result = Some(result.clone());
+                        wake = std::mem::take(&mut entry.waiters);
+                        Some(result)
+                    }
+                }
+            }
+        };
+        for waiter in wake {
+            waiter.wake();
+        }
+        let Some(result) = result else {
+            return Poll::Pending;
+        };
+        self.as_mut().get_mut().finish();
+        Poll::Ready(result.map(|bytes| ChunkLease::new(bytes, Rc::clone(&self.leases))))
+    }
+}
+
+impl Drop for CoalescedChunkGet {
+    fn drop(&mut self) {
+        self.finish();
+    }
 }
 
 struct ActiveChunkRequest {
@@ -786,6 +886,7 @@ impl OwnedChunkProvider {
             })),
             leases: Rc::new(RefCell::new(ChunkLeaseStats::default())),
             activity: Rc::new(RefCell::new(ChunkActivityState::default())),
+            in_flight: Rc::new(RefCell::new(InFlightChunks::default())),
         }
     }
 
@@ -828,52 +929,82 @@ impl OwnedChunkProvider {
         let cache = Rc::clone(&self.cache);
         let leases = Rc::clone(&self.leases);
         let activity = Rc::clone(&self.activity);
-        Box::pin(async move {
-            let request_guard = ActiveChunkRequest::acquire(activity).await;
-            {
-                let mut cache = cache.borrow_mut();
-                cache.clock = cache.clock.wrapping_add(1);
-                let clock = cache.clock;
-                if let Some((bytes, last_use)) = cache.entries.get_mut(&request) {
-                    *last_use = clock;
-                    let lease = ChunkLease::new(bytes.clone(), leases);
-                    drop(request_guard);
-                    return Ok(lease);
-                }
-            }
-            let bytes = provider.get(request.clone()).await?;
-            if bytes.len() > crate::large_values::MAX_ENCODED_NODE_BYTES {
-                return Err(ChunkError::Integrity);
-            }
-            if crate::large_values::object_hash(&bytes).0 != request.object_hash {
-                return Err(ChunkError::Integrity);
-            }
+        let in_flight = Rc::clone(&self.in_flight);
+        let cached = {
             let mut cache = cache.borrow_mut();
-            let length = bytes.len();
-            if length <= cache.budget {
-                while cache.bytes.saturating_add(length) > cache.budget {
-                    let Some(oldest) = cache
-                        .entries
-                        .iter()
-                        .min_by_key(|(_, (_, last_use))| *last_use)
-                        .map(|(request, _)| request.clone())
-                    else {
-                        break;
-                    };
-                    if let Some((evicted, _)) = cache.entries.remove(&oldest) {
-                        cache.bytes = cache.bytes.saturating_sub(evicted.len());
-                    }
-                }
-                cache.clock = cache.clock.wrapping_add(1);
-                let clock = cache.clock;
-                cache.entries.insert(request, (bytes.clone(), clock));
-                cache.bytes = cache.bytes.saturating_add(length);
+            cache.clock = cache.clock.wrapping_add(1);
+            let clock = cache.clock;
+            if let Some((bytes, last_use)) = cache.entries.get_mut(&request) {
+                *last_use = clock;
+                Some(bytes.clone())
+            } else {
+                None
             }
-            let lease = ChunkLease::new(bytes, leases);
-            drop(request_guard);
-            Ok(lease)
+        };
+        if let Some(bytes) = cached {
+            return Box::pin(async move { Ok(ChunkLease::new(bytes, leases)) });
+        }
+        let mut entries = in_flight.borrow_mut();
+        if let Some(entry) = entries.entries.get_mut(&request) {
+            entry.consumers = entry.consumers.saturating_add(1);
+        } else {
+            entries.entries.insert(
+                request.clone(),
+                InFlightChunk {
+                    future: load_and_verify_chunk(provider, cache, activity, request.clone()),
+                    result: None,
+                    waiters: Vec::new(),
+                    consumers: 1,
+                },
+            );
+        }
+        drop(entries);
+        Box::pin(CoalescedChunkGet {
+            request,
+            in_flight,
+            leases,
+            done: false,
         })
     }
+}
+
+fn load_and_verify_chunk(
+    provider: Rc<dyn ChunkProvider>,
+    cache: Rc<RefCell<VerifiedChunkCache>>,
+    activity: Rc<RefCell<ChunkActivityState>>,
+    request: ChunkRequest,
+) -> ChunkFuture<'static, Result<Bytes, ChunkError>> {
+    Box::pin(async move {
+        let _request_guard = ActiveChunkRequest::acquire(activity).await;
+        let bytes = provider.get(request.clone()).await?;
+        if bytes.len() > crate::large_values::MAX_ENCODED_NODE_BYTES
+            || crate::large_values::object_hash(&bytes).0 != request.object_hash
+        {
+            return Err(ChunkError::Integrity);
+        }
+        let mut cache = cache.borrow_mut();
+        let length = bytes.len();
+        if length <= cache.budget {
+            while cache.bytes.saturating_add(length) > cache.budget {
+                let Some(oldest) = cache
+                    .entries
+                    .iter()
+                    .min_by_key(|(_, (_, last_use))| *last_use)
+                    .map(|(request, _)| request.clone())
+                else {
+                    break;
+                };
+                if let Some((evicted, _)) = cache.entries.remove(&oldest) {
+                    cache.bytes = cache.bytes.saturating_sub(evicted.len());
+                }
+            }
+            cache.clock = cache.clock.wrapping_add(1);
+            let clock = cache.clock;
+            cache.entries.insert(request, (bytes.clone(), clock));
+            cache.bytes = cache.bytes.saturating_add(length);
+        }
+        Ok(bytes)
+    })
 }
 
 #[derive(Debug)]
@@ -1017,8 +1148,10 @@ impl ChunkProvider for TestChunkProvider {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::pin::Pin;
 
     use futures::executor::block_on;
+    use futures::task::noop_waker;
 
     use super::*;
 
@@ -1051,6 +1184,82 @@ mod tests {
         assert_eq!(block_on(chunks.get(request.clone())).unwrap(), bytes);
         assert_eq!(block_on(chunks.get(request)).unwrap(), bytes);
         assert_eq!(provider.calls.get(), 1);
+    }
+
+    #[test]
+    fn concurrent_cold_sessions_share_one_provider_request_and_cancel_cleanly() {
+        let bytes = Bytes::from_static(b"one cold authenticated chunk");
+        let request = ChunkRequest {
+            object_hash: crate::large_values::object_hash(&bytes).0,
+            locator: Locator::from_seed(b"one-cold-request"),
+        };
+        let (provider, control) = TestChunkProvider::controlled([(request.clone(), bytes)]);
+        let chunks = OwnedChunkProvider::new(Rc::new(provider));
+        control.pause();
+        let mut first = chunks.get(request.clone());
+        let mut second = chunks.get(request.clone());
+        let waker = noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+
+        assert!(matches!(
+            Pin::new(&mut first).poll(&mut context),
+            Poll::Pending
+        ));
+        assert!(matches!(
+            Pin::new(&mut second).poll(&mut context),
+            Poll::Pending
+        ));
+        assert_eq!(control.observed(), vec![request.clone()]);
+        assert_eq!(chunks.cache_stats().active_requests, 1);
+
+        // No blocked consumer remains, so the shared request is dropped rather
+        // than becoming a permanently unpolled registry entry.
+        drop(first);
+        drop(second);
+        assert_eq!(chunks.cache_stats().active_requests, 0);
+        let mut retry = chunks.get(request.clone());
+        assert!(matches!(
+            Pin::new(&mut retry).poll(&mut context),
+            Poll::Pending
+        ));
+        assert_eq!(control.observed(), vec![request.clone(), request]);
+    }
+
+    #[test]
+    fn concurrent_cold_sessions_receive_independent_leases_from_one_completion() {
+        let bytes = Bytes::from_static(b"shared completion bytes");
+        let request = ChunkRequest {
+            object_hash: crate::large_values::object_hash(&bytes).0,
+            locator: Locator::from_seed(b"shared-completion"),
+        };
+        let (provider, control) = TestChunkProvider::controlled([(request.clone(), bytes.clone())]);
+        let chunks = OwnedChunkProvider::new(Rc::new(provider));
+        control.pause();
+        let mut first = chunks.get(request.clone());
+        let mut second = chunks.get(request.clone());
+        let waker = noop_waker();
+        let mut context = std::task::Context::from_waker(&waker);
+
+        assert!(matches!(
+            Pin::new(&mut first).poll(&mut context),
+            Poll::Pending
+        ));
+        assert!(matches!(
+            Pin::new(&mut second).poll(&mut context),
+            Poll::Pending
+        ));
+        control.release_one();
+        let Poll::Ready(Ok(first)) = Pin::new(&mut first).poll(&mut context) else {
+            panic!("first coalesced consumer must complete after the shared request");
+        };
+        let Poll::Ready(Ok(second)) = Pin::new(&mut second).poll(&mut context) else {
+            panic!("second coalesced consumer must complete after the shared request");
+        };
+        assert_eq!(first, bytes);
+        assert_eq!(second, bytes);
+        assert_eq!(control.observed(), vec![request]);
+        assert_eq!(chunks.cache_stats().active_requests, 0);
+        assert_eq!(chunks.cache_stats().active_leases, 2);
     }
 
     #[test]
