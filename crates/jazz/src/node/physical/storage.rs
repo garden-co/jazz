@@ -16,16 +16,11 @@ where
                 SHARED_DELETION_HISTORY_TABLE.to_owned(),
             ));
         }
-        Ok(groove::Intern::new(
-            physical_history_binding(
-                &self.catalogue.catalogue_schemas,
-                &self.catalogue.schema_version_aliases,
-                &self.catalogue.physical_mappings,
-                schema_version,
-                version.table(),
-            )?
-            .storage_table,
-        ))
+        Ok(groove::Intern::new(physical_history_storage_table(
+            &self.catalogue.physical_mappings,
+            schema_version,
+            version.table(),
+        )?))
     }
 
     pub(super) fn version_storage_primary_key(
@@ -243,9 +238,7 @@ where
             return self.shared_deletion_history_write_binding(version);
         }
 
-        let binding = physical_history_binding(
-            &self.catalogue.catalogue_schemas,
-            &self.catalogue.schema_version_aliases,
+        let storage_table = physical_history_storage_table(
             &self.catalogue.physical_mappings,
             schema_version,
             version.table(),
@@ -259,7 +252,7 @@ where
             .ok_or(Error::InvalidStoredValue(
                 "physical history table mapping missing",
             ))?;
-        let physical_table = self.database.table_schema(&binding.storage_table)?.clone();
+        let physical_table = self.database.table_schema(&storage_table)?.clone();
         let descriptor = physical_write_descriptor(
             &source_table.history_storage_table().record_schema(),
             &physical_history_field_names(&source_table, source_mapping)?,
@@ -423,7 +416,7 @@ where
         }
         let record = OwnedRecord::new(descriptor.create(&values)?, descriptor);
         Ok((
-            groove::Intern::new(binding.storage_table),
+            groove::Intern::new(storage_table),
             groove::records::VariantRecord::new(
                 groove_variant_tag(version.schema_version_alias())?,
                 record,

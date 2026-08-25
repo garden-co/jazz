@@ -1243,8 +1243,7 @@ where
         match version.layer() {
             VersionLayer::Content => {
                 let table = self.table_in_schema(version.table(), schema_version)?;
-                let binding = physical_current_binding(
-                    &self.catalogue.catalogue_schemas,
+                let storage_table = physical_current_storage_table(
                     &self.catalogue.physical_mappings,
                     schema_version,
                     version.table(),
@@ -1264,7 +1263,7 @@ where
                     .ok_or(Error::InvalidStoredValue(
                         "physical global-current table mapping missing",
                     ))?;
-                let physical_table = self.database.table_schema(&binding.storage_table)?.clone();
+                let physical_table = self.database.table_schema(&storage_table)?.clone();
                 let descriptor = physical_write_descriptor(
                     &table.global_current_storage_tables()[0].record_schema(),
                     &physical_current_field_names(&table, &mapping)?,
@@ -1280,7 +1279,7 @@ where
                 )?;
                 let physical = OwnedRecord::new(descriptor.create(&values)?, descriptor);
                 batch.update_raw(
-                    binding.storage_table,
+                    storage_table,
                     global_current_primary_key(version.branch_key(), version.row_uuid()),
                     groove::records::VariantRecord::new(
                         u32::try_from(version.schema_version_alias().0)
@@ -1346,8 +1345,7 @@ where
         match version.layer() {
             VersionLayer::Content => {
                 let table = self.table_in_schema(version.table(), schema_version)?;
-                let binding = physical_current_binding(
-                    &self.catalogue.catalogue_schemas,
+                let storage_table = physical_current_storage_table(
                     &self.catalogue.physical_mappings,
                     schema_version,
                     version.table(),
@@ -1367,7 +1365,7 @@ where
                     .ok_or(Error::InvalidStoredValue(
                         "physical ahead-current table mapping missing",
                     ))?;
-                let physical_table = self.database.table_schema(&binding.storage_table)?.clone();
+                let physical_table = self.database.table_schema(&storage_table)?.clone();
                 let descriptor = physical_write_descriptor(
                     &table.ahead_current_storage_tables()[0].record_schema(),
                     &physical_current_field_names(&table, &mapping)?,
@@ -1383,7 +1381,7 @@ where
                 )?;
                 let physical = OwnedRecord::new(descriptor.create(&values)?, descriptor);
                 batch.insert_raw(
-                    binding.storage_table,
+                    storage_table,
                     history_primary_key(version),
                     groove::records::VariantRecord::new(
                         u32::try_from(version.schema_version_alias().0)
