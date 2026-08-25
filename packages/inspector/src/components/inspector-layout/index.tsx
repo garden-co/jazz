@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { NavLink, Outlet, useLocation } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { useStandaloneContext } from "../../contexts/standalone-context.js";
@@ -6,9 +7,13 @@ import {
   type SchemaHashInfo,
 } from "../../utility/schema-hash-display.js";
 import {
+  DETACH_SHORTCUT_TOOLTIP,
+  OVERLAY_SHOW_DETACH_BUTTON_STORAGE_KEY,
+  isBoolean,
   isDetachedInspector,
   requestCloseOverlay,
   requestDetachOverlay,
+  setOverlayActiveRoute,
 } from "../../utility/overlay-settings.js";
 import { useLocalStorageState } from "../../utility/use-local-storage-state.js";
 import { Tooltip } from "../tooltip/Tooltip.js";
@@ -89,8 +94,27 @@ export function InspectorLayout() {
     TABLES_PANEL_OPEN_STORAGE_KEY,
     true,
   );
+  const [showDetachButton, setShowDetachButton] = useLocalStorageState<boolean>(
+    OVERLAY_SHOW_DETACH_BUTTON_STORAGE_KEY,
+    true,
+    { isValid: isBoolean },
+  );
 
   const isDataExplorerRoute = location.pathname.startsWith("/data-explorer");
+  const activeRoute = `${location.pathname}${location.search}`;
+
+  useEffect(() => {
+    if (!isOverlay || isDetached) return;
+    setOverlayActiveRoute(activeRoute);
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!event.altKey || !event.shiftKey || event.code !== "KeyD") return;
+      event.preventDefault();
+      requestDetachOverlay(activeRoute);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activeRoute, isDetached, isOverlay]);
 
   const onToggleTablesPanel = () => {
     setIsTablesPanelOpen((isOpen) => !isOpen);
@@ -158,16 +182,18 @@ export function InspectorLayout() {
           ) : null}
           {isOverlay && !isDetached ? (
             <>
-              <Tooltip label="Open in separate window">
-                <button
-                  type="button"
-                  onClick={() => requestDetachOverlay(`${location.pathname}${location.search}`)}
-                  className={styles.iconButton}
-                  aria-label="Open inspector in separate window"
-                >
-                  <PictureInPictureIcon />
-                </button>
-              </Tooltip>
+              {showDetachButton ? (
+                <Tooltip label={DETACH_SHORTCUT_TOOLTIP}>
+                  <button
+                    type="button"
+                    onClick={() => requestDetachOverlay(activeRoute)}
+                    className={styles.iconButton}
+                    aria-label="Open inspector in separate window"
+                  >
+                    <PictureInPictureIcon />
+                  </button>
+                </Tooltip>
+              ) : null}
               <Tooltip label="Close (Esc)">
                 <button
                   type="button"
@@ -183,7 +209,7 @@ export function InspectorLayout() {
         </div>
       </header>
       <section className={styles.content}>
-        <Outlet context={{ isTablesPanelOpen }} />
+        <Outlet context={{ isTablesPanelOpen, showDetachButton, setShowDetachButton }} />
       </section>
     </main>
   );

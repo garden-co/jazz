@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { requestCloseOverlay, requestDetachOverlay } from "./overlay-settings.js";
+import {
+  requestCloseOverlay,
+  requestDetachOverlay,
+  setOverlayActiveRoute,
+} from "./overlay-settings.js";
 
 const initialUrl = window.location.href;
 
@@ -35,6 +39,15 @@ describe("requestDetachOverlay", () => {
 
     expect(document.activeElement).toBe(trigger);
     trigger.remove();
+  });
+
+  it("synchronizes the active route with the parent overlay", () => {
+    const setActiveRoute = vi.fn();
+    (window as unknown as Record<string, unknown>).__jazzInspectorOverlay = { setActiveRoute };
+
+    setOverlayActiveRoute("/settings");
+
+    expect(setActiveRoute).toHaveBeenCalledWith("/settings");
   });
 
   it("closes a detached inspector window", () => {

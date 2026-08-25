@@ -9,6 +9,11 @@ class TestStyleSheet {
   replaceSync() {}
 }
 
+interface InspectorOverlayControl {
+  detach(route: string): boolean;
+  setActiveRoute(route: string): void;
+}
+
 describe("inspector overlay detached window", () => {
   beforeEach(() => {
     const values = new Map<string, string>();
@@ -48,10 +53,16 @@ describe("inspector overlay detached window", () => {
       height: 420,
     } as DOMRect);
 
-    const control = (
-      window as unknown as { __jazzInspectorOverlay: { detach(route: string): boolean } }
-    ).__jazzInspectorOverlay;
-    expect(control.detach("/settings")).toBe(true);
+    let control = (window as unknown as { __jazzInspectorOverlay: InspectorOverlayControl })
+      .__jazzInspectorOverlay;
+    control.setActiveRoute("/settings");
+    overlay?.remove();
+    document.body.append(overlay!);
+    control = (window as unknown as { __jazzInspectorOverlay: InspectorOverlayControl })
+      .__jazzInspectorOverlay;
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { altKey: true, shiftKey: true, code: "KeyD" }),
+    );
 
     expect(open).toHaveBeenCalledOnce();
     const url = new URL(String(open.mock.calls[0]?.[0]));

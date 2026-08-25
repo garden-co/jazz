@@ -11,6 +11,14 @@
  * literal `true` / `false`, which the loader reads as `raw === "true"`.
  */
 export const OVERLAY_HIDE_LAUNCHER_STORAGE_KEY = "jazz-inspector-overlay:hide-toggle";
+export const OVERLAY_SHOW_DETACH_BUTTON_STORAGE_KEY = "jazz-inspector-overlay:show-detach-button";
+
+const IS_APPLE =
+  typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/.test(navigator.platform);
+export const DETACH_SHORTCUT_KEYS = IS_APPLE ? ["⌥", "⇧", "D"] : ["Alt", "Shift", "D"];
+export const DETACH_SHORTCUT_TOOLTIP = IS_APPLE
+  ? "Open in separate window ⌥⇧D"
+  : "Open in separate window Alt+Shift+D";
 
 export function isBoolean(value: unknown): value is boolean {
   return typeof value === "boolean";
@@ -23,6 +31,7 @@ const OVERLAY_CONTROL_GLOBAL = "__jazzInspectorOverlay";
 
 interface InspectorOverlayControl {
   detach(route: string): boolean;
+  setActiveRoute(route: string): void;
 }
 
 export function isDetachedInspector(): boolean {
@@ -39,6 +48,17 @@ export function requestDetachOverlay(route: string): void {
     }
   } catch {
     // No parent / cross-origin (e.g. standalone app) — nothing to detach.
+  }
+}
+
+export function setOverlayActiveRoute(route: string): void {
+  try {
+    const control = (window.parent as unknown as Record<string, unknown>)[OVERLAY_CONTROL_GLOBAL] as
+      | InspectorOverlayControl
+      | undefined;
+    control?.setActiveRoute(route);
+  } catch {
+    // No parent / cross-origin (e.g. standalone app) — nothing to synchronize.
   }
 }
 

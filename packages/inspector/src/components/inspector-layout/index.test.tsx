@@ -1,6 +1,11 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, Route, Routes } from "react-router";
+import { SettingsPage } from "../../pages/settings/index.js";
+import {
+  DETACH_SHORTCUT_TOOLTIP,
+  OVERLAY_SHOW_DETACH_BUTTON_STORAGE_KEY,
+} from "../../utility/overlay-settings.js";
 import { InspectorLayout } from "./index";
 
 const mockUseStandaloneContext = vi.fn();
@@ -17,16 +22,24 @@ vi.mock("../../contexts/devtools-context.js", () => ({
 }));
 
 vi.mock("../../utility/overlay-settings.js", () => ({
+  DETACH_SHORTCUT_KEYS: ["Alt", "Shift", "D"],
+  DETACH_SHORTCUT_TOOLTIP: "Open in separate window Alt+Shift+D",
+  OVERLAY_HIDE_LAUNCHER_STORAGE_KEY: "jazz-inspector-overlay:hide-toggle",
+  OVERLAY_SHOW_DETACH_BUTTON_STORAGE_KEY: "jazz-inspector-overlay:show-detach-button",
   isDetachedInspector: () => mockIsDetachedInspector(),
+  isBoolean: (value: unknown) => typeof value === "boolean",
   requestCloseOverlay: vi.fn(),
   requestDetachOverlay: (...args: unknown[]) => mockRequestDetachOverlay(...args),
+  setOverlayActiveRoute: vi.fn(),
 }));
 
 describe("InspectorLayout", () => {
   beforeEach(() => {
+    localStorage.clear();
     mockUseStandaloneContext.mockReset();
     mockUseDevtoolsContext.mockReset();
     mockIsDetachedInspector.mockReset();
+    mockRequestDetachOverlay.mockReset();
     mockIsDetachedInspector.mockReturnValue(false);
     mockUseDevtoolsContext.mockReturnValue({ runtime: "extension" });
   });
@@ -199,6 +212,35 @@ describe("InspectorLayout", () => {
     const detach = screen.getByRole("button", { name: "Open inspector in separate window" });
     fireEvent.click(detach);
     expect(mockRequestDetachOverlay).toHaveBeenCalledWith("/data-explorer/todos/data");
+    expect(screen.getByText(DETACH_SHORTCUT_TOOLTIP)).not.toBeNull();
+
+    fireEvent.keyDown(window, { altKey: true, shiftKey: true, code: "KeyD" });
+    expect(mockRequestDetachOverlay).toHaveBeenNthCalledWith(2, "/data-explorer/todos/data");
+  });
+
+  it("shows the detach button by default and lets settings hide it", () => {
+    mockUseStandaloneContext.mockReturnValue(null);
+    mockUseDevtoolsContext.mockReturnValue({ runtime: "overlay" });
+
+    render(
+      <MemoryRouter initialEntries={["/settings"]}>
+        <Routes>
+          <Route element={<InspectorLayout />}>
+            <Route path="settings" element={<SettingsPage />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const visibility = screen.getByRole("switch", { name: "Show the detach button" });
+    expect(
+      screen.getByRole("button", { name: "Open inspector in separate window" }),
+    ).not.toBeNull();
+
+    fireEvent.click(visibility);
+
+    expect(screen.queryByRole("button", { name: "Open inspector in separate window" })).toBeNull();
+    expect(localStorage.getItem(OVERLAY_SHOW_DETACH_BUTTON_STORAGE_KEY)).toBe("false");
   });
 
   it("hides overlay window actions in a detached inspector", () => {

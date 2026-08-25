@@ -283,6 +283,7 @@ const hostBinding = new HostBinding();
 // registered against #ac.signal so disconnectedCallback() removes them at once.
 class JazzInspectorOverlay extends HTMLElement {
   #ac: AbortController | undefined;
+  #activeRoute = "/data-explorer";
 
   // Constructed once and shared by adoptedStyleSheets, so the (large) CSS is
   // parsed a single time rather than re-injected as a <style> per mount.
@@ -391,7 +392,12 @@ class JazzInspectorOverlay extends HTMLElement {
     };
     signal.addEventListener("abort", closeDetachedWindow, { once: true });
     window.addEventListener("pagehide", closeDetachedWindow, { signal });
-    const overlayControl = { detach: openDetachedWindow };
+    const overlayControl = {
+      detach: openDetachedWindow,
+      setActiveRoute: (route: string) => {
+        this.#activeRoute = route;
+      },
+    };
     (window as unknown as Record<string, unknown>)[OVERLAY_CONTROL_GLOBAL] = overlayControl;
     signal.addEventListener(
       "abort",
@@ -460,6 +466,14 @@ class JazzInspectorOverlay extends HTMLElement {
             return;
           }
           setOpen(!open);
+        } else if (e.altKey && e.shiftKey && e.code === "KeyD") {
+          e.preventDefault();
+          restoreDockIfDetachedWindowClosed();
+          if (detachedWindow && !detachedWindow.closed) {
+            detachedWindow.focus();
+            return;
+          }
+          if (openDetachedWindow(this.#activeRoute)) setOpen(true);
         } else if (e.key === "Escape" && open && detachedWindow === null) {
           setOpen(false);
         }
