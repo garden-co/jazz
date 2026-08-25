@@ -36,9 +36,10 @@ Groove enum that is not visible in a schema, query, policy, index, or result:
 
 ```text
 StoredScalar = enum {
-  Primitive { value: declared primitive },
+  Primitive { kind, value: declared primitive },
   Chunked {
     format_version,
+    kind,
     logical_hash,
     root: { object_hash, locator },
     byte_length,
@@ -50,6 +51,7 @@ StoredScalar = enum {
 
 LargeValueRef {
   format_version,
+  kind,
   logical_hash,
   root: NodeRef { object_hash, locator },
   byte_length,
@@ -66,10 +68,12 @@ record, array, nullable, and enum codecs;
 there is no private tag byte or postcard envelope for a scalar descriptor.
 `bytes` uses the bytes primitive and `string` uses the string primitive. JSON
 retains Groove's existing canonical JSON-as-string logical representation, so
-its primitive backing is string as well; its JSON validation and chunk behavior
-are selected by declared schema/lowering metadata, never by a stored or
-client-supplied `kind` field. Internal raw string/bytes backing primitives only
-terminate this self-hosting enum encoding and are impossible at the public
+its primitive backing is string as well. Both physical arms carry a Groove-owned
+kind witness which MUST equal the immutable kind supplied by schema lowering
+before the payload is interpreted. The witness authenticates that a stored
+payload has not been replayed through another logical kind; it is never a
+client-selected semantics switch. Internal raw string/bytes backing primitives
+only terminate this self-hosting enum encoding and are impossible at the public
 schema or logical-operator boundary.
 
 `logical_hash` is deterministic content identity. `object_hash` authenticates
@@ -135,19 +139,33 @@ and exact aggregate metrics:
 
 ```text
 NodeRef { object_hash, locator }
-Leaf    { format, bytes }
-Branch  { format, children: [{ node_ref, byte_length, utf16_length? }] }
+Leaf    { format, kind, bytes }
+Branch  { format, kind, children: [{ node_ref, byte_length, utf16_length? }] }
 ```
 
 Leaves are selected by a versioned FastCDC-like content-defined chunker with
 hard minimum, target, and maximum sizes. Branches use content-defined grouping
-over complete child descriptors. Recursive grouping produces a deterministic
-prolly tree: identical kind, format and logical base bytes produce the same
-logical hashes and shape independent of edit history. A branch's object hash
+over a private kind/format-neutral content fingerprint derived from complete
+child descriptors. Keeping this grouping fingerprint separate from logical
+identity means a representation-version or semantic-kind distinction does not
+arbitrarily reshuffle otherwise identical content. Recursive grouping produces
+a deterministic prolly tree: identical kind, format and logical base bytes
+produce the same logical hashes and shape independent of edit history. A branch's object hash
 commits to its exact child `NodeRef`s, including locators; the separate logical
 hash excludes retrieval identities. Unchanged nodes may retain their locators
 across versions, while an independently created equal value may have a different
 retrieval graph and the same logical identity.
+
+The current immutable-node format is version 2. Every leaf and branch embeds
+both that format and its semantic kind. Decoding MUST reject either field when
+it differs from the expected descriptor context. The locator-independent
+logical hash commits to the format and kind as well as the leaf bytes or branch
+child descriptors. Groove derives that logical identity from the grouping
+fingerprint with a reversible full-width kind/format domain mask, allowing
+localized consolidation to recover canonical grouping without persisting a
+second hash in each child descriptor. Consequently, identical UTF-8 or JSON-compatible bytes do
+not share logical identities across bytes, text, and JSON values. Candidate
+format-1 nodes fail closed; there is no compatibility decoder.
 
 Text leaf boundaries are valid UTF-8 code-point boundaries. Text branches also
 carry exact aggregate UTF-16 code-unit lengths. JSON uses literal validated

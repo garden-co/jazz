@@ -578,7 +578,7 @@ mod variant_case_tests {
     }
 
     #[test]
-    fn physical_large_scalar_kind_is_schema_derived_and_json_is_not_text() {
+    fn physical_large_scalar_kind_is_schema_derived_authenticated_and_json_is_not_text() {
         let text = ColumnSchema::new("body", records::ValueType::String);
         let mut json = ColumnSchema::new("body", records::ValueType::String);
         json.large_value_kind = crate::schema::LargeValueSemanticKind::Json;
@@ -612,10 +612,10 @@ mod variant_case_tests {
             physical_storage_value_type(&json),
         )]);
         let same_json_shaped_bytes = Value::String(r#"{"title":"same bytes"}"#.to_owned());
-        assert_eq!(
+        assert_ne!(
             text_cell.create(std::slice::from_ref(&same_json_shaped_bytes)).unwrap(),
             json_cell.create(std::slice::from_ref(&same_json_shaped_bytes)).unwrap(),
-            "the kind is contextual schema metadata, not a redundant cell witness"
+            "the schema-derived kind is redundantly authenticated in physical storage"
         );
 
         let json_root = groove::large_values::prepare(
