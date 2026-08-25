@@ -268,9 +268,9 @@ fn remote_authored_branch_keys_are_validated_atomically_before_storage() {
         row(0x63),
         Vec::new(),
         AuthorSubject::SYSTEM,
-        TxTime(10),
+        10,
         AuthorSubject::SYSTEM,
-        TxTime(10),
+        10,
         &content_cells,
         None,
     )
@@ -282,9 +282,9 @@ fn remote_authored_branch_keys_are_validated_atomically_before_storage() {
         row(0x64),
         Vec::new(),
         AuthorSubject::SYSTEM,
-        TxTime(10),
+        10,
         AuthorSubject::SYSTEM,
-        TxTime(10),
+        10,
         &BTreeMap::<String, Value>::new(),
         Some(DeletionEvent::Deleted),
     )

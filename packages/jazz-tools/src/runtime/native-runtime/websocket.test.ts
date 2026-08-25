@@ -289,7 +289,9 @@ describe("websocket frame carrier", () => {
 
     socket!.emitMessage(encodeWebSocketFrameBatch([encodeServerHello(1n, 12)]));
 
-    await expect(carrier.ready()).rejects.toThrow("does not support wire protocol 13");
+    await expect(carrier.ready()).rejects.toThrow(
+      `does not support wire protocol ${WIRE_PROTOCOL_VERSION}`,
+    );
     expect(socket!.closed).toBe(true);
   });
 

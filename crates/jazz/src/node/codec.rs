@@ -72,9 +72,9 @@ groove::define_record! {
         4 => schema_version: SchemaVersionAlias,
         5 => parents: ParentRefs,
         6 => created_by: AuthorSubject,
-        7 => created_at: TxTime,
+        7 => created_at: u64,
         8 => updated_by: AuthorSubject,
-        9 => updated_at: TxTime,
+        9 => updated_at: u64,
         10 => global_time: Option<GlobalTime>,
         .. user_cells,
     }
@@ -89,9 +89,9 @@ groove::define_record! {
         4 => schema_version: SchemaVersionAlias,
         5 => parents: ParentRefs,
         6 => created_by: AuthorSubject,
-        7 => created_at: TxTime,
+        7 => created_at: u64,
         8 => updated_by: AuthorSubject,
-        9 => updated_at: TxTime,
+        9 => updated_at: u64,
         10 => global_time: Option<GlobalTime>,
         11 => _deletion: DeletionEvent,
     }
@@ -212,9 +212,9 @@ groove::define_record! {
         0 => row_uuid: RowUuid,
         1 => parents: ParentRefs,
         2 => created_by: AuthorSubject,
-        3 => created_at: TxTime,
+        3 => created_at: u64,
         4 => updated_by: AuthorSubject,
-        5 => updated_at: TxTime,
+        5 => updated_at: u64,
         6 => _deletion: Option<Value>,
         .. user_cells,
     }
@@ -316,6 +316,11 @@ impl VersionRecord {
         table: &TableSchema,
         schema_version: SchemaVersionId,
     ) -> Result<Self, Error> {
+        TxTime::from_physical_ms(commit.now_ms).map_err(|_| {
+            Error::InvalidMergeableCommit(
+                "commit now_ms exceeds packed HLC physical-millisecond range",
+            )
+        })?;
         let positional = positional_cells_from_map(table, &commit.cells)?;
         VersionRecord::encode(
             table,
@@ -323,9 +328,9 @@ impl VersionRecord {
             commit.row_uuid,
             commit.parents.clone(),
             commit.made_by,
-            TxTime(commit.now_ms),
+            commit.now_ms,
             commit.made_by,
-            TxTime(commit.now_ms),
+            commit.now_ms,
             &positional,
             commit.deletion,
         )
@@ -353,9 +358,9 @@ impl VersionRecord {
             stored.row_uuid(),
             stored.parents(),
             stored.created_by(),
-            stored.created_at(),
+            stored.created_at().physical_ms(),
             stored.updated_by(),
-            stored.updated_at(),
+            stored.updated_at().physical_ms(),
             &cells,
             stored.deletion(),
         )
@@ -560,7 +565,7 @@ impl VersionRow {
                     schema_version_alias,
                     tx_time,
                     deletion,
-                ),
+                )?,
             )
         } else {
             (
@@ -1329,9 +1334,19 @@ fn history_values_from_wire(
             .collect(),
     ));
     values.push(Value::String(version.created_by().canonical().to_owned()));
-    values.push(Value::U64(version.created_at().0));
+    // Wire provenance carries public Unix milliseconds. Reconstruct the
+    // internal HLC with logical counter zero at this ingestion boundary.
+    values.push(Value::U64(
+        TxTime::from_physical_ms(version.created_at_ms())
+            .map_err(|_| Error::InvalidStoredValue("wire created_at_ms exceeds packed HLC range"))?
+            .0,
+    ));
     values.push(Value::String(version.updated_by().canonical().to_owned()));
-    values.push(Value::U64(version.updated_at().0));
+    values.push(Value::U64(
+        TxTime::from_physical_ms(version.updated_at_ms())
+            .map_err(|_| Error::InvalidStoredValue("wire updated_at_ms exceeds packed HLC range"))?
+            .0,
+    ));
     for (idx, column) in table.columns.iter().enumerate() {
         let value = version.optional_cell_at(idx);
         if let Some(value) = value.as_ref() {
@@ -1379,8 +1394,8 @@ fn register_values_from_wire(
     schema_version_alias: SchemaVersionAlias,
     tx_time: TxTime,
     deletion: DeletionEvent,
-) -> Vec<Value> {
-    vec![
+) -> Result<Vec<Value>, Error> {
+    Ok(vec![
         Value::Bytes(version.branch_key().canonical_bytes()),
         Value::Uuid(version.row_uuid().0),
         Value::U64(tx_time.0),
@@ -1394,11 +1409,23 @@ fn register_values_from_wire(
                 .collect(),
         ),
         Value::String(version.created_by().canonical().to_owned()),
-        Value::U64(version.created_at().0),
+        Value::U64(
+            TxTime::from_physical_ms(version.created_at_ms())
+                .map_err(|_| {
+                    Error::InvalidStoredValue("wire created_at_ms exceeds packed HLC range")
+                })?
+                .0,
+        ),
         Value::String(version.updated_by().canonical().to_owned()),
-        Value::U64(version.updated_at().0),
+        Value::U64(
+            TxTime::from_physical_ms(version.updated_at_ms())
+                .map_err(|_| {
+                    Error::InvalidStoredValue("wire updated_at_ms exceeds packed HLC range")
+                })?
+                .0,
+        ),
         deletion_event_value(deletion),
-    ]
+    ])
 }
 
 pub(super) fn deletion_event_value(deletion: DeletionEvent) -> Value {
@@ -1454,6 +1481,12 @@ pub(super) fn global_current_values(
     global_time: Option<GlobalTime>,
 ) -> Result<Vec<Value>, Error> {
     let mut values = stored_version_prefix_values(version);
+    // Current rows are the public read carrier. HLC ordering remains on the
+    // version/transaction fields; provenance exposes Unix milliseconds.
+    values[GlobalCurrentRowRecord::FIELD_CREATED_AT_IDX] =
+        Value::U64(version.created_at().physical_ms());
+    values[GlobalCurrentRowRecord::FIELD_UPDATED_AT_IDX] =
+        Value::U64(version.updated_at().physical_ms());
     values.push(Value::Nullable(
         global_time.map(|seq| Box::new(Value::U64(seq.0))),
     ));
@@ -1477,6 +1510,10 @@ pub(super) fn register_global_current_values(
     global_time: Option<GlobalTime>,
 ) -> Vec<Value> {
     let mut values = stored_version_prefix_values(version);
+    values[RegisterGlobalCurrentRowRecord::FIELD_CREATED_AT_IDX] =
+        Value::U64(version.created_at().physical_ms());
+    values[RegisterGlobalCurrentRowRecord::FIELD_UPDATED_AT_IDX] =
+        Value::U64(version.updated_at().physical_ms());
     values.push(Value::Nullable(
         global_time.map(|seq| Box::new(Value::U64(seq.0))),
     ));
@@ -1763,9 +1800,9 @@ pub(super) fn current_row_from_materialized_cells_with_layer_provenance(
         ));
     }
     values.push(Value::String(created.created_by().canonical().to_owned()));
-    values.push(Value::U64(created.created_at().0));
+    values.push(Value::U64(created.created_at().physical_ms()));
     values.push(Value::String(updated.updated_by().canonical().to_owned()));
-    values.push(Value::U64(updated.updated_at().0));
+    values.push(Value::U64(updated.updated_at().physical_ms()));
     values.push(Value::U64(updated.tx_time().0));
     values.push(Value::U64(updated.tx_node_alias().0));
     let raw = descriptor.create(&values)?;
@@ -1791,9 +1828,9 @@ pub(super) fn current_row_from_cells_with_explicit_provenance(
         ));
     }
     values.push(Value::String(provenance.created_by.canonical().to_owned()));
-    values.push(Value::U64(provenance.created_at.0));
+    values.push(Value::U64(provenance.created_at));
     values.push(Value::String(provenance.updated_by.canonical().to_owned()));
-    values.push(Value::U64(provenance.updated_at.0));
+    values.push(Value::U64(provenance.updated_at));
     let (tx_time, tx_node_alias) = projected_tx.unwrap_or((TxTime(0), NodeAlias(0)));
     values.push(Value::U64(tx_time.0));
     values.push(Value::U64(tx_node_alias.0));
@@ -1827,11 +1864,11 @@ fn append_current_row_provenance(values: &mut Vec<Value>, provenance: &VersionRo
     values.push(Value::String(
         provenance.created_by().canonical().to_owned(),
     ));
-    values.push(Value::U64(provenance.created_at().0));
+    values.push(Value::U64(provenance.created_at().physical_ms()));
     values.push(Value::String(
         provenance.updated_by().canonical().to_owned(),
     ));
-    values.push(Value::U64(provenance.updated_at().0));
+    values.push(Value::U64(provenance.updated_at().physical_ms()));
     values.push(Value::U64(provenance.tx_time().0));
     values.push(Value::U64(provenance.tx_node_alias().0));
 }

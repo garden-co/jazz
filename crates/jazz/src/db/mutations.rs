@@ -20,6 +20,22 @@ type PushPreparation = groove::large_values::PushStreamingPreparation<
     Box<dyn FnMut(groove::large_values::StagedChunk) -> Result<(), groove::large_values::Error>>,
 >;
 
+const MAX_PHYSICAL_TIMESTAMP_MS: u64 = crate::time::HLC_MAX_PHYSICAL_MS;
+
+pub(super) fn validate_updated_at_ms(updated_at_ms: Option<u64>) -> Result<(), Error> {
+    if let Some(updated_at_ms) = updated_at_ms
+        && updated_at_ms > MAX_PHYSICAL_TIMESTAMP_MS
+    {
+        return Err(Error::new(
+            ErrorCode::WriteRejected,
+            format!(
+                "updated_at_ms {updated_at_ms} exceeds the packed-HLC physical millisecond range"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Resumable host-driven upload used by asynchronous bindings such as WASM.
 pub struct StreamingValueUpload {
     id: groove::large_values::StagedLargeValueId,
@@ -472,6 +488,7 @@ where
             identity,
             matches!(target, ExactWriteTarget::Branch(_)),
         )?;
+        validate_updated_at_ms(updated_at_ms)?;
         let supplied_row_id = row_id.is_some();
         let row = row_id.unwrap_or_else(|| self.row_id_source.borrow_mut().next_row_id());
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
@@ -1154,6 +1171,7 @@ where
             identity,
             matches!(target, WriteTarget::BranchView { .. }),
         )?;
+        validate_updated_at_ms(updated_at_ms)?;
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
 
@@ -1295,6 +1313,7 @@ where
             identity,
             matches!(target, ExactWriteTarget::Branch(_)),
         )?;
+        validate_updated_at_ms(updated_at_ms)?;
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
         let branch = target.branch();
@@ -1414,6 +1433,7 @@ where
             identity,
             matches!(target, WriteTarget::BranchView { .. }),
         )?;
+        validate_updated_at_ms(updated_at_ms)?;
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());
 
@@ -1588,6 +1608,7 @@ where
             identity,
             matches!(target, ExactWriteTarget::Branch(_)),
         )?;
+        validate_updated_at_ms(updated_at_ms)?;
         let (made_by, permission_subject) = self.resolve_write_identity(identity)?;
         let branch = target.branch();
         let now_ms = updated_at_ms.unwrap_or_else(|| self.next_now_ms());

@@ -5,7 +5,7 @@ import type {
   Value,
   WasmRow,
 } from "../../drivers/types.js";
-import { isProvenanceMagicColumn, isProvenanceMagicTimestampColumn } from "../../magic-columns.js";
+import { isProvenanceMagicColumn } from "../../magic-columns.js";
 import { decodeCanonicalAuthorSubjectBytes } from "../author-id.js";
 
 const textDecoder = new TextDecoder();
@@ -744,7 +744,7 @@ function decodeTerminalColumnBytes(
   ) {
     return { type: "Text", value: decodeProvenanceText(bytes) };
   }
-  return decodeTerminalBytes(column.column_type, bytes);
+  return decodeTerminalBytes(column.column_type, bytes, column.name);
 }
 
 function decodeProvenanceText(bytes: Uint8Array): string {
@@ -838,12 +838,14 @@ function decodeNativeTerminalRowValues(
   return columns.map((column, index) => {
     const bytes = decodeRecordValue(descriptor, raw, index);
     if (bytes == null) return { type: "Null" };
-    return decodeTerminalBytes(column.column_type, bytes);
+    return decodeTerminalColumnBytes(column, bytes, descriptor[index]?.valueType);
   });
 }
 
-function decodeTerminalBytes(type: ColumnType, bytes: Uint8Array): Value {
+function decodeTerminalBytes(type: ColumnType, bytes: Uint8Array, columnName?: string): Value {
   switch (type.type) {
+    case "Timestamp":
+      return { type: "Timestamp", value: decodeNativeTimestamp(bytes, columnName) };
     case "Array":
       return { type: "Array", value: decodeTerminalArray(type.element, bytes) };
     case "Row": {
@@ -1351,7 +1353,7 @@ function decodePlainValue(type: ColumnType, bytes: Uint8Array, columnName?: stri
   const value = decodeBytes(type, bytes);
   switch (type.type) {
     case "Timestamp":
-      return value.type === "Timestamp" ? timestampToDate(value.value, columnName) : null;
+      return timestampToDate(decodeNativeTimestamp(bytes, columnName), columnName);
     case "Json":
       return value.type === "Text" ? JSON.parse(value.value) : null;
     case "Array":
@@ -1421,10 +1423,14 @@ function decodeArrayElements<T>(
   return values;
 }
 
-function timestampToDate(value: number, columnName?: string): Date {
-  if (columnName && isProvenanceMagicTimestampColumn(columnName)) {
-    return new Date(Math.trunc(value / 1_000));
-  }
+export function decodeNativeTimestamp(bytes: Uint8Array, _columnName?: string): number {
+  const raw = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getBigUint64(0, true);
+  // All public timestamps use Unix milliseconds. Packed HLCs stay in internal
+  // version and transaction-ordering state and never cross this boundary.
+  return Number(raw);
+}
+
+function timestampToDate(value: number, _columnName?: string): Date {
   return new Date(value);
 }
 

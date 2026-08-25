@@ -73,13 +73,13 @@ pub fn generate_id() -> String {
     uuid::Uuid::now_v7().to_string()
 }
 
-/// Get the current timestamp in microseconds since Unix epoch.
+/// Get the current timestamp in milliseconds since Unix epoch.
 #[wasm_bindgen(js_name = currentTimestamp)]
 pub fn current_timestamp() -> u64 {
     use web_time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_micros() as u64)
+        .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
 }
 
@@ -2601,8 +2601,8 @@ fn write_timestamp_option(options: &JsValue) -> Result<Option<u64>, JsValue> {
         .map(|value| {
             value
                 .as_f64()
-                .map(|value| value as u64)
                 .ok_or_else(|| JsValue::from_str("updatedAtMs must be a number"))
+                .and_then(|value| checked_js_u64(value, "updatedAtMs"))
         })
         .transpose()
 }
@@ -2837,16 +2837,16 @@ fn row_uuid_from_bytes(bytes: &[u8]) -> Result<RowUuid, JsValue> {
 }
 
 fn checked_js_u64(value: f64, name: &str) -> Result<u64, JsValue> {
-    if !value.is_finite()
-        || value < 0.0
-        || value.fract() != 0.0
-        || value > jazz::tools::policy_claims::MAX_SAFE_JS_INTEGER as f64
-    {
-        return Err(JsValue::from_str(&format!(
-            "{name} must be a nonnegative safe integer"
-        )));
-    }
-    Ok(value as u64)
+    checked_js_safe_u64(value)
+        .ok_or_else(|| JsValue::from_str(&format!("{name} must be a nonnegative safe integer")))
+}
+
+fn checked_js_safe_u64(value: f64) -> Option<u64> {
+    (value.is_finite()
+        && value >= 0.0
+        && value.fract() == 0.0
+        && value <= jazz::tools::policy_claims::MAX_SAFE_JS_INTEGER as f64)
+        .then_some(value as u64)
 }
 
 fn checked_js_u64_range(start: f64, end: f64) -> Result<std::ops::Range<u64>, JsValue> {
@@ -3516,6 +3516,48 @@ mod dynamic_schema_view_tests {
     use jazz::tools::public_schema::{
         ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema,
     };
+
+    /// Every ordinary write option shares `write_timestamp_option`, so this
+    /// boundary test protects insert, update, upsert, delete, and restore from
+    /// JavaScript's lossy number-to-u64 coercions.
+    #[test]
+    fn write_timestamp_requires_a_nonnegative_safe_integer_millisecond_value() {
+        assert_eq!(
+            checked_js_safe_u64(1_704_067_200_123.0),
+            Some(1_704_067_200_123),
+        );
+        for invalid in [-1.0, 1.5, f64::NAN, f64::INFINITY, 9_007_199_254_740_992.0] {
+            assert!(
+                checked_js_safe_u64(invalid).is_none(),
+                "invalid updatedAtMs {invalid:?} must fail before a write"
+            );
+        }
+    }
+
+    /// The JavaScript-facing parsers share the checked timestamp conversion
+    /// for every ordinary write shape, including delete and restore delegates.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen_test::wasm_bindgen_test]
+    fn ordinary_write_options_reject_lossy_updated_at_milliseconds_before_mutation() {
+        fn options(updated_at_ms: f64) -> JsValue {
+            let options = js_sys::Object::new();
+            js_sys::Reflect::set(
+                &options,
+                &JsValue::from_str("updatedAtMs"),
+                &JsValue::from_f64(updated_at_ms),
+            )
+            .expect("setting ordinary write options succeeds");
+            options.into()
+        }
+
+        for invalid in [-1.0, 1.5, f64::NAN, f64::INFINITY, 9_007_199_254_740_992.0] {
+            assert!(insert_options_from_js(options(invalid)).is_err());
+            assert!(update_options_from_js(options(invalid)).is_err());
+            assert!(upsert_options_from_js(options(invalid)).is_err());
+            assert!(delete_options_from_js(options(invalid)).is_err());
+            assert!(restore_options_from_js(options(invalid)).is_err());
+        }
+    }
 
     /// Binding read choices lower to the existing core tiers.
     #[test]

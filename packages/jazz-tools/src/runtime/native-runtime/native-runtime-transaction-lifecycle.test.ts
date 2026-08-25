@@ -715,8 +715,8 @@ it("does not emit onMutationError when an active wait handles the rejection", as
 });
 
 it("passes caller-supplied updatedAt into staged mergeable transaction writes", () => {
-  const updatedAt = 1_704_067_200_123_000;
-  const expectedUpdatedAtMs = Math.trunc(updatedAt / 1_000);
+  const updatedAt = 1_704_067_200_123;
+  const expectedUpdatedAtMs = updatedAt;
   const staged: Array<{ op: string; updatedAtMs: number | null | undefined }> = [];
   const runtime = new NativeRuntimeAdapter(
     {
