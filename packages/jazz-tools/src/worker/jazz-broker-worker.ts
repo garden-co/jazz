@@ -21,7 +21,7 @@ import type {
 import { openConfig } from "../runtime/native-runtime/native-codec.js";
 import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
 import { encodeSchema } from "../runtime/native-runtime/schema-codec.js";
-import type { MutationErrorEvent } from "../runtime/client.js";
+import { deliverMutationErrorToAttachedPeers } from "./mutation-error-delivery.js";
 
 const DEFAULT_WASM_LOG_LEVEL = "warn";
 
@@ -62,7 +62,6 @@ type RuntimeContext = {
   serverUrl: string | null;
   serverAuthJson: string;
   serverConnectionStarted: boolean;
-  pendingMutationErrors: Map<string, MutationErrorEvent>;
 };
 
 const workerGlobal = globalThis as SharedWorkerGlobal;
@@ -136,7 +135,6 @@ function createContext(
     serverUrl: options.serverUrl ?? null,
     serverAuthJson: options.authJson,
     serverConnectionStarted: false,
-    pendingMutationErrors: new Map(),
     initialize: Promise.resolve(),
     closing: null,
     idleReleaseTimer: null,
@@ -189,8 +187,13 @@ async function initialize(context: RuntimeContext): Promise<void> {
   );
   context.runtime.onAuthFailure((reason) => broadcast(context, { type: "auth-failure", reason }));
   context.runtime.onMutationError((event) => {
-    context.pendingMutationErrors.set(event.transaction.transactionId, event);
-    broadcast(context, { type: "mutation-error", event });
+    // A mutation error is a notification for foreground runtimes that are
+    // attached now. Durable reconciliation belongs to the worker's database;
+    // persisting this event would instead surface an old application's toast
+    // to an unrelated future tab.
+    deliverMutationErrorToAttachedPeers(context.peers.values(), event, (peer, received) =>
+      post(peer.port, { type: "mutation-error", event: received }),
+    );
   });
 }
 
@@ -324,9 +327,6 @@ async function handleTabMessage(peer: TabPeer, message: BrowserFollowerPortReque
         pump.receive(pending);
       }
       ensureServerConnection(peer.context);
-      for (const event of peer.context.pendingMutationErrors.values()) {
-        post(peer.port, { type: "mutation-error", event });
-      }
       result(peer, message.id);
       return;
     }

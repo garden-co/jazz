@@ -7,17 +7,16 @@ members = [
   "crates/jazz",
   "crates/jazz-compression",
   "crates/jazz-native-transport",
+  "crates/jazz-native-relay",
   "crates/jazz-cli",
   "crates/jazz-server",
   "crates/jazz-storage-rocksdb",
+  "crates/jazz-storage-sqlite",
   "crates/jazz-testkit",
   "crates/jazz-otel",
   "crates/jazz-sim",
   "crates/jazz-wasm",
   "crates/jazz-napi",
-  # React Native is paused while we decide whether the new core runtime should
-  # use RocksDB on mobile or a dedicated mobile storage backend.
-  # "crates/jazz-rn/rust",
   "crates/wasm-tracing",
   # The old Axum todo server examples expect a Send + Sync JazzClient in shared
   # router state. Core Db ownership is currently local-thread by design;
@@ -31,7 +30,7 @@ members = [
   "examples/benchmarks/smoke",
   "dev/benchmarks/storage/bench-core",
 ]
-exclude = ["crates/jazz-rn/rust", "examples/todo-server-rs", "examples/docs/todo-server-rs"]
+exclude = ["examples/todo-server-rs", "examples/docs/todo-server-rs"]
 
 [workspace.dependencies]
 groove = { path = "crates/groove", default-features = false }
@@ -39,6 +38,7 @@ jazz = { path = "crates/jazz", default-features = false }
 jazz-compression = { path = "crates/jazz-compression", default-features = false }
 jazz-otel = { path = "crates/jazz-otel" }
 jazz-storage-rocksdb = { path = "crates/jazz-storage-rocksdb" }
+jazz-storage-sqlite = { path = "crates/jazz-storage-sqlite" }
 jazz-native-transport = { path = "crates/jazz-native-transport" }
 rustc-hash = "2.1.1"
 divan = { package = "codspeed-divan-compat", version = "5.0.1" }

@@ -346,6 +346,15 @@ describe("backend/create-jazz-context", () => {
     const attributedSessionDb = context.withAttributionForSession(session);
     const attributedRequestDb = await context.withAttributionForRequest(req);
 
+    // An un-attributed backend read deliberately passes no logical session:
+    // it is trusted serving, not a public request impersonating SYSTEM. A
+    // request keeps its external session and therefore remains policy-scoped.
+    expect((backendDb as any).getRuntimeOperationContext()).toBeNull();
+    expect((requestDb as any).getRuntimeOperationContext()).toMatchObject({
+      session,
+      readSession: undefined,
+    });
+
     for (const scopedDb of [
       db,
       backendDb,

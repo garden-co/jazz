@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use jazz::groove::records::{BorrowedRecord, RecordDescriptor, Value};
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::Query;
 use jazz::tools::{ColumnType, PolicyExpr, SchemaBuilder, TablePolicies, TableSchema};
 use jazz_wasm::{current_timestamp, derive_user_id, generate_id, mint_anonymous_token, WasmDb};
@@ -105,7 +105,7 @@ struct OpenDbConfigFixture {
 #[derive(Serialize)]
 struct OpenDbIdentityFixture {
     node: NodeUuid,
-    author: AuthorId,
+    author: AuthorSubject,
 }
 
 fn fixture_db() -> WasmDb {
@@ -127,7 +127,7 @@ fn fixture_db() -> WasmDb {
     let config = OpenDbConfigFixture {
         identity: OpenDbIdentityFixture {
             node: NodeUuid::from_bytes([0x51; 16]),
-            author: AuthorId::from_bytes([0xa1; 16]),
+            author: AuthorSubject::for_test_bytes([0xa1; 16]),
         },
         row_id_seed: Some(51),
         history_complete: false,
