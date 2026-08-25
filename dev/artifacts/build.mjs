@@ -1,12 +1,25 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { existsSync, renameSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { fileURLToPath } from "node:url";
-import { join, resolve } from "node:path";
-import { writeManifest } from "./provenance.mjs";
+import { basename, join, resolve } from "node:path";
+import { verifyManifest, writeManifest } from "./provenance.mjs";
+import {
+  acquireArtifactBuildLock,
+  artifactLockPath,
+  verifyArtifactBuildLease,
+} from "../gates/build-test-artifacts.mjs";
 
 const root = resolve(fileURLToPath(new URL(".", import.meta.url)), "../..");
-const [kind, profile = "release", ...extraArgs] = process.argv.slice(2);
 const commands = {
   wasm: {
     fast: ["wasm-pack", ["build", "crates/jazz-wasm", "--target", "web", "--dev"]],
@@ -25,66 +38,265 @@ const commands = {
     ],
   },
 };
-const selected = commands[kind]?.[profile];
-if (!selected)
-  throw new Error("usage: build.mjs <wasm fast|release|profiling | napi debug|release>");
-const [command, args] = selected;
-if (kind !== "napi" && extraArgs.length)
-  throw new Error("only napi builds accept extra napi CLI arguments");
-args.push(...extraArgs);
-const targetIndex = extraArgs.indexOf("--target");
-const target = targetIndex === -1 ? undefined : extraArgs[targetIndex + 1];
-const napiBindingForTarget = {
-  "x86_64-unknown-linux-gnu": "jazz-napi.linux-x64-gnu.node",
-  "x86_64-pc-windows-msvc": "jazz-napi.win32-x64-msvc.node",
-  "x86_64-apple-darwin": "jazz-napi.darwin-x64.node",
-  "aarch64-apple-darwin": "jazz-napi.darwin-arm64.node",
-};
-const hostTarget = {
-  "linux-x64": "x86_64-unknown-linux-gnu",
-  "win32-x64": "x86_64-pc-windows-msvc",
-  "darwin-x64": "x86_64-apple-darwin",
-  "darwin-arm64": "aarch64-apple-darwin",
-}[`${process.platform}-${process.arch}`];
-const resolvedNapiTarget = target ?? hostTarget;
-const expectedNapiBinding = kind === "napi" && napiBindingForTarget[resolvedNapiTarget];
-if (kind === "napi" && !expectedNapiBinding)
-  throw new Error(`unsupported NAPI target ${resolvedNapiTarget ?? "unknown"}`);
-const napiPath = expectedNapiBinding && join(root, "crates/jazz-napi", expectedNapiBinding);
-const stagedNapiPath = napiPath && `${napiPath}.staged-${process.pid}-${Date.now()}`;
-if (napiPath && existsSync(napiPath)) renameSync(napiPath, stagedNapiPath);
-const result = spawnSync(command, args, {
-  cwd: root,
-  stdio: "inherit",
-  shell: process.platform === "win32",
-});
-const restoreStagedNapi = () => {
-  if (stagedNapiPath && existsSync(stagedNapiPath)) {
-    if (!existsSync(napiPath)) renameSync(stagedNapiPath, napiPath);
-    else rmSync(stagedNapiPath, { force: true });
-  }
-};
-if (result.error) {
-  restoreStagedNapi();
-  throw result.error;
+export const wasmPackageFiles = [
+  "jazz_wasm_bg.wasm",
+  "jazz_wasm_bg.wasm.d.ts",
+  "jazz_wasm.d.ts",
+  "jazz_wasm.js",
+  "package.json",
+  ".jazz-artifact-manifest.json",
+];
+const hash = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
+const journalPath = (dir) => join(dir, ".pkg-transaction.json");
+
+export function createWasmPackageStage(rootDir = root, profile = "release") {
+  const packageDir = join(rootDir, "crates", "jazz-wasm");
+  const path = mkdtempSync(join(packageDir, `.pkg-stage-${profile}-`));
+  return { path, outDir: basename(path) };
 }
-if (result.status !== 0) {
-  restoreStagedNapi();
-  process.exit(result.status ?? 1);
-}
-if (napiPath && !existsSync(napiPath)) {
-  restoreStagedNapi();
-  throw new Error(`NAPI build produced no ${expectedNapiBinding}; refusing to write provenance`);
-}
-if (napiPath && resolvedNapiTarget === hostTarget) {
-  const load = spawnSync(process.execPath, ["-e", "require(process.argv[1])", napiPath], {
-    stdio: "inherit",
+export function assertCompleteWasmPackage(path) {
+  if (!existsSync(path) || !lstatSync(path).isDirectory() || lstatSync(path).isSymbolicLink())
+    throw new Error(`WASM build package directory is not a real directory (${basename(path)})`);
+  const invalid = wasmPackageFiles.filter((file) => {
+    const candidate = join(path, file);
+    return (
+      !existsSync(candidate) || !lstatSync(candidate).isFile() || lstatSync(candidate).size === 0
+    );
   });
-  if ((load.status ?? 1) !== 0) {
-    rmSync(napiPath, { force: true });
-    restoreStagedNapi();
-    throw new Error("NAPI build produced an unloadable host binding; refusing to write provenance");
+  if (invalid.length)
+    throw new Error(
+      `WASM build produced an incomplete staged package (${basename(path)}; invalid ${invalid.join(", ")})`,
+    );
+  return Object.fromEntries(wasmPackageFiles.map((file) => [file, hash(join(path, file))]));
+}
+function readJournal(path) {
+  if (!existsSync(path)) return undefined;
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    throw new Error(`WASM package transaction journal is unreadable: ${error.message}`);
   }
 }
-if (stagedNapiPath) rmSync(stagedNapiPath, { force: true });
-writeManifest(root, kind, profile, target);
+function writeJournal(path, value) {
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  renameSync(temporary, path);
+}
+function matches(path, hashes) {
+  try {
+    const actual = assertCompleteWasmPackage(path);
+    return Object.entries(hashes).every(([file, value]) => actual[file] === value);
+  } catch {
+    return false;
+  }
+}
+function inheritedWasmLease() {
+  const token = process.env.JAZZ_ARTIFACT_BUILD_LEASE;
+  const lockPath = process.env.JAZZ_ARTIFACT_BUILD_LOCK_PATH;
+  if (!token && !lockPath) return undefined;
+  return verifyArtifactBuildLease({ token, lockPath });
+}
+function acquireWasmLease() {
+  const inherited = inheritedWasmLease();
+  if (inherited) return { lease: inherited };
+  // Direct producers are command-line entrypoints; a short synchronous wait is
+  // preferable to failing a valid concurrent `pnpm build:core` invocation.
+  const deadline = Date.now() + 60_000;
+  for (;;) {
+    try {
+      const lock = acquireArtifactBuildLock(artifactLockPath(root));
+      return {
+        lease: { token: lock.token, lockPath: lock.lockPath },
+        release: () => lock.release(),
+      };
+    } catch (error) {
+      if (!String(error.message).includes("active artifact lock") || Date.now() >= deadline)
+        throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    }
+  }
+}
+function journalChild(packageDir, name, prefix) {
+  if (
+    typeof name !== "string" ||
+    name.includes("/") ||
+    name.includes("\\") ||
+    !name.startsWith(prefix)
+  )
+    throw new Error(`WASM package transaction journal has unsafe ${prefix} path`);
+  const path = resolve(packageDir, name);
+  if (resolve(path, "..") !== resolve(packageDir))
+    throw new Error(`WASM package transaction journal ${prefix} is outside its package directory`);
+  return path;
+}
+function realDirectory(path, label, { required = false } = {}) {
+  if (!existsSync(path)) {
+    if (required) throw new Error(`WASM package transaction ${label} is missing`);
+    return false;
+  }
+  const stat = lstatSync(path);
+  if (!stat.isDirectory() || stat.isSymbolicLink())
+    throw new Error(`WASM package transaction ${label} must be a real directory`);
+  return true;
+}
+function validateJournal(journal) {
+  if (
+    !journal ||
+    journal.schema !== 1 ||
+    typeof journal.hadCurrent !== "boolean" ||
+    !["prepared", "old-moved", "new-published"].includes(journal.state)
+  )
+    throw new Error("WASM package transaction journal has an invalid shape");
+  if (
+    !journal.hashes ||
+    typeof journal.hashes !== "object" ||
+    Object.keys(journal.hashes).length !== wasmPackageFiles.length ||
+    wasmPackageFiles.some((file) => !/^[a-f0-9]{64}$/.test(journal.hashes[file] ?? ""))
+  )
+    throw new Error("WASM package transaction journal has invalid generation hashes");
+}
+/** Recover an interrupted old→new directory swap. Must run while holding the clone lock. */
+export function recoverWasmPackageTransaction(packageDir) {
+  const journal = readJournal(journalPath(packageDir));
+  if (!journal) return;
+  validateJournal(journal);
+  const pkg = join(packageDir, "pkg");
+  const stage = journalChild(packageDir, journal.stage, ".pkg-stage-");
+  const backup = journal.backup
+    ? journalChild(packageDir, journal.backup, ".pkg-backup-")
+    : undefined;
+  try {
+    realDirectory(pkg, "pkg");
+    realDirectory(stage, "stage");
+    if (backup) realDirectory(backup, "backup");
+    if (existsSync(pkg) && matches(pkg, journal.hashes)) {
+      if (backup && existsSync(backup)) rmSync(backup, { recursive: true, force: true });
+    }
+    // `prepared` is journaled before the first rename. A crash here leaves the
+    // complete prior pkg in place and no backup; do not mistake it for loss.
+    else if (
+      journal.state === "prepared" &&
+      journal.hadCurrent &&
+      existsSync(pkg) &&
+      (!backup || !existsSync(backup))
+    ) {
+      // Retain old pkg; only the uncommitted stage/journal are discarded below.
+    } else if (backup && existsSync(backup)) {
+      if (existsSync(pkg)) rmSync(pkg, { recursive: true, force: true });
+      renameSync(backup, pkg);
+    } else if (journal.hadCurrent)
+      throw new Error("old package is absent and no recoverable backup remains");
+    if (existsSync(stage)) rmSync(stage, { recursive: true, force: true });
+    rmSync(journalPath(packageDir), { force: true });
+  } catch (error) {
+    throw new Error(`WASM package transaction recovery failed: ${error.message}`);
+  }
+}
+/** Publish one complete generation; readers see old, missing, or new, never mixed files. */
+export function publishWasmPackage(
+  stagePath,
+  packagePath,
+  { profile = "release", lease = undefined } = {},
+) {
+  const packageDir = resolve(packagePath, "..");
+  // A caller may only skip acquisition with the opaque lease returned by the
+  // clone-wide lock layer. Re-verify it immediately before the first mutable
+  // operation; neither a boolean nor a child-controlled path is authority.
+  const held = lease ? { lease: verifyArtifactBuildLease(lease) } : acquireWasmLease();
+  try {
+    recoverWasmPackageTransaction(packageDir);
+    realDirectory(stagePath, "stage", { required: true });
+    realDirectory(packagePath, "pkg");
+    const hashes = assertCompleteWasmPackage(stagePath);
+    const backupPath = join(
+      packageDir,
+      `.pkg-backup-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    const transaction = {
+      schema: 1,
+      profile,
+      stage: basename(stagePath),
+      backup: basename(backupPath),
+      hadCurrent: existsSync(packagePath),
+      hashes,
+      state: "prepared",
+    };
+    writeJournal(journalPath(packageDir), transaction);
+    if (transaction.hadCurrent) renameSync(packagePath, backupPath);
+    transaction.state = "old-moved";
+    writeJournal(journalPath(packageDir), transaction);
+    if (process.env.JAZZ_WASM_BUILD_FAULT === "after-old-moved")
+      process.kill(process.pid, "SIGKILL");
+    renameSync(stagePath, packagePath);
+    transaction.state = "new-published";
+    writeJournal(journalPath(packageDir), transaction);
+    if (!matches(packagePath, hashes))
+      throw new Error("published package does not match staged hashes");
+    if (existsSync(backupPath)) rmSync(backupPath, { recursive: true, force: true });
+    rmSync(journalPath(packageDir), { force: true });
+  } catch (error) {
+    recoverWasmPackageTransaction(packageDir);
+    throw new Error(`WASM package publish transaction failed: ${error.message}`);
+  } finally {
+    if (existsSync(stagePath)) rmSync(stagePath, { recursive: true, force: true });
+    held.release?.();
+  }
+}
+export function writeWasmStageManifest(stagePath, profile) {
+  if (process.env.JAZZ_WASM_BUILD_FAULT === "manifest-write")
+    throw new Error("planted staged manifest write failure");
+  writeManifest(root, "wasm", profile, undefined, { wasmPackageDir: stagePath });
+}
+export function buildArtifact(kind, profile = "release", extraArgs = []) {
+  const selected = commands[kind]?.[profile];
+  if (!selected)
+    throw new Error("usage: build.mjs <wasm fast|release|profiling | napi debug|release>");
+  if (kind !== "napi" && extraArgs.length)
+    throw new Error("only napi builds accept extra napi CLI arguments");
+  const [command, selectedArgs] = selected;
+  const wasmLock = kind === "wasm" ? acquireWasmLease() : undefined;
+  const wasmStage = kind === "wasm" ? createWasmPackageStage(root, profile) : undefined;
+  const args = [
+    ...selectedArgs,
+    ...extraArgs,
+    ...(wasmStage ? ["--out-dir", wasmStage.outDir] : []),
+  ];
+  try {
+    const result = spawnSync(command, args, {
+      cwd: root,
+      stdio: "inherit",
+      shell: process.platform === "win32",
+    });
+    if (result.error) throw result.error;
+    if (result.status !== 0) {
+      if (wasmStage)
+        throw new Error(
+          `WASM ${profile} build failed before publishing staged package ${basename(wasmStage.path)}; the prior package remains intact`,
+        );
+      process.exitCode = result.status ?? 1;
+      return;
+    }
+    if (wasmStage) {
+      writeWasmStageManifest(wasmStage.path, profile);
+      publishWasmPackage(wasmStage.path, join(root, "crates", "jazz-wasm", "pkg"), {
+        profile,
+        lease: wasmLock.lease,
+      });
+      const problem = verifyManifest(root, kind, profile);
+      if (problem) throw new Error(`published WASM manifest verification failed: ${problem}`);
+    } else writeManifest(root, kind, profile);
+  } finally {
+    if (wasmStage && existsSync(wasmStage.path))
+      rmSync(wasmStage.path, { recursive: true, force: true });
+    wasmLock?.release?.();
+  }
+}
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const [kind, profile = "release", ...extraArgs] = process.argv.slice(2);
+  try {
+    buildArtifact(kind, profile, extraArgs);
+  } catch (error) {
+    console.error(`artifact build: ${error.message}`);
+    process.exitCode = 1;
+  }
+}

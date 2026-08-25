@@ -149,6 +149,8 @@ export function acquireArtifactBuildLock(lockPath = artifactLockPath()) {
   console.log(`test-artifacts: acquired shared artifact lock (pid ${owner.pid})`);
   let released = false;
   return {
+    lockPath,
+    token: owner.token,
     release() {
       if (released) return;
       released = true;
@@ -163,6 +165,35 @@ export function acquireArtifactBuildLock(lockPath = artifactLockPath()) {
       console.log("test-artifacts: released shared artifact lock");
     },
   };
+}
+
+/**
+ * Environment inherited by an artifact producer owned by this lock.
+ *
+ * `JAZZ_TEST_ARTIFACT_LOCK_PATH` is deliberately the selected-lock input, not
+ * merely a test convenience: the aggregate CI parent selects its runner-temp
+ * lock before it spawns Turbo.  Turbo children must receive that same input so
+ * `verifyArtifactBuildLease` can prove that a claimed lease belongs to the
+ * parent-selected lock, rather than treating a child-provided lock path as
+ * authority.
+ */
+export function artifactBuildLease(lock) {
+  return {
+    JAZZ_ARTIFACT_BUILD_LEASE: lock.token,
+    JAZZ_ARTIFACT_BUILD_LOCK_PATH: lock.lockPath,
+    JAZZ_TEST_ARTIFACT_LOCK_PATH: lock.lockPath,
+  };
+}
+
+/** Reject forged/nested leases instead of silently racing the aggregate builder. */
+export function verifyArtifactBuildLease({ token, lockPath }) {
+  const expectedPath = artifactLockPath(root);
+  if (!lockPath || resolve(lockPath) !== resolve(expectedPath))
+    throw new Error("test-artifacts: inherited artifact lease is for a different clone lock.");
+  const owner = readLockOwner(lockPath);
+  if (!owner || owner.token !== token || !ownerIsAlive(owner))
+    throw new Error("test-artifacts: inherited artifact lease is missing or no longer owned.");
+  return { token, lockPath };
 }
 
 export function unlockArtifactBuildLock(lockPath = artifactLockPath()) {
@@ -226,7 +257,7 @@ export async function withArtifactBuildLock(run, lockPath = artifactLockPath()) 
   process.once("SIGINT", onSigint);
   process.once("SIGTERM", onSigterm);
   try {
-    return await run(scope);
+    return await run(scope, artifactBuildLease(lock));
   } finally {
     process.removeListener("SIGINT", onSigint);
     process.removeListener("SIGTERM", onSigterm);
@@ -321,16 +352,22 @@ export function command(command, args, label = [command, ...args].join(" "), opt
   });
 }
 
-export async function buildTestArtifacts(run = command, scope = createBuildScope()) {
+export async function buildTestArtifacts(
+  run = command,
+  scope = createBuildScope(),
+  lease = undefined,
+) {
   let firstBuildError;
   const guardedRun = (command, args, label, env) =>
-    scope.track(run(command, args, label, { env, signal: scope.signal })).catch((error) => {
-      if (!firstBuildError) {
-        firstBuildError = error;
-        scope.abort(error);
-      }
-      throw error;
-    });
+    scope
+      .track(run(command, args, label, { env: { ...env, ...lease }, signal: scope.signal }))
+      .catch((error) => {
+        if (!firstBuildError) {
+          firstBuildError = error;
+          scope.abort(error);
+        }
+        throw error;
+      });
 
   // Keep every Cargo invocation in the default target directory restored by
   // Swatinem/rust-cache. On the 4-vCPU CI runner, separate target directories
@@ -359,14 +396,7 @@ export async function buildTestArtifacts(run = command, scope = createBuildScope
     await scope.drain();
     throw firstBuildError ?? error;
   }
-  // The parallel CLI Cargo process can overlap the WASM build's first receipt.
-  // Seal the completed (or signed-cache-restored) artifact against the stable
-  // post-build checkout before any consumer uses it.
-  await guardedRun(
-    "node",
-    ["dev/artifacts/provenance.mjs", "write", "wasm", "fast"],
-    "seal fast WASM provenance",
-  );
+  // The atomic WASM producer seals its matching manifest before publication.
   await guardedRun(
     "pnpm",
     ["exec", "turbo", "run", "build", "--filter=jazz-tools", "--only"],
@@ -425,8 +455,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.error("test-artifacts: expected no argument or `unlock`");
     process.exitCode = 1;
   } else
-    withArtifactBuildLock((scope) => buildTestArtifacts(command, scope)).catch((error) => {
-      console.error(`test-artifacts: ${error.message}`);
-      process.exitCode = 1;
-    });
+    withArtifactBuildLock((scope, lease) => buildTestArtifacts(command, scope, lease)).catch(
+      (error) => {
+        console.error(`test-artifacts: ${error.message}`);
+        process.exitCode = 1;
+      },
+    );
 }

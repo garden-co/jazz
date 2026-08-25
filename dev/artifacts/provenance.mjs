@@ -89,7 +89,7 @@ function files(root, paths) {
     const stat = statSync(path);
     if (stat.isDirectory())
       for (const name of readdirSync(path).sort()) {
-        if (["pkg", "target", "node_modules"].includes(name)) continue;
+        if (["pkg", "target", "node_modules"].includes(name) || name.startsWith(".pkg-")) continue;
         const child = join(path, name);
         if (isNapiTurboOutputDirectory(relative(root, child))) continue;
         visit(child);
@@ -143,7 +143,7 @@ const inputsFor = {
   ],
 };
 
-function artifactHashes(root, kind) {
+function artifactHashes(root, kind, options = {}) {
   const paths =
     kind === "wasm"
       ? // Browser tests import the generated JS and declarations as well as the
@@ -151,10 +151,13 @@ function artifactHashes(root, kind) {
         // file can silently drop a new Rust argument while the `.wasm` itself is
         // perfectly current.
         [
-          join(root, "crates/jazz-wasm/pkg/jazz_wasm_bg.wasm"),
-          join(root, "crates/jazz-wasm/pkg/jazz_wasm.js"),
-          join(root, "crates/jazz-wasm/pkg/jazz_wasm.d.ts"),
-          join(root, "crates/jazz-wasm/pkg/jazz_wasm_bg.wasm.d.ts"),
+          join(options.wasmPackageDir ?? join(root, "crates/jazz-wasm/pkg"), "jazz_wasm_bg.wasm"),
+          join(options.wasmPackageDir ?? join(root, "crates/jazz-wasm/pkg"), "jazz_wasm.js"),
+          join(options.wasmPackageDir ?? join(root, "crates/jazz-wasm/pkg"), "jazz_wasm.d.ts"),
+          join(
+            options.wasmPackageDir ?? join(root, "crates/jazz-wasm/pkg"),
+            "jazz_wasm_bg.wasm.d.ts",
+          ),
         ]
       : readdirSync(join(root, "crates/jazz-napi"), { withFileTypes: true })
           .filter((entry) => entry.isFile() && entry.name.endsWith(".node"))
@@ -165,7 +168,7 @@ function artifactHashes(root, kind) {
     .map((path) => ({ file: basename(path), sha256: sha256(readFileSync(path)) }));
 }
 
-export function expectedManifest(root, kind, profile, targetOverride) {
+export function expectedManifest(root, kind, profile, targetOverride, options = {}) {
   if (!(kind in inputsFor)) throw new Error(`unknown artifact kind: ${kind}`);
   const trackedInputs = files(root, inputsFor[kind]);
   const inputHash = createHash("sha256");
@@ -204,7 +207,7 @@ export function expectedManifest(root, kind, profile, targetOverride) {
       dirtyDiff: injectedGit
         ? process.env.JAZZ_ARTIFACT_GIT_DIRTY_DIFF
         : sha256(
-            `${run(root, "git", ["diff", "--binary", "HEAD"])}\n${run(root, "git", ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude)crates/jazz-wasm/pkg/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-napi/.jazz-artifact-manifest.json"])}`,
+            `${run(root, "git", ["diff", "--binary", "HEAD"])}\n${run(root, "git", ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude)crates/jazz-wasm/pkg/.jazz-artifact-manifest.json", ":(exclude)crates/jazz-wasm/.pkg-stage-*", ":(exclude)crates/jazz-wasm/.pkg-backup-*", ":(exclude)crates/jazz-wasm/.pkg-transaction.json*", ":(exclude)crates/jazz-napi/.jazz-artifact-manifest.json"])}`,
           ),
     },
     cargoLock: existsSync(cargoLock) ? sha256(readFileSync(cargoLock)) : "missing",
@@ -218,7 +221,7 @@ export function expectedManifest(root, kind, profile, targetOverride) {
         : (toolVersion(root, "rustc", ["-vV"]).match(/^host: (.+)$/m)?.[1] ?? "unknown")),
     features: "default",
     packageInputs: inputHash.digest("hex"),
-    artifacts: artifactHashes(root, kind),
+    artifacts: artifactHashes(root, kind, options),
   };
 }
 
@@ -230,11 +233,13 @@ export const manifestPath = (root, kind) =>
       : "crates/jazz-napi/.jazz-artifact-manifest.json",
   );
 
-export function writeManifest(root, kind, profile, targetOverride) {
-  const path = manifestPath(root, kind);
+export function writeManifest(root, kind, profile, targetOverride, options = {}) {
+  const path = options.wasmPackageDir
+    ? join(options.wasmPackageDir, ".jazz-artifact-manifest.json")
+    : manifestPath(root, kind);
   writeFileSync(
     path,
-    `${JSON.stringify(expectedManifest(root, kind, profile, targetOverride), null, 2)}\n`,
+    `${JSON.stringify(expectedManifest(root, kind, profile, targetOverride, options), null, 2)}\n`,
   );
 }
 

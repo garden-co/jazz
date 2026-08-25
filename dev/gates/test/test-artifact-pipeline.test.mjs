@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -304,8 +304,8 @@ test("test artifact pipeline overlaps independent bindings and repairs NAPI only
     "release NAPI",
     "CLI",
     "fast WASM",
-    "seal fast WASM provenance",
     "jazz-tools",
+    "verify fast WASM provenance",
   ]);
   assert.equal(labels.filter((label) => label === "release NAPI").length, 1);
   assert.equal(labels.filter((label) => label === "repair release NAPI").length, 1);
@@ -319,6 +319,67 @@ test("test artifact pipeline overlaps independent bindings and repairs NAPI only
     ["CLI", "fast WASM", "release NAPI", "repair release NAPI"].includes(label),
   ))
     assert.equal(call.options.env?.CARGO_TARGET_DIR, undefined, call.label);
+});
+
+test("aggregate CI lock selection reaches every Turbo artifact producer", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "jazz-ci-artifact-lock-"));
+  const lockPath = join(fixture, "runner-temp-selected.lock");
+  const calls = [];
+  try {
+    await withArtifactBuildLock(
+      (scope, lease) =>
+        buildTestArtifacts(
+          async (command, args, label, options) => {
+            calls.push({ command, args, label, options });
+          },
+          scope,
+          lease,
+        ),
+      lockPath,
+    );
+    for (const call of calls.filter(({ label }) =>
+      ["release NAPI", "CLI", "fast WASM", "jazz-tools", "repair release NAPI"].includes(label),
+    )) {
+      assert.equal(
+        call.options.env.JAZZ_TEST_ARTIFACT_LOCK_PATH,
+        lockPath,
+        `${call.label} lost the parent-selected CI lock path`,
+      );
+      assert.equal(
+        call.options.env.JAZZ_ARTIFACT_BUILD_LOCK_PATH,
+        lockPath,
+        `${call.label} received a child-selected lease path`,
+      );
+      assert.ok(call.options.env.JAZZ_ARTIFACT_BUILD_LEASE, `${call.label} lost the lease token`);
+    }
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("a strict Turbo-like child verifies the CI parent's runner-temp lease", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "jazz-ci-strict-artifact-lock-"));
+  const lockPath = join(fixture, "runner-temp-selected.lock");
+  try {
+    await withArtifactBuildLock(async (unusedScope, lease) => {
+      const child = spawnSync(
+        process.execPath,
+        [
+          "--input-type=module",
+          "-e",
+          `import { verifyArtifactBuildLease } from ${JSON.stringify(new URL("../build-test-artifacts.mjs", import.meta.url).href)}; verifyArtifactBuildLease({ token: process.env.JAZZ_ARTIFACT_BUILD_LEASE, lockPath: process.env.JAZZ_ARTIFACT_BUILD_LOCK_PATH });`,
+        ],
+        {
+          // Turbo's strict environment is intentionally modelled as exactly
+          // the declared inputs, not the ambient parent process.
+          env: { PATH: process.env.PATH, ...lease },
+        },
+      );
+      assert.equal(child.status, 0, child.stderr.toString());
+    }, lockPath);
+  } finally {
+    rmSync(fixture, { recursive: true, force: true });
+  }
 });
 
 test("a failed build aborts its still-running sibling commands", async () => {
@@ -440,15 +501,15 @@ test("CI uses the correctness artifact path while package builds keep release WA
   );
   assert.match(
     packageJson,
-    /"build:ci": "turbo run build:crates.*jazz-wasm.*provenance\.mjs write wasm release.*jazz-napi.*jazz-tools/,
+    /"build:ci": "turbo run build:crates.*jazz-wasm.*jazz-napi.*jazz-tools/,
   );
   for (const script of ["build", "build:core", "build:ci"])
     assert.match(
       packageJson,
       new RegExp(
-        `"${script.replace(":", "\\:")}": "turbo run build:crates.*jazz-wasm.*provenance\\.mjs write wasm release.*turbo run build`,
+        `"${script.replace(":", "\\:")}": "turbo run build:crates.*jazz-wasm.*turbo run build`,
       ),
-      `${script} must reseal cache-restored WASM provenance before consumers build`,
+      `${script} must leave atomic WASM publication as the sole provenance writer`,
     );
   assert.doesNotMatch(workflow, /CARGO_TARGET_DIR/);
   assert.doesNotMatch(pipeline, /target\/test-artifacts-(?:wasm|napi)/);
@@ -457,6 +518,19 @@ test("CI uses the correctness artifact path while package builds keep release WA
       pipeline,
       new RegExp(`"exec", "turbo", "run", "${task.replace(":", "\\:")}"`),
       `${task} correctness artifact must run through Turbo`,
+    );
+
+  const turbo = JSON.parse(readFileSync(new URL("../../../turbo.json", import.meta.url), "utf8"));
+  const expectedLease = [
+    "JAZZ_TEST_ARTIFACT_LOCK_PATH",
+    "JAZZ_ARTIFACT_BUILD_LEASE",
+    "JAZZ_ARTIFACT_BUILD_LOCK_PATH",
+  ];
+  for (const task of ["jazz-napi#build", "jazz-wasm#build", "jazz-wasm#build:fast"])
+    assert.deepEqual(
+      turbo.tasks[task].passThroughEnv,
+      expectedLease,
+      `${task} must preserve the aggregate parent's selected artifact lock`,
     );
 });
 

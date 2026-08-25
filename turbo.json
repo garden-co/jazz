@@ -52,6 +52,11 @@
         "$TURBO_ROOT$/pnpm-workspace.yaml",
         "$TURBO_ROOT$/turbo.json"
       ],
+      "passThroughEnv": [
+        "JAZZ_TEST_ARTIFACT_LOCK_PATH",
+        "JAZZ_ARTIFACT_BUILD_LEASE",
+        "JAZZ_ARTIFACT_BUILD_LOCK_PATH"
+      ],
       "outputs": ["*.node", "index.js", "index.d.ts", ".jazz-artifact-manifest.json"]
     },
     "jazz-wasm#build": {
@@ -72,7 +77,13 @@
         "$TURBO_ROOT$/pnpm-workspace.yaml",
         "$TURBO_ROOT$/turbo.json"
       ],
-      "outputs": ["pkg/**"]
+      "passThroughEnv": [
+        "JAZZ_TEST_ARTIFACT_LOCK_PATH",
+        "JAZZ_ARTIFACT_BUILD_LEASE",
+        "JAZZ_ARTIFACT_BUILD_LOCK_PATH"
+      ],
+      "cache": false,
+      "outputs": []
     },
     "jazz-wasm#build:fast": {
       "inputs": [
@@ -92,7 +103,13 @@
         "$TURBO_ROOT$/pnpm-workspace.yaml",
         "$TURBO_ROOT$/turbo.json"
       ],
-      "outputs": ["pkg/**"]
+      "passThroughEnv": [
+        "JAZZ_TEST_ARTIFACT_LOCK_PATH",
+        "JAZZ_ARTIFACT_BUILD_LEASE",
+        "JAZZ_ARTIFACT_BUILD_LOCK_PATH"
+      ],
+      "cache": false,
+      "outputs": []
     },
     "jazz-tools#build": {
       "inputs": [
