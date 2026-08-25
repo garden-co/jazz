@@ -1433,6 +1433,68 @@ async fn last_root_publication_blocks_descendant_install_until_its_refcount_writ
     assert_eq!(metadata.references, 0);
 }
 
+/// Verifies a corrupt root record rejects Alice's batch before reserving a
+/// publication, so Bob's following valid batch can persist without waiting on
+/// a publication that will never exist.
+///
+/// alice ──corrupt root──► rejected delete
+/// bob ──valid insert────► publication N ──persist──► durable row
+#[futures_test::test]
+async fn corrupt_large_value_root_does_not_leave_a_publication_hole() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::Bytes),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(Rc::new(crate::chunks::MemoryChunkStorage::new()));
+    let staged = database
+        .prepare_and_stage_large_value(
+            crate::large_values::LargeValueKind::Bytes,
+            &vec![9; crate::large_values::INLINE_VALUE_MAX_BYTES * 4],
+        )
+        .await
+        .unwrap();
+    let mut insert = database.open_batch();
+    insert.insert(
+        "objects",
+        vec![Value::U64(1), Value::Large(staged.value_ref.clone())],
+    );
+    insert.accept_large_value(staged.id);
+    database.commit_batch(insert).await.unwrap();
+
+    database
+        .storage
+        .write_many(vec![OwnedWriteOperation::Set {
+            cf: LARGE_VALUE_METADATA_CF.to_owned(),
+            key: large_value_root_key(&staged.value_ref.root).unwrap(),
+            value: vec![0xff],
+        }])
+        .await
+        .unwrap();
+    let mut rejected = database.open_batch();
+    rejected.delete("objects", PrimaryKeyValue::U64(1));
+    assert!(matches!(
+        database.apply_batch(rejected).await,
+        Err(Error::InvalidLargeValueMetadata(message))
+            if message.contains("cannot decode root references")
+    ));
+
+    let mut valid = database.open_batch();
+    valid.insert("objects", vec![Value::U64(2), Value::Bytes(vec![2])]);
+    let applied = database.apply_batch(valid).await.unwrap();
+    let mut persistence = Box::pin(applied.persist());
+    let persisted = match futures::poll!(persistence.as_mut()) {
+        Poll::Ready(persisted) => persisted,
+        Poll::Pending => panic!("valid persistence waited on a missing publication"),
+    };
+    database.finish_persistence(persisted).unwrap();
+}
+
 #[futures_test::test]
 async fn root_first_upload_requests_only_authenticated_missing_frontier() {
     let schema = DatabaseSchema::new([TableSchema::new(

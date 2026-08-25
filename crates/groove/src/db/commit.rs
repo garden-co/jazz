@@ -227,46 +227,10 @@ impl Database {
             .chain(accepted_roots.keys())
             .cloned()
             .collect::<BTreeSet<_>>();
-        let resident_overlay = Rc::new(StagedWriteOverlay::new_owned(
-            Rc::clone(&self.storage),
-            Rc::clone(&self.resident_writes),
-        ));
-        let staged_state = Rc::new(RefCell::new(StagedWriteState::from(staged_operations)));
-        let storage = Rc::new(StagedWriteOverlay::new_owned(
-            resident_overlay,
-            Rc::clone(&staged_state),
-        ));
-        let publication = PublicationId(self.next_publication_id);
-        self.next_publication_id = self.next_publication_id.saturating_add(1);
-        let tick_start = Instant::now();
-        let tick = match self
-            .ivm_runtime
-            .tick_resident_staged(
-                table_deltas,
-                OwnedStorage::new(storage),
-                publication,
-                defer_notifications_until_durable,
-            )
-            .await
-        {
-            Ok(tick) => tick,
-            Err(error) => {
-                self.poisoned = true;
-                return Err(Error::IvmRuntime(error));
-            }
-        };
-        // Chunk resolution during the tick can invoke the install observer,
-        // which takes this mutex itself. Acquire only after ticking, then keep
-        // the guard on the database until every resident lifecycle transition
-        // reaches the durable frontier. This admits pipelined batches while
-        // preventing an observer from interleaving with their overlay-derived
-        // metadata snapshots.
-        let lifecycle_guard =
-            if roots.is_empty() || self.large_value_publication_lifecycle_guard.is_some() {
-                None
-            } else {
-                Some(self.large_value_lifecycle.clone().lock_owned().await)
-            };
+        // Validate and encode the complete lifecycle transition before the
+        // runtime receives a publication id or makes any resident mutation.
+        // A corrupt metadata record can therefore reject this batch without
+        // leaving an unfillable hole in ordered persistence.
         if !roots.is_empty() {
             let mut node_transitions = Vec::<(crate::large_values::NodeRef, i8)>::new();
             let mut lifecycle_operations = Vec::new();
@@ -337,8 +301,47 @@ impl Database {
                 )
                 .await?,
             );
-            staged_state.borrow_mut().extend(lifecycle_operations);
+            staged_operations.extend(lifecycle_operations);
         }
+        let resident_overlay = Rc::new(StagedWriteOverlay::new_owned(
+            Rc::clone(&self.storage),
+            Rc::clone(&self.resident_writes),
+        ));
+        let staged_state = Rc::new(RefCell::new(StagedWriteState::from(staged_operations)));
+        let storage = Rc::new(StagedWriteOverlay::new_owned(
+            resident_overlay,
+            Rc::clone(&staged_state),
+        ));
+        let publication = PublicationId(self.next_publication_id);
+        self.next_publication_id = self.next_publication_id.saturating_add(1);
+        let tick_start = Instant::now();
+        let tick = match self
+            .ivm_runtime
+            .tick_resident_staged(
+                table_deltas,
+                OwnedStorage::new(storage),
+                publication,
+                defer_notifications_until_durable,
+            )
+            .await
+        {
+            Ok(tick) => tick,
+            Err(error) => {
+                self.poisoned = true;
+                return Err(Error::IvmRuntime(error));
+            }
+        };
+        // Chunk resolution during the tick can invoke the install observer,
+        // which takes this mutex itself. Acquire only after ticking, before
+        // this publication becomes externally resident, then keep the guard
+        // until every resident lifecycle transition reaches the durable
+        // frontier. Later pipelined batches join an already-held guard.
+        let lifecycle_guard =
+            if roots.is_empty() || self.large_value_publication_lifecycle_guard.is_some() {
+                None
+            } else {
+                Some(self.large_value_lifecycle.clone().lock_owned().await)
+            };
         let ivm_tick_time = tick_start.elapsed();
         let staged_operations = std::mem::take(&mut *staged_state.borrow_mut()).into_operations();
         let operations = staged_operations
