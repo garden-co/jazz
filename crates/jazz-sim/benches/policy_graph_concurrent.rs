@@ -659,7 +659,7 @@ fn write_seed_rows(core: &Node<RocksDbStorage>, schema: &JazzSchema, rows: &[See
                 let column_schema = table
                     .columns
                     .iter()
-                    .find(|candidate| candidate.name == *column)
+                    .find(|candidate| candidate.name() == column)
                     .unwrap_or_else(|| panic!("seed row missing column {}/{}", row.table, column));
                 (
                     column.clone(),
@@ -795,6 +795,9 @@ fn json_to_cell_value(value: &JsonValue, column_type: &ColumnType) -> Value {
                     panic!("invalid union payload for case {case_name}: {error}")
                 }),
             )
+        }
+        ColumnType::Internal(_) => {
+            panic!("policy-graph JSON seed fixtures cannot target internal physical columns")
         }
     }
 }
