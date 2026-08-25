@@ -440,25 +440,6 @@ where
         Ok(cache)
     }
 
-    pub(super) async fn materialize_local_maintained_view_relation_edge_row(
-        &mut self,
-        local: &LocalMaintainedViewSubscription,
-        table_name: &str,
-        row_uuid: RowUuid,
-        tx_id: TxId,
-    ) -> Result<Option<CurrentRow>, Error> {
-        let tx_versions = local.maintained.versions_by_tx(tx_id);
-        let Some(version) =
-            local_maintained_view_content_witness(&tx_versions, table_name, row_uuid)
-        else {
-            return Ok(None);
-        };
-        self.projected_current_row_from_materialized_version_in_read_schema(
-            local.result_schema_version,
-            version,
-        )
-    }
-
     async fn materialize_local_maintained_view_relation_edge_row_with_cache(
         &mut self,
         local: &LocalMaintainedViewSubscription,

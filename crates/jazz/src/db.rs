@@ -4068,8 +4068,6 @@ fn apply_maintained_membership_update_to_snapshot(
         authoritative_membership_changed: _,
         added: update_added,
         removed: update_removed,
-        added_edges: update_added_edges,
-        removed_edges: update_removed_edges,
         terminal_operations,
         terminal_layout: _,
     } = update;
@@ -4085,80 +4083,21 @@ fn apply_maintained_membership_update_to_snapshot(
         && snapshot.edges.is_empty()
         && snapshot.root_count == 0
         && update_removed.is_empty()
-        && update_removed_edges.is_empty()
     {
-        if update_added_edges.is_empty() {
-            snapshot.root_count = update_added.len();
-            snapshot.rows.reserve(update_added.len());
-            snapshot
-                .rows
-                .extend(update_added.iter().map(|(_, row)| row.clone()));
-            snapshot_index.roots = update_added
-                .iter()
-                .enumerate()
-                .map(|(index, (occurrence, _))| (occurrence.clone(), index))
-                .collect();
-            return SubscriptionEvent::Delta {
-                reset: false,
-                publishable: true,
-                added: update_added
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, (occurrence_id, row))| SubscriptionOutputRow {
-                        occurrence_id,
-                        row,
-                        previous_index: None,
-                        index,
-                    })
-                    .collect(),
-                updated: Vec::new(),
-                removed: Vec::new(),
-                terminal_operations: terminal_operations.clone(),
-                settled,
-                tier,
-            };
-        }
-
-        let mut event_added = Vec::with_capacity(update_added.len());
-        let mut added_related = Vec::new();
-        let mut seen_rows = BTreeSet::new();
-        for (occurrence_id, row) in &update_added {
-            seen_rows.insert((row.table().to_owned(), row.row_uuid()));
-            event_added.push((occurrence_id.clone(), row.clone()));
-        }
-
-        let mut seen_edges = BTreeSet::new();
-        for (edge, row) in &update_added_edges {
-            if seen_edges.insert(edge.clone()) {
-                snapshot.edges.push(edge.clone());
-            }
-            let Some(row) = row else {
-                continue;
-            };
-            if seen_rows.insert((row.table().to_owned(), row.row_uuid())) {
-                added_related.push(row.clone());
-            }
-        }
-
-        snapshot.root_count = event_added.len();
+        snapshot.root_count = update_added.len();
+        snapshot.rows.reserve(update_added.len());
         snapshot
             .rows
-            .reserve(event_added.len() + added_related.len());
-        snapshot
-            .rows
-            .extend(event_added.iter().map(|(_, row)| row.clone()));
-        snapshot.rows.extend(added_related.iter().cloned());
-        *snapshot_index = RelationSnapshotIndex::from_snapshot(snapshot);
-        snapshot_index.roots = event_added
+            .extend(update_added.iter().map(|(_, row)| row.clone()));
+        snapshot_index.roots = update_added
             .iter()
             .enumerate()
             .map(|(index, (occurrence, _))| (occurrence.clone(), index))
             .collect();
-
         return SubscriptionEvent::Delta {
             reset: false,
             publishable: true,
-            added: event_added
+            added: update_added
                 .into_iter()
                 .enumerate()
                 .map(|(index, (occurrence_id, row))| SubscriptionOutputRow {
@@ -4179,7 +4118,6 @@ fn apply_maintained_membership_update_to_snapshot(
     let mut added = Vec::new();
     let mut updated = Vec::new();
     let mut removed = Vec::new();
-    let mut added_related = Vec::new();
 
     for (key, row) in &update_added {
         if let Some(position) = snapshot_index.roots.get(&key).copied() {
@@ -4240,60 +4178,6 @@ fn apply_maintained_membership_update_to_snapshot(
             });
         } else {
             index += 1;
-        }
-    }
-
-    if !update_removed_edges.is_empty() {
-        snapshot.edges.retain(|edge| {
-            let remove = update_removed_edges.iter().any(|removed| removed == edge);
-            if remove {
-                snapshot_index.edges.remove(edge);
-            }
-            !remove
-        });
-    }
-
-    for (edge, row) in &update_added_edges {
-        if snapshot_index.edges.insert(edge.clone()) {
-            snapshot.edges.push(edge.clone());
-        }
-        let Some(row) = row else {
-            continue;
-        };
-        let root_key = subscription_row_occurrence_id(row);
-        if snapshot_index.roots.contains_key(&root_key) {
-            continue;
-        }
-        let key = (row.table().to_owned(), row.row_uuid());
-        if let Some(position) = snapshot_index.related.get(&key).copied() {
-            snapshot.rows[position] = row.clone();
-        } else {
-            snapshot_index.related.insert(key, snapshot.rows.len());
-            snapshot.rows.push(row.clone());
-        }
-        added_related.push(row.clone());
-    }
-
-    for removed_edge in &update_removed_edges {
-        let still_referenced = snapshot_index.edges.iter().any(|edge| {
-            edge.target_table == removed_edge.target_table
-                && edge.target_row == removed_edge.target_row
-        });
-        let target_key = (removed_edge.target_table.clone(), removed_edge.target_row);
-        let is_root = snapshot_index
-            .roots
-            .contains_key(&OutputOccurrenceId::single_source(ObjectId::from_uuid(
-                target_key.1.0,
-            )));
-        if !still_referenced && !is_root {
-            if let Some(position) = snapshot_index.related.remove(&target_key) {
-                snapshot.rows.remove(position);
-                for indexed_position in snapshot_index.related.values_mut() {
-                    if *indexed_position > position {
-                        *indexed_position -= 1;
-                    }
-                }
-            }
         }
     }
 

@@ -149,8 +149,6 @@ pub(crate) struct LocalMaintainedViewSubscriptionUpdate {
     pub(crate) authoritative_membership_changed: bool,
     pub(crate) added: Vec<(OutputOccurrenceId, CurrentRow)>,
     pub(crate) removed: Vec<OutputOccurrenceId>,
-    pub(crate) added_edges: Vec<(RelationEdge, Option<CurrentRow>)>,
-    pub(crate) removed_edges: Vec<RelationEdge>,
     pub(crate) terminal_operations: Vec<groove::ivm::TerminalOperation>,
     pub(crate) terminal_layout: Option<crate::db::TerminalRootLayout>,
 }
@@ -805,8 +803,6 @@ where
             .collect::<Result<BTreeSet<_>, _>>()?;
         let mut added = Vec::new();
         let mut removed = Vec::new();
-        let mut added_edges = Vec::new();
-        let mut removed_edges = Vec::new();
         for member in transitions.result_payload_removes {
             local.result_payloads.remove(&member);
         }
@@ -891,47 +887,10 @@ where
             }
         }
         for fact in transitions.program_fact_removes {
-            if local.program_facts.remove(&fact) {
-                if materialize_update
-                    && !structured_output
-                    && let ProgramFactEntry::RelationEdge(edge) = fact
-                {
-                    removed_edges.push(
-                        self.project_relation_edge_through_read_schema(
-                            &edge,
-                            local.result_schema_version,
-                        )
-                        .await?,
-                    );
-                }
-            }
+            local.program_facts.remove(&fact);
         }
         for fact in transitions.program_fact_adds {
-            let edge = (materialize_update && !structured_output)
-                .then(|| match &fact {
-                    ProgramFactEntry::RelationEdge(edge) => Some(edge.clone()),
-                    _ => None,
-                })
-                .flatten();
-            if local.program_facts.insert(fact)
-                && let Some(edge) = edge
-            {
-                let relation_edge = self
-                    .project_relation_edge_through_read_schema(&edge, local.result_schema_version)
-                    .await?;
-                let row = if let Some(version) = &edge.target_version {
-                    self.materialize_local_maintained_view_relation_edge_row(
-                        local,
-                        edge.target_table.as_str(),
-                        edge.target_row,
-                        version.tx,
-                    )
-                    .await?
-                } else {
-                    None
-                };
-                added_edges.push((relation_edge, row));
-            }
+            local.program_facts.insert(fact);
         }
         if materialize_update && structured_output {
             for root in structured_app_row_changes {
@@ -950,8 +909,6 @@ where
             authoritative_membership_changed,
             added,
             removed,
-            added_edges,
-            removed_edges,
             terminal_operations,
             terminal_layout,
         })
