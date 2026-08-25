@@ -11,12 +11,14 @@ import { constants as fsConstants } from "node:fs";
 import {
   access,
   lstat,
+  link,
   mkdir,
   open,
   readFile,
   readdir,
   rename,
   rm,
+  unlink,
   writeFile,
   type FileHandle,
 } from "node:fs/promises";
@@ -658,7 +660,26 @@ async function writeSnapshotSchemaForMigrations(
   migrationsDir: string,
   fileName: string,
   schema: WasmSchema,
+  secureMigrationsDir?: SecureMigrationDirectory,
 ): Promise<string> {
+  if (secureMigrationsDir) {
+    const dir = await snapshotDirectoryForMigrations(secureMigrationsDir, true);
+    if (!dir) throw new Error("Migration snapshots directory does not exist");
+    const contents = `${JSON.stringify(schema, null, 2)}\n`;
+    try {
+      await pauseMigrationPublicationForTest("remote-cache-write");
+      try {
+        await syncFile(descriptorPath(dir, fileName), contents);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        const identity = contentIdentity(contents);
+        await verifiedContentsAt(dir, fileName, identity.size, identity.sha256);
+      }
+    } finally {
+      await dir.close();
+    }
+    return join(snapshotsDirForMigrations(migrationsDir), fileName);
+  }
   const dir = snapshotsDirForMigrations(migrationsDir);
   await mkdir(dir, { recursive: true });
   const filePath = join(dir, fileName);
@@ -956,6 +977,28 @@ async function verifiedContentsAt(
   }
 }
 
+async function publishStagedFileNoReplace(
+  stage: FileHandle,
+  stagedName: string,
+  destination: SecurePublicationDestination,
+  size: number,
+  sha256: string,
+): Promise<void> {
+  const stagedPath = descriptorPath(stage, stagedName);
+  const destinationPath = descriptorPath(destination.dir, destination.fileName);
+  try {
+    // link(2) is an atomic no-replace publication primitive. Unlike rename,
+    // it cannot overwrite a file created after the journal was committed.
+    await link(stagedPath, destinationPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    // A retry/recovery may find its own already-published generation. It may
+    // only adopt that destination when the journal identity matches exactly.
+    await verifiedContentsAt(destination.dir, destination.fileName, size, sha256);
+  }
+  await unlink(stagedPath);
+}
+
 function relativePublicationPath(migrationsDir: string, finalPath: string): string {
   const relativePath = relative(resolve(migrationsDir), resolve(finalPath));
   if (
@@ -1098,9 +1141,12 @@ async function recoverSecureMigrationPublication(
           );
         }
         await verifiedContentsAt(stage, file.stagedName, file.size, file.sha256);
-        await rename(
-          descriptorPath(stage, file.stagedName),
-          descriptorPath(destination.dir, destination.fileName),
+        await publishStagedFileNoReplace(
+          stage,
+          file.stagedName,
+          destination,
+          file.size,
+          file.sha256,
         );
         await verifiedContentsAt(destination.dir, destination.fileName, file.size, file.sha256);
         await syncDirectory(descriptorPath(destination.dir));
@@ -1233,7 +1279,13 @@ async function publishMigrationFilesRecoverably(
           // preflight checks and this rename. The staged source is also anchored
           // below the descriptor-held migration root.
           await verifiedContentsAt(stage!, file.stagedName, file.size, file.sha256);
-          await rename(stagedPath, descriptorPath(destination.dir, destination.fileName));
+          await publishStagedFileNoReplace(
+            stage!,
+            file.stagedName,
+            destination,
+            file.size,
+            file.sha256,
+          );
           await verifiedContentsAt(destination.dir, destination.fileName, file.size, file.sha256);
           await syncDirectory(descriptorPath(destination.dir));
         } finally {
@@ -1287,13 +1339,14 @@ async function loadCurrentSchema(schemaDir: string): Promise<ResolvedSchemaInput
 
 async function resolveHistoricalSchemaForCreateMigration(
   migrationsDir: string,
+  secureMigrationsDir: SecureMigrationDirectory,
   hash: string,
   label: string,
   appId: string | undefined,
   serverUrl: string | undefined,
   adminSecret: string | undefined,
 ): Promise<ResolvedSchemaInput> {
-  const local = await resolveLocalHistoricalSchema(migrationsDir, hash, label);
+  const local = await resolveLocalHistoricalSchema(migrationsDir, hash, label, secureMigrationsDir);
   if (local) {
     return { hash: local.hash, schema: local.schema };
   }
@@ -1305,6 +1358,7 @@ async function resolveHistoricalSchemaForCreateMigration(
     requireAppId(appId),
     requireServerValue(serverUrl, "serverUrl"),
     requireServerValue(adminSecret, "adminSecret"),
+    secureMigrationsDir,
   );
 }
 
@@ -1314,7 +1368,6 @@ async function createMigrationUnlocked(
 ): Promise<CreateMigrationResult> {
   const explicitHashFlow = Boolean(options.fromHash || options.toHash);
 
-  await mkdir(options.migrationsDir, { recursive: true });
   const currentSchema =
     !explicitHashFlow || !options.toHash ? await loadCurrentSchema(options.schemaDir) : null;
 
@@ -1333,6 +1386,7 @@ async function createMigrationUnlocked(
     if (options.fromHash) {
       fromSchema = await resolveHistoricalSchemaForCreateMigration(
         options.migrationsDir,
+        secureMigrationsDir,
         options.fromHash,
         "fromHash",
         options.appId,
@@ -1352,6 +1406,7 @@ async function createMigrationUnlocked(
     toSchema = options.toHash
       ? await resolveHistoricalSchemaForCreateMigration(
           options.migrationsDir,
+          secureMigrationsDir,
           options.toHash,
           "toHash",
           options.appId,
@@ -1707,7 +1762,14 @@ async function resolveSnapshotEntry(
   hash: string,
   label: string,
 ): Promise<SnapshotEntry | null> {
-  const entries = await listSnapshotEntries(dir);
+  return resolveSnapshotEntryFromEntries(await listSnapshotEntries(dir), hash, label);
+}
+
+function resolveSnapshotEntryFromEntries(
+  entries: SnapshotEntry[],
+  hash: string,
+  label: string,
+): SnapshotEntry | null {
   if (entries.length === 0) {
     return null;
   }
@@ -1735,12 +1797,16 @@ async function resolveLocalHistoricalSchema(
   migrationsDir: string,
   hash: string,
   label: string,
+  secureMigrationsDir?: SecureMigrationDirectory,
 ): Promise<ResolvedSchemaInput | null> {
-  const localEntry = await resolveSnapshotEntry(
-    snapshotsDirForMigrations(migrationsDir),
-    hash,
-    label,
-  );
+  if (secureMigrationsDir) await pauseMigrationPublicationForTest("explicit-local-read");
+  const localEntry = secureMigrationsDir
+    ? await resolveSnapshotEntryFromEntries(
+        await listSnapshotEntriesForMigrations(migrationsDir, secureMigrationsDir),
+        hash,
+        label,
+      )
+    : await resolveSnapshotEntry(snapshotsDirForMigrations(migrationsDir), hash, label);
   if (!localEntry) {
     return null;
   }
@@ -1758,6 +1824,7 @@ async function resolveRemoteHistoricalSchema(
   appId: string,
   serverUrl: string,
   adminSecret: string,
+  secureMigrationsDir?: SecureMigrationDirectory,
 ): Promise<ResolvedSchemaInput> {
   const normalized = normalizeSchemaHashInput(hash, label);
   const resolvedHash =
@@ -1782,6 +1849,7 @@ async function resolveRemoteHistoricalSchema(
         createSnapshotTimestampFromPublishedAt(storedSchema.publishedAt),
       ),
       storedSchema.schema,
+      secureMigrationsDir,
     );
     return { hash: resolvedHash, schema: storedSchema.schema };
   } catch (error) {
