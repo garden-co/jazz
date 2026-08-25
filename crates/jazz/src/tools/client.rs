@@ -3030,9 +3030,11 @@ impl JazzClient {
         }
     }
 
-    /// Subscribe to a query.
+    /// Subscribe to a raw core query.
     ///
-    /// Returns a stream of row deltas as the data changes.
+    /// Query timestamp literals use the physical-millisecond units stored in
+    /// core CurrentRows. Decoded public provenance result values use the
+    /// separate microsecond public boundary representation.
     pub async fn subscribe(&self, query: Query) -> Result<SubscriptionStream> {
         self.subscribe_with_opts(
             query,
@@ -3056,9 +3058,10 @@ impl JazzClient {
         Ok(SubscriptionStream::new(rx, cancellation))
     }
 
-    /// One-shot query, optionally waiting for a durability tier.
+    /// One-shot raw core query, optionally waiting for a durability tier.
     ///
-    /// Returns the current results as `Vec<(ObjectId, Vec<Value>)>`.
+    /// Its timestamp literals use core physical milliseconds; decoded public
+    /// provenance result values use microseconds.
     pub async fn query(
         &self,
         query: Query,
