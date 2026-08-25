@@ -220,6 +220,8 @@ where
         patch: RowCells,
         now_ms: Option<u64>,
     ) -> Result<(), Error> {
+        self.require_mergeable_transaction_read_visibility(tx_id, table, row, "UPDATE")
+            .await?;
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         self.node
             .node
@@ -246,6 +248,17 @@ where
                 ErrorCode::Schema,
                 "branch-view update requires at least one authored column",
             ));
+        }
+        let permission_subject = self
+            .node
+            .node
+            .lock()
+            .await
+            .mergeable_transaction_permission_subject(tx_id)?;
+        if let Some(identity) = permission_subject {
+            self.visible_branch_view_cells_for_identity(table, &head, base.as_ref(), row, identity)
+                .await?
+                .ok_or_else(|| read_for_write_denied("UPDATE", table))?;
         }
         let now_ms = Some(now_ms.unwrap_or_else(|| self.next_now_ms()));
         let head_cells = self
@@ -288,6 +301,48 @@ where
         inherited.extend(patch);
         self.stage_mergeable_insert_in_branch(tx_id, table, head, row, inherited, now_ms, false)
             .await
+    }
+
+    pub(super) async fn require_mergeable_transaction_upsert_visibility(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row: RowUuid,
+    ) -> Result<(), Error> {
+        self.require_mergeable_transaction_read_visibility(tx_id, table, row, "UPSERT")
+            .await
+    }
+
+    async fn require_mergeable_transaction_read_visibility(
+        &self,
+        tx_id: OpenTransactionId,
+        table: &str,
+        row: RowUuid,
+        operation: &str,
+    ) -> Result<(), Error> {
+        let permission_subject = self
+            .node
+            .node
+            .lock()
+            .await
+            .mergeable_transaction_permission_subject(tx_id)?;
+        let Some(identity) = permission_subject else {
+            return Ok(());
+        };
+        if self
+            .local_row_for_trusted_identity(table, row, identity)
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+        if self.local_current_row(table, row).await?.is_some() {
+            return Err(read_for_write_denied(operation, table));
+        }
+        if operation == "UPDATE" {
+            return Err(read_for_write_denied(operation, table));
+        }
+        Ok(())
     }
 
     pub(super) async fn stage_mergeable_delete(

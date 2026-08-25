@@ -270,8 +270,12 @@ fn exact_mixed_reentry_delta(
     )
 }
 
+/// A write-only session cannot mutate a read-hidden row, even with a complete
+/// replacement, through an ordinary facade or a mergeable transaction.
+///
+/// writer ──full/partial update or upsert──► hidden document ──► denied
 #[test]
-fn write_only_full_row_update_succeeds_but_partial_update_and_upsert_are_denied() {
+fn write_only_updates_and_upserts_are_denied_without_disclosing_the_target() {
     let db = open_db();
     let authorized_team = row(0x11);
     let winner = row(0x21);
@@ -300,7 +304,7 @@ fn write_only_full_row_update_succeeds_but_partial_update_and_upsert_are_denied(
         )
         .expect("prepare exact ordered page");
 
-    block_on(db.update(
+    let full_error = match block_on(db.update(
         DOCUMENTS,
         winner,
         BTreeMap::from([
@@ -311,9 +315,17 @@ fn write_only_full_row_update_succeeds_but_partial_update_and_upsert_are_denied(
             identity: WriteIdentity::Session(writer()),
             ..Default::default()
         },
-    ))
-    .expect("write-only principal can issue a full-row update");
-    assert_eq!(ordered_page(&db, reader(), &prepared), vec![second, refill]);
+    )) {
+        Ok(_) => panic!("write-only principal's full-row update must be denied"),
+        Err(error) => error,
+    };
+    assert_eq!(full_error.code, ErrorCode::WriteRejected);
+    assert!(
+        full_error.message.contains("UPDATE")
+            && full_error.message.contains("requires read permission"),
+        "full-update denial must not distinguish the hidden target: {full_error:?}"
+    );
+    assert_eq!(ordered_page(&db, reader(), &prepared), vec![winner, second]);
 
     let partial_error = match block_on(db.update(
         DOCUMENTS,
@@ -329,11 +341,42 @@ fn write_only_full_row_update_succeeds_but_partial_update_and_upsert_are_denied(
     };
     assert_eq!(partial_error.code, ErrorCode::WriteRejected);
     assert!(
-        partial_error.message.contains("partial UPDATE")
+        partial_error.message.contains("UPDATE")
             && partial_error.message.contains("requires read permission"),
         "partial-update denial must explain its read authorization requirement: {partial_error:?}"
     );
-    assert_eq!(ordered_page(&db, reader(), &prepared), vec![second, refill]);
+    assert_eq!(ordered_page(&db, reader(), &prepared), vec![winner, second]);
+
+    let transaction_error = match block_on(db.transaction_for_identity(writer(), async |tx| {
+        tx.update(
+            DOCUMENTS,
+            winner,
+            BTreeMap::from([("rank".to_owned(), Value::U64(5))]),
+            Default::default(),
+        )
+        .await
+    })) {
+        Ok(_) => panic!("write-only transaction update must be denied"),
+        Err(error) => error,
+    };
+    assert_eq!(transaction_error.code, ErrorCode::WriteRejected);
+    assert!(transaction_error.message.contains("UPDATE"));
+
+    let transaction_upsert_error =
+        match block_on(db.transaction_for_identity(writer(), async |tx| {
+            tx.upsert(
+                DOCUMENTS,
+                winner,
+                BTreeMap::from([("rank".to_owned(), Value::U64(5))]),
+                Default::default(),
+            )
+            .await
+        })) {
+            Ok(_) => panic!("write-only transaction upsert must be denied"),
+            Err(error) => error,
+        };
+    assert_eq!(transaction_upsert_error.code, ErrorCode::WriteRejected);
+    assert!(transaction_upsert_error.message.contains("UPSERT"));
 
     let upsert_error = match block_on(db.upsert(
         DOCUMENTS,

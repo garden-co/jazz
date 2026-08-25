@@ -998,6 +998,20 @@ where
                     .chain(std::iter::once(column.to_owned()))
                     .collect();
                 if let Some(head) = head.as_ref() {
+                    let visible_to_session = match identity {
+                        Some(identity) => Some(
+                            self.visible_branch_view_cells_for_identity(
+                                table,
+                                head,
+                                base.as_ref(),
+                                row,
+                                identity,
+                            )
+                            .await?
+                            .ok_or_else(|| read_for_write_denied("UPDATE", table))?,
+                        ),
+                        None => None,
+                    };
                     let mut node = self.node.node.lock().await;
                     if let Some(mut current) = node
                         .visible_current_cells_in_branch(table, head, row)
@@ -1007,6 +1021,9 @@ where
                             .local_content_winner_tx_id_in_branch(table, head, row)
                             .await?;
                         drop(node);
+                        if let Some(visible_to_session) = visible_to_session {
+                            current = visible_to_session;
+                        }
                         current.extend(cells);
                         (current, parent.into_iter().collect(), Some(authored), false)
                     } else {
@@ -1020,6 +1037,9 @@ where
                             ));
                         };
                         drop(node);
+                        if let Some(visible_to_session) = visible_to_session {
+                            inherited = visible_to_session;
+                        }
                         inherited.extend(cells);
                         (inherited, Vec::new(), Some(authored), true)
                     }
@@ -1040,6 +1060,19 @@ where
                     .chain(std::iter::once(column.to_owned()))
                     .collect();
                 if let Some(head) = head.as_ref() {
+                    let visible_to_session = match identity {
+                        Some(identity) => {
+                            self.visible_branch_view_cells_for_identity(
+                                table,
+                                head,
+                                base.as_ref(),
+                                row,
+                                identity,
+                            )
+                            .await?
+                        }
+                        None => None,
+                    };
                     let mut node = self.node.node.lock().await;
                     if let Some(mut current) = node
                         .visible_current_cells_in_branch(table, head, row)
@@ -1049,6 +1082,12 @@ where
                             .local_content_winner_tx_id_in_branch(table, head, row)
                             .await?;
                         drop(node);
+                        if identity.is_some() && visible_to_session.is_none() {
+                            return Err(read_for_write_denied("UPSERT", table));
+                        }
+                        if let Some(visible_to_session) = visible_to_session {
+                            current = visible_to_session;
+                        }
                         current.extend(cells);
                         (current, parent.into_iter().collect(), Some(authored), false)
                     } else if let Some(mut inherited) = node
@@ -1056,6 +1095,12 @@ where
                         .await?
                     {
                         drop(node);
+                        if identity.is_some() && visible_to_session.is_none() {
+                            return Err(read_for_write_denied("UPSERT", table));
+                        }
+                        if let Some(visible_to_session) = visible_to_session {
+                            inherited = visible_to_session;
+                        }
                         inherited.extend(cells);
                         (inherited, Vec::new(), Some(authored), true)
                     } else {
@@ -1222,6 +1267,20 @@ where
                         "branch update requires at least one authored column",
                     ));
                 }
+                let visible_to_session = match identity {
+                    WriteIdentity::Session(author) => Some(
+                        self.visible_branch_view_cells_for_identity(
+                            table,
+                            &head,
+                            base.as_ref(),
+                            row,
+                            author,
+                        )
+                        .await?
+                        .ok_or_else(|| read_for_write_denied("UPDATE", table))?,
+                    ),
+                    WriteIdentity::Database | WriteIdentity::Attribution(_) => None,
+                };
                 let local = self
                     .node
                     .node
@@ -1238,7 +1297,7 @@ where
                         .local_content_winner_tx_id_in_branch(table, &head, row)
                         .await?;
                     (
-                        cells,
+                        visible_to_session.unwrap_or(cells),
                         parent.into_iter().collect(),
                         Some(patch.keys().cloned().collect()),
                     )
@@ -1256,7 +1315,7 @@ where
                                 format!("row is not visible in branch view: {}", row.0),
                             )
                         })?;
-                    (inherited, Vec::new(), None)
+                    (visible_to_session.unwrap_or(inherited), Vec::new(), None)
                 };
                 cells.extend(patch);
                 self.write_mergeable_at_ms_with_authorship_in_branch(
@@ -1351,6 +1410,15 @@ where
                 }
             }
             ExactWriteTarget::Branch(_) => {
+                let visible_to_session = match identity {
+                    WriteIdentity::Session(author) => {
+                        self.visible_branch_view_cells_for_identity(
+                            table, &branch, None, row, author,
+                        )
+                        .await?
+                    }
+                    WriteIdentity::Database | WriteIdentity::Attribution(_) => None,
+                };
                 let mut node = self.node.node.lock().await;
                 let existing = node
                     .visible_current_cells_in_branch(table, &branch, row)
@@ -1363,11 +1431,18 @@ where
                 };
                 drop(node);
                 if let Some(mut existing) = existing {
+                    if matches!(identity, WriteIdentity::Session(_)) && visible_to_session.is_none()
+                    {
+                        return Err(read_for_write_denied("UPSERT", table));
+                    }
                     if cells.is_empty() {
                         return Err(Error::new(
                             ErrorCode::Schema,
                             "branch upsert update requires at least one authored column",
                         ));
+                    }
+                    if let Some(visible_to_session) = visible_to_session {
+                        existing = visible_to_session;
                     }
                     let authored_columns = cells.keys().cloned().collect();
                     existing.extend(cells);
@@ -2160,7 +2235,7 @@ where
             .find(|candidate| candidate.row_uuid() == row))
     }
 
-    async fn local_row_for_trusted_identity(
+    pub(super) async fn local_row_for_trusted_identity(
         &self,
         table: &str,
         row: RowUuid,
@@ -2184,6 +2259,39 @@ where
             .find(|candidate| candidate.row_uuid() == row))
     }
 
+    pub(super) async fn visible_branch_view_cells_for_identity(
+        &self,
+        table: &str,
+        head: &BranchSelector,
+        base: Option<&BranchViewBase>,
+        row: RowUuid,
+        identity: AuthorSubject,
+    ) -> Result<Option<RowCells>, Error> {
+        let table_schema = self.table_schema(table)?.clone();
+        let query = self.prepare_query(&Query::from(table))?;
+        let opts = ReadOpts {
+            propagation: Propagation::LocalOnly,
+            ..ReadOpts::default()
+        }
+        .branch_view(head.clone(), base.cloned());
+        Ok(self
+            .all_for_identity(&query, opts, identity)
+            .await?
+            .into_iter()
+            .find(|candidate| candidate.row_uuid() == row)
+            .map(|candidate| {
+                table_schema
+                    .columns
+                    .iter()
+                    .filter_map(|column| {
+                        candidate
+                            .cell(&table_schema, &column.name)
+                            .map(|value| (column.name.clone(), value))
+                    })
+                    .collect()
+            }))
+    }
+
     async fn no_op_update_handle_for_client(
         &self,
         table: &str,
@@ -2194,7 +2302,7 @@ where
         let existing = self
             .local_row_for_client_identity(table, row, identity)
             .await?
-            .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+            .ok_or_else(|| read_for_write_denied("UPDATE", table))?;
         let tx_id = self
             .node
             .node
@@ -2222,7 +2330,7 @@ where
         let existing = self
             .local_row_for_trusted_identity(table, row, identity)
             .await?
-            .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+            .ok_or_else(|| read_for_write_denied("UPDATE", table))?;
         let tx_id = self
             .node
             .node
@@ -2257,40 +2365,17 @@ where
         patch: RowCells,
         identity: AuthorSubject,
     ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
-        let table_schema = self.table_schema(table)?;
         self.ensure_row_not_deleted(table, row).await?;
-        if table_schema
-            .columns
-            .iter()
-            .all(|column| patch.contains_key(&column.name))
-        {
-            // A full-row write does not observe user data. Its causal parent is
-            // storage bookkeeping, so obtain only that parent with system
-            // authority rather than evaluating the writer's read policy.
-            let parent = match self.local_current_row(table, row).await? {
-                Some(existing) => {
-                    self.node
-                        .node
-                        .lock()
-                        .await
-                        .current_row_tx_id(&existing)
-                        .await
-                }
-                None => None,
-            };
-            let authored_columns = patch.keys().cloned().collect();
-            return Ok((patch, parent, authored_columns));
-        }
         let existing = self
             .local_row_for_client_identity(table, row, identity)
             .await?
-            .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+            .ok_or_else(|| read_for_write_denied("UPDATE", table))?;
         let (mut cells, parent) = {
             let mut node = self.node.node.lock().await;
             let cells = node
                 .current_physical_cells_in_schema(self.schema_version_id, table, row)
                 .await?
-                .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+                .ok_or_else(|| read_for_write_denied("UPDATE", table))?;
             let parent = node.current_row_tx_id(&existing).await;
             (cells, parent)
         };
@@ -2306,40 +2391,20 @@ where
         patch: RowCells,
         identity: AuthorSubject,
     ) -> Result<(RowCells, Option<TxId>, BTreeSet<String>), Error> {
-        let table_schema = self.table_schema(table)?;
         self.ensure_row_not_deleted(table, row).await?;
-        if table_schema
-            .columns
-            .iter()
-            .all(|column| patch.contains_key(&column.name))
-        {
-            let parent = match self.local_current_row(table, row).await? {
-                Some(existing) => {
-                    self.node
-                        .node
-                        .lock()
-                        .await
-                        .current_row_tx_id(&existing)
-                        .await
-                }
-                None => None,
-            };
-            let authored_columns = patch.keys().cloned().collect();
-            return Ok((patch, parent, authored_columns));
-        }
         if self.authorize_read_for_identity(table, row, identity)? != PermissionAdvice::Allowed {
-            return Err(read_for_write_denied("partial UPDATE", table));
+            return Err(read_for_write_denied("UPDATE", table));
         }
         let existing = self
             .local_row_for_trusted_identity(table, row, identity)
             .await?
-            .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+            .ok_or_else(|| read_for_write_denied("UPDATE", table))?;
         let (mut cells, parent) = {
             let mut node = self.node.node.lock().await;
             let cells = node
                 .current_physical_cells_in_schema(self.schema_version_id, table, row)
                 .await?
-                .ok_or_else(|| read_for_write_denied("partial UPDATE", table))?;
+                .ok_or_else(|| read_for_write_denied("UPDATE", table))?;
             let parent = node.current_row_tx_id(&existing).await;
             (cells, parent)
         };

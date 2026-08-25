@@ -84,6 +84,21 @@ where
         }
     }
 
+    /// Return the policy identity bound to an open mergeable transaction.
+    pub(crate) fn mergeable_transaction_permission_subject(
+        &self,
+        id: OpenTransactionId,
+    ) -> Result<Option<AuthorSubject>, Error> {
+        match self.open_tx(id)?.kind {
+            OpenTransactionKind::Mergeable {
+                permission_subject, ..
+            } => Ok(permission_subject),
+            OpenTransactionKind::Exclusive { .. } => Err(Error::InvalidMergeableCommit(
+                "open transaction is not mergeable",
+            )),
+        }
+    }
+
     async fn open_transaction(
         &mut self,
         id: OpenTransactionId,
