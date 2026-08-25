@@ -469,20 +469,6 @@ impl Database {
         Ok(pending_writes)
     }
 
-    #[cfg(any(test, feature = "test"))]
-    pub(super) fn pending_writes_from_operations(
-        &self,
-        operations: &[BatchOperation],
-    ) -> Result<Vec<PendingTableWrite>, Error> {
-        let mut pending_writes = Vec::with_capacity(operations.len());
-
-        for operation in operations {
-            pending_writes.push(self.pending_write_from_operation(operation)?);
-        }
-
-        Ok(pending_writes)
-    }
-
     pub(super) fn ensure_batch_storage_txn(&self, batch: &DatabaseBatch) -> Result<(), Error> {
         let mut txn_operations = batch.txn_operations.borrow_mut();
         while batch.txn_indexed_operations.get() < batch.operations.len() {
@@ -715,9 +701,15 @@ impl Database {
     }
 
     fn record_descriptor(&self, table: &str, variant_tag: u32) -> Result<RecordDescriptor, Error> {
-        self.ivm_runtime
+        if let Some(descriptor) = self
+            .ivm_runtime
             .record_descriptor(table, variant_tag)
             .copied()
+        {
+            return Ok(descriptor);
+        }
+        self.table(table)?
+            .record_schema_for_variant(variant_tag)
             .ok_or_else(|| Error::UnknownTableVariant {
                 table: table.to_owned(),
                 version: u64::from(variant_tag),
