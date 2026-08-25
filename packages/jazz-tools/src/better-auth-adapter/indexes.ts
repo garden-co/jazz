@@ -15,26 +15,41 @@ export const readTableIndexes = (table: string, indexes: unknown): readonly DBTa
     throw invalidIndexMetadata(table, "expected indexes to be an array");
   }
 
-  return indexes.map((index, position) => {
+  const validated: DBTableIndex[] = [];
+  for (let position = 0; position < indexes.length; position++) {
+    if (!Object.hasOwn(indexes, position)) {
+      throw invalidIndexMetadata(table, `index ${position} must be present`);
+    }
+
+    const index = indexes[position];
     if (typeof index !== "object" || index === null) {
       throw invalidIndexMetadata(table, `index ${position} must be an object`);
     }
 
     const candidate = index as Partial<DBTableIndex>;
-    if (
-      !Array.isArray(candidate.fields) ||
-      candidate.fields.length === 0 ||
-      !candidate.fields.every((field) => typeof field === "string")
-    ) {
+    if (!Array.isArray(candidate.fields) || candidate.fields.length === 0) {
       throw invalidIndexMetadata(
         table,
         `index ${position} must declare a non-empty string[] fields`,
       );
     }
+    for (let fieldPosition = 0; fieldPosition < candidate.fields.length; fieldPosition++) {
+      if (
+        !Object.hasOwn(candidate.fields, fieldPosition) ||
+        typeof candidate.fields[fieldPosition] !== "string"
+      ) {
+        throw invalidIndexMetadata(
+          table,
+          `index ${position} must declare a non-empty string[] fields`,
+        );
+      }
+    }
     if (candidate.unique !== undefined && typeof candidate.unique !== "boolean") {
       throw invalidIndexMetadata(table, `index ${position} unique must be a boolean when present`);
     }
 
-    return candidate as DBTableIndex;
-  });
+    validated.push(candidate as DBTableIndex);
+  }
+
+  return validated;
 };
