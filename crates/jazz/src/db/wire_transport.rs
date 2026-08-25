@@ -43,7 +43,6 @@ pub(super) struct LogicalMessageReassembler {
     deadlines: BTreeSet<(u64, u64)>,
     staging_budget: usize,
     recently_completed: VecDeque<(u64, [u8; 32])>,
-    highest_completed_message_id: Option<u64>,
 }
 
 impl Default for LogicalMessageReassembler {
@@ -54,7 +53,6 @@ impl Default for LogicalMessageReassembler {
             deadlines: BTreeSet::new(),
             staging_budget: MAX_INFLIGHT_LOGICAL_MESSAGE_BYTES,
             recently_completed: VecDeque::new(),
-            highest_completed_message_id: None,
         }
     }
 }
@@ -111,12 +109,6 @@ impl LogicalMessageReassembler {
             } else {
                 Err("completed logical message id was reused with another digest".to_owned())
             };
-        }
-        if self
-            .highest_completed_message_id
-            .is_some_and(|completed| fragment.message_id <= completed)
-        {
-            return Ok(None);
         }
         let total_len = usize::try_from(fragment.total_len)
             .map_err(|_| "logical message length does not fit this receiver".to_owned())?;
@@ -231,7 +223,6 @@ impl LogicalMessageReassembler {
         }
         self.recently_completed
             .push_back((fragment.message_id, state.message_digest));
-        self.highest_completed_message_id = Some(fragment.message_id);
         if self.recently_completed.len() > RECENT_COMPLETED_LOGICAL_MESSAGES {
             self.recently_completed.pop_front();
         }

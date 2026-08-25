@@ -493,6 +493,99 @@ fn active_reassembly_still_rejects_a_completed_payload_with_the_wrong_digest() {
     assert!(error.contains("logical message digest mismatch"));
 }
 
+/// Verifies that Alice can finish an older fragmented message after her later
+/// message completes first on a reordering transport.
+///
+/// ```text
+/// alice message 1 extent 0 ─┐
+/// alice message 2 complete ──┼──► receiver
+/// alice message 1 extent 1 ─┘
+/// ```
+#[test]
+fn active_lower_id_reassembly_completes_after_higher_id() {
+    let mut reassembler = LogicalMessageReassembler::default();
+    let lower = b"ab";
+    assert_eq!(
+        reassembler
+            .push(
+                test_message_fragment(
+                    1,
+                    *blake3::hash(lower).as_bytes(),
+                    lower.len() as u64,
+                    0,
+                    lower[..1].to_vec(),
+                ),
+                0,
+            )
+            .unwrap(),
+        None
+    );
+    let completed = vec![2];
+    assert!(
+        reassembler
+            .push(
+                test_message_fragment(2, *blake3::hash(&completed).as_bytes(), 1, 0, completed),
+                1,
+            )
+            .unwrap()
+            .is_some()
+    );
+
+    let envelope = reassembler
+        .push(
+            test_message_fragment(
+                1,
+                *blake3::hash(lower).as_bytes(),
+                lower.len() as u64,
+                1,
+                lower[1..].to_vec(),
+            ),
+            1,
+        )
+        .unwrap()
+        .expect("the older message remains active after the later completion");
+    assert_eq!(envelope.payload, lower);
+}
+
+/// Verifies that Alice's expired lower message id can start fresh after her
+/// higher id completed while physical delivery was reordered.
+///
+/// ```text
+/// alice message 1 extent ─────► receiver ──idle expiry──► new message 1 extent
+/// alice message 2 complete ───► receiver
+/// ```
+#[test]
+fn expired_lower_id_restarts_after_higher_id_completion() {
+    let mut reassembler = LogicalMessageReassembler::default();
+    assert_eq!(
+        reassembler
+            .push(test_message_fragment(1, [1; 32], 2, 0, vec![1]), 0)
+            .unwrap(),
+        None
+    );
+    let completed = vec![2];
+    assert!(
+        reassembler
+            .push(
+                test_message_fragment(2, *blake3::hash(&completed).as_bytes(), 1, 0, completed),
+                1,
+            )
+            .unwrap()
+            .is_some()
+    );
+
+    assert_eq!(
+        reassembler
+            .push(
+                test_message_fragment(1, [1; 32], 2, 0, vec![1]),
+                MAX_FRAGMENT_REASSEMBLY_IDLE_MS,
+            )
+            .unwrap(),
+        None
+    );
+    assert!(reassembler.incomplete.contains_key(&1));
+}
+
 #[test]
 fn fragmented_message_survives_mid_send_backpressure_without_semantic_retry() {
     let staged = Rc::new(RefCell::new(std::collections::VecDeque::new()));
