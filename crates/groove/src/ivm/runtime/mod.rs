@@ -154,6 +154,7 @@ pub struct IvmRuntime {
     schema: DatabaseSchema,
     chunk_provider: crate::chunks::OwnedChunkProvider,
     table_descriptors: HashMap<String, RecordDescriptor>,
+    variant_descriptors: HashMap<String, HashMap<u32, RecordDescriptor>>,
     /// Append-only, fixed-output projection families for heterogeneous table
     /// sources. Cases are runtime input metadata rather than graph identity.
     variant_projections: HashMap<VariantProjectionKey, VariantProjection>,
@@ -208,10 +209,28 @@ impl IvmRuntime {
             .filter(|table| !table.has_variants())
             .map(|table| (table.name.clone(), table.record_schema()))
             .collect();
+        let variant_descriptors = schema
+            .tables
+            .iter()
+            .filter(|table| table.has_variants())
+            .map(|table| {
+                let descriptors = table
+                    .variants
+                    .iter()
+                    .filter_map(|variant| {
+                        table
+                            .record_schema_for_variant(variant.tag)
+                            .map(|descriptor| (variant.tag, descriptor))
+                    })
+                    .collect();
+                (table.name.clone(), descriptors)
+            })
+            .collect();
         let mut runtime = Self {
             schema,
             chunk_provider: crate::chunks::OwnedChunkProvider::default(),
             table_descriptors,
+            variant_descriptors,
             variant_projections: HashMap::default(),
             graph: IvmGraph::new(),
             multisink_subscriptions: HashMap::default(),
@@ -285,6 +304,21 @@ impl IvmRuntime {
 
     pub fn table_descriptor(&self, table: &str) -> Option<&RecordDescriptor> {
         self.table_descriptors.get(table)
+    }
+
+    pub(crate) fn record_descriptor(
+        &self,
+        table: &str,
+        variant_tag: u32,
+    ) -> Option<&RecordDescriptor> {
+        self.table_descriptors
+            .get(table)
+            .filter(|_| variant_tag == 0)
+            .or_else(|| {
+                self.variant_descriptors
+                    .get(table)
+                    .and_then(|descriptors| descriptors.get(&variant_tag))
+            })
     }
 }
 

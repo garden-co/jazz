@@ -10,6 +10,16 @@ impl IvmRuntime {
         if !table.has_variants() {
             self.table_descriptors
                 .insert(table.name.clone(), table.record_schema());
+        } else {
+            let descriptors = self
+                .variant_descriptors
+                .entry(table.name.clone())
+                .or_default();
+            for variant in &table.variants {
+                if let Some(descriptor) = table.record_schema_for_variant(variant.tag) {
+                    descriptors.insert(variant.tag, descriptor);
+                }
+            }
         }
         self.schema.tables.push(table);
         self.define_schema_index_variant_projections()?;
@@ -55,6 +65,13 @@ impl IvmRuntime {
                 .collect_variant_registries(&mut table_schema.value_variant_registries);
         }
         table_schema.variants.push(variant_tag);
+        let descriptor = table_schema
+            .record_schema_for_variant(version)
+            .expect("the newly registered variant exists");
+        self.variant_descriptors
+            .entry(table.to_owned())
+            .or_default()
+            .insert(version, descriptor);
         let table_schema = table_schema.clone();
         for index in &table_schema.indices {
             self.register_schema_index_variant_case(&table_schema, index, version)?;
@@ -128,6 +145,15 @@ impl IvmRuntime {
                 .column_type
                 .collect_variant_registries(&mut table_schema.value_variant_registries);
         }
+        let mut descriptors = HashMap::default();
+        for variant in &table_schema.variants {
+            let descriptor = table_schema
+                .record_schema_for_variant(variant.tag)
+                .expect("registered variants have valid descriptors");
+            descriptors.insert(variant.tag, descriptor);
+        }
+        self.variant_descriptors
+            .insert(table.to_owned(), descriptors);
         self.invalidate_table_inputs(table);
         Ok(())
     }

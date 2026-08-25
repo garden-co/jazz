@@ -515,7 +515,9 @@ impl Database {
         match operation {
             BatchOperation::Insert { table, record } => {
                 let table_schema = self.table(table)?;
-                let (variant_tag, descriptor, record) = resolve_record_input(table_schema, record)?;
+                let descriptor = self.record_descriptor_for_input(table, record)?;
+                let (variant_tag, descriptor, record) =
+                    resolve_record_input(table_schema, record, descriptor)?;
                 let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Insert,
@@ -528,8 +530,9 @@ impl Database {
             }
             BatchOperation::InsertRaw { table, key, record } => {
                 let table_schema = self.table(table)?;
+                let descriptor = self.record_descriptor_for_raw_input(table, record)?;
                 let (variant_tag, descriptor, record) =
-                    resolve_raw_record_input(table_schema, record)?;
+                    resolve_raw_record_input(table_schema, record, descriptor)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Insert,
                     table: table.clone(),
@@ -541,8 +544,9 @@ impl Database {
             }
             BatchOperation::InsertRawFresh { table, key, record } => {
                 let table_schema = self.table(table)?;
+                let descriptor = self.record_descriptor_for_raw_input(table, record)?;
                 let (variant_tag, descriptor, record) =
-                    resolve_raw_record_input(table_schema, record)?;
+                    resolve_raw_record_input(table_schema, record, descriptor)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::InsertFresh,
                     table: table.clone(),
@@ -554,7 +558,9 @@ impl Database {
             }
             BatchOperation::Update { table, record } => {
                 let table_schema = self.table(table)?;
-                let (variant_tag, descriptor, record) = resolve_record_input(table_schema, record)?;
+                let descriptor = self.record_descriptor_for_input(table, record)?;
+                let (variant_tag, descriptor, record) =
+                    resolve_record_input(table_schema, record, descriptor)?;
                 let key = primary_key_bytes(table_schema, variant_tag, descriptor, &record)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Update,
@@ -567,8 +573,9 @@ impl Database {
             }
             BatchOperation::UpdateRaw { table, key, record } => {
                 let table_schema = self.table(table)?;
+                let descriptor = self.record_descriptor_for_raw_input(table, record)?;
                 let (variant_tag, descriptor, record) =
-                    resolve_raw_record_input(table_schema, record)?;
+                    resolve_raw_record_input(table_schema, record, descriptor)?;
                 Ok(PendingTableWrite::Set {
                     mode: WriteMode::Update,
                     table: table.clone(),
@@ -587,6 +594,40 @@ impl Database {
                 })
             }
         }
+    }
+
+    fn record_descriptor_for_input(
+        &self,
+        table: &str,
+        record: &RecordInput,
+    ) -> Result<RecordDescriptor, Error> {
+        let variant_tag = match record {
+            RecordInput::Values(_) => 0,
+            RecordInput::Record(record) => record.variant_tag(),
+        };
+        self.record_descriptor(table, variant_tag)
+    }
+
+    fn record_descriptor_for_raw_input(
+        &self,
+        table: &str,
+        record: &RawRecordInput,
+    ) -> Result<RecordDescriptor, Error> {
+        let variant_tag = match record {
+            RawRecordInput::Payload(_) => 0,
+            RawRecordInput::Record(record) => record.variant_tag(),
+        };
+        self.record_descriptor(table, variant_tag)
+    }
+
+    fn record_descriptor(&self, table: &str, variant_tag: u32) -> Result<RecordDescriptor, Error> {
+        self.ivm_runtime
+            .record_descriptor(table, variant_tag)
+            .copied()
+            .ok_or_else(|| Error::UnknownTableVariant {
+                table: table.to_owned(),
+                version: u64::from(variant_tag),
+            })
     }
 
     pub(super) fn table(&self, table: &str) -> Result<&TableSchema, Error> {

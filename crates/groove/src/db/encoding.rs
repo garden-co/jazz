@@ -3,53 +3,38 @@ use super::*;
 pub(super) fn resolve_record_input(
     table: &TableSchema,
     input: &RecordInput,
+    descriptor: RecordDescriptor,
 ) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
     match input {
         RecordInput::Values(values) => {
             let variant_tag = 0;
-            let descriptor = table
-                .record_schema_for_variant(variant_tag)
-                .ok_or_else(|| Error::UnknownTableVariant {
-                    table: table.name.clone(),
-                    version: u64::from(variant_tag),
-                })?;
             let record = encode_record(table, descriptor, values)?;
             Ok((variant_tag, descriptor, record))
         }
-        RecordInput::Record(record) => resolve_variant_record(table, record),
+        RecordInput::Record(record) => resolve_variant_record(table, record, descriptor),
     }
 }
 
 pub(super) fn resolve_raw_record_input(
     table: &TableSchema,
     input: &RawRecordInput,
+    descriptor: RecordDescriptor,
 ) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
     match input {
         RawRecordInput::Payload(payload) => {
             let variant_tag = 0;
-            let descriptor = table
-                .record_schema_for_variant(variant_tag)
-                .ok_or_else(|| Error::UnknownTableVariant {
-                    table: table.name.clone(),
-                    version: u64::from(variant_tag),
-                })?;
             Ok((variant_tag, descriptor, payload.clone()))
         }
-        RawRecordInput::Record(record) => resolve_variant_record(table, record),
+        RawRecordInput::Record(record) => resolve_variant_record(table, record, descriptor),
     }
 }
 
 pub(super) fn resolve_variant_record(
     table: &TableSchema,
     record: &VariantRecord,
+    descriptor: RecordDescriptor,
 ) -> Result<(u32, RecordDescriptor, Vec<u8>), Error> {
     let variant_tag = record.variant_tag();
-    let descriptor = table
-        .record_schema_for_variant(variant_tag)
-        .ok_or_else(|| Error::UnknownTableVariant {
-            table: table.name.clone(),
-            version: u64::from(variant_tag),
-        })?;
     if !record
         .record()
         .descriptor()
