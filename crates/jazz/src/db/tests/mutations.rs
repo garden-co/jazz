@@ -947,6 +947,36 @@ fn db_sync_surface_uploads_client_exclusive_commit_for_global_fate() {
 }
 
 #[test]
+fn anonymous_authority_exclusive_write_is_rejected_before_policy_evaluation() {
+    let schema = schema();
+    let anonymous =
+        AuthorSubject::from_canonical(r#"["urn:jazz:anonymous","exclusive-anonymous"]"#).unwrap();
+    let core = open_core_with_claims(0x5e, anonymous, &schema, BTreeMap::new());
+    let row = row(0xe2);
+
+    // This authority-local path cannot use a remote session transport: it
+    // finalizes its own exclusive unit directly, which is why it separately
+    // proves the shared fate gate applies here as well.
+    let write = core.exclusive_tx().unwrap();
+    write
+        .insert_with_id(
+            "todos",
+            row,
+            cells(
+                "must be denied",
+                false,
+                AuthorSubject::for_test_bytes([0xa1; 16]),
+            ),
+        )
+        .unwrap();
+    let error = write.commit().unwrap_err();
+
+    assert_eq!(error.code, ErrorCode::WriteRejected, "{error:?}");
+    assert!(error.message.contains("AuthorizationDenied"));
+    assert!(core.read(&Query::from("todos")).unwrap().is_empty());
+}
+
+#[test]
 fn db_sync_surface_returns_exclusive_conflict_fate_to_client() {
     let schema = schema();
     let author = AuthorSubject::for_test_bytes([0xc1; 16]);

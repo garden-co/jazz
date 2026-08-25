@@ -256,6 +256,17 @@ where
         if !matches!(stored.fate, Fate::Pending) {
             return Ok(PublicationOutcome::settled(stored.fate));
         }
+        // Locally finalized exclusive commits bypass `ingest_commit_unit_once`,
+        // so they must still take the common fate-policy path before their
+        // optimistic local versions become globally accepted.
+        if !self
+            .commit_unit_satisfies_write_policies(&tx, &versions, None)
+            .await?
+        {
+            let fate = Fate::Rejected(RejectionReason::AuthorizationDenied);
+            self.ingest_rejected_transaction(tx, fate.clone()).await?;
+            return Ok(PublicationOutcome::settled(fate));
+        }
         // Validate through the SAME authority path the core uses for an incoming
         // exclusive commit unit (§3.7): row/absent/predicate reads (INV-TX-16/17/18)
         // AND per-write first-committer-wins (INV-TX-20). Do not reimplement.
