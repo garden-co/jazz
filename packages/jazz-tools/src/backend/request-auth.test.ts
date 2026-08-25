@@ -65,17 +65,29 @@ async function getAvailablePort(): Promise<number> {
 class JwksServer {
   private readonly server: HttpServer;
   readonly url: string;
+  requests = 0;
+  private secret: string;
+  private failuresRemaining = 0;
 
-  private constructor(server: HttpServer, url: string) {
+  private constructor(server: HttpServer, url: string, secret: string) {
     this.server = server;
     this.url = url;
+    this.secret = secret;
   }
 
   static async start(secret = JWT_SECRET): Promise<JwksServer> {
+    let instance: JwksServer;
     const server = createHttpServer((request, response) => {
       if (request.url !== "/jwks") {
         response.statusCode = 404;
         response.end("not found");
+        return;
+      }
+      instance.requests += 1;
+      if (instance.failuresRemaining > 0) {
+        instance.failuresRemaining -= 1;
+        response.statusCode = 503;
+        response.end("temporarily unavailable");
         return;
       }
 
@@ -87,7 +99,7 @@ class JwksServer {
             {
               kty: "oct",
               kid: JWT_KID,
-              k: base64Url(secret),
+              k: base64Url(instance.secret),
             },
           ],
         }),
@@ -102,7 +114,16 @@ class JwksServer {
       });
     });
 
-    return new JwksServer(server, `http://127.0.0.1:${port}/jwks`);
+    instance = new JwksServer(server, `http://127.0.0.1:${port}/jwks`, secret);
+    return instance;
+  }
+
+  rotateKey(secret: string): void {
+    this.secret = secret;
+  }
+
+  failNextFetch(): void {
+    this.failuresRemaining += 1;
   }
 
   async stop(): Promise<void> {
@@ -118,6 +139,7 @@ describe("backend request auth", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await Promise.all(
       Array.from(servers, async (server) => {
         servers.delete(server);
@@ -226,6 +248,145 @@ describe("backend request auth", () => {
       claims: { role: "editor" },
       authMode: "external",
     });
+  });
+
+  it("shares one cold JWKS fetch and rejects invalid JWTs without an immediate refresh", async () => {
+    const jwks = await JwksServer.start();
+    servers.add(jwks);
+    const config = {
+      appId: "app-with-cold-jwks",
+      jwksUrl: jwks.url,
+    };
+    const invalidToken = signHs256Jwt(
+      {
+        sub: "invalid-user",
+        iss: "https://issuer.example",
+      },
+      "different-secret",
+    );
+    const request = {
+      headers: { authorization: `Bearer ${invalidToken}` },
+    };
+
+    const attempts = await Promise.allSettled(
+      Array.from({ length: 20 }, () => resolveRequestSession(request, config)),
+    );
+
+    expect(attempts.every((attempt) => attempt.status === "rejected")).toBe(true);
+    expect(jwks.requests).toBe(1);
+  });
+
+  it("refreshes a stale JWKS once after provider key rotation and validates the token", async () => {
+    let now = 1_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const jwks = await JwksServer.start();
+    servers.add(jwks);
+    const config = {
+      appId: "app-with-rotating-jwks",
+      jwksUrl: jwks.url,
+    };
+    const oldToken = signHs256Jwt({
+      sub: "old-key-user",
+      iss: "https://issuer.example",
+    });
+    const newSecret = "rotated-backend-request-test-secret";
+    const newToken = signHs256Jwt(
+      {
+        sub: "rotated-key-user",
+        iss: "https://issuer.example",
+      },
+      newSecret,
+    );
+    const requestFor = (token: string) => ({
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    await resolveRequestSession(requestFor(oldToken), config);
+    expect(jwks.requests).toBe(1);
+
+    jwks.rotateKey(newSecret);
+    now += 30_001;
+
+    await expect(resolveRequestSession(requestFor(newToken), config)).resolves.toMatchObject({
+      issuer: "https://issuer.example",
+      user_id: "rotated-key-user",
+      authMode: "external",
+    });
+    expect(jwks.requests).toBe(2);
+  });
+
+  it("shares a failed cold JWKS fetch and retries after in-flight cleanup", async () => {
+    const jwks = await JwksServer.start();
+    servers.add(jwks);
+    jwks.failNextFetch();
+    const config = {
+      appId: "app-with-retrying-jwks",
+      jwksUrl: jwks.url,
+    };
+    const token = signHs256Jwt({
+      sub: "retry-user",
+      iss: "https://issuer.example",
+    });
+    const request = {
+      headers: { authorization: `Bearer ${token}` },
+    };
+
+    const attempts = await Promise.allSettled(
+      Array.from({ length: 20 }, () => resolveRequestSession(request, config)),
+    );
+
+    expect(
+      attempts.every(
+        (attempt) => attempt.status === "rejected" && String(attempt.reason).includes("HTTP 503"),
+      ),
+    ).toBe(true);
+    expect(jwks.requests).toBe(1);
+
+    await expect(resolveRequestSession(request, config)).resolves.toMatchObject({
+      user_id: "retry-user",
+      authMode: "external",
+    });
+    expect(jwks.requests).toBe(2);
+  });
+
+  it("coalesces and rate-limits forced JWKS refreshes after bad signatures", async () => {
+    const jwks = await JwksServer.start();
+    servers.add(jwks);
+    let now = 1_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    const config = {
+      appId: "app-with-jwks-refresh-control",
+      jwksUrl: jwks.url,
+    };
+    const validToken = signHs256Jwt({
+      sub: "valid-user",
+      iss: "https://issuer.example",
+    });
+    const invalidToken = signHs256Jwt(
+      {
+        sub: "invalid-user",
+        iss: "https://issuer.example",
+      },
+      "different-secret",
+    );
+    const requestFor = (token: string) => ({
+      headers: { authorization: `Bearer ${token}` },
+    });
+
+    await resolveRequestSession(requestFor(validToken), config);
+    expect(jwks.requests).toBe(1);
+    now += 30_001;
+
+    const attempts = await Promise.allSettled(
+      Array.from({ length: 20 }, () => resolveRequestSession(requestFor(invalidToken), config)),
+    );
+    expect(attempts.every((attempt) => attempt.status === "rejected")).toBe(true);
+    expect(jwks.requests).toBe(2);
+
+    await expect(resolveRequestSession(requestFor(invalidToken), config)).rejects.toThrow(
+      /Invalid JWT/,
+    );
+    expect(jwks.requests).toBe(2);
   });
 
   it("verifies external JWTs via a static JWK and uses JWT sub as the session user", async () => {
