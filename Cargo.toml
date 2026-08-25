@@ -28,6 +28,7 @@ members = [
   "examples/band-chat/benchmarks",
   "examples/music-agent/benchmarks",
   "examples/benchmarks/smoke",
+  "examples/benchmarks/multi-table-ingest",
   "dev/benchmarks/storage/bench-core",
 ]
 exclude = ["examples/todo-server-rs", "examples/docs/todo-server-rs"]

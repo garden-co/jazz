@@ -2110,6 +2110,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "jazz-example-multi-table-ingest-benchmark"
+version = "0.1.0"
+dependencies = [
+ "codspeed-divan-compat",
+ "jazz",
+ "jazz-storage-rocksdb",
+ "tempfile",
+]
+
+[[package]]
 name = "jazz-example-music-agent-benchmark"
 version = "0.1.0"
 dependencies = [
