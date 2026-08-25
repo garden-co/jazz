@@ -3353,6 +3353,30 @@ fn inline_current_graph_with_source_metadata(
     )
 }
 
+#[cfg(test)]
+pub(super) fn inline_current_graph_with_source_metadata_for_test(
+    table: &TableSchema,
+    rows: Vec<CurrentRow>,
+    schema_version_alias: SchemaVersionAlias,
+    coverage: &str,
+    requirements: &SourceRequirements,
+) -> Result<
+    (
+        GraphBuilder,
+        RecordDescriptor,
+        BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+    ),
+    Error,
+> {
+    inline_current_graph_with_source_metadata(
+        table,
+        rows,
+        schema_version_alias,
+        coverage,
+        requirements,
+    )
+}
+
 fn inline_current_graph_with_source_metadata_and_branch_witness(
     table: &TableSchema,
     rows: Vec<CurrentRow>,

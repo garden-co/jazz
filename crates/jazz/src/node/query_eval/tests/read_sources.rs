@@ -2,6 +2,70 @@
 
 use super::*;
 
+/// This is intentionally structural: write-policy admission supplies inline
+/// rows before there is a public result to inspect. A provenance-only policy
+/// requirement must still acquire the hidden version capability used by the
+/// policy program; callers must not have to request that capability separately.
+#[test]
+fn inline_policy_provenance_requirement_synthesizes_version_witnesses() {
+    let schema = public_query_eval_schema(
+        PublicSchemaBuilder::new()
+            .table(PublicTableSchemaBuilder::new("docs").column("title", PublicColumnType::Text)),
+    );
+    let table = &schema.tables[0];
+    let requirements = SourceRequirements {
+        app_fields: FieldRequirement::None,
+        metadata: BTreeSet::from([SourceMetadataRequirement::Provenance(
+            ProvenanceField::CreatedBy,
+        )]),
+    };
+    assert!(
+        !requirements
+            .metadata
+            .contains(&SourceMetadataRequirement::VersionWitnesses),
+        "the policy request itself must remain provenance-only"
+    );
+    let candidate = current_row_from_cells(
+        table,
+        row(0x21),
+        &BTreeMap::from([("title".to_owned(), Value::String("inline".to_owned()))]),
+    )
+    .unwrap();
+
+    let (_graph, descriptor, metadata) = inline_current_graph_with_source_metadata_for_test(
+        table,
+        vec![candidate],
+        SchemaVersionAlias(7),
+        "inline-policy",
+        &requirements,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        metadata.get(&SourceMetadataRequirement::VersionWitnesses),
+        Some(SourceMetadataFields::VersionWitnesses {
+            schema_version_field,
+            tx_time_field,
+            tx_node_field,
+            branch_or_prefix_field: None,
+        }) if schema_version_field == "schema_version"
+            && tx_time_field == "tx_time"
+            && tx_node_field == "tx_node_id"
+    ));
+    for field in [
+        "table",
+        "layer",
+        "schema_version",
+        "parents",
+        "authored_columns",
+    ] {
+        assert!(
+            descriptor.field_index(field).is_some(),
+            "synthesized witness descriptor must carry {field}"
+        );
+    }
+}
+
 #[test]
 fn reverse_table_lens_projects_membership_and_content_version_sources() {
     // This is intentionally an internal assertion: the public subscription
