@@ -71,7 +71,7 @@ fn rejected_versions_share_physical_storage_across_renamed_schemas_and_reopen() 
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: renamed.id,
@@ -89,7 +89,7 @@ fn rejected_versions_share_physical_storage_across_renamed_schemas_and_reopen() 
         None,
     )
     .unwrap();
-    let (rejected, _unit) = core.commit_exclusive_settled(tx, AuthorId::SYSTEM, 10).unwrap();
+    let (rejected, _unit) = core.commit_exclusive_settled(tx, AuthorSubject::SYSTEM, 10).unwrap();
     core.apply_sync_message_settled(SyncMessage::FateUpdate {
         tx_id: rejected,
         fate: Fate::Rejected(RejectionReason::ExclusiveConflict),
@@ -192,7 +192,7 @@ fn physical_deletion_register_spans_renamed_schemas_and_reopens() {
     )
     .unwrap();
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: renamed.id,
@@ -338,7 +338,7 @@ fn late_renamed_deletion_fate_uses_authored_prefix_and_keeps_newer_winner() {
     )
     .expect("publish rename");
     core.apply_trusted_catalogue_message_settled(SyncMessage::SetCurrentWriteSchema {
-        author: AuthorId::SYSTEM,
+        author: AuthorSubject::SYSTEM,
         pointer: CurrentWriteSchema {
             revision: 1,
             schema: renamed.id,

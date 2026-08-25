@@ -16,7 +16,7 @@ pub(super) fn query_binding_value_signature(binding: &Binding) -> String {
 
 pub(super) fn policy_plan_cache_signature(
     binding: &Binding,
-    identity: AuthorId,
+    identity: AuthorSubject,
     claims_revision: u64,
 ) -> String {
     // Authorization lowering still embeds the permission subject in source

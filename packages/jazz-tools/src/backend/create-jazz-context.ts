@@ -8,7 +8,9 @@ import type { AppContext, Session } from "../runtime/context.js";
 import { RuntimeSource, type RuntimeClientContext } from "../runtime/runtime-source.js";
 import { Db, type DbConfig } from "../runtime/db.js";
 import { NativeRuntimeAdapter } from "../runtime/native-runtime/native-runtime-adapter.js";
-import { SYSTEM_AUTHOR_ID, SYSTEM_READ_SESSION } from "../runtime/system-identity.js";
+import { SYSTEM_READ_SESSION } from "../runtime/system-identity.js";
+import { canonicalAuthorSubject } from "../runtime/author-id.js";
+import { authorBytesForSession } from "../runtime/author-id.js";
 import type { AuthState } from "../runtime/auth-state.js";
 import { mergePermissionsIntoWasmSchema } from "../schema-permissions.js";
 import {
@@ -112,15 +114,19 @@ class BackendRuntimeSource extends RuntimeSource<DbConfig> {
       NapiDb,
       schema,
       deterministicBytes(`${this.config.appId}:${env}:${this.nodeIdentityScope}:node`),
-      deterministicBytes(`${this.config.appId}:${env}:author`),
+      authorBytesForSession({ issuer: "https://jazz.invalid", user_id: "backend-open" }),
       1,
       true,
       this.config.driver.type === "persistent"
         ? {
             persistentPath: this.config.driver.dataPath,
             readAuthorizationHost: "trusted-serving",
+            backendMode: true,
           }
-        : { readAuthorizationHost: "trusted-serving" },
+        : {
+            readAuthorizationHost: "trusted-serving",
+            backendMode: true,
+          },
     );
 
     this.client = JazzClient.connectWithRuntime(
@@ -344,17 +350,24 @@ export class JazzContext {
   asBackend(source?: BackendSchemaInput): Db {
     const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, schema, undefined, SYSTEM_AUTHOR_ID, true, true);
+    return this.wrapDb(client, schema, undefined, undefined, true, false);
   }
 
   /**
-   * Build a backend-scoped `Db` that stamps write provenance as `principalId`
+   * Build a backend-scoped `Db` that stamps write provenance as one issuer/subject pair
    * without evaluating permissions as that user.
    */
-  withAttribution(principalId: string, source?: BackendSchemaInput): Db {
+  withAttribution(issuer: string, subject: string, source?: BackendSchemaInput): Db {
     const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, schema, undefined, principalId, true, true);
+    return this.wrapDb(
+      client,
+      schema,
+      undefined,
+      canonicalAuthorSubject(issuer, subject),
+      true,
+      true,
+    );
   }
 
   /**
@@ -409,7 +422,13 @@ export class JazzContext {
   withAttributionForSession(session: Session, source?: BackendSchemaInput): Db {
     const { client, schema } = this.getClientAndSchema(source);
     this.enableBackendSyncIfConfigured(client);
-    return this.wrapDb(client, schema, undefined, session.user_id, true);
+    return this.wrapDb(
+      client,
+      schema,
+      undefined,
+      canonicalAuthorSubject(session.issuer, session.user_id),
+      true,
+    );
   }
 
   /**

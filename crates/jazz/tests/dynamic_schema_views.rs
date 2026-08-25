@@ -3,7 +3,7 @@ mod common;
 use jazz::db::{Db, DbConfig, DbIdentity, ExclusiveTxOps, MergeableTxOps, SeededRowIdSource};
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, col, gt, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::{
@@ -137,7 +137,7 @@ async fn open_owner(schema: JazzSchema) -> Db<TestStorage> {
             TestStorage::new(&refs),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x31; 16]),
-                author: AuthorId::from_bytes([0xa1; 16]),
+                author: AuthorSubject::for_test_bytes([0xa1; 16]),
             },
         )
         .with_id_source(SeededRowIdSource::new(7)),

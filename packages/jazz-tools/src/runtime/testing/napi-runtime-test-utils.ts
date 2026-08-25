@@ -70,7 +70,7 @@ export async function createNapiNativeRuntimeAdapter(
     },
     schema,
     deterministicBytes(`${appId}:${env}:${peerId}:node`),
-    deterministicBytes(`${appId}:${env}:${peerId}:author`),
+    testAuthorBytes(`${appId}:${env}:${peerId}:author`),
     1,
     true,
   );
@@ -101,7 +101,7 @@ export async function createPersistentNapiNativeRuntimeAdapter(
     },
     schema,
     deterministicBytes(`${appId}:${env}:${peerId}:node`),
-    deterministicBytes(`${appId}:${env}:${peerId}:author`),
+    testAuthorBytes(`${appId}:${env}:${peerId}:author`),
     1,
     false,
     { persistentPath: dataPath },
@@ -109,6 +109,10 @@ export async function createPersistentNapiNativeRuntimeAdapter(
   registerRuntimeCleanup(runtime);
 
   return runtime;
+}
+
+function testAuthorBytes(seed: string): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify(["urn:jazz:test", seed]));
 }
 
 function deterministicBytes(seed: string): Uint8Array {

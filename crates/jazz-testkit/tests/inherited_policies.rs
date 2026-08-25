@@ -264,7 +264,7 @@ async fn inherited_select_policy_exposes_child_row_through_parent() {
                 connect_ready_user(&server, schema.clone(), &alice_user_id, "documents").await;
             let bob = connect_ready_user(&server, schema.clone(), &bob_user_id, "documents").await;
 
-            let alice_session = alice.for_session(Session::new(alice_user_id));
+            let alice_session = alice.for_session(Session::new("urn:jazz:test", alice_user_id));
             let (folder_id, _, folder_tx) = alice_session
                 .insert(
                     "folders",
@@ -350,7 +350,7 @@ async fn reverse_inherited_select_retains_nested_source_inheritance() {
             let bob_user_id = test_user_id("bob");
             let alice = connect_ready_user(&server, schema.clone(), &alice_user_id, "files").await;
             let bob = connect_ready_user(&server, schema.clone(), &bob_user_id, "files").await;
-            let alice_session = alice.for_session(Session::new(alice_user_id));
+            let alice_session = alice.for_session(Session::new("urn:jazz:test", alice_user_id));
 
             let (organization_id, _, organization_tx) = alice_session
                 .insert("organizations", row_input!("owner_id" => alice_owner_id))
@@ -429,7 +429,7 @@ async fn inherited_select_policy_exposes_child_row_through_multi_hop_parent_chai
             let alice =
                 connect_ready_user(&server, schema.clone(), &alice_user_id, "documents").await;
 
-            let alice_session = alice.for_session(Session::new(alice_user_id));
+            let alice_session = alice.for_session(Session::new("urn:jazz:test", alice_user_id));
             let (organization_id, _, organization_tx) = alice_session
                 .insert(
                     "organizations",
@@ -509,7 +509,7 @@ async fn inherited_select_policy_exposes_child_row_through_any_forward_parent() 
                 connect_ready_user(&server, schema.clone(), &alice_user_id, "shared_documents")
                     .await;
 
-            let alice_session = alice.for_session(Session::new(alice_user_id));
+            let alice_session = alice.for_session(Session::new("urn:jazz:test", alice_user_id));
             let (bob_folder_id, _, bob_folder_tx) = alice_session
                 .insert(
                     "folders",
@@ -586,7 +586,7 @@ async fn inherited_select_policy_expands_both_forward_parent_branches() {
                 connect_ready_user(&server, schema.clone(), &alice_user_id, "shared_documents")
                     .await;
 
-            let alice_session = alice.for_session(Session::new(alice_user_id));
+            let alice_session = alice.for_session(Session::new("urn:jazz:test", alice_user_id));
             let (organization_id, _, organization_tx) = alice_session
                 .insert(
                     "organizations",
@@ -699,7 +699,7 @@ async fn inherited_update_policy_allows_update_through_parent() {
             let alice = jazz_testkit::connect(context).await.expect("connect alice");
             wait_for_edge_query_ready(&alice, "children", Duration::from_secs(30)).await;
 
-            let alice_session = alice.for_session(Session::new(alice_user_id));
+            let alice_session = alice.for_session(Session::new("urn:jazz:test", alice_user_id));
             let (organization_id, _, organization_tx) = alice_session
                 .insert(
                     "organizations",
@@ -810,7 +810,7 @@ async fn inherited_update_policy_allows_multi_hop_update_chain() {
             let alice = jazz_testkit::connect(context).await.expect("connect alice");
             wait_for_edge_query_ready(&alice, "children", Duration::from_secs(30)).await;
 
-            let alice_session = alice.for_session(Session::new(alice_user_id));
+            let alice_session = alice.for_session(Session::new("urn:jazz:test", alice_user_id));
             let (organization_id, _, organization_tx) = alice_session
                 .insert(
                     "organizations",
@@ -906,7 +906,7 @@ async fn inherited_update_policy_allows_reparenting_when_old_and_new_parents_gra
             let alice = jazz_testkit::connect(context).await.expect("connect alice");
             wait_for_edge_query_ready(&alice, "children", Duration::from_secs(30)).await;
 
-            let alice_session = alice.for_session(Session::new(alice_user_id));
+            let alice_session = alice.for_session(Session::new("urn:jazz:test", alice_user_id));
             let (organization_id, _, organization_tx) = alice_session
                 .insert(
                     "organizations",

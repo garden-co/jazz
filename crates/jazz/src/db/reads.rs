@@ -140,13 +140,13 @@ where
                     &shape,
                     &binding,
                     DurabilityTier::Local,
-                    AuthorId::SYSTEM,
+                    AuthorSubject::SYSTEM,
                 ))?),
                 Some(super::block_on(node.prepared_query_plan(
                     &shape,
                     &binding,
                     DurabilityTier::Global,
-                    AuthorId::SYSTEM,
+                    AuthorSubject::SYSTEM,
                 ))?),
             )
         } else {
@@ -313,7 +313,7 @@ where
         &self,
         prepared: &PreparedQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.all_for_identity_in_authorization_mode(
             prepared,
@@ -328,7 +328,7 @@ where
         &self,
         prepared: &PreparedQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
         let tier = effective_read_tier(&opts);
@@ -528,7 +528,7 @@ where
         &self,
         prepared: &PreparedQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<RelationSnapshot, Error> {
         ensure_supported_read_view(&opts)?;
         if opts.include_deleted {
@@ -593,7 +593,7 @@ where
         &self,
         query: &RelationQuery,
         opts: ReadOpts,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<RelationSnapshot, Error> {
         ensure_default_read_view(&opts)?;
         let query = relation_query_to_query(query)?;

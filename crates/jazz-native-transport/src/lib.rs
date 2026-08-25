@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use futures::{SinkExt as _, StreamExt as _};
 use jazz::db::{ConnectionSessionContext, WireTransportAdapter};
-use jazz::ids::{AuthorId, NodeUuid};
+use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::protocol_limits::{MAX_WIRE_BATCH_FRAMES, MAX_WIRE_FRAME_BYTES, validate_wire_frame_len};
 use jazz::wire::{
     FEATURE_SYNC_MESSAGE_PAYLOAD, TransportError, WIRE_PROTOCOL_VERSION, WireAuthorityEndpoint,
@@ -279,7 +279,7 @@ impl WebSocketTransport {
     pub async fn connect(
         base_url: impl AsRef<str>,
         app_id: AppId,
-        peer_identity: AuthorId,
+        peer_identity: AuthorSubject,
         auth: AuthConfig,
     ) -> Result<Self, WebSocketClientError> {
         Self::connect_with_wake(base_url, app_id, peer_identity, auth, Arc::new(|| {})).await
@@ -288,7 +288,7 @@ impl WebSocketTransport {
     pub async fn connect_with_wake(
         base_url: impl AsRef<str>,
         app_id: AppId,
-        peer_identity: AuthorId,
+        peer_identity: AuthorSubject,
         auth: AuthConfig,
         wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Self, WebSocketClientError> {
@@ -302,7 +302,7 @@ impl WebSocketTransport {
     pub async fn connect_catalogue_bootstrap(
         base_url: impl AsRef<str>,
         app_id: AppId,
-        peer_identity: AuthorId,
+        peer_identity: AuthorSubject,
         auth: AuthConfig,
     ) -> Result<jazz::protocol::CatalogueSnapshot, WebSocketClientError> {
         validate_catalogue_bootstrap_upstream_url(base_url.as_ref(), app_id)
@@ -363,7 +363,7 @@ impl WebSocketTransport {
     async fn connect_with_wake_and_bootstrap(
         base_url: impl AsRef<str>,
         app_id: AppId,
-        peer_identity: AuthorId,
+        peer_identity: AuthorSubject,
         auth: AuthConfig,
         wake: Arc<dyn Fn() + Send + Sync>,
         bootstrap_catalogue: bool,
@@ -382,7 +382,10 @@ impl WebSocketTransport {
             // The server authenticates the session subject separately. This
             // endpoint only binds a fresh wire link and is never trusted as a
             // semantic identity.
-            node: NodeUuid::from_bytes(*peer_identity.as_bytes()),
+            node: NodeUuid(uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_URL,
+                peer_identity.canonical().as_bytes(),
+            )),
             epoch: NEXT_CLIENT_CONNECTION_EPOCH.fetch_add(1, Ordering::Relaxed),
         };
         let hello = WireFrame::Hello(
@@ -502,12 +505,12 @@ fn is_false(value: &bool) -> bool {
 }
 
 fn encode_prelude(
-    peer_identity: AuthorId,
+    peer_identity: AuthorSubject,
     auth: AuthConfig,
     bootstrap_catalogue: bool,
 ) -> Result<Vec<u8>, WebSocketClientError> {
     serde_json::to_vec(&WebSocketClientPrelude {
-        peer_identity: hex::encode(peer_identity.as_bytes()),
+        peer_identity: peer_identity.canonical().to_owned(),
         auth,
         bootstrap_catalogue,
     })
@@ -781,7 +784,7 @@ mod tests {
             .collect::<String>();
         sender
             .send(jazz::protocol::SyncMessage::SessionClaims {
-                identity: AuthorId::SYSTEM,
+                identity: AuthorSubject::SYSTEM,
                 claims: BTreeMap::from([(
                     "catalogue_fixture".to_owned(),
                     jazz::groove::records::Value::String(body),
@@ -880,7 +883,7 @@ mod tests {
 
     #[test]
     fn snapshot_bootstrap_prelude_explicitly_marks_the_snapshot_only_exchange() {
-        let bytes = encode_prelude(AuthorId::SYSTEM, AuthConfig::default(), true)
+        let bytes = encode_prelude(AuthorSubject::SYSTEM, AuthConfig::default(), true)
             .expect("encode snapshot bootstrap prelude");
         let prelude: serde_json::Value =
             serde_json::from_slice(&bytes).expect("decode snapshot bootstrap prelude");

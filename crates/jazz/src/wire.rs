@@ -9,14 +9,16 @@
 use postcard::{from_bytes, to_allocvec};
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{AuthorId, NodeUuid};
+use crate::ids::{AuthorSubject, NodeUuid};
 use crate::protocol::SyncMessage;
 use crate::protocol_limits::{validate_logical_message_len, validate_wire_frame_len};
 
 /// Current Jazz wire protocol version.
 /// Version 12 changes postcard discriminants for large-value-bearing semantic
-/// payloads. This is an intentional breaking baseline: version 11 peers could
-/// otherwise decode a changed ordinal as a different valid variant.
+/// payloads and carries author identities as exact canonical `[iss,sub]` JSON
+/// strings. This is an intentional breaking baseline: version 11 peers could
+/// decode changed ordinals incorrectly and UUID authors have no compatibility
+/// decoder, so negotiation rejects them.
 pub const WIRE_PROTOCOL_VERSION: u16 = 12;
 
 /// No optional features.
@@ -214,7 +216,7 @@ pub struct WireSession {
     /// Monotone session incarnation. Reconnects that abandon prior ordering use a new epoch.
     pub epoch: u64,
     /// Authenticated user identity for edge/client links, once admission succeeds.
-    pub identity: Option<AuthorId>,
+    pub identity: Option<AuthorSubject>,
 }
 
 impl std::fmt::Debug for WireSession {
@@ -736,7 +738,7 @@ mod tests {
         let session = WireSession {
             session_id: "session-1".to_owned(),
             epoch: 3,
-            identity: Some(AuthorId::from_bytes([0x42; 16])),
+            identity: Some(AuthorSubject::for_test_bytes([0x42; 16])),
         };
         let frame = WireFrame::Message(
             WireEnvelope::new(1, FEATURE_SESSION_FRAME, vec![1, 2, 3, 4])
@@ -788,7 +790,7 @@ mod tests {
         let session = WireSession {
             session_id: "credential-bearing-session-id".repeat(10_000),
             epoch: 3,
-            identity: Some(AuthorId::from_bytes([0x42; 16])),
+            identity: Some(AuthorSubject::for_test_bytes([0x42; 16])),
         };
         let distinct_session = WireSession {
             session_id: "credential-bearing-session-ix".repeat(10_000),
@@ -898,7 +900,7 @@ mod tests {
             request_id: PermissionAdviceRequestId([0x11; 16]),
             key: AuthorizationSupportScopeKey {
                 support_shape_digest: [0x22; 32],
-                subject: AuthorId::from_bytes([0x33; 16]),
+                subject: AuthorSubject::for_test_bytes([0x33; 16]),
                 claims_digest: [0x44; 32],
                 policy_digest: [0x55; 32],
             },
@@ -1091,7 +1093,7 @@ mod tests {
             request_id: PermissionAdviceRequestId([0x11; 16]),
             key: AuthorizationSupportScopeKey {
                 support_shape_digest: [0x22; 32],
-                subject: AuthorId::from_bytes([0x33; 16]),
+                subject: AuthorSubject::for_test_bytes([0x33; 16]),
                 claims_digest: [0x44; 32],
                 policy_digest: [0x55; 32],
             },
@@ -1181,7 +1183,7 @@ mod tests {
         let table = TableSchema::new("todos", [ColumnSchema::new("title", ColumnType::String)]);
         let schema_version = SchemaVersionId::from_bytes([0x44; 16]);
         let node = NodeUuid::from_bytes([0x11; 16]);
-        let author = AuthorId::from_bytes([0x55; 16]);
+        let author = AuthorSubject::for_test_bytes([0x55; 16]);
         (0..count)
             .map(|index| {
                 let tx_id = TxId::new(TxTime(1_000 + index as u64), node);
@@ -1456,7 +1458,7 @@ mod tests {
                     tx_id,
                     kind: TxKind::Mergeable,
                     n_total_writes: 0,
-                    made_by: AuthorId::from_bytes([0x55; 16]),
+                    made_by: AuthorSubject::for_test_bytes([0x55; 16]),
                     permission_subject: None,
                     base_snapshot: None,
                     row_read_set: None,
@@ -1579,10 +1581,11 @@ mod tests {
     }
 
     #[test]
-    fn current_wire_version_rejects_previous_release_peer() {
+    fn wire_v12_rejects_v11_without_compatibility_negotiation() {
+        assert_eq!(WIRE_PROTOCOL_VERSION, 12);
         let remote = WireHello {
-            min_protocol_version: WIRE_PROTOCOL_VERSION - 1,
-            max_protocol_version: WIRE_PROTOCOL_VERSION - 1,
+            min_protocol_version: 11,
+            max_protocol_version: 11,
             features: FEATURE_SYNC_MESSAGE_PAYLOAD,
             role: WirePeerRole::Core,
             authority: None,

@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn local_subscription_emits_removed_row_for_fire_and_forget_delete() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0x31; 16]);
+    let owner = AuthorSubject::for_test_bytes([0x31; 16]);
     let db = open_db(0x31, owner, &schema);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
@@ -42,7 +42,7 @@ fn local_subscription_emits_removed_row_for_fire_and_forget_delete() {
 #[test]
 fn one_shot_and_subscription_rows_keep_identical_record_descriptors() {
     let schema = schema();
-    let owner = AuthorId::from_bytes([0x32; 16]);
+    let owner = AuthorSubject::for_test_bytes([0x32; 16]);
     let db = open_db(0x32, owner, &schema);
     let query = Query::from("todos");
     let mut subscription = prepared_subscribe(&db, &query, ReadOpts::default()).unwrap();
@@ -80,8 +80,8 @@ fn one_shot_and_subscription_rows_keep_identical_record_descriptors() {
 #[test]
 fn session_scoped_subscription_emits_removed_row_for_owned_delete() {
     let schema = owner_id_public_schema();
-    let author = AuthorId::from_bytes([0x32; 16]);
-    let db = open_db(0x32, AuthorId::SYSTEM, &schema);
+    let author = AuthorSubject::for_test_bytes([0x32; 16]);
+    let db = open_db(0x32, AuthorSubject::SYSTEM, &schema);
     let user_id = "local-first-user";
     db.set_identity_claims(
         author,
@@ -136,7 +136,7 @@ fn session_scoped_subscription_emits_removed_row_for_owned_delete() {
 #[test]
 fn subscription_retains_a_plan_from_its_selected_authorization_mode() {
     let schema = owner_id_public_schema();
-    let author = AuthorId::from_bytes([0x33; 16]);
+    let author = AuthorSubject::for_test_bytes([0x33; 16]);
     let db = open_db(0x33, author, &schema);
     db.set_identity_claims(
         author,

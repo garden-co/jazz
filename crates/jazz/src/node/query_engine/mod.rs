@@ -25,7 +25,7 @@ use groove::schema::ColumnType;
 use super::OpenTransactionId;
 #[cfg(test)]
 use crate::ids::RowUuid;
-use crate::ids::{AuthorId, SchemaFamilyId, SchemaVersionId};
+use crate::ids::{AuthorSubject, SchemaFamilyId, SchemaVersionId};
 use crate::protocol::{BindingViewKey, BranchKey, RegisterShapeOptions, SnapshotRef};
 use crate::query::{BindingId, Query, RecursionBound, RelationQuery, ShapeId};
 use crate::schema::TableSchema;

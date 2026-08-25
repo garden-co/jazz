@@ -287,6 +287,7 @@ fn attributed_write_retry_preserves_permission_subject_after_rejection_error() {
         .collect::<Vec<_>>();
     let storage = FailTransactionReadMemoryStorage::new(&column_family_refs);
     let mut core = NodeState::new(node(0x90), schema, storage.clone()).unwrap();
+    install_test_uuid_sub_claim(&mut core, backend);
 
     let tx_id = core
         .commit_mergeable_settled(
@@ -343,6 +344,7 @@ fn attributed_write_checkpoint_error_cleans_up_terminal_permission_subject() {
         .collect::<Vec<_>>();
     let storage = FailTransactionReadMemoryStorage::new(&column_family_refs);
     let mut core = NodeState::new(node(0x90), schema, storage.clone()).unwrap();
+    install_test_uuid_sub_claim(&mut core, backend);
 
     let tx_id = core
         .commit_mergeable_settled(
@@ -419,6 +421,12 @@ fn session_owner_string_uuid_write_policy_accepts_matching_author() {
     let (_writer_dir, mut writer) = open_node_with_schema(node(1), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
     let author = user(0xa1);
+    let claims = BTreeMap::from([(
+        "user_id".to_owned(),
+        Value::String(author.test_uuid().to_string()),
+    )]);
+    writer.set_session_claims(author, claims.clone());
+    core.set_session_claims(author, claims);
     let row_uuid = row(0x51);
     let (tx_id, unit) = writer
         .commit_mergeable_unit_settled(
@@ -426,7 +434,7 @@ fn session_owner_string_uuid_write_policy_accepts_matching_author() {
                 .made_by(author)
                 .cells(BTreeMap::from([
                     ("title".to_owned(), Value::String("owned".to_owned())),
-                    ("owner_id".to_owned(), Value::String(author.0.to_string())),
+                    ("owner_id".to_owned(), Value::String(author.test_uuid().to_string())),
                 ])),
         )
         .unwrap();
@@ -451,7 +459,7 @@ fn session_owner_string_uuid_write_policy_accepts_matching_author() {
             row_uuid,
             BTreeMap::from([
                 ("title".to_owned(), Value::String("owned".to_owned())),
-                ("owner_id".to_owned(), Value::String(author.0.to_string())),
+                ("owner_id".to_owned(), Value::String(author.test_uuid().to_string())),
             ]),
         )]
     );
@@ -594,7 +602,7 @@ fn maintained_public_query_bundle_filters_private_rows_from_same_tx() {
                 .made_by(alice)
                 .cells(BTreeMap::from([
                     ("body".to_owned(), v("alice private")),
-                    ("owner_id".to_owned(), Value::String(alice.0.to_string())),
+                    ("owner_id".to_owned(), Value::String(alice.test_uuid().to_string())),
                 ])),
         ])
         .unwrap();
@@ -765,6 +773,8 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
     let (_invited_dir, mut invited_reader) = open_node_with_schema(node(3), schema.clone());
     let (_uninvited_dir, mut uninvited_reader) = open_node_with_schema(node(4), schema);
+    install_test_uuid_sub_claim(&mut core, invited);
+    install_test_uuid_sub_claim(&mut core, uninvited);
 
     let denied_tx = uninvited_writer
         .commit_mergeable_unit_settled(
@@ -793,7 +803,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
         .commit_mergeable_settled(MergeableCommit::new("canvasInvites", invite_row, 11).cells(
             BTreeMap::from([
                 ("canvas".to_owned(), Value::Uuid(canvas_row.0)),
-                ("userID".to_owned(), Value::Uuid(invited.0)),
+                ("userID".to_owned(), Value::Uuid(invited.test_uuid())),
             ]),
         ))
         .unwrap();
@@ -927,6 +937,7 @@ fn join_policy_authorizes_writes_reads_and_next_emission_revocation() {
 #[test]
 fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_and_update() {
     let owner = user(0xa1);
+    let owner_claim_subject = owner.test_uuid();
     let workspace_a = row(0xb1);
     let workspace_b = row(0xb2);
     let owner_membership_a = row(0xc1);
@@ -1028,7 +1039,7 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
             3,
             BTreeMap::from([
                 ("workspace".to_owned(), Value::Uuid(workspace_a.0)),
-                ("subject".to_owned(), Value::Uuid(owner.0)),
+                ("subject".to_owned(), Value::Uuid(owner_claim_subject)),
             ]),
         ),
         (
@@ -1037,7 +1048,7 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
             4,
             BTreeMap::from([
                 ("workspace".to_owned(), Value::Uuid(workspace_b.0)),
-                ("subject".to_owned(), Value::Uuid(owner.0)),
+                ("subject".to_owned(), Value::Uuid(owner_claim_subject)),
             ]),
         ),
         (
@@ -1055,7 +1066,10 @@ fn correlated_exists_rel_keeps_workspace_and_referenced_row_together_for_insert_
     ] {
         accept_global(&mut core, MergeableCommit::new(table, row_uuid, time).cells(cells));
     }
-    core.set_session_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.0))]));
+    core.set_session_claims(
+        owner,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(owner_claim_subject))]),
+    );
 
     let accepted = core
         .commit_mergeable_settled(
@@ -1368,7 +1382,7 @@ fn correlated_inherited_insert_policy_accepts_owner_and_denies_cross_tenant_memb
         &mut core,
         MergeableCommit::new("memberships", owner_membership, 3).cells(BTreeMap::from([
             ("organization".to_owned(), Value::Uuid(organization.0)),
-            ("user".to_owned(), Value::Uuid(owner.0)),
+            ("user".to_owned(), Value::Uuid(owner.test_uuid())),
             ("role".to_owned(), Value::String("admin".to_owned())),
         ])),
     );
@@ -1376,7 +1390,7 @@ fn correlated_inherited_insert_policy_accepts_owner_and_denies_cross_tenant_memb
         &mut core,
         MergeableCommit::new("memberships", foreign_membership, 4).cells(BTreeMap::from([
             ("organization".to_owned(), Value::Uuid(foreign_organization.0)),
-            ("user".to_owned(), Value::Uuid(outsider.0)),
+            ("user".to_owned(), Value::Uuid(outsider.test_uuid())),
             ("role".to_owned(), Value::String("admin".to_owned())),
         ])),
     );
@@ -1395,7 +1409,10 @@ fn correlated_inherited_insert_policy_accepts_owner_and_denies_cross_tenant_memb
             ("title".to_owned(), Value::String("release".to_owned())),
         ])),
     );
-    core.set_session_claims(owner, BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.0))]));
+    core.set_session_claims(
+        owner,
+        BTreeMap::from([("sub".to_owned(), Value::Uuid(owner.test_uuid()))]),
+    );
 
     let accepted = core
         .commit_mergeable_settled(
@@ -1470,12 +1487,14 @@ fn write_policy_branch_or_join_allows_either_literal_branch_or_membership_join()
     let (_invited_dir, mut invited_writer) = open_node_with_schema(node(1), schema.clone());
     let (_uninvited_dir, mut uninvited_writer) = open_node_with_schema(node(2), schema.clone());
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema);
+    install_test_uuid_sub_claim(&mut core, invited);
+    install_test_uuid_sub_claim(&mut core, uninvited);
 
     let invite_tx = core
         .commit_mergeable_settled(MergeableCommit::new("canvasInvites", invite_row, 3).cells(
             BTreeMap::from([
                 ("canvas".to_owned(), Value::Uuid(private_canvas.0)),
-                ("userID".to_owned(), Value::Uuid(invited.0)),
+                ("userID".to_owned(), Value::Uuid(invited.test_uuid())),
             ]),
         ))
         .unwrap();
@@ -1588,6 +1607,20 @@ fn read_policy_branch_or_join_allows_public_or_membership_reads() {
     let (_core_dir, mut core) = open_node_with_schema(node(9), schema.clone());
     let (_member_dir, _member_reader) = open_node_with_schema(node(3), schema.clone());
     let (_other_dir, _other_reader) = open_node_with_schema(node(4), schema);
+    core.set_session_claims(
+        member,
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(member.test_uuid().to_string()),
+        )]),
+    );
+    core.set_session_claims(
+        other,
+        BTreeMap::from([(
+            "user_id".to_owned(),
+            Value::String(other.test_uuid().to_string()),
+        )]),
+    );
 
     accept_global(
         &mut core,
@@ -1596,7 +1629,7 @@ fn read_policy_branch_or_join_allows_public_or_membership_reads() {
             .cells(BTreeMap::from([
                 ("title".to_owned(), Value::String("public".to_owned())),
                 ("isPublic".to_owned(), Value::Bool(true)),
-                ("createdBy".to_owned(), Value::Uuid(member.0)),
+                ("createdBy".to_owned(), Value::Uuid(member.test_uuid())),
             ])),
     );
     accept_global(
@@ -1606,14 +1639,14 @@ fn read_policy_branch_or_join_allows_public_or_membership_reads() {
             .cells(BTreeMap::from([
                 ("title".to_owned(), Value::String("private".to_owned())),
                 ("isPublic".to_owned(), Value::Bool(false)),
-                ("createdBy".to_owned(), Value::Uuid(member.0)),
+                ("createdBy".to_owned(), Value::Uuid(member.test_uuid())),
             ])),
     );
     accept_global(
         &mut core,
         MergeableCommit::new("chatMembers", membership, 12).cells(BTreeMap::from([
             ("chatId".to_owned(), Value::Uuid(private_chat.0)),
-            ("userId".to_owned(), Value::String(member.0.to_string())),
+            ("userId".to_owned(), Value::String(member.test_uuid().to_string())),
         ])),
     );
     let shape = Query::from("chats").validate(&core.catalogue.schema).unwrap();

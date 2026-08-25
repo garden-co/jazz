@@ -85,7 +85,7 @@ where
     pub(super) async fn write_policy_allows_version_record(
         &mut self,
         version: &VersionRecord,
-        author: AuthorId,
+        author: AuthorSubject,
         candidate_tx_id: Option<TxId>,
     ) -> Result<bool, Error> {
         self.write_policy_allows_version_record_for_view(version, author, None, candidate_tx_id)
@@ -95,11 +95,11 @@ where
     async fn write_policy_allows_version_record_for_view(
         &mut self,
         version: &VersionRecord,
-        author: AuthorId,
+        author: AuthorSubject,
         exact_view: Option<&JazzSchema>,
         candidate_tx_id: Option<TxId>,
     ) -> Result<bool, Error> {
-        if author == AuthorId::SYSTEM {
+        if author == AuthorSubject::SYSTEM {
             return Ok(true);
         }
         let (policy_schema_version, table, cells) = if let Some(schema) = exact_view {
@@ -314,7 +314,7 @@ where
         &mut self,
         table_name: &str,
         row_uuid: RowUuid,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<bool, Error> {
         self.dry_run_read_current_allows_in_schema(
             table_name,
@@ -333,7 +333,7 @@ where
         table_name: &str,
         row_uuid: RowUuid,
         schema_version: SchemaVersionId,
-        identity: AuthorId,
+        identity: AuthorSubject,
     ) -> Result<bool, Error> {
         let schema = if schema_version == self.catalogue.current_schema_version_id {
             &self.catalogue.schema
@@ -368,9 +368,9 @@ where
         &mut self,
         table_name: &str,
         row_uuid: RowUuid,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<bool, Error> {
-        if author == AuthorId::SYSTEM {
+        if author == AuthorSubject::SYSTEM {
             return Ok(true);
         }
         let table = self.table(table_name)?.clone();
@@ -397,9 +397,9 @@ where
         &mut self,
         table_name: &str,
         row_uuid: RowUuid,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<bool, Error> {
-        if author == AuthorId::SYSTEM {
+        if author == AuthorSubject::SYSTEM {
             return Ok(true);
         }
         let table = self.table(table_name)?.clone();

@@ -89,7 +89,7 @@ async fn core_websocket_transport_helper_negotiates_route_hello() {
     let client = WebSocketTransport::connect(
         url,
         app_id,
-        jazz::ids::AuthorId::SYSTEM,
+        jazz::ids::AuthorSubject::SYSTEM,
         transport_auth("secret"),
     )
     .await
@@ -118,7 +118,7 @@ async fn websocket_transport_wakes_only_for_inbound_db_work() {
     let mut client = WebSocketTransport::connect_with_wake(
         url,
         app_id,
-        jazz::ids::AuthorId::SYSTEM,
+        jazz::ids::AuthorSubject::SYSTEM,
         transport_auth("secret"),
         callback,
     )
@@ -225,7 +225,7 @@ async fn dynamic_edge_bootstraps_authenticated_catalogue_before_first_client() {
     let client = WebSocketTransport::connect(
         &edge_url,
         app_id,
-        jazz::ids::AuthorId::from_bytes([0x44; 16]),
+        jazz::ids::AuthorSubject::for_test_bytes([0x44; 16]),
         transport_auth("bootstrap-secret"),
     )
     .await;
@@ -281,7 +281,7 @@ async fn dynamic_edge_rejects_client_until_normal_upstream_session_is_attached()
     let error = WebSocketTransport::connect(
         edge_url,
         app_id,
-        jazz::ids::AuthorId::from_bytes([0x44; 16]),
+        jazz::ids::AuthorSubject::for_test_bytes([0x44; 16]),
         transport_auth("bootstrap-secret"),
     )
     .await
@@ -309,7 +309,7 @@ async fn dynamic_catalogue_bootstrap_rejects_wrong_authority_credential() {
     let error = WebSocketTransport::connect_catalogue_bootstrap(
         core_url,
         app_id,
-        jazz::ids::AuthorId::SYSTEM,
+        jazz::ids::AuthorSubject::SYSTEM,
         transport_auth("wrong-secret"),
     )
     .await
@@ -335,7 +335,7 @@ async fn dynamic_catalogue_bootstrap_requires_the_reserved_edge_identity() {
     let error = WebSocketTransport::connect_catalogue_bootstrap(
         core_url,
         app_id,
-        jazz::ids::AuthorId::from_bytes([0x46; 16]),
+        jazz::ids::AuthorSubject::for_test_bytes([0x46; 16]),
         transport_auth("bootstrap-secret"),
     )
     .await
@@ -365,7 +365,7 @@ async fn dynamic_catalogue_bootstrap_rejects_generic_backend_credential() {
     let error = WebSocketTransport::connect_catalogue_bootstrap(
         core_url,
         app_id,
-        jazz::ids::AuthorId::SYSTEM,
+        jazz::ids::AuthorSubject::SYSTEM,
         jazz::tools::websocket_prelude_auth::AuthConfig {
             backend_secret: Some("ordinary-backend-secret".to_owned()),
             ..Default::default()
@@ -401,7 +401,7 @@ async fn blank_dynamic_edge_rejects_downstream_with_retry_later_until_ready() {
     let error = WebSocketTransport::connect(
         edge_url,
         app_id,
-        jazz::ids::AuthorId::from_bytes([0x45; 16]),
+        jazz::ids::AuthorSubject::for_test_bytes([0x45; 16]),
         transport_auth("edge-secret"),
     )
     .await

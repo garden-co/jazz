@@ -8,7 +8,7 @@ use jazz::db::{
 };
 use jazz::groove::records::Value;
 use jazz::groove::storage::MemoryStorage;
-use jazz::ids::{AuthorId, NodeUuid};
+use jazz::ids::{AuthorSubject, NodeUuid};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 
@@ -45,7 +45,7 @@ fn open_db(seed: u64) -> Result<Db<MemoryStorage>, Box<dyn std::error::Error>> {
         storage,
         identity: DbIdentity {
             node: NodeUuid::from_bytes([0x44; 16]),
-            author: AuthorId::from_bytes([0x55; 16]),
+            author: AuthorSubject::for_test_bytes([0x55; 16]),
         },
         id_source: Some(Box::new(SeededRowIdSource::new(seed))),
     }))?)

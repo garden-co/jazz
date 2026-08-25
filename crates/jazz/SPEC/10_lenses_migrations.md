@@ -66,7 +66,7 @@ publication and write-pointer changes under administrative authority. Catalogue
 mutations travel as admin-gated
 `SyncMessage::{PublishSchemaWithLens, PublishLens, SetCurrentWriteSchema}`
 messages with `CatalogueAck` replies; a non-admin author is rejected
-(`INV-LENS-3`). `AuthorId::SYSTEM` is the catalogue admin.
+(`INV-LENS-3`). `AuthorSubject::SYSTEM` is the catalogue admin.
 
 Exactly one database-wide catalogue sequencer assigns a dense monotone
 `CatalogueSeq`. An arbitrary core or replica never assigns catalogue sequence;
@@ -349,3 +349,63 @@ change future merge behavior.
 ## Open Questions
 
 - 🔶 [#1779](https://github.com/garden-co/jazz/issues/1779) — Lens/catalogue lifecycle, validation, administration, and schema projection.
+
+### Detailed issue context
+
+- **Binding-facing lens facade.** TS/WASM/NAPI should expose published
+  schemas, migration lenses, current-write-schema movement, and catalogue acks
+  as stable facade operations rather than leaking branch-key storage details. The
+  ABI should use opaque `SchemaVersionId`/`MigrationLensId` bytes plus structured
+  validation errors and deterministic golden fixtures for natural lens behavior.
+- **Catalogue admin set.** `AuthorSubject::SYSTEM` is the catalogue admin; the
+  implementation has no broader admin set.
+- **Policy pin movement validation.** Schema versions/lenses may be published
+  ahead of the permission-evaluation pin moving, but policy stays on the pinned
+  schema until the admin moves the pin — at which point the new current schema
+  must have a valid bundle, and a lens that drops a column referenced by the
+  active bundle is rejected at publish (same family as the
+  missing-backwards-default check).
+- **Explicit schema-version GC.** `INV-LENS-20` forbids automatic deletion of
+  published physical lineages or authored variants. If explicit GC is ever added, what completeness,
+  branch-key/history, lens, and audit evidence must authorize it?
+- **Multiple-parent schema lineage.** Initial admission has exactly one
+  lineage-defining parent. Later cross-lenses may add translation paths but may
+  not change physical placement. If a future schema must inherit physical
+  identities from multiple independently evolved parents, define an atomic
+  multi-parent lineage proof rather than making arrival order authoritative.
+- **Catalogue sequence unification.** Schema-lineage activation requires an
+  authoritative database-wide monotone catalogue sequence. Current-write
+  pointers and later ordered catalogue mutations should enter the same sequence;
+  the remaining work is migrating the pointer API from its legacy independent
+  revision field to the common committed envelope.
+- **`RenameTable` payload.** `RenameTable`'s payload is ignored in favor of
+  `TableLens` source/target during evaluation. Decide whether the op should be
+  removed or the redundant payload should be validated.
+- **Catalogue as a separate lane.** The design distributes the catalogue on a
+  lane beside read/write sync; the protocol has the message variants but no
+  separate-lane enforcement (ch. 8).
+- **Schema-projected source nodes.** Some projected historical/current reads
+  still materialize rows inside the source resolver. Decide the
+  first-class lowered source-node surface for schema/lens projections so
+  projected sources compose with the normal query graph instead of staying as an
+  inline resolver path.
+- **Shared core-supported schema gate.** Keep CLI publish, dev server schema
+  load, native/WASM runtime open, and server conversion on one validator until
+  the public schema vocabulary and executable core support converge.
+- **Dynamic defaults.** Literal defaults are write-origin expansion; dynamic
+  defaults need a deterministic time/source rule and policy ordering before they
+  can enter the executable subset.
+- **Column metadata.** Arbitrary column metadata can help generated UIs, but
+  must be versioned, preserved through lenses, and kept separate from executable
+  policy/planner semantics unless explicitly promoted.
+- **Lens hardening.** Preserve hidden newer fields under old-client writes,
+  make lens-path selection ambiguity-aware, allow corrected or asymmetric
+  migrations where safe, and define type-changing migrations.
+- **Authored-column presence through lenses.** `INV-HIST-8` distinguishes an
+  explicitly authored unchanged cell from materialized inherited context, while
+  `INV-LENS-11`/`INV-LENS-14` require old-schema deltas to translate through
+  lens paths. Define how authored presence propagates through `RenameColumn`,
+  `CopyColumn`, `AddColumn`, `DropColumn`, and `TransformColumn`. Until that
+  contract exists, a lens-translated version deliberately marks presence
+  unavailable and conservatively treats every present translated payload cell
+  as authored; this is not a claim of per-column LWW fidelity across a lens.

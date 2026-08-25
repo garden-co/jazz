@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { schema as s } from "../index.js";
+import type { BatchId, WriteReceipt } from "./client.js";
 import { createWasmRuntime, hasJazzWasmBuild } from "./testing/wasm-runtime-test-utils.js";
 
 const app = s.defineApp({
@@ -10,7 +11,56 @@ const app = s.defineApp({
   }),
 });
 
+async function committedBatchId(receipt: WriteReceipt): Promise<BatchId> {
+  if (receipt.kind !== "committed") throw new Error("expected committed write receipt");
+  return await receipt.batchId;
+}
+
 describe.skipIf(!hasJazzWasmBuild())("WASM streaming mutations", () => {
+  it("selects and filters public provenance authors as canonical text", async () => {
+    const appId = "wasm-public-provenance";
+    const author = JSON.stringify(["urn:jazz:test", `${appId}:test:default:author`]);
+    const runtime = await createWasmRuntime(app.wasmSchema, { appId });
+    const inserted = runtime.insert("todos", {
+      title: { type: "Text", value: "created by canonical author" },
+      done: { type: "Boolean", value: false },
+    });
+    await runtime.waitForTransaction(await committedBatchId(inserted), "local");
+
+    await expect(
+      runtime.query(
+        JSON.stringify({
+          table: "todos",
+          select_columns: ["title", "$createdBy", "$updatedBy"],
+          relation_ir: {
+            Filter: {
+              input: { TableScan: { table: "todos" } },
+              predicate: {
+                Cmp: {
+                  left: { column: "$createdBy" },
+                  op: "Eq",
+                  right: { Literal: { type: "Text", value: author } },
+                },
+              },
+            },
+          },
+        }),
+        null,
+        "local",
+      ),
+    ).resolves.toEqual([
+      {
+        table: "todos",
+        id: inserted.id,
+        values: [
+          { type: "Text", value: "created by canonical author" },
+          { type: "Text", value: author },
+          { type: "Text", value: author },
+        ],
+      },
+    ]);
+  });
+
   it("streams insert, update, and partial upsert through the browser runtime boundary", async () => {
     const runtime = await createWasmRuntime(app.wasmSchema, {
       appId: "wasm-streaming-mutations",

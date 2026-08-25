@@ -6,6 +6,7 @@
     "orientation": "portrait",
     "jsEngine": "hermes",
     "newArchEnabled": true,
+    "plugins": ["jazz-rn"],
     "android": {
       "package": "dev.jazz.todo.localfirstexpo"
     },

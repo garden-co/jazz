@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::ids::{AuthorId, RowUuid, SchemaVersionId};
+use crate::ids::{AuthorSubject, RowUuid, SchemaVersionId};
 use crate::protocol::{LensOp, MigrationLens};
 use crate::schema::MergeStrategy;
 use crate::time::{GlobalTime, TxTime};
@@ -470,7 +470,7 @@ impl Oracle {
     pub fn visible_global_content_set_at_owner(
         &self,
         global_base: GlobalTime,
-        owner: AuthorId,
+        owner: AuthorSubject,
     ) -> BTreeSet<(RowUuid, TxId)> {
         self.versions
             .iter()
@@ -479,7 +479,10 @@ impl Oracle {
             .into_iter()
             .filter_map(|row_uuid| {
                 self.visible_global_current_version_at(row_uuid, global_base)
-                    .filter(|version| version.cells.get("owner") == Some(&Value::Uuid(owner.0)))
+                    .filter(|version| {
+                        version.cells.get("owner")
+                            == Some(&Value::String(owner.canonical().to_owned()))
+                    })
                     .map(|version| (row_uuid, version.tx_id))
             })
             .collect()
@@ -489,7 +492,7 @@ impl Oracle {
     pub fn visible_content_set_at_snapshot_owner(
         &self,
         snapshot: &Snapshot,
-        owner: Option<AuthorId>,
+        owner: Option<AuthorSubject>,
     ) -> BTreeSet<(RowUuid, TxId)> {
         self.versions
             .iter()
@@ -521,7 +524,8 @@ impl Oracle {
                 current_content_version(covered)
                     .filter(|version| {
                         owner.is_none_or(|owner| {
-                            version.cells.get("owner") == Some(&Value::Uuid(owner.0))
+                            version.cells.get("owner")
+                                == Some(&Value::String(owner.canonical().to_owned()))
                         })
                     })
                     .map(|version| (row_uuid, version.tx_id))

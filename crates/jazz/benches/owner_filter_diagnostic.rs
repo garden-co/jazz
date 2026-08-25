@@ -13,7 +13,7 @@ use jazz::db::{
 };
 use jazz::groove::db::StorageReadMetrics;
 use jazz::groove::records::Value;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::query::{OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TablePolicies, TableSchemaBuilder};
@@ -22,8 +22,16 @@ use jazz_storage_rocksdb::RocksDbStorage;
 use serde_json::{Map, json};
 
 const TABLE: &str = "documents";
-const AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000a1"));
-const OTHER_AUTHOR: AuthorId = AuthorId(uuid::uuid!("00000000-0000-0000-0000-0000000000b2"));
+const AUTHOR_UUID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-0000000000a1");
+const OTHER_AUTHOR_UUID: uuid::Uuid = uuid::uuid!("00000000-0000-0000-0000-0000000000b2");
+
+fn author() -> AuthorSubject {
+    AuthorSubject::for_test_uuid(AUTHOR_UUID)
+}
+
+fn other_author() -> AuthorSubject {
+    AuthorSubject::for_test_uuid(OTHER_AUTHOR_UUID)
+}
 
 fn main() {
     jazz_benchmark_guard::refuse_contaminated_measurement();
@@ -75,7 +83,7 @@ fn run_rung(table_rows: usize, owned_rows: usize, result_rows: usize, batch_rows
 
         db.reset_storage_read_metrics_for_test();
         let query_started = Instant::now();
-        let rows = block_on(db.all_for_identity(&prepared, global_read_opts(), AUTHOR))
+        let rows = block_on(db.all_for_identity(&prepared, global_read_opts(), author()))
             .expect("run owner-filter query");
         let query_us = query_started.elapsed().as_micros();
         let query_metrics = db.take_storage_read_metrics_for_test();
@@ -127,7 +135,7 @@ fn open_db(path: &Path, schema: JazzSchema) -> Db<RocksDbStorage> {
             RocksDbStorage::open(path, &refs).expect("open owner-filter RocksDB"),
             DbIdentity {
                 node: NodeUuid::from_bytes([0x51; 16]),
-                author: AUTHOR,
+                author: author(),
             },
         )
         .with_id_source(SeededRowIdSource::new(0x51)),
@@ -142,14 +150,14 @@ fn seed_rows(db: &Db<RocksDbStorage>, table_rows: usize, owned_rows: usize, batc
 
         for index in batch_start..batch_end {
             let owner = if index < owned_rows {
-                AUTHOR
+                author()
             } else {
-                OTHER_AUTHOR
+                other_author()
             };
             block_on(tx.insert(
                 TABLE,
                 BTreeMap::from([
-                    ("owner".to_owned(), Value::Uuid(owner.0)),
+                    ("owner".to_owned(), Value::Uuid(owner.test_uuid())),
                     ("active".to_owned(), Value::Bool(true)),
                     ("updated_at".to_owned(), Value::U64(index as u64)),
                     (
@@ -184,7 +192,7 @@ fn policy_only_query() -> Query {
 
 fn owner_predicate_query() -> Query {
     Query::from(TABLE)
-        .filter(eq(col("owner"), lit(AUTHOR.0)))
+        .filter(eq(col("owner"), lit(AUTHOR_UUID)))
         .filter(eq(col("active"), lit(true)))
 }
 

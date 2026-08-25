@@ -133,7 +133,7 @@ fn unbound_team_claim_in_composed_read_policy_denies_without_binding_error() {
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x87), 10).cells(BTreeMap::from([
                 ("title".to_owned(), v("team-owned")),
-                ("team".to_owned(), Value::Uuid(user(0xa1).0)),
+                ("team".to_owned(), Value::Uuid(user(0xa1).test_uuid())),
             ])),
         )
         .unwrap();
@@ -172,7 +172,7 @@ fn registered_team_claim_in_composed_read_policy_allows_matching_rows() {
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x87), 10).cells(BTreeMap::from([
                 ("title".to_owned(), v("team-a")),
-                ("team".to_owned(), Value::Uuid(team_a.0)),
+                ("team".to_owned(), Value::Uuid(team_a.test_uuid())),
             ])),
         )
         .unwrap();
@@ -187,7 +187,7 @@ fn registered_team_claim_in_composed_read_policy_allows_matching_rows() {
         .commit_mergeable_settled(
             MergeableCommit::new("todos", row(0x88), 11).cells(BTreeMap::from([
                 ("title".to_owned(), v("team-b")),
-                ("team".to_owned(), Value::Uuid(team_b.0)),
+                ("team".to_owned(), Value::Uuid(team_b.test_uuid())),
             ])),
         )
         .unwrap();
@@ -200,7 +200,7 @@ fn registered_team_claim_in_composed_read_policy_allows_matching_rows() {
     .unwrap();
     core.set_session_claims(
         team_a,
-        BTreeMap::from([("team".to_owned(), Value::Uuid(team_a.0))]),
+        BTreeMap::from([("team".to_owned(), Value::Uuid(team_a.test_uuid()))]),
     );
     let mut edge = PeerState::edge_client(team_a);
 

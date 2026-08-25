@@ -297,7 +297,8 @@ describe("Db runtime schema order", () => {
     const session: Session = {
       user_id: "00000000-0000-0000-0000-0000000000a1",
       claims: {},
-      authMode: "anonymous",
+      issuer: "https://issuer.example",
+      authMode: "external",
     };
     const query = vi.fn(
       async (_queryJson: string, _options: unknown, receivedSession?: Session) => {

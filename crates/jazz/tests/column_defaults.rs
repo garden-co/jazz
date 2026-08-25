@@ -5,7 +5,7 @@ mod common;
 use jazz::db::{Db, DbConfig, DbIdentity};
 use jazz::groove::records::Value;
 use jazz::groove::storage::TestStorage;
-use jazz::ids::{AuthorId, NodeUuid, RowUuid};
+use jazz::ids::{AuthorSubject, NodeUuid, RowUuid};
 use jazz::schema::JazzSchema;
 use jazz::tools::{
     ColumnDescriptor, ColumnType, RowDescriptor, Schema, TableName, TableSchema,
@@ -47,7 +47,7 @@ fn open_db() -> Db<TestStorage> {
         storage: TestStorage::new(&refs),
         identity: DbIdentity {
             node: NodeUuid::from_bytes([0x11; 16]),
-            author: AuthorId::from_bytes([0xa1; 16]),
+            author: AuthorSubject::for_test_bytes([0xa1; 16]),
         },
         id_source: None,
     }))

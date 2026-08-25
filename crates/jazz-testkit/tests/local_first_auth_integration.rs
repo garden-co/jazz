@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use jazz::tools::{
-    AppContext, ClientId, ClientStorage, ColumnType, Schema, SchemaBuilder, Session, TableSchema,
-    Value, identity,
+    AppContext, AuthMode, ClientId, ClientStorage, ColumnType, Schema, SchemaBuilder, Session,
+    TableSchema, Value, identity,
 };
 use jazz_server::JazzServer;
 use jazz_server::middleware::auth::TestClock;
@@ -303,16 +303,23 @@ async fn local_first_writes_carry_derived_principal_as_created_by_impl() {
     .expect("connect alice");
 
     let alice_user_id = identity::derive_user_id(&alice_seed()).to_string();
+    let alice_session = Session::new(identity::LOCAL_FIRST_ISSUER, &alice_user_id)
+        .with_auth_mode(AuthMode::LocalFirst);
+    let alice_author = alice_session
+        .author_subject()
+        .expect("local-first session has an author subject")
+        .canonical()
+        .to_owned();
 
     let (todo_id, _, _) = alice
-        .for_session(Session::new(&alice_user_id))
+        .for_session(alice_session)
         .insert("todos", todo_values("provenance check", false))
         .expect("alice creates todo");
 
     let expected = vec![
         Value::Text("provenance check".to_string()),
         Value::Boolean(false),
-        Value::Text(alice_user_id),
+        Value::Text(alice_author),
     ];
 
     wait_for_rows(
@@ -350,13 +357,8 @@ async fn local_first_and_jwt_clients_coexist_impl() {
     .expect("connect alice (local-first)");
     let alice_user_id = identity::derive_user_id(&alice_seed()).to_string();
 
-    // Bob authenticates via the default HS256 JWT minted by JazzServer. The
-    // testing helper derives a stable wire principal for a symbolic subject,
-    // because WebSocket sessions validate principals as UUIDs, so Bob's
-    // provenance is that derived id rather than the literal subject.
+    // Bob authenticates via the default HS256 JWT minted by JazzServer.
     let bob_subject = "bob";
-    let bob_user_id =
-        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, bob_subject.as_bytes()).to_string();
     let mut bob_ctx = server.make_client_context_for_user(test_schema(), bob_subject);
     bob_ctx.backend_secret = None;
     bob_ctx.admin_secret = None;
@@ -364,24 +366,38 @@ async fn local_first_and_jwt_clients_coexist_impl() {
         .await
         .expect("connect bob (jwt)");
 
+    let alice_session = Session::new(identity::LOCAL_FIRST_ISSUER, &alice_user_id)
+        .with_auth_mode(AuthMode::LocalFirst);
+    let alice_author = alice_session
+        .author_subject()
+        .expect("local-first session has an author subject")
+        .canonical()
+        .to_owned();
+    let bob_session = Session::new("urn:jazz:test", bob_subject);
+    let bob_author = bob_session
+        .author_subject()
+        .expect("jwt session has an author subject")
+        .canonical()
+        .to_owned();
+
     let (alice_id, _, _) = alice
-        .for_session(Session::new(&alice_user_id))
+        .for_session(alice_session)
         .insert("todos", todo_values("alice via ed25519", false))
         .expect("alice creates todo");
     let (bob_id, _, _) = bob
-        .for_session(Session::new("bob"))
+        .for_session(bob_session)
         .insert("todos", todo_values("bob via jwt", true))
         .expect("bob creates todo");
 
     let alice_row = vec![
         Value::Text("alice via ed25519".to_string()),
         Value::Boolean(false),
-        Value::Text(alice_user_id.clone()),
+        Value::Text(alice_author),
     ];
     let bob_row = vec![
         Value::Text("bob via jwt".to_string()),
         Value::Boolean(true),
-        Value::Text(bob_user_id.clone()),
+        Value::Text(bob_author),
     ];
 
     wait_for_rows(

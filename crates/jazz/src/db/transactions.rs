@@ -42,7 +42,7 @@ where
     /// Build a mergeable transaction authored and permission-checked as `author`.
     pub async fn mergeable_tx_for_identity(
         &self,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<MergeableTx<'_, S>, Error> {
         let tx_id = OpenTransactionId::new();
         self.begin_mergeable_for_identity(tx_id, author).await?;
@@ -58,7 +58,7 @@ where
     /// If `callback` returns an error, the transaction is dropped without committing.
     pub async fn transaction_for_identity<T>(
         &self,
-        author: AuthorId,
+        author: AuthorSubject,
         callback: impl AsyncFnOnce(&mut MergeableTx<'_, S>) -> Result<T, Error>,
     ) -> Result<(T, TxId), Error> {
         let mut tx = self.mergeable_tx_for_identity(author).await?;
@@ -91,7 +91,7 @@ where
     pub async fn begin_mergeable_for_identity(
         &self,
         id: OpenTransactionId,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<(), Error> {
         self.node
             .node
@@ -478,18 +478,13 @@ where
     ///
     /// Transaction-local reads, authorization, provenance, and commit
     /// attribution all use `author`; subsequent calls cannot replace it.
+    #[doc(hidden)]
     pub async fn begin_exclusive_for_identity(
         &self,
         id: OpenTransactionId,
-        author: AuthorId,
+        author: AuthorSubject,
     ) -> Result<(), Error> {
-        self.node
-            .node
-            .lock()
-            .await
-            .open_exclusive_for_identity(id, author)
-            .await
-            .map_err(Into::into)
+        self.open_exclusive_handle_for_identity(id, author).await
     }
 
     /// Return a non-owning operations handle for an already-open exclusive transaction.
@@ -538,7 +533,7 @@ where
         &self,
         tx_id: OpenTransactionId,
         prepared: &PreparedQuery,
-        author: AuthorId,
+        author: AuthorSubject,
         opts: ReadOpts,
     ) -> Result<Vec<CurrentRow>, Error> {
         self.transaction_all_in_authorization_mode(
@@ -555,7 +550,7 @@ where
         &self,
         tx_id: OpenTransactionId,
         prepared: &PreparedQuery,
-        author: AuthorId,
+        author: AuthorSubject,
         opts: ReadOpts,
         authorization_mode: QueryAuthorizationMode,
     ) -> Result<Vec<CurrentRow>, Error> {
@@ -756,6 +751,35 @@ where
             .await
             .commit_exclusive_bound(open_tx_id, self.next_now_ms())
             .await?;
+        self.finish_exclusive_publication(published, unit).await
+    }
+
+    /// Commit an owned exclusive transaction as an explicit policy identity.
+    ///
+    /// Bindings that expose session-scoped transactions use this rather than
+    /// the connection's default identity so a trusted backend cannot silently
+    /// turn a `for_session` transaction into a system-authored commit.
+    #[cfg_attr(not(feature = "testing"), allow(dead_code))]
+    pub(crate) async fn commit_exclusive_handle_for_identity(
+        &self,
+        open_tx_id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<TxId, Error> {
+        let (published, unit) = self
+            .node
+            .node
+            .lock()
+            .await
+            .commit_exclusive(open_tx_id, author, self.next_now_ms())
+            .await?;
+        self.finish_exclusive_publication(published, unit).await
+    }
+
+    async fn finish_exclusive_publication(
+        &self,
+        published: PublishedTransaction,
+        unit: SyncMessage,
+    ) -> Result<TxId, Error> {
         let tx_id = published.tx_id;
         if self.node.defer_local_persistence.get() {
             self.refresh_subscriptions().await?;
@@ -774,11 +798,20 @@ where
     }
 
     pub(crate) async fn open_exclusive_handle(&self, id: OpenTransactionId) -> Result<(), Error> {
+        self.open_exclusive_handle_for_identity(id, self.identity.author)
+            .await
+    }
+
+    async fn open_exclusive_handle_for_identity(
+        &self,
+        id: OpenTransactionId,
+        author: AuthorSubject,
+    ) -> Result<(), Error> {
         self.node
             .node
             .lock()
             .await
-            .open_exclusive_for_identity(id, self.identity.author)
+            .open_exclusive_for_identity(id, author)
             .await
             .map_err(Into::into)
     }
