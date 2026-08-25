@@ -402,12 +402,7 @@ impl Database {
                         "cannot decode pushed chunk metadata: {error}"
                     ))
                 })?;
-                let children = match node {
-                    crate::large_values::ChunkNode::Leaf { .. } => Vec::new(),
-                    crate::large_values::ChunkNode::Branch { children, .. } => {
-                        children.into_iter().map(|child| child.node_ref).collect()
-                    }
-                };
+                let children = unique_large_value_children(&node);
                 LargeValueNodeReferences {
                     references: 0,
                     upload_references: 1,
