@@ -25,11 +25,23 @@ exact contiguous coverage and the full digest, then decompresses and decodes
 the semantic message. No partial semantic message reaches `Db`.
 
 Reconnect creates a new adapter/codec epoch and discards incomplete assembly.
-Known-state replay remains the retry mechanism; fragments themselves do not
-outlive a connection. Implementations bound physical frames, concurrent
-incomplete messages, aggregate staged bytes, advertised logical length, and
-recent-completion deduplication. These are configurable/resource-defense
-budgets, not query semantics and not a 2 MiB logical-message ceiling.
+While a connection remains live, an incomplete message expires 30 seconds after
+its last novel, non-overlapping extent and no later than five minutes after its
+first accepted extent. An exact duplicate or rejected extent is not progress and
+does not refresh the inactivity deadline. Expiry runs before every adapter send
+or receive poll and before fragment admission, reclaiming the id and all staged
+bytes.
+Fragments arriving after expiry begin a new incomplete assembly; known-state
+replay remains the retry mechanism. An otherwise legal message remains
+admissible while it makes progress inside the inactivity window and completes
+before the maximum age.
+
+Implementations also bound physical frames, concurrent incomplete messages,
+aggregate staged bytes, advertised logical length, and recent-completion
+deduplication. These are configurable/resource-defense budgets, not query
+semantics and not a 2 MiB logical-message ceiling. The named expiry constants
+are `MAX_FRAGMENT_REASSEMBLY_IDLE_MS` and
+`MAX_FRAGMENT_REASSEMBLY_AGE_MS`.
 
 ## Limit inventory
 
