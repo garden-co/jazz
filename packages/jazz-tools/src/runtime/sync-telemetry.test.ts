@@ -118,16 +118,18 @@ type MockWasmModule = {
 
 function createWasmModule(drains: WasmTraceEntry[][] = []): MockWasmModule {
   const subscribers: TraceEntrySubscriber[] = [];
-  const unsubscribeTraceEntries = vi.fn(() => {
-    subscribers.length = 0;
-  });
+  const unsubscribeTraceEntries = vi.fn<() => void>();
 
   return {
     setTraceEntryCollectionEnabled: vi.fn<(enabled: boolean) => void>(),
     drainTraceEntries: vi.fn<() => WasmTraceEntry[]>(() => drains.shift() ?? []),
     subscribeTraceEntries: vi.fn((callback: TraceEntrySubscriber) => {
       subscribers.push(callback);
-      return unsubscribeTraceEntries;
+      return () => {
+        const index = subscribers.indexOf(callback);
+        if (index >= 0) subscribers.splice(index, 1);
+        unsubscribeTraceEntries();
+      };
     }),
     subscribers,
     unsubscribeTraceEntries,
@@ -405,5 +407,44 @@ describe("telemetry OTLP helpers", () => {
     expect(wasmModule.drainTraceEntries).toHaveBeenCalledTimes(1);
     expect(wasmModule.unsubscribeTraceEntries).toHaveBeenCalledTimes(1);
     expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenLastCalledWith(false);
+  });
+
+  it("keeps shared WASM collection enabled across failed-context cleanup and retry", () => {
+    const wasmModule = createWasmModule([[], [], []]);
+    const liveContext = installWasmTelemetry({
+      wasmModule,
+      collectorUrl: "http://127.0.0.1:54418",
+      appId: "live-context",
+      runtimeThread: "worker",
+    });
+    const failedContext = installWasmTelemetry({
+      wasmModule,
+      collectorUrl: "http://127.0.0.1:54418",
+      appId: "failed-context",
+      runtimeThread: "worker",
+    });
+
+    expect(wasmModule.subscribers).toHaveLength(2);
+    expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenCalledTimes(1);
+
+    // Models cleanupFailedContext after B installs telemetry but fails opening its database.
+    failedContext();
+    expect(wasmModule.subscribers).toHaveLength(1);
+    expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenLastCalledWith(true);
+
+    const retriedContext = installWasmTelemetry({
+      wasmModule,
+      collectorUrl: "http://127.0.0.1:54418",
+      appId: "retried-context",
+      runtimeThread: "worker",
+    });
+    retriedContext();
+    expect(wasmModule.subscribers).toHaveLength(1);
+    expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenLastCalledWith(true);
+
+    liveContext();
+    expect(wasmModule.subscribers).toHaveLength(0);
+    expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenLastCalledWith(false);
+    expect(wasmModule.setTraceEntryCollectionEnabled).toHaveBeenCalledTimes(2);
   });
 });
