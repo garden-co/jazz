@@ -2038,6 +2038,11 @@ fn stored_scalar_schema(kind: LargeValueKind) -> EnumSchema {
     ]);
     let chunked = RecordDescriptor::new([
         ("format_version", ValueType::U8),
+        // Primitive cells deliberately have no semantic witness: JSON and
+        // text may carry identical UTF-8 bytes under their schema context.
+        // A chunked reference, however, carries a typed root/edit tail and
+        // must reject a received descriptor replayed through another kind.
+        ("kind", ValueType::U8),
         ("logical_hash", ValueType::raw_bytes()),
         ("root", ValueType::Record(Box::new(root))),
         ("byte_length", ValueType::U64),
@@ -2110,6 +2115,7 @@ fn chunked_values(value: &LargeValueRef) -> Vec<Value> {
     ]);
     vec![
         Value::U8(value.format_version),
+        Value::U8(large_value_kind_tag(value.kind)),
         Value::Bytes(value.logical_hash.0.to_vec()),
         Value::Record(crate::records::OwnedRecord::new(
             root.create(&[
@@ -2147,6 +2153,7 @@ fn chunked_values(value: &LargeValueRef) -> Vec<Value> {
 fn decode_chunked_values(kind: LargeValueKind, values: &[Value]) -> Result<LargeValueRef, Error> {
     let [
         Value::U8(format_version),
+        Value::U8(encoded_kind),
         logical_hash,
         Value::Record(root),
         Value::U64(byte_length),
@@ -2156,6 +2163,9 @@ fn decode_chunked_values(kind: LargeValueKind, values: &[Value]) -> Result<Large
     else {
         return Err(Error::MalformedScalar);
     };
+    if large_value_kind_from_tag(*encoded_kind)? != kind {
+        return Err(Error::MalformedScalar);
+    }
     let root_values = root.to_values().map_err(|_| Error::MalformedScalar)?;
     let [object_hash, locator] = root_values.as_slice() else {
         return Err(Error::MalformedScalar);
@@ -2205,6 +2215,23 @@ fn decode_chunked_values(kind: LargeValueKind, values: &[Value]) -> Result<Large
     };
     validate_descriptor(&value)?;
     Ok(value)
+}
+
+fn large_value_kind_tag(kind: LargeValueKind) -> u8 {
+    match kind {
+        LargeValueKind::Bytes => 0,
+        LargeValueKind::String => 1,
+        LargeValueKind::Json => 2,
+    }
+}
+
+fn large_value_kind_from_tag(tag: u8) -> Result<LargeValueKind, Error> {
+    match tag {
+        0 => Ok(LargeValueKind::Bytes),
+        1 => Ok(LargeValueKind::String),
+        2 => Ok(LargeValueKind::Json),
+        _ => Err(Error::MalformedScalar),
+    }
 }
 
 fn validate_descriptor(value: &LargeValueRef) -> Result<(), Error> {

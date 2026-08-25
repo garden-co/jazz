@@ -987,7 +987,12 @@ pub(super) fn decode_value(bytes: &[u8], value_type: &ValueType) -> Result<Value
                         .map(Value::String)
                         .map_err(|_| Error::InvalidUtf8),
                 },
-                crate::large_values::StoredScalar::Chunked(value) => Ok(Value::Large(value)),
+                crate::large_values::StoredScalar::Chunked(value) if value.kind == *kind => {
+                    Ok(Value::Large(value))
+                }
+                crate::large_values::StoredScalar::Chunked(_) => Err(Error::TypeMismatch {
+                    expected: value_type.clone(),
+                }),
             }
         }
         ValueType::Uuid => Ok(Value::Uuid(uuid::Uuid::from_bytes(read_exact::<16>(

@@ -629,8 +629,29 @@ mod variant_case_tests {
             "the JSON physical descriptor accepts its schema-derived large value"
         );
         assert!(
-            text_cell.create(&[Value::Large(json_root)]).is_err(),
+            text_cell.create(&[Value::Large(json_root.clone())]).is_err(),
             "a JSON descriptor must not enter text physical storage"
+        );
+
+        let json_record = json_cell
+            .create(&[Value::Large(json_root)])
+            .expect("encode JSON physical cell");
+        assert!(
+            text_cell.bind(&json_record).to_values().is_err(),
+            "a received JSON physical record cannot replay as text"
+        );
+        let text_root = groove::large_values::prepare(
+            groove::large_values::LargeValueKind::String,
+            br#"{"title":"same bytes"}"#,
+        )
+        .unwrap()
+        .value_ref;
+        let text_record = text_cell
+            .create(&[Value::Large(text_root)])
+            .expect("encode text physical cell");
+        assert!(
+            json_cell.bind(&text_record).to_values().is_err(),
+            "a received text physical record cannot replay as JSON"
         );
     }
 }
