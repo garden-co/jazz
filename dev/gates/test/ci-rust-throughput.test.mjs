@@ -1450,6 +1450,11 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   );
   assert.match(typescript, /name: Run Node and browser test suites in parallel/);
   assert.match(typescript, /run: dev\/gates\/run-ts-tests\.sh/);
+  assert.match(runner, /pnpm --filter jazz-tools build/);
+  assert.match(
+    runner,
+    /Every example resolves the public `jazz-tools\/\*` exports from `dist`/,
+  );
   assert.match(runner, /--concurrency=2/);
   assert.match(runner, /setsid bash -c "\$\{node_tests_command\}" >"\$\{node_tests_log\}" 2>&1 &/);
   assert.match(
@@ -1488,6 +1493,7 @@ test("parallel TypeScript runner waits for both suites and combines their failur
       encoding: "utf8",
       env: {
         ...process.env,
+        JAZZ_SKIP_JAZZ_TOOLS_BUILD: "1",
         JAZZ_NODE_TEST_COMMAND: `sleep 0.05; touch ${JSON.stringify(nodeMarker)}; exit ${testCase.node}`,
         JAZZ_BROWSER_TEST_COMMAND: `sleep 0.1; touch ${JSON.stringify(browserMarker)}; exit ${testCase.browser}`,
       },
@@ -1509,6 +1515,7 @@ test("parallel TypeScript runner terminates both child process groups", async ()
     cwd: root,
     env: {
       ...process.env,
+      JAZZ_SKIP_JAZZ_TOOLS_BUILD: "1",
       JAZZ_NODE_TEST_COMMAND: `sleep 0.5; touch ${JSON.stringify(nodeMarker)}`,
       JAZZ_BROWSER_TEST_COMMAND: `sleep 0.5; touch ${JSON.stringify(browserMarker)}`,
     },
