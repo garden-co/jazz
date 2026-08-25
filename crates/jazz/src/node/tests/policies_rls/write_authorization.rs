@@ -226,6 +226,67 @@ fn local_authority_keeps_insert_and_update_policies_distinct() {
     ), "the predecessor remains independently pending");
 }
 
+/// This stays at the node boundary because admission evaluates policy-pinned
+/// inline rows before a public client receives a write outcome. It proves the
+/// provenance visible to that inline program matches the public milliseconds
+/// contract at both its persisted-old-row and incoming-version boundaries.
+#[test]
+fn write_policy_timestamp_provenance_uses_physical_milliseconds() {
+    let created_at_ms = 1_777_777_777_777;
+    let updated_at_ms = created_at_ms + 1;
+    let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
+        PublicTableSchemaBuilder::new("todos")
+            .column("title", PublicColumnType::Text)
+            .policies(
+                PublicTablePolicies::new()
+                    .with_insert(PublicPolicyExpr::eq_literal(
+                        "$createdAt",
+                        PublicValue::Timestamp(created_at_ms),
+                    ))
+                    .with_update(
+                        Some(PublicPolicyExpr::eq_literal(
+                            "$createdAt",
+                            PublicValue::Timestamp(created_at_ms),
+                        )),
+                        PublicPolicyExpr::eq_literal(
+                            "$updatedAt",
+                            PublicValue::Timestamp(updated_at_ms),
+                        ),
+                    ),
+            ),
+    ));
+    let (_core_dir, mut core) = open_node_with_schema(node(0x9a), schema);
+    let author = user(0xa1);
+    let row_uuid = row(0x9a);
+
+    let insert = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, created_at_ms)
+                .made_by(author)
+                .cells(title_cells("created")),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit_settled(insert).unwrap();
+    assert!(matches!(
+        core.transaction_state_settled(insert),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+
+    let update = core
+        .commit_mergeable_settled(
+            MergeableCommit::new("todos", row_uuid, updated_at_ms)
+                .made_by(author)
+                .parents(vec![insert])
+                .cells(title_cells("updated")),
+        )
+        .unwrap();
+    core.finalize_local_mergeable_commit_settled(update).unwrap();
+    assert!(matches!(
+        core.transaction_state_settled(update),
+        Some((Fate::Accepted, Some(_), DurabilityTier::Global))
+    ));
+}
+
 #[test]
 fn local_insert_policy_classification_survives_finalization_retry() {
     let schema = build_public_test_schema(PublicSchemaBuilder::new().table(
