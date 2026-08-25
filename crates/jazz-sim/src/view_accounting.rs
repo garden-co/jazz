@@ -159,9 +159,9 @@ mod tests {
             RowUuid(uuid::Uuid::nil()),
             Vec::new(),
             AuthorSubject::for_test_bytes([0; 16]),
-            tx_id.time,
+            tx_id.time.physical_ms(),
             AuthorSubject::for_test_bytes([0; 16]),
-            tx_id.time,
+            tx_id.time.physical_ms(),
             &BTreeMap::<String, Value>::from([("name".to_owned(), Value::String("value".into()))]),
             None,
         )

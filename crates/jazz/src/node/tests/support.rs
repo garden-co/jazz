@@ -357,9 +357,9 @@ fn version_record<V: Into<Value> + Clone>(
         row_uuid,
         parents,
         AuthorSubject::SYSTEM,
-        TxTime(1),
+        1,
         AuthorSubject::SYSTEM,
-        TxTime(1),
+        1,
         &cells,
         deletion,
     )

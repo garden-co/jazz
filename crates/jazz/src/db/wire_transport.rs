@@ -421,7 +421,7 @@ where
         self.validate_inbound_session(&envelope)?;
         let payload = self
             .inbound_stream
-            .decode_message(&envelope.payload, envelope.features)
+            .decode_message_borrowed(&envelope.payload, envelope.features)
             .map_err(|message| {
                 WireError::new(WireErrorCode::MalformedFrame, WireRetry::Never, message)
             })?;

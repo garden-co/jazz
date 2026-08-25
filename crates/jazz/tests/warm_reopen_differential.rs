@@ -204,8 +204,8 @@ fn canonical_row(schema: &JazzSchema, row: &CurrentRow) -> CanonicalRow {
             .iter()
             .map(|column| {
                 (
-                    column.name.clone(),
-                    row.cell(table, &column.name)
+                    column.name().to_owned(),
+                    row.cell(table, column.name())
                         .map(|value| format!("{value:?}")),
                 )
             })
