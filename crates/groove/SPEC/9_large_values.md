@@ -35,8 +35,8 @@ storage are physical arms of those types, encoded as one engine-owned ordinary
 Groove enum that is not visible in a schema, query, policy, index, or result:
 
 ```text
-StoredScalar = enum {
-  Primitive { value: declared primitive },
+StoredScalar<kind> = enum {
+  Primitive { value: primitive for kind },
   Chunked {
     format_version,
     logical_hash,
@@ -50,6 +50,7 @@ StoredScalar = enum {
 
 LargeValueRef {
   format_version,
+  kind,
   logical_hash,
   root: NodeRef { object_hash, locator },
   byte_length,
@@ -66,10 +67,14 @@ record, array, nullable, and enum codecs;
 there is no private tag byte or postcard envelope for a scalar descriptor.
 `bytes` uses the bytes primitive and `string` uses the string primitive. JSON
 retains Groove's existing canonical JSON-as-string logical representation, so
-its primitive backing is string as well; its JSON validation and chunk behavior
-are selected by declared schema/lowering metadata, never by a stored or
-client-supplied `kind` field. Internal raw string/bytes backing primitives only
-terminate this self-hosting enum encoding and are impossible at the public
+its primitive backing is string as well. The ordinary enum schema is
+parameterized by the immutable kind supplied by schema lowering, so neither
+physical arm duplicates that context. Inline payloads are interpreted as the
+primitive selected by that schema; the same raw UTF-8 content can therefore be
+a valid string or JSON value when stored under the corresponding column kind.
+Every independently addressed immutable tree node carries and authenticates its
+own format and kind before traversal. Internal raw string/bytes backing primitives
+only terminate this self-hosting enum encoding and are impossible at the public
 schema or logical-operator boundary.
 
 `logical_hash` is deterministic content identity. `object_hash` authenticates
@@ -135,19 +140,44 @@ and exact aggregate metrics:
 
 ```text
 NodeRef { object_hash, locator }
-Leaf    { format, bytes }
-Branch  { format, children: [{ node_ref, byte_length, utf16_length? }] }
+Leaf    { format, kind, bytes }
+Branch  { format, kind, children: [{ node_ref, byte_length, utf16_length? }] }
 ```
 
 Leaves are selected by a versioned FastCDC-like content-defined chunker with
 hard minimum, target, and maximum sizes. Branches use content-defined grouping
-over complete child descriptors. Recursive grouping produces a deterministic
-prolly tree: identical kind, format and logical base bytes produce the same
-logical hashes and shape independent of edit history. A branch's object hash
+over a private kind/format-neutral content fingerprint derived from complete
+child descriptors. Keeping this grouping fingerprint separate from logical
+identity means a representation-version or semantic-kind distinction does not
+arbitrarily reshuffle otherwise identical content. Recursive grouping produces
+a deterministic prolly tree: identical kind, format and logical base bytes
+produce the same logical hashes and shape independent of edit history. A branch's object hash
 commits to its exact child `NodeRef`s, including locators; the separate logical
 hash excludes retrieval identities. Unchanged nodes may retain their locators
 across versions, while an independently created equal value may have a different
 retrieval graph and the same logical identity.
+
+The current immutable-node format is version 2. Every leaf and branch embeds
+both that format and its semantic kind. Decoding MUST reject either field when
+it differs from the expected descriptor context. The locator-independent
+logical hash commits to the format and kind as well as the leaf bytes or branch
+child descriptors. Groove derives that logical identity from the grouping
+fingerprint with a reversible full-width kind/format domain mask, allowing
+localized consolidation to recover canonical grouping without persisting a
+second hash in each child descriptor. Consequently, identical UTF-8 or JSON-compatible bytes do
+not share logical identities across bytes, text, and JSON values. Candidate
+format-1 nodes fail closed; there is no compatibility decoder.
+
+Nodes use Groove's ordinary canonical enum/record codec rather than a private
+serialization envelope. A leaf is `{ format, kind, bytes }`; a branch is
+`{ format, kind, children }`, where each child is the ordinary record
+`{ object_hash, locator, byte_length, utf16_length?, logical_hash }`. The exact
+canonical bytes are object-hashed. A byte appended to a leaf's raw-bytes field
+is therefore authenticated content, not ignorable trailing data.
+Branch array counts are bounded before allocating or decoding child records.
+The same untyped authenticated structural validator (object hash, canonical
+encoding, format, kind-shaped metrics, leaf bounds, fanout, and overflow) is
+used by traversal, upload admission, and metadata-only storage observers.
 
 Text leaf boundaries are valid UTF-8 code-point boundaries. Text branches also
 carry exact aggregate UTF-16 code-unit lengths. JSON uses literal validated
@@ -157,8 +187,14 @@ Every decoded node is checked against the expected object hash learned from its
 parent (or the owner descriptor for the root). Branch fanout, depth, child
 metrics, total metrics and encoded sizes
 are bounded and checked. Unknown format versions, cycles, dishonest metrics,
-invalid UTF-8, invalid JSON, arithmetic overflow, trailing bytes, and malformed
+invalid UTF-8, invalid JSON, arithmetic overflow, and malformed
 child references fail the affected evaluation closure.
+
+Postcard decoding alone is insufficient because it accepts a valid value with
+trailing bytes. Every path that interprets node structure MUST require an exact
+byte-for-byte canonical re-encoding, including metadata-only traversal before
+the caller has an expected logical kind. Evaluation additionally verifies the
+expected object hash, format, kind, logical hash, and metrics.
 
 The encoded-node size ceiling is checked before hashing or deserialization, so
 an authenticated transport envelope cannot turn one malicious node into an
@@ -179,12 +215,16 @@ Replace { offset, delete_length, insert_bytes, utf16_effects? }
 
 Each offset addresses the value produced by all preceding edits in the tail.
 Append is a replacement at the current length with zero deletion. Insert,
-delete, overwrite, text splice, file mutation, and JSON replacement lower to
-the same primitive.
+delete, overwrite, text splice, and file mutation lower to the same primitive.
+JSON currently admits only a complete replacement of the current logical value;
+the inserted source must itself be valid JSON.
 
 Admission bounds patch count, total encoded tail bytes, inserted bytes, and all
-range arithmetic. The final result must satisfy the logical kind; intermediate
-states within one atomic tail need not independently be valid text or JSON.
+range arithmetic. For text, the byte boundaries and the exact UTF-16 offset and
+length effects are recomputed against the source value produced by preceding
+edits. An untrusted staged descriptor is replayed from its immutable base before
+publication so forged text coordinates, partial JSON edits, and noncanonical
+tails fail closed.
 
 When adding an edit would exceed a bound, Groove streams the current logical
 value through the edit, rechunks until content boundaries resynchronize, stages

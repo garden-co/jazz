@@ -389,12 +389,15 @@ impl Database {
                     })?;
                 metadata
             } else {
-                let node: crate::large_values::ChunkNode = postcard::from_bytes(&chunk.encoded)
-                    .map_err(|error| {
-                        Error::InvalidLargeValueMetadata(format!(
-                            "cannot decode pushed chunk metadata: {error}"
-                        ))
-                    })?;
+                let node = crate::large_values::decode_authenticated_node(
+                    chunk.node_ref.object_hash,
+                    &chunk.encoded,
+                )
+                .map_err(|error| {
+                    Error::InvalidLargeValueMetadata(format!(
+                        "cannot decode pushed chunk metadata: {error}"
+                    ))
+                })?;
                 let children = match node {
                     crate::large_values::ChunkNode::Leaf { .. } => Vec::new(),
                     crate::large_values::ChunkNode::Branch { children, .. } => {
@@ -757,6 +760,27 @@ impl Database {
         &self,
         value: &crate::large_values::LargeValueRef,
     ) -> Result<(), Error> {
+        let mut inputs = crate::ivm::runtime::evaluation_session::EvaluationInputs::default();
+        let provider = self.ivm_runtime.chunk_provider();
+        loop {
+            match crate::large_values::validate_edit_tail_attempt(value, &mut inputs) {
+                Ok(()) => break,
+                Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked) => {
+                    let requests = inputs.take_missing_chunks();
+                    if requests.is_empty() {
+                        return Err(crate::ivm::runtime::IvmRuntimeError::EvaluationBlocked.into());
+                    }
+                    for request in requests {
+                        let bytes = provider
+                            .get(request.clone())
+                            .await
+                            .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
+                        inputs.install_chunk_from_provider(request, bytes);
+                    }
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
         let mut validator = crate::large_values::LogicalValueValidator::new(value)
             .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
         let mut offset = 0_u64;

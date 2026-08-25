@@ -1738,7 +1738,7 @@ fn lookup_rejects_invalid_utf8_string() {
     let descriptor = descriptor([ValueType::String]);
 
     assert_eq!(
-        descriptor.get_idx(&[2, 0xff], 0).unwrap_err(),
+        descriptor.get_idx(&[2, 1, 0xff], 0).unwrap_err(),
         Error::InvalidUtf8
     );
 }
