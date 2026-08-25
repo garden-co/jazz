@@ -2456,6 +2456,7 @@ mod tests {
                 deletion: None,
             },
             None,
+            None,
         )
         .unwrap()
     }
@@ -2479,6 +2480,7 @@ mod tests {
                 authored_columns: None,
                 deletion: Some(DeletionEvent::Deleted),
             },
+            None,
             None,
         )
         .unwrap()

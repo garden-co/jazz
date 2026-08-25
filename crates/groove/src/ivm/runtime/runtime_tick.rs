@@ -596,6 +596,25 @@ impl IncrementalEvaluation<'_> {
             return self.poll(runtime, cx);
         }
 
+        let mut terminal_consumers = HashMap::<NodeId, usize>::default();
+        for subscription_id in &self.affected_subscriptions {
+            let Some(subscription) = runtime.multisink_subscriptions.get(subscription_id) else {
+                continue;
+            };
+            if subscription.failed || self.published_subscriptions.contains(subscription_id) {
+                continue;
+            }
+            for output in subscription
+                .outputs
+                .values()
+                .filter(|output| self.affected_nodes.contains(&output.node))
+            {
+                if let Some(node) = evaluator.terminal_delta_node_for_output(output.node)? {
+                    *terminal_consumers.entry(node).or_default() += 1;
+                }
+            }
+        }
+
         for subscription_id in &self.affected_subscriptions {
             let Some(subscription) = runtime.multisink_subscriptions.get(subscription_id) else {
                 continue;
@@ -615,8 +634,7 @@ impl IncrementalEvaluation<'_> {
             {
                 continue;
             }
-            let mut sinks = BTreeMap::new();
-            let mut terminal_sinks = BTreeMap::new();
+            let mut prepared_outputs = Vec::new();
             for (sink, output) in &subscription.outputs {
                 if !self.affected_nodes.contains(&output.node) {
                     continue;
@@ -680,6 +698,12 @@ impl IncrementalEvaluation<'_> {
                     }
                     Err(error) => return Poll::Ready(Err(error.into())),
                 };
+                prepared_outputs.push((sink, output, records));
+            }
+
+            let mut sinks = BTreeMap::new();
+            let mut terminal_sinks = BTreeMap::new();
+            for (sink, output, records) in prepared_outputs {
                 if !records.deltas.is_empty()
                     && !records.descriptor.registry_compatible_with(&output.output)
                 {
@@ -691,10 +715,12 @@ impl IncrementalEvaluation<'_> {
                 let records = records.as_ref().clone();
                 if terminal_owned {
                     let terminal = if structured {
-                        if let Some(terminal) =
-                            evaluator.take_terminal_deltas_for_output(output.node)?
-                        {
-                            Some(terminal)
+                        if let Some(node) = evaluator.terminal_delta_node_for_output(output.node)? {
+                            let remaining = terminal_consumers
+                                .get_mut(&node)
+                                .expect("terminal consumer counted before publication");
+                            *remaining -= 1;
+                            evaluator.terminal_deltas_for_consumer(node, *remaining == 0)
                         } else if !public_root && !records.is_empty() {
                             Some(terminal_deltas_from_record_deltas(&records)?)
                         } else if output.root_ordering_node.is_some() {
