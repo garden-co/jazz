@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { parse } from "yaml";
+import { cleanDist } from "../../../packages/jazz-tools/scripts/clean-dist.mjs";
 
 const root = path.resolve(import.meta.dirname, "../../..");
 const workflow = fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8");
@@ -1451,6 +1452,9 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   assert.match(typescript, /name: Run Node and browser test suites in parallel/);
   assert.match(typescript, /run: dev\/gates\/run-ts-tests\.sh/);
   assert.match(runner, /pnpm --filter jazz-tools build/);
+  assert.match(runner, /JAZZ_TEST_SEALED_TOOLS_DIST=1/);
+  assert.match(runner, /dist\/testing\/index\.js/);
+  assert.match(runner, /dist\/runtime\/client-session\.js/);
   assert.match(runner, /Every example resolves the public `jazz-tools\/\*` exports from `dist`/);
   assert.match(runner, /--concurrency=2/);
   assert.match(runner, /setsid bash -c "\$\{node_tests_command\}" >"\$\{node_tests_log\}" 2>&1 &/);
@@ -1471,6 +1475,23 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   assert.match(runner, /Browser test suite exit status:/);
   assert.match(runner, /node_tests_status.*-ne 0 \|\|.*browser_tests_status.*-ne 0/);
   assert.doesNotMatch(typescript, /rust-components: clippy,rustfmt/);
+});
+
+test("a sealed test surface rejects a child clean before it can delete prepared exports", async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-sealed-tools-dist-"));
+  const marker = path.join(fixture, "testing", "index.js");
+  fs.mkdirSync(path.dirname(marker), { recursive: true });
+  fs.writeFileSync(marker, "prepared export");
+  const previous = process.env.JAZZ_TEST_SEALED_TOOLS_DIST;
+  process.env.JAZZ_TEST_SEALED_TOOLS_DIST = "1";
+  try {
+    await assert.rejects(() => cleanDist(fixture), /sealed for concurrent tests/);
+    assert.equal(fs.existsSync(marker), true, "sealed child build deleted a prepared export");
+  } finally {
+    if (previous === undefined) delete process.env.JAZZ_TEST_SEALED_TOOLS_DIST;
+    else process.env.JAZZ_TEST_SEALED_TOOLS_DIST = previous;
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
 });
 
 test("parallel TypeScript runner waits for both suites and combines their failures", () => {
