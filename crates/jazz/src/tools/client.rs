@@ -3783,6 +3783,48 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn raw_core_provenance_predicates_use_ms_while_public_results_use_microseconds() {
+        use crate::query::{Query, col, gte, lit};
+
+        let updated_at_ms = 1_777_777_777_777;
+        let client = JazzClient::test_client(declared_todo_schema()).await;
+        let writer =
+            client.with_write_context(WriteContext::default().with_updated_at(updated_at_ms));
+        writer
+            .upsert(
+                "todos",
+                Uuid::from_u128(9),
+                HashMap::from([
+                    (
+                        "title".to_owned(),
+                        Value::Text("timestamp receipt".to_owned()),
+                    ),
+                    ("completed".to_owned(), Value::Boolean(false)),
+                ]),
+            )
+            .expect("write with deterministic physical timestamp");
+
+        // `JazzClient` accepts the raw core AST: its predicate is evaluated
+        // against physical-ms CurrentRow provenance, not its public µs output.
+        let query = Query::from("todos")
+            .filter(gte(col("$updatedAt"), lit(updated_at_ms)))
+            .select(["$updatedAt"]);
+        let results = client
+            .query_results(query, Some(DurabilityTier::Local))
+            .await
+            .expect("query with physical-ms provenance predicate");
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0].fields,
+            vec![QueryResultField {
+                name: "$updatedAt".to_owned(),
+                value: Value::Timestamp(updated_at_ms * 1_000),
+            }],
+            "the public result boundary independently exposes provenance in microseconds"
+        );
+    }
+
     #[test]
     fn default_session_from_context_uses_jwt_claims_for_user_clients() {
         let app_id = AppId::from_name("client-jwt-session");
