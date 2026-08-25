@@ -92,13 +92,14 @@ impl Fixture {
 /// the measured ingest operation.
 pub struct IngestFixture {
     db: BenchDb,
+    release_table: TableSchema,
 }
 
 impl IngestFixture {
     pub fn new() -> Self {
-        let (db, _) = open_db();
+        let (db, release_table) = open_db();
         seed_labels_and_artists(&db);
-        Self { db }
+        Self { db, release_table }
     }
 
     pub fn ingest_releases(&self, release_count: usize, batch_size: usize) -> usize {
@@ -116,6 +117,29 @@ impl IngestFixture {
             .read(&query)
             .expect("read all BigLabel releases")
             .len()
+    }
+
+    /// Return one label's imported releases via its indexed relationship,
+    /// newest release first. This is an untimed correctness oracle for the
+    /// ingest benchmarks, not part of the measured closure.
+    pub fn label_release_titles_and_order(&self, label: usize) -> Vec<(String, u64)> {
+        let query = prepare_release_load(&self.db, "label", row_id(1, label));
+        self.db
+            .read(&query)
+            .expect("read imported releases by label")
+            .into_iter()
+            .map(|row| {
+                let title = match row.cell(&self.release_table, "title") {
+                    Some(Value::String(title)) => title,
+                    other => panic!("release has unexpected title value: {other:?}"),
+                };
+                let released_at = match row.cell(&self.release_table, "released_at") {
+                    Some(Value::U64(released_at)) => released_at,
+                    other => panic!("release has unexpected released_at value: {other:?}"),
+                };
+                (title, released_at)
+            })
+            .collect()
     }
 }
 

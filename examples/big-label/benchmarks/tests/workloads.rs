@@ -33,3 +33,16 @@ fn batched_ingest_commits_every_release() {
         assert_eq!(fixture.release_count(), 1_000);
     }
 }
+
+#[test]
+fn batched_generated_id_ingest_preserves_values_and_indexed_label_order() {
+    let fixture = IngestFixture::new();
+    fixture.ingest_releases(1_000, 100);
+
+    let expected = (0..1_000)
+        .filter(|release| release % 8 == 3)
+        .rev()
+        .map(|release| (format!("Release {release:06}"), release as u64))
+        .collect::<Vec<_>>();
+    assert_eq!(fixture.label_release_titles_and_order(3), expected);
+}
