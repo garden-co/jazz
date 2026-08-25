@@ -1196,6 +1196,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn persistent_builder_fails_when_catalogue_schema_publish_time_is_missing_or_invalid() {
+        let schema = dynamic_bootstrap_schema();
+        let schema_hash = SchemaHash::compute(&schema);
+        for published_at in [None, Some("not-a-timestamp")] {
+            let data_dir = tempfile::TempDir::new().expect("temp data dir");
+            let catalogue_path = data_dir.path().join(CATALOGUE_ROCKSDB_DIR);
+            let app_id = AppId::from_name("corrupt-schema-publish-time");
+            let object_id = jazz::tools::ObjectId::new();
+            let mut metadata = std::collections::HashMap::from([
+                (
+                    MetadataKey::Type.to_string(),
+                    ObjectType::CatalogueSchema.to_string(),
+                ),
+                (MetadataKey::AppId.to_string(), app_id.uuid().to_string()),
+                (MetadataKey::SchemaHash.to_string(), schema_hash.to_string()),
+            ]);
+            if let Some(published_at) = published_at {
+                metadata.insert(
+                    MetadataKey::PublishedAt.to_string(),
+                    published_at.to_owned(),
+                );
+            }
+            write_raw_catalogue_entry(
+                &catalogue_path,
+                &CatalogueEntry {
+                    object_id,
+                    metadata,
+                    content: crate::server::catalogue_payload_codec::encode_schema(&schema),
+                },
+            );
+
+            let error = ServerBuilder::new(app_id)
+                .with_storage_factory(Arc::new(jazz_storage_rocksdb::RocksDbStorageFactory))
+                .with_storage(StorageBackend::Persistent {
+                    path: data_dir.path().to_path_buf(),
+                })
+                .build()
+                .await
+                .err()
+                .expect("missing or malformed schema publication time must fail startup");
+            assert!(
+                error.contains("failed to read durable catalogue: Decode error")
+                    && error.contains(ObjectType::CatalogueSchema.as_str())
+                    && error.contains("published_at metadata")
+                    && error.contains(&object_id.to_string()),
+                "startup error identifies the corrupt schema metadata: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn persistent_builder_ignores_unknown_forward_compatible_catalogue_entries() {
         let data_dir = tempfile::TempDir::new().expect("temp data dir");
         let catalogue_path = data_dir.path().join(CATALOGUE_ROCKSDB_DIR);

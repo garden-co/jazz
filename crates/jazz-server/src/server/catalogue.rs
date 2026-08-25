@@ -424,16 +424,21 @@ impl CatalogueIndex {
                     .and_then(|raw| SchemaHash::from_hex(raw))
                     .unwrap_or_else(|| SchemaHash::compute(&schema));
                 self.schemas.entry(hash).or_insert(schema);
-                if let Some(published_at) = entry
+                let published_at = entry
                     .metadata
                     .get(MetadataKey::PublishedAt.as_str())
-                    .and_then(|raw| raw.parse::<u64>().ok())
-                {
-                    self.schema_published_at
-                        .entry(hash)
-                        .and_modify(|existing| *existing = (*existing).max(published_at))
-                        .or_insert(published_at);
-                }
+                    .ok_or_else(|| corrupt_catalogue_entry(entry, "missing published_at metadata"))?
+                    .parse::<u64>()
+                    .map_err(|error| {
+                        corrupt_catalogue_entry(
+                            entry,
+                            format!("invalid published_at metadata: {error}"),
+                        )
+                    })?;
+                self.schema_published_at
+                    .entry(hash)
+                    .and_modify(|existing| *existing = (*existing).max(published_at))
+                    .or_insert(published_at);
             }
             Some(kind) if kind == ObjectType::CatalogueLens.as_str() => {
                 let source = entry
