@@ -320,6 +320,15 @@ export interface AuthConfig {
  * - `global`: Persisted at global server
  */
 export type DurabilityTier = "local" | "edge" | "global";
+/** Product-facing policy for reads. It deliberately does not change write durability. */
+export enum ReadTier {
+  LocalFirst = "local-first",
+  Remote = "remote",
+  RemoteIfPossible = "remote-if-possible",
+}
+/** @deprecated Read APIs also accept these legacy durability names unchanged. */
+export type LegacyReadDurabilityTier = DurabilityTier;
+export type QueryReadTier = ReadTier | LegacyReadDurabilityTier;
 /**
  * Controls when a write is visible to subscriptions.
  *
@@ -361,7 +370,8 @@ export interface BranchView {
 }
 
 export interface QueryExecutionOptions {
-  tier?: DurabilityTier;
+  /** `ReadTier.RemoteIfPossible` falls back only after an explicit disconnect. @deprecated DurabilityTier values remain accepted with their old meaning. */
+  tier?: QueryReadTier;
   localUpdates?: LocalUpdatesMode;
   propagation?: QueryPropagation;
   visibility?: QueryVisibility;
@@ -517,12 +527,21 @@ export function resolveEffectiveQueryExecutionOptions(
   options?: QueryExecutionOptions,
 ): ResolvedQueryExecutionOptions {
   return {
-    tier: options?.tier ?? resolveDefaultDurabilityTier(context),
+    tier: resolveReadTier(options?.tier ?? resolveDefaultDurabilityTier(context)),
     localUpdates: options?.localUpdates ?? "immediate",
     propagation: options?.propagation ?? "full",
     visibility: options?.visibility ?? "public",
     branch: options?.branch,
   };
+}
+
+/** @internal Low-level runtimes retain the legacy three-tier wire contract. */
+export function resolveReadTier(tier: QueryReadTier): DurabilityTier {
+  return tier === ReadTier.LocalFirst
+    ? "local"
+    : tier === ReadTier.Remote || tier === ReadTier.RemoteIfPossible
+      ? "edge"
+      : tier;
 }
 
 function isBrowserRuntime(): boolean {
@@ -1555,19 +1574,27 @@ export class JazzClient {
       optionsJson,
     );
 
-    this.runtime.executeSubscription(handle, (...args: unknown[]) => {
-      const deltaJsonOrObject = normalizeSubscriptionCallbackArgs(args);
-      if (deltaJsonOrObject === undefined) {
-        return;
-      }
-      if (deltaJsonOrObject instanceof Error) {
-        throw deltaJsonOrObject;
-      }
+    try {
+      this.runtime.executeSubscription(handle, (...args: unknown[]) => {
+        const deltaJsonOrObject = normalizeSubscriptionCallbackArgs(args);
+        if (deltaJsonOrObject === undefined) {
+          return;
+        }
+        if (deltaJsonOrObject instanceof Error) {
+          throw deltaJsonOrObject;
+        }
 
-      const delta: SubscriptionWireDelta =
-        typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
-      callback(delta);
-    });
+        const delta: SubscriptionWireDelta =
+          typeof deltaJsonOrObject === "string" ? JSON.parse(deltaJsonOrObject) : deltaJsonOrObject;
+        callback(delta);
+      });
+    } catch (error) {
+      // createSubscription already transferred ownership to this facade. If
+      // callback installation fails synchronously, no caller can own the
+      // handle because subscribe() has not returned it yet.
+      this.runtime.unsubscribe(handle);
+      throw error;
+    }
 
     return handle;
   }
