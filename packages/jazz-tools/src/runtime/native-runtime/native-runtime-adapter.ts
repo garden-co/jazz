@@ -146,12 +146,8 @@ type NativeDb = {
   // owns idempotence, so callers never observe that implementation detail.
   close?(): void | boolean | Promise<void | boolean>;
   registerSchema(schema: Uint8Array): NativeDb;
-  beginTransaction(
-    openBatchId: string,
-    kind: TransactionKind,
-    author?: Uint8Array,
-    attribution?: Uint8Array,
-  ): void;
+  beginTransaction(openBatchId: string, kind: TransactionKind, author?: Uint8Array): void;
+  beginTransactionAttributed?(openBatchId: string, attribution: Uint8Array): void;
   commitTransaction(openBatchId: string, kind?: TransactionKind): Write;
   rollbackTransaction(openBatchId: string): void;
   attachMergeableTx(openBatchId: string): Tx;
@@ -406,6 +402,8 @@ type PendingTx = {
   kind: TransactionKind;
   txByView: Map<NativeRuntimeAdapter, Tx>;
   identity?: Uint8Array;
+  /** External provenance fixed at begin, never supplied per staged operation. */
+  attribution?: Uint8Array;
   writes: PendingTxWrite[];
 };
 
@@ -1001,7 +999,6 @@ export class NativeRuntimeAdapter implements Runtime {
     objectId?: string | null,
   ): InsertResult {
     const suppliedRowId = objectId ? parseUuid(objectId) : undefined;
-    const cells = encodeCellsForRow(this.table(table), values);
     const writeSession = sessionFromWriteContext(_writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = this.trustedWriteIdentity(writeSession);
@@ -1010,6 +1007,12 @@ export class NativeRuntimeAdapter implements Runtime {
     const branchView = branchViewFromWriteContext(_writeContext);
     rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(_writeContext, "Insert");
+    if (tx) this.assertTransactionAttribution(tx, attribution);
+    const attributedInsert =
+      attribution && !tx
+        ? requireBackendAttributionAbi(this.db.insertWithIdEncodedAttributed, "insert")
+        : undefined;
+    const cells = encodeCellsForRow(this.table(table), values);
     if (tx) {
       const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
       const rowId = nativeTx.insertEncoded(table, cells, {
@@ -1026,21 +1029,23 @@ export class NativeRuntimeAdapter implements Runtime {
         openBatchId: txIdFromContext(_writeContext)!,
       };
     }
-    const write = writeOrNormalizeRejection("Insert", () =>
-      attribution && this.db.insertWithIdEncodedAttributed
-        ? this.db.insertWithIdEncodedAttributed(
-            table,
-            suppliedRowId ?? crypto.getRandomValues(new Uint8Array(16)),
-            cells,
-            attribution,
-          )
-        : this.db.insertEncoded(table, cells, {
-            rowId: suppliedRowId,
-            author: writeIdentity,
-            branch: branchView?.head,
-            updatedAtMs: updatedAtMs ?? undefined,
-          }),
-    );
+    const write = writeOrNormalizeRejection("Insert", () => {
+      if (attribution) {
+        return attributedInsert!.call(
+          this.db,
+          table,
+          suppliedRowId ?? crypto.getRandomValues(new Uint8Array(16)),
+          cells,
+          attribution,
+        );
+      }
+      return this.db.insertEncoded(table, cells, {
+        rowId: suppliedRowId,
+        author: writeIdentity,
+        branch: branchView?.head,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
+    });
     return this.finishInsert(table, suppliedRowId ?? write.rowId, values, write);
   }
 
@@ -1054,7 +1059,6 @@ export class NativeRuntimeAdapter implements Runtime {
     objectId?: string | null,
   ): Promise<StreamingInsertResult> {
     const begin = this.db.beginStreamingMutationEncoded;
-    if (!begin) throw new Error("Native runtime does not expose streaming mutations");
     const operation =
       mutation === "insert" ? "Insert" : mutation === "update" ? "Update" : "Upsert";
     if (this.currentTx(writeContext, operation)) {
@@ -1067,6 +1071,15 @@ export class NativeRuntimeAdapter implements Runtime {
     const branchView = branchViewFromWriteContext(writeContext);
     const updatedAtMs = effectiveUpdatedAtMs(writeContext);
     rejectAttributedBranchWrite(attribution, branchView);
+    const attributedBegin = attribution
+      ? requireBackendAttributionAbi(
+          this.db.beginStreamingMutationAttributedEncoded,
+          "streaming mutations",
+        )
+      : undefined;
+    const ordinaryBegin = attribution
+      ? undefined
+      : requireBackendAttributionAbi(begin, "streaming mutations");
 
     const definition = this.table(table);
     const descriptor = definition.columns.find((candidate) => candidate.name === column);
@@ -1081,9 +1094,8 @@ export class NativeRuntimeAdapter implements Runtime {
       mutation === "insert"
         ? encodeCellsForStreamingRow(definition, values, column, table)
         : encodeCellsForStreamingPatch(definition, values, column);
-    const attributedBegin = attribution && this.db.beginStreamingMutationAttributedEncoded;
-    const upload = attributedBegin
-      ? attributedBegin.call(
+    const upload = attribution
+      ? attributedBegin!.call(
           this.db,
           table,
           rowId,
@@ -1095,7 +1107,7 @@ export class NativeRuntimeAdapter implements Runtime {
           attribution,
           updatedAtMs ?? undefined,
         )
-      : begin.call(
+      : ordinaryBegin!.call(
           this.db,
           table,
           rowId,
@@ -1154,7 +1166,6 @@ export class NativeRuntimeAdapter implements Runtime {
     writeContext?: string | null,
   ): InsertResult {
     const rowId = parseUuid(objectId);
-    const cells = encodeCellsForRow(this.table(table), values);
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = this.trustedWriteIdentity(writeSession);
@@ -1163,6 +1174,12 @@ export class NativeRuntimeAdapter implements Runtime {
     const branchView = branchViewFromWriteContext(writeContext);
     rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(writeContext, "Restore");
+    if (tx) this.assertTransactionAttribution(tx, attribution);
+    const attributedRestore =
+      attribution && !tx
+        ? requireBackendAttributionAbi(this.db.restoreEncodedAttributed, "restore")
+        : undefined;
+    const cells = encodeCellsForRow(this.table(table), values);
     if (tx) {
       const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
       nativeTx.restoreEncoded(table, rowId, cells, {
@@ -1178,15 +1195,16 @@ export class NativeRuntimeAdapter implements Runtime {
         openBatchId: txIdFromContext(writeContext)!,
       };
     }
-    const write = writeOrNormalizeRejection("Restore", () =>
-      attribution && this.db.restoreEncodedAttributed
-        ? this.db.restoreEncodedAttributed(table, rowId, cells, attribution)
-        : this.db.restoreEncoded(table, rowId, cells, {
-            author: writeIdentity,
-            branch: branchView?.head,
-            updatedAtMs: updatedAtMs ?? undefined,
-          }),
-    );
+    const write = writeOrNormalizeRejection("Restore", () => {
+      if (attribution) {
+        return attributedRestore!.call(this.db, table, rowId, cells, attribution);
+      }
+      return this.db.restoreEncoded(table, rowId, cells, {
+        author: writeIdentity,
+        branch: branchView?.head,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
+    });
     return this.finishInsert(table, rowId, values, write);
   }
 
@@ -1197,7 +1215,6 @@ export class NativeRuntimeAdapter implements Runtime {
     writeContext?: string | null,
   ): MutationResult {
     const rowId = parseUuid(objectId);
-    const patch = encodeCellsForPatch(this.table(table), values);
     const writeSession = sessionFromWriteContext(writeContext);
     this.applySessionClaims(writeSession);
     const writeIdentity = this.trustedWriteIdentity(writeSession);
@@ -1206,6 +1223,12 @@ export class NativeRuntimeAdapter implements Runtime {
     const branchView = branchViewFromWriteContext(writeContext);
     rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(writeContext, "Update");
+    if (tx) this.assertTransactionAttribution(tx, attribution);
+    const attributedUpdate =
+      attribution && !tx
+        ? requireBackendAttributionAbi(this.db.updateEncodedAttributed, "update")
+        : undefined;
+    const patch = encodeCellsForPatch(this.table(table), values);
     if (tx) {
       const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
       nativeTx.updateEncoded(table, rowId, patch, {
@@ -1220,16 +1243,17 @@ export class NativeRuntimeAdapter implements Runtime {
       });
       return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
     }
-    const write = writeOrNormalizeRejection("Update", () =>
-      attribution && this.db.updateEncodedAttributed
-        ? this.db.updateEncodedAttributed(table, rowId, patch, attribution)
-        : this.db.updateEncoded(table, rowId, patch, {
-            author: writeIdentity,
-            head: branchView?.head,
-            base: branchView?.base,
-            updatedAtMs: updatedAtMs ?? undefined,
-          }),
-    );
+    const write = writeOrNormalizeRejection("Update", () => {
+      if (attribution) {
+        return attributedUpdate!.call(this.db, table, rowId, patch, attribution);
+      }
+      return this.db.updateEncoded(table, rowId, patch, {
+        author: writeIdentity,
+        head: branchView?.head,
+        base: branchView?.base,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
+    });
     return this.finishMutation(write);
   }
 
@@ -1249,6 +1273,11 @@ export class NativeRuntimeAdapter implements Runtime {
     const branchView = branchViewFromWriteContext(writeContext);
     rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(writeContext, "Upsert");
+    if (tx) this.assertTransactionAttribution(tx, attribution);
+    const attributedUpsert =
+      attribution && !tx
+        ? requireBackendAttributionAbi(this.db.upsertEncodedAttributed, "upsert")
+        : undefined;
     const existing = tx
       ? (this.stagedRowForWriteMerge(tx, table, rowId) ?? this.readRowForWriteMerge(table, rowId))
       : this.readRow(table, rowId, writeIdentity);
@@ -1279,15 +1308,16 @@ export class NativeRuntimeAdapter implements Runtime {
       });
       return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
     }
-    const write = writeOrNormalizeRejection("Upsert", () =>
-      attribution && this.db.upsertEncodedAttributed
-        ? this.db.upsertEncodedAttributed(table, rowId, cells, attribution)
-        : this.db.upsertEncoded(table, rowId, cells, {
-            author: writeIdentity,
-            branch: branchView?.head,
-            updatedAtMs: updatedAtMs ?? undefined,
-          }),
-    );
+    const write = writeOrNormalizeRejection("Upsert", () => {
+      if (attribution) {
+        return attributedUpsert!.call(this.db, table, rowId, cells, attribution);
+      }
+      return this.db.upsertEncoded(table, rowId, cells, {
+        author: writeIdentity,
+        branch: branchView?.head,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
+    });
     return this.finishMutation(write);
   }
 
@@ -1302,6 +1332,11 @@ export class NativeRuntimeAdapter implements Runtime {
     const branchView = branchViewFromWriteContext(writeContext);
     rejectAttributedBranchWrite(attribution, branchView);
     const tx = this.currentTx(writeContext, "Delete");
+    if (tx) this.assertTransactionAttribution(tx, attribution);
+    const attributedDelete =
+      attribution && !tx
+        ? requireBackendAttributionAbi(this.db.deleteAttributed, "delete")
+        : undefined;
     if (tx) {
       const nativeTx = this.txForWrite(tx, attribution ? undefined : writeIdentity);
       nativeTx.deleteEncoded(table, rowId, {
@@ -1312,16 +1347,17 @@ export class NativeRuntimeAdapter implements Runtime {
       tx.writes.push({ table, rowId, deleted: true });
       return { kind: "staged", openBatchId: txIdFromContext(writeContext)! };
     }
-    const write = writeOrNormalizeRejection("Delete", () =>
-      attribution && this.db.deleteAttributed
-        ? this.db.deleteAttributed(table, rowId, attribution)
-        : this.db.deleteEncoded(table, rowId, {
-            author: writeIdentity,
-            head: branchView?.head,
-            base: branchView?.base,
-            updatedAtMs: updatedAtMs ?? undefined,
-          }),
-    );
+    const write = writeOrNormalizeRejection("Delete", () => {
+      if (attribution) {
+        return attributedDelete!.call(this.db, table, rowId, attribution);
+      }
+      return this.db.deleteEncoded(table, rowId, {
+        author: writeIdentity,
+        head: branchView?.head,
+        base: branchView?.base,
+        updatedAtMs: updatedAtMs ?? undefined,
+      });
+    });
     return this.finishMutation(write);
   }
 
@@ -1427,8 +1463,25 @@ export class NativeRuntimeAdapter implements Runtime {
     const identity = this.trustedWriteIdentity(session);
     const attribution = this.backendAttribution(sessionJson);
     const admission = attribution ? undefined : identity;
-    this.db.beginTransaction(id, kind, admission, attribution);
-    this.pendingTxs.set(id, { id, kind, identity: admission, writes: [], txByView: new Map() });
+    if (attribution) {
+      if (kind !== "mergeable") {
+        throw new Error("Backend-attributed transactions require mergeable kind");
+      }
+      requireBackendAttributionAbi(
+        this.db.beginTransactionAttributed,
+        "mergeable transactions",
+      ).call(this.db, id, attribution);
+    } else {
+      this.db.beginTransaction(id, kind, admission);
+    }
+    this.pendingTxs.set(id, {
+      id,
+      kind,
+      identity: admission,
+      attribution,
+      writes: [],
+      txByView: new Map(),
+    });
     return id;
   }
 
@@ -2003,16 +2056,21 @@ export class NativeRuntimeAdapter implements Runtime {
    * ordinary/session callers continue through their normal identity path. */
   private backendAttribution(writeContext?: string | null): Uint8Array | undefined {
     if (!this.trustedBackend || !writeContext) return undefined;
+    let attribution: unknown;
     try {
-      const attribution = (JSON.parse(writeContext) as { attribution?: unknown }).attribution;
-      if (typeof attribution !== "string") return undefined;
-      const author = parsePublicCanonicalAuthor(attribution);
-      return author
-        ? authorBytesForSession({ issuer: author.issuer, user_id: author.user_id })
-        : undefined;
+      attribution = (JSON.parse(writeContext) as { attribution?: unknown }).attribution;
     } catch {
       return undefined;
     }
+    if (attribution === undefined) return undefined;
+    if (typeof attribution !== "string") {
+      throw new Error("backend attribution must be a canonical author subject string");
+    }
+    const author = parsePublicCanonicalAuthor(attribution);
+    if (!author) {
+      throw new Error("backend attribution must be a canonical author subject string");
+    }
+    return authorBytesForSession({ issuer: author.issuer, user_id: author.user_id });
   }
 
   private stagedRowForWriteMerge(
@@ -2243,6 +2301,21 @@ export class NativeRuntimeAdapter implements Runtime {
       throw new Error("Native runtime mergeable transaction cannot mix write identities");
     }
     return this.txForRead(pending);
+  }
+
+  private assertTransactionAttribution(
+    pending: PendingTx,
+    attribution: Uint8Array | undefined,
+  ): void {
+    if (!pending.attribution && !attribution) return;
+    if (!pending.attribution) {
+      throw new Error("Native runtime transaction was opened without backend attribution");
+    }
+    if (!attribution || !sameBytes(pending.attribution, attribution)) {
+      throw new Error(
+        "Native runtime backend-attributed transaction requires its original provenance subject",
+      );
+    }
   }
 
   private txForRead(pending: PendingTx): Tx {
@@ -3068,6 +3141,15 @@ function rejectAttributedBranchWrite(
   if (attribution && branchView) {
     throw new Error("Backend-attributed writes do not support branch views");
   }
+}
+
+function requireBackendAttributionAbi<T>(method: T | undefined, operation: string): T {
+  if (!method) {
+    throw new Error(
+      `Native runtime does not support backend-attributed ${operation}; rebuild the matching Jazz native artifact`,
+    );
+  }
+  return method;
 }
 
 function sessionFromWriteContext(writeContext?: string | null): RuntimeSession | null {
