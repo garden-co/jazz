@@ -279,33 +279,8 @@ jobs:
               const previewTree = previewCommit.data.tree.sha;
 
               let treeReuseSafe = currentTree === previewTree;
-              let treeReason = "";
 
-              if (!treeReuseSafe && eventName === "workflow_dispatch") {
-                const compare = await github.rest.repos.compareCommits({
-                  owner,
-                  repo,
-                  base: releasePrHeadSha,
-                  head: sha,
-                });
-                const changedFiles = (compare.data.files || [])
-                  .map((file) => file.filename)
-                  .filter(Boolean);
-                const nonWorkflowFiles = changedFiles.filter(
-                  (filename) => !filename.startsWith(".github/workflows/"),
-                );
-
-                if (changedFiles.length > 0 && nonWorkflowFiles.length === 0) {
-                  treeReuseSafe = true;
-                  treeReason = `workflow-only drift since release PR head (${changedFiles.join(", ")})`;
-                } else {
-                  const changedSummary =
-                    nonWorkflowFiles.length > 0
-                      ? nonWorkflowFiles.slice(0, 10).join(", ")
-                      : "unknown changes";
-                  reason = `main differs from release PR head outside workflow files: ${changedSummary}`;
-                }
-              } else if (!treeReuseSafe) {
+              if (!treeReuseSafe) {
                 reason = `main tree ${currentTree} differs from release PR head tree ${previewTree}`;
               }
 
@@ -366,9 +341,7 @@ jobs:
                   } else {
                     usePreviewArtifacts = "true";
                     previewRunId = String(previewRun.id);
-                    reason = treeReason
-                      ? `reusing preview artifacts from run ${previewRun.id} for PR #${releasePrNumber} (${treeReason})`
-                      : `reusing preview artifacts from run ${previewRun.id} for PR #${releasePrNumber}`;
+                    reason = `reusing preview artifacts from run ${previewRun.id} for PR #${releasePrNumber}`;
                   }
                 }
               }
