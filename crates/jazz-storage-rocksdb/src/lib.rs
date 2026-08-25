@@ -62,7 +62,6 @@ const ROCKSDB_VALUE_FORMAT_KEY: &[u8] = b"value-format";
 const ROCKSDB_VALUE_FORMAT_V2: &[u8] = b"v2";
 const ROCKSDB_VALUE_LIVE_TAG: u8 = 0;
 const ROCKSDB_VALUE_TOMBSTONE_TAG: u8 = 1;
-const LEGACY_STORAGE_DELTA_TOMBSTONE_V1: &[u8] = b"\0groove-storage-delta-tombstone-v1";
 
 fn encode_rocks_value(value: Option<&[u8]>) -> Vec<u8> {
     match value {
@@ -268,65 +267,35 @@ impl RocksDbStorage {
         let block_cache = Cache::new_lru_cache(ROCKSDB_BLOCK_CACHE_BYTES);
         let write_buffer_manager =
             WriteBufferManager::new_write_buffer_manager(ROCKSDB_WRITE_BUFFER_MANAGER_BYTES, false);
-        let mut options = rocksdb_options(&block_cache, &write_buffer_manager);
-        options.create_if_missing(true);
-        options.create_missing_column_families(true);
-        if matches!(durability, Durability::FullSync) {
-            options.set_use_fsync(true);
-        }
-        if matches!(durability, Durability::WalNoSync) {
-            options.set_wal_bytes_per_sync(1 << 20);
-        }
-
-        let mut opened_column_families = column_families
+        let requested_column_families = column_families
             .iter()
             .map(|name| (*name).to_owned())
             .collect::<BTreeSet<_>>();
-        opened_column_families.insert("default".to_owned());
-        if path.exists()
-            && let Ok(existing) = DB::list_cf(&options, &path)
-        {
-            opened_column_families.extend(existing);
-        }
-
-        let internal_cf_existed = opened_column_families.contains(ROCKSDB_INTERNAL_CF);
-        opened_column_families.insert(ROCKSDB_INTERNAL_CF.to_owned());
-        let legacy_descriptors = opened_column_families
-            .iter()
-            .map(String::as_str)
-            .filter(|name| *name != "default")
-            .map(|name| {
-                ColumnFamilyDescriptor::new(
-                    name,
-                    rocksdb_options_for_cf(name, &block_cache, &write_buffer_manager),
-                )
-            });
 
         let mut write_options = WriteOptions::default();
         write_options.disable_wal(false);
         write_options.set_sync(matches!(durability, Durability::FullSync));
 
-        {
-            // Open with the legacy merger just long enough to materialize any
-            // pre-envelope merge chains during the one atomic value-codec
-            // migration. Reopening below switches the same named merge
-            // operator to the v2 representation.
-            let legacy_db =
-                DB::open_cf_descriptors(&options, &path, legacy_descriptors).storage()?;
-            migrate_legacy_rocks_values(
-                &legacy_db,
+        let listed_column_families = DB::list_cf(&Options::default(), &path).ok();
+        let is_new_store = listed_column_families.is_none();
+        if let Some(existing) = &listed_column_families {
+            validate_or_initialize_rocks_value_format(
+                &path,
+                existing,
+                &block_cache,
+                &write_buffer_manager,
                 &write_options,
-                &opened_column_families,
-                internal_cf_existed,
             )?;
         }
 
-        let mut final_options = rocksdb_options_for_profile(
-            RocksDbClassProfile::Default,
-            &block_cache,
-            &write_buffer_manager,
-            RocksMergeFormat::EncodedV2,
-        );
+        let mut opened_column_families = requested_column_families;
+        opened_column_families.insert("default".to_owned());
+        if let Some(existing) = listed_column_families {
+            opened_column_families.extend(existing);
+        }
+        opened_column_families.insert(ROCKSDB_INTERNAL_CF.to_owned());
+
+        let mut final_options = rocksdb_options(&block_cache, &write_buffer_manager);
         final_options.create_if_missing(true);
         final_options.create_missing_column_families(true);
         if matches!(durability, Durability::FullSync) {
@@ -342,15 +311,36 @@ impl RocksDbStorage {
             .map(|name| {
                 ColumnFamilyDescriptor::new(
                     name,
-                    rocksdb_options_for_cf_with_merge_format(
-                        name,
-                        &block_cache,
-                        &write_buffer_manager,
-                        RocksMergeFormat::EncodedV2,
-                    ),
+                    rocksdb_options_for_cf(name, &block_cache, &write_buffer_manager),
                 )
             });
         let db = DB::open_cf_descriptors(&final_options, &path, descriptors).storage()?;
+        let internal_cf = db
+            .cf_handle(ROCKSDB_INTERNAL_CF)
+            .expect("RocksDB internal column family was opened");
+        match db.get_cf(internal_cf, ROCKSDB_VALUE_FORMAT_KEY).storage()? {
+            Some(marker) if marker.as_slice() == ROCKSDB_VALUE_FORMAT_V2 => {}
+            Some(_) => {
+                return Err(Error::InvalidStorageLayout(
+                    "incompatible RocksDB storage format: unsupported private value format marker"
+                        .to_owned(),
+                ));
+            }
+            None if is_new_store => db
+                .put_cf_opt(
+                    internal_cf,
+                    ROCKSDB_VALUE_FORMAT_KEY,
+                    ROCKSDB_VALUE_FORMAT_V2,
+                    &write_options,
+                )
+                .storage()?,
+            None => {
+                return Err(Error::InvalidStorageLayout(
+                    "incompatible RocksDB storage format: private value format marker is missing"
+                        .to_owned(),
+                ));
+            }
+        }
 
         Ok(Self {
             path,
@@ -433,7 +423,6 @@ fn rocksdb_options(block_cache: &Cache, write_buffer_manager: &WriteBufferManage
         RocksDbClassProfile::Default,
         block_cache,
         write_buffer_manager,
-        RocksMergeFormat::LegacyV1,
     )
 }
 
@@ -442,26 +431,7 @@ fn rocksdb_options_for_cf(
     block_cache: &Cache,
     write_buffer_manager: &WriteBufferManager,
 ) -> Options {
-    rocksdb_options_for_cf_with_merge_format(
-        cf,
-        block_cache,
-        write_buffer_manager,
-        RocksMergeFormat::LegacyV1,
-    )
-}
-
-fn rocksdb_options_for_cf_with_merge_format(
-    cf: &str,
-    block_cache: &Cache,
-    write_buffer_manager: &WriteBufferManager,
-    merge_format: RocksMergeFormat,
-) -> Options {
-    rocksdb_options_for_profile(
-        rocksdb_class_profile(cf),
-        block_cache,
-        write_buffer_manager,
-        merge_format,
-    )
+    rocksdb_options_for_profile(rocksdb_class_profile(cf), block_cache, write_buffer_manager)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -470,12 +440,6 @@ enum RocksDbClassProfile {
     AppendRange,
     OverwriteHot,
     Meta,
-}
-
-#[derive(Clone, Copy)]
-enum RocksMergeFormat {
-    LegacyV1,
-    EncodedV2,
 }
 
 fn rocksdb_class_profile(cf: &str) -> RocksDbClassProfile {
@@ -493,7 +457,6 @@ fn rocksdb_options_for_profile(
     profile: RocksDbClassProfile,
     block_cache: &Cache,
     write_buffer_manager: &WriteBufferManager,
-    merge_format: RocksMergeFormat,
 ) -> Options {
     let mut block_options = BlockBasedOptions::default();
     if profile.uses_blooms() {
@@ -508,11 +471,11 @@ fn rocksdb_options_for_profile(
     options.set_target_file_size_base(profile.target_file_size());
     options.set_compression_type(profile.compression());
     options.set_bottommost_compression_type(profile.bottommost_compression());
-    let full_merge = match merge_format {
-        RocksMergeFormat::LegacyV1 => rocksdb_full_merge_delta_legacy,
-        RocksMergeFormat::EncodedV2 => rocksdb_full_merge_delta,
-    };
-    options.set_merge_operator("groove_delta", full_merge, rocksdb_partial_merge_delta);
+    options.set_merge_operator(
+        "groove_delta",
+        rocksdb_full_merge_delta,
+        rocksdb_partial_merge_delta,
+    );
     if matches!(profile, RocksDbClassProfile::AppendRange) {
         let mut universal = UniversalCompactOptions::default();
         universal.set_size_ratio(20);
@@ -582,80 +545,83 @@ impl ReopenableStorage for RocksDbStorage {
     }
 }
 
-fn migrate_legacy_rocks_values(
-    db: &DB,
+fn validate_or_initialize_rocks_value_format(
+    path: &Path,
+    column_families: &[String],
+    block_cache: &Cache,
+    write_buffer_manager: &WriteBufferManager,
     write_options: &WriteOptions,
-    column_families: &BTreeSet<String>,
-    internal_cf_existed: bool,
 ) -> Result<(), Error> {
-    let internal_cf = db
-        .cf_handle(ROCKSDB_INTERNAL_CF)
-        .expect("RocksDB internal column family was opened");
-    match db.get_cf(internal_cf, ROCKSDB_VALUE_FORMAT_KEY).storage()? {
-        Some(marker) if marker.as_slice() == ROCKSDB_VALUE_FORMAT_V2 => return Ok(()),
-        Some(_) => {
-            return Err(Error::InvalidStorageLayout(
-                "unsupported RocksDB private value format marker".to_owned(),
-            ));
+    let mut options = rocksdb_options(block_cache, write_buffer_manager);
+    options.create_if_missing(false);
+    options.create_missing_column_families(false);
+    let descriptors = column_families
+        .iter()
+        .map(String::as_str)
+        .filter(|name| *name != "default")
+        .map(|name| {
+            ColumnFamilyDescriptor::new(
+                name,
+                rocksdb_options_for_cf(name, block_cache, write_buffer_manager),
+            )
+        });
+    let mut db = DB::open_cf_descriptors(&options, path, descriptors).storage()?;
+
+    if column_families.iter().any(|cf| cf == ROCKSDB_INTERNAL_CF) {
+        let internal_cf = db
+            .cf_handle(ROCKSDB_INTERNAL_CF)
+            .expect("listed RocksDB column family was opened");
+        match db
+            .get_cf(internal_cf, ROCKSDB_VALUE_FORMAT_KEY)
+            .storage()?
+            .as_deref()
+        {
+            Some(ROCKSDB_VALUE_FORMAT_V2) => return Ok(()),
+            Some(_) => {
+                return Err(Error::InvalidStorageLayout(
+                    "incompatible RocksDB storage format: unsupported private value format marker"
+                        .to_owned(),
+                ));
+            }
+            None => {}
         }
-        None if internal_cf_existed => {
-            return Err(Error::InvalidStorageLayout(
-                "RocksDB internal column family exists without a value format marker".to_owned(),
-            ));
-        }
-        None => {}
     }
 
-    // This one write batch makes the migration crash-atomic: either every
-    // formerly raw logical value receives the v2 envelope (and old internal
-    // tombstones are removed), or the database remains wholly legacy for the
-    // next open to retry. The snapshot keeps the input stable while the batch
-    // is assembled.
-    let snapshot = db.snapshot();
-    let mut batch = WriteBatch::default();
-    for cf in column_families {
-        if cf == ROCKSDB_INTERNAL_CF {
-            continue;
-        }
-        let iterator = if cf == "default" {
-            snapshot.iterator(IteratorMode::Start)
+    let is_empty = column_families.iter().all(|cf| {
+        let first = if cf == "default" {
+            db.iterator(IteratorMode::Start).next()
         } else {
-            snapshot.iterator_cf(
+            db.iterator_cf(
                 db.cf_handle(cf)
-                    .expect("all opened column families have handles"),
+                    .expect("listed RocksDB column family was opened"),
                 IteratorMode::Start,
             )
+            .next()
         };
-        for item in iterator {
-            let (key, value) = item.storage()?;
-            if value.as_ref() == LEGACY_STORAGE_DELTA_TOMBSTONE_V1 {
-                if cf == "default" {
-                    batch.delete(key);
-                } else {
-                    batch.delete_cf(
-                        db.cf_handle(cf)
-                            .expect("all opened column families have handles"),
-                        key,
-                    );
-                }
-            } else if cf == "default" {
-                batch.put(key, encode_rocks_value(Some(value.as_ref())));
-            } else {
-                batch.put_cf(
-                    db.cf_handle(cf)
-                        .expect("all opened column families have handles"),
-                    key,
-                    encode_rocks_value(Some(value.as_ref())),
-                );
-            }
-        }
+        first.is_none()
+    });
+    if !is_empty {
+        return Err(Error::InvalidStorageLayout(
+            "incompatible RocksDB storage format: non-empty store is missing the v2 private value format marker"
+                .to_owned(),
+        ));
     }
-    batch.put_cf(
-        internal_cf,
+
+    if db.cf_handle(ROCKSDB_INTERNAL_CF).is_none() {
+        db.create_cf(
+            ROCKSDB_INTERNAL_CF,
+            &rocksdb_options_for_cf(ROCKSDB_INTERNAL_CF, block_cache, write_buffer_manager),
+        )
+        .storage()?;
+    }
+    db.put_cf_opt(
+        db.cf_handle(ROCKSDB_INTERNAL_CF)
+            .expect("new RocksDB internal column family has a handle"),
         ROCKSDB_VALUE_FORMAT_KEY,
         ROCKSDB_VALUE_FORMAT_V2,
-    );
-    db.write_opt(&batch, write_options).storage()
+        write_options,
+    )
+    .storage()
 }
 
 impl OrderedKvStorage for RocksDbStorage {
@@ -892,14 +858,6 @@ fn rocksdb_full_merge_delta(
     apply_merge_operands(old_value, operands).ok()
 }
 
-fn rocksdb_full_merge_delta_legacy(
-    _key: &[u8],
-    old_value: Option<&[u8]>,
-    operands: &MergeOperands,
-) -> Option<Vec<u8>> {
-    apply_legacy_merge_operands(old_value, operands).ok()
-}
-
 fn rocksdb_partial_merge_delta(
     _key: &[u8],
     left_operand: Option<&[u8]>,
@@ -935,17 +893,6 @@ fn apply_merge_operands(
     Ok(encode_rocks_value(value.as_deref()))
 }
 
-fn apply_legacy_merge_operands(
-    initial: Option<&[u8]>,
-    operands: &MergeOperands,
-) -> Result<Vec<u8>, Error> {
-    let mut value = initial.map(<[u8]>::to_vec);
-    for operand in operands {
-        value = apply_storage_delta(value.as_deref(), operand)?;
-    }
-    Ok(value.unwrap_or_else(|| LEGACY_STORAGE_DELTA_TOMBSTONE_V1.to_vec()))
-}
-
 fn advance_prefix_upper_bound(prefix: &mut [u8]) -> bool {
     for byte in prefix.iter_mut().rev() {
         if *byte != u8::MAX {
@@ -967,9 +914,9 @@ mod tests {
     use crate::{
         CLASS_AHEAD_CURRENT_CF, CLASS_CHANGES_CF, CLASS_GLOBAL_CURRENT_CF, CLASS_HISTORY_CF,
         CLASS_INDICES_CF, CLASS_META_CF, CLASS_REGISTER_CF, Cache, ColumnFamilyDescriptor, DB,
-        LEGACY_STORAGE_DELTA_TOMBSTONE_V1, ROCKSDB_BLOCK_CACHE_BYTES,
-        ROCKSDB_WRITE_BUFFER_MANAGER_BYTES, RocksDbClassProfile, RocksDbStorage,
-        WriteBufferManager, any_available, rocksdb_class_profile, rocksdb_options,
+        Options, ROCKSDB_BLOCK_CACHE_BYTES, ROCKSDB_INTERNAL_CF, ROCKSDB_VALUE_FORMAT_KEY,
+        ROCKSDB_VALUE_FORMAT_V2, ROCKSDB_WRITE_BUFFER_MANAGER_BYTES, RocksDbClassProfile,
+        RocksDbStorage, WriteBufferManager, any_available, rocksdb_class_profile, rocksdb_options,
         rocksdb_options_for_cf, sum_available,
     };
     use groove::storage::{OwnedWriteOperation, StorageDelta, storage_delta_requires_full_merge};
@@ -1165,7 +1112,65 @@ mod tests {
     }
 
     #[test]
-    fn legacy_raw_values_migrate_atomically_to_the_private_value_codec() {
+    fn unmarked_nonempty_store_is_rejected_repeatedly_without_mutation() {
+        const FORMER_SENTINEL: &[u8] = b"\0groove-storage-delta-tombstone-v1";
+        let dir = tempfile::tempdir().unwrap();
+        let block_cache = Cache::new_lru_cache(ROCKSDB_BLOCK_CACHE_BYTES);
+        let write_buffer_manager =
+            WriteBufferManager::new_write_buffer_manager(ROCKSDB_WRITE_BUFFER_MANAGER_BYTES, false);
+        let mut options = rocksdb_options(&block_cache, &write_buffer_manager);
+        options.create_if_missing(true);
+        options.create_missing_column_families(true);
+        let db = DB::open_cf_descriptors(
+            &options,
+            dir.path(),
+            [ColumnFamilyDescriptor::new(
+                "records",
+                rocksdb_options_for_cf("records", &block_cache, &write_buffer_manager),
+            )],
+        )
+        .unwrap();
+        let records = db.cf_handle("records").unwrap();
+        db.put_cf(records, b"ordinary", FORMER_SENTINEL).unwrap();
+        drop(db);
+
+        for _ in 0..2 {
+            let error = match RocksDbStorage::open(dir.path(), &["records", "must-not-be-created"])
+            {
+                Ok(_) => panic!("an unmarked non-empty store must fail closed"),
+                Err(error) => error,
+            };
+            assert!(matches!(
+                error,
+                groove::storage::Error::InvalidStorageLayout(message)
+                    if message.contains("incompatible RocksDB storage format")
+                        && message.contains("non-empty")
+            ));
+
+            let cfs = DB::list_cf(&Options::default(), dir.path()).unwrap();
+            assert!(!cfs.iter().any(|cf| cf == ROCKSDB_INTERNAL_CF));
+            assert!(!cfs.iter().any(|cf| cf == "must-not-be-created"));
+            let db = DB::open_cf_descriptors(
+                &options,
+                dir.path(),
+                [ColumnFamilyDescriptor::new(
+                    "records",
+                    rocksdb_options_for_cf("records", &block_cache, &write_buffer_manager),
+                )],
+            )
+            .unwrap();
+            assert_eq!(
+                db.get_cf(db.cf_handle("records").unwrap(), b"ordinary")
+                    .unwrap()
+                    .as_deref(),
+                Some(FORMER_SENTINEL)
+            );
+            drop(db);
+        }
+    }
+
+    #[test]
+    fn empty_unmarked_store_initializes_v2_and_reopens() {
         use groove::storage::OrderedKvStorage;
 
         let dir = tempfile::tempdir().unwrap();
@@ -1184,21 +1189,52 @@ mod tests {
             )],
         )
         .unwrap();
-        let records = db.cf_handle("records").unwrap();
-        db.put_cf(records, b"live", b"legacy value").unwrap();
-        db.put_cf(records, b"deleted", LEGACY_STORAGE_DELTA_TOMBSTONE_V1)
-            .unwrap();
         drop(db);
 
         let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        ready(storage.set("records".to_owned(), b"empty".to_vec(), Vec::new())).unwrap();
+        drop(storage);
+        let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
         assert_eq!(
-            ready(storage.get("records".to_owned(), b"live".to_vec())).unwrap(),
-            Some(b"legacy value".to_vec())
+            ready(storage.get("records".to_owned(), b"empty".to_vec())).unwrap(),
+            Some(Vec::new())
         );
         assert_eq!(
-            ready(storage.get("records".to_owned(), b"deleted".to_vec())).unwrap(),
-            None,
-            "the legacy adapter had already exposed this internal marker as absence"
+            storage
+                .db
+                .get_cf(
+                    storage.db.cf_handle(ROCKSDB_INTERNAL_CF).unwrap(),
+                    ROCKSDB_VALUE_FORMAT_KEY,
+                )
+                .unwrap()
+                .as_deref(),
+            Some(ROCKSDB_VALUE_FORMAT_V2)
+        );
+    }
+
+    #[test]
+    fn pending_conditional_merge_survives_v2_reopen() {
+        use groove::storage::OrderedKvStorage;
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        let operand = StorageDelta::set_if_absent(b"installed".to_vec())
+            .encode()
+            .unwrap();
+        storage
+            .db
+            .merge_cf(
+                storage.db.cf_handle("records").unwrap(),
+                b"pending",
+                operand,
+            )
+            .unwrap();
+        drop(storage);
+
+        let storage = RocksDbStorage::open(dir.path(), &["records"]).unwrap();
+        assert_eq!(
+            ready(storage.get("records".to_owned(), b"pending".to_vec())).unwrap(),
+            Some(b"installed".to_vec())
         );
     }
 
