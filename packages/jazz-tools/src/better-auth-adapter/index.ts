@@ -60,19 +60,33 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         return Object.fromEntries(selectedEntries);
       };
 
-      const getUniqueFields = (model: string): Array<{ storedFieldName: string }> => {
+      type UniqueConstraint = {
+        storedFieldNames: readonly string[];
+      };
+
+      const getUniqueConstraints = (model: string): UniqueConstraint[] => {
         const defaultModelName = getDefaultModelName(model);
         const modelSchema = schema[defaultModelName];
         if (!modelSchema) return [];
 
-        const result: Array<{ storedFieldName: string }> = [];
+        const result: UniqueConstraint[] = [];
         for (const [fieldName, field] of Object.entries(modelSchema.fields)) {
           if (field.unique) {
             result.push({
-              storedFieldName: getFieldName({ model: defaultModelName, field: fieldName }),
+              storedFieldNames: [getFieldName({ model: defaultModelName, field: fieldName })],
             });
           }
         }
+
+        for (const index of modelSchema.indexes ?? []) {
+          if (!index.unique) continue;
+          result.push({
+            storedFieldNames: index.fields.map((field) =>
+              getFieldName({ model: defaultModelName, field }),
+            ),
+          });
+        }
+
         return result;
       };
 
@@ -151,9 +165,23 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         );
       };
 
+      const uniqueTupleFor = (
+        data: Record<string, unknown>,
+        constraint: UniqueConstraint,
+      ): unknown[] | null => {
+        const values = constraint.storedFieldNames.map((field) => data[field]);
+        // Match ordinary SQL unique-index semantics: tuples containing NULL are
+        // not equal to one another. `undefined` means Better Auth did not supply
+        // this field, so there is no complete tuple to validate either.
+        return values.some((value) => value === undefined || value === null) ? null : values;
+      };
+
+      const constraintName = (constraint: UniqueConstraint) =>
+        constraint.storedFieldNames.join(", ");
+
       const assertUniqueConstraints = async (
         model: string,
-        data: Record<string, unknown>,
+        candidates: readonly JazzRowRecord[],
         excludeRowIds?: ReadonlySet<string>,
         readAll: (
           query: QueryBuilder<Record<string, unknown>>,
@@ -161,31 +189,56 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
           config.db().all(query, { tier: "global" }),
       ): Promise<void> => {
         const table = getPrefixedModelName(model);
-        const uniqueFields = getUniqueFields(model);
+        const uniqueConstraints = getUniqueConstraints(model);
         const excluded = excludeRowIds?.size ?? 0;
-        for (const { storedFieldName } of uniqueFields) {
-          if (!Object.prototype.hasOwnProperty.call(data, storedFieldName)) continue;
-          const value = data[storedFieldName];
-          if (value === undefined || value === null) continue;
+        const candidateTuples = new Map<string, string>();
 
-          const checkQb = createQueryBuilder(table, wasmSchema, {
-            conditions: [{ column: storedFieldName, op: "eq", value }],
-            limit: excluded + 1,
-          });
+        for (const candidate of candidates) {
+          for (const constraint of uniqueConstraints) {
+            const tuple = uniqueTupleFor(candidate, constraint);
+            if (!tuple) continue;
 
-          const existing = (await readAll(checkQb)) as JazzRowRecord[];
-          const conflict = existing.find((row) => !excludeRowIds?.has(row.id));
-          if (conflict) {
-            throw new Error(
-              `Unique constraint violated: "${table}.${storedFieldName}" already has a row with value "${String(value)}"`,
+            const tupleKey = JSON.stringify(tuple);
+            const priorCandidateId = candidateTuples.get(
+              `${constraintName(constraint)}\u0000${tupleKey}`,
             );
+            if (priorCandidateId && priorCandidateId !== candidate.id) {
+              throw new Error(
+                `Unique constraint violated: "${table}.${constraintName(constraint)}" would have duplicate value tuple`,
+              );
+            }
+            candidateTuples.set(`${constraintName(constraint)}\u0000${tupleKey}`, candidate.id);
+
+            const checkQb = createQueryBuilder(table, wasmSchema, {
+              conditions: constraint.storedFieldNames.map((column, index) => ({
+                column,
+                op: "eq" as const,
+                value: tuple[index],
+              })),
+              limit: excluded + 1,
+            });
+
+            const existing = (await readAll(checkQb)) as JazzRowRecord[];
+            const conflict = existing.find((row) => !excludeRowIds?.has(row.id));
+            if (conflict) {
+              throw new Error(
+                `Unique constraint violated: "${table}.${constraintName(constraint)}" already has a row with value tuple ${JSON.stringify(tuple)}`,
+              );
+            }
           }
         }
       };
 
+      const isRetryableExclusiveConflict = (error: unknown) =>
+        error instanceof PersistedWriteRejectedError &&
+        (error.code === "cascade_rejected" ||
+          error.code === "exclusive_conflict" ||
+          error.code === "transaction_conflict");
+
       const runExclusiveMutation = async (
         model: string,
         where: CleanedWhere[],
+        preflight: (match: JazzRowRecord) => Promise<void>,
         mutate: (
           tx: TransactionScope<"exclusive">,
           match: JazzRowRecord,
@@ -197,9 +250,11 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
           // Synchronize the relevant query before anchoring the exclusive snapshot. This also
           // initializes the Jazz client, which is required before starting an exclusive
           // transaction.
-          await findAllRows(model, { where, limit: 1 }, (query) =>
+          const [globalMatch] = await findAllRows(model, { where, limit: 1 }, (query) =>
             db.all(query, { tier: "global" }),
           );
+          if (!globalMatch) return null;
+          await preflight(globalMatch);
 
           try {
             const result = await db.exclusiveTransaction(async (tx) => {
@@ -215,12 +270,7 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
 
             return await result.wait();
           } catch (error) {
-            if (
-              error instanceof PersistedWriteRejectedError &&
-              (error.code === "cascade_rejected" ||
-                error.code === "exclusive_conflict" ||
-                error.code === "transaction_conflict")
-            ) {
+            if (isRetryableExclusiveConflict(error)) {
               continue;
             }
 
@@ -250,12 +300,34 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
       return {
         async create({ model, data }): Promise<any> {
           const table = getPrefixedModelName(model);
-
-          await assertUniqueConstraints(model, data as Record<string, unknown>);
-
           const { id, ...fields } = data as Record<string, unknown> & { id?: string };
           const qb = createQueryBuilder(table, wasmSchema);
-          return db.insert(qb, fields, id ? { id } : undefined).wait({ tier: "global" });
+
+          while (true) {
+            // Do the potentially remote reads before opening the exclusive batch.
+            // The same predicates are repeated locally below, where the authority
+            // serializes the actual admission decision.
+            await findAllRows(model, { limit: 1 });
+            await assertUniqueConstraints(model, [{ id: "<new>", ...fields }]);
+
+            try {
+              const result = await db.exclusiveTransaction(
+                async (tx: TransactionScope<"exclusive">) => {
+                  await assertUniqueConstraints(
+                    model,
+                    [{ id: "<new>", ...fields }],
+                    undefined,
+                    (query) => tx.all(query, { tier: "local" }),
+                  );
+                  return tx.insert(qb, fields, id ? { id } : undefined);
+                },
+              );
+              return await result.wait();
+            } catch (error) {
+              if (isRetryableExclusiveConflict(error)) continue;
+              throw error;
+            }
+          }
         },
 
         async findOne({ model, where, select, join }): Promise<any> {
@@ -295,41 +367,86 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
         },
 
         async update({ model, where, update }): Promise<any> {
-          const [match] = await findAllRows(model, { where, limit: 1 });
-          if (!match) {
-            return null;
-          }
-
           const { id: _id, ...fields } = update as Record<string, unknown>;
-
-          await assertUniqueConstraints(model, fields, new Set([match.id]));
-
           const table = getPrefixedModelName(model);
           const qb = createQueryBuilder(table, wasmSchema);
 
-          await db.update(qb, match.id, fields).wait({ tier: "global" });
+          while (true) {
+            const [globalMatch] = await findAllRows(model, { where, limit: 1 });
+            if (!globalMatch) return null;
+            await assertUniqueConstraints(
+              model,
+              [{ ...globalMatch, ...fields }],
+              new Set([globalMatch.id]),
+            );
 
-          return findByJazzRowId(model, match.id);
+            try {
+              const result = await db.exclusiveTransaction(
+                async (tx: TransactionScope<"exclusive">) => {
+                  const [match] = await findAllRows(model, { where, limit: 1 }, (query) =>
+                    tx.all(query, { tier: "local" }),
+                  );
+                  if (!match) return null;
+
+                  await assertUniqueConstraints(
+                    model,
+                    [{ ...match, ...fields }],
+                    new Set([match.id]),
+                    (query) => tx.all(query, { tier: "local" }),
+                  );
+                  tx.update(qb, match.id, fields);
+                  return match.id;
+                },
+              );
+              const id = await result.wait();
+              return id ? findByJazzRowId(model, id) : null;
+            } catch (error) {
+              if (isRetryableExclusiveConflict(error)) continue;
+              throw error;
+            }
+          }
         },
 
         async updateMany({ model, where, update }) {
-          const matches = await findAllRows(model, { where });
-          if (matches.length === 0) {
-            return 0;
-          }
-
           const { id: _id, ...fields } = update as Record<string, unknown>;
-
-          await assertUniqueConstraints(model, fields, new Set(matches.map((match) => match.id)));
-
           const table = getPrefixedModelName(model);
           const qb = createQueryBuilder(table, wasmSchema);
 
-          for (const match of matches) {
-            await db.update(qb, match.id, fields).wait({ tier: "global" });
-          }
+          while (true) {
+            const globalMatches = await findAllRows(model, { where });
+            if (globalMatches.length === 0) return 0;
+            await assertUniqueConstraints(
+              model,
+              globalMatches.map((match) => ({ ...match, ...fields })),
+              new Set(globalMatches.map((match) => match.id)),
+            );
 
-          return matches.length;
+            try {
+              const result = await db.exclusiveTransaction(
+                async (tx: TransactionScope<"exclusive">) => {
+                  const matches = await findAllRows(model, { where }, (query) =>
+                    tx.all(query, { tier: "local" }),
+                  );
+                  if (matches.length === 0) return 0;
+
+                  await assertUniqueConstraints(
+                    model,
+                    matches.map((match) => ({ ...match, ...fields })),
+                    new Set(matches.map((match) => match.id)),
+                    (query) => tx.all(query, { tier: "local" }),
+                  );
+                  for (const match of matches) {
+                    tx.update(qb, match.id, fields);
+                  }
+                  return matches.length;
+                },
+              );
+              return await result.wait();
+            } catch (error) {
+              if (isRetryableExclusiveConflict(error)) continue;
+              throw error;
+            }
+          }
         },
 
         async delete({ model, where }) {
@@ -368,10 +485,15 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
           const table = getPrefixedModelName(model);
           const qb = createQueryBuilder(table, wasmSchema);
           const consumed = await serializeExclusiveMutation(() =>
-            runExclusiveMutation(model, where, (tx, match) => {
-              tx.delete(qb, match.id);
-              return match;
-            }),
+            runExclusiveMutation(
+              model,
+              where,
+              async () => {},
+              (tx, match) => {
+                tx.delete(qb, match.id);
+                return match;
+              },
+            ),
           );
 
           return consumed as T | null;
@@ -391,41 +513,67 @@ export const jazzAdapter = (config: JazzAdapterConfig) => {
           const table = getPrefixedModelName(model);
           const qb = createQueryBuilder(table, wasmSchema);
           const updated = await serializeExclusiveMutation(() =>
-            runExclusiveMutation(model, where, async (tx, match) => {
-              const fields: Record<string, unknown> = {};
-              for (const [field, delta] of Object.entries(increment)) {
-                const current = match[field];
-                if (typeof current !== "number") {
-                  throw new TypeError(
-                    `Cannot increment non-numeric field "${table}.${field}" with value "${String(current)}"`,
+            runExclusiveMutation(
+              model,
+              where,
+              async (match) => {
+                const fields: Record<string, unknown> = {};
+                for (const [field, delta] of Object.entries(increment)) {
+                  const current = match[field];
+                  if (typeof current !== "number") {
+                    throw new TypeError(
+                      `Cannot increment non-numeric field "${table}.${field}" with value "${String(current)}"`,
+                    );
+                  }
+                  fields[field] = current + delta;
+                }
+                Object.assign(fields, set);
+                delete fields.id;
+                await assertUniqueConstraints(
+                  model,
+                  [{ ...match, ...fields }],
+                  new Set([match.id]),
+                );
+              },
+              async (tx, match) => {
+                const fields: Record<string, unknown> = {};
+                for (const [field, delta] of Object.entries(increment)) {
+                  const current = match[field];
+                  if (typeof current !== "number") {
+                    throw new TypeError(
+                      `Cannot increment non-numeric field "${table}.${field}" with value "${String(current)}"`,
+                    );
+                  }
+                  fields[field] = current + delta;
+                }
+
+                Object.assign(fields, set);
+                delete fields.id;
+
+                await assertUniqueConstraints(
+                  model,
+                  [{ ...match, ...fields }],
+                  new Set([match.id]),
+                  (query) => tx.all(query, { tier: "local" }),
+                );
+                tx.update(qb, match.id, fields);
+
+                const persisted = await tx.one(
+                  createQueryBuilder(table, wasmSchema, {
+                    conditions: [{ column: "id", op: "eq", value: match.id }],
+                    limit: 1,
+                  }),
+                  { tier: "local" },
+                );
+                if (!persisted) {
+                  throw new Error(
+                    `Updated row "${table}.${match.id}" disappeared inside transaction`,
                   );
                 }
-                fields[field] = current + delta;
-              }
 
-              Object.assign(fields, set);
-              delete fields.id;
-
-              await assertUniqueConstraints(model, fields, new Set([match.id]), (query) =>
-                tx.all(query, { tier: "local" }),
-              );
-              tx.update(qb, match.id, fields);
-
-              const persisted = await tx.one(
-                createQueryBuilder(table, wasmSchema, {
-                  conditions: [{ column: "id", op: "eq", value: match.id }],
-                  limit: 1,
-                }),
-                { tier: "local" },
-              );
-              if (!persisted) {
-                throw new Error(
-                  `Updated row "${table}.${match.id}" disappeared inside transaction`,
-                );
-              }
-
-              return persisted as JazzRowRecord;
-            }),
+                return persisted as JazzRowRecord;
+              },
+            ),
           );
 
           return updated as T | null;

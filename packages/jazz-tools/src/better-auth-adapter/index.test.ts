@@ -578,6 +578,89 @@ describe("jazzAdapter", () => {
       ).resolves.toMatchObject({ email: "carol@example.com" });
     });
 
+    it("enforces Better Auth's mapped composite account identity on create and mutations", async () => {
+      const firstUser = await adapter.create<any>({
+        model: "user",
+        data: {
+          name: "First",
+          email: "composite-first@example.com",
+          emailVerified: false,
+          image: null,
+        },
+      });
+      const secondUser = await adapter.create<any>({
+        model: "user",
+        data: {
+          name: "Second",
+          email: "composite-second@example.com",
+          emailVerified: false,
+          image: null,
+        },
+      });
+      const account = (issuer: string, accountId: string, userId: string) => ({
+        issuer,
+        accountId,
+        providerId: "test",
+        userId,
+        accessToken: null,
+        refreshToken: null,
+        idToken: null,
+        accessTokenExpiresAt: null,
+        refreshTokenExpiresAt: null,
+        scope: null,
+        password: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const primary = await adapter.create<any>({
+        model: "account",
+        data: account("issuer-a", "same-account", firstUser.id),
+      });
+      await expect(
+        adapter.create({
+          model: "account",
+          data: account("issuer-a", "same-account", secondUser.id),
+        }),
+      ).rejects.toThrow(/issuer, accountId/);
+      await expect(
+        adapter.create({
+          model: "account",
+          data: account("issuer-b", "same-account", secondUser.id),
+        }),
+      ).resolves.toMatchObject({ issuer: "issuer-b", accountId: "same-account" });
+
+      const movable = await adapter.create<any>({
+        model: "account",
+        data: account("issuer-a", "other-account", secondUser.id),
+      });
+      await expect(
+        adapter.update({
+          model: "account",
+          where: [{ field: "id", operator: "eq", value: movable.id, connector: "AND" }],
+          update: { accountId: primary.accountId },
+        }),
+      ).rejects.toThrow(/issuer, accountId/);
+      await expect(
+        adapter.incrementOne({
+          model: "account",
+          where: [{ field: "id", operator: "eq", value: movable.id, connector: "AND" }],
+          increment: {},
+          set: { accountId: primary.accountId },
+        }),
+      ).rejects.toThrow(/issuer, accountId/);
+
+      await adapter.create({ model: "account", data: account("issuer-c", "one", firstUser.id) });
+      await adapter.create({ model: "account", data: account("issuer-c", "two", secondUser.id) });
+      await expect(
+        adapter.updateMany({
+          model: "account",
+          where: [{ field: "issuer", operator: "eq", value: "issuer-c", connector: "AND" }],
+          update: { accountId: "shared" },
+        }),
+      ).rejects.toThrow(/issuer, accountId/);
+    });
+
     it("allows inserts when unique column value is null or undefined", async () => {
       await adapter.create({
         model: "user",
@@ -1307,6 +1390,84 @@ describe("jazzAdapter", () => {
         await ctx2.shutdown();
       }
     });
+
+    test(
+      "admits exactly one concurrent composite account identity across two backends",
+      { timeout: 30_000 },
+      async () => {
+        await deployProject({
+          serverUrl: server.url,
+          appId: server.appId,
+          adminSecret: server.adminSecret,
+          schemaDir: join(import.meta.dirname, "fixtures"),
+        });
+        const ctx1 = createJazzContext({
+          appId: server.appId,
+          driver: { type: "memory" },
+          serverUrl: server.url,
+          backendSecret: server.backendSecret,
+        });
+        const ctx2 = createJazzContext({
+          appId: server.appId,
+          driver: { type: "memory" },
+          serverUrl: server.url,
+          backendSecret: server.backendSecret,
+        });
+        try {
+          const adapter1 = jazzAdapter({
+            db: () => ctx1.asBackend(wasmSchemaExample),
+            schema: wasmSchemaExample,
+          })({});
+          const adapter2 = jazzAdapter({
+            db: () => ctx2.asBackend(wasmSchemaExample),
+            schema: wasmSchemaExample,
+          })({});
+          const user = await adapter1.create<any>({
+            model: "user",
+            data: {
+              name: "Race",
+              email: "composite-race@example.com",
+              emailVerified: false,
+              image: null,
+            },
+          });
+          await vi.waitFor(
+            () =>
+              expect(
+                adapter2.findOne({
+                  model: "user",
+                  where: [{ field: "id", operator: "eq", value: user.id, connector: "AND" }],
+                }),
+              ).resolves.toMatchObject({ id: user.id }),
+            { timeout: 15_000 },
+          );
+          const account = {
+            issuer: "issuer-race",
+            accountId: "same-account",
+            providerId: "test",
+            userId: user.id,
+            accessToken: null,
+            refreshToken: null,
+            idToken: null,
+            accessTokenExpiresAt: null,
+            refreshTokenExpiresAt: null,
+            scope: null,
+            password: null,
+            createdAt: new Date(),
+            updatedAt: new Date(),
+          };
+          const results = await Promise.allSettled([
+            adapter1.create({ model: "account", data: account }),
+            adapter2.create({ model: "account", data: account }),
+          ]);
+          expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+          expect(results.filter((result) => result.status === "rejected")).toHaveLength(1);
+        } finally {
+          await ctx1.shutdown();
+          await ctx2.shutdown();
+        }
+      },
+    );
 
     test(
       "allows exactly one consumeOne winner across concurrent clients",
