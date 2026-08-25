@@ -81,20 +81,12 @@ describe("Vanilla TS Todo App E2E", () => {
     await instances[idx].destroy();
     el.remove();
     instances.splice(idx, 1);
-    // Give IndexedDB handles time to release
-    await new Promise((r) => setTimeout(r, 200));
   }
 
   afterEach(async () => {
-    for (const { container, destroy } of instances) {
-      try {
-        await destroy();
-      } catch {
-        /* best effort */
-      }
-      container.remove();
+    while (instances.length > 0) {
+      await destroyInstance(instances[0].container);
     }
-    instances.length = 0;
   });
 
   // -------------------------------------------------------------------------

@@ -23,6 +23,8 @@ export interface BackendRequestAuthConfig {
   appId: string;
   jwksUrl?: string;
   jwtPublicKey?: BackendJwtPublicKey;
+  jwtIssuer?: string;
+  jwtAudience?: string | readonly string[];
   allowLocalFirstAuth?: boolean;
 }
 
@@ -322,6 +324,26 @@ function ensureJwtNotExpired(payload: JwtPayload): void {
   }
 }
 
+function ensureJwtDomain(payload: JwtPayload, config: BackendRequestAuthConfig): void {
+  if (config.jwtIssuer !== undefined && payload.iss !== config.jwtIssuer) {
+    throw new Error("JWT issuer does not match the configured issuer");
+  }
+
+  if (config.jwtAudience === undefined) {
+    return;
+  }
+  const expected = Array.isArray(config.jwtAudience) ? config.jwtAudience : [config.jwtAudience];
+  const actual =
+    typeof payload.aud === "string"
+      ? [payload.aud]
+      : Array.isArray(payload.aud) && payload.aud.every((audience) => typeof audience === "string")
+        ? payload.aud
+        : [];
+  if (!expected.some((audience) => actual.includes(audience))) {
+    throw new Error("JWT audience does not match the configured audience");
+  }
+}
+
 async function verifyLocalFirstIdentityProof(token: string, appId: string): Promise<string> {
   const { verifyLocalFirstIdentityProof: verifyToken } = await import("jazz-napi");
   const result = verifyToken(token, appId);
@@ -332,7 +354,11 @@ async function verifyLocalFirstIdentityProof(token: string, appId: string): Prom
   return result.id;
 }
 
-async function verifyExternalJwt(token: string, config: BackendRequestAuthConfig): Promise<void> {
+async function verifyExternalJwt(
+  token: string,
+  payload: JwtPayload,
+  config: BackendRequestAuthConfig,
+): Promise<void> {
   if (config.jwtPublicKey !== undefined) {
     try {
       await verifyJwtSignatureWithStaticKey(token, config.jwtPublicKey);
@@ -341,7 +367,8 @@ async function verifyExternalJwt(token: string, config: BackendRequestAuthConfig
       throw new Error(`Invalid JWT: ${message}`);
     }
 
-    ensureJwtNotExpired(requireJwtPayload(token));
+    ensureJwtNotExpired(payload);
+    ensureJwtDomain(payload, config);
     return;
   }
 
@@ -359,7 +386,8 @@ async function verifyExternalJwt(token: string, config: BackendRequestAuthConfig
       }
     }
 
-    ensureJwtNotExpired(requireJwtPayload(token));
+    ensureJwtNotExpired(payload);
+    ensureJwtDomain(payload, config);
     return;
   }
 
@@ -396,6 +424,6 @@ export async function resolveRequestSession(
 
   const session = requireJwtSession(payload);
   rejectReservedExternalJwtIssuer(session);
-  await verifyExternalJwt(token, config);
+  await verifyExternalJwt(token, payload, config);
   return session;
 }

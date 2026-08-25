@@ -3641,11 +3641,11 @@ describe("bin integration", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("normalizes microsecond publishedAt values when persisting fetched snapshots", async () => {
+  it("uses millisecond publishedAt values when persisting fetched snapshots", async () => {
     const { root } = await createWorkspace();
     const schema = storedRootSchema();
     const schemaHash = await computeTestSchemaHash(schema);
-    const publishedAtMicros = Date.UTC(2026, 3, 6, 12, 0, 0) * 1_000;
+    const publishedAtMs = Date.UTC(2026, 3, 6, 12, 0, 0);
     const writes: string[] = [];
     const originalWrite = process.stdout.write.bind(process.stdout);
     const writeSpy = vi.spyOn(process.stdout, "write").mockImplementation(((
@@ -3655,7 +3655,7 @@ describe("bin integration", () => {
       return true;
     }) as typeof process.stdout.write);
 
-    const fetchMock = vi.fn(async () => storedSchemaResponse(schema, publishedAtMicros));
+    const fetchMock = vi.fn(async () => storedSchemaResponse(schema, publishedAtMs));
     vi.stubGlobal("fetch", fetchMock);
 
     try {
