@@ -1,7 +1,7 @@
+import { createHmac } from "node:crypto";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, test, vi } from "vitest";
 import { betterAuth, type BetterAuthOptions, type DBAdapter } from "better-auth";
-import { mintLocalFirstToken } from "jazz-napi";
 import { createJazzContext, type JazzContext } from "../backend/index.js";
 import { startLocalJazzServer, type LocalJazzServerHandle } from "../testing/index.js";
 import { deploy as deployProject } from "../dev/catalogue-project.js";
@@ -12,6 +12,24 @@ import {
   wasmSchema as wasmSchemaExample,
 } from "./fixtures/schema.js";
 import { jazzAdapter } from "./index.js";
+
+const TEST_EXTERNAL_JWT_SECRET = "better-auth-adapter-test-secret";
+const TEST_EXTERNAL_JWT_KID = "better-auth-adapter-test";
+
+function signedExternalTestToken(subject: string): string {
+  const header = Buffer.from(
+    JSON.stringify({ alg: "HS256", typ: "JWT", kid: TEST_EXTERNAL_JWT_KID }),
+    "utf8",
+  ).toString("base64url");
+  const payload = Buffer.from(
+    JSON.stringify({ iss: "https://better-auth-test.example", sub: subject }),
+    "utf8",
+  ).toString("base64url");
+  const signature = createHmac("sha256", TEST_EXTERNAL_JWT_SECRET)
+    .update(`${header}.${payload}`, "utf8")
+    .digest("base64url");
+  return `${header}.${payload}.${signature}`;
+}
 
 describe("jazzAdapter", () => {
   describe("generated auth-table permissions", () => {
@@ -47,6 +65,12 @@ describe("jazzAdapter", () => {
       driver: { type: "memory" },
       serverUrl: server.url,
       backendSecret: server.backendSecret,
+      jwtPublicKey: {
+        kty: "oct",
+        kid: TEST_EXTERNAL_JWT_KID,
+        alg: "HS256",
+        k: Buffer.from(TEST_EXTERNAL_JWT_SECRET, "utf8").toString("base64url"),
+      },
     });
 
     try {
@@ -64,8 +88,7 @@ describe("jazzAdapter", () => {
         },
       });
 
-      const localFirstSecret = Buffer.alloc(32, 7).toString("base64url");
-      const token = mintLocalFirstToken(localFirstSecret, server.appId, 60);
+      const token = signedExternalTestToken("ordinary-session-user");
       const sessionDb = await context.forRequest({
         headers: { authorization: `Bearer ${token}` },
       });

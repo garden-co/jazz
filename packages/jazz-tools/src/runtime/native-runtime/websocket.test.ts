@@ -144,7 +144,7 @@ describe("websocket frame carrier", () => {
     expect(issuerA).not.toBe(issuerB);
   });
 
-  it("matches verified external JWT issuer normalization while preserving the provider subject", () => {
+  it("preserves verified external JWT issuer and subject bytes exactly", () => {
     const fallback = new TextEncoder().encode('["urn:jazz:runtime-host","cache"]');
     const jwt = (iss: string) =>
       `header.${btoa(JSON.stringify({ iss, sub: " provider-subject " }))}.signature`;
@@ -155,10 +155,10 @@ describe("websocket frame carrier", () => {
         fallback,
       ),
     );
-    expect(normalized).toBe('["https://issuer.example"," provider-subject "]');
+    expect(normalized).toBe('[" https://issuer.example "," provider-subject "]');
 
-    // The server rejects a verified external token whose issuer is blank after
-    // normalization. Keep the client sessionless instead of fabricating an
+    // The server rejects a verified external token whose issuer is ASCII-blank.
+    // Keep the client sessionless instead of fabricating an
     // author that would only self-reject at WebSocket admission.
     expect(peerIdentityForWebSocketAuth(JSON.stringify({ jwt_token: jwt(" \t ") }), fallback)).toBe(
       fallback,
