@@ -222,14 +222,23 @@ where
         };
         if let Some(rows) = self.inline_sources.get(&request.source) {
             if request.visibility != RowVisibility::Visible
-                || !request.requirements.metadata.is_empty()
                 || !matches!(authorization, SourceAuthorizationRequest::System)
             {
                 return Err(source_resolution_error(request, SourceGap::Coverage));
             }
-            let graph = inline_current_graph(&table, rows.clone())
+            let schema_version_alias = self
+                .node
+                .ensure_schema_version_alias(self.read_view.read_schema)
+                .await
                 .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
-            let descriptor = current_row_descriptor(&table);
+            let (graph, descriptor, metadata) = inline_current_graph_with_source_metadata(
+                &table,
+                rows.clone(),
+                schema_version_alias,
+                "inline-current",
+                &request.requirements,
+            )
+            .map_err(|_| source_resolution_error(request, SourceGap::Coverage))?;
             return Ok(ResolvedSource {
                 table_schema: table,
                 graph,
@@ -237,7 +246,7 @@ where
                     source: request.source.clone(),
                     descriptor,
                     row_uuid_field: "row_uuid".to_owned(),
-                    metadata: BTreeMap::new(),
+                    metadata,
                 },
                 routing_fields: BTreeSet::new(),
                 requires_result_payload: false,
@@ -3344,6 +3353,30 @@ fn inline_current_graph_with_source_metadata(
     )
 }
 
+#[cfg(test)]
+pub(super) fn inline_current_graph_with_source_metadata_for_test(
+    table: &TableSchema,
+    rows: Vec<CurrentRow>,
+    schema_version_alias: SchemaVersionAlias,
+    coverage: &str,
+    requirements: &SourceRequirements,
+) -> Result<
+    (
+        GraphBuilder,
+        RecordDescriptor,
+        BTreeMap<SourceMetadataRequirement, SourceMetadataFields>,
+    ),
+    Error,
+> {
+    inline_current_graph_with_source_metadata(
+        table,
+        rows,
+        schema_version_alias,
+        coverage,
+        requirements,
+    )
+}
+
 fn inline_current_graph_with_source_metadata_and_branch_witness(
     table: &TableSchema,
     rows: Vec<CurrentRow>,
@@ -3360,10 +3393,18 @@ fn inline_current_graph_with_source_metadata_and_branch_witness(
     Error,
 > {
     let mut metadata = BTreeMap::new();
-    if requirements
+    // Provenance is carried by the same content-version witness as ordinary
+    // table sources.  Inline candidates must expose that full capability too:
+    // a provenance-only requirement still needs the hidden version fields the
+    // query program uses to prove and evaluate the source.
+    let needs_version_witnesses = requirements
         .metadata
         .contains(&SourceMetadataRequirement::VersionWitnesses)
-    {
+        || requirements
+            .metadata
+            .iter()
+            .any(|requirement| matches!(requirement, SourceMetadataRequirement::Provenance(_)));
+    if needs_version_witnesses {
         metadata.insert(
             SourceMetadataRequirement::VersionWitnesses,
             SourceMetadataFields::VersionWitnesses {

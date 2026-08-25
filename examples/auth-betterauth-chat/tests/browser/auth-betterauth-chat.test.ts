@@ -1,9 +1,8 @@
 /**
  * Jazz permission-DSL tests for auth-betterauth-chat.
  *
- * Mints a verified JWT against a local JWKS and asserts that the
- * `authMode: "external"` permission rule lets authenticated callers
- * post to either chat while denying anonymous callers for Announcements.
+ * Mints role-tagged JWTs against a local JWKS and asserts that generic-chat
+ * updates and deletes remain bound to the original message creator.
  *
  * NOT covered by `pnpm test`: Better Auth's sign-up / sign-in API
  * (`src/lib/auth.ts`), the JWKS endpoint at `/api/auth/jwks`, the
@@ -35,14 +34,23 @@ async function makeClient(jwt?: string): Promise<JazzClient> {
   return client;
 }
 
-async function send(client: JazzClient, chat_id: string, text: string): Promise<void> {
+async function send(client: JazzClient, chat_id: string, text: string): Promise<string> {
   const handle = client.db.insert(app.messages, {
     author_name: "Tester",
     chat_id,
     text,
     sent_at: new Date(),
   });
-  await handle.wait({ tier: "edge" });
+  const message = await handle.wait({ tier: "edge" });
+  return message.id;
+}
+
+async function update(client: JazzClient, messageId: string, text: string): Promise<void> {
+  await client.db.update(app.messages, messageId, { text }).wait({ tier: "edge" });
+}
+
+async function remove(client: JazzClient, messageId: string): Promise<void> {
+  await client.db.delete(app.messages, messageId).wait({ tier: "edge" });
 }
 
 describe("auth-betterauth-chat permissions", () => {
@@ -59,14 +67,27 @@ describe("auth-betterauth-chat permissions", () => {
   });
 
   it("authenticated JWT can post to Announcements and General", async () => {
-    const client = await makeClient(__USER_JWT__);
-    await expect(send(client, __ANNOUNCEMENTS_CHAT_ID__, "user-ann")).resolves.toBeUndefined();
-    await expect(send(client, __CHAT_ID__, "user-gen")).resolves.toBeUndefined();
+    const client = await makeClient(__MEMBER_JWT__);
+    await expect(send(client, __ANNOUNCEMENTS_CHAT_ID__, "member-ann")).resolves.toEqual(
+      expect.any(String),
+    );
+    await expect(send(client, __CHAT_ID__, "member-gen")).resolves.toEqual(expect.any(String));
+  });
+
+  it("keeps generic-chat updates and deletes bound to the creator", async () => {
+    const admin = await makeClient(__ADMIN_JWT__);
+    const member = await makeClient(__MEMBER_JWT__);
+
+    const messageId = await send(member, __CHAT_ID__, "member-gen");
+    await expect(update(member, messageId, "member edit")).resolves.toBeUndefined();
+    await expect(update(admin, messageId, "admin edit")).rejects.toThrow();
+    await expect(remove(admin, messageId)).rejects.toThrow();
+    await expect(remove(member, messageId)).resolves.toBeUndefined();
   });
 
   it("anonymous can post to General but is denied for Announcements", async () => {
     const client = await makeClient();
     await expect(send(client, __ANNOUNCEMENTS_CHAT_ID__, "anon-ann")).rejects.toThrow();
-    await expect(send(client, __CHAT_ID__, "anon-gen")).resolves.toBeUndefined();
+    await expect(send(client, __CHAT_ID__, "anon-gen")).resolves.toEqual(expect.any(String));
   });
 });
