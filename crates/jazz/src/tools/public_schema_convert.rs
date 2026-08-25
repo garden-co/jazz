@@ -3112,15 +3112,9 @@ mod tests {
             crate::groove::records::ValueType::Bool => GrooveValue::Bool(true),
             crate::groove::records::ValueType::String => GrooveValue::String("value".to_owned()),
             crate::groove::records::ValueType::Bytes => GrooveValue::Bytes(vec![8]),
-            crate::groove::records::ValueType::RawString => GrooveValue::String("raw".to_owned()),
-            crate::groove::records::ValueType::RawBytes => GrooveValue::Bytes(vec![8]),
-            crate::groove::records::ValueType::StoredScalar(kind) => match kind {
-                crate::groove::large_values::LargeValueKind::Bytes => GrooveValue::Bytes(vec![8]),
-                crate::groove::large_values::LargeValueKind::String
-                | crate::groove::large_values::LargeValueKind::Json => {
-                    GrooveValue::String("stored".to_owned())
-                }
-            },
+            crate::groove::records::ValueType::Internal(_) => {
+                panic!("public schemas must not contain Groove internal storage types")
+            }
             crate::groove::records::ValueType::Uuid => GrooveValue::Uuid(Uuid::from_bytes([9; 16])),
             crate::groove::records::ValueType::EnumTag(_) => GrooveValue::EnumTag(0),
             crate::groove::records::ValueType::Tuple(members) => {

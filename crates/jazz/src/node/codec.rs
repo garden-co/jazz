@@ -532,7 +532,7 @@ impl VersionRow {
             )
         } else {
             (
-                table.history_storage_table(),
+                table.authored_history_storage_table(),
                 history_values_from_parts(table, &parts)?,
             )
         };
@@ -564,7 +564,7 @@ impl VersionRow {
             )
         } else {
             (
-                table.history_storage_table(),
+                table.authored_history_storage_table(),
                 history_values_from_wire(
                     table,
                     version,

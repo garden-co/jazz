@@ -766,12 +766,9 @@ fn policy_graph_perf_fixture_version_layouts_round_trip_all_storage_records() {
             groove::schema::ColumnType::Bool => Value::Bool(seed & 1 == 0),
             groove::schema::ColumnType::String => Value::String(format!("fixture-value-{seed}")),
             groove::schema::ColumnType::Bytes => Value::Bytes(vec![seed, seed.wrapping_add(1)]),
-            groove::schema::ColumnType::RawString => Value::String(format!("raw-{seed}")),
-            groove::schema::ColumnType::RawBytes => Value::Bytes(vec![seed]),
-            groove::schema::ColumnType::StoredScalar(kind) => match kind {
-                groove::large_values::LargeValueKind::Bytes => Value::Bytes(vec![seed]),
-                groove::large_values::LargeValueKind::String | groove::large_values::LargeValueKind::Json => Value::String(format!("stored-{seed}")),
-            },
+            groove::schema::ColumnType::Internal(_) => {
+                panic!("public Jazz schemas must not contain Groove internal storage types")
+            }
             groove::schema::ColumnType::Uuid => Value::Uuid(uuid::Uuid::from_bytes([seed; 16])),
             groove::schema::ColumnType::EnumTag(_) => Value::EnumTag(0),
             groove::schema::ColumnType::Tuple(members) => Value::Tuple(

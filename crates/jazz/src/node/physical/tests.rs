@@ -589,9 +589,19 @@ mod variant_case_tests {
         );
         assert_eq!(
             physical_storage_value_type(&json),
-            records::ValueType::StoredScalar(groove::large_values::LargeValueKind::Json)
+            groove::large_values::physical_storage_value_type(
+                groove::large_values::LargeValueKind::Json,
+            )
         );
         assert_ne!(physical_storage_value_type(&text), physical_storage_value_type(&json));
+        assert!(physical_storage_value_type(&json).is_internal_storage_type());
+        assert!(
+            std::panic::catch_unwind(|| {
+                ColumnSchema::new("not_public", physical_storage_value_type(&json))
+            })
+            .is_err(),
+            "the physical descriptor constructor cannot be smuggled back into a public Jazz schema"
+        );
 
         let text_cell = records::RecordDescriptor::new([(
             "cell",
@@ -614,6 +624,10 @@ mod variant_case_tests {
         )
         .unwrap()
         .value_ref;
+        assert!(
+            json_cell.create(&[Value::Large(json_root.clone())]).is_ok(),
+            "the JSON physical descriptor accepts its schema-derived large value"
+        );
         assert!(
             text_cell.create(&[Value::Large(json_root)]).is_err(),
             "a JSON descriptor must not enter text physical storage"

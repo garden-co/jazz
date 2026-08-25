@@ -100,6 +100,16 @@ pub enum LargeValueKind {
     Json,
 }
 
+/// Constructs the descriptor-only physical scalar type used by Jazz's storage
+/// lowering. The resulting type is intentionally impossible to name or
+/// construct through the public `records::ValueType` API.
+///
+/// This is an engine boundary rather than a schema feature: public schemas
+/// must continue to use their logical `String`/`Bytes` types.
+pub fn physical_storage_value_type(kind: LargeValueKind) -> ValueType {
+    ValueType::stored_scalar(kind)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeRef {
     pub object_hash: ContentHash,
@@ -2010,25 +2020,25 @@ fn stored_scalar_schema(kind: LargeValueKind) -> EnumSchema {
     let primitive = RecordDescriptor::new([(
         "value",
         match kind {
-            LargeValueKind::Bytes => ValueType::RawBytes,
-            LargeValueKind::String | LargeValueKind::Json => ValueType::RawString,
+            LargeValueKind::Bytes => ValueType::raw_bytes(),
+            LargeValueKind::String | LargeValueKind::Json => ValueType::raw_string(),
         },
     )]);
     let root = RecordDescriptor::new([
-        ("object_hash", ValueType::RawBytes),
-        ("locator", ValueType::RawBytes),
+        ("object_hash", ValueType::raw_bytes()),
+        ("locator", ValueType::raw_bytes()),
     ]);
     let edit = RecordDescriptor::new([
         ("offset", ValueType::U64),
         ("delete_length", ValueType::U64),
-        ("insert_bytes", ValueType::RawBytes),
+        ("insert_bytes", ValueType::raw_bytes()),
         ("utf16_offset", ValueType::U64),
         ("delete_utf16_length", ValueType::U64),
         ("insert_utf16_length", ValueType::U64),
     ]);
     let chunked = RecordDescriptor::new([
         ("format_version", ValueType::U8),
-        ("logical_hash", ValueType::RawBytes),
+        ("logical_hash", ValueType::raw_bytes()),
         ("root", ValueType::Record(Box::new(root))),
         ("byte_length", ValueType::U64),
         (
@@ -2087,13 +2097,13 @@ fn raw_bytes(value: &Value) -> Result<[u8; 32], Error> {
 
 fn chunked_values(value: &LargeValueRef) -> Vec<Value> {
     let root = RecordDescriptor::new([
-        ("object_hash", ValueType::RawBytes),
-        ("locator", ValueType::RawBytes),
+        ("object_hash", ValueType::raw_bytes()),
+        ("locator", ValueType::raw_bytes()),
     ]);
     let edit = RecordDescriptor::new([
         ("offset", ValueType::U64),
         ("delete_length", ValueType::U64),
-        ("insert_bytes", ValueType::RawBytes),
+        ("insert_bytes", ValueType::raw_bytes()),
         ("utf16_offset", ValueType::U64),
         ("delete_utf16_length", ValueType::U64),
         ("insert_utf16_length", ValueType::U64),
@@ -4659,7 +4669,7 @@ mod tests {
         .unwrap()
         .value_ref;
         let text_cell =
-            RecordDescriptor::new([("cell", ValueType::StoredScalar(LargeValueKind::String))]);
+            RecordDescriptor::new([("cell", physical_storage_value_type(LargeValueKind::String))]);
         assert!(text_cell.create(&[Value::Large(json)]).is_err());
     }
 

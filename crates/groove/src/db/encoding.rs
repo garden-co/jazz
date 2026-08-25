@@ -498,9 +498,7 @@ pub(super) fn decode_primary_key_part(
             Ok(Value::EnumTag(value))
         }
         records::ValueType::F64
-        | records::ValueType::RawString
-        | records::ValueType::RawBytes
-        | records::ValueType::StoredScalar(_)
+        | records::ValueType::Internal(_)
         | records::ValueType::Array(_)
         | records::ValueType::Nullable(_)
         | records::ValueType::Tuple(_)
@@ -635,9 +633,7 @@ pub(super) fn decode_index_key_part(
                 _ => Err(Error::InvalidPersistedIndex(index_name.to_owned())),
             }
         }
-        ColumnType::RawString
-        | ColumnType::RawBytes
-        | ColumnType::StoredScalar(_)
+        ColumnType::Internal(_)
         | ColumnType::Array(_)
         | ColumnType::Record(_)
         | ColumnType::Enum(_) => Err(Error::InvalidPersistedIndex(index_name.to_owned())),

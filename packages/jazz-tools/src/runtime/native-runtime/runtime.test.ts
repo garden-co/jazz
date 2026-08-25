@@ -4645,7 +4645,6 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         _rowId: Uint8Array,
         _cells: Uint8Array,
         _column: string,
-        _kind: string,
         _mutation?: string,
         _author?: Uint8Array,
         _updatedAtMs?: number,
@@ -4699,7 +4698,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
 
     expect(beginStreamingMutationEncoded).toHaveBeenCalledOnce();
     expect(beginStreamingMutationEncoded.mock.calls[0]?.[3]).toBe("title");
-    expect(beginStreamingMutationEncoded.mock.calls[0]?.[4]).toBe("Text");
+    expect(beginStreamingMutationEncoded.mock.calls[0]?.[4]).toBe("insert");
     expect(pushed.map((chunk) => new TextDecoder().decode(chunk))).toEqual(["hello ", "world"]);
     expect(finished).toBe(true);
     expect(result.id).toBe("00000000-0000-0000-0000-000000000123");
@@ -4749,11 +4748,11 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
     );
 
     const call = beginStreamingMutationEncoded.mock.calls[0] as unknown[];
-    expect(call[5]).toBe("update");
-    expect(call[6]).toBeInstanceOf(Uint8Array);
-    expect(call[7]).toBe(1234);
-    expect(call[8]).toEqual(head);
-    expect(call[9]).toEqual(base);
+    expect(call[4]).toBe("update");
+    expect(call[5]).toBeInstanceOf(Uint8Array);
+    expect(call[6]).toBe(1234);
+    expect(call[7]).toEqual(head);
+    expect(call[8]).toEqual(base);
   });
 
   it.each([
@@ -4780,7 +4779,6 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         _rowId: Uint8Array,
         _cells: Uint8Array,
         _column: string,
-        _kind: "Text" | "Json" | "Bytea",
         _mutation?: "insert" | "update" | "upsert",
         _author?: Uint8Array,
         _updatedAtMs?: number,
@@ -4819,7 +4817,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       "00000000-0000-0000-0000-000000000123",
     );
 
-    const author = beginStreamingMutationEncoded.mock.calls[0]?.[6];
+    const author = beginStreamingMutationEncoded.mock.calls[0]?.[5];
     expect(author instanceof Uint8Array ? new TextDecoder().decode(author) : undefined).toBe(
       testCase.expectedAuthor ?? ownerAuthor,
     );
@@ -5118,7 +5116,6 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
         _rowId: Uint8Array,
         _cells: Uint8Array,
         _column: string,
-        _kind: "Text" | "Json" | "Bytea",
         _mutation?: "insert" | "update" | "upsert",
         _author?: Uint8Array,
         _updatedAtMs?: number,
@@ -5166,7 +5163,7 @@ describe("NativeRuntimeAdapter streaming inserts", () => {
       "00000000-0000-0000-0000-000000000123",
     );
 
-    const author = beginStreamingMutationEncoded.mock.calls[0]?.[6];
+    const author = beginStreamingMutationEncoded.mock.calls[0]?.[5];
     expect(author instanceof Uint8Array ? new TextDecoder().decode(author) : undefined).toBe(
       '["urn:jazz:local-first","verified-writer"]',
     );

@@ -697,10 +697,10 @@ impl ColumnSchema {
 }
 
 fn contains_internal_storage_type(column_type: &GrooveColumnType) -> bool {
+    if column_type.is_internal_storage_type() {
+        return true;
+    }
     match column_type {
-        GrooveColumnType::RawString
-        | GrooveColumnType::RawBytes
-        | GrooveColumnType::StoredScalar(_) => true,
         GrooveColumnType::Nullable(inner) | GrooveColumnType::Array(inner) => {
             contains_internal_storage_type(inner)
         }
@@ -725,6 +725,18 @@ fn large_value_kind_for_type(column_type: &GrooveColumnType) -> LargeValueSemant
         GrooveColumnType::Bytes => LargeValueSemanticKind::Bytes,
         GrooveColumnType::Nullable(inner) => large_value_kind_for_type(inner),
         _ => LargeValueSemanticKind::NotLarge,
+    }
+}
+
+/// Storage descriptors are schema-derived. JSON remains string-shaped to
+/// callers and operators, but its internal cell codec is distinct so a large
+/// JSON descriptor cannot be mistaken for text.
+fn storage_column_type(column: &ColumnSchema) -> GrooveColumnType {
+    match column.large_value_kind {
+        LargeValueSemanticKind::Json => groove::large_values::physical_storage_value_type(
+            groove::large_values::LargeValueKind::Json,
+        ),
+        _ => column.column_type.clone(),
     }
 }
 
@@ -921,7 +933,7 @@ impl TableSchema {
         columns.extend(self.columns.iter().map(|user_column| {
             column(
                 format!("user_{}", user_column.name),
-                user_column.column_type.clone().nullable(),
+                storage_column_type(user_column).nullable(),
             )
         }));
         GrooveTableSchema::new(format!("jazz_{}_rejected_versions", self.name), columns)
@@ -936,6 +948,12 @@ impl TableSchema {
     /// Return the storage history table for this application table.
     pub fn history_storage_table(&self) -> GrooveTableSchema {
         self.history_storage_table_named(format!("jazz_{}_history", self.name))
+    }
+
+    /// Alias kept at the codec boundary to make the physical interpretation
+    /// explicit at call sites.
+    pub(crate) fn authored_history_storage_table(&self) -> GrooveTableSchema {
+        self.history_storage_table()
     }
 
     fn history_storage_table_named(&self, name: String) -> GrooveTableSchema {
@@ -954,7 +972,7 @@ impl TableSchema {
         columns.extend(self.columns.iter().map(|user_column| {
             column(
                 format!("user_{}", user_column.name),
-                user_column.column_type.clone().nullable(),
+                storage_column_type(user_column).nullable(),
             )
         }));
         // Absent on legacy records. When present, this is a serialized set of
@@ -1035,7 +1053,7 @@ impl TableSchema {
         content_columns.extend(self.columns.iter().map(|user_column| {
             column(
                 format!("user_{}", user_column.name),
-                user_column.column_type.clone().nullable(),
+                storage_column_type(user_column).nullable(),
             )
         }));
         content_columns.push(column(
@@ -1100,7 +1118,7 @@ impl TableSchema {
         content_columns.extend(self.columns.iter().map(|user_column| {
             column(
                 format!("user_{}", user_column.name),
-                user_column.column_type.clone().nullable(),
+                storage_column_type(user_column).nullable(),
             )
         }));
         content_columns.push(column(
@@ -1591,9 +1609,7 @@ fn put_column_type(bytes: &mut Vec<u8>, column_type: &GrooveColumnType) {
                 }
             }
         }
-        GrooveColumnType::RawString
-        | GrooveColumnType::RawBytes
-        | GrooveColumnType::StoredScalar(_) => {
+        _ => {
             panic!("raw stored-scalar backing types cannot appear in a Jazz schema")
         }
     }

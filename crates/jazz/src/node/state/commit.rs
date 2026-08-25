@@ -487,6 +487,7 @@ where
         commits: &mut [(SchemaVersionId, MergeableCommit)],
     ) -> Result<(), Error> {
         for (schema_version, commit) in commits.iter_mut() {
+            let table_schema = self.table_in_schema(&commit.table, *schema_version)?;
             let inherited = if commit.cells.values().any(value_contains_indirect_descriptor) {
                 self.current_physical_cells_in_branch_schema(
                     *schema_version,
@@ -506,7 +507,16 @@ where
                     commit.prepared_large_columns.insert(column.clone());
                     continue;
                 }
-                let Some(staged) = self.prepare_and_stage_large_scalar(value).await? else {
+                let semantic_kind = table_schema
+                    .columns
+                    .iter()
+                    .find(|candidate| candidate.name == *column)
+                    .map(|column| column.large_value_kind)
+                    .unwrap_or(crate::schema::LargeValueSemanticKind::NotLarge);
+                let Some(staged) = self
+                    .prepare_and_stage_large_scalar(value, semantic_kind)
+                    .await?
+                else {
                     continue;
                 };
                 commit.staged_large_values.push(staged.id);
@@ -521,20 +531,31 @@ where
     pub(crate) async fn prepare_and_stage_large_scalar(
         &mut self,
         value: &mut Value,
+        semantic_kind: crate::schema::LargeValueSemanticKind,
     ) -> Result<Option<groove::large_values::StagedLargeValue>, Error> {
         use groove::large_values::{INLINE_VALUE_MAX_BYTES, LargeValueKind};
 
         let candidate = match value {
-            Value::String(text) if text.len() > INLINE_VALUE_MAX_BYTES => {
-                Some((LargeValueKind::String, text.as_bytes().to_vec(), false))
-            }
+            Value::String(text) if text.len() > INLINE_VALUE_MAX_BYTES => Some((
+                match semantic_kind {
+                    crate::schema::LargeValueSemanticKind::Json => LargeValueKind::Json,
+                    _ => LargeValueKind::String,
+                },
+                text.as_bytes().to_vec(),
+                false,
+            )),
             Value::Bytes(bytes) if bytes.len() > INLINE_VALUE_MAX_BYTES => {
                 Some((LargeValueKind::Bytes, bytes.clone(), false))
             }
             Value::Nullable(Some(inner)) => match inner.as_ref() {
-                Value::String(text) if text.len() > INLINE_VALUE_MAX_BYTES => {
-                    Some((LargeValueKind::String, text.as_bytes().to_vec(), true))
-                }
+                Value::String(text) if text.len() > INLINE_VALUE_MAX_BYTES => Some((
+                    match semantic_kind {
+                        crate::schema::LargeValueSemanticKind::Json => LargeValueKind::Json,
+                        _ => LargeValueKind::String,
+                    },
+                    text.as_bytes().to_vec(),
+                    true,
+                )),
                 Value::Bytes(bytes) if bytes.len() > INLINE_VALUE_MAX_BYTES => {
                     Some((LargeValueKind::Bytes, bytes.clone(), true))
                 }

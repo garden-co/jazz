@@ -1757,7 +1757,6 @@ impl WasmDb {
         row_id: Vec<u8>,
         cells: Vec<u8>,
         column: String,
-        kind: String,
         mutation: Option<String>,
         author: Option<Vec<u8>>,
         updated_at_ms: Option<f64>,
@@ -1766,16 +1765,6 @@ impl WasmDb {
     ) -> Result<WasmStreamingMutation, JsValue> {
         let row_id = row_uuid_from_bytes(&row_id)?;
         let cells = decode_cells(&cells)?;
-        let kind = match kind.as_str() {
-            "Text" => jazz::groove::large_values::LargeValueKind::String,
-            "Json" => jazz::groove::large_values::LargeValueKind::Json,
-            "Bytea" => jazz::groove::large_values::LargeValueKind::Bytes,
-            _ => {
-                return Err(JsValue::from_str(
-                    "streaming kind must be Text, Json, or Bytea",
-                ));
-            }
-        };
         let mutation = match mutation.as_deref().unwrap_or("insert") {
             "insert" => StreamingMutationKind::Insert,
             "update" => StreamingMutationKind::Update,
@@ -1800,13 +1789,9 @@ impl WasmDb {
             ));
         }
         let upload = match &self.inner {
-            WasmDbInner::Memory(db) => {
-                db.begin_streaming_value_upload(&table, &cells, &column, kind)
-            }
+            WasmDbInner::Memory(db) => db.begin_streaming_value_upload(&table, &cells, &column),
             #[cfg(target_arch = "wasm32")]
-            WasmDbInner::Browser(db) => {
-                db.begin_streaming_value_upload(&table, &cells, &column, kind)
-            }
+            WasmDbInner::Browser(db) => db.begin_streaming_value_upload(&table, &cells, &column),
             WasmDbInner::Closed => return Err(JsValue::from_str("WasmDb is closed")),
         }
         .map_err(to_js_error)?;
