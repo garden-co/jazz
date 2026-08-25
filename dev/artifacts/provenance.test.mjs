@@ -30,6 +30,7 @@ function fixture() {
     "crates/jazz-otel/src",
     "crates/jazz-compression/src",
     "crates/benchmark-guard/src",
+    "crates/idb-tree/src",
   ])
     mkdirSync(join(root, dir), { recursive: true });
   for (const [path, content] of Object.entries({
@@ -194,6 +195,7 @@ test("NAPI provenance covers every reachable local Cargo dependency", () => {
     "jazz-otel",
     "jazz-compression",
     "benchmark-guard",
+    "idb-tree",
   ]) {
     const path = join(root, `crates/${crate}/src/lib.rs`);
     writeFileSync(path, "// planted dependency change\n");

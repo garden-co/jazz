@@ -162,6 +162,7 @@ const inputsFor = {
     "crates/jazz-otel",
     "crates/jazz-compression",
     "crates/benchmark-guard",
+    "crates/idb-tree",
   ],
 };
 
