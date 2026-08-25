@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { mintLocalFirstToken, verifyLocalFirstIdentityProof } from "jazz-napi";
 import { randomUUID } from "node:crypto";
+import { startTestJwtIssuer, type TestJwtIssuerHandle } from "jazz-tools/testing";
 import {
   createServer,
   startServer,
@@ -9,7 +9,7 @@ import {
   type Todo,
 } from "../src/main.ts";
 
-const APP_ID = "019d4349-244c-74d4-8573-8e1b24cf21e2";
+const EXTERNAL_ISSUER = "https://todo-server.example.test";
 
 type Identity = {
   token: string;
@@ -20,14 +20,11 @@ type OwnedTodo = Todo & {
   owner_id: string;
 };
 
-function createIdentity(name: string): Identity {
-  const seed = Buffer.from(name.padEnd(32, "-").slice(0, 32)).toString("base64url");
-  const token = mintLocalFirstToken(seed, APP_ID, 60);
-  const result = verifyLocalFirstIdentityProof(token, APP_ID);
-  if (!result.ok) {
-    throw new Error(result.error);
-  }
-  return { token, userId: result.id };
+function createIdentity(jwtIssuer: TestJwtIssuerHandle, userId: string): Identity {
+  const token = jwtIssuer.jwtForUser(userId, {}, { issuer: EXTERNAL_ISSUER });
+  const payload = JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString("utf8"));
+  expect(payload).toMatchObject({ iss: EXTERNAL_ISSUER, sub: userId });
+  return { token, userId };
 }
 
 function authorization(identity: Identity): Record<string, string> {
@@ -37,11 +34,15 @@ function authorization(identity: Identity): Record<string, string> {
 describe("Todo Server request authentication", () => {
   let server: RunningServer;
   let baseUrl: string;
-  const alice = createIdentity("todo-rest-auth-alice");
-  const bob = createIdentity("todo-rest-auth-bob");
+  let jwtIssuer: TestJwtIssuerHandle;
+  let alice: Identity;
+  let bob: Identity;
 
   beforeAll(async () => {
-    server = await startServer(await createServer(), 0);
+    jwtIssuer = await startTestJwtIssuer();
+    alice = createIdentity(jwtIssuer, "todo-rest-auth-alice");
+    bob = createIdentity(jwtIssuer, "todo-rest-auth-bob");
+    server = await startServer(await createServer(undefined, { jwksUrl: jwtIssuer.jwksUrl }), 0);
     baseUrl = server.baseUrl;
   });
 
@@ -49,6 +50,7 @@ describe("Todo Server request authentication", () => {
     if (server) {
       await stopServer(server);
     }
+    await jwtIssuer?.stop();
   });
 
   const protectedRequests: Array<[string, string, RequestInit]> = [

@@ -262,6 +262,16 @@ carrying `Cascade { root }` with the original root `TxId` (`INV-TX-8`). The
 `RejectedTransaction` / `RejectedVersion` retry stores (so it can retry), while a
 non-origin authority does not retain foreign rejected payloads (`INV-TX-9`).
 
+Rehydration deliberately does **not** provide application-notification
+continuity. If a persistent worker receives an authority rejection while no
+foreground runtime is attached (for example, the user closed the app after a
+locally durable optimistic write), a later runtime rehydrates the reconciled
+data view with that rejected transaction excluded. It does not receive a
+retroactive `onMutationError` callback and therefore cannot reliably show a
+belated error toast. A runtime attached when the rejection arrives receives the
+ordinary one-shot rejection delivery and may acknowledge it; applications that
+need durable user-visible outcomes must record their own domain-level status.
+
 ### 3.10 Subsumed batch and replay notes
 
 The former batch specs are now interpreted through this chapter's transaction
