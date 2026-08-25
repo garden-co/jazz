@@ -77,6 +77,44 @@ describe("JazzProvider — stable config deps", () => {
     expect(setTimeoutSpy).not.toHaveBeenCalled();
   });
 
+  it("replaces the client when its factory identity changes", async () => {
+    const firstClient = makeFakeClient({
+      authMode: "local-first",
+      userId: "first",
+      claims: {},
+    });
+    const secondClient = makeFakeClient({
+      authMode: "local-first",
+      userId: "second",
+      claims: {},
+    });
+    firstClient.shutdown = vi.fn().mockResolvedValue(undefined);
+    const firstFactory = vi.fn().mockResolvedValue(firstClient);
+    const secondFactory = vi.fn().mockResolvedValue(secondClient);
+    const config: DbConfig = { appId: "app-1", serverUrl: "https://jazz.example.com" };
+
+    function Wrapper({ factory }: { factory: typeof firstFactory }) {
+      return (
+        <JazzProvider config={config} createJazzClient={factory} fallback={null}>
+          <div data-testid="child" />
+        </JazzProvider>
+      );
+    }
+
+    const result = render(<Wrapper factory={firstFactory} />);
+    await act(async () => Promise.resolve());
+    expect(firstFactory).toHaveBeenCalledOnce();
+
+    result.rerender(<Wrapper factory={secondFactory} />);
+    await act(async () => {
+      await vi.runAllTimersAsync();
+      await Promise.resolve();
+    });
+
+    expect(firstClient.shutdown).toHaveBeenCalledOnce();
+    expect(secondFactory).toHaveBeenCalledOnce();
+  });
+
   it("finishes shutting down one config before creating its same-app replacement", async () => {
     let finishShutdown!: () => void;
     const shutdownFinished = new Promise<void>((resolve) => {

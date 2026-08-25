@@ -80,7 +80,12 @@ export function serializeClientConfig(config: DbConfig): string {
   return canonicalizeConfigValue(config, new WeakSet())!;
 }
 
-/** Namespaced registry identity for a client configuration. */
-export function createClientConfigKey(namespace: string, config: DbConfig): string {
-  return `${namespace}:${serializeClientConfig(config)}`;
+/** Namespaced registry identity for a client configuration and opaque owners. */
+export function createClientConfigKey(
+  namespace: string,
+  config: DbConfig,
+  opaqueIdentities: readonly object[] = [],
+): string {
+  const identities = opaqueIdentities.map((value) => opaqueValueId(value)).join(",");
+  return `${namespace}:${serializeClientConfig(config)}:X[${identities}]`;
 }
