@@ -1142,6 +1142,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
         },
       },
     });
+    expect(mutationErrorSpy).toHaveBeenCalledTimes(1);
 
     const todosAfterRevert = await db.all(allTodos, { tier: "local" });
     expect(todosAfterRevert.length).toBe(0);
@@ -1168,7 +1169,7 @@ describe("SharedWorker bridge with IndexedDB", () => {
     expect(mutationErrorSpy).not.toHaveBeenCalled();
   });
 
-  it("does not replay delivered rejected worker batches after restart", async () => {
+  it("does not send a live rejection to a runtime attached after its originating peer closes", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions(
       "sync-on-mutation-error-restart",
       readOnlyPermissions,
@@ -1222,11 +1223,14 @@ describe("SharedWorker bridge with IndexedDB", () => {
     const replayAfterAckSpy = vi.fn();
     dbAfterAcknowledgement.onMutationError(replayAfterAckSpy);
     await dbAfterAcknowledgement.all(allTodos, { tier: "local" });
+    // The durable worker can outlive its tabs. Reconciliation remains durable,
+    // but the original tab's application notification is not a worker backlog
+    // for a later tab (or a reconnecting replacement runtime).
     await sleep(500);
     expect(replayAfterAckSpy).not.toHaveBeenCalled();
   });
 
-  it("replays undelivered rejected worker batches after restart", async () => {
+  it("rehydrates rejected worker batches without replaying an absent runtime's notification", async () => {
     const syncServer = await publishSyncServerSchemaAndPermissions(
       "sync-on-mutation-error-undelivered-restart",
       readOnlyPermissions,
@@ -1243,14 +1247,10 @@ describe("SharedWorker bridge with IndexedDB", () => {
       });
 
     const dbBeforeRestart = track(await createPersistentDb(undefined));
-    const mutationErrorSpy = vi.fn();
-    dbBeforeRestart.onMutationError(mutationErrorSpy);
-
     const insertResult = dbBeforeRestart.insert(todos, {
       title: "Rejected replayed after restart",
       done: false,
     });
-    const batchId = await insertResult.transactionId;
     await withTimeout(
       insertResult.wait({ tier: "local" }),
       5000,
@@ -1259,7 +1259,6 @@ describe("SharedWorker bridge with IndexedDB", () => {
 
     await dbBeforeRestart.shutdown();
     untrack(dbBeforeRestart);
-    expect(mutationErrorSpy).not.toHaveBeenCalled();
 
     const dbAfterRestart = track(await createPersistentDb(syncServer.serverUrl));
     const replayAfterRestartSpy = vi.fn();
@@ -1269,25 +1268,12 @@ describe("SharedWorker bridge with IndexedDB", () => {
     await dbAfterRestart.all(allTodos, { tier: "edge" });
 
     await waitForCondition(
-      async () => replayAfterRestartSpy.mock.calls.length > 0,
+      async () => (await dbAfterRestart.all(allTodos, { tier: "local" })).length === 0,
       5000,
-      "onMutationError handler should replay undelivered rejection after restart",
+      "rejected transaction should not rehydrate into the restarted local view",
     );
-    expect(replayAfterRestartSpy).toHaveBeenCalledWith({
-      code: "permission_denied",
-      reason: "Write rejected by server authorization",
-      transaction: {
-        transactionId: batchId,
-        kind: "mergeable",
-        sealed: true,
-        latestSettlement: {
-          kind: "rejected",
-          transactionId: batchId,
-          code: "permission_denied",
-          reason: "Write rejected by server authorization",
-        },
-      },
-    });
+    await sleep(500);
+    expect(replayAfterRestartSpy).not.toHaveBeenCalled();
   });
 
   describe("optimistic writes are reverted on server rejection", () => {
@@ -1385,7 +1371,6 @@ describe("SharedWorker bridge with IndexedDB", () => {
           title: "Rejected after restart",
           done: false,
         });
-        const batchId = await insertResult.transactionId;
         await insertResult.wait({ tier: "local" });
 
         const todosBeforeRestart = await dbBeforeRestart.all(allTodos, {
@@ -1397,9 +1382,6 @@ describe("SharedWorker bridge with IndexedDB", () => {
         untrack(dbBeforeRestart);
 
         const dbAfterRestart = track(await createPersistentDb(syncServer.serverUrl));
-        const mutationErrorSpy = vi.fn();
-        dbAfterRestart.onMutationError(mutationErrorSpy);
-
         // Run a query to set up the runtime
         await dbAfterRestart.all(allTodos, { tier: "edge" });
 
@@ -1412,17 +1394,6 @@ describe("SharedWorker bridge with IndexedDB", () => {
           },
           5000,
           "restarted rejected insert should remove the previous local row",
-        );
-        await waitForCondition(
-          async () => mutationErrorSpy.mock.calls.length > 0,
-          5000,
-          "restarted rejected insert should surface onMutationError",
-        );
-        expect(mutationErrorSpy).toHaveBeenCalledWith(
-          expect.objectContaining({
-            code: "permission_denied",
-            transaction: expect.objectContaining({ transactionId: batchId }),
-          }),
         );
       });
 
@@ -1459,7 +1430,6 @@ describe("SharedWorker bridge with IndexedDB", () => {
         const updateResult = dbBeforeRestart.update(todos, todo.id, {
           title: "Rejected update after restart",
         });
-        const batchId = await updateResult.transactionId;
         await updateResult.wait({ tier: "local" });
 
         const todosBeforeRestart = await dbBeforeRestart.all(allTodos, {
@@ -1471,8 +1441,6 @@ describe("SharedWorker bridge with IndexedDB", () => {
         untrack(dbBeforeRestart);
 
         const dbAfterRestart = track(await createPersistentDb(syncServer.serverUrl));
-        const mutationErrorSpy = vi.fn();
-        dbAfterRestart.onMutationError(mutationErrorSpy);
         await dbAfterRestart.all(allTodos, { tier: "edge" });
 
         await waitForCondition(
@@ -1484,17 +1452,6 @@ describe("SharedWorker bridge with IndexedDB", () => {
           },
           5000,
           "restarted rejected update should restore the previous local row",
-        );
-        await waitForCondition(
-          async () => mutationErrorSpy.mock.calls.length > 0,
-          5000,
-          "restarted rejected update should surface onMutationError",
-        );
-        expect(mutationErrorSpy).toHaveBeenCalledWith(
-          expect.objectContaining({
-            code: "permission_denied",
-            transaction: expect.objectContaining({ transactionId: batchId }),
-          }),
         );
       });
 
@@ -1529,7 +1486,6 @@ describe("SharedWorker bridge with IndexedDB", () => {
         expect(await dbBeforeRestart.all(allTodos, { tier: "local" })).toEqual([todo]);
 
         const deleteResult = dbBeforeRestart.delete(todos, todo.id);
-        const batchId = await deleteResult.transactionId;
         await deleteResult.wait({ tier: "local" });
 
         const todosBeforeRestart = await dbBeforeRestart.all(allTodos, {
@@ -1541,8 +1497,6 @@ describe("SharedWorker bridge with IndexedDB", () => {
         untrack(dbBeforeRestart);
 
         const dbAfterRestart = track(await createPersistentDb(syncServer.serverUrl));
-        const mutationErrorSpy = vi.fn();
-        dbAfterRestart.onMutationError(mutationErrorSpy);
         await dbAfterRestart.all(allTodos, { tier: "edge" });
 
         await waitForCondition(
@@ -1556,17 +1510,6 @@ describe("SharedWorker bridge with IndexedDB", () => {
           "restarted rejected delete should restore the previous local row",
         );
         expect(await dbAfterRestart.all(allTodos, { tier: "local" })).toEqual([todo]);
-        await waitForCondition(
-          async () => mutationErrorSpy.mock.calls.length > 0,
-          5000,
-          "restarted rejected delete should surface onMutationError",
-        );
-        expect(mutationErrorSpy).toHaveBeenCalledWith(
-          expect.objectContaining({
-            code: "permission_denied",
-            transaction: expect.objectContaining({ transactionId: batchId }),
-          }),
-        );
       });
     });
   });

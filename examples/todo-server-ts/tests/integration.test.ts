@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { mintLocalFirstToken, verifyLocalFirstIdentityProof } from "jazz-napi";
+import { startTestJwtIssuer, type TestJwtIssuerHandle } from "jazz-tools/testing";
 import { tmpdir } from "node:os";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
@@ -18,24 +18,21 @@ import {
   type Todo,
 } from "../src/main.ts";
 
-const APP_ID = "019d4349-244c-74d4-8573-8e1b24cf21e2";
+const EXTERNAL_ISSUER = "https://todo-server.example.test";
 
 type Identity = {
   token: string;
   userId: string;
 };
 
-function createIdentity(name: string): Identity {
-  const seed = Buffer.from(name.padEnd(32, "-").slice(0, 32)).toString("base64url");
-  const token = mintLocalFirstToken(seed, APP_ID, 60);
-  const result = verifyLocalFirstIdentityProof(token, APP_ID);
-  if (!result.ok) {
-    throw new Error(result.error);
-  }
-  return { token, userId: result.id };
+function createIdentity(jwtIssuer: TestJwtIssuerHandle, userId: string): Identity {
+  const token = jwtIssuer.jwtForUser(userId, {}, { issuer: EXTERNAL_ISSUER });
+  const payload = JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString("utf8"));
+  expect(payload).toMatchObject({ iss: EXTERNAL_ISSUER, sub: userId });
+  return { token, userId };
 }
-
-const primaryIdentity = createIdentity("todo-rest-integration");
+let primaryIdentity: Identity;
+let jwtIssuer: TestJwtIssuerHandle;
 
 function authenticatedFetch(
   input: string | URL,
@@ -52,8 +49,10 @@ describe("Todo Server Integration", () => {
   let baseUrl: string;
 
   beforeAll(async () => {
+    jwtIssuer = await startTestJwtIssuer();
+    primaryIdentity = createIdentity(jwtIssuer, "todo-rest-integration");
     // Create server with Fjall-backed storage (temp directory)
-    const todoServer = await createServer();
+    const todoServer = await createServer(undefined, { jwksUrl: jwtIssuer.jwksUrl });
 
     // Start on random available port
     server = await startServer(todoServer, 0);
@@ -64,6 +63,7 @@ describe("Todo Server Integration", () => {
     if (server) {
       await stopServer(server);
     }
+    await jwtIssuer?.stop();
   });
 
   describe("Health Check", () => {
@@ -164,8 +164,8 @@ describe("Todo Server Integration", () => {
 
   describe("Policy-Aware Requests", () => {
     it("filters rows by the authenticated session owner", async () => {
-      const alice = createIdentity("todo-rest-policy-alice");
-      const bob = createIdentity("todo-rest-policy-bob");
+      const alice = createIdentity(jwtIssuer, "todo-rest-policy-alice");
+      const bob = createIdentity(jwtIssuer, "todo-rest-policy-bob");
       const aliceTitle = `Alice private ${Date.now()}`;
       const bobTitle = `Bob private ${Date.now()}`;
 
@@ -231,7 +231,10 @@ describe("Todo Server Integration", () => {
       const dbPath = join(dataDir, "jazz.db");
 
       // --- First boot: create some todos ---
-      const server1 = await startServer(await createServer(dbPath), 0);
+      const server1 = await startServer(
+        await createServer(dbPath, { jwksUrl: jwtIssuer.jwksUrl }),
+        0,
+      );
 
       const createRes1 = await authenticatedFetch(`${server1.baseUrl}/todos`, {
         method: "POST",
@@ -254,7 +257,10 @@ describe("Todo Server Integration", () => {
       await stopServer(server1);
 
       // --- Second boot: same data path, fresh server ---
-      const server2 = await startServer(await createServer(dbPath), 0);
+      const server2 = await startServer(
+        await createServer(dbPath, { jwksUrl: jwtIssuer.jwksUrl }),
+        0,
+      );
 
       const listRes = await authenticatedFetch(`${server2.baseUrl}/todos`);
       expect(listRes.status).toBe(200);
@@ -280,11 +286,14 @@ describe("Todo Server Integration", () => {
   describe("SSE Live Endpoint", () => {
     it("streams only the authenticated caller's todos and updates on changes", async () => {
       // Use an isolated server instance so this test has an independent persistence context.
-      const sseServer = await startServer(await createServer(), 0);
+      const sseServer = await startServer(
+        await createServer(undefined, { jwksUrl: jwtIssuer.jwksUrl }),
+        0,
+      );
       const sseBaseUrl = sseServer.baseUrl;
       let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
       try {
-        const otherIdentity = createIdentity("todo-rest-sse-other");
+        const otherIdentity = createIdentity(jwtIssuer, "todo-rest-sse-other");
         const foreignCreate = await authenticatedFetch(
           `${sseBaseUrl}/todos`,
           {
