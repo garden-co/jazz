@@ -211,7 +211,11 @@ function activeNapiBindings(root) {
   return readdirSync(generation, { withFileTypes: true })
     .filter((entry) => {
       const path = join(generation, entry.name);
-      return entry.name.endsWith(".node") && lstatSync(path).isFile() && !lstatSync(path).isSymbolicLink();
+      return (
+        entry.name.endsWith(".node") &&
+        lstatSync(path).isFile() &&
+        !lstatSync(path).isSymbolicLink()
+      );
     })
     .map((entry) => join(generation, entry.name));
 }

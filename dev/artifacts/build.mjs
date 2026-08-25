@@ -278,8 +278,7 @@ function assertRealNapiGeneration(path, expectedBinding, { sealed = true } = {})
     [join(path, "index.d.ts"), "generated declarations"],
   ];
   if (sealed) required.push([join(path, ".jazz-artifact-manifest.json"), "sealed manifest"]);
-  for (const [candidate, label] of required)
-    realRegularFile(candidate, label);
+  for (const [candidate, label] of required) realRegularFile(candidate, label);
 }
 function publishExpectedFingerprint(kind, fingerprint) {
   // Producer tasks never mutate jazz-tools source. Release assembly derives

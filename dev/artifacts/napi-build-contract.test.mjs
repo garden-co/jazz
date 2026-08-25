@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -122,10 +130,7 @@ test("NAPI publication rejects symlinked generation files before the active poin
     const staged = stage(root, ".napi-stage-symlink", "next");
     rmSync(join(staged, "jazz-napi.linux-x64-gnu.node"));
     symlinkSync(outside, join(staged, "jazz-napi.linux-x64-gnu.node"));
-    assert.throws(
-      () => publishNapiGeneration(staged, root, "next"),
-      /real regular file/,
-    );
+    assert.throws(() => publishNapiGeneration(staged, root, "next"), /real regular file/);
     assert.equal(readFileSync(join(root, "native-binding.pointer.cjs"), "utf8"), pointer);
   } finally {
     rmSync(root, { recursive: true, force: true });
