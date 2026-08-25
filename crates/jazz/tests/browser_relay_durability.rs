@@ -543,6 +543,118 @@ fn browser_client_hydrates_local_subscription_from_worker_relay() {
     );
 }
 
+/// A main-thread Local subscription and a one-shot Edge read have distinct
+/// downstream serving options, but both canonicalize to the worker's Global
+/// upstream coverage. Retiring the one-shot usage site must not unsubscribe
+/// that shared upstream coverage while the live Local subscription still owns
+/// it.
+#[test]
+fn one_shot_edge_read_does_not_retire_live_browser_subscription_coverage() {
+    let schema = schema();
+    let alice = AuthorSubject::for_test_bytes([0xac; 16]);
+    let main_thread = open_db(0x1e, alice, &schema);
+    let worker = open_db(0x2e, AuthorSubject::SYSTEM, &schema);
+    let core = open_core(0x3e, &schema);
+    let writer = open_db(0x4e, AuthorSubject::for_test_bytes([0xbc; 16]), &schema);
+    main_thread.set_non_durable_client();
+
+    let (main_transport, worker_subscriber_transport) = duplex();
+    let _main_connection = block_on(main_thread.connect_upstream(main_transport));
+    let _worker_subscriber = worker.accept_subscriber(worker_subscriber_transport, alice);
+    let (worker_upstream_transport, core_transport) = duplex();
+    let _worker_upstream = block_on(worker.connect_upstream(worker_upstream_transport));
+    let _core_subscriber = core.accept_subscriber(core_transport, alice);
+    let (writer_transport, core_writer_transport) = duplex();
+    let _writer_upstream = block_on(writer.connect_upstream(writer_transport));
+    let _core_writer = core.accept_subscriber(
+        core_writer_transport,
+        AuthorSubject::for_test_bytes([0xbc; 16]),
+    );
+
+    let todos = main_thread
+        .prepare_query(&main_thread.table("todos"))
+        .expect("prepare todos query");
+    let mut subscription = block_on(main_thread.subscribe(&todos, ReadOpts::default()))
+        .expect("open browser Local subscription");
+    assert_truthful_empty_local_opening(subscription.try_next_event());
+
+    for _ in 0..8 {
+        main_thread
+            .tick()
+            .expect("send Local subscription to worker");
+        worker.tick().expect("relay Local subscription to Core");
+        core.tick().expect("serve shared upstream coverage");
+        worker.tick().expect("apply Core coverage at worker");
+        main_thread
+            .tick()
+            .expect("apply worker coverage on main thread");
+    }
+    while subscription.try_next_event().is_some() {}
+
+    let edge_read = main_thread
+        .attach_query_with_opts(
+            &todos,
+            ReadOpts {
+                tier: DurabilityTier::Edge,
+                ..ReadOpts::default()
+            },
+        )
+        .expect("attach one-shot Edge read");
+    for _ in 0..8 {
+        main_thread.tick().expect("send one-shot Edge coverage");
+        worker.tick().expect("refresh canonical worker coverage");
+        core.tick().expect("serve refreshed canonical coverage");
+        worker.tick().expect("apply refreshed canonical coverage");
+        main_thread.tick().expect("apply one-shot Edge receipt");
+        if main_thread.query_attachment_is_covered(&edge_read) {
+            break;
+        }
+    }
+    assert!(
+        main_thread.query_attachment_is_covered(&edge_read),
+        "the one-shot Edge usage site never received its own authority receipt",
+    );
+
+    main_thread.detach_query(edge_read);
+    for _ in 0..4 {
+        main_thread.tick().expect("retire one-shot Edge usage site");
+        worker.tick().expect("retain shared worker coverage");
+        core.tick().expect("process any upstream lifecycle traffic");
+        worker.tick().expect("apply upstream lifecycle traffic");
+    }
+
+    writer
+        .insert(
+            "todos",
+            BTreeMap::from([(
+                "title".to_owned(),
+                Value::String("still live after one-shot read".to_owned()),
+            )]),
+            Default::default(),
+        )
+        .expect("insert writer row after one-shot detach");
+    for _ in 0..8 {
+        writer.tick().expect("upload writer row");
+        core.tick().expect("publish authority row");
+        writer.tick().expect("apply writer settlement");
+        worker
+            .tick()
+            .expect("relay authority row to browser worker");
+        main_thread
+            .tick()
+            .expect("apply authority row on main thread");
+    }
+
+    let events = std::iter::from_fn(|| subscription.try_next_event()).collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            SubscriptionEvent::Delta { added, .. } if added.len() == 1
+        )),
+        "retiring the one-shot Edge read also retired live Local subscription coverage: {events:?}",
+    );
+}
+
 /// A freshly reopened persistent worker must hydrate a downstream Local
 /// subscription without requiring an unrelated one-shot query to warm its
 /// resident view first.

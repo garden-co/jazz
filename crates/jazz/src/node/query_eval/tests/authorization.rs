@@ -360,7 +360,12 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         .query
         .registered_bindings
         .get(&shape.shape_id())
-        .and_then(|bindings| bindings.get(&binding.binding_id()))
+        .and_then(|bindings| {
+            bindings.get(&(
+                binding.binding_id(),
+                RegisterShapeOptions::default().read_view_key(),
+            ))
+        })
         .map(|registered| registered.values.clone())
         .expect("server reconstructed the subscribed invite binding");
     let server_binding = shape
@@ -582,9 +587,15 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     .expect("one-shot nested policy claim routes must bind against the root descriptor");
 
     let mut edge = PeerState::edge_client(identity);
+    let client_subscription = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
     let update = edge
-        .rehydrate_query_with_opts(
+        .rehydrate_query_for_subscription_with_opts(
             &mut node,
+            client_subscription,
             &shape,
             &server_binding,
             RegisterShapeOptions {
@@ -592,7 +603,8 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
                 ..RegisterShapeOptions::default()
             },
         )
-        .expect("the serving maintained view must retain the invite claim route");
+        .expect("the serving maintained view must retain the invite claim route")
+        .expect("the invite subscription has an initial update");
     client
         .apply_sync_message_settled(update)
         .expect("the client must materialize the invited chat update");
@@ -716,11 +728,17 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
         &simple_message_binding,
     );
     let mut normal_simple_peer = PeerState::edge_client(identity);
+    let normal_simple_subscription = SubscriptionKey {
+        shape_id: simple_message_shape.shape_id(),
+        binding_id: simple_message_binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
     normal_client
         .apply_sync_message_settled(
             normal_simple_peer
-                .rehydrate_query_with_opts(
+                .rehydrate_query_for_subscription_with_opts(
                     &mut node,
+                    normal_simple_subscription,
                     &simple_message_shape,
                     &simple_message_binding,
                     RegisterShapeOptions {
@@ -728,7 +746,8 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
                         ..RegisterShapeOptions::default()
                     },
                 )
-                .expect("serve normal-member message snapshot without include"),
+                .expect("serve normal-member message snapshot without include")
+                .expect("normal-member message snapshot without include is ready"),
         )
         .expect("client applies normal-member message snapshot without include");
     assert_eq!(
@@ -756,9 +775,15 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
     );
     subscribe_query_binding(&mut normal_client, &message_shape, &message_binding);
     let mut normal_peer = PeerState::edge_client(identity);
+    let normal_subscription = SubscriptionKey {
+        shape_id: message_shape.shape_id(),
+        binding_id: message_binding.binding_id(),
+        read_view: RegisterShapeOptions::default().read_view_key(),
+    };
     let normal_update = normal_peer
-        .rehydrate_query_with_opts(
+        .rehydrate_query_for_subscription_with_opts(
             &mut node,
+            normal_subscription,
             &message_shape,
             &message_binding,
             RegisterShapeOptions {
@@ -766,7 +791,8 @@ fn prepared_nested_policy_claim_routes_keep_outer_descriptor_slots() {
                 ..RegisterShapeOptions::default()
             },
         )
-        .expect("serve normal-member message include/order snapshot");
+        .expect("serve normal-member message include/order snapshot")
+        .expect("normal-member message include/order snapshot is ready");
     let normal_versions = normal_update
         .expand_version_carriers_for_receive()
         .expect("expand normal-member message include/order payloads");

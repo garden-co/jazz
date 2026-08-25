@@ -169,7 +169,10 @@ where
             .entry(subscribe.shape_id)
             .or_default()
             .insert(
-                subscribe.subscription.binding_id,
+                (
+                    subscribe.subscription.binding_id,
+                    subscribe.subscription.read_view,
+                ),
                 RegisteredBinding {
                     values: subscribe.values,
                     read_view: subscribe.subscription.read_view,
@@ -186,7 +189,7 @@ where
             .registered_bindings
             .get_mut(&subscription.shape_id)
         {
-            bindings.remove(&subscription.binding_id);
+            bindings.remove(&(subscription.binding_id, subscription.read_view));
         }
         if let Some(binding_view_key) = binding_view_key
             && !self.registered_binding_resolves_to_binding_view_key(binding_view_key)
@@ -637,7 +640,7 @@ where
             .query
             .registered_bindings
             .get(&subscription.shape_id)
-            .and_then(|bindings| bindings.get(&subscription.binding_id))
+            .and_then(|bindings| bindings.get(&(subscription.binding_id, subscription.read_view)))
         {
             return Ok(registered.binding_view_key);
         }

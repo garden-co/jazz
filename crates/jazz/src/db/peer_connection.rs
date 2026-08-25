@@ -7,6 +7,32 @@
 use super::node_runtime::{refresh_subscriptions_in, route_upstream_subscription_rejection};
 use super::*;
 
+/// Namespace for relay-owned usage-site subscription handles.
+///
+/// A relay may normalize multiple downstream coverage requests to the same
+/// upstream read view. The resulting subscriptions still need distinct wire
+/// handles: the upstream node deduplicates their work by [`CoverageKey`], while
+/// retaining the independent ownership needed for correct unsubscribe behavior.
+const RELAY_UPSTREAM_SUBSCRIPTION_NAMESPACE: uuid::Uuid =
+    uuid::uuid!("ae3eb9f7-65cc-528d-8f3e-a772fb6f68fe");
+
+fn relay_upstream_subscription_key(
+    connection_epoch: u64,
+    downstream: SubscriptionKey,
+    upstream_read_view: ReadViewKey,
+) -> SubscriptionKey {
+    let identity = postcard::to_allocvec(&(connection_epoch, downstream, upstream_read_view))
+        .expect("relay subscription identity is postcard encodable");
+    SubscriptionKey {
+        shape_id: downstream.shape_id,
+        binding_id: BindingId(uuid::Uuid::new_v5(
+            &RELAY_UPSTREAM_SUBSCRIPTION_NAMESPACE,
+            &identity,
+        )),
+        read_view: upstream_read_view,
+    }
+}
+
 async fn finish_peer_publication_outcome<S, T>(
     node: &SharedNodeState<S>,
     subscriptions: &SubscriptionList,
@@ -2490,11 +2516,18 @@ where
                             } else {
                                 opts.clone()
                             };
-                            let upstream_subscription = SubscriptionKey {
-                                shape_id: coverage.shape_id,
-                                binding_id: coverage.binding_id,
-                                read_view: upstream_opts.read_view_key(),
-                            };
+                            // This is an upstream usage-site handle, not the
+                            // canonical binding id. Distinct downstream views
+                            // can normalize to identical Global coverage, but
+                            // each retains independent subscribe/unsubscribe
+                            // ownership. The upstream node's CoverageKey groups
+                            // them onto one evaluator without conflating their
+                            // wire lifecycles.
+                            let upstream_subscription = relay_upstream_subscription_key(
+                                connection_epoch,
+                                subscription,
+                                upstream_opts.read_view_key(),
+                            );
                             let first_subscriber = coverage_groups
                                 .get(&coverage)
                                 .is_none_or(|group| group.subscribers.is_empty());
