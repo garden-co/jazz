@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import test from "node:test";
 import { isDeepStrictEqual } from "node:util";
 import { parse } from "yaml";
@@ -180,6 +181,44 @@ test("CI-equivalent workspace check compiles every target class with the require
       : item,
   );
   assert.throws(() => assertFullWorkspaceCoverage(missingFeature), /required CI feature selection/);
+});
+
+test("CI-equivalent partitions cannot silently substitute their Rust or TypeScript runners", () => {
+  const rust = planFor({ partition: "rust-workspace" }).find(
+    ({ label }) => label === "workspace Rust tests",
+  );
+  assert.ok(rust);
+  assert.ok(
+    rust.args.includes("--require-nextest"),
+    "CI-equivalent Rust must fail rather than silently switch to Cargo fallback",
+  );
+
+  const typescript = planFor({ partition: "typescript" }).find(
+    ({ label }) => label === "parallel Node and browser suites",
+  );
+  assert.ok(typescript);
+  assert.deepEqual(typescript.env, { JAZZ_REQUIRE_CI_TEST_COMMANDS: "1" });
+
+  const planted = { ...typescript, env: {} };
+  assert.notDeepEqual(
+    planted.env,
+    { JAZZ_REQUIRE_CI_TEST_COMMANDS: "1" },
+    "a missing guard would permit inherited suite overrides",
+  );
+});
+
+test("the shared TypeScript runner rejects inherited suite overrides under the CI guard", () => {
+  const result = spawnSync("bash", ["dev/gates/run-ts-tests.sh"], {
+    cwd: root,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      JAZZ_REQUIRE_CI_TEST_COMMANDS: "1",
+      JAZZ_NODE_TEST_COMMAND: "true",
+    },
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /JAZZ_NODE_TEST_COMMAND.*forbidden by the CI-equivalent partition/);
 });
 
 test("planted bench/test/bin/example compile failures are surfaced rather than skipped", async () => {

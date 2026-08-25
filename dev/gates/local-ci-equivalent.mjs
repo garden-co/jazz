@@ -88,6 +88,7 @@ export const ciPartitions = Object.freeze({
   "rust-workspace": Object.freeze([
     command("workspace Rust tests", "node", [
       "dev/gates/run-rust-tests.mjs",
+      "--require-nextest",
       "--timeout-seconds",
       "780",
       "--nextest-profile",
@@ -126,7 +127,12 @@ export const ciPartitions = Object.freeze({
       "--dry-run",
       "chromium",
     ]),
-    command("parallel Node and browser suites", "bash", ["dev/gates/run-ts-tests.sh"]),
+    command("parallel Node and browser suites", "bash", ["dev/gates/run-ts-tests.sh"], {
+      // The test runner intentionally supports command overrides for its own
+      // harness tests.  A CI-equivalent invocation must not inherit one from
+      // a developer shell and silently test a smaller/different suite.
+      env: { JAZZ_REQUIRE_CI_TEST_COMMANDS: "1" },
+    }),
   ]),
 });
 
@@ -180,11 +186,15 @@ export async function runPlan(commands, run = runCommand) {
   for (const item of commands) await run(item);
 }
 
-export async function runCommand({ label, executable, args }) {
+export async function runCommand({ label, executable, args, env = {} }) {
   const started = performance.now();
   console.log(`local-ci: start ${label}: ${[executable, ...args].join(" ")}`);
   const status = await new Promise((resolvePromise, reject) => {
-    const child = spawn(executable, args, { cwd: root, stdio: "inherit" });
+    const child = spawn(executable, args, {
+      cwd: root,
+      stdio: "inherit",
+      env: { ...process.env, ...env },
+    });
     child.once("error", reject);
     child.once("exit", (code, signal) => resolvePromise({ code, signal }));
   });
