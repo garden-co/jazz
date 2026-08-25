@@ -323,9 +323,9 @@ export class SubscriptionManager<T extends { id: string }> {
         if (change.kind === RowChangeKind.Removed) {
           for (const rootId of removedRoots) this.terminalRows.delete(rootId);
         } else if (change.row) {
-          // Terminal edits mutate the positional tree, so retain a private
-          // copy whose positional and named values share one value graph.
-          this.terminalRows.set(change.id, cloneTerminalRow(change.row));
+          // Retained roots are immutable. The first descendant edit in a
+          // later frame makes a private writable copy of the whole root.
+          this.terminalRows.set(change.id, change.row);
         }
       }
       const wireResult = this.handleDecodedDelta(decoded, transform, reset);
@@ -350,9 +350,9 @@ export class SubscriptionManager<T extends { id: string }> {
   private snapshot(): SubscriptionManagerSnapshot<T> {
     return {
       currentResults: new Map(this.currentResults),
-      terminalRows: new Map(
-        Array.from(this.terminalRows, ([id, row]) => [id, cloneTerminalRow(row)]),
-      ),
+      // Terminal application is copy-on-write, so retained roots remain safe
+      // to share with this rollback snapshot.
+      terminalRows: new Map(this.terminalRows),
       terminalOccurrenceAddresses: new Map(this.terminalOccurrenceAddresses),
       orderedIds: [...this.orderedIds],
       orderedIdIndex: new Map(this.orderedIdIndex),
@@ -407,12 +407,12 @@ export class SubscriptionManager<T extends { id: string }> {
   ): SubscriptionDelta<T> {
     const beforeIndices = new Map(this.orderedIdIndex);
     const affectedRoots = new Set<string>();
+    const writableRoots = new Set<string>();
 
     for (const operation of operations) {
       const rootId = this.terminalAddress(operation.root_key);
       const edit = operation.edit;
-      const root = this.terminalRows.get(rootId);
-      if (!root) throw new Error(`terminal child edit addressed missing root ${rootId}`);
+      const root = this.writableTerminalRoot(rootId, writableRoots);
       assertTerminalPathEditKey(operation.path, edit);
       const target = terminalCollection(root, operation.path);
       if (!target) throw new Error(`terminal child edit addressed an unresolved path on ${rootId}`);
@@ -422,7 +422,7 @@ export class SubscriptionManager<T extends { id: string }> {
         if (edit.Insert.row.id !== id) {
           throw new Error("terminal insert row key does not match its edit key");
         }
-        const value: Value = { type: "Row", value: edit.Insert.row };
+        const value: Value = { type: "Row", value: cloneTerminalRow(edit.Insert.row) };
         removeTerminalValue(values, id);
         values.splice(Math.max(0, Math.min(edit.Insert.index, values.length)), 0, value);
       } else if ("Update" in edit) {
@@ -432,7 +432,7 @@ export class SubscriptionManager<T extends { id: string }> {
         if (edit.Update.row.id !== id) {
           throw new Error("terminal update row key does not match its edit key");
         }
-        values[index] = { type: "Row", value: edit.Update.row };
+        values[index] = { type: "Row", value: cloneTerminalRow(edit.Update.row) };
       } else if ("Remove" in edit) {
         const id = terminalPayloadRowId(edit.Remove.key);
         if (!removeTerminalValue(values, id)) {
@@ -465,6 +465,17 @@ export class SubscriptionManager<T extends { id: string }> {
       ];
     });
     return { delta, all: this.all() } as SubscriptionDelta<T>;
+  }
+
+  private writableTerminalRoot(rootId: string, writableRoots: Set<string>): WasmRow {
+    const retained = this.terminalRows.get(rootId);
+    if (!retained) throw new Error(`terminal child edit addressed missing root ${rootId}`);
+    if (writableRoots.has(rootId)) return retained;
+
+    const writable = cloneTerminalRow(retained);
+    this.terminalRows.set(rootId, writable);
+    writableRoots.add(rootId);
+    return writable;
   }
 
   private terminalAddress(encoded: readonly number[]): string {
