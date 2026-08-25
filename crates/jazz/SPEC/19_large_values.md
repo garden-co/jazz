@@ -19,12 +19,13 @@ operator needs.
 Each runtime column also freezes an internal large-value semantic kind at
 schema lowering: bytes, text, or JSON. JSON remains the existing logical
 string-shaped Groove value, but the physical-row descriptor carries its
-schema-derived JSON context so a JSON root cannot be staged or encoded as text
-(or vice versa). Primitive bytes remain context-only; every persisted
-`Chunked` descriptor additionally carries a Groove-owned kind witness, checked
-against that immutable schema context before a root or edit tail is consumed.
-It is not client-chosen and is never visible to logical queries, policies,
-indices, or application results.
+schema-derived JSON context. Inline primitives and chunked descriptors do not
+duplicate that context: their ordinary Groove enum schema is parameterized by
+the column kind. Every independently addressed immutable tree node carries a
+Groove-owned kind witness, checked against the schema-derived expected kind and
+bound into the locator-independent logical hash, so a JSON root cannot be
+replayed as text (or vice versa). The witness is not client-chosen or visible to
+logical queries, policies, indices, or application results.
 
 Invariant digest:
 
@@ -156,7 +157,9 @@ staging before it is intentionally not atomic: unreachable immutable chunks are
 harmless and expire. The row MUST NOT publish unless its exact root is available
 and Groove can validate the bounded tree/descriptor. Finalization itself is
 that admission boundary: regardless of prior staging call order, it validates
-the complete authenticated reachable tree and final logical scalar, and binds
+the complete authenticated reachable tree, canonically replays the edit tail
+against that immutable base (including source-derived text coordinates and
+whole-value-only JSON replacement), validates the final logical scalar, and binds
 the pending upload to the exact canonical descriptor before issuing a receipt.
 A pending upload's chunk journal or accounting cannot be reused to finalize a
 different descriptor. A failed/rejected mutation publishes neither the row
