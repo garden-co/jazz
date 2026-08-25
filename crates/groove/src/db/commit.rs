@@ -286,76 +286,15 @@ impl Database {
                 })?,
             });
         }
-        let mut node_updates =
-            BTreeMap::<crate::large_values::NodeRef, LargeValueNodeReferences>::new();
-        let mut pending = node_transitions;
-        while let Some((node_ref, delta)) = pending.pop() {
-            let mut metadata = if let Some(metadata) = node_updates.remove(&node_ref) {
-                metadata
-            } else {
-                let encoded = self
-                    .storage
-                    .get(
-                        LARGE_VALUE_METADATA_CF.to_owned(),
-                        large_value_node_key(&node_ref)?,
-                    )
-                    .await?
-                    .ok_or_else(|| {
-                        Error::InvalidLargeValueMetadata(
-                            "active node reference metadata is missing".to_owned(),
-                        )
-                    })?;
-                postcard::from_bytes(&encoded).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot decode node references: {error}"
-                    ))
-                })?
-            };
-            let crossed_zero = if delta > 0 {
-                let crossed = metadata.references == 0;
-                metadata.references = metadata.references.checked_add(1).ok_or_else(|| {
-                    Error::InvalidLargeValueMetadata("node reference count overflow".to_owned())
-                })?;
-                crossed
-            } else {
-                metadata.references = metadata.references.checked_sub(1).ok_or_else(|| {
-                    Error::InvalidLargeValueMetadata("node reference count underflow".to_owned())
-                })?;
-                metadata.references == 0
-            };
-            if crossed_zero {
-                pending.extend(
-                    metadata
-                        .children
-                        .iter()
-                        .cloned()
-                        .map(|child| (child, delta)),
-                );
-            }
-            node_updates.insert(node_ref, metadata);
-        }
-        for (node_ref, metadata) in node_updates {
-            staged_operations.push(OwnedWriteOperation::Set {
-                cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                key: large_value_node_key(&node_ref)?,
-                value: postcard::to_allocvec(&metadata).map_err(|error| {
-                    Error::InvalidLargeValueMetadata(format!(
-                        "cannot encode node references: {error}"
-                    ))
-                })?,
-            });
-            if metadata.references == 0 {
-                staged_operations.push(OwnedWriteOperation::Set {
-                    cf: LARGE_VALUE_METADATA_CF.to_owned(),
-                    key: large_value_reclaim_key(&node_ref)?,
-                    value: postcard::to_allocvec(&node_ref).map_err(|error| {
-                        Error::InvalidLargeValueMetadata(format!(
-                            "cannot encode reclaim entry: {error}"
-                        ))
-                    })?,
-                });
-            }
-        }
+        staged_operations.extend(
+            large_value_node_transition_operations(
+                &self.storage,
+                BTreeMap::new(),
+                node_transitions,
+                false,
+            )
+            .await?,
+        );
         let resident_overlay = Rc::new(StagedWriteOverlay::new_owned(
             Rc::clone(&self.storage),
             Rc::clone(&self.resident_writes),
