@@ -150,6 +150,9 @@ jobs:
         with:
           name: jazz-wasm-pkg
           path: crates/jazz-wasm/pkg
+          # The sealed provenance receipt is intentionally dot-prefixed. The
+          # upload action excludes hidden files unless this is explicit.
+          include-hidden-files: true
           if-no-files-found: error
 
   build-napi:
