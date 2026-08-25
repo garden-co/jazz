@@ -2329,6 +2329,60 @@ fn validate_descriptor_shape(value: &LargeValueRef) -> Result<(), Error> {
     }
 }
 
+/// Reconstruct and replay an untrusted descriptor's tail against its immutable
+/// base tree. Shape validation alone cannot prove that text UTF-16 coordinates
+/// describe the same byte splice, or that a JSON edit is a whole-value replace.
+pub(crate) fn validate_edit_tail_attempt(
+    value: &LargeValueRef,
+    inputs: &mut EvaluationInputs,
+) -> Result<(), IvmRuntimeError> {
+    validate_descriptor(value)?;
+    let mut replay = value.clone();
+    for edit in value.edit_tail.iter().rev() {
+        let inserted = u64::try_from(edit.insert_bytes.len()).map_err(|_| Error::MetricOverflow)?;
+        replay.byte_length = replay
+            .byte_length
+            .checked_sub(inserted)
+            .and_then(|length| length.checked_add(edit.delete_length))
+            .ok_or(Error::MetricOverflow)?;
+        replay.utf16_length = match replay.kind {
+            LargeValueKind::Bytes => None,
+            LargeValueKind::String | LargeValueKind::Json => Some(
+                replay
+                    .utf16_length
+                    .ok_or(Error::MalformedScalar)?
+                    .checked_sub(edit.insert_utf16_length)
+                    .and_then(|length| length.checked_add(edit.delete_utf16_length))
+                    .ok_or(Error::MetricOverflow)?,
+            ),
+        };
+    }
+    replay.edit_tail.clear();
+    validate_descriptor(&replay)?;
+
+    for expected in &value.edit_tail {
+        let outcome = replace_tail_with_bounds_attempt(
+            &replay,
+            expected.offset,
+            expected.delete_length,
+            expected.insert_bytes.clone(),
+            inputs,
+            false,
+        )?;
+        let next = match outcome {
+            TailEditOutcome::Updated(next) | TailEditOutcome::ConsolidationRequired(next) => next,
+        };
+        if next.edit_tail.last() != Some(expected) {
+            return Err(Error::DescriptorMismatch.into());
+        }
+        replay = next;
+    }
+    if &replay != value {
+        return Err(Error::DescriptorMismatch.into());
+    }
+    Ok(())
+}
+
 fn stage_node(
     node: ChunkNode,
     metrics: NodeMetrics,
@@ -2563,7 +2617,7 @@ pub fn decode_node(
     if object_hash(encoded) != expected_hash {
         return Err(Error::ObjectHashMismatch);
     }
-    let node: ChunkNode = postcard::from_bytes(encoded).map_err(|_| Error::MalformedNode)?;
+    let node = decode_canonical_node(encoded)?;
     match &node {
         ChunkNode::Leaf {
             format,
@@ -2614,6 +2668,22 @@ pub fn decode_node(
                 return Err(Error::MalformedNode);
             }
         }
+    }
+    Ok(node)
+}
+
+/// Decode the authenticated chunk payload representation without interpreting
+/// its schema-derived logical kind. Postcard accepts trailing bytes, so an
+/// exact canonical re-encode check is required anywhere node structure is
+/// consumed outside [`decode_node`].
+pub(crate) fn decode_canonical_node(encoded: &[u8]) -> Result<ChunkNode, Error> {
+    if encoded.len() > MAX_ENCODED_NODE_BYTES {
+        return Err(Error::MalformedNode);
+    }
+    let node: ChunkNode = postcard::from_bytes(encoded).map_err(|_| Error::MalformedNode)?;
+    let canonical = postcard::to_allocvec(&node).map_err(|_| Error::MalformedNode)?;
+    if canonical != encoded {
+        return Err(Error::MalformedNode);
     }
     Ok(node)
 }
@@ -4642,6 +4712,34 @@ mod tests {
         assert_eq!(
             decode_node(LargeValueKind::Bytes, root.node_ref.object_hash, &corrupted,),
             Err(Error::ObjectHashMismatch)
+        );
+    }
+
+    #[test]
+    fn node_decode_rejects_trailing_bytes_even_under_their_recomputed_hash() {
+        let prepared =
+            prepare_with_locator(LargeValueKind::Bytes, b"canonical", deterministic_locator)
+                .unwrap();
+        let mut encoded = prepared.staged_chunks[0].encoded.clone();
+        encoded.push(0);
+        let appended_hash = object_hash(&encoded);
+        assert_eq!(
+            decode_node(LargeValueKind::Bytes, appended_hash, &encoded),
+            Err(Error::MalformedNode)
+        );
+    }
+
+    #[test]
+    fn staged_batch_rejects_noncanonical_nodes_before_publication() {
+        let prepared =
+            prepare_with_locator(LargeValueKind::Bytes, b"canonical", deterministic_locator)
+                .unwrap();
+        let mut chunk = prepared.staged_chunks[0].clone();
+        chunk.encoded.push(0);
+        chunk.node_ref.object_hash = object_hash(&chunk.encoded);
+        assert_eq!(
+            validate_staged_chunk_batch(LargeValueKind::Bytes, &[chunk]),
+            Err(Error::MalformedNode)
         );
     }
 

@@ -461,6 +461,83 @@ async fn raw_finalization_rejects_dishonest_or_unrelated_descriptors_and_survive
     );
 }
 
+#[futures_test::test]
+async fn raw_finalization_rejects_forged_text_coordinates_and_partial_json_tail() {
+    let schema = DatabaseSchema::new([TableSchema::new(
+        "objects",
+        [
+            ColumnSchema::new("id", ColumnType::U64),
+            ColumnSchema::new("payload", ColumnType::String),
+        ],
+    )
+    .with_primary_key(PrimaryKey::new("id", IntegerKeyType::U64))]);
+    let storage = MemoryStorage::new(&schema.column_families());
+    let chunks = Rc::new(crate::chunks::MemoryChunkStorage::new());
+    let mut database = Database::new(schema, storage).await.unwrap();
+    database.set_chunk_storage(chunks);
+
+    let text =
+        crate::large_values::prepare(crate::large_values::LargeValueKind::String, b"abcd").unwrap();
+    let mut forged_text = text.value_ref.clone();
+    forged_text
+        .edit_tail
+        .push(crate::large_values::ReplaceEdit {
+            offset: 1,
+            delete_length: 1,
+            insert_bytes: b"X".to_vec(),
+            // The byte splice starts at UTF-16 offset 1, not 2. Shape and
+            // final-value validation alone cannot detect this lie.
+            utf16_offset: 2,
+            delete_utf16_length: 1,
+            insert_utf16_length: 1,
+        });
+    let forged_text: crate::large_values::LargeValueRef =
+        postcard::from_bytes(&postcard::to_allocvec(&forged_text).expect("encode peer descriptor"))
+            .expect("decode peer descriptor");
+    let text_upload = crate::large_values::StagedLargeValueId([0xa1; 16]);
+    database
+        .stage_large_value_chunk_batch(text_upload, text.value_ref.kind, text.staged_chunks)
+        .await
+        .unwrap();
+    assert!(
+        database
+            .finalize_large_value_upload(text_upload, forged_text)
+            .await
+            .is_err(),
+        "staged text coordinates must describe the exact byte splice"
+    );
+
+    let json =
+        crate::large_values::prepare(crate::large_values::LargeValueKind::Json, br#"{"a":1}"#)
+            .unwrap();
+    let mut forged_json = json.value_ref.clone();
+    forged_json
+        .edit_tail
+        .push(crate::large_values::ReplaceEdit {
+            offset: 5,
+            delete_length: 1,
+            insert_bytes: b"2".to_vec(),
+            utf16_offset: 5,
+            delete_utf16_length: 1,
+            insert_utf16_length: 1,
+        });
+    let forged_json: crate::large_values::LargeValueRef =
+        postcard::from_bytes(&postcard::to_allocvec(&forged_json).expect("encode peer descriptor"))
+            .expect("decode peer descriptor");
+    let json_upload = crate::large_values::StagedLargeValueId([0xa2; 16]);
+    database
+        .stage_large_value_chunk_batch(json_upload, json.value_ref.kind, json.staged_chunks)
+        .await
+        .unwrap();
+    assert!(
+        database
+            .finalize_large_value_upload(json_upload, forged_json)
+            .await
+            .is_err(),
+        "JSON edit tails admit only whole-value replacement"
+    );
+}
+
 // The chunk backend is deliberately separate from metadata storage here. Each
 // injected backend error represents a process loss at the exact boundary after
 // metadata intent is durable, but before the indicated next blob put returns.
