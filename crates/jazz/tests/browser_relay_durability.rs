@@ -13,8 +13,10 @@ use jazz::db::{
 use jazz::groove::records::Value;
 use jazz::groove::storage::{TestStorage, TestStorageOperation};
 use jazz::ids::{AuthorSubject, NodeUuid};
-use jazz::protocol::{SubscribeRejectReason, SyncMessage};
-use jazz::query::{OrderDirection, Query, col, eq, lit};
+use jazz::protocol::{
+    RegisterShapeOptions, ShapeAst, Subscribe, SubscribeRejectReason, SubscriptionKey, SyncMessage,
+};
+use jazz::query::{BindingId, OrderDirection, Query, col, eq, lit};
 use jazz::schema::JazzSchema;
 use jazz::tools::{ColumnType, SchemaBuilder, TableSchemaBuilder};
 use jazz::tx::{DurabilityTier, Fate};
@@ -861,6 +863,99 @@ fn worker_relay_forwards_upstream_subscription_rejection_to_every_group_member()
             .count(),
         1,
         "the rejected relay owner is retired exactly once",
+    );
+}
+
+/// One downstream wire connection can attach two independent usage-site keys
+/// to the same canonical coverage. When authority rejects the one relayed
+/// coverage request, the worker must address both original keys before
+/// retiring the shared group.
+///
+/// alice wire client ──Subscribe(A), Subscribe(B)──► worker relay ──Subscribe──► authority
+/// alice wire client ◄─Rejected(A), Rejected(B)──── worker relay ◄─Rejected─── authority
+#[test]
+fn worker_relay_fans_upstream_subscription_rejection_to_distinct_wire_group_members() {
+    let schema = schema();
+    let worker = open_db(0x72, AuthorSubject::SYSTEM, &schema);
+    let rejection = SubscribeRejectReason::UnsupportedShapeCapability {
+        detail: "scripted authority rejection".to_owned(),
+    };
+    let (authority, authority_state) = scripted_authority(Some(rejection.clone()));
+    let _worker_upstream = block_on(worker.connect_upstream(authority));
+
+    let alice = AuthorSubject::for_test_bytes([0x72; 16]);
+    let (mut alice_transport, worker_transport) = duplex();
+    let _worker_downstream = worker.accept_subscriber(worker_transport, alice);
+    let prepared = worker
+        .prepare_query(&worker.table("todos"))
+        .expect("prepare worker todos shape");
+    let shape = prepared.shape();
+    let opts = RegisterShapeOptions::default();
+    let first = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: BindingId(uuid::Uuid::from_bytes([0x72; 16])),
+        read_view: opts.read_view_key(),
+    };
+    let second = SubscriptionKey {
+        shape_id: shape.shape_id(),
+        binding_id: BindingId(uuid::Uuid::from_bytes([0x73; 16])),
+        read_view: opts.read_view_key(),
+    };
+
+    alice_transport
+        .send(SyncMessage::RegisterShape {
+            shape_id: shape.shape_id(),
+            ast: ShapeAst::from_validated(shape),
+            opts,
+        })
+        .expect("register relay shape");
+    worker.tick().expect("register shape at worker");
+    for subscription in [first, second] {
+        alice_transport
+            .send(SyncMessage::Subscribe(Subscribe {
+                shape_id: shape.shape_id(),
+                subscription,
+                values: Vec::new(),
+                known_state: None,
+            }))
+            .expect("subscribe with distinct wire key");
+    }
+
+    for _ in 0..3 {
+        worker.tick().expect("relay authority rejection");
+    }
+
+    let rejected = std::iter::from_fn(|| alice_transport.try_recv())
+        .filter_map(|message| match message {
+            SyncMessage::SubscribeRejected {
+                subscription,
+                reason,
+            } if reason == rejection => Some(subscription),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rejected,
+        vec![first, second],
+        "the authority rejection must fan out to both distinct wire usage sites",
+    );
+    assert_eq!(worker.relay_upstream_subscription_owner_count_for_test(), 0);
+    let messages = &authority_state.borrow().outbound;
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| matches!(message, SyncMessage::Subscribe(_)))
+            .count(),
+        1,
+        "identical wire members share one relayed coverage request",
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| matches!(message, SyncMessage::Unsubscribe { .. }))
+            .count(),
+        1,
+        "the rejected shared owner is retired exactly once",
     );
 }
 
