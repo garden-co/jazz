@@ -73,14 +73,14 @@ impl Database {
             )));
         let chunk_resolver: Rc<dyn crate::chunks::MissingChunkResolver> =
             Rc::new(crate::chunks::UnavailableChunkResolver);
-        let large_value_lifecycle = Rc::new(futures::lock::Mutex::new(()));
+        let large_value_lifecycle = std::sync::Arc::new(futures::lock::Mutex::new(()));
         ivm_runtime.set_chunk_provider(Rc::new(
             crate::chunks::StorageChunkProvider::with_resolver_and_observer(
                 chunk_storage.clone(),
                 chunk_resolver.clone(),
                 Rc::new(MetadataChunkInstallObserver {
                     storage: Rc::downgrade(&storage),
-                    lifecycle: Rc::downgrade(&large_value_lifecycle),
+                    lifecycle: std::sync::Arc::downgrade(&large_value_lifecycle),
                 }),
             ),
         ));
@@ -189,7 +189,7 @@ impl Database {
                 self.chunk_resolver.clone(),
                 Rc::new(MetadataChunkInstallObserver {
                     storage: Rc::downgrade(&self.storage),
-                    lifecycle: Rc::downgrade(&self.large_value_lifecycle),
+                    lifecycle: std::sync::Arc::downgrade(&self.large_value_lifecycle),
                 }),
             ),
         ));
@@ -206,7 +206,7 @@ impl Database {
                 resolver.clone(),
                 Rc::new(MetadataChunkInstallObserver {
                     storage: Rc::downgrade(&self.storage),
-                    lifecycle: Rc::downgrade(&self.large_value_lifecycle),
+                    lifecycle: std::sync::Arc::downgrade(&self.large_value_lifecycle),
                 }),
             ),
         ));
@@ -402,12 +402,7 @@ impl Database {
                         "cannot decode pushed chunk metadata: {error}"
                     ))
                 })?;
-                let children = match node {
-                    crate::large_values::ChunkNode::Leaf { .. } => Vec::new(),
-                    crate::large_values::ChunkNode::Branch { children, .. } => {
-                        children.into_iter().map(|child| child.node_ref).collect()
-                    }
-                };
+                let children = unique_large_value_children(&node);
                 LargeValueNodeReferences {
                     references: 0,
                     upload_references: 1,

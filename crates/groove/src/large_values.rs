@@ -33,6 +33,15 @@ pub const MAX_TREE_DEPTH: usize = 32;
 /// small authenticated DAG with zero-length metrics from turning one
 /// materialization attempt into exponential CPU or memory work.
 pub const MAX_LOGICAL_TRAVERSAL_STEPS: usize = 128 * 1024;
+/// Maximum number of distinct immutable nodes a graph-oriented operation may
+/// retain while authenticating one descriptor. This matches the logical-work
+/// budget while still admitting multi-gigabyte canonical values: even at the
+/// minimum leaf size, a normally shaped tree can represent well over 1 GiB.
+///
+/// Physical traversals must remember every discovered node to deduplicate DAG
+/// edges and validate repeated references consistently, so this is also their
+/// memory boundary.
+pub const MAX_PHYSICAL_TRAVERSAL_NODES: usize = MAX_LOGICAL_TRAVERSAL_STEPS;
 /// JSON syntax validation retains one frame per open array/object. Keep this
 /// separate from the immutable-tree bound: a small logical value can otherwise
 /// use arbitrarily deep JSON nesting to grow validator memory.
@@ -1465,6 +1474,8 @@ pub enum Error {
     InvalidTree,
     #[error("large-value logical traversal exceeded its deterministic work limit")]
     TraversalWorkLimitExceeded,
+    #[error("large-value physical traversal exceeded its distinct-node limit")]
+    PhysicalTraversalNodeLimitExceeded,
     #[error("malformed physical scalar encoding")]
     MalformedScalar,
     #[error("indirect scalar requires interruptible evaluation")]
@@ -1505,6 +1516,7 @@ struct PhysicalTraversal {
     pending: Vec<PhysicalTraversalEntry>,
     nodes: BTreeMap<NodeRef, PhysicalNodeState>,
     edges: BTreeMap<NodeRef, Vec<NodeRef>>,
+    node_budget: PhysicalTraversalNodeBudget,
 }
 
 impl PhysicalTraversal {
@@ -1513,7 +1525,24 @@ impl PhysicalTraversal {
         expected_metrics: Option<NodeMetrics>,
         expected_logical_hash: ContentHash,
     ) -> Self {
-        Self {
+        Self::new_with_node_limit(
+            root,
+            expected_metrics,
+            expected_logical_hash,
+            MAX_PHYSICAL_TRAVERSAL_NODES,
+        )
+        .expect("the configured physical traversal node limit is non-zero")
+    }
+
+    fn new_with_node_limit(
+        root: NodeRef,
+        expected_metrics: Option<NodeMetrics>,
+        expected_logical_hash: ContentHash,
+        max_nodes: usize,
+    ) -> Result<Self, Error> {
+        let mut node_budget = PhysicalTraversalNodeBudget::with_limit(max_nodes);
+        node_budget.consume()?;
+        Ok(Self {
             root: root.clone(),
             pending: vec![PhysicalTraversalEntry {
                 node_ref: root.clone(),
@@ -1528,7 +1557,8 @@ impl PhysicalTraversal {
                 },
             )]),
             edges: BTreeMap::new(),
-        }
+            node_budget,
+        })
     }
 
     fn pop(&mut self) -> Option<PhysicalTraversalEntry> {
@@ -1636,6 +1666,7 @@ impl PhysicalTraversal {
                 state.expected_metrics = Some(child.metrics);
             }
             std::collections::btree_map::Entry::Vacant(entry) => {
+                self.node_budget.consume()?;
                 entry.insert(PhysicalNodeState {
                     expected_logical_hash: child.logical_hash,
                     expected_metrics: Some(child.metrics),
@@ -1658,6 +1689,37 @@ impl PhysicalTraversal {
         for child in children.into_iter().rev() {
             self.discover_child(parent, child)?;
         }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct PhysicalTraversalNodeBudget {
+    remaining: usize,
+}
+
+impl PhysicalTraversalNodeBudget {
+    pub(crate) fn new() -> Self {
+        Self::with_limit(MAX_PHYSICAL_TRAVERSAL_NODES)
+    }
+
+    fn with_limit(limit: usize) -> Self {
+        Self { remaining: limit }
+    }
+
+    pub(crate) fn consume(&mut self) -> Result<(), Error> {
+        self.remaining = self
+            .remaining
+            .checked_sub(1)
+            .ok_or(Error::PhysicalTraversalNodeLimitExceeded)?;
+        Ok(())
+    }
+
+    pub(crate) fn consume_many(&mut self, count: usize) -> Result<(), Error> {
+        self.remaining = self
+            .remaining
+            .checked_sub(count)
+            .ok_or(Error::PhysicalTraversalNodeLimitExceeded)?;
         Ok(())
     }
 }
@@ -4371,6 +4433,44 @@ mod tests {
         Locator(hash.0)
     }
 
+    fn traverse_fixture_with_node_limit(
+        prepared: &PreparedLargeValue,
+        max_nodes: usize,
+    ) -> Result<usize, Error> {
+        let root_metrics = Some(NodeMetrics {
+            byte_length: prepared.value_ref.byte_length,
+            utf16_length: prepared.value_ref.utf16_length,
+        });
+        let chunks = prepared
+            .staged_chunks
+            .iter()
+            .map(|chunk| (chunk.node_ref.clone(), chunk))
+            .collect::<BTreeMap<_, _>>();
+        let mut traversal = PhysicalTraversal::new_with_node_limit(
+            prepared.value_ref.root.clone(),
+            root_metrics,
+            prepared.value_ref.logical_hash,
+            max_nodes,
+        )?;
+        let mut visited = 0;
+        while let Some(entry) = traversal.pop() {
+            let chunk = chunks
+                .get(&entry.node_ref)
+                .expect("fixture has every reachable physical node");
+            let node = decode_node(
+                prepared.value_ref.kind,
+                entry.node_ref.object_hash,
+                &chunk.encoded,
+            )?;
+            traversal.validate_node(prepared.value_ref.kind, &entry.node_ref, &node)?;
+            if let ChunkNode::Branch { children, .. } = node {
+                traversal.discover_children(&entry, children)?;
+            }
+            visited += 1;
+        }
+        Ok(visited)
+    }
+
     fn encode_v12_primitive_bytes(bytes: &[u8]) -> Vec<u8> {
         let primitive = RecordDescriptor::new([("value", ValueType::raw_bytes())]);
         let chunked = RecordDescriptor::new(Vec::<(String, ValueType)>::new());
@@ -4481,6 +4581,27 @@ mod tests {
         .unwrap();
         assert_eq!(count as usize, prepared.staged_chunks.len());
         assert_eq!(visited.len(), prepared.staged_chunks.len());
+    }
+
+    #[test]
+    fn physical_traversal_budget_allows_the_exact_distinct_node_boundary_for_shared_dag() {
+        let prepared = repeated_child_dag_fixture(2, BRANCH_MAX_CHILDREN);
+        assert_eq!(prepared.staged_chunks.len(), 3);
+        assert_eq!(
+            traverse_fixture_with_node_limit(&prepared, prepared.staged_chunks.len()),
+            Ok(prepared.staged_chunks.len()),
+            "repeated logical child edges consume one physical-node slot"
+        );
+    }
+
+    #[test]
+    fn physical_traversal_budget_rejects_one_distinct_node_over_the_boundary() {
+        let prepared = repeated_child_dag_fixture(3, BRANCH_MAX_CHILDREN);
+        assert_eq!(prepared.staged_chunks.len(), 4);
+        assert_eq!(
+            traverse_fixture_with_node_limit(&prepared, prepared.staged_chunks.len() - 1),
+            Err(Error::PhysicalTraversalNodeLimitExceeded)
+        );
     }
 
     struct WindowReader<'a> {

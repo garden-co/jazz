@@ -13,6 +13,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::str;
+use std::sync::{Arc, Weak};
 use std::task::{Poll, Waker};
 
 use futures::lock::Mutex as AsyncMutex;
@@ -98,13 +99,24 @@ fn unique_large_value_children(
 ) -> Vec<crate::large_values::NodeRef> {
     match node {
         crate::large_values::ChunkNode::Leaf { .. } => Vec::new(),
-        crate::large_values::ChunkNode::Branch { children, .. } => children
-            .iter()
-            .map(|child| child.node_ref.clone())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect(),
+        crate::large_values::ChunkNode::Branch { children, .. } => {
+            canonical_large_value_children(children.iter().map(|child| child.node_ref.clone()))
+        }
     }
+}
+
+/// Metadata child edges describe physical ownership rather than a logical
+/// byte order. Normalize them on every read/write boundary so historical
+/// logical-order vectors and duplicate child occurrences retain their exact
+/// one-edge-per-physical-child meaning.
+fn canonical_large_value_children(
+    children: impl IntoIterator<Item = crate::large_values::NodeRef>,
+) -> Vec<crate::large_values::NodeRef> {
+    children
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// Apply physical-node ownership transitions against one read-your-own-write
@@ -121,11 +133,18 @@ async fn large_value_node_transition_operations<S>(
 where
     S: OrderedKvStorage + ?Sized,
 {
+    let mut node_budget = crate::large_values::PhysicalTraversalNodeBudget::new();
+    node_budget
+        .consume_many(node_updates.len())
+        .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
     let mut reclaim_candidates = BTreeSet::new();
     while let Some((node_ref, delta)) = pending.pop() {
         let mut metadata = if let Some(metadata) = node_updates.remove(&node_ref) {
             metadata
         } else {
+            node_budget
+                .consume()
+                .map_err(crate::ivm::runtime::IvmRuntimeError::from)?;
             match storage
                 .get(
                     LARGE_VALUE_METADATA_CF.to_owned(),
@@ -148,12 +167,7 @@ where
                 }
             }
         };
-        metadata.children = metadata
-            .children
-            .into_iter()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
+        metadata.children = canonical_large_value_children(metadata.children);
         let crossed_zero = if delta > 0 {
             let crossed = metadata.references == 0;
             metadata.references = metadata.references.checked_add(1).ok_or_else(|| {
@@ -209,7 +223,7 @@ where
 #[derive(Clone)]
 struct MetadataChunkInstallObserver {
     storage: std::rc::Weak<LayoutStorage>,
-    lifecycle: std::rc::Weak<AsyncMutex<()>>,
+    lifecycle: Weak<AsyncMutex<()>>,
 }
 
 impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
@@ -248,11 +262,13 @@ impl crate::chunks::ChunkInstallObserver for MetadataChunkInstallObserver {
                 .transpose()
                 .map_err(|error| crate::chunks::ChunkError::Backend(error.to_string()))?
                 .unwrap_or_default();
-            if !metadata.children.is_empty() && metadata.children != children {
+            let existing_children =
+                canonical_large_value_children(std::mem::take(&mut metadata.children));
+            if !existing_children.is_empty() && existing_children != children {
                 return Err(crate::chunks::ChunkError::Integrity);
             }
             let newly_discovered_active_children =
-                metadata.references > 0 && metadata.children.is_empty() && !children.is_empty();
+                metadata.references > 0 && existing_children.is_empty() && !children.is_empty();
             metadata.children = children.clone();
 
             let root_key = large_value_root_key(&node_ref)
@@ -333,7 +349,7 @@ pub struct Database {
     /// promotion, and reclamation lifecycle. The blob backend may be separate
     /// from metadata storage, so this boundary prevents both intent eviction
     /// during an in-flight put and lost reference-count updates across uploads.
-    large_value_lifecycle: Rc<AsyncMutex<()>>,
+    large_value_lifecycle: Arc<AsyncMutex<()>>,
     abandoned_application: Rc<Cell<bool>>,
     poisoned: bool,
 }
