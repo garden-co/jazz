@@ -25,14 +25,24 @@ interface Entry {
   /** True only after creation produced a client and its shutdown was invoked. */
   shutdownStarted: boolean;
   /**
-   * The shutdown that must remain the barrier when this entry only waits for an
-   * earlier handoff. It is needed if several pending handoffs are abandoned
-   * before the original shutdown settles.
+   * The immediately preceding closing entry. On a rejected handoff, walk this
+   * chain to retain the first shutdown that actually started. Keeping the
+   * direct predecessor is necessary because an acquire can observe `closing`
+   * before that entry's shutdown microtask marks it started.
    */
   shutdownBarrier: Entry | null;
 }
 
 const registry = new Map<string, Entry>();
+
+function startedShutdownBarrier(entry: Entry | null): Entry | null {
+  let current = entry;
+  while (current) {
+    if (current.shutdownStarted) return current;
+    current = current.shutdownBarrier;
+  }
+  return null;
+}
 
 export function acquireClient<T extends RegisteredClient>(
   key: string,
@@ -54,12 +64,13 @@ export function acquireClient<T extends RegisteredClient>(
       pendingRelease: null,
       closing: null,
       shutdownStarted: false,
-      shutdownBarrier: previous.shutdownStarted ? previous : previous.shutdownBarrier,
+      shutdownBarrier: previous,
     };
     created.promise.catch(() => {
       if (registry.get(key) === created) {
-        if (!teardownSucceeded && created.shutdownBarrier) {
-          registry.set(key, created.shutdownBarrier);
+        const shutdownBarrier = startedShutdownBarrier(created.shutdownBarrier);
+        if (!teardownSucceeded && shutdownBarrier) {
+          registry.set(key, shutdownBarrier);
         } else {
           registry.delete(key);
         }

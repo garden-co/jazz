@@ -160,6 +160,37 @@ describe("client-registry", () => {
     expect(create).toHaveBeenCalledTimes(1);
   });
 
+  it("retains the failed shutdown barrier across the release timer's first microtask", async () => {
+    vi.useFakeTimers();
+    let failShutdown!: (error: Error) => void;
+    const shutdownFinished = new Promise<void>((_, reject) => {
+      failShutdown = reject;
+    });
+    const shutdownError = new Error("shutdown failed");
+    const first = { shutdown: vi.fn(() => shutdownFinished) };
+    const recovered = fakeClient();
+    const create = vi
+      .fn<() => Promise<{ shutdown(): Promise<void> }>>()
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(recovered);
+    const holder = {};
+    await acquireClient("persistent:first-microtask", create, holder);
+
+    const releasing = releaseClient("persistent:first-microtask", holder);
+    vi.advanceTimersByTime(0);
+    const handoff = acquireClient("persistent:first-microtask", create, {});
+    await Promise.resolve();
+    expect(first.shutdown).toHaveBeenCalledOnce();
+
+    failShutdown(shutdownError);
+    await expect(releasing).resolves.toBeUndefined();
+    await expect(handoff).rejects.toBe(shutdownError);
+    await expect(acquireClient("persistent:first-microtask", create, {})).rejects.toBe(
+      shutdownError,
+    );
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
   it("cleans up an abandoned handoff after its predecessor shuts down", async () => {
     vi.useFakeTimers();
     let finishShutdown!: () => void;
