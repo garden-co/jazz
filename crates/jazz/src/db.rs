@@ -3737,255 +3737,117 @@ fn apply_maintained_update_to_snapshot(
     snapshot: &mut RelationSnapshot,
     snapshot_index: &mut RelationSnapshotIndex,
     update: LocalMaintainedViewSubscriptionUpdate,
+    table: &str,
     tier: DurabilityTier,
     settled: bool,
-    terminal_rows: bool,
     terminal_layout: Option<&TerminalRootLayout>,
 ) -> Result<SubscriptionEvent, Error> {
-    let root_operations = update
-        .terminal_operations
-        .iter()
-        .filter(|operation| operation.path.is_empty())
-        .cloned()
-        .collect::<Vec<_>>();
-    if !terminal_rows {
-        let mut event = apply_maintained_membership_update_to_snapshot(
-            snapshot,
-            snapshot_index,
-            update,
-            tier,
-            settled,
-            terminal_rows,
-        );
-        // A flat join can have several public occurrences for one root even
-        // though Groove's app-row terminal deliberately addresses that root
-        // only once. Membership owns the rows; terminal root edits order the
-        // root groups, and occurrence identity provides the stable tie-break.
-        apply_membership_terminal_root_order(snapshot, snapshot_index, &root_operations)?;
-        let SubscriptionEvent::Delta { added, updated, .. } = &mut event else {
-            unreachable!("maintained updates always emit deltas")
-        };
-        for output in added.iter_mut().chain(updated.iter_mut()) {
-            let Some(index) = snapshot_index.roots.get(&output.occurrence_id).copied() else {
-                continue;
-            };
-            output.row = snapshot.rows[index].clone();
-            output.index = index;
-        }
-        return Ok(event);
-    }
-    if root_operations.is_empty() {
-        return Ok(apply_maintained_membership_update_to_snapshot(
-            snapshot,
-            snapshot_index,
-            update,
-            tier,
-            settled,
-            terminal_rows,
-        ));
-    }
-
-    let layout = terminal_layout.ok_or_else(|| {
-        Error::new(
-            ErrorCode::Protocol,
-            "terminal root operation arrived without a prepared root layout",
-        )
-    })?;
-    let table = update
-        .added
-        .first()
-        .map(|(_, row)| row.table().to_owned())
-        .or_else(|| snapshot.rows.first().map(|row| row.table().to_owned()))
-        .ok_or_else(|| {
-            Error::new(
-                ErrorCode::Protocol,
-                "terminal root operation arrived without a root table",
-            )
-        })?;
-    let known_occurrences = snapshot_index
-        .roots
-        .keys()
-        .chain(update.added.iter().map(|(occurrence, _)| occurrence))
-        .chain(update.removed.iter())
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let mut occurrence_overrides = BTreeMap::new();
-    let mut irrelevant_root_keys = BTreeSet::new();
-    for operation in &root_operations {
-        let decoded = terminal_root_occurrence_id(&operation.root_key);
-        if decoded
-            .as_ref()
-            .is_ok_and(|occurrence| known_occurrences.contains(occurrence))
-        {
-            continue;
-        }
-        let root_bytes = operation
-            .root_key
-            .get(1..17)
-            .filter(|_| operation.root_key.first().copied() == Some(10));
-        let candidates = known_occurrences
-            .iter()
-            .filter(|candidate| candidate.canonical_bytes().get(..16) == root_bytes)
-            .cloned()
-            .collect::<Vec<_>>();
-        match candidates.as_slice() {
-            [candidate] => {
-                occurrence_overrides.insert(operation.root_key.clone(), candidate.clone());
-            }
-            [] => {
-                decoded?;
-                irrelevant_root_keys.insert(operation.root_key.clone());
-            }
-            _ => {
+    match update {
+        LocalMaintainedViewSubscriptionUpdate::Flat {
+            authoritative_membership_changed: _,
+            added,
+            removed,
+            terminal_operations,
+        } => {
+            if terminal_operations
+                .iter()
+                .any(|operation| !operation.path.is_empty())
+            {
                 return Err(Error::new(
                     ErrorCode::Protocol,
-                    "terminal root key is ambiguous after hiding internal join identities",
+                    "flat maintained update emitted a descendant terminal operation",
                 ));
             }
+            let mut event = apply_maintained_membership_update_to_snapshot(
+                snapshot,
+                snapshot_index,
+                added,
+                removed,
+                tier,
+                settled,
+            );
+            // A flat join can have several public occurrences for one root
+            // even though Groove addresses that root only once. Membership
+            // owns the rows; terminal root edits order the occurrence groups.
+            apply_membership_terminal_root_order(snapshot, snapshot_index, &terminal_operations)?;
+            let SubscriptionEvent::Delta { added, updated, .. } = &mut event else {
+                unreachable!("maintained updates always emit deltas")
+            };
+            for output in added.iter_mut().chain(updated.iter_mut()) {
+                let Some(index) = snapshot_index.roots.get(&output.occurrence_id).copied() else {
+                    continue;
+                };
+                output.row = snapshot.rows[index].clone();
+                output.index = index;
+            }
+            Ok(event)
+        }
+        LocalMaintainedViewSubscriptionUpdate::Structured {
+            terminal_operations,
+        } => {
+            if terminal_operations.is_empty() {
+                return Ok(SubscriptionEvent::Delta {
+                    reset: false,
+                    publishable: true,
+                    added: Vec::new(),
+                    updated: Vec::new(),
+                    removed: Vec::new(),
+                    terminal_operations: Vec::new(),
+                    settled,
+                    tier,
+                });
+            }
+            let layout = terminal_layout.ok_or_else(|| {
+                Error::new(
+                    ErrorCode::Protocol,
+                    "structured terminal operation arrived without a prepared root layout",
+                )
+            })?;
+            let known_occurrences = snapshot_index.roots.keys().cloned().collect::<Vec<_>>();
+            let mut occurrence_overrides = BTreeMap::new();
+            for operation in terminal_operations
+                .iter()
+                .filter(|operation| operation.path.is_empty())
+            {
+                if terminal_root_occurrence_id(&operation.root_key).is_ok() {
+                    continue;
+                }
+                let root_bytes = operation
+                    .root_key
+                    .get(1..17)
+                    .filter(|_| operation.root_key.first().copied() == Some(10));
+                let candidates = known_occurrences
+                    .iter()
+                    .filter(|candidate| candidate.canonical_bytes().get(..16) == root_bytes)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                match candidates.as_slice() {
+                    [candidate] => {
+                        occurrence_overrides.insert(operation.root_key.clone(), candidate.clone());
+                    }
+                    [] => {
+                        terminal_root_occurrence_id(&operation.root_key)?;
+                    }
+                    _ => {
+                        return Err(Error::new(
+                            ErrorCode::Protocol,
+                            "terminal root key is ambiguous after hiding internal join identities",
+                        ));
+                    }
+                }
+            }
+            apply_terminal_operations_to_subscription_snapshot(
+                snapshot,
+                snapshot_index,
+                terminal_operations,
+                Some(&occurrence_overrides),
+                layout,
+                table,
+                tier,
+                settled,
+            )
         }
     }
-    let membership_rows = update.added.iter().cloned().collect::<BTreeMap<_, _>>();
-    let mut event = apply_maintained_membership_update_to_snapshot(
-        snapshot,
-        snapshot_index,
-        update,
-        tier,
-        settled,
-        terminal_rows,
-    );
-    let SubscriptionEvent::Delta {
-        removed: membership_removed,
-        ..
-    } = &event
-    else {
-        unreachable!("maintained updates always emit deltas")
-    };
-    let membership_removed = membership_removed
-        .iter()
-        .map(|removed| removed.occurrence_id.clone())
-        .collect::<BTreeSet<_>>();
-    let mut applicable_root_operations = Vec::with_capacity(root_operations.len());
-    for operation in root_operations {
-        if irrelevant_root_keys.contains(operation.root_key.as_slice()) {
-            continue;
-        }
-        let occurrence_id = occurrence_overrides
-            .get(operation.root_key.as_slice())
-            .cloned()
-            .map(Ok)
-            .unwrap_or_else(|| terminal_root_occurrence_id(&operation.root_key))?;
-        let already_removed = matches!(operation.edit, groove::ivm::TerminalEdit::Remove { .. })
-            && !snapshot_index.roots.contains_key(&occurrence_id)
-            && membership_removed.contains(&occurrence_id);
-        if !already_removed {
-            applicable_root_operations.push(operation);
-        }
-    }
-    let root_event = apply_terminal_operations_to_subscription_snapshot(
-        snapshot,
-        snapshot_index,
-        applicable_root_operations,
-        Some(&occurrence_overrides),
-        layout,
-        &table,
-        tier,
-        settled,
-    )?;
-    for (occurrence_id, row) in membership_rows {
-        if let Some(index) = snapshot_index.roots.get(&occurrence_id).copied() {
-            snapshot.rows[index] = row;
-        }
-    }
-
-    let SubscriptionEvent::Delta {
-        added: root_added,
-        updated: root_updated,
-        removed: root_removed,
-        ..
-    } = root_event
-    else {
-        unreachable!("terminal updates always emit deltas")
-    };
-    let SubscriptionEvent::Delta {
-        added,
-        updated,
-        removed,
-        ..
-    } = &mut event
-    else {
-        unreachable!("maintained updates always emit deltas")
-    };
-    for root in root_added {
-        if let Some(position) = added
-            .iter()
-            .position(|output| output.occurrence_id == root.occurrence_id)
-        {
-            added[position] = root;
-        } else if let Some(position) = removed
-            .iter()
-            .position(|output| output.occurrence_id == root.occurrence_id)
-        {
-            let previous_index = removed.remove(position).index;
-            updated.push(SubscriptionOutputRow {
-                occurrence_id: root.occurrence_id,
-                row: root.row,
-                previous_index: Some(previous_index),
-                index: root.index,
-            });
-        } else {
-            added.push(root);
-        }
-    }
-    for root in root_updated {
-        if let Some(output) = added
-            .iter_mut()
-            .find(|output| output.occurrence_id == root.occurrence_id)
-        {
-            output.row = root.row;
-            output.index = root.index;
-        } else if let Some(output) = updated
-            .iter_mut()
-            .find(|output| output.occurrence_id == root.occurrence_id)
-        {
-            output.row = root.row;
-            output.index = root.index;
-        } else {
-            updated.push(root);
-        }
-    }
-    for root in root_removed {
-        if let Some(position) = added
-            .iter()
-            .position(|output| output.occurrence_id == root.occurrence_id)
-        {
-            added.remove(position);
-        } else if let Some(position) = updated
-            .iter()
-            .position(|output| output.occurrence_id == root.occurrence_id)
-        {
-            let previous_index = updated
-                .remove(position)
-                .previous_index
-                .unwrap_or(root.index);
-            removed.push(RemovedRow {
-                index: previous_index,
-                ..root
-            });
-        } else if !removed
-            .iter()
-            .any(|output| output.occurrence_id == root.occurrence_id)
-        {
-            removed.push(root);
-        }
-    }
-    for output in added.iter_mut().chain(updated.iter_mut()) {
-        let Some(index) = snapshot_index.roots.get(&output.occurrence_id).copied() else {
-            continue;
-        };
-        output.row = snapshot.rows[index].clone();
-        output.index = index;
-    }
-    Ok(event)
 }
 
 /// Apply Groove's root order to membership-owned output occurrences.
@@ -4060,25 +3922,11 @@ fn terminal_occurrence_root_bytes(encoded: &[u8]) -> Result<[u8; 16], Error> {
 fn apply_maintained_membership_update_to_snapshot(
     snapshot: &mut RelationSnapshot,
     snapshot_index: &mut RelationSnapshotIndex,
-    update: LocalMaintainedViewSubscriptionUpdate,
+    update_added: Vec<(OutputOccurrenceId, CurrentRow)>,
+    update_removed: Vec<OutputOccurrenceId>,
     tier: DurabilityTier,
     settled: bool,
-    terminal_rows: bool,
 ) -> SubscriptionEvent {
-    let LocalMaintainedViewSubscriptionUpdate {
-        authoritative_membership_changed: _,
-        added: update_added,
-        removed: update_removed,
-        terminal_operations,
-    } = update;
-    // Root edits were applied by the wrapper either as complete terminal rows
-    // or as ordering for membership-owned root groups. Only descendant edits
-    // may cross the binding boundary.
-    let terminal_operations = terminal_operations
-        .into_iter()
-        .filter(|operation| terminal_rows && !operation.path.is_empty())
-        .collect::<Vec<_>>();
-
     if snapshot.rows.is_empty()
         && snapshot.edges.is_empty()
         && snapshot.root_count == 0
@@ -4109,7 +3957,7 @@ fn apply_maintained_membership_update_to_snapshot(
                 .collect(),
             updated: Vec::new(),
             removed: Vec::new(),
-            terminal_operations: terminal_operations.clone(),
+            terminal_operations: Vec::new(),
             settled,
             tier,
         };
@@ -4187,7 +4035,7 @@ fn apply_maintained_membership_update_to_snapshot(
         added,
         updated,
         removed,
-        terminal_operations,
+        terminal_operations: Vec::new(),
         settled,
         tier,
     }

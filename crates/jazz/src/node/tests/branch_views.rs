@@ -884,8 +884,11 @@ fn maintained_live_base_emits_a_delta_before_facade_refresh() {
         .drain_local_maintained_view_subscription(&mut maintained, None)
         .unwrap()
         .expect("live-base write must emit a maintained delta");
-    assert_eq!(update.added.len(), 1);
-    assert_eq!(update.removed.len(), 1);
+    let LocalMaintainedViewSubscriptionUpdate::Flat { added, removed, .. } = update else {
+        panic!("flat branch query produced a structured maintained update");
+    };
+    assert_eq!(added.len(), 1);
+    assert_eq!(removed.len(), 1);
 }
 
 #[test]

@@ -1753,9 +1753,9 @@ where
                             &mut snapshot,
                             &mut snapshot_index,
                             update,
+                            shape.query().table.as_str(),
                             read_tier,
                             previous_settled,
-                            terminal_rows,
                             terminal_layout,
                         )?;
                     }
@@ -2157,9 +2157,9 @@ where
                         &mut snapshot,
                         &mut snapshot_index,
                         update,
+                        shape.query().table.as_str(),
                         snapshot_tier,
                         previous_settled,
-                        terminal_rows,
                         terminal_layout,
                     )?;
                 }
@@ -2268,7 +2268,16 @@ where
                     };
                 if let Some(update) = maintained_update {
                     if terminal_rows {
-                        if !update.terminal_operations.is_empty() {
+                        let LocalMaintainedViewSubscriptionUpdate::Structured {
+                            terminal_operations,
+                        } = update
+                        else {
+                            return Err(Error::new(
+                                ErrorCode::Protocol,
+                                "structured subscription produced a flat maintained update",
+                            ));
+                        };
+                        if !terminal_operations.is_empty() {
                             let settled = subscription_is_settled(
                                 &node.borrow(),
                                 active_authority_view_receipts,
@@ -2292,7 +2301,7 @@ where
                             let event = apply_terminal_operations_to_subscription_snapshot(
                                 &mut refresh.snapshot,
                                 &mut refresh.snapshot_index,
-                                update.terminal_operations,
+                                terminal_operations,
                                 None,
                                 terminal_layout,
                                 shape.query().table.as_str(),
@@ -2357,18 +2366,33 @@ where
                         }
                         continue;
                     } else {
+                        let LocalMaintainedViewSubscriptionUpdate::Flat {
+                            authoritative_membership_changed,
+                            added,
+                            removed,
+                            terminal_operations,
+                        } = update
+                        else {
+                            return Err(Error::new(
+                                ErrorCode::Protocol,
+                                "flat subscription produced a structured maintained update",
+                            ));
+                        };
                         let state_ref = &mut refresh;
                         let previous_snapshot = state_ref.snapshot.clone();
                         let previous_snapshot_index = state_ref.snapshot_index.clone();
-                        let authoritative_membership_changed =
-                            update.authoritative_membership_changed;
                         let mut event = apply_maintained_update_to_snapshot(
                             &mut state_ref.snapshot,
                             &mut state_ref.snapshot_index,
-                            update,
+                            LocalMaintainedViewSubscriptionUpdate::Flat {
+                                authoritative_membership_changed,
+                                added,
+                                removed,
+                                terminal_operations,
+                            },
+                            shape.query().table.as_str(),
                             snapshot_tier,
                             previous_settled,
-                            terminal_rows,
                             None,
                         )?;
                         if authoritative_membership_changed {

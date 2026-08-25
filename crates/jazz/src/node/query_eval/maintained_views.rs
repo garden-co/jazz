@@ -145,11 +145,19 @@ impl LocalMaintainedViewSubscription {
     }
 }
 
-pub(crate) struct LocalMaintainedViewSubscriptionUpdate {
-    pub(crate) authoritative_membership_changed: bool,
-    pub(crate) added: Vec<(OutputOccurrenceId, CurrentRow)>,
-    pub(crate) removed: Vec<OutputOccurrenceId>,
-    pub(crate) terminal_operations: Vec<groove::ivm::TerminalOperation>,
+pub(crate) enum LocalMaintainedViewSubscriptionUpdate {
+    /// Flat membership owns public occurrence rows. Groove root operations
+    /// only order the root groups those occurrences belong to.
+    Flat {
+        authoritative_membership_changed: bool,
+        added: Vec<(OutputOccurrenceId, CurrentRow)>,
+        removed: Vec<OutputOccurrenceId>,
+        terminal_operations: Vec<groove::ivm::TerminalOperation>,
+    },
+    /// Structured output is published directly from Groove's terminal tree.
+    Structured {
+        terminal_operations: Vec<groove::ivm::TerminalOperation>,
+    },
 }
 
 fn result_member_matches_row_keys(
@@ -883,11 +891,17 @@ where
         for fact in transitions.program_fact_adds {
             local.program_facts.insert(fact);
         }
-        Ok(LocalMaintainedViewSubscriptionUpdate {
-            authoritative_membership_changed,
-            added,
-            removed,
-            terminal_operations,
+        Ok(if structured_output {
+            LocalMaintainedViewSubscriptionUpdate::Structured {
+                terminal_operations,
+            }
+        } else {
+            LocalMaintainedViewSubscriptionUpdate::Flat {
+                authoritative_membership_changed,
+                added,
+                removed,
+                terminal_operations,
+            }
         })
     }
 }
