@@ -12,7 +12,7 @@ use bytes::Bytes;
 use thiserror::Error;
 
 use crate::large_values::{ContentHash, Locator, StagedChunk, object_hash};
-use crate::storage::{LayoutStorage, OrderedKvStorage, OwnedWriteOperation};
+use crate::storage::{LayoutStorage, OrderedKvStorage, OwnedWriteOperation, StorageDelta};
 
 /// Opaque retrieval identity paired with the hash Groove must verify.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -422,7 +422,50 @@ impl OrderedChunkStorage {
         value
     }
 
+    // Ordered storage's conditional merge only returns the materialized
+    // winner, not whether this caller installed it.  An equal restage must be
+    // classified as an existing mapping for incoming-byte accounting, so each
+    // newly written chunk carries the installing call's opaque receipt. This
+    // lives only in Groove's private chunk-value format; legacy values retain
+    // their original hash-plus-bytes layout and decode without a receipt.
+    const INSTALL_RECEIPT_MAGIC: [u8; 32] = *b"\0groove-chunk-install-receipt-v1";
+
+    fn encode_with_install_receipt(hash: ContentHash, bytes: &[u8], receipt: [u8; 16]) -> Vec<u8> {
+        let encoded = Self::encode(hash, bytes);
+        let mut value =
+            Vec::with_capacity(Self::INSTALL_RECEIPT_MAGIC.len() + receipt.len() + encoded.len());
+        value.extend_from_slice(&Self::INSTALL_RECEIPT_MAGIC);
+        value.extend_from_slice(&receipt);
+        value.extend_from_slice(&encoded);
+        value
+    }
+
+    fn split_install_receipt(value: &[u8]) -> (Option<[u8; 16]>, &[u8]) {
+        let Some((magic, remainder)) = value.split_at_checked(Self::INSTALL_RECEIPT_MAGIC.len())
+        else {
+            return (None, value);
+        };
+        if magic != Self::INSTALL_RECEIPT_MAGIC {
+            return (None, value);
+        }
+        let Some((receipt, encoded)) = remainder.split_at_checked(16) else {
+            return (None, value);
+        };
+        let mut receipt_bytes = [0; 16];
+        receipt_bytes.copy_from_slice(receipt);
+        (Some(receipt_bytes), encoded)
+    }
+
+    /// The receipt identifies an attempted installation, but it is not an
+    /// integrity witness for the candidate bytes. Require the complete
+    /// private envelope too, so a matching receipt in corrupted storage
+    /// cannot be treated as this call's successful write.
+    fn is_installed_candidate(existing: &[u8], candidate: &[u8], receipt: [u8; 16]) -> bool {
+        Self::split_install_receipt(existing).0 == Some(receipt) && existing == candidate
+    }
+
     fn decode(value: Vec<u8>) -> Result<(ContentHash, Bytes), ChunkStorageError> {
+        let (_, value) = Self::split_install_receipt(&value);
         let (hash, bytes) = value
             .split_at_checked(32)
             .ok_or(ChunkStorageError::Integrity)?;
@@ -468,22 +511,34 @@ impl ChunkKvStorage for OrderedChunkStorage {
         Box::pin(async move {
             let storage = self.storage()?;
             let key = Self::key(locator.as_bytes());
-            if let Some(existing) = storage
-                .get(crate::db::LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
-                .await
-                .map_err(|error| ChunkStorageError::Backend(error.to_string()))?
-            {
-                return Self::decode(existing).map(Some);
-            }
+            let receipt = *uuid::Uuid::new_v4().as_bytes();
+            let candidate = Self::encode_with_install_receipt(hash, &bytes, receipt);
+            // This must be a conditional storage transition rather than a
+            // get-then-set sequence.  A durable backend can be shared by
+            // independent database instances, so an executor-local lock would
+            // still allow the loser to overwrite the immutable winner.
             storage
-                .write_many(vec![OwnedWriteOperation::Set {
+                .write_many(vec![OwnedWriteOperation::Delta {
                     cf: crate::db::LARGE_VALUE_METADATA_CF.to_owned(),
-                    key,
-                    value: Self::encode(hash, &bytes),
+                    key: key.clone(),
+                    delta: StorageDelta::set_if_absent(candidate.clone()),
                 }])
                 .await
                 .map_err(|error| ChunkStorageError::Backend(error.to_string()))?;
-            Ok(None)
+            let existing = storage
+                .get(crate::db::LARGE_VALUE_METADATA_CF.to_owned(), key.clone())
+                .await
+                .map_err(|error| ChunkStorageError::Backend(error.to_string()))?
+                .ok_or_else(|| {
+                    ChunkStorageError::Backend(
+                        "conditional chunk insert did not leave a winner".to_owned(),
+                    )
+                })?;
+            if Self::is_installed_candidate(&existing, &candidate, receipt) {
+                Ok(None)
+            } else {
+                Self::decode(existing).map(Some)
+            }
         })
     }
 
@@ -502,12 +557,19 @@ impl ChunkKvStorage for OrderedChunkStorage {
             else {
                 return Ok(());
             };
-            let (hash, bytes) = Self::decode(existing)?;
+            let (hash, bytes) = Self::decode(existing.clone())?;
             if hash != expected_hash || object_hash(&bytes) != expected_hash {
                 return Err(ChunkStorageError::Integrity);
             }
+            // The read above is only an integrity proof. The durable compare
+            // and delete must happen as one delta so a newer mapping installed
+            // after that read survives this orphan cleanup.
             storage
-                .delete(crate::db::LARGE_VALUE_METADATA_CF.to_owned(), key)
+                .write_many(vec![OwnedWriteOperation::Delta {
+                    cf: crate::db::LARGE_VALUE_METADATA_CF.to_owned(),
+                    key,
+                    delta: StorageDelta::delete_if_value_matches(existing),
+                }])
                 .await
                 .map_err(|error| ChunkStorageError::Backend(error.to_string()))
         })
@@ -1369,6 +1431,15 @@ mod tests {
 
     use super::*;
 
+    struct StaticResolver(Bytes);
+
+    impl MissingChunkResolver for StaticResolver {
+        fn resolve(&self, _request: ChunkRequest) -> ChunkFuture<'_, Result<Bytes, ChunkError>> {
+            let bytes = self.0.clone();
+            Box::pin(async move { Ok(bytes) })
+        }
+    }
+
     struct CountingProvider {
         calls: Cell<usize>,
         bytes: Bytes,
@@ -1914,5 +1985,217 @@ mod tests {
             block_on(managed.get(locator, ContentHash([7; 32]))),
             Err(ChunkStorageError::Integrity)
         );
+    }
+
+    #[test]
+    fn ordered_managed_storage_equal_restaging_is_not_new_storage() {
+        // This is intentionally an internal receipt: staging/accounting is
+        // below public row APIs, and it needs the durable ordered chunk plane.
+        let storage = crate::storage::MemoryStorage::new(&[crate::db::LARGE_VALUE_METADATA_CF]);
+        let layout = Rc::new(
+            block_on(LayoutStorage::new(
+                storage,
+                crate::storage::StorageLayout::Identity,
+            ))
+            .unwrap(),
+        );
+        let backend = Rc::new(OrderedChunkStorage::new(Rc::downgrade(&layout)));
+        let managed = ManagedChunkStorage::new(backend);
+        let bytes = Bytes::from_static(b"ordered managed immutable bytes");
+        let hash = object_hash(&bytes);
+        let locator = Locator::from_seed(b"ordered-managed-opaque-locator");
+        let chunk = StagedChunk {
+            node_ref: crate::large_values::NodeRef {
+                object_hash: hash,
+                locator,
+            },
+            encoded: bytes.to_vec(),
+        };
+
+        let installed = block_on(managed.stage(vec![chunk.clone()])).unwrap();
+        let restaged = block_on(managed.stage(vec![chunk])).unwrap();
+
+        assert!(installed.encoded_bytes > 0);
+        assert_eq!(restaged, Default::default());
+    }
+
+    #[test]
+    fn ordered_chunk_install_receipt_requires_the_exact_candidate_envelope() {
+        let receipt = [0x5a; 16];
+        let candidate_bytes = b"candidate authenticated bytes";
+        let candidate = OrderedChunkStorage::encode_with_install_receipt(
+            object_hash(candidate_bytes),
+            candidate_bytes,
+            receipt,
+        );
+        let mismatched_bytes = b"different authenticated bytes";
+        let mismatched = OrderedChunkStorage::encode_with_install_receipt(
+            object_hash(mismatched_bytes),
+            mismatched_bytes,
+            receipt,
+        );
+
+        assert!(OrderedChunkStorage::is_installed_candidate(
+            &candidate, &candidate, receipt
+        ));
+        assert!(
+            !OrderedChunkStorage::is_installed_candidate(&mismatched, &candidate, receipt),
+            "a receipt collision or corrupted payload must not claim this call installed it"
+        );
+    }
+
+    #[test]
+    fn ordered_chunk_storage_classifies_legacy_equal_mapping_as_existing() {
+        // This is intentionally an internal compatibility receipt: the
+        // legacy on-disk chunk representation predates the install receipt.
+        let storage = crate::storage::MemoryStorage::new(&[crate::db::LARGE_VALUE_METADATA_CF]);
+        let layout = Rc::new(
+            block_on(LayoutStorage::new(
+                storage,
+                crate::storage::StorageLayout::Identity,
+            ))
+            .unwrap(),
+        );
+        let backend = OrderedChunkStorage::new(Rc::downgrade(&layout));
+        let bytes = Bytes::from_static(b"legacy immutable chunk bytes");
+        let hash = object_hash(&bytes);
+        let locator = Locator::from_seed(b"legacy-ordered-chunk-locator");
+        block_on(layout.set(
+            crate::db::LARGE_VALUE_METADATA_CF.to_owned(),
+            OrderedChunkStorage::key(locator.as_bytes()),
+            OrderedChunkStorage::encode(hash, &bytes),
+        ))
+        .unwrap();
+
+        assert_eq!(
+            block_on(backend.put_if_absent(locator, hash, bytes.clone())).unwrap(),
+            Some((hash, bytes))
+        );
+    }
+
+    #[test]
+    fn concurrent_remote_resolution_never_overwrites_an_immutable_locator() {
+        // This is intentionally an internal receipt: the race belongs to the
+        // Groove-owned blob plane below Database's row APIs. It nevertheless
+        // exercises the public-to-Jazz StorageChunkProvider remote-resolution
+        // path, which is where two independent requests meet that plane.
+        let (inner, _control) =
+            crate::storage::TestStorage::controlled(&[crate::db::LARGE_VALUE_METADATA_CF]);
+        let layout = Rc::new(
+            block_on(LayoutStorage::new(
+                inner,
+                crate::storage::StorageLayout::Identity,
+            ))
+            .unwrap(),
+        );
+        let backend = Rc::new(OrderedChunkStorage::new(Rc::downgrade(&layout)));
+        let managed = Rc::new(ManagedChunkStorage::new(backend.clone()));
+        let locator = Locator::from_seed(b"one-locator-two-remote-winners");
+        let first = Bytes::from_static(b"first authenticated remote chunk");
+        let second = Bytes::from_static(b"second authenticated remote chunk");
+        let first_request = ChunkRequest {
+            object_hash: object_hash(&first).0,
+            locator,
+        };
+        let second_request = ChunkRequest {
+            object_hash: object_hash(&second).0,
+            locator,
+        };
+        let first_provider = StorageChunkProvider::with_resolver(
+            managed.clone(),
+            Rc::new(StaticResolver(first.clone())),
+        );
+        let second_provider =
+            StorageChunkProvider::with_resolver(managed, Rc::new(StaticResolver(second.clone())));
+
+        // TestStorage makes the two initial absence reads, and then each
+        // conditional write, yield. The old get-then-Set implementation let
+        // both requests observe absence and overwrote the first bytes here.
+        let (first_result, second_result) = block_on(async {
+            futures::join!(
+                first_provider.get(first_request.clone()),
+                second_provider.get(second_request.clone()),
+            )
+        });
+
+        let winner = match (&first_result, &second_result) {
+            (Ok(bytes), Err(ChunkError::Backend(message))) => {
+                assert!(message.contains("opaque locator already names different content"));
+                bytes.clone()
+            }
+            (Err(ChunkError::Backend(message)), Ok(bytes)) => {
+                assert!(message.contains("opaque locator already names different content"));
+                bytes.clone()
+            }
+            other => panic!("exactly one remote resolution must win: {other:?}"),
+        };
+        let (stored_hash, stored_bytes) =
+            block_on(ChunkKvStorage::get_exact(backend.as_ref(), locator))
+                .unwrap()
+                .expect("the winner must remain durable");
+        assert_eq!(stored_bytes, winner);
+        assert_eq!(stored_hash, object_hash(&winner));
+    }
+
+    #[test]
+    fn stale_chunk_delete_cannot_remove_a_newer_durable_mapping() {
+        block_on(async {
+            let (inner, control) =
+                crate::storage::TestStorage::controlled(&[crate::db::LARGE_VALUE_METADATA_CF]);
+            let layout = Rc::new(
+                LayoutStorage::new(inner, crate::storage::StorageLayout::Identity)
+                    .await
+                    .unwrap(),
+            );
+            let backend = OrderedChunkStorage::new(Rc::downgrade(&layout));
+            let locator = Locator::from_seed(b"conditional-chunk-delete-race");
+            let old_bytes = Bytes::from_static(b"old authenticated chunk");
+            let old_hash = object_hash(&old_bytes);
+            let new_bytes = Bytes::from_static(b"new authenticated chunk");
+            let new_hash = object_hash(&new_bytes);
+
+            assert_eq!(
+                backend
+                    .put_if_absent(locator, old_hash, old_bytes.clone())
+                    .await
+                    .unwrap(),
+                None
+            );
+            control.take_observed();
+
+            // Freeze the stale cleanup after its integrity read but before its
+            // durable compare-and-delete. Another completed reclamation frees
+            // the old locator and a new owner reuses it before this stale
+            // cleanup reaches the durable compare.
+            control.pause_on(crate::storage::TestStorageOperation::WriteMany);
+            let mut delete = Box::pin(backend.delete_exact(locator, old_hash));
+            assert!(futures::poll!(delete.as_mut()).is_pending());
+            assert_eq!(
+                control.take_observed(),
+                vec![crate::storage::TestStorageOperation::WriteMany]
+            );
+
+            layout
+                .delete(
+                    crate::db::LARGE_VALUE_METADATA_CF.to_owned(),
+                    OrderedChunkStorage::key(locator.as_bytes()),
+                )
+                .await
+                .unwrap();
+            control.resume_operation(crate::storage::TestStorageOperation::WriteMany);
+            assert_eq!(
+                backend
+                    .put_if_absent(locator, new_hash, new_bytes.clone())
+                    .await
+                    .unwrap(),
+                None
+            );
+            delete.await.unwrap();
+
+            assert_eq!(
+                backend.get_exact(locator).await.unwrap(),
+                Some((new_hash, new_bytes))
+            );
+        });
     }
 }

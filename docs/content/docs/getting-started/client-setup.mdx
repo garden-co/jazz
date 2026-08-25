@@ -296,6 +296,7 @@ Use `runtimeSources` when Jazz can't automatically find its internal assets. Thi
 | `runtimeSources.baseUrl`         | Jazz runtime assets are served from a shared base path like `/assets/jazz/` |
 | `runtimeSources.wasmUrl`         | The Wasm file has an explicit public URL                                    |
 | `runtimeSources.brokerWorkerUrl` | The browser broker worker has an explicit public URL                        |
+| `runtimeSources.wasmVersion`     | An immutable deployed build version for configured browser asset URLs       |
 | `runtimeSources.wasmSource`      | Your runtime gives you Wasm bytes directly                                  |
 | `runtimeSources.wasmModule`      | Your runtime gives you a precompiled `WebAssembly.Module`                   |
 
@@ -346,6 +347,12 @@ The config is the same across frameworks. Plain TypeScript uses `createDb(...)` 
 
 Use `baseUrl` when both assets live together under one public directory. Use explicit `wasmUrl` /
 `brokerWorkerUrl` when your app serves them from different places.
+
+For browser URL overrides, also set `wasmVersion` to an immutable value that changes whenever
+either the Wasm or broker-worker build changes (for example, your deployment's asset manifest
+version). Jazz adds that value to both asset URLs, so a rolling deployment cannot reuse a
+long-lived SharedWorker with bytes fetched from an older build at the same URL. Your asset host
+must serve these URLs with query strings intact.
 
 ### Edge-style Wasm setup
 
