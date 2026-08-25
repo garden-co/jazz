@@ -14,12 +14,12 @@ use crate::protocol::SyncMessage;
 use crate::protocol_limits::{validate_logical_message_len, validate_wire_frame_len};
 
 /// Current Jazz wire protocol version.
-/// Version 12 changes postcard discriminants for large-value-bearing semantic
-/// payloads and carries author identities as exact canonical `[iss,sub]` JSON
-/// strings. This is an intentional breaking baseline: version 11 peers could
-/// decode changed ordinals incorrectly and UUID authors have no compatibility
-/// decoder, so negotiation rejects them.
-pub const WIRE_PROTOCOL_VERSION: u16 = 12;
+/// Version 14 combines the v13 Groove canonical large-scalar descriptor and
+/// canonical `[iss,sub]` author encoding with Unix-millisecond public row
+/// provenance. The packed HLC remains internal ordering state and is never
+/// protocol data. This is an intentional breaking baseline: a v13 peer would
+/// interpret provenance payloads differently, so negotiation rejects it.
+pub const WIRE_PROTOCOL_VERSION: u16 = 14;
 
 /// No optional features.
 pub const FEATURE_NONE: WireFeatures = 0;
@@ -1208,9 +1208,9 @@ mod tests {
                             RowUuid::from_bytes([index as u8; 16]),
                             Vec::new(),
                             author,
-                            TxTime(1_000 + index as u64),
+                            1_000 + index as u64,
                             author,
-                            TxTime(1_000 + index as u64),
+                            1_000 + index as u64,
                             &BTreeMap::from([("title".to_owned(), format!("todo-{index}"))]),
                             None,
                         )
@@ -1581,11 +1581,11 @@ mod tests {
     }
 
     #[test]
-    fn wire_v12_rejects_v11_without_compatibility_negotiation() {
-        assert_eq!(WIRE_PROTOCOL_VERSION, 12);
+    fn wire_v14_rejects_v13_without_compatibility_negotiation() {
+        assert_eq!(WIRE_PROTOCOL_VERSION, 14);
         let remote = WireHello {
-            min_protocol_version: 11,
-            max_protocol_version: 11,
+            min_protocol_version: 13,
+            max_protocol_version: 13,
             features: FEATURE_SYNC_MESSAGE_PAYLOAD,
             role: WirePeerRole::Core,
             authority: None,
@@ -1604,24 +1604,24 @@ mod tests {
     }
 
     #[test]
-    fn large_value_wire_era_rejects_v11_peer_before_payload_decode() {
-        let v11_peer = WireHello {
-            min_protocol_version: 11,
-            max_protocol_version: 11,
+    fn wire_v14_rejects_v12_peer_before_payload_decode() {
+        let v12_peer = WireHello {
+            min_protocol_version: 12,
+            max_protocol_version: 12,
             features: current_wire_features(),
             role: WirePeerRole::Core,
             authority: None,
         };
 
         let error = negotiate_wire(
-            &v11_peer,
+            &v12_peer,
             WIRE_PROTOCOL_VERSION,
             WIRE_PROTOCOL_VERSION,
             current_wire_features(),
         )
-        .expect_err("v11 postcard ordinals must fail during handshake");
+        .expect_err("v12 encoding must fail during the v14 handshake");
 
-        assert_eq!(WIRE_PROTOCOL_VERSION, 12);
+        assert_eq!(WIRE_PROTOCOL_VERSION, 14);
         assert_eq!(error.code, WireErrorCode::UnsupportedProtocolVersion);
         assert_eq!(error.retry, WireRetry::Never);
     }

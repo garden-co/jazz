@@ -9,9 +9,9 @@ use thiserror::Error;
 use crate::chunks::ChunkRequest;
 use crate::ivm::runtime::IvmRuntimeError;
 use crate::ivm::runtime::evaluation_session::EvaluationInputs;
-use crate::records::{RecordDescriptor, Value};
+use crate::records::{EnumCase, EnumSchema, EnumValue, RecordDescriptor, Value, ValueType};
 
-pub const FORMAT_VERSION: u8 = 1;
+pub const FORMAT_VERSION: u8 = 2;
 /// Logical scalar size above which ordinary writes use indirect storage.
 pub const INLINE_VALUE_MAX_BYTES: usize = 64 * 1024;
 pub const LEAF_MIN_BYTES: usize = 16 * 1024;
@@ -100,6 +100,16 @@ pub enum LargeValueKind {
     Json,
 }
 
+/// Constructs the descriptor-only physical scalar type used by Jazz's storage
+/// lowering. The resulting type is intentionally impossible to name or
+/// construct through the public `records::ValueType` API.
+///
+/// This is an engine boundary rather than a schema feature: public schemas
+/// must continue to use their logical `String`/`Bytes` types.
+pub fn physical_storage_value_type(kind: LargeValueKind) -> ValueType {
+    ValueType::stored_scalar(kind)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeRef {
     pub object_hash: ContentHash,
@@ -124,10 +134,12 @@ pub struct BranchChild {
 pub enum ChunkNode {
     Leaf {
         format: u8,
+        kind: LargeValueKind,
         bytes: Vec<u8>,
     },
     Branch {
         format: u8,
+        kind: LargeValueKind,
         children: Vec<BranchChild>,
     },
 }
@@ -652,25 +664,24 @@ where
 
     fn emit_leaf(&mut self, bytes: Vec<u8>) -> Result<(), Error> {
         let metrics = metrics(self.kind, &bytes)?;
-        let structural_hash = hash_domain(b"groove-large-leaf-logical-v1", &bytes);
-        let node = self.stage_node_to(
-            ChunkNode::Leaf {
-                format: FORMAT_VERSION,
-                bytes,
-            },
-            metrics,
-            structural_hash,
-        )?;
+        let chunk_node = ChunkNode::Leaf {
+            format: FORMAT_VERSION,
+            kind: self.kind,
+            bytes,
+        };
+        let node = self.stage_node_to(chunk_node, metrics)?;
         self.add_node(0, node)
     }
 
-    fn stage_node_to(
-        &mut self,
-        node: ChunkNode,
-        metrics: NodeMetrics,
-        structural_hash: ContentHash,
-    ) -> Result<BuiltNode, Error> {
-        let encoded = postcard::to_allocvec(&node).map_err(|_| Error::MalformedNode)?;
+    fn stage_node_to(&mut self, node: ChunkNode, metrics: NodeMetrics) -> Result<BuiltNode, Error> {
+        if node_kind(&node) != self.kind {
+            return Err(Error::DescriptorMismatch);
+        }
+        if node_metrics(self.kind, &node)? != metrics {
+            return Err(Error::DescriptorMismatch);
+        }
+        let structural_hash = node_logical_hash(&node);
+        let encoded = encode_node(&node)?;
         let object_hash = object_hash(&encoded);
         let node_ref = NodeRef {
             object_hash,
@@ -706,7 +717,9 @@ where
             }
             let (count, boundary) = {
                 let state = &mut self.levels[level];
-                for byte in node.structural_hash.0 {
+                for byte in
+                    grouping_hash_from_logical(FORMAT_VERSION, self.kind, node.structural_hash).0
+                {
                     state.hash = state.hash.wrapping_shl(1).wrapping_add(gear(byte));
                 }
                 state.pending.push(node);
@@ -738,31 +751,20 @@ where
         let mut group_metrics = group.iter().map(|child| child.metrics);
         let first = group_metrics.next().ok_or(Error::MalformedNode)?;
         let metrics = group_metrics.try_fold(first, add_metrics)?;
-        let mut logical = Vec::with_capacity(group.len() * 48);
         let children = group
             .iter()
-            .map(|child| {
-                logical.extend_from_slice(&child.structural_hash.0);
-                logical.extend_from_slice(&child.metrics.byte_length.to_le_bytes());
-                logical.extend_from_slice(
-                    &child.metrics.utf16_length.unwrap_or(u64::MAX).to_le_bytes(),
-                );
-                BranchChild {
-                    node_ref: child.node_ref.clone(),
-                    metrics: child.metrics,
-                    logical_hash: child.structural_hash,
-                }
+            .map(|child| BranchChild {
+                node_ref: child.node_ref.clone(),
+                metrics: child.metrics,
+                logical_hash: child.structural_hash,
             })
             .collect();
-        let structural_hash = hash_domain(b"groove-large-branch-logical-v1", &logical);
-        self.stage_node_to(
-            ChunkNode::Branch {
-                format: FORMAT_VERSION,
-                children,
-            },
-            metrics,
-            structural_hash,
-        )
+        let chunk_node = ChunkNode::Branch {
+            format: FORMAT_VERSION,
+            kind: self.kind,
+            children,
+        };
+        self.stage_node_to(chunk_node, metrics)
     }
 
     fn finish(mut self) -> Result<(LargeValueRef, StreamingPrepareStats), Error> {
@@ -905,15 +907,18 @@ pub enum TailEditOutcome {
 }
 
 /// Physical arm stored inside a logical bytes/string/JSON cell.
+///
+/// This is deliberately an engine-owned *normal Groove enum*: `Primitive`
+/// carries the declared primitive in a raw backing field and `Chunked` carries
+/// its descriptor and tail as ordinary records, arrays, and primitives. The
+/// raw backing fields terminate the envelope recursion; they are not public
+/// schema or operator types. Their shape is parameterized by the immutable
+/// declared column kind. Independently addressed tree nodes authenticate that
+/// kind themselves; the containing scalar does not duplicate it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoredScalar {
-    Inline(Vec<u8>),
-    Large(LargeValueRef),
-}
-
-pub(crate) enum BorrowedStoredScalar<'a> {
-    Inline(&'a [u8]),
-    Large(LargeValueRef),
+    Primitive(Vec<u8>),
+    Chunked(LargeValueRef),
 }
 
 /// Append bytes without reading the immutable base tree. The descriptor's
@@ -1166,6 +1171,7 @@ pub(crate) fn consolidate_appends_attempt(
         let bytes = logical_suffix[range].to_vec();
         let node = ChunkNode::Leaf {
             format: FORMAT_VERSION,
+            kind: value.kind,
             bytes,
         };
         replacement.push(stage_node_reusing(
@@ -1190,10 +1196,11 @@ pub(crate) fn consolidate_appends_attempt(
             .collect::<Vec<_>>();
         rebuilt.append(&mut replacement);
         replacement = Vec::new();
-        for range in branch_ranges(&rebuilt) {
+        for range in branch_ranges(value.kind, &rebuilt) {
             let children = rebuilt[range].to_vec();
             let node = ChunkNode::Branch {
                 format: FORMAT_VERSION,
+                kind: value.kind,
                 children: children
                     .iter()
                     .map(|child| BranchChild {
@@ -1220,10 +1227,11 @@ pub(crate) fn consolidate_appends_attempt(
             return Err(Error::InvalidTree.into());
         }
         let mut next = Vec::new();
-        for range in branch_ranges(&replacement) {
+        for range in branch_ranges(value.kind, &replacement) {
             let children = replacement[range].to_vec();
             let node = ChunkNode::Branch {
                 format: FORMAT_VERSION,
+                kind: value.kind,
                 children: children
                     .iter()
                     .map(|child| BranchChild {
@@ -1361,6 +1369,7 @@ pub(crate) fn consolidate_single_edit_attempt(
             value.kind,
             ChunkNode::Leaf {
                 format: FORMAT_VERSION,
+                kind: value.kind,
                 bytes: segment[range].to_vec(),
             },
             &existing,
@@ -1799,15 +1808,14 @@ fn prepare_with_locator(
     for range in leaf_ranges(kind, logical_bytes)? {
         let bytes = logical_bytes[range].to_vec();
         let metrics = metrics(kind, &bytes)?;
-        let structural_hash = hash_domain(b"groove-large-leaf-logical-v1", &bytes);
         let node = ChunkNode::Leaf {
             format: FORMAT_VERSION,
+            kind,
             bytes,
         };
         level.push(stage_node(
             node,
             metrics,
-            structural_hash,
             &mut locator_for,
             &mut staged_chunks,
         )?);
@@ -1820,23 +1828,14 @@ fn prepare_with_locator(
             return Err(Error::MalformedNode);
         }
         let mut next = Vec::new();
-        for range in branch_ranges(&level) {
+        for range in branch_ranges(kind, &level) {
             let group = &level[range];
             let mut group_metrics = group.iter().map(|child| child.metrics);
             let first_metrics = group_metrics.next().ok_or(Error::MalformedNode)?;
             let metrics = group_metrics.try_fold(first_metrics, add_metrics)?;
-            let mut logical_descriptor = Vec::with_capacity(group.len() * 48);
-            for child in group {
-                logical_descriptor.extend_from_slice(&child.structural_hash.0);
-                logical_descriptor.extend_from_slice(&child.metrics.byte_length.to_le_bytes());
-                logical_descriptor.extend_from_slice(
-                    &child.metrics.utf16_length.unwrap_or(u64::MAX).to_le_bytes(),
-                );
-            }
-            let structural_hash =
-                hash_domain(b"groove-large-branch-logical-v1", &logical_descriptor);
             let node = ChunkNode::Branch {
                 format: FORMAT_VERSION,
+                kind,
                 children: group
                     .iter()
                     .map(|child| BranchChild {
@@ -1849,7 +1848,6 @@ fn prepare_with_locator(
             next.push(stage_node(
                 node,
                 metrics,
-                structural_hash,
                 &mut locator_for,
                 &mut staged_chunks,
             )?);
@@ -1894,54 +1892,335 @@ pub fn prepare_reusing(
     })
 }
 
-pub fn encode_stored_scalar(value: &StoredScalar) -> Result<Vec<u8>, Error> {
-    match value {
-        StoredScalar::Inline(bytes) => {
-            let mut encoded = Vec::with_capacity(bytes.len() + 1);
-            encoded.push(0);
-            encoded.extend_from_slice(bytes);
-            Ok(encoded)
+/// Encode the internal stored-scalar enum using Groove's ordinary enum and
+/// record codecs. The containing schema supplies the declared kind, including
+/// the backing primitive type and the expected kind of every referenced node.
+pub fn encode_stored_scalar(kind: LargeValueKind, value: &StoredScalar) -> Result<Vec<u8>, Error> {
+    let schema = stored_scalar_schema(kind);
+    let enum_value = match value {
+        StoredScalar::Primitive(bytes) => {
+            validate_logical(kind, bytes)?;
+            EnumValue::create(
+                2,
+                schema.case(2).map_err(|_| Error::MalformedScalar)?.payload,
+                &[primitive_value(kind, bytes.clone())],
+            )
+            .map_err(|_| Error::MalformedScalar)?
         }
-        StoredScalar::Large(value) => {
+        StoredScalar::Chunked(value) => {
+            if value.kind != kind {
+                return Err(Error::DescriptorMismatch);
+            }
             validate_descriptor(value)?;
-            let mut encoded = vec![1];
-            encoded.extend(postcard::to_allocvec(value).map_err(|_| Error::MalformedScalar)?);
-            Ok(encoded)
+            EnumValue::create(
+                3,
+                schema.case(3).map_err(|_| Error::MalformedScalar)?.payload,
+                &chunked_values(value),
+            )
+            .map_err(|_| Error::MalformedScalar)?
         }
+    };
+    crate::records::encode_single_field_value(
+        &Value::Enum(enum_value),
+        &ValueType::Enum(Box::new(schema)),
+    )
+    .map_err(|_| Error::MalformedScalar)
+}
+
+/// Decode and canonically validate the internal stored-scalar enum. The
+/// declared kind is supplied by the containing schema. Primitive payloads are
+/// interpreted directly through that schema; indirect values authenticate the
+/// expected kind when their content-addressed nodes are decoded.
+pub fn decode_stored_scalar(kind: LargeValueKind, encoded: &[u8]) -> Result<StoredScalar, Error> {
+    let schema = stored_scalar_schema(kind);
+    let decoded = crate::records::decode_single_field_value(
+        encoded,
+        &ValueType::Enum(Box::new(schema.clone())),
+    )
+    .map_err(|error| match error {
+        crate::records::Error::InvalidUtf8 => Error::InvalidUtf8,
+        _ => Error::MalformedScalar,
+    })?;
+    let Value::Enum(value) = decoded else {
+        return Err(Error::MalformedScalar);
+    };
+    let canonical = crate::records::encode_single_field_value(
+        &Value::Enum(value.clone()),
+        &ValueType::Enum(Box::new(schema.clone())),
+    )
+    .map_err(|_| Error::MalformedScalar)?;
+    if canonical != encoded {
+        return Err(Error::MalformedScalar);
+    }
+    let values = value
+        .record()
+        .to_values()
+        .map_err(|_| Error::MalformedScalar)?;
+    match value.tag() {
+        2 => {
+            let [value] = values.as_slice() else {
+                return Err(Error::MalformedScalar);
+            };
+            primitive_bytes(kind, value).map(StoredScalar::Primitive)
+        }
+        3 => decode_chunked_values(kind, &values).map(StoredScalar::Chunked),
+        _ => Err(Error::MalformedScalar),
     }
 }
 
-pub fn decode_stored_scalar(encoded: &[u8]) -> Result<StoredScalar, Error> {
-    match decode_borrowed_stored_scalar(encoded)? {
-        BorrowedStoredScalar::Inline(bytes) => Ok(StoredScalar::Inline(bytes.to_vec())),
-        BorrowedStoredScalar::Large(value) => Ok(StoredScalar::Large(value)),
-    }
-}
-
-pub(crate) fn decode_borrowed_stored_scalar(
-    encoded: &[u8],
-) -> Result<BorrowedStoredScalar<'_>, Error> {
-    let (&tag, payload) = encoded.split_first().ok_or(Error::MalformedScalar)?;
+pub fn inline_scalar_bytes(kind: LargeValueKind, encoded: &[u8]) -> Result<&[u8], Error> {
+    let schema = stored_scalar_schema(kind);
+    let (tag, payload) =
+        crate::records::split_variant_record(encoded).map_err(|_| Error::MalformedScalar)?;
     match tag {
-        0 => Ok(BorrowedStoredScalar::Inline(payload)),
-        1 => {
-            let value: LargeValueRef =
-                postcard::from_bytes(payload).map_err(|_| Error::MalformedScalar)?;
-            validate_descriptor(&value)?;
-            if postcard::to_allocvec(&value).map_err(|_| Error::MalformedScalar)? != payload {
+        2 => {
+            let descriptor = schema.case(2).map_err(|_| Error::MalformedScalar)?.payload;
+            let values = descriptor
+                .bind(payload)
+                .to_values()
+                .map_err(|_| Error::MalformedScalar)?;
+            let [value] = values.as_slice() else {
+                return Err(Error::MalformedScalar);
+            };
+            if primitive_bytes(kind, value).is_err()
+                || descriptor
+                    .create(&values)
+                    .map_err(|_| Error::MalformedScalar)?
+                    != payload
+            {
                 return Err(Error::MalformedScalar);
             }
-            Ok(BorrowedStoredScalar::Large(value))
+            let span = descriptor
+                .field_span(payload, 0)
+                .map_err(|_| Error::MalformedScalar)?;
+            Ok(&payload[span])
+        }
+        3 => {
+            // Validate the complete descriptor before reporting that materialization is needed.
+            let _ = decode_stored_scalar(kind, encoded)?;
+            Err(Error::RequiresEvaluation)
         }
         _ => Err(Error::MalformedScalar),
     }
 }
 
-pub fn inline_scalar_bytes(encoded: &[u8]) -> Result<&[u8], Error> {
-    let (&tag, payload) = encoded.split_first().ok_or(Error::MalformedScalar)?;
+fn stored_scalar_schema(kind: LargeValueKind) -> EnumSchema {
+    let primitive = RecordDescriptor::new([(
+        "value",
+        match kind {
+            LargeValueKind::Bytes => ValueType::raw_bytes(),
+            LargeValueKind::String | LargeValueKind::Json => ValueType::raw_string(),
+        },
+    )]);
+    let root = RecordDescriptor::new([
+        ("object_hash", ValueType::raw_bytes()),
+        ("locator", ValueType::raw_bytes()),
+    ]);
+    let edit = RecordDescriptor::new([
+        ("offset", ValueType::U64),
+        ("delete_length", ValueType::U64),
+        ("insert_bytes", ValueType::raw_bytes()),
+        ("utf16_offset", ValueType::U64),
+        ("delete_utf16_length", ValueType::U64),
+        ("insert_utf16_length", ValueType::U64),
+    ]);
+    let chunked = RecordDescriptor::new([
+        ("format_version", ValueType::U8),
+        ("logical_hash", ValueType::raw_bytes()),
+        ("root", ValueType::Record(Box::new(root))),
+        ("byte_length", ValueType::U64),
+        (
+            "utf16_length",
+            ValueType::Nullable(Box::new(ValueType::U64)),
+        ),
+        (
+            "edit_tail",
+            ValueType::Array(Box::new(ValueType::Record(Box::new(edit)))),
+        ),
+    ]);
+    EnumSchema::new(
+        match kind {
+            LargeValueKind::Bytes => "groove.internal.stored_scalar.bytes",
+            LargeValueKind::String => "groove.internal.stored_scalar.string",
+            LargeValueKind::Json => "groove.internal.stored_scalar.json",
+        },
+        [
+            // Tags 0 and 1 belonged to the pre-v13 private scalar codec. Keep
+            // them reserved and reject them at the scalar boundary so no
+            // legacy byte sequence can be accepted with a different meaning. In particular, legacy
+            // inline bytes were `[0] + payload`, which can otherwise collide
+            // exactly with a length-prefixed canonical record.
+            EnumCase::new(
+                "ReservedLegacyPrimitive",
+                RecordDescriptor::new(Vec::<(String, ValueType)>::new()),
+            ),
+            EnumCase::new(
+                "ReservedLegacyChunked",
+                RecordDescriptor::new(Vec::<(String, ValueType)>::new()),
+            ),
+            EnumCase::new("Primitive", primitive),
+            EnumCase::new("Chunked", chunked),
+        ],
+    )
+    .expect("fixed internal stored-scalar enum schema is valid")
+}
+
+fn primitive_value(kind: LargeValueKind, bytes: Vec<u8>) -> Value {
+    match kind {
+        LargeValueKind::Bytes => Value::Bytes(bytes),
+        LargeValueKind::String | LargeValueKind::Json => {
+            Value::String(String::from_utf8(bytes).expect("validated logical text/JSON primitive"))
+        }
+    }
+}
+
+fn primitive_bytes(kind: LargeValueKind, value: &Value) -> Result<Vec<u8>, Error> {
+    let bytes = match (kind, value) {
+        (LargeValueKind::Bytes, Value::Bytes(bytes)) => Ok(bytes.clone()),
+        (LargeValueKind::String | LargeValueKind::Json, Value::String(value)) => {
+            Ok(value.as_bytes().to_vec())
+        }
+        _ => Err(Error::MalformedScalar),
+    }?;
+    validate_logical(kind, &bytes)?;
+    Ok(bytes)
+}
+
+fn raw_bytes(value: &Value) -> Result<[u8; 32], Error> {
+    let Value::Bytes(value) = value else {
+        return Err(Error::MalformedScalar);
+    };
+    value
+        .as_slice()
+        .try_into()
+        .map_err(|_| Error::MalformedScalar)
+}
+
+fn chunked_values(value: &LargeValueRef) -> Vec<Value> {
+    let root = RecordDescriptor::new([
+        ("object_hash", ValueType::raw_bytes()),
+        ("locator", ValueType::raw_bytes()),
+    ]);
+    let edit = RecordDescriptor::new([
+        ("offset", ValueType::U64),
+        ("delete_length", ValueType::U64),
+        ("insert_bytes", ValueType::raw_bytes()),
+        ("utf16_offset", ValueType::U64),
+        ("delete_utf16_length", ValueType::U64),
+        ("insert_utf16_length", ValueType::U64),
+    ]);
+    vec![
+        Value::U8(value.format_version),
+        Value::Bytes(value.logical_hash.0.to_vec()),
+        Value::Record(crate::records::OwnedRecord::new(
+            root.create(&[
+                Value::Bytes(value.root.object_hash.0.to_vec()),
+                Value::Bytes(value.root.locator.0.to_vec()),
+            ])
+            .expect("internal root record"),
+            root,
+        )),
+        Value::U64(value.byte_length),
+        Value::Nullable(value.utf16_length.map(|value| Box::new(Value::U64(value)))),
+        Value::Array(
+            value
+                .edit_tail
+                .iter()
+                .map(|edit_value| {
+                    Value::Record(crate::records::OwnedRecord::new(
+                        edit.create(&[
+                            Value::U64(edit_value.offset),
+                            Value::U64(edit_value.delete_length),
+                            Value::Bytes(edit_value.insert_bytes.clone()),
+                            Value::U64(edit_value.utf16_offset),
+                            Value::U64(edit_value.delete_utf16_length),
+                            Value::U64(edit_value.insert_utf16_length),
+                        ])
+                        .expect("internal edit record"),
+                        edit,
+                    ))
+                })
+                .collect(),
+        ),
+    ]
+}
+
+fn decode_chunked_values(kind: LargeValueKind, values: &[Value]) -> Result<LargeValueRef, Error> {
+    let [
+        Value::U8(format_version),
+        logical_hash,
+        Value::Record(root),
+        Value::U64(byte_length),
+        Value::Nullable(utf16_length),
+        Value::Array(edits),
+    ] = values
+    else {
+        return Err(Error::MalformedScalar);
+    };
+    let root_values = root.to_values().map_err(|_| Error::MalformedScalar)?;
+    let [object_hash, locator] = root_values.as_slice() else {
+        return Err(Error::MalformedScalar);
+    };
+    let utf16_length = match utf16_length.as_deref() {
+        None => None,
+        Some(Value::U64(value)) => Some(*value),
+        _ => return Err(Error::MalformedScalar),
+    };
+    let mut edit_tail = Vec::with_capacity(edits.len());
+    for value in edits {
+        let Value::Record(edit) = value else {
+            return Err(Error::MalformedScalar);
+        };
+        let fields = edit.to_values().map_err(|_| Error::MalformedScalar)?;
+        let [
+            Value::U64(offset),
+            Value::U64(delete_length),
+            Value::Bytes(insert_bytes),
+            Value::U64(utf16_offset),
+            Value::U64(delete_utf16_length),
+            Value::U64(insert_utf16_length),
+        ] = fields.as_slice()
+        else {
+            return Err(Error::MalformedScalar);
+        };
+        edit_tail.push(ReplaceEdit {
+            offset: *offset,
+            delete_length: *delete_length,
+            insert_bytes: insert_bytes.clone(),
+            utf16_offset: *utf16_offset,
+            delete_utf16_length: *delete_utf16_length,
+            insert_utf16_length: *insert_utf16_length,
+        });
+    }
+    let value = LargeValueRef {
+        kind,
+        format_version: *format_version,
+        logical_hash: ContentHash(raw_bytes(logical_hash)?),
+        root: NodeRef {
+            object_hash: ContentHash(raw_bytes(object_hash)?),
+            locator: Locator(raw_bytes(locator)?),
+        },
+        byte_length: *byte_length,
+        utf16_length,
+        edit_tail,
+    };
+    validate_descriptor(&value)?;
+    Ok(value)
+}
+
+fn large_value_kind_tag(kind: LargeValueKind) -> u8 {
+    match kind {
+        LargeValueKind::Bytes => 0,
+        LargeValueKind::String => 1,
+        LargeValueKind::Json => 2,
+    }
+}
+
+fn large_value_kind_from_tag(tag: u8) -> Result<LargeValueKind, Error> {
     match tag {
-        0 => Ok(payload),
-        1 => Err(Error::RequiresEvaluation),
+        0 => Ok(LargeValueKind::Bytes),
+        1 => Ok(LargeValueKind::String),
+        2 => Ok(LargeValueKind::Json),
         _ => Err(Error::MalformedScalar),
     }
 }
@@ -2029,14 +2308,71 @@ fn validate_descriptor_shape(value: &LargeValueRef) -> Result<(), Error> {
     }
 }
 
+/// Reconstruct and replay an untrusted descriptor's tail against its immutable
+/// base tree. Shape validation alone cannot prove that text UTF-16 coordinates
+/// describe the same byte splice, or that a JSON edit is a whole-value replace.
+pub(crate) fn validate_edit_tail_attempt(
+    value: &LargeValueRef,
+    inputs: &mut EvaluationInputs,
+) -> Result<(), IvmRuntimeError> {
+    validate_descriptor(value)?;
+    let mut replay = value.clone();
+    for edit in value.edit_tail.iter().rev() {
+        let inserted = u64::try_from(edit.insert_bytes.len()).map_err(|_| Error::MetricOverflow)?;
+        replay.byte_length = replay
+            .byte_length
+            .checked_sub(inserted)
+            .and_then(|length| length.checked_add(edit.delete_length))
+            .ok_or(Error::MetricOverflow)?;
+        replay.utf16_length = match replay.kind {
+            LargeValueKind::Bytes => None,
+            LargeValueKind::String | LargeValueKind::Json => Some(
+                replay
+                    .utf16_length
+                    .ok_or(Error::MalformedScalar)?
+                    .checked_sub(edit.insert_utf16_length)
+                    .and_then(|length| length.checked_add(edit.delete_utf16_length))
+                    .ok_or(Error::MetricOverflow)?,
+            ),
+        };
+    }
+    replay.edit_tail.clear();
+    validate_descriptor(&replay)?;
+
+    for expected in &value.edit_tail {
+        let outcome = replace_tail_with_bounds_attempt(
+            &replay,
+            expected.offset,
+            expected.delete_length,
+            expected.insert_bytes.clone(),
+            inputs,
+            false,
+        )?;
+        let next = match outcome {
+            TailEditOutcome::Updated(next) | TailEditOutcome::ConsolidationRequired(next) => next,
+        };
+        if next.edit_tail.last() != Some(expected) {
+            return Err(Error::DescriptorMismatch.into());
+        }
+        replay = next;
+    }
+    if &replay != value {
+        return Err(Error::DescriptorMismatch.into());
+    }
+    Ok(())
+}
+
 fn stage_node(
     node: ChunkNode,
     metrics: NodeMetrics,
-    structural_hash: ContentHash,
     locator_for: &mut impl FnMut(ContentHash) -> Locator,
     staged_chunks: &mut Vec<StagedChunk>,
 ) -> Result<BuiltNode, Error> {
-    let encoded = postcard::to_allocvec(&node).map_err(|_| Error::MalformedNode)?;
+    if node_metrics(node_kind(&node), &node)? != metrics {
+        return Err(Error::DescriptorMismatch);
+    }
+    let structural_hash = node_logical_hash(&node);
+    let encoded = encode_node(&node)?;
     let object_hash = object_hash(&encoded);
     let node_ref = NodeRef {
         object_hash,
@@ -2060,16 +2396,9 @@ fn stage_node_reusing(
     fresh_locator: &mut impl FnMut(ContentHash) -> Locator,
     staged_chunks: &mut Vec<StagedChunk>,
 ) -> Result<BuiltNode, Error> {
-    let metrics = match &node {
-        ChunkNode::Leaf { bytes, .. } => metrics(kind, bytes)?,
-        ChunkNode::Branch { children, .. } => {
-            let mut metrics = children.iter().map(|child| child.metrics);
-            let first = metrics.next().ok_or(Error::MalformedNode)?;
-            metrics.try_fold(first, add_metrics)?
-        }
-    };
+    let metrics = node_metrics(kind, &node)?;
     let structural_hash = node_logical_hash(&node);
-    let encoded = postcard::to_allocvec(&node).map_err(|_| Error::MalformedNode)?;
+    let encoded = encode_node(&node)?;
     let object_hash = object_hash(&encoded);
     if let Some(locator) = existing.get(&object_hash) {
         return Ok(BuiltNode {
@@ -2112,7 +2441,7 @@ fn stage_branch_level_reusing(
     staged_chunks: &mut Vec<StagedChunk>,
 ) -> Result<Vec<BuiltNode>, Error> {
     let mut next = Vec::new();
-    for range in branch_ranges(level) {
+    for range in branch_ranges(kind, level) {
         let children = level[range]
             .iter()
             .map(|child| BranchChild {
@@ -2125,6 +2454,7 @@ fn stage_branch_level_reusing(
             kind,
             ChunkNode::Branch {
                 format: FORMAT_VERSION,
+                kind,
                 children,
             },
             existing,
@@ -2266,21 +2596,255 @@ pub fn decode_node(
     if object_hash(encoded) != expected_hash {
         return Err(Error::ObjectHashMismatch);
     }
-    let node: ChunkNode = postcard::from_bytes(encoded).map_err(|_| Error::MalformedNode)?;
-    match &node {
-        ChunkNode::Leaf { format, bytes } => {
+    let node = decode_canonical_node(encoded)?;
+    let encoded_kind = match &node {
+        ChunkNode::Leaf { kind, .. } | ChunkNode::Branch { kind, .. } => *kind,
+    };
+    if encoded_kind != kind {
+        return Err(Error::DescriptorMismatch);
+    }
+    Ok(node)
+}
+
+pub(crate) fn decode_authenticated_node(
+    expected_hash: ContentHash,
+    encoded: &[u8],
+) -> Result<ChunkNode, Error> {
+    if object_hash(encoded) != expected_hash {
+        return Err(Error::ObjectHashMismatch);
+    }
+    decode_canonical_node(encoded)
+}
+
+/// Encode a chunk node using Groove's ordinary canonical enum/record algebra.
+pub fn encode_node(node: &ChunkNode) -> Result<Vec<u8>, Error> {
+    let schema = chunk_node_schema();
+    let value = match node {
+        ChunkNode::Leaf {
+            format,
+            kind,
+            bytes,
+        } => EnumValue::create(
+            0,
+            schema.case(0).map_err(|_| Error::MalformedNode)?.payload,
+            &[
+                Value::U8(*format),
+                Value::U8(large_value_kind_tag(*kind)),
+                Value::Bytes(bytes.clone()),
+            ],
+        ),
+        ChunkNode::Branch {
+            format,
+            kind,
+            children,
+        } => {
+            let child_schema = chunk_node_child_schema();
+            let children = children
+                .iter()
+                .map(|child| {
+                    child_schema
+                        .create(&[
+                            Value::Bytes(child.node_ref.object_hash.0.to_vec()),
+                            Value::Bytes(child.node_ref.locator.0.to_vec()),
+                            Value::U64(child.metrics.byte_length),
+                            Value::Nullable(
+                                child
+                                    .metrics
+                                    .utf16_length
+                                    .map(|value| Box::new(Value::U64(value))),
+                            ),
+                            Value::Bytes(child.logical_hash.0.to_vec()),
+                        ])
+                        .map(|bytes| {
+                            Value::Record(crate::records::OwnedRecord::new(bytes, child_schema))
+                        })
+                        .map_err(|_| Error::MalformedNode)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            EnumValue::create(
+                1,
+                schema.case(1).map_err(|_| Error::MalformedNode)?.payload,
+                &[
+                    Value::U8(*format),
+                    Value::U8(large_value_kind_tag(*kind)),
+                    Value::Array(children),
+                ],
+            )
+        }
+    }
+    .map_err(|_| Error::MalformedNode)?;
+    crate::records::encode_single_field_value(
+        &Value::Enum(value),
+        &ValueType::Enum(Box::new(schema)),
+    )
+    .map_err(|_| Error::MalformedNode)
+}
+
+fn chunk_node_child_schema() -> RecordDescriptor {
+    RecordDescriptor::new([
+        ("object_hash", ValueType::raw_bytes()),
+        ("locator", ValueType::raw_bytes()),
+        ("byte_length", ValueType::U64),
+        (
+            "utf16_length",
+            ValueType::Nullable(Box::new(ValueType::U64)),
+        ),
+        ("logical_hash", ValueType::raw_bytes()),
+    ])
+}
+
+fn chunk_node_schema() -> EnumSchema {
+    EnumSchema::new(
+        "groove.internal.large_value.chunk_node",
+        [
+            EnumCase::new(
+                "Leaf",
+                RecordDescriptor::new([
+                    ("format", ValueType::U8),
+                    ("kind", ValueType::U8),
+                    ("bytes", ValueType::raw_bytes()),
+                ]),
+            ),
+            EnumCase::new(
+                "Branch",
+                RecordDescriptor::new([
+                    ("format", ValueType::U8),
+                    ("kind", ValueType::U8),
+                    (
+                        "children",
+                        ValueType::Array(Box::new(ValueType::Record(Box::new(
+                            chunk_node_child_schema(),
+                        )))),
+                    ),
+                ]),
+            ),
+        ],
+    )
+    .expect("fixed chunk-node enum schema is valid")
+}
+
+/// Decode the authenticated chunk payload representation without interpreting
+/// its schema-derived logical kind. Exact canonical re-encoding rejects any
+/// alternate or trailing representation.
+pub(crate) fn decode_canonical_node(encoded: &[u8]) -> Result<ChunkNode, Error> {
+    if encoded.len() > MAX_ENCODED_NODE_BYTES {
+        return Err(Error::MalformedNode);
+    }
+    let schema = chunk_node_schema();
+    preflight_node_bounds(encoded, &schema)?;
+    let value =
+        crate::records::decode_single_field_value(encoded, &ValueType::Enum(Box::new(schema)))
+            .map_err(|_| Error::MalformedNode)?;
+    let Value::Enum(value) = value else {
+        return Err(Error::MalformedNode);
+    };
+    let fields = value
+        .record()
+        .to_values()
+        .map_err(|_| Error::MalformedNode)?;
+    let node = match (value.tag(), fields.as_slice()) {
+        (0, [Value::U8(format), Value::U8(kind), Value::Bytes(bytes)]) => ChunkNode::Leaf {
+            format: *format,
+            kind: large_value_kind_from_tag(*kind).map_err(|_| Error::MalformedNode)?,
+            bytes: bytes.clone(),
+        },
+        (1, [Value::U8(format), Value::U8(kind), Value::Array(children)]) => {
+            let children = children
+                .iter()
+                .map(|child| {
+                    let Value::Record(child) = child else {
+                        return Err(Error::MalformedNode);
+                    };
+                    let fields = child.to_values().map_err(|_| Error::MalformedNode)?;
+                    let [
+                        object_hash,
+                        locator,
+                        Value::U64(byte_length),
+                        Value::Nullable(utf16_length),
+                        logical_hash,
+                    ] = fields.as_slice()
+                    else {
+                        return Err(Error::MalformedNode);
+                    };
+                    let utf16_length = match utf16_length.as_deref() {
+                        None => None,
+                        Some(Value::U64(value)) => Some(*value),
+                        _ => return Err(Error::MalformedNode),
+                    };
+                    Ok(BranchChild {
+                        node_ref: NodeRef {
+                            object_hash: ContentHash(
+                                raw_bytes(object_hash).map_err(|_| Error::MalformedNode)?,
+                            ),
+                            locator: Locator(raw_bytes(locator).map_err(|_| Error::MalformedNode)?),
+                        },
+                        metrics: NodeMetrics {
+                            byte_length: *byte_length,
+                            utf16_length,
+                        },
+                        logical_hash: ContentHash(
+                            raw_bytes(logical_hash).map_err(|_| Error::MalformedNode)?,
+                        ),
+                    })
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            ChunkNode::Branch {
+                format: *format,
+                kind: large_value_kind_from_tag(*kind).map_err(|_| Error::MalformedNode)?,
+                children,
+            }
+        }
+        _ => return Err(Error::MalformedNode),
+    };
+    let canonical = encode_node(&node)?;
+    if canonical != encoded {
+        return Err(Error::MalformedNode);
+    }
+    validate_untyped_node_structure(&node)?;
+    Ok(node)
+}
+
+fn preflight_node_bounds(encoded: &[u8], schema: &EnumSchema) -> Result<(), Error> {
+    let (tag, payload) =
+        crate::records::split_variant_record(encoded).map_err(|_| Error::MalformedNode)?;
+    if tag == 1 {
+        let descriptor = schema.case(1).map_err(|_| Error::MalformedNode)?.payload;
+        let span = descriptor
+            .field_span(payload, 2)
+            .map_err(|_| Error::MalformedNode)?;
+        let array = &payload[span];
+        let count = array
+            .get(..4)
+            .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+            .map(u32::from_le_bytes)
+            .ok_or(Error::MalformedNode)?;
+        if usize::try_from(count).map_err(|_| Error::MalformedNode)? > BRANCH_MAX_CHILDREN {
+            return Err(Error::MalformedNode);
+        }
+    }
+    Ok(())
+}
+
+fn validate_untyped_node_structure(node: &ChunkNode) -> Result<(), Error> {
+    match node {
+        ChunkNode::Leaf {
+            format,
+            kind,
+            bytes,
+        } => {
             check_format(*format)?;
             if bytes.len() > LEAF_MAX_BYTES {
                 return Err(Error::MalformedNode);
             }
-            match kind {
-                LargeValueKind::Bytes => {}
-                LargeValueKind::String | LargeValueKind::Json => {
-                    std::str::from_utf8(bytes).map_err(|_| Error::InvalidUtf8)?;
-                }
+            if *kind != LargeValueKind::Bytes {
+                std::str::from_utf8(bytes).map_err(|_| Error::InvalidUtf8)?;
             }
         }
-        ChunkNode::Branch { format, children } => {
+        ChunkNode::Branch {
+            format,
+            kind,
+            children,
+        } => {
             check_format(*format)?;
             if children.is_empty() || children.len() > BRANCH_MAX_CHILDREN {
                 return Err(Error::MalformedNode);
@@ -2288,14 +2852,14 @@ pub fn decode_node(
             let mut child_metrics = children.iter().map(|child| child.metrics);
             let first_metrics = child_metrics.next().ok_or(Error::MalformedNode)?;
             let _ = child_metrics.try_fold(first_metrics, add_metrics)?;
-            if kind == LargeValueKind::Bytes
+            if *kind == LargeValueKind::Bytes
                 && children
                     .iter()
                     .any(|child| child.metrics.utf16_length.is_some())
             {
                 return Err(Error::MalformedNode);
             }
-            if kind != LargeValueKind::Bytes
+            if *kind != LargeValueKind::Bytes
                 && children
                     .iter()
                     .any(|child| child.metrics.utf16_length.is_none())
@@ -2304,7 +2868,7 @@ pub fn decode_node(
             }
         }
     }
-    Ok(node)
+    Ok(())
 }
 
 pub fn object_hash(encoded: &[u8]) -> ContentHash {
@@ -2312,12 +2876,32 @@ pub fn object_hash(encoded: &[u8]) -> ContentHash {
 }
 
 fn node_logical_hash(node: &ChunkNode) -> ContentHash {
+    let (format, kind) = match node {
+        ChunkNode::Leaf { format, kind, .. } | ChunkNode::Branch { format, kind, .. } => {
+            (*format, *kind)
+        }
+    };
+    bind_grouping_hash(format, kind, node_grouping_hash(node))
+}
+
+/// Content-defined grouping deliberately remains stable across semantic kinds
+/// and representation-format bumps. The public logical identity binds those
+/// dimensions separately, while this private reversible component lets later
+/// localized consolidation make the same boundaries as a fresh construction
+/// without persisting a second hash in every branch child.
+fn node_grouping_hash(node: &ChunkNode) -> ContentHash {
     match node {
         ChunkNode::Leaf { bytes, .. } => hash_domain(b"groove-large-leaf-logical-v1", bytes),
-        ChunkNode::Branch { children, .. } => {
+        ChunkNode::Branch {
+            format,
+            kind,
+            children,
+        } => {
             let mut descriptor = Vec::with_capacity(children.len() * 48);
             for child in children {
-                descriptor.extend_from_slice(&child.logical_hash.0);
+                descriptor.extend_from_slice(
+                    &grouping_hash_from_logical(*format, *kind, child.logical_hash).0,
+                );
                 descriptor.extend_from_slice(&child.metrics.byte_length.to_le_bytes());
                 descriptor.extend_from_slice(
                     &child.metrics.utf16_length.unwrap_or(u64::MAX).to_le_bytes(),
@@ -2328,7 +2912,35 @@ fn node_logical_hash(node: &ChunkNode) -> ContentHash {
     }
 }
 
+fn bind_grouping_hash(format: u8, kind: LargeValueKind, grouping_hash: ContentHash) -> ContentHash {
+    let mask = kind_format_hash_mask(format, kind);
+    ContentHash(std::array::from_fn(|index| {
+        grouping_hash.0[index] ^ mask.0[index]
+    }))
+}
+
+fn grouping_hash_from_logical(
+    format: u8,
+    kind: LargeValueKind,
+    logical_hash: ContentHash,
+) -> ContentHash {
+    // XOR is its own inverse. The mask is a full-width, domain-separated hash,
+    // so this retains 256-bit cross-kind/cross-format separation while allowing
+    // deterministic grouping to recover its format-neutral content component.
+    bind_grouping_hash(format, kind, logical_hash)
+}
+
+fn kind_format_hash_mask(format: u8, kind: LargeValueKind) -> ContentHash {
+    hash_domain(
+        b"groove-large-logical-kind-format-v2",
+        &[format, large_value_kind_tag(kind)],
+    )
+}
+
 fn node_metrics(kind: LargeValueKind, node: &ChunkNode) -> Result<NodeMetrics, Error> {
+    if node_kind(node) != kind {
+        return Err(Error::DescriptorMismatch);
+    }
     match node {
         ChunkNode::Leaf { bytes, .. } => metrics(kind, bytes),
         ChunkNode::Branch { children, .. } => {
@@ -2336,6 +2948,12 @@ fn node_metrics(kind: LargeValueKind, node: &ChunkNode) -> Result<NodeMetrics, E
             let first = metrics.next().ok_or(Error::MalformedNode)?;
             metrics.try_fold(first, add_metrics)
         }
+    }
+}
+
+fn node_kind(node: &ChunkNode) -> LargeValueKind {
+    match node {
+        ChunkNode::Leaf { kind, .. } | ChunkNode::Branch { kind, .. } => *kind,
     }
 }
 
@@ -3316,7 +3934,7 @@ fn leaf_ranges(kind: LargeValueKind, bytes: &[u8]) -> Result<Vec<std::ops::Range
     Ok(ranges)
 }
 
-fn branch_ranges(nodes: &[BuiltNode]) -> Vec<std::ops::Range<usize>> {
+fn branch_ranges(kind: LargeValueKind, nodes: &[BuiltNode]) -> Vec<std::ops::Range<usize>> {
     let mut ranges = Vec::new();
     let mut start = 0;
     while start < nodes.len() {
@@ -3324,7 +3942,7 @@ fn branch_ranges(nodes: &[BuiltNode]) -> Vec<std::ops::Range<usize>> {
         let mut hash = 0_u64;
         let mut end = hard_end;
         for (offset, child) in nodes[start..hard_end].iter().enumerate() {
-            for byte in child.structural_hash.0 {
+            for byte in grouping_hash_from_logical(FORMAT_VERSION, kind, child.structural_hash).0 {
                 hash = hash.wrapping_shl(1).wrapping_add(gear(byte));
             }
             let length = offset + 1;
@@ -3399,6 +4017,71 @@ mod tests {
 
     fn deterministic_locator(hash: ContentHash) -> Locator {
         Locator(hash.0)
+    }
+
+    fn encode_v12_primitive_bytes(bytes: &[u8]) -> Vec<u8> {
+        let primitive = RecordDescriptor::new([("value", ValueType::raw_bytes())]);
+        let chunked = RecordDescriptor::new(Vec::<(String, ValueType)>::new());
+        let schema = EnumSchema::new(
+            "groove.internal.stored_scalar.bytes",
+            [
+                EnumCase::new("Primitive", primitive),
+                EnumCase::new("Chunked", chunked),
+            ],
+        )
+        .unwrap();
+        let value = EnumValue::create(0, primitive, &[Value::Bytes(bytes.to_vec())]).unwrap();
+        crate::records::encode_single_field_value(
+            &Value::Enum(value),
+            &ValueType::Enum(Box::new(schema)),
+        )
+        .unwrap()
+    }
+
+    fn encode_v12_chunked_scalar(value: &LargeValueRef) -> Vec<u8> {
+        let primitive = RecordDescriptor::new([("value", ValueType::raw_bytes())]);
+        let root = RecordDescriptor::new([
+            ("object_hash", ValueType::raw_bytes()),
+            ("locator", ValueType::raw_bytes()),
+        ]);
+        let edit = RecordDescriptor::new([
+            ("offset", ValueType::U64),
+            ("delete_length", ValueType::U64),
+            ("insert_bytes", ValueType::raw_bytes()),
+            ("utf16_offset", ValueType::U64),
+            ("delete_utf16_length", ValueType::U64),
+            ("insert_utf16_length", ValueType::U64),
+        ]);
+        let chunked = RecordDescriptor::new([
+            ("format_version", ValueType::U8),
+            ("logical_hash", ValueType::raw_bytes()),
+            ("root", ValueType::Record(Box::new(root))),
+            ("byte_length", ValueType::U64),
+            (
+                "utf16_length",
+                ValueType::Nullable(Box::new(ValueType::U64)),
+            ),
+            (
+                "edit_tail",
+                ValueType::Array(Box::new(ValueType::Record(Box::new(edit)))),
+            ),
+        ]);
+        let schema = EnumSchema::new(
+            "groove.internal.stored_scalar.bytes",
+            [
+                EnumCase::new("Primitive", primitive),
+                EnumCase::new("Chunked", chunked),
+            ],
+        )
+        .unwrap();
+        let mut values = chunked_values(value);
+        values[0] = Value::U8(1);
+        let value = EnumValue::create(1, schema.case(1).unwrap().payload, &values).unwrap();
+        crate::records::encode_single_field_value(
+            &Value::Enum(value),
+            &ValueType::Enum(Box::new(schema)),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -4214,6 +4897,112 @@ mod tests {
     }
 
     #[test]
+    fn leaf_raw_bytes_are_exactly_authenticated_content() {
+        let prepared =
+            prepare_with_locator(LargeValueKind::Bytes, b"canonical", deterministic_locator)
+                .unwrap();
+        let mut encoded = prepared.staged_chunks[0].encoded.clone();
+        encoded.push(0);
+        let appended_hash = object_hash(&encoded);
+        assert_eq!(
+            decode_node(
+                LargeValueKind::Bytes,
+                prepared.staged_chunks[0].node_ref.object_hash,
+                &encoded,
+            ),
+            Err(Error::ObjectHashMismatch)
+        );
+        assert!(matches!(
+            decode_node(LargeValueKind::Bytes, appended_hash, &encoded),
+            Ok(ChunkNode::Leaf { bytes, .. }) if bytes == b"canonical\0"
+        ));
+
+        let mut forged = prepared.value_ref.clone();
+        forged.root.object_hash = appended_hash;
+        let mut inputs = EvaluationInputs::default();
+        inputs.install_chunk(
+            ChunkRequest {
+                object_hash: appended_hash.0,
+                locator: forged.root.locator,
+            },
+            bytes::Bytes::from(encoded),
+        );
+        assert!(matches!(
+            materialize_attempt(&forged, &mut inputs),
+            Err(IvmRuntimeError::LargeValue(Error::DescriptorMismatch))
+        ));
+    }
+
+    #[test]
+    fn branch_decode_rejects_unused_bytes_under_a_recomputed_hash() {
+        let prepared = prepare_with_locator(
+            LargeValueKind::Bytes,
+            &vec![7; LEAF_MAX_BYTES * 2],
+            deterministic_locator,
+        )
+        .unwrap();
+        let root = prepared.staged_chunks.last().unwrap();
+        assert!(matches!(
+            decode_node(
+                LargeValueKind::Bytes,
+                root.node_ref.object_hash,
+                &root.encoded
+            ),
+            Ok(ChunkNode::Branch { .. })
+        ));
+        let mut encoded = root.encoded.clone();
+        encoded.push(0);
+        assert_eq!(
+            decode_node(LargeValueKind::Bytes, object_hash(&encoded), &encoded),
+            Err(Error::MalformedNode)
+        );
+    }
+
+    #[test]
+    fn oversized_branch_fanout_is_rejected_before_metadata_decode() {
+        let child = BranchChild {
+            node_ref: NodeRef {
+                object_hash: ContentHash([1; 32]),
+                locator: Locator([2; 32]),
+            },
+            metrics: NodeMetrics {
+                byte_length: 1,
+                utf16_length: None,
+            },
+            logical_hash: ContentHash([3; 32]),
+        };
+        let encoded = encode_node(&ChunkNode::Branch {
+            format: FORMAT_VERSION,
+            kind: LargeValueKind::Bytes,
+            children: vec![child; BRANCH_MAX_CHILDREN + 1],
+        })
+        .unwrap();
+        assert!(encoded.len() <= MAX_ENCODED_NODE_BYTES);
+        assert_eq!(
+            preflight_node_bounds(&encoded, &chunk_node_schema()),
+            Err(Error::MalformedNode)
+        );
+        assert_eq!(
+            decode_authenticated_node(object_hash(&encoded), &encoded),
+            Err(Error::MalformedNode)
+        );
+    }
+
+    #[test]
+    fn staged_batch_rejects_malformed_standard_enum_nodes_before_publication() {
+        let prepared =
+            prepare_with_locator(LargeValueKind::Bytes, b"canonical", deterministic_locator)
+                .unwrap();
+        let mut chunk = prepared.staged_chunks[0].clone();
+        chunk.encoded[0] = u8::MAX;
+        chunk.node_ref.object_hash = object_hash(&chunk.encoded);
+        assert_eq!(
+            validate_staged_chunk_batch(LargeValueKind::Bytes, &[chunk]),
+            Err(Error::MalformedNode)
+        );
+    }
+
+    #[test]
     fn json_preserves_literal_source_and_rejects_invalid_input() {
         let source = br#"{ "b": 2, "a": [1, true, null] }"#;
         let prepared =
@@ -4310,17 +5099,413 @@ mod tests {
     }
 
     #[test]
-    fn physical_scalar_tag_is_unambiguous_for_every_inline_prefix() {
+    fn stored_scalar_is_a_canonical_generic_enum_for_each_declared_kind() {
         for prefix in 0..=u8::MAX {
             let logical = vec![prefix, 1, 2, 3];
-            let encoded = encode_stored_scalar(&StoredScalar::Inline(logical.clone())).unwrap();
+            let encoded = encode_stored_scalar(
+                LargeValueKind::Bytes,
+                &StoredScalar::Primitive(logical.clone()),
+            )
+            .unwrap();
             assert_eq!(
-                decode_stored_scalar(&encoded),
-                Ok(StoredScalar::Inline(logical))
+                decode_stored_scalar(LargeValueKind::Bytes, &encoded),
+                Ok(StoredScalar::Primitive(logical))
+            );
+            let generic = crate::records::decode_single_field_value(
+                &encoded,
+                &ValueType::Enum(Box::new(stored_scalar_schema(LargeValueKind::Bytes))),
+            )
+            .unwrap();
+            assert!(matches!(generic, Value::Enum(ref value) if value.tag() == 2));
+        }
+        for (kind, primitive) in [
+            (
+                LargeValueKind::String,
+                StoredScalar::Primitive("text".into()),
+            ),
+            (
+                LargeValueKind::Json,
+                StoredScalar::Primitive(br#"{"key":1}"#.to_vec()),
+            ),
+        ] {
+            let encoded = encode_stored_scalar(kind, &primitive).unwrap();
+            assert_eq!(decode_stored_scalar(kind, &encoded), Ok(primitive));
+        }
+        assert_eq!(
+            decode_stored_scalar(LargeValueKind::Bytes, &[]),
+            Err(Error::MalformedScalar)
+        );
+        assert_eq!(
+            decode_stored_scalar(LargeValueKind::Bytes, &[4, 0]),
+            Err(Error::MalformedScalar)
+        );
+        // The exact v12 generic enum used tag 0.
+        let legacy_primitive = encode_v12_primitive_bytes(b"abc");
+        assert_eq!(legacy_primitive[0], 0);
+        assert_eq!(
+            decode_stored_scalar(LargeValueKind::Bytes, &legacy_primitive),
+            Err(Error::MalformedScalar)
+        );
+        assert_eq!(
+            inline_scalar_bytes(LargeValueKind::Bytes, &legacy_primitive),
+            Err(Error::MalformedScalar)
+        );
+
+        // The v12 generic Chunked case used tag 1 and the same ordinary record
+        // payload.
+        let prepared = prepare_with_locator(
+            LargeValueKind::Bytes,
+            &vec![7; LEAF_MAX_BYTES + 1],
+            deterministic_locator,
+        )
+        .unwrap();
+        let legacy_chunked = encode_v12_chunked_scalar(&prepared.value_ref);
+        assert_eq!(legacy_chunked[0], 1);
+        assert_eq!(
+            decode_stored_scalar(LargeValueKind::Bytes, &legacy_chunked),
+            Err(Error::MalformedScalar)
+        );
+        assert_eq!(
+            inline_scalar_bytes(LargeValueKind::Bytes, &legacy_chunked),
+            Err(Error::MalformedScalar)
+        );
+    }
+
+    #[test]
+    fn stored_scalar_chunked_round_trips_through_generic_enum_records_and_tail() {
+        for (kind, logical) in [
+            (LargeValueKind::Bytes, b"bytes root".as_slice()),
+            (LargeValueKind::String, "text root 🙂".as_bytes()),
+            (LargeValueKind::Json, br#"{"title":"json root"}"#.as_slice()),
+        ] {
+            let prepared = prepare_with_locator(kind, logical, deterministic_locator).unwrap();
+            let mut value = prepared.value_ref;
+            value.edit_tail.push(ReplaceEdit {
+                offset: value.byte_length,
+                delete_length: 0,
+                insert_bytes: match kind {
+                    LargeValueKind::Bytes => vec![0, 0xff],
+                    LargeValueKind::String => "!".as_bytes().to_vec(),
+                    // This receipt proves ordinary list/record tail encoding;
+                    // JSON edits are validated by the higher replacement path.
+                    LargeValueKind::Json => Vec::new(),
+                },
+                utf16_offset: value.utf16_length.unwrap_or(0),
+                delete_utf16_length: 0,
+                insert_utf16_length: 0,
+            });
+            if kind == LargeValueKind::Bytes {
+                value.byte_length += 2;
+            }
+            // Keep the text and JSON receipt descriptor shape valid while
+            // retaining a real tail record for text.
+            if kind == LargeValueKind::String {
+                value.byte_length += 1;
+                value.utf16_length = value.utf16_length.map(|length| length + 1);
+                value.edit_tail[0].insert_utf16_length = 1;
+            }
+            let encoded =
+                encode_stored_scalar(kind, &StoredScalar::Chunked(value.clone())).unwrap();
+            let decoded = decode_stored_scalar(kind, &encoded).unwrap();
+            assert_eq!(decoded, StoredScalar::Chunked(value));
+            let generic = crate::records::decode_single_field_value(
+                &encoded,
+                &ValueType::Enum(Box::new(stored_scalar_schema(kind))),
+            )
+            .unwrap();
+            assert!(matches!(generic, Value::Enum(ref value) if value.tag() == 3));
+        }
+    }
+
+    #[test]
+    fn primitive_payload_is_interpreted_by_its_declared_schema_kind() {
+        // Inline values need no duplicated kind witness: the same canonical
+        // UTF-8/JSON payload is valid under either parameterized schema.
+        let logical = br#"{"valid":"json and utf8"}"#.to_vec();
+        let encoded = encode_stored_scalar(
+            LargeValueKind::Bytes,
+            &StoredScalar::Primitive(logical.clone()),
+        )
+        .unwrap();
+
+        for replay_kind in [LargeValueKind::String, LargeValueKind::Json] {
+            assert_eq!(
+                decode_stored_scalar(replay_kind, &encoded),
+                Ok(StoredScalar::Primitive(logical.clone())),
+                "the schema must supply {replay_kind:?} semantics"
+            );
+            assert_eq!(
+                inline_scalar_bytes(replay_kind, &encoded),
+                Ok(logical.as_slice()),
+                "inline fast path must use the {replay_kind:?} schema"
             );
         }
-        assert_eq!(decode_stored_scalar(&[]), Err(Error::MalformedScalar));
-        assert_eq!(decode_stored_scalar(&[2, 0]), Err(Error::MalformedScalar));
+    }
+
+    #[test]
+    fn single_leaf_kind_witness_rejects_descriptor_replay_with_valid_metrics() {
+        // This must stay an internal format test: a hostile persisted descriptor
+        // is rejected while resolving its authenticated physical root, before a
+        // public query can observe a relabeled logical value.
+        let logical = br#"{"valid":"json and utf8"}"#;
+        let prepared =
+            prepare_with_locator(LargeValueKind::Bytes, logical, deterministic_locator).unwrap();
+        assert_eq!(prepared.staged_chunks.len(), 1);
+        let root = &prepared.staged_chunks[0];
+
+        for replay_kind in [LargeValueKind::String, LargeValueKind::Json] {
+            let mut forged = prepared.value_ref.clone();
+            forged.kind = replay_kind;
+            forged.utf16_length = Some(logical.len() as u64);
+            // Replay the exact source root identity. If decode_node stopped
+            // authenticating the embedded kind, every later identity and
+            // metric check would still pass and expose these bytes as the
+            // target semantic kind.
+            forged.logical_hash = prepared.value_ref.logical_hash;
+            let encoded =
+                encode_stored_scalar(replay_kind, &StoredScalar::Chunked(forged.clone())).unwrap();
+            assert_eq!(
+                decode_stored_scalar(replay_kind, &encoded),
+                Ok(StoredScalar::Chunked(forged.clone()))
+            );
+
+            let mut inputs = EvaluationInputs::default();
+            inputs.install_chunk(
+                ChunkRequest {
+                    object_hash: root.node_ref.object_hash.0,
+                    locator: root.node_ref.locator,
+                },
+                bytes::Bytes::copy_from_slice(&root.encoded),
+            );
+            assert!(matches!(
+                materialize_attempt(&forged, &mut inputs),
+                Err(IvmRuntimeError::LargeValue(Error::DescriptorMismatch))
+            ));
+        }
+    }
+
+    #[test]
+    fn every_node_kind_witness_rejects_multi_leaf_replay() {
+        // Forge a target-kind branch root with correct target metrics so the
+        // traversal reaches an original bytes child. The child witness, not
+        // merely the descriptor/root witness, must stop the replay.
+        let logical = format!(r#"{{"body":"{}"}}"#, "x".repeat(LEAF_MAX_BYTES * 3));
+        let prepared = prepare_with_locator(
+            LargeValueKind::Bytes,
+            logical.as_bytes(),
+            deterministic_locator,
+        )
+        .unwrap();
+        let original_root = prepared
+            .staged_chunks
+            .iter()
+            .find(|chunk| chunk.node_ref == prepared.value_ref.root)
+            .unwrap();
+        let ChunkNode::Branch { mut children, .. } = decode_node(
+            LargeValueKind::Bytes,
+            original_root.node_ref.object_hash,
+            &original_root.encoded,
+        )
+        .unwrap() else {
+            panic!("fixture must produce a multi-leaf branch root");
+        };
+        assert!(children.len() > 1);
+        for child in &mut children {
+            child.metrics.utf16_length = Some(child.metrics.byte_length);
+        }
+        let forged_root = ChunkNode::Branch {
+            format: FORMAT_VERSION,
+            kind: LargeValueKind::Json,
+            children,
+        };
+        let forged_root_encoded = encode_node(&forged_root).unwrap();
+        let forged_root_ref = NodeRef {
+            object_hash: object_hash(&forged_root_encoded),
+            locator: original_root.node_ref.locator,
+        };
+        let mut forged = prepared.value_ref.clone();
+        forged.kind = LargeValueKind::Json;
+        forged.root = forged_root_ref.clone();
+        forged.logical_hash = node_logical_hash(&forged_root);
+        forged.utf16_length = Some(logical.encode_utf16().count() as u64);
+
+        let mut inputs = EvaluationInputs::default();
+        let mut supplied_original_child = false;
+        loop {
+            match materialize_attempt(&forged, &mut inputs) {
+                Err(IvmRuntimeError::EvaluationBlocked) => {
+                    for request in inputs.take_missing_chunks() {
+                        if request.object_hash == forged_root_ref.object_hash.0
+                            && request.locator == forged_root_ref.locator
+                        {
+                            inputs.install_chunk(
+                                request,
+                                bytes::Bytes::copy_from_slice(&forged_root_encoded),
+                            );
+                            continue;
+                        }
+                        let chunk = prepared
+                            .staged_chunks
+                            .iter()
+                            .find(|chunk| {
+                                chunk.node_ref.object_hash.0 == request.object_hash
+                                    && chunk.node_ref.locator == request.locator
+                            })
+                            .expect("forged root may reveal only original children");
+                        supplied_original_child = true;
+                        inputs
+                            .install_chunk(request, bytes::Bytes::copy_from_slice(&chunk.encoded));
+                    }
+                }
+                Err(IvmRuntimeError::LargeValue(Error::DescriptorMismatch)) => break,
+                result => panic!("unexpected replay result: {result:?}"),
+            }
+        }
+        assert!(
+            supplied_original_child,
+            "the forged branch must pass before a child witness rejects replay"
+        );
+    }
+
+    #[test]
+    fn candidate_format_one_nodes_fail_closed() {
+        // This local type is the exact candidate format-1 leaf shape. Keeping
+        // the receipt independent of the current enum ensures a future serde
+        // layout change cannot accidentally turn old content into a v2 node.
+        #[derive(Serialize)]
+        enum CandidateFormatOneNode {
+            Leaf { format: u8, bytes: Vec<u8> },
+        }
+
+        for bytes in [
+            Vec::new(),
+            b"plain utf8".to_vec(),
+            br#"{"valid":"json"}"#.to_vec(),
+            vec![0, 1, 2, 3],
+        ] {
+            let encoded =
+                postcard::to_allocvec(&CandidateFormatOneNode::Leaf { format: 1, bytes }).unwrap();
+            let hash = object_hash(&encoded);
+            for expected_kind in [
+                LargeValueKind::Bytes,
+                LargeValueKind::String,
+                LargeValueKind::Json,
+            ] {
+                assert!(
+                    decode_node(expected_kind, hash, &encoded).is_err(),
+                    "format-1 leaf must fail closed as {expected_kind:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn same_kind_prepare_reuse_and_append_consolidation_remain_deterministic() {
+        // Internal construction coverage is necessary because deterministic
+        // object/logical identity and locator reuse are representation
+        // invariants intentionally hidden from public queries.
+        let logical = (0..LEAF_MAX_BYTES * 5)
+            .map(|index| (index.wrapping_mul(37) & 0xff) as u8)
+            .collect::<Vec<_>>();
+        let first =
+            prepare_with_locator(LargeValueKind::Bytes, &logical, deterministic_locator).unwrap();
+        let second =
+            prepare_with_locator(LargeValueKind::Bytes, &logical, deterministic_locator).unwrap();
+        assert_eq!(first, second);
+
+        let reused =
+            prepare_reusing(LargeValueKind::Bytes, &logical, &first.staged_chunks).unwrap();
+        assert_eq!(
+            reused, first,
+            "same-kind reconstruction must retain every exact node and locator"
+        );
+
+        let append = b"deterministic append".to_vec();
+        let TailAppendOutcome::Updated(with_tail) =
+            append_tail(&first.value_ref, append.clone()).unwrap()
+        else {
+            panic!("one small append must remain in the bounded tail");
+        };
+        let available = first
+            .staged_chunks
+            .iter()
+            .map(|chunk| {
+                (
+                    ChunkRequest {
+                        object_hash: chunk.node_ref.object_hash.0,
+                        locator: chunk.node_ref.locator,
+                    },
+                    bytes::Bytes::copy_from_slice(&chunk.encoded),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let consolidate = || {
+            let mut inputs = EvaluationInputs::default();
+            loop {
+                match consolidate_appends_attempt(&with_tail, &mut inputs, deterministic_locator) {
+                    Ok(prepared) => break prepared,
+                    Err(IvmRuntimeError::EvaluationBlocked) => {
+                        for request in inputs.take_missing_chunks() {
+                            inputs.install_chunk(request.clone(), available[&request].clone());
+                        }
+                    }
+                    Err(error) => panic!("unexpected consolidation failure: {error}"),
+                }
+            }
+        };
+        let consolidated = consolidate();
+        assert_eq!(consolidated, consolidate());
+        let mut expected = logical;
+        expected.extend_from_slice(&append);
+        let fresh =
+            prepare_with_locator(LargeValueKind::Bytes, &expected, deterministic_locator).unwrap();
+        assert_eq!(consolidated.value_ref, fresh.value_ref);
+
+        let shared = br#"{"same":"valid bytes, text, and json"}"#;
+        let cross_kind_hashes = [
+            LargeValueKind::Bytes,
+            LargeValueKind::String,
+            LargeValueKind::Json,
+        ]
+        .map(|kind| {
+            prepare_with_locator(kind, shared, deterministic_locator)
+                .unwrap()
+                .value_ref
+                .logical_hash
+        });
+        assert_ne!(cross_kind_hashes[0], cross_kind_hashes[1]);
+        assert_ne!(cross_kind_hashes[0], cross_kind_hashes[2]);
+        assert_ne!(cross_kind_hashes[1], cross_kind_hashes[2]);
+
+        let current_node = ChunkNode::Leaf {
+            format: FORMAT_VERSION,
+            kind: LargeValueKind::Bytes,
+            bytes: shared.to_vec(),
+        };
+        let candidate_old_node = ChunkNode::Leaf {
+            format: 1,
+            kind: LargeValueKind::Bytes,
+            bytes: shared.to_vec(),
+        };
+        assert_ne!(
+            node_logical_hash(&current_node),
+            node_logical_hash(&candidate_old_node),
+            "node format must participate in locator-independent identity"
+        );
+    }
+
+    #[test]
+    fn schema_derived_stored_scalar_kind_rejects_a_mismatched_descriptor() {
+        let json = prepare_with_locator(
+            LargeValueKind::Json,
+            br#"{"same":"bytes"}"#,
+            deterministic_locator,
+        )
+        .unwrap()
+        .value_ref;
+        let text_cell =
+            RecordDescriptor::new([("cell", physical_storage_value_type(LargeValueKind::String))]);
+        assert!(text_cell.create(&[Value::Large(json)]).is_err());
     }
 
     #[test]

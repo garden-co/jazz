@@ -11,11 +11,7 @@
 import type { ColumnType, WasmSchema } from "../drivers/types.js";
 import { toJsonText } from "./json-text.js";
 import { analyzeRelations, type Relation } from "../codegen/relation-analyzer.js";
-import {
-  isProvenanceMagicColumn,
-  isProvenanceMagicTimestampColumn,
-  magicColumnType,
-} from "../magic-columns.js";
+import { magicColumnType } from "../magic-columns.js";
 import {
   normalizeBuiltQuery,
   type BuiltCondition,
@@ -34,7 +30,6 @@ import type {
 } from "../ir.js";
 
 function relColumn(column: string, scope?: string): RelColumnRef {
-  if (isProvenanceMagicColumn(column)) return { column };
   return scope ? { scope, column } : { column };
 }
 
@@ -105,17 +100,17 @@ function toTimestampMs(value: unknown): number {
   throw new Error("Invalid timestamp condition. Expected Date, ISO string, or finite number.");
 }
 
-function toRuntimeTimestampValue(value: unknown, columnName?: string): number {
-  const timestampMs = toTimestampMs(value);
-  return columnName && isProvenanceMagicTimestampColumn(columnName)
-    ? timestampMs * 1_000
-    : timestampMs;
+function toRuntimeTimestampValue(value: unknown): number {
+  // Relation IR is evaluated by NAPI/WASM directly against core CurrentRows.
+  // Both ordinary and provenance timestamps are Unix milliseconds there and
+  // at every public result boundary.
+  return toTimestampMs(value);
 }
 
 /**
  * Translate a JavaScript value to the runtime value format.
  */
-function toRuntimeValue(value: unknown, columnType: ColumnType, columnName?: string): object {
+function toRuntimeValue(value: unknown, columnType: ColumnType): object {
   if (value === null || value === undefined) {
     return { type: "Null" };
   }
@@ -123,7 +118,7 @@ function toRuntimeValue(value: unknown, columnType: ColumnType, columnName?: str
     return { type: "Text", value: toJsonText(value) };
   }
   if (columnType.type === "Timestamp" && value instanceof Date) {
-    return { type: "Timestamp", value: toRuntimeTimestampValue(value, columnName) };
+    return { type: "Timestamp", value: toRuntimeTimestampValue(value) };
   }
   if (columnType.type === "Bytea") {
     if (value instanceof Uint8Array) {
@@ -155,7 +150,7 @@ function toRuntimeValue(value: unknown, columnType: ColumnType, columnName?: str
   }
   if (typeof value === "number") {
     if (columnType?.type === "Timestamp") {
-      return { type: "Timestamp", value: toRuntimeTimestampValue(value, columnName) };
+      return { type: "Timestamp", value: toRuntimeTimestampValue(value) };
     }
     if (columnType.type === "BigInt") {
       if (!Number.isSafeInteger(value)) {
@@ -175,7 +170,7 @@ function toRuntimeValue(value: unknown, columnType: ColumnType, columnName?: str
   }
   if (typeof value === "string") {
     if (columnType?.type === "Timestamp") {
-      return { type: "Timestamp", value: toRuntimeTimestampValue(value, columnName) };
+      return { type: "Timestamp", value: toRuntimeTimestampValue(value) };
     }
     if (columnType?.type === "Uuid") {
       return { type: "Uuid", value };
@@ -339,7 +334,7 @@ function conditionToRelPredicate(
           Cmp: {
             left: relColumn(field),
             op: "Eq" as const,
-            right: { Literal: toRuntimeValue(value, descriptor.column_type, field) },
+            right: { Literal: toRuntimeValue(value, descriptor.column_type) },
           },
         } satisfies RelPredicateExpr;
       },
@@ -366,7 +361,7 @@ function conditionToRelPredicate(
       In: {
         left: columnRef,
         values: cond.value.map((value) => ({
-          Literal: toRuntimeValue(value, columnType, column),
+          Literal: toRuntimeValue(value, columnType),
         })),
       },
     };
@@ -378,7 +373,7 @@ function conditionToRelPredicate(
     isFrontierRowIdToken(cond.value) && cond.op === "eq"
       ? { RowId: "Frontier" as const }
       : {
-          Literal: toRuntimeValue(cond.value, valueTypeForCondition, column),
+          Literal: toRuntimeValue(cond.value, valueTypeForCondition),
         };
   const isNullValue = cond.value === undefined ? true : cond.value;
   if (columnType.type === "Bytea" && ["gt", "gte", "lt", "lte"].includes(cond.op)) {

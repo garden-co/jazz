@@ -257,19 +257,19 @@ describe("transformRows", () => {
     expect(result[0]?.created_at.getTime()).toBe(ts);
   });
 
-  it("scales provenance magic timestamp columns down to JS milliseconds", () => {
+  it("keeps provenance magic timestamp columns in Unix milliseconds", () => {
     const timestampSchema: WasmSchema = {
       events: {
         columns: [{ name: "title", column_type: { type: "Text" }, nullable: false }],
       },
     };
-    const tsMicros = 1_704_067_200_123_000;
+    const tsMs = 1_704_067_200_123;
     const rows: WasmRow[] = [
       {
         id: "event-1",
         values: [
           { type: "Text", value: "Launch" },
-          { type: "Timestamp", value: tsMicros },
+          { type: "Timestamp", value: tsMs },
         ],
       },
     ];

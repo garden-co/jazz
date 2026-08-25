@@ -9,7 +9,7 @@ where
     ) -> Result<PublishedTransaction, Error> {
         commit.validate()?;
         self.merge_commit_parent_times(std::slice::from_ref(&commit))?;
-        let made_at = self.mint_tx_time(commit.now_ms);
+        let made_at = self.mint_tx_time(commit.now_ms)?;
         self.commit_mergeable_at(commit, made_at).await
     }
 
@@ -47,7 +47,7 @@ where
             }
         }
         self.merge_commit_parent_times(&commits)?;
-        let made_at = self.mint_tx_time(commits[0].now_ms);
+        let made_at = self.mint_tx_time(commits[0].now_ms)?;
         self.commit_mergeable_many_at(commits, made_at).await
     }
 
@@ -151,7 +151,7 @@ where
             ));
         }
         self.merge_commit_parent_times(&commits)?;
-        let made_at = self.mint_tx_time(commits[0].now_ms);
+        let made_at = self.mint_tx_time(commits[0].now_ms)?;
         self.commit_mergeable_many_at_with_schema_versions_and_provenance(
             commits
                 .into_iter()
@@ -193,7 +193,7 @@ where
             }
         }
         self.merge_commit_parent_times(&commits)?;
-        let made_at = self.mint_tx_time(commits[0].now_ms);
+        let made_at = self.mint_tx_time(commits[0].now_ms)?;
         self.commit_mergeable_many_at_with_schema_versions(
             commits
                 .into_iter()
@@ -255,6 +255,12 @@ where
         made_at: TxTime,
         contribution_merge: Option<ContributionMergeProvenance>,
     ) -> Result<PublishedTransaction, Error> {
+        // `*_at` is also used by trusted internal paths, so do not rely on the
+        // public `commit_mergeable[_many]` wrapper to validate a public
+        // provenance millisecond before any staging or batch mutation begins.
+        for (_, commit) in &commits {
+            commit.validate()?;
+        }
         self.prepare_and_stage_large_commit_values(&mut commits).await?;
         let staged_ids = commits
             .iter()
@@ -301,6 +307,11 @@ where
         let mut pending_parents = BTreeSet::new();
         let mut authored_content_rows = BTreeSet::new();
         for (write_schema_version, commit) in commits {
+            let provenance_at = TxTime::from_physical_ms(commit.now_ms).map_err(|_| {
+                Error::InvalidMergeableCommit(
+                    "commit now_ms exceeds packed HLC physical-millisecond range",
+                )
+            })?;
             let schema_version_alias = self
                 .ensure_schema_version_alias(write_schema_version)
                 .await?;
@@ -393,7 +404,7 @@ where
             let (created_by, created_at) = creator_source
                 .as_ref()
                 .map(|version| (version.created_by(), version.created_at()))
-                .unwrap_or((commit.made_by, TxTime(commit.now_ms)));
+                .unwrap_or((commit.made_by, provenance_at));
 
             let parents = if commit.parents.is_empty() {
                 Vec::new()
@@ -442,7 +453,7 @@ where
                     created_by,
                     created_at,
                     updated_by: commit.made_by,
-                    updated_at: TxTime(commit.now_ms),
+                    updated_at: provenance_at,
                     cells,
                     authored_columns,
                     deletion: commit.deletion,
@@ -527,6 +538,7 @@ where
         commits: &mut [(SchemaVersionId, MergeableCommit)],
     ) -> Result<(), Error> {
         for (schema_version, commit) in commits.iter_mut() {
+            let table_schema = self.table_in_schema(&commit.table, *schema_version)?;
             let inherited = if commit.cells.values().any(value_contains_indirect_descriptor) {
                 self.current_physical_cells_in_branch_schema(
                     *schema_version,
@@ -546,7 +558,16 @@ where
                     commit.prepared_large_columns.insert(column.clone());
                     continue;
                 }
-                let Some(staged) = self.prepare_and_stage_large_scalar(value).await? else {
+                let semantic_kind = table_schema
+                    .columns
+                    .iter()
+                    .find(|candidate| candidate.name == *column)
+                    .map(|column| column.large_value_kind)
+                    .unwrap_or(crate::schema::LargeValueSemanticKind::NotLarge);
+                let Some(staged) = self
+                    .prepare_and_stage_large_scalar(value, semantic_kind)
+                    .await?
+                else {
                     continue;
                 };
                 commit.staged_large_values.push(staged.id);
@@ -561,20 +582,31 @@ where
     pub(crate) async fn prepare_and_stage_large_scalar(
         &mut self,
         value: &mut Value,
+        semantic_kind: crate::schema::LargeValueSemanticKind,
     ) -> Result<Option<groove::large_values::StagedLargeValue>, Error> {
         use groove::large_values::{INLINE_VALUE_MAX_BYTES, LargeValueKind};
 
         let candidate = match value {
-            Value::String(text) if text.len() > INLINE_VALUE_MAX_BYTES => {
-                Some((LargeValueKind::String, text.as_bytes().to_vec(), false))
-            }
+            Value::String(text) if text.len() > INLINE_VALUE_MAX_BYTES => Some((
+                match semantic_kind {
+                    crate::schema::LargeValueSemanticKind::Json => LargeValueKind::Json,
+                    _ => LargeValueKind::String,
+                },
+                text.as_bytes().to_vec(),
+                false,
+            )),
             Value::Bytes(bytes) if bytes.len() > INLINE_VALUE_MAX_BYTES => {
                 Some((LargeValueKind::Bytes, bytes.clone(), false))
             }
             Value::Nullable(Some(inner)) => match inner.as_ref() {
-                Value::String(text) if text.len() > INLINE_VALUE_MAX_BYTES => {
-                    Some((LargeValueKind::String, text.as_bytes().to_vec(), true))
-                }
+                Value::String(text) if text.len() > INLINE_VALUE_MAX_BYTES => Some((
+                    match semantic_kind {
+                        crate::schema::LargeValueSemanticKind::Json => LargeValueKind::Json,
+                        _ => LargeValueKind::String,
+                    },
+                    text.as_bytes().to_vec(),
+                    true,
+                )),
                 Value::Bytes(bytes) if bytes.len() > INLINE_VALUE_MAX_BYTES => {
                     Some((LargeValueKind::Bytes, bytes.clone(), true))
                 }

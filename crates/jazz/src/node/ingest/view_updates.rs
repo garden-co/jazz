@@ -136,6 +136,7 @@ where
             .into_iter()
             .max_by_key(|made_at| made_at.sort_key(self.node_uuid))
             .map(TxTime::tick_after)
+            .transpose()?
             .ok_or(Error::InvalidStoredValue("merge requires heads"))?;
         self.merge_tx_time(made_at);
         let merge_tx_id = TxId::new(made_at, self.node_uuid);
