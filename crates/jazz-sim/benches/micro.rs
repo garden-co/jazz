@@ -97,7 +97,8 @@ fn run_hlc(config: &Config) {
     let mut mint = NsHist::new();
     for idx in 0..config.iterations {
         let start = Instant::now();
-        register = TxTime::tick(register, 1_000 + idx as u64 / 128);
+        register = TxTime::tick(register, 1_000 + idx as u64 / 128)
+            .expect("benchmark clock stays below the packed HLC horizon");
         black_box(register);
         mint.record(start.elapsed());
     }
@@ -236,9 +237,9 @@ fn run_commit_unit(config: &Config) {
                         row(20_000 + iter * rows_per_unit + idx),
                         Vec::new(),
                         AuthorSubject::SYSTEM,
-                        TxTime(iter as u64),
+                        iter as u64,
                         AuthorSubject::SYSTEM,
-                        TxTime(iter as u64),
+                        iter as u64,
                         &cells(&format!("cu-{iter}-{idx}")),
                         None,
                     )

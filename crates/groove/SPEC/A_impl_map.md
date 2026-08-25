@@ -62,7 +62,7 @@ state (`IvmRuntime` in `ivm/runtime/mod.rs`) includes the `graph`,
 
 Commits enter the maintained graph as table deltas. That path lives in
 `db/mod.rs`: `commit_batch`, table-delta construction, and
-`consolidate_table_deltas` (ch. 4).
+Direct consolidation in `compute_table_deltas` (ch. 4).
 
 ### A.4 Test map
 

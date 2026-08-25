@@ -1,4 +1,8 @@
-import { resolveBrowserWorkerUrl } from "../browser-worker-config.js";
+import {
+  createBrowserWorkerAssetScope,
+  resolveBrowserWorkerRuntimeSources,
+  resolveBrowserWorkerUrl,
+} from "../browser-worker-config.js";
 import type { BrowserWorkerConnection, BrowserWorkerConnectionContext } from "../runtime-source.js";
 import { MessagePortBrowserFollowerConnection } from "./browser-follower-connection.js";
 import type {
@@ -28,11 +32,17 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
     // that same replica share its worker; explicitly separate replicas must
     // not share one WASM realm, because their independent runtime lifecycles
     // can overlap. Inspector controls aggregate across these workers.
-    const workerName = `jazz-runtime:${options.authSessionKey}:${options.dbName}`;
+    const runtimeSources = resolveBrowserWorkerRuntimeSources(options.runtimeSources);
+    const workerName = [
+      "jazz-runtime",
+      options.authSessionKey,
+      options.dbName,
+      createBrowserWorkerAssetScope(runtimeSources),
+    ].join(":");
     const createWorker =
-      options.runtimeSources?.brokerWorkerUrl || options.runtimeSources?.baseUrl
+      runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl || runtimeSources?.wasmVersion
         ? (name: string) =>
-            new SharedWorker(resolveBrowserWorkerUrl(options.runtimeSources), {
+            new SharedWorker(resolveBrowserWorkerUrl(runtimeSources), {
               type: "module",
               name,
             })
@@ -41,7 +51,13 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
               type: "module",
               name,
             });
-    this.readyPromise = this.connect(runtime, options, fingerprint, workerName, createWorker);
+    this.readyPromise = this.connect(
+      runtime,
+      { ...options, runtimeSources },
+      fingerprint,
+      workerName,
+      createWorker,
+    );
     void this.readyPromise.catch(callbacks.onFailure);
   }
 

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { INSPECTOR_HOST_GLOBAL } from "jazz-tools";
 import {
@@ -23,6 +23,7 @@ function installHost(subs: unknown[] = []) {
 
 afterEach(() => {
   delete (window as unknown as Record<string, unknown>)[INSPECTOR_HOST_GLOBAL];
+  Object.defineProperty(window, "opener", { configurable: true, value: null });
 });
 
 describe("host-link", () => {
@@ -42,6 +43,7 @@ describe("host-link", () => {
       window.dispatchEvent(
         new MessageEvent("message", {
           data: { type: "jazz-inspector:subscriptions", list: [{ id: "s2", table: "projects" }] },
+          origin: window.location.origin,
           // Real cross-window postMessage sets event.source to the sender;
           // window.parent === window in jsdom, so that's `window` here.
           source: window,
@@ -77,5 +79,56 @@ describe("host-link", () => {
       window.dispatchEvent(new MessageEvent("message", { data: { type: "other" } }));
     });
     expect(result.current).toEqual([]);
+  });
+
+  it("reads from and registers a detached window with its opener host", () => {
+    const registerInspectorWindow = vi.fn();
+    const unregisterInspectorWindow = vi.fn();
+    const opener = {
+      [INSPECTOR_HOST_GLOBAL]: {
+        getConnectionConfig: () => ({ appId: "detached" }),
+        getWasmSchema: () => ({ todos: { columns: [] } }),
+        getActiveSubscriptions: () => [{ id: "s1", table: "todos" }],
+        registerInspectorWindow,
+        unregisterInspectorWindow,
+      },
+    } as unknown as Window;
+    const previousOpener = window.opener;
+    Object.defineProperty(window, "opener", { configurable: true, value: opener });
+
+    const { result, unmount } = renderHook(() => useHostSubscriptions());
+
+    expect(readInspectorHostConfig()).toMatchObject({ appId: "detached" });
+    expect(result.current).toEqual([{ id: "s1", table: "todos" }]);
+    expect(registerInspectorWindow).toHaveBeenCalledWith(window);
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data: { type: "jazz-inspector:subscriptions", list: [{ id: "s2", table: "projects" }] },
+          origin: window.location.origin,
+          source: opener,
+        }),
+      );
+    });
+    expect(result.current).toEqual([{ id: "s2", table: "projects" }]);
+
+    unmount();
+    expect(unregisterInspectorWindow).toHaveBeenCalledWith(window);
+    Object.defineProperty(window, "opener", { configurable: true, value: previousOpener });
+  });
+
+  it("falls back to the parent host when an opener's parent is cross-origin", () => {
+    installHost();
+    const opener = Object.create(null, {
+      parent: {
+        get() {
+          throw new DOMException("Blocked", "SecurityError");
+        },
+      },
+    }) as Window;
+    Object.defineProperty(window, "opener", { configurable: true, value: opener });
+
+    expect(readInspectorHostConfig()).toMatchObject({ appId: "app1" });
   });
 });

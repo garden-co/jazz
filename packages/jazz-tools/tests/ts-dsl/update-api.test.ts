@@ -124,7 +124,7 @@ describe("TS Update API", () => {
   });
 
   it("can use caller-supplied updatedAt on update", async () => {
-    const updatedAt = 1_704_067_200_123_000;
+    const updatedAt = 1_704_067_200_123;
     const project = insertProject(db, "Test Project");
 
     db.update(app.projects, project.id, { name: "Backfilled Project" }, { updatedAt });
@@ -136,7 +136,7 @@ describe("TS Update API", () => {
     expect(projected).toEqual({
       id: project.id,
       name: "Backfilled Project",
-      $updatedAt: new Date(Math.trunc(updatedAt / 1_000)),
+      $updatedAt: new Date(updatedAt),
     });
   });
 

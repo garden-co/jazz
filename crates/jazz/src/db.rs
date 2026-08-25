@@ -77,9 +77,9 @@ use crate::tx::{DeletionEvent, DurabilityTier, Fate, RejectionReason, TxId, TxKi
 use crate::wire::{TransportError, WireAuthorityEndpoint, WireFeatures, encode_sync_message};
 
 mod wire_transport;
-#[cfg(test)]
-use wire_transport::LogicalMessageReassembler;
 pub use wire_transport::WireTransportAdapter;
+#[cfg(test)]
+use wire_transport::{LogicalMessageReassembler, RECENT_COMPLETED_LOGICAL_MESSAGES};
 
 /// Pragmatic single-threaded serialization boundary for canonical Jazz state.
 ///
@@ -257,7 +257,15 @@ impl PeerChunkResolver {
         state.disconnected_connections.remove(&connection);
         if upstream {
             state.upstream_connections.insert(connection);
-            state.upstream_connection.get_or_insert(connection);
+            if state.upstream_connection.is_none() {
+                state.upstream_connection = Some(connection);
+                // A predecessor may have already drained its request batch
+                // before disconnecting. Requeue that in-flight demand when a
+                // replacement registers, preserving its hop-local id so the
+                // usual late-frame guard still rejects the old link.
+                Self::requeue_pending_demands(&mut state);
+                Self::wake_connection(&mut state, connection);
+            }
         }
     }
 
@@ -265,6 +273,29 @@ impl PeerChunkResolver {
         if let Some(waker) = state.outbound_wakers.remove(&connection) {
             waker.wake();
         }
+    }
+
+    /// Put every demand absent from the outbound queue back on the active
+    /// upstream. Requests retain their allocated ids so a superseded link
+    /// cannot complete the replacement link's demand with a late response.
+    fn requeue_pending_demands(state: &mut ChunkDemandState) {
+        let queued = state
+            .outbound
+            .iter()
+            .map(|entry| entry.request_id)
+            .collect::<BTreeSet<_>>();
+        let retries = state
+            .pending_by_chunk
+            .iter()
+            .filter(|(_, pending)| !queued.contains(&pending.upstream_id))
+            .map(|(request, pending)| ChunkRequestEntry {
+                request_id: pending.upstream_id,
+                locator: request.locator.clone(),
+                expected_hash: request.object_hash,
+                remaining_hops: pending.remaining_hops,
+            })
+            .collect::<Vec<_>>();
+        state.outbound.extend(retries);
     }
 
     fn enqueue(
@@ -449,23 +480,7 @@ impl PeerChunkResolver {
             if state.upstream_connection == Some(connection) {
                 state.upstream_connection = state.upstream_connections.iter().next().copied();
                 if let Some(successor) = state.upstream_connection {
-                    let queued = state
-                        .outbound
-                        .iter()
-                        .map(|entry| entry.request_id)
-                        .collect::<BTreeSet<_>>();
-                    let retries = state
-                        .pending_by_chunk
-                        .iter()
-                        .filter(|(_, pending)| !queued.contains(&pending.upstream_id))
-                        .map(|(request, pending)| ChunkRequestEntry {
-                            request_id: pending.upstream_id,
-                            locator: request.locator.clone(),
-                            expected_hash: request.object_hash,
-                            remaining_hops: pending.remaining_hops,
-                        })
-                        .collect::<Vec<_>>();
-                    state.outbound.extend(retries);
+                    Self::requeue_pending_demands(&mut state);
                     Self::wake_connection(&mut state, successor);
                 }
             }
@@ -1195,6 +1210,7 @@ where
     identity: DbIdentity,
     node: Rc<Node<S>>,
     row_id_source: Rc<RefCell<Box<dyn RowIdSource>>>,
+    row_id_source_guarantees_fresh: bool,
     next_now_ms: Rc<Cell<u64>>,
     // Minted only by the explicitly unsafe trusted-backend open path. SYSTEM
     // itself is an admission identity, not proof that a Db may forge external
@@ -2562,13 +2578,21 @@ where
         options: InsertOptions,
     ) -> Result<RowUuid, Error> {
         ensure_transaction_identity(options.identity)?;
+        let known_fresh_row = options.row_id.is_none() && self.db().row_id_source_guarantees_fresh;
         let row = options
             .row_id
             .unwrap_or_else(|| self.db().row_id_source.borrow_mut().next_row_id());
         match options.target {
             ExactWriteTarget::Root => {
                 self.db()
-                    .stage_mergeable_insert(self.tx_id(), table, row, cells, options.updated_at_ms)
+                    .stage_mergeable_insert(
+                        self.tx_id(),
+                        table,
+                        row,
+                        cells,
+                        options.updated_at_ms,
+                        known_fresh_row,
+                    )
                     .await?;
             }
             ExactWriteTarget::Branch(branch) => {
@@ -2580,6 +2604,7 @@ where
                         row,
                         cells,
                         options.updated_at_ms,
+                        known_fresh_row,
                     )
                     .await?;
             }
@@ -2647,6 +2672,7 @@ where
                             row,
                             cells,
                             options.updated_at_ms,
+                            false,
                         )
                         .await
                 }
