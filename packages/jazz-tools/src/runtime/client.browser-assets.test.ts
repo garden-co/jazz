@@ -100,11 +100,12 @@ describe("loadWasmModule runtimeSources bootstrap", () => {
     await loadWasmModule({
       wasmUrl: "/custom/jazz/jazz_wasm_bg.wasm",
       baseUrl: "/ignored/",
+      wasmVersion: "deploy-42",
     });
 
     expect(wasmDefaultInit).toHaveBeenCalledTimes(1);
     expect(globalThis.fetch).toHaveBeenCalledWith(
-      "http://localhost:3000/custom/jazz/jazz_wasm_bg.wasm",
+      "http://localhost:3000/custom/jazz/jazz_wasm_bg.wasm?jazz-runtime-version=deploy-42",
     );
     expect(wasmDefaultInit).toHaveBeenCalledWith({ module_or_path: expect.any(Uint8Array) });
   });
@@ -118,11 +119,12 @@ describe("loadWasmModule runtimeSources bootstrap", () => {
 
     await loadWasmModule({
       baseUrl: "/assets/jazz/",
+      wasmVersion: "deploy-42",
     });
 
     expect(wasmDefaultInit).toHaveBeenCalledTimes(1);
     expect(globalThis.fetch).toHaveBeenCalledWith(
-      "http://localhost:3000/assets/jazz/jazz_wasm_bg.wasm",
+      "http://localhost:3000/assets/jazz/jazz_wasm_bg.wasm?jazz-runtime-version=deploy-42",
     );
     expect(wasmDefaultInit).toHaveBeenCalledWith({ module_or_path: expect.any(Uint8Array) });
   });

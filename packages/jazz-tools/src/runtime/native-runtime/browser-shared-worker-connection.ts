@@ -40,7 +40,7 @@ export class SharedBrowserWorkerConnection implements BrowserWorkerConnection {
       createBrowserWorkerAssetScope(runtimeSources),
     ].join(":");
     const createWorker =
-      runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl
+      runtimeSources?.brokerWorkerUrl || runtimeSources?.baseUrl || runtimeSources?.wasmVersion
         ? (name: string) =>
             new SharedWorker(resolveBrowserWorkerUrl(runtimeSources), {
               type: "module",

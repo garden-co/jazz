@@ -246,6 +246,25 @@ describe("broker worker context initialization", () => {
     expect(mocks.loadWasmModule).toHaveBeenCalledTimes(1);
   });
 
+  it("never aliases distinct supplied WASM byte arrays to the first worker realm", async () => {
+    const firstOptions = {
+      ...options("first-source"),
+      runtimeSources: { wasmSource: new Uint8Array([0, 97, 115, 109]) },
+    };
+    const secondOptions = {
+      ...options("second-source"),
+      runtimeSources: { wasmSource: new Uint8Array([0, 97, 115, 109]) },
+    };
+
+    expect((await connect(firstOptions, "first-tab")).outcome).toEqual({ type: "runtime-ready" });
+    expect((await connect(secondOptions, "second-tab")).outcome).toEqual({
+      type: "runtime-error",
+      message:
+        "incompatible WASM asset source for this SharedWorker; start a worker scoped to the new asset URL",
+    });
+    expect(mocks.loadWasmModule).toHaveBeenCalledTimes(1);
+  });
+
   it("evicts a context when telemetry installation fails so the same key can retry", async () => {
     mocks.installWasmTelemetry.mockImplementationOnce(() => {
       throw new Error("telemetry installation failed");

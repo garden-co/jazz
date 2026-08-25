@@ -9,6 +9,8 @@ import {
 
 const SHARED_RUNTIME_PROTOCOL_VERSION = "jazz-shared-runtime-v1";
 const BROWSER_STORAGE_FORMAT_VERSION = "idbtree-v1";
+const inMemoryWasmAssetIds = new WeakMap<object, string>();
+let nextInMemoryWasmAssetId = 0;
 
 /** Resolve the exact script URL that identifies the origin-wide SharedWorker. */
 export function resolveBrowserWorkerUrl(runtimeSources?: RuntimeSourcesConfig): string {
@@ -39,9 +41,22 @@ export function resolveBrowserWorkerUrl(runtimeSources?: RuntimeSourcesConfig): 
 export function resolveBrowserWorkerRuntimeSources(
   runtimeSources?: RuntimeSourcesConfig,
 ): RuntimeSourcesConfig | undefined {
-  if (!runtimeSources || runtimeSources.wasmModule || runtimeSources.wasmSource) {
-    return runtimeSources;
+  if (!runtimeSources) return runtimeSources;
+
+  if (
+    (runtimeSources.baseUrl || runtimeSources.wasmUrl || runtimeSources.brokerWorkerUrl) &&
+    !runtimeSources.wasmVersion
+  ) {
+    throw new Error(
+      "Configured browser runtime assets require runtimeSources.wasmVersion. Use an immutable build version that changes whenever the WASM or worker bytes change.",
+    );
   }
+
+  const workerWasmAssetIdentity = inMemoryWasmAssetIdentity(runtimeSources);
+  if (workerWasmAssetIdentity) {
+    return { ...runtimeSources, workerWasmAssetIdentity };
+  }
+
   const wasmUrl = resolveRuntimeConfigWasmUrl(
     import.meta.url,
     typeof location !== "undefined" ? location.href : undefined,
@@ -57,23 +72,41 @@ export function resolveBrowserWorkerRuntimeSources(
  * A worker module owns one wasm-bindgen initialization for its entire process
  * lifetime.  Keeping this scope out of the database name allows an old Vite
  * origin or an earlier deployment to keep serving a new tab with its stale
- * asset URL.  The short deterministic hash keeps the browser-visible worker
- * name bounded while retaining origin and cache-buster identity.
+ * asset URL. The complete canonical identity is intentionally kept instead
+ * of a short hash: a collision must not let incompatible WASM bytes share a
+ * process-global wasm-bindgen module.
  */
 export function createBrowserWorkerAssetScope(runtimeSources?: RuntimeSourcesConfig): string {
   const resolvedSources = resolveBrowserWorkerRuntimeSources(runtimeSources);
-  const identity = JSON.stringify({
+  return JSON.stringify({
     workerUrl: resolveBrowserWorkerUrl(resolvedSources),
-    wasmUrl: resolvedSources?.wasmUrl ?? "worker-local",
-    wasmSource: resolvedSources?.wasmSource ? "provided" : undefined,
-    wasmModule: resolvedSources?.wasmModule ? "provided" : undefined,
+    wasmAsset: workerWasmAssetIdentity(resolvedSources),
   });
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < identity.length; index += 1) {
-    hash ^= identity.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
+}
+
+function inMemoryWasmAssetIdentity(runtimeSources: RuntimeSourcesConfig): string | undefined {
+  const [value, kind] = runtimeSources.wasmModule
+    ? [runtimeSources.wasmModule, "module"]
+    : runtimeSources.wasmSource
+      ? [runtimeSources.wasmSource, "source"]
+      : [];
+  if (!value || !kind) return undefined;
+  let identity = inMemoryWasmAssetIds.get(value);
+  if (!identity) {
+    identity = `${kind}:${++nextInMemoryWasmAssetId}`;
+    inMemoryWasmAssetIds.set(value, identity);
   }
-  return (hash >>> 0).toString(16).padStart(8, "0");
+  return identity;
+}
+
+function workerWasmAssetIdentity(runtimeSources?: RuntimeSourcesConfig): string {
+  if (runtimeSources?.wasmModule) {
+    return `module:${runtimeSources.workerWasmAssetIdentity ?? "unscoped"}`;
+  }
+  if (runtimeSources?.wasmSource) {
+    return `source:${runtimeSources.workerWasmAssetIdentity ?? "unscoped"}`;
+  }
+  return `url:${runtimeSources?.wasmUrl ?? "worker-local"}`;
 }
 
 export function createBrowserWorkerFingerprint(

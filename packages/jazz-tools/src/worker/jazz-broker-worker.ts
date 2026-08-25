@@ -226,7 +226,7 @@ async function loadWorkerWasmModule(
   runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
 ): Promise<WasmModule> {
   const source = workerWasmSource(runtimeSources);
-  if (wasmModulePromise && wasmModuleSource !== source) {
+  if (wasmModulePromise && (!source || wasmModuleSource !== source)) {
     throw new Error(
       "incompatible WASM asset source for this SharedWorker; start a worker scoped to the new asset URL",
     );
@@ -245,9 +245,23 @@ async function loadWorkerWasmModule(
   }
 }
 
-function workerWasmSource(runtimeSources: BrowserWorkerInitOptions["runtimeSources"]): string {
-  if (runtimeSources?.wasmModule) return "provided-module";
-  if (runtimeSources?.wasmSource) return "provided-source";
+function workerWasmSource(
+  runtimeSources: BrowserWorkerInitOptions["runtimeSources"],
+): string | null {
+  // The page assigns an opaque identity before structured-cloning an in-memory
+  // source into this worker. A raw worker caller without that identity is
+  // deliberately unshareable: treating every supplied byte array/module as
+  // the same source would silently reuse the first wasm-bindgen realm.
+  if (runtimeSources?.wasmModule) {
+    return runtimeSources.workerWasmAssetIdentity
+      ? `module:${runtimeSources.workerWasmAssetIdentity}`
+      : null;
+  }
+  if (runtimeSources?.wasmSource) {
+    return runtimeSources.workerWasmAssetIdentity
+      ? `source:${runtimeSources.workerWasmAssetIdentity}`
+      : null;
+  }
   return runtimeSources?.wasmUrl ?? "worker-local";
 }
 
