@@ -132,14 +132,20 @@ class TestPort {
   waitForOutcome(): Promise<RuntimeOutcome> {
     const outcome = this.outcomes.shift();
     if (outcome) return Promise.resolve(outcome);
-    const { promise, resolve } = Promise.withResolvers<RuntimeOutcome>();
-    this.outcomeWaiters.push(resolve);
-    return promise;
+    const waiter = deferred<RuntimeOutcome>();
+    this.outcomeWaiters.push(waiter.resolve);
+    return waiter.promise;
   }
 }
 
 function deferred<T>() {
-  return Promise.withResolvers<T>();
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 function options(dbName: string): BrowserWorkerInitOptions {
@@ -153,6 +159,13 @@ function options(dbName: string): BrowserWorkerInitOptions {
     authSessionKey: "session",
     authJson: "{}",
     sessionClaims: {},
+  };
+}
+
+function enabledTelemetryOptions(dbName: string): BrowserWorkerInitOptions {
+  return {
+    ...options(dbName),
+    telemetryCollectorUrl: "http://localhost:4318",
   };
 }
 
@@ -213,7 +226,7 @@ describe("broker worker context initialization", () => {
       throw new Error("telemetry installation failed");
     });
 
-    const failed = await connect(options("telemetry-failure"), "failed-tab");
+    const failed = await connect(enabledTelemetryOptions("telemetry-failure"), "failed-tab");
     expect(failed.outcome).toEqual({
       type: "runtime-error",
       message: "telemetry installation failed",
@@ -221,7 +234,9 @@ describe("broker worker context initialization", () => {
     expect(failed.port.close).toHaveBeenCalledOnce();
     expect(mocks.openPageStore).not.toHaveBeenCalled();
 
-    expect((await connect(options("telemetry-failure"), "retry-tab")).outcome).toEqual({
+    expect(
+      (await connect(enabledTelemetryOptions("telemetry-failure"), "retry-tab")).outcome,
+    ).toEqual({
       type: "runtime-ready",
     });
     expect(mocks.loadWasmModule).toHaveBeenCalledOnce();
@@ -231,7 +246,7 @@ describe("broker worker context initialization", () => {
   it("disposes telemetry when page-store opening fails and retries the same key", async () => {
     mocks.openPageStore.mockRejectedValueOnce(new Error("page-store open failed"));
 
-    const failed = await connect(options("page-store-failure"), "failed-tab");
+    const failed = await connect(enabledTelemetryOptions("page-store-failure"), "failed-tab");
     expect(failed.outcome).toEqual({
       type: "runtime-error",
       message: "page-store open failed",
@@ -239,7 +254,9 @@ describe("broker worker context initialization", () => {
     expect(mocks.telemetryDisposers[0]).toHaveBeenCalledOnce();
     expect(mocks.openBrowser).not.toHaveBeenCalled();
 
-    expect((await connect(options("page-store-failure"), "retry-tab")).outcome).toEqual({
+    expect(
+      (await connect(enabledTelemetryOptions("page-store-failure"), "retry-tab")).outcome,
+    ).toEqual({
       type: "runtime-ready",
     });
     expect(mocks.telemetryDisposers).toHaveLength(2);
@@ -250,7 +267,7 @@ describe("broker worker context initialization", () => {
   it("closes the page store and telemetry when browser DB opening fails, then retries", async () => {
     mocks.openBrowser.mockRejectedValueOnce(new Error("browser DB open failed"));
 
-    const failed = await connect(options("browser-db-failure"), "failed-tab");
+    const failed = await connect(enabledTelemetryOptions("browser-db-failure"), "failed-tab");
     expect(failed.outcome).toEqual({
       type: "runtime-error",
       message: "browser DB open failed",
@@ -258,13 +275,44 @@ describe("broker worker context initialization", () => {
     expect(mocks.pageStores[0]?.close).toHaveBeenCalledOnce();
     expect(mocks.telemetryDisposers[0]).toHaveBeenCalledOnce();
 
-    expect((await connect(options("browser-db-failure"), "retry-tab")).outcome).toEqual({
+    expect(
+      (await connect(enabledTelemetryOptions("browser-db-failure"), "retry-tab")).outcome,
+    ).toEqual({
       type: "runtime-ready",
     });
     expect(mocks.pageStores).toHaveLength(2);
     expect(mocks.pageStores[1]?.close).not.toHaveBeenCalled();
     expect(mocks.telemetryDisposers[1]).not.toHaveBeenCalled();
     expect(mocks.openBrowser).toHaveBeenCalledTimes(2);
+  });
+
+  it("closes an unowned browser DB when adapter construction fails, cleans up, and retries", async () => {
+    const rawDb = { close: vi.fn(async () => true) };
+    mocks.openBrowser.mockResolvedValueOnce(rawDb);
+    mocks.fromDb.mockImplementationOnce(() => {
+      throw new Error("adapter construction failed");
+    });
+
+    const failed = await connect(enabledTelemetryOptions("adapter-failure"), "failed-tab");
+    expect(failed.outcome).toEqual({
+      type: "runtime-error",
+      message: "adapter construction failed",
+    });
+    expect(failed.port.close).toHaveBeenCalledOnce();
+    expect(rawDb.close).toHaveBeenCalledOnce();
+    expect(mocks.pageStores[0]?.close).toHaveBeenCalledOnce();
+    expect(mocks.telemetryDisposers[0]).toHaveBeenCalledOnce();
+
+    expect(
+      (await connect(enabledTelemetryOptions("adapter-failure"), "retry-tab")).outcome,
+    ).toEqual({ type: "runtime-ready" });
+    expect(rawDb.close).toHaveBeenCalledOnce();
+    expect(mocks.pageStores).toHaveLength(2);
+    expect(mocks.pageStores[1]?.close).not.toHaveBeenCalled();
+    expect(mocks.telemetryDisposers).toHaveLength(2);
+    expect(mocks.telemetryDisposers[1]).not.toHaveBeenCalled();
+    expect(mocks.openBrowser).toHaveBeenCalledTimes(2);
+    expect(mocks.fromDb).toHaveBeenCalledTimes(2);
   });
 
   it("shares one successful initialization between concurrent connections for the same key", async () => {
