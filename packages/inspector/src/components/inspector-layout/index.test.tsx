@@ -290,4 +290,40 @@ describe("InspectorLayout", () => {
 
     expect(screen.getByText("/data-explorer/projects/data")).not.toBeNull();
   });
+
+  it("rejects route messages from a spoofed source or origin", () => {
+    mockUseStandaloneContext.mockReturnValue(null);
+    mockUseDevtoolsContext.mockReturnValue({ runtime: "overlay" });
+
+    render(
+      <MemoryRouter initialEntries={["/settings"]}>
+        <Routes>
+          <Route element={<InspectorLayout />}>
+            <Route path="settings" element={<LocationProbe />} />
+            <Route path="data-explorer/projects/data" element={<LocationProbe />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    fireEvent(
+      window,
+      new MessageEvent("message", {
+        origin: window.location.origin,
+        source: {} as MessageEventSource,
+        data: { type: OVERLAY_ROUTE_MESSAGE_TYPE, route: "/data-explorer/projects/data" },
+      }),
+    );
+    expect(screen.getByText("/settings")).not.toBeNull();
+
+    fireEvent(
+      window,
+      new MessageEvent("message", {
+        origin: "https://untrusted.example",
+        source: window.parent,
+        data: { type: OVERLAY_ROUTE_MESSAGE_TYPE, route: "/data-explorer/projects/data" },
+      }),
+    );
+    expect(screen.getByText("/settings")).not.toBeNull();
+  });
 });
