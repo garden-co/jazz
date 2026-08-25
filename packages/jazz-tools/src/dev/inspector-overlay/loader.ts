@@ -14,6 +14,7 @@ const HIDE_TOGGLE_KEY = "jazz-inspector-overlay:hide-toggle";
 // packages/inspector/src/utility/overlay-settings.ts.
 const CLOSE_MESSAGE_TYPE = "jazz-inspector-overlay:close";
 const OVERLAY_CONTROL_GLOBAL = "__jazzInspectorOverlay";
+const OVERLAY_ROUTE_MESSAGE_TYPE = "jazz-inspector-overlay:route";
 const DETACHED_WINDOW_NAME = "jazz-inspector-detached";
 const MIN_HEIGHT = 200;
 const DEFAULT_RATIO = 0.42;
@@ -360,6 +361,10 @@ class JazzInspectorOverlay extends HTMLElement {
       if (!detachedWindow?.closed) return false;
       detachedWindow = null;
       stopDetachedWindowCheck();
+      iframe.contentWindow?.postMessage(
+        { type: OVERLAY_ROUTE_MESSAGE_TYPE, route: this.#activeRoute },
+        window.location.origin,
+      );
       apply();
       return true;
     };

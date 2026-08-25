@@ -88,7 +88,16 @@ export function installInspectorHost(
       }
     }
   };
-  const stop = db.onActiveQuerySubscriptionsChange(push);
+  // Db currently invokes this listener synchronously with its initial snapshot.
+  // Keep the host bridge correct if that delivery is ever deferred: a detached
+  // inspector retained across a host rebind must see the new Db immediately,
+  // rather than waiting for its next subscription mutation.
+  let receivedInitialSnapshot = false;
+  const stop = db.onActiveQuerySubscriptionsChange(() => {
+    receivedInitialSnapshot = true;
+    push();
+  });
+  if (!receivedInitialSnapshot) push();
 
   return () => {
     stop();

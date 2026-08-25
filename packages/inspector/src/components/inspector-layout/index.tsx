@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { NavLink, Outlet, useLocation } from "react-router";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router";
 import { useDevtoolsContext } from "../../contexts/devtools-context.js";
 import { useStandaloneContext } from "../../contexts/standalone-context.js";
 import {
@@ -8,6 +8,7 @@ import {
 } from "../../utility/schema-hash-display.js";
 import {
   DETACH_SHORTCUT_TOOLTIP,
+  OVERLAY_ROUTE_MESSAGE_TYPE,
   OVERLAY_SHOW_DETACH_BUTTON_STORAGE_KEY,
   isBoolean,
   isDetachedInspector,
@@ -90,6 +91,7 @@ export function InspectorLayout() {
   const isDetached = isOverlay && isDetachedInspector();
   const standaloneContext = useStandaloneContext();
   const location = useLocation();
+  const navigate = useNavigate();
   const [isTablesPanelOpen, setIsTablesPanelOpen] = useLocalStorageState(
     TABLES_PANEL_OPEN_STORAGE_KEY,
     true,
@@ -104,8 +106,10 @@ export function InspectorLayout() {
   const activeRoute = `${location.pathname}${location.search}`;
 
   useEffect(() => {
-    if (!isOverlay || isDetached) return;
+    if (!isOverlay) return;
     setOverlayActiveRoute(activeRoute);
+
+    if (isDetached) return;
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (!event.altKey || !event.shiftKey || event.code !== "KeyD") return;
@@ -115,6 +119,23 @@ export function InspectorLayout() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [activeRoute, isDetached, isOverlay]);
+
+  useEffect(() => {
+    if (!isOverlay || isDetached) return;
+    const onMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin || event.source !== window.parent) return;
+      const data = event.data as { type?: unknown; route?: unknown } | null;
+      if (
+        data?.type === OVERLAY_ROUTE_MESSAGE_TYPE &&
+        typeof data.route === "string" &&
+        data.route.startsWith("/")
+      ) {
+        navigate(data.route);
+      }
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [isDetached, isOverlay, navigate]);
 
   const onToggleTablesPanel = () => {
     setIsTablesPanelOpen((isOpen) => !isOpen);

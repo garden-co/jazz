@@ -47,6 +47,12 @@ describe("inspector overlay detached window", () => {
     startInspectorOverlay({} as import("../../runtime/db.js").Db);
     const overlay = document.querySelector("jazz-inspector-overlay");
     const dock = overlay?.shadowRoot?.querySelector<HTMLElement>(".jzov-dock");
+    const iframe = overlay?.shadowRoot?.querySelector<HTMLIFrameElement>(".jzov-frame");
+    const postRoute = vi.fn();
+    Object.defineProperty(iframe!, "contentWindow", {
+      configurable: true,
+      value: { postMessage: postRoute },
+    });
     expect(dock?.dataset.open).toBe("true");
     vi.spyOn(dock!, "getBoundingClientRect").mockReturnValue({
       width: 1024,
@@ -87,6 +93,10 @@ describe("inspector overlay detached window", () => {
     );
 
     expect(dock?.dataset.open).toBe("true");
+    expect(postRoute).toHaveBeenCalledWith(
+      { type: "jazz-inspector-overlay:route", route: "/settings" },
+      window.location.origin,
+    );
     expect(localStorage.getItem("jazz-inspector-overlay:open")).toBe("1");
 
     open.mockReturnValueOnce(null);

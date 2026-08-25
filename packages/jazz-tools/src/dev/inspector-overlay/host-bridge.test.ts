@@ -111,11 +111,12 @@ describe("installInspectorHost", () => {
     handle.registerInspectorWindow(popupWindow);
 
     dispose();
-    const second = makeFakeDb();
+    const second = makeFakeDb({
+      onActiveQuerySubscriptionsChange: () => vi.fn(),
+    });
     installInspectorHost(second.db, iframeWindow, "http://localhost", inspectorWindows);
-    second.fireChange();
 
-    expect(popupWindow.postMessage).toHaveBeenCalled();
+    expect(popupWindow.postMessage).toHaveBeenCalledOnce();
   });
 
   it("dispose() removes the listener and the global", () => {

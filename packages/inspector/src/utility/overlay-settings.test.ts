@@ -50,6 +50,21 @@ describe("requestDetachOverlay", () => {
     expect(setActiveRoute).toHaveBeenCalledWith("/settings");
   });
 
+  it("synchronizes a detached inspector route through its opener overlay", () => {
+    const setActiveRoute = vi.fn();
+    const previousOpener = window.opener;
+    Object.defineProperty(window, "opener", {
+      configurable: true,
+      value: { __jazzInspectorOverlay: { setActiveRoute } },
+    });
+    window.history.replaceState(null, "", "?detached=1");
+
+    setOverlayActiveRoute("/data-explorer/projects/data");
+
+    expect(setActiveRoute).toHaveBeenCalledWith("/data-explorer/projects/data");
+    Object.defineProperty(window, "opener", { configurable: true, value: previousOpener });
+  });
+
   it("closes a detached inspector window", () => {
     const close = vi.spyOn(window, "close").mockImplementation(() => {});
     window.history.replaceState(null, "", "?detached=1");

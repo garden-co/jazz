@@ -28,6 +28,7 @@ export function isBoolean(value: unknown): value is boolean {
 // loader on purpose (separate package); keep them in sync.
 const OVERLAY_CLOSE_MESSAGE_TYPE = "jazz-inspector-overlay:close";
 const OVERLAY_CONTROL_GLOBAL = "__jazzInspectorOverlay";
+export const OVERLAY_ROUTE_MESSAGE_TYPE = "jazz-inspector-overlay:route";
 
 interface InspectorOverlayControl {
   detach(route: string): boolean;
@@ -53,7 +54,8 @@ export function requestDetachOverlay(route: string): void {
 
 export function setOverlayActiveRoute(route: string): void {
   try {
-    const control = (window.parent as unknown as Record<string, unknown>)[OVERLAY_CONTROL_GLOBAL] as
+    const overlayWindow = isDetachedInspector() ? window.opener : window.parent;
+    const control = (overlayWindow as unknown as Record<string, unknown>)[OVERLAY_CONTROL_GLOBAL] as
       | InspectorOverlayControl
       | undefined;
     control?.setActiveRoute(route);
