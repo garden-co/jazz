@@ -6,6 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { parse } from "yaml";
+import { cleanDist } from "../../../packages/jazz-tools/scripts/clean-dist.mjs";
+import { missingJazzToolsTestSurface } from "../verify-jazz-tools-exports.mjs";
 
 const root = path.resolve(import.meta.dirname, "../../..");
 const workflow = fs.readFileSync(path.join(root, ".github/workflows/ci.yml"), "utf8");
@@ -1342,8 +1344,11 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   assert.match(typescript, /local-ci-equivalent\.mjs --ci-partition typescript/);
   assert.match(localCi, /correctness-test artifacts[\s\S]*build:test-artifacts/);
   assert.match(localCi, /parallel Node and browser suites[\s\S]*run-ts-tests\.sh/);
-  assert.match(runner, /pnpm --filter jazz-tools build/);
-  assert.match(runner, /Every example resolves the public `jazz-tools\/\*` exports from `dist`/);
+  assert.match(runner, /require\('\.\/crates\/jazz-napi'\)/);
+  assert.match(runner, /JAZZ_TEST_SEALED_TOOLS_DIST=1/);
+  assert.match(runner, /verify-jazz-tools-exports\.mjs/);
+  assert.match(runner, /public export surface is incomplete/);
+  assert.match(runner, /Test children only\s+# consume those immutable artifacts/);
   assert.match(runner, /--concurrency=2/);
   assert.match(runner, /setsid bash -c "\$\{node_tests_command\}" >"\$\{node_tests_log\}" 2>&1 &/);
   assert.match(
@@ -1363,6 +1368,41 @@ test("TypeScript CI overlaps independent Node and browser suites after one artif
   assert.match(runner, /Browser test suite exit status:/);
   assert.match(runner, /node_tests_status.*-ne 0 \|\|.*browser_tests_status.*-ne 0/);
   assert.doesNotMatch(typescript, /rust-components: clippy,rustfmt/);
+});
+
+test("a sealed test surface rejects a child clean before it can delete prepared exports", async () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-sealed-tools-dist-"));
+  const marker = path.join(fixture, "testing", "index.js");
+  fs.mkdirSync(path.dirname(marker), { recursive: true });
+  fs.writeFileSync(marker, "prepared export");
+  const previous = process.env.JAZZ_TEST_SEALED_TOOLS_DIST;
+  process.env.JAZZ_TEST_SEALED_TOOLS_DIST = "1";
+  try {
+    await assert.rejects(() => cleanDist(fixture), /sealed for concurrent tests/);
+    assert.equal(fs.existsSync(marker), true, "sealed child build deleted a prepared export");
+  } finally {
+    if (previous === undefined) delete process.env.JAZZ_TEST_SEALED_TOOLS_DIST;
+    else process.env.JAZZ_TEST_SEALED_TOOLS_DIST = previous;
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("Turbo preserves the sealed surface for the real Jazz Tools build task", () => {
+  const result = spawnSync(
+    "pnpm",
+    ["exec", "turbo", "run", "build", "--filter=jazz-tools", "--only", "--force"],
+    {
+      cwd: root,
+      encoding: "utf8",
+      env: { ...process.env, JAZZ_TEST_SEALED_TOOLS_DIST: "1" },
+    },
+  );
+  assert.notEqual(result.status, 0, "a sealed Jazz Tools build must not clean dist");
+  assert.match(
+    `${result.stdout}\n${result.stderr}`,
+    /jazz-tools dist is sealed for concurrent tests/,
+    "Turbo strict-env child dropped JAZZ_TEST_SEALED_TOOLS_DIST before clean-dist",
+  );
 });
 
 test("parallel TypeScript runner waits for both suites and combines their failures", () => {
@@ -1396,14 +1436,14 @@ test("parallel TypeScript runner waits for both suites and combines their failur
   }
 });
 
-test("a failed jazz-tools prebuild prevents both TypeScript suites from starting", () => {
+test("a missing prepared native artifact prevents both TypeScript suites from starting", () => {
   const runner = path.join(root, "dev/gates/run-ts-tests.sh");
   const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-ts-ci-prebuild-"));
-  const fakePnpm = path.join(fixture, "pnpm");
-  const nodeMarker = path.join(fixture, "node");
+  const fakeNode = path.join(fixture, "node");
+  const nodeMarker = path.join(fixture, "node-suite-ran");
   const browserMarker = path.join(fixture, "browser");
   try {
-    fs.writeFileSync(fakePnpm, "#!/bin/sh\nexit 23\n", { mode: 0o755 });
+    fs.writeFileSync(fakeNode, "#!/bin/sh\nexit 23\n", { mode: 0o755 });
     const result = spawnSync("bash", [runner], {
       cwd: root,
       encoding: "utf8",
@@ -1414,17 +1454,138 @@ test("a failed jazz-tools prebuild prevents both TypeScript suites from starting
         JAZZ_BROWSER_TEST_COMMAND: `touch ${JSON.stringify(browserMarker)}`,
       },
     });
-    assert.equal(result.status, 23, result.stderr);
-    assert.equal(fs.existsSync(nodeMarker), false, "node suite started after failed prebuild");
+    assert.equal(result.status, 1, result.stderr);
+    assert.equal(
+      fs.existsSync(nodeMarker),
+      false,
+      "node suite started after failed artifact check",
+    );
     assert.equal(
       fs.existsSync(browserMarker),
       false,
-      "browser suite started after failed prebuild",
+      "browser suite started after failed artifact check",
     );
-    assert.match(result.stderr, /refusing to launch suites against stale exports/);
+    assert.match(result.stderr, /prepared release jazz-napi artifact did not load/);
   } finally {
     fs.rmSync(fixture, { recursive: true, force: true });
   }
+});
+
+test("the Jazz Tools preflight derives public exports and keeps test-only entrypoints explicit", () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-tools-test-surface-"));
+  const packageRoot = path.join(fixture, "packages/jazz-tools");
+  const write = (relative, contents = "export {};") => {
+    const target = path.join(packageRoot, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, contents);
+  };
+  try {
+    write(
+      "package.json",
+      JSON.stringify({
+        exports: {
+          ".": { types: "./dist/index.d.ts", default: "./dist/index.js" },
+          "./react": { types: "./dist/react/index.d.ts", default: "./dist/react/index.js" },
+          "./testing": { default: "./dist/testing/index.js" },
+        },
+      }),
+    );
+    for (const file of [
+      "dist/index.d.ts",
+      "dist/index.js",
+      "dist/react/index.d.ts",
+      "dist/react/index.js",
+      "dist/testing/index.js",
+      "dist/cli.js",
+      "dist/runtime/client-session.js",
+      "dist/backend/request-auth.js",
+    ])
+      write(file);
+    assert.deepEqual(missingJazzToolsTestSurface(fixture), []);
+
+    fs.rmSync(path.join(packageRoot, "dist/index.js"));
+    assert.deepEqual(missingJazzToolsTestSurface(fixture), ["dist/index.js"]);
+    write("dist/index.js");
+
+    fs.rmSync(path.join(packageRoot, "dist/react/index.js"));
+    assert.deepEqual(missingJazzToolsTestSurface(fixture), ["dist/react/index.js"]);
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("missing public root or framework exports prevent both TypeScript suites from starting", () => {
+  const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "jazz-ts-ci-public-export-"));
+  const write = (relative, contents = "export {};") => {
+    const target = path.join(fixture, relative);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, contents);
+  };
+  const packageFiles = [
+    "dist/index.d.ts",
+    "dist/index.js",
+    "dist/react/index.d.ts",
+    "dist/react/index.js",
+    "dist/testing/index.js",
+    "dist/cli.js",
+    "dist/runtime/client-session.js",
+    "dist/backend/request-auth.js",
+  ];
+  try {
+    // The real runner and verifier resolve from cwd, so this is a controlled
+    // checkout rather than a mutation of the developer's generated dist. Lint
+    // CI deliberately has no Jazz Tools build before it runs this contract.
+    for (const source of ["run-ts-tests.sh", "verify-jazz-tools-exports.mjs"])
+      write(`dev/gates/${source}`, fs.readFileSync(path.join(root, "dev/gates", source), "utf8"));
+    write("crates/jazz-napi/package.json", JSON.stringify({ type: "commonjs" }));
+    write("crates/jazz-napi/index.js", "module.exports = {};\n");
+    write(
+      "packages/jazz-tools/package.json",
+      JSON.stringify({
+        exports: {
+          ".": { types: "./dist/index.d.ts", default: "./dist/index.js" },
+          "./react": { types: "./dist/react/index.d.ts", default: "./dist/react/index.js" },
+          "./testing": { default: "./dist/testing/index.js" },
+        },
+      }),
+    );
+    for (const file of packageFiles) write(`packages/jazz-tools/${file}`);
+
+    for (const relative of ["dist/index.js", "dist/react/index.js"]) {
+      const nodeMarker = path.join(fixture, "node-suite-ran");
+      const browserMarker = path.join(fixture, "browser-suite-ran");
+      fs.rmSync(nodeMarker, { force: true });
+      fs.rmSync(browserMarker, { force: true });
+      fs.rmSync(path.join(fixture, "packages/jazz-tools", relative));
+      const result = spawnSync("bash", ["dev/gates/run-ts-tests.sh"], {
+        cwd: fixture,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          JAZZ_NODE_TEST_COMMAND: `touch ${JSON.stringify(nodeMarker)}`,
+          JAZZ_BROWSER_TEST_COMMAND: `touch ${JSON.stringify(browserMarker)}`,
+        },
+      });
+      assert.equal(result.status, 1, `${relative}: ${result.stderr}`);
+      assert.equal(fs.existsSync(nodeMarker), false, `${relative}: node suite started`);
+      assert.equal(fs.existsSync(browserMarker), false, `${relative}: browser suite started`);
+      assert.match(
+        `${result.stdout}\n${result.stderr}`,
+        new RegExp(`public export is missing: ${relative}`),
+      );
+      write(`packages/jazz-tools/${relative}`);
+    }
+  } finally {
+    fs.rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
+test("TypeScript test children do not retain obsolete artifact fallback builds", () => {
+  const todoServer = JSON.parse(
+    fs.readFileSync(path.join(root, "examples/docs/todo-server-ts/package.json"), "utf8"),
+  );
+  assert.equal(todoServer.scripts.pretest, undefined);
+  assert.doesNotMatch(JSON.stringify(todoServer.scripts), /jazz-napi build|jazz-tools build/);
 });
 
 test("parallel TypeScript runner terminates both child process groups", async () => {

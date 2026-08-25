@@ -29,6 +29,14 @@ export const RUST_WORKSPACE_TARGETS = Object.freeze([
 export const RUST_CI_FEATURES =
   "jazz/testing,jazz/transport-compression-zstd,jazz-server/test,jazz-cli/test";
 
+/** The CI-suite job that invokes each named partition. */
+export const ciPartitionJobs = Object.freeze({
+  lint: "lint",
+  "rust-workspace": "test-rust-workspace",
+  "rust-differential": "test-rust-differential",
+  typescript: "test-ts",
+});
+
 const command = (label, executable, args, options = {}) =>
   Object.freeze({ label, executable, args: Object.freeze(args), ...options });
 

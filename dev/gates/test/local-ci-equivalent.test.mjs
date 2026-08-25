@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { parse } from "yaml";
 import {
   RUST_CI_FEATURES,
   RUST_WORKSPACE_TARGETS,
   assertArtifactBoundary,
   assertFullWorkspaceCoverage,
+  ciPartitionJobs,
   ciPartitions,
   planFor,
   runPlan,
@@ -14,14 +16,70 @@ import {
 
 const root = path.resolve(import.meta.dirname, "../../..");
 const workflow = fs.readFileSync(path.join(root, ".github/workflows/ci-suite.yml"), "utf8");
+const workflowModel = parse(workflow);
 
-test("CI invokes every shared partition and local CI-equivalent flattens exactly those partitions", () => {
-  for (const partition of Object.keys(ciPartitions))
-    assert.match(
-      workflow,
-      new RegExp(`local-ci-equivalent\\.mjs --ci-partition ${partition}`),
-      `CI omits shared ${partition} partition`,
+const partitionCommand = (partition) =>
+  `node dev/gates/local-ci-equivalent.mjs --ci-partition ${partition}`;
+const isSccacheExport = ({ name, run }) =>
+  name === "Export trusted sccache configuration" &&
+  run
+    .trim()
+    .split("\n")
+    .every((line) => /^echo "SCCACHE_[A-Z0-9_]+=.*" >> "\$\{GITHUB_ENV\}"$/.test(line));
+const isTurboExport = ({ name, run }) =>
+  name === "Export trusted Turbo cache signing key" &&
+  /^echo "TURBO_REMOTE_CACHE_SIGNATURE_KEY=.*" >> "\$\{GITHUB_ENV\}"$/.test(run.trim());
+
+function assertCiSuiteUsesOnlySharedCorrectnessPartitions(model) {
+  const expectedJobs = new Set(Object.values(ciPartitionJobs));
+  for (const [partition, jobName] of Object.entries(ciPartitionJobs)) {
+    const job = model.jobs?.[jobName];
+    assert.ok(job, `CI omits ${jobName} for shared ${partition} partition`);
+    const runSteps = (job.steps ?? []).filter(({ run }) => typeof run === "string");
+    const expected = partitionCommand(partition);
+    assert.equal(
+      runSteps.filter(({ run }) => run === expected).length,
+      1,
+      `${jobName} must invoke its shared ${partition} partition exactly once`,
     );
+    for (const step of runSteps) {
+      if (
+        step.run === expected ||
+        step.run === "sccache --show-stats" ||
+        isSccacheExport(step) ||
+        isTurboExport(step)
+      )
+        continue;
+      assert.fail(`${jobName} has an unshared direct run step: ${step.name ?? step.run}`);
+    }
+  }
+
+  const aggregate = model.jobs?.["test-rust"];
+  assert.ok(aggregate, "CI omits the Rust aggregate status job");
+  const aggregateRuns = (aggregate.steps ?? []).filter(({ run }) => typeof run === "string");
+  assert.deepEqual(
+    aggregateRuns.map(({ run }) => run.trim()),
+    ['test "${WORKSPACE_RESULT}" = success\ntest "${DIFFERENTIAL_RESULT}" = success'],
+    "the Rust aggregate may check partition statuses, but must not add a correctness command",
+  );
+
+  for (const [jobName, job] of Object.entries(model.jobs ?? {})) {
+    if (expectedJobs.has(jobName) || jobName === "test-rust") continue;
+    const runSteps = (job.steps ?? []).filter(({ run }) => typeof run === "string");
+    assert.equal(runSteps.length, 0, `${jobName} bypasses the shared CI partition source of truth`);
+  }
+}
+
+test("CI invokes only shared partitions and rejects a direct correctness bypass", () => {
+  assert.deepEqual(Object.keys(ciPartitionJobs).sort(), Object.keys(ciPartitions).sort());
+  assert.doesNotThrow(() => assertCiSuiteUsesOnlySharedCorrectnessPartitions(workflowModel));
+
+  const planted = structuredClone(workflowModel);
+  planted.jobs.lint.steps.push({ name: "quiet bypass", run: "cargo test -p jazz" });
+  assert.throws(
+    () => assertCiSuiteUsesOnlySharedCorrectnessPartitions(planted),
+    /unshared direct run step: quiet bypass/,
+  );
 
   assert.deepEqual(
     planFor({ mode: "ci-equivalent" }),
