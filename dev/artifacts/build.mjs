@@ -280,6 +280,33 @@ function assertRealNapiGeneration(path, expectedBinding, { sealed = true } = {})
   if (sealed) required.push([join(path, ".jazz-artifact-manifest.json"), "sealed manifest"]);
   for (const [candidate, label] of required) realRegularFile(candidate, label);
 }
+function displayArtifactPath(path) {
+  return relative(root, path).replaceAll("\\\\", "/");
+}
+function declarationMismatchDiagnostic(stablePath, generatedPath, stable, generated) {
+  const stableLines = stable.split("\n");
+  const generatedLines = generated.split("\n");
+  const firstDifference = stableLines.findIndex((line, index) => line !== generatedLines[index]);
+  const line =
+    firstDifference === -1 ? Math.min(stableLines.length, generatedLines.length) : firstDifference;
+  const start = Math.max(0, line - 2);
+  const end = Math.min(Math.max(stableLines.length, generatedLines.length), line + 3);
+  const render = (lines, prefix) =>
+    lines
+      .slice(start, end)
+      .map((value, index) => `${prefix}${String(start + index + 1).padStart(5)} | ${value}`)
+      .join("\n");
+  return [
+    "NAPI build generated declarations that differ from the public package type surface; update the checked-in declaration before activating.",
+    `checked-in declarations: ${displayArtifactPath(stablePath)}`,
+    `generated declarations: ${displayArtifactPath(generatedPath)}`,
+    `first difference near line ${line + 1}:`,
+    "--- checked-in",
+    render(stableLines, "-"),
+    "+++ generated",
+    render(generatedLines, "+"),
+  ].join("\n");
+}
 function publishExpectedFingerprint(kind, fingerprint) {
   // Producer tasks never mutate jazz-tools source. Release assembly derives
   // its expectation modules from the sealed downloaded manifests.
@@ -343,9 +370,16 @@ export function validateNapiStage(
   const loader = join(stagePath, "index.js");
   const declarations = join(stagePath, "index.d.ts");
   assertRealNapiGeneration(stagePath, expectedBinding, { sealed: false });
-  if (readFileSync(declarations, "utf8") !== readFileSync(stableDeclarationsPath, "utf8"))
+  const generatedDeclarations = readFileSync(declarations, "utf8");
+  const stableDeclarations = readFileSync(stableDeclarationsPath, "utf8");
+  if (generatedDeclarations !== stableDeclarations)
     throw new Error(
-      "NAPI build generated declarations that differ from the public package type surface; update the checked-in declaration before activating",
+      declarationMismatchDiagnostic(
+        stableDeclarationsPath,
+        declarations,
+        stableDeclarations,
+        generatedDeclarations,
+      ),
     );
   if (target !== hostTarget) return;
   const receipt = spawnSync(
